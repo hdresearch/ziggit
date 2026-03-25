@@ -46,6 +46,13 @@ int ziggit_branch_list(ZiggitRepository* repo, char* buffer, size_t buffer_size)
 int ziggit_status(ZiggitRepository* repo, char* buffer, size_t buffer_size);
 int ziggit_diff(ZiggitRepository* repo, char* buffer, size_t buffer_size);
 
+// Index operations
+int ziggit_add(ZiggitRepository* repo, const char* pathspec);
+
+// Remote operations
+int ziggit_remote_get_url(ZiggitRepository* repo, const char* remote_name, char* buffer, size_t buffer_size);
+int ziggit_remote_set_url(ZiggitRepository* repo, const char* remote_name, const char* url);
+
 // Version information
 const char* ziggit_version(void);
 int ziggit_version_major(void);

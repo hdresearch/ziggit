@@ -183,4 +183,29 @@ pub fn build(b: *std.Build) void {
     // Install the simple benchmark executable  
     const install_simple_comparison = b.addInstallArtifact(simple_comparison_exe, .{});
     bench_simple_step.dependOn(&install_simple_comparison.step);
+
+    // Full comparison benchmark (ziggit vs git CLI vs libgit2)
+    const full_comparison_exe = b.addExecutable(.{
+        .name = "ziggit-full-bench",
+        .root_source_file = b.path("benchmarks/full_comparison_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Link the static library for C integration testing
+    full_comparison_exe.linkLibrary(lib_static);
+    full_comparison_exe.linkLibC();
+    full_comparison_exe.addIncludePath(b.path("src/lib"));
+    
+    // Link libgit2
+    full_comparison_exe.linkSystemLibrary("git2");
+
+    const run_full_comparison = b.addRunArtifact(full_comparison_exe);
+
+    const bench_full_step = b.step("bench-full", "Run full comparison benchmarks (ziggit vs git CLI vs libgit2)");
+    bench_full_step.dependOn(&run_full_comparison.step);
+
+    // Install the full benchmark executable
+    const install_full_comparison = b.addInstallArtifact(full_comparison_exe, .{});
+    bench_full_step.dependOn(&install_full_comparison.step);
 }

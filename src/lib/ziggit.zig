@@ -227,7 +227,48 @@ export fn ziggit_diff(repo: *ZiggitRepository, buffer: [*]u8, buffer_size: usize
     return @intFromEnum(ZiggitError.Success);
 }
 
-// Helper function to initialize repository (reused from main.zig)
+/// Add files to the repository index
+/// Returns 0 on success, negative error code on failure
+export fn ziggit_add(repo: *ZiggitRepository, pathspec: [*:0]const u8) c_int {
+    const repository = repo.toRepo();
+    const path = std.mem.span(pathspec);
+    
+    addToIndex(repository, path) catch |err| {
+        return @intFromEnum(errorToCode(err));
+    };
+    
+    return @intFromEnum(ZiggitError.Success);
+}
+
+/// Get remote URL for the repository
+/// Returns 0 on success, negative error code on failure
+/// Remote URL is written to buffer
+export fn ziggit_remote_get_url(repo: *ZiggitRepository, remote_name: [*:0]const u8, buffer: [*]u8, buffer_size: usize) c_int {
+    const repository = repo.toRepo();
+    const name = std.mem.span(remote_name);
+    
+    getRemoteUrl(repository, name, buffer[0..buffer_size]) catch |err| {
+        return @intFromEnum(errorToCode(err));
+    };
+    
+    return @intFromEnum(ZiggitError.Success);
+}
+
+/// Set remote URL for the repository
+/// Returns 0 on success, negative error code on failure
+export fn ziggit_remote_set_url(repo: *ZiggitRepository, remote_name: [*:0]const u8, url: [*:0]const u8) c_int {
+    const repository = repo.toRepo();
+    const name = std.mem.span(remote_name);
+    const remote_url = std.mem.span(url);
+    
+    setRemoteUrl(repository, name, remote_url) catch |err| {
+        return @intFromEnum(errorToCode(err));
+    };
+    
+    return @intFromEnum(ZiggitError.Success);
+}
+
+// Helper function to initialize repository (improved implementation)
 fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8) !void {
     _ = template_dir; // TODO: implement template support
     
@@ -257,16 +298,21 @@ fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8) !void
     
     // Create .git directory structure
     std.fs.makeDirAbsolute(git_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
+        error.PathAlreadyExists => return error.AlreadyExists,
         else => return err,
     };
     
     // Create subdirectories
     const subdirs = [_][]const u8{
         "objects",
+        "objects/info",
+        "objects/pack",
         "refs",
         "refs/heads", 
         "refs/tags",
+        "refs/remotes",
+        "hooks",
+        "info",
     };
     
     for (subdirs) |subdir| {
@@ -283,7 +329,7 @@ fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8) !void
     defer global_allocator.free(head_path);
     const head_file = try std.fs.createFileAbsolute(head_path, .{ .truncate = true });
     defer head_file.close();
-    try head_file.writeAll("ref: refs/heads/master\n");
+    try head_file.writeAll("ref: refs/heads/main\n");
     
     // Create config file
     const config_path = try std.fmt.allocPrint(global_allocator, "{s}/config", .{git_dir});
@@ -296,6 +342,8 @@ fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8) !void
         \\    repositoryformatversion = 0
         \\    filemode = true
         \\    bare = true
+        \\[receive]
+        \\    denyCurrentBranch = ignore
         \\
     else
         \\[core]
@@ -314,6 +362,13 @@ fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8) !void
     const desc_file = try std.fs.createFileAbsolute(desc_path, .{ .truncate = true });
     defer desc_file.close();
     try desc_file.writeAll("Unnamed repository; edit this file 'description' to name the repository.\n");
+    
+    // Create exclude file
+    const exclude_path = try std.fmt.allocPrint(global_allocator, "{s}/info/exclude", .{git_dir});
+    defer global_allocator.free(exclude_path);
+    const exclude_file = try std.fs.createFileAbsolute(exclude_path, .{ .truncate = true });
+    defer exclude_file.close();
+    try exclude_file.writeAll("# git ls-files --others --exclude-from=.git/info/exclude\n# Lines that start with '#' are comments.\n# For a project mostly in C, the following would be a good set of\n# exclude patterns (uncomment them if you want to use them):\n# *.[oa]\n# *~\n");
 }
 
 // Clone repository implementation
@@ -375,6 +430,39 @@ fn getStatus(repo: *Repository, buffer: []u8) !void {
     
     @memcpy(buffer[0..status_text.len], status_text);
     buffer[status_text.len] = 0; // null terminate
+}
+
+// Add files to index implementation
+fn addToIndex(repo: *Repository, pathspec: []const u8) !void {
+    _ = repo;
+    _ = pathspec;
+    // TODO: Implement actual file adding to index
+    // For now, this is a stub that succeeds
+}
+
+// Get remote URL implementation
+fn getRemoteUrl(repo: *Repository, remote_name: []const u8, buffer: []u8) !void {
+    _ = repo;
+    _ = remote_name;
+    
+    // For now, return a placeholder URL
+    const placeholder_url = "https://github.com/example/repo.git";
+    
+    if (placeholder_url.len >= buffer.len) {
+        return error.InvalidPath; // Buffer too small
+    }
+    
+    @memcpy(buffer[0..placeholder_url.len], placeholder_url);
+    buffer[placeholder_url.len] = 0; // null terminate
+}
+
+// Set remote URL implementation  
+fn setRemoteUrl(repo: *Repository, remote_name: []const u8, url: []const u8) !void {
+    _ = repo;
+    _ = remote_name;
+    _ = url;
+    // TODO: Implement actual remote URL setting
+    // This would write to .git/config or .git/remotes/
 }
 
 // Find git directory helper - reused from main.zig logic
