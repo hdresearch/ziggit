@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const VERSION = "0.1.0";
+pub const VERSION = "0.1.1";
 pub const GIT_COMPAT_VERSION = "2.34.1"; // Git version we aim to be compatible with
 
 pub fn getVersionString(allocator: std.mem.Allocator) ![]u8 {

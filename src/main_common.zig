@@ -63,7 +63,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         } else |_| {
             try platform_impl.writeStdout("ziggit version 0.1.0\n");
         }
-    } else if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
+    } else if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "help")) {
         try showUsage(&platform_impl);
     } else {
         const error_msg = std.fmt.allocPrint(allocator, "ziggit: '{s}' is not a ziggit command. See 'ziggit --help'.\n", .{command}) catch "ziggit: invalid command. See 'ziggit --help'.\n";
