@@ -215,7 +215,7 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     defer allocator.free(git_path);
 
     // Get current branch
-    const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch "master";
+    const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch try allocator.dupe(u8, "master");
     defer allocator.free(current_branch);
 
     const branch_msg = try std.fmt.allocPrint(allocator, "On branch {s}\n", .{current_branch});
