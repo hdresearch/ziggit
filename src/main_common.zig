@@ -191,7 +191,7 @@ fn showUsage(platform_impl: *const platform_mod.Platform) !void {
         try platform_impl.writeStdout("   push       Update remote refs along with associated objects\n");
     }
     
-    const suffix_msg = std.fmt.allocPrint(std.heap.page_allocator, "\nziggit{s} - A modern version control system written in Zig\n\nOptions:\n  --version, -v       Show version information\n  --version-info      Show detailed version and build information\n  --help, -h          Show this help message\n", .{target_info}) catch return;
+    const suffix_msg = std.fmt.allocPrint(std.heap.page_allocator, "\nziggit{s} - A modern version control system written in Zig\n\nDrop-in replacement for git commands - use 'ziggit' instead of 'git'\nCompatible .git directory format, works with existing git repositories\n\nOptions:\n  --version, -v       Show version information\n  --version-info      Show detailed version and build information\n  --help, -h          Show this help message\n", .{target_info}) catch return;
     defer std.heap.page_allocator.free(suffix_msg);
     try platform_impl.writeStdout(suffix_msg);
 }

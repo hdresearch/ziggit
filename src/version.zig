@@ -1,7 +1,8 @@
 const std = @import("std");
 
-pub const VERSION = "0.1.3";
+pub const VERSION = "0.1.4";
 pub const GIT_COMPAT_VERSION = "2.34.1"; // Git version we aim to be compatible with
+pub const FEATURES_STATUS = "Core git commands implemented as drop-in replacements";
 
 pub fn getVersionString(allocator: std.mem.Allocator) ![]u8 {
     const target_info = switch (@import("builtin").target.os.tag) {
@@ -20,10 +21,20 @@ pub fn getFullVersionInfo(allocator: std.mem.Allocator) ![]u8 {
         else => "",
     };
     
+    const build_date = comptime blk: {
+        // Use a static build identifier since timestamp isn't available at compile time
+        break :blk "v0.1.4-" ++ @import("builtin").zig_version_string;
+    };
+    
     return try std.fmt.allocPrint(allocator, 
         \\ziggit version {s}{s}
         \\Git compatibility target: {s}
         \\Built with Zig {s}
+        \\Status: {s}
+        \\Build: {s}
         \\
-    , .{ VERSION, target_info, GIT_COMPAT_VERSION, @import("builtin").zig_version_string });
+        \\Supported commands: init, add, commit, status, log, checkout, branch, merge, diff
+        \\Features: SHA-1 object storage, index management, refs, WebAssembly support
+        \\
+    , .{ VERSION, target_info, GIT_COMPAT_VERSION, @import("builtin").zig_version_string, FEATURES_STATUS, build_date });
 }
