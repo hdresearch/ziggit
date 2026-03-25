@@ -20,16 +20,16 @@ Running git add (50 iterations)..... done (50 successful)
 === BENCHMARK RESULTS ===
   Operation                 | Mean Time (±Range) [Success Rate]
   --------------------------|--------------------------------------------
-                   git init | 1.27 ms (±231.51 μs) [50/50 runs]
-                ziggit init | 324.27 μs (±140.04 μs) [50/50 runs]
-                 git status | 1.00 ms (±163.23 μs) [50/50 runs]
-              ziggit status | 62.61 μs (±54.77 μs) [50/50 runs]
-                ziggit open | 9.26 μs (±3.36 μs) [50/50 runs]
-                    git add | 1.04 ms (±168.26 μs) [50/50 runs]
+                   git init | 1.27 ms (±265.66 μs) [50/50 runs]
+                ziggit init | 320.99 μs (±118.15 μs) [50/50 runs]
+                 git status | 1.00 ms (±159.88 μs) [50/50 runs]
+              ziggit status | 62.25 μs (±39.23 μs) [50/50 runs]
+                ziggit open | 10.64 μs (±64.41 μs) [50/50 runs]
+                    git add | 1.05 ms (±164.23 μs) [50/50 runs]
 
 === PERFORMANCE COMPARISON ===
-Init: ziggit is 3.93x faster
-Status: ziggit is 16.04x faster
+Init: ziggit is 3.95x faster
+Status: ziggit is 16.07x faster
 
 Cleaning up...
 Benchmark complete!

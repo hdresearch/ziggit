@@ -8,7 +8,7 @@ Performance comparison between ziggit library, git CLI, and libgit2 for operatio
 - **Zig**: 0.13.0
 - **Git**: 2.47.1
 - **libgit2**: 1.7.2 (system package)
-- **Test Date**: 2026-03-25
+- **Test Date**: 2026-03-25 (Latest run: 22:05:07 UTC)
 
 ## Methodology
 
@@ -25,17 +25,17 @@ This benchmark tests ziggit's C-compatible library interface against git CLI for
 
 Operation                 | Mean Time (±Range) [Success Rate]
 --------------------------|--------------------------------------------
-git init                  | 1.26 ms (±203.92 μs) [50/50 runs]
-ziggit init               | 324.59 μs (±110.57 μs) [50/50 runs]
-git status                | 1.00 ms (±160.89 μs) [50/50 runs]
-ziggit status             | 65.27 μs (±82.06 μs) [50/50 runs]
-ziggit open               | 9.45 μs (±17.09 μs) [50/50 runs]
-git add                   | 1.04 ms (±400.99 μs) [50/50 runs]
+git init                  | 1.27 ms (±265.66 μs) [50/50 runs]
+ziggit init               | 320.99 μs (±118.15 μs) [50/50 runs]
+git status                | 1.00 ms (±159.88 μs) [50/50 runs]
+ziggit status             | 62.25 μs (±39.23 μs) [50/50 runs]
+ziggit open               | 10.64 μs (±64.41 μs) [50/50 runs]
+git add                   | 1.05 ms (±164.23 μs) [50/50 runs]
 ```
 
 **Performance Summary:**
-- **Repository Init**: ziggit is **3.87x faster** than git CLI
-- **Status Operations**: ziggit is **15.39x faster** than git CLI
+- **Repository Init**: ziggit is **3.95x faster** than git CLI
+- **Status Operations**: ziggit is **16.07x faster** than git CLI
 
 ### CLI Comparison Benchmark
 
