@@ -111,6 +111,20 @@ pub fn build(b: *std.Build) void {
     const focused_commit_test_step = b.step("test-focused-commit", "Run focused commit test");
     focused_commit_test_step.dependOn(&run_focused_commit_test.step);
 
+    // Comprehensive git compatibility test suite (new)
+    const git_compatibility_tests = b.addExecutable(.{
+        .name = "git_compatibility_tests",
+        .root_source_file = b.path("test/git_compatibility_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_git_compatibility_tests = b.addRunArtifact(git_compatibility_tests);
+    run_git_compatibility_tests.step.dependOn(b.getInstallStep()); // Ensure ziggit is built first
+
+    const git_compatibility_test_step = b.step("test-git-compatibility", "Run comprehensive git compatibility tests");
+    git_compatibility_test_step.dependOn(&run_git_compatibility_tests.step);
+
     // WebAssembly target (WASI)
     const wasm_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
