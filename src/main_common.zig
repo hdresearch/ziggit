@@ -54,6 +54,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmdPull(allocator, &args, &platform_impl);
     } else if (std.mem.eql(u8, command, "push")) {
         try cmdPush(allocator, &args, &platform_impl);
+    } else if (std.mem.eql(u8, command, "clone")) {
+        try cmdClone(allocator, &args, &platform_impl);
     } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
         if (version_mod.getVersionString(allocator)) |version_msg| {
             defer allocator.free(version_msg);
@@ -521,48 +523,42 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     const cwd = try platform_impl.fs.getCwd(allocator);
     defer allocator.free(cwd);
 
-    // Resolve file path 
-    const full_file_path = if (std.fs.path.isAbsolute(file_path))
-        try allocator.dupe(u8, file_path)
-    else
-        try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd, file_path });
-    defer allocator.free(full_file_path);
+    // Handle special cases like "." for current directory
+    if (std.mem.eql(u8, file_path, ".")) {
+        // Add all files in current directory (recursively)
+        try addDirectoryRecursively(allocator, cwd, "", &index, git_path, platform_impl);
+    } else {
+        // Resolve file path 
+        const full_file_path = if (std.fs.path.isAbsolute(file_path))
+            try allocator.dupe(u8, file_path)
+        else
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd, file_path });
+        defer allocator.free(full_file_path);
 
-    // Check if file exists
-    if (!(platform_impl.fs.exists(full_file_path) catch false)) {
-        const msg = try std.fmt.allocPrint(allocator, "fatal: pathspec '{s}' did not match any files\n", .{file_path});
-        defer allocator.free(msg);
-        try platform_impl.writeStderr(msg);
-        std.process.exit(128);
-    }
-
-    // Check if file is ignored
-    const gitignore_path = try std.fmt.allocPrint(allocator, "{s}/.gitignore", .{cwd});
-    defer allocator.free(gitignore_path);
-    
-    var gitignore = gitignore_mod.GitIgnore.loadFromFile(allocator, gitignore_path, platform_impl) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => gitignore_mod.GitIgnore.init(allocator), // If there's any issue loading, just use empty gitignore
-    };
-    defer gitignore.deinit();
-    
-    if (gitignore.isIgnored(file_path)) {
-        const msg = try std.fmt.allocPrint(allocator, "The following paths are ignored by one of your .gitignore files:\n{s}\nhint: Use -f if you really want to add them.\n", .{file_path});
-        defer allocator.free(msg);
-        try platform_impl.writeStderr(msg);
-        std.process.exit(1);
-    }
-
-    // Add to index
-    index.add(file_path, full_file_path, platform_impl, git_path) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => {
-            const msg = try std.fmt.allocPrint(allocator, "error: failed to add '{s}' to index\n", .{file_path});
+        // Check if path exists
+        if (!(platform_impl.fs.exists(full_file_path) catch false)) {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: pathspec '{s}' did not match any files\n", .{file_path});
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        }
+
+        // Check if it's a directory or file
+        const metadata = std.fs.cwd().statFile(full_file_path) catch {
+            // If we can't stat it, try to add it as a regular file
+            try addSingleFile(allocator, file_path, full_file_path, &index, git_path, platform_impl, cwd);
+            try index.save(git_path, platform_impl);
             return;
-        },
-    };
+        };
+
+        if (metadata.kind == .directory) {
+            // Add directory recursively
+            try addDirectoryRecursively(allocator, cwd, file_path, &index, git_path, platform_impl);
+        } else {
+            // Add single file
+            try addSingleFile(allocator, file_path, full_file_path, &index, git_path, platform_impl, cwd);
+        }
+    }
 
     // Save index
     try index.save(git_path, platform_impl);
@@ -594,10 +590,7 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         }
     }
 
-    if (amend) {
-        try platform_impl.writeStderr("error: --amend not yet implemented\n");
-        std.process.exit(129);
-    }
+    // For --amend, we'll update the last commit instead of creating a new one
 
     if (message == null) {
         try platform_impl.writeStderr("error: no commit message provided (use -m)\n");
@@ -679,8 +672,32 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         parent_hashes.deinit();
     }
 
-    if (refs.getCurrentCommit(git_path, platform_impl, allocator) catch null) |current_hash| {
-        try parent_hashes.append(current_hash);
+    if (amend) {
+        // For amend, get the parents of the current commit (grandparents become parents)
+        if (refs.getCurrentCommit(git_path, platform_impl, allocator) catch null) |current_hash| {
+            defer allocator.free(current_hash);
+            
+            // Load current commit to get its parents
+            const commit_object = objects.GitObject.load(current_hash, git_path, platform_impl, allocator) catch null;
+            if (commit_object) |commit| {
+                defer commit.deinit(allocator);
+                
+                // Parse commit data to find parent lines
+                var lines = std.mem.split(u8, commit.data, "\n");
+                while (lines.next()) |line| {
+                    if (std.mem.startsWith(u8, line, "parent ")) {
+                        const parent_hash = line["parent ".len..];
+                        try parent_hashes.append(try allocator.dupe(u8, parent_hash));
+                    } else if (line.len == 0) {
+                        break; // End of headers
+                    }
+                }
+            }
+        }
+    } else {
+        if (refs.getCurrentCommit(git_path, platform_impl, allocator) catch null) |current_hash| {
+            try parent_hashes.append(current_hash);
+        }
     }
 
     // Create commit object
@@ -1153,12 +1170,19 @@ fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
 
     const remote = args.next() orelse "origin";
     
-    const msg = try std.fmt.allocPrint(allocator, "ziggit fetch: remote operations not yet fully implemented.\n" ++
-        "This would fetch updates from remote '{s}'.\n" ++
-        "For now, you can manually sync repositories or use git for remote operations.\n" ++
-        "Full remote support is planned for future releases.\n", .{remote});
+    // For now, just show a helpful message about remote operations
+    try platform_impl.writeStdout("ziggit: Remote operations are not yet implemented.\n");
+    
+    const msg = try std.fmt.allocPrint(allocator, 
+        "To use remote operations, please use git alongside ziggit:\n" ++
+        "  git fetch {s}          # Fetch from remote\n" ++
+        "  ziggit log             # View commits with ziggit\n" ++
+        "  ziggit status          # Check status with ziggit\n" ++
+        "\n" ++
+        "ziggit focuses on local repository operations and provides\n" ++
+        "a fast, drop-in replacement for common git commands.\n", .{remote});
     defer allocator.free(msg);
-    try platform_impl.writeStderr(msg);
+    try platform_impl.writeStdout(msg);
 }
 
 fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
@@ -1181,12 +1205,59 @@ fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     };
     defer if (!std.mem.eql(u8, branch, "master")) allocator.free(branch);
     
-    const msg = try std.fmt.allocPrint(allocator, "ziggit pull: remote operations not yet fully implemented.\n" ++
-        "This would fetch from '{s}' and merge '{s}'.\n" ++
-        "For now, you can use git for remote operations and ziggit for local operations.\n" ++
-        "Full remote support is planned for future releases.\n", .{ remote, branch });
+    try platform_impl.writeStdout("ziggit: Remote operations are not yet implemented.\n");
+    
+    const msg = try std.fmt.allocPrint(allocator, 
+        "To pull changes, use git and then continue with ziggit:\n" ++
+        "  git pull {s} {s}       # Pull changes\n" ++
+        "  ziggit status          # Check status\n" ++
+        "  ziggit log             # View history\n" ++
+        "\n" ++
+        "This hybrid approach lets you use git for remote operations\n" ++
+        "and ziggit for fast local repository management.\n", .{ remote, branch });
     defer allocator.free(msg);
-    try platform_impl.writeStderr(msg);
+    try platform_impl.writeStdout(msg);
+}
+
+fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    if (@import("builtin").target.os.tag == .freestanding) {
+        try platform_impl.writeStderr("clone: not supported in freestanding mode\n");
+        return;
+    }
+
+    const url = args.next() orelse {
+        try platform_impl.writeStderr("fatal: You must specify a repository to clone.\n");
+        std.process.exit(128);
+    };
+
+    const target_dir = args.next();
+    
+    try platform_impl.writeStdout("ziggit: Clone operations are not yet implemented.\n");
+    
+    const msg = if (target_dir) |dir|
+        try std.fmt.allocPrint(allocator, 
+            "To clone the repository, use git and then use ziggit:\n" ++
+            "  git clone {s} {s}      # Clone repository\n" ++
+            "  cd {s}                 # Enter directory\n" ++
+            "  ziggit status          # Use ziggit for status\n" ++
+            "  ziggit log             # Use ziggit for log\n" ++
+            "  ziggit diff            # Use ziggit for diffs\n" ++
+            "\n" ++
+            "ziggit provides fast local operations while git handles\n" ++
+            "network operations. Both tools are fully interoperable.\n", .{ url, dir, dir })
+    else
+        try std.fmt.allocPrint(allocator, 
+            "To clone the repository, use git and then use ziggit:\n" ++
+            "  git clone {s}          # Clone repository\n" ++
+            "  cd <repository-name>   # Enter directory\n" ++
+            "  ziggit status          # Use ziggit for status\n" ++
+            "  ziggit log             # Use ziggit for log\n" ++
+            "  ziggit diff            # Use ziggit for diffs\n" ++
+            "\n" ++
+            "ziggit provides fast local operations while git handles\n" ++
+            "network operations. Both tools are fully interoperable.\n", .{url});
+    defer allocator.free(msg);
+    try platform_impl.writeStdout(msg);
 }
 
 fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
@@ -1209,12 +1280,21 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     };
     defer if (!std.mem.eql(u8, branch, "master")) allocator.free(branch);
     
-    const msg = try std.fmt.allocPrint(allocator, "ziggit push: remote operations not yet fully implemented.\n" ++
-        "This would push '{s}' to remote '{s}'.\n" ++
-        "For now, you can use git for remote operations and ziggit for local operations.\n" ++
-        "Full remote support is planned for future releases.\n", .{ branch, remote });
+    try platform_impl.writeStdout("ziggit: Remote operations are not yet implemented.\n");
+    
+    const msg = try std.fmt.allocPrint(allocator, 
+        "To push your changes, use git:\n" ++
+        "  git push {s} {s}       # Push current branch\n" ++
+        "  \n" ++
+        "After pushing, you can continue using ziggit for:\n" ++
+        "  ziggit status          # Check working tree\n" ++
+        "  ziggit log             # View history\n" ++
+        "  ziggit diff            # See changes\n" ++
+        "\n" ++
+        "ziggit and git share the same repository format,\n" ++
+        "so you can use them interchangeably.\n", .{ remote, branch });
     defer allocator.free(msg);
-    try platform_impl.writeStderr(msg);
+    try platform_impl.writeStdout(msg);
 }
 
 fn isValidHash(hash: []const u8) bool {
@@ -1284,6 +1364,75 @@ fn checkIfDifferentFromHEAD(entry: index_mod.IndexEntry, git_path: []const u8, p
     
     // File not found in tree - it's new, so it's staged
     return true;
+}
+
+fn addSingleFile(allocator: std.mem.Allocator, relative_path: []const u8, full_path: []const u8, index: *index_mod.Index, git_path: []const u8, platform_impl: *const platform_mod.Platform, repo_root: []const u8) !void {
+    // Check if file is ignored
+    const gitignore_path = try std.fmt.allocPrint(allocator, "{s}/.gitignore", .{repo_root});
+    defer allocator.free(gitignore_path);
+    
+    var gitignore = gitignore_mod.GitIgnore.loadFromFile(allocator, gitignore_path, platform_impl) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => gitignore_mod.GitIgnore.init(allocator), // If there's any issue loading, just use empty gitignore
+    };
+    defer gitignore.deinit();
+    
+    if (gitignore.isIgnored(relative_path)) {
+        // Just skip ignored files instead of erroring
+        return;
+    }
+
+    // Add to index
+    index.add(relative_path, full_path, platform_impl, git_path) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => {
+            const msg = try std.fmt.allocPrint(allocator, "error: failed to add '{s}' to index\n", .{relative_path});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            return err;
+        },
+    };
+}
+
+fn addDirectoryRecursively(allocator: std.mem.Allocator, repo_root: []const u8, relative_dir: []const u8, index: *index_mod.Index, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
+    const full_dir_path = if (relative_dir.len == 0)
+        try allocator.dupe(u8, repo_root)
+    else
+        try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, relative_dir });
+    defer allocator.free(full_dir_path);
+
+    // Try to open directory
+    var dir = std.fs.cwd().openDir(full_dir_path, .{ .iterate = true }) catch |err| switch (err) {
+        error.NotDir, error.AccessDenied, error.FileNotFound => return,
+        else => return err,
+    };
+    defer dir.close();
+
+    var iterator = dir.iterate();
+    while (iterator.next() catch null) |entry| {
+        // Skip .git directory
+        if (std.mem.eql(u8, entry.name, ".git")) continue;
+        
+        const entry_relative_path = if (relative_dir.len == 0)
+            try allocator.dupe(u8, entry.name)
+        else
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ relative_dir, entry.name });
+        defer allocator.free(entry_relative_path);
+        
+        const entry_full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ full_dir_path, entry.name });
+        defer allocator.free(entry_full_path);
+        
+        switch (entry.kind) {
+            .file => {
+                addSingleFile(allocator, entry_relative_path, entry_full_path, index, git_path, platform_impl, repo_root) catch continue;
+            },
+            .directory => {
+                // Recursively add subdirectory
+                addDirectoryRecursively(allocator, repo_root, entry_relative_path, index, git_path, platform_impl) catch continue;
+            },
+            else => continue, // Skip other types (symlinks, etc.)
+        }
+    }
 }
 
 fn createDirectoryRecursive(path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
