@@ -125,6 +125,34 @@ pub fn build(b: *std.Build) void {
     const git_compatibility_test_step = b.step("test-git-compatibility", "Run comprehensive git compatibility tests");
     git_compatibility_test_step.dependOn(&run_git_compatibility_tests.step);
 
+    // Critical git compatibility test suite (focused on core functionality)
+    const critical_compatibility_tests = b.addExecutable(.{
+        .name = "critical_compatibility_tests",
+        .root_source_file = b.path("test/critical_compatibility_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_critical_compatibility_tests = b.addRunArtifact(critical_compatibility_tests);
+    run_critical_compatibility_tests.step.dependOn(b.getInstallStep()); // Ensure ziggit is built first
+
+    const critical_compatibility_test_step = b.step("test-critical", "Run critical git compatibility tests");
+    critical_compatibility_test_step.dependOn(&run_critical_compatibility_tests.step);
+
+    // Edge case git compatibility test suite
+    const edge_case_tests = b.addExecutable(.{
+        .name = "edge_case_tests",
+        .root_source_file = b.path("test/edge_case_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_edge_case_tests = b.addRunArtifact(edge_case_tests);
+    run_edge_case_tests.step.dependOn(b.getInstallStep()); // Ensure ziggit is built first
+
+    const edge_case_test_step = b.step("test-edge-cases", "Run git edge case compatibility tests");
+    edge_case_test_step.dependOn(&run_edge_case_tests.step);
+
     // WebAssembly target (WASI)
     const wasm_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
