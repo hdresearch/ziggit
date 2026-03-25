@@ -56,20 +56,20 @@ Performance Improvement:
 === Bun Git Operations Benchmark ===
 
 --- Repository Status Check ---
-git status --porcelain: SUCCESS, 1.34ms
-ziggit status check: SUCCESS, 0.08ms
-Status check speedup: 17.1x faster with ziggit
+git status --porcelain: SUCCESS, 1.31ms
+ziggit status check: SUCCESS, 0.09ms
+Status check speedup: 14.8x faster with ziggit
 
 --- Tag Resolution ---  
-git describe --tags: SUCCESS, v1.0.0, 1.20ms
+git describe --tags: SUCCESS, v1.0.0, 1.17ms
 ziggit describe --tags: [Implementation in progress]
 
 --- Commit Hash Resolution ---
-git rev-parse HEAD: SUCCESS, 7d4190a2, 1.31ms
+git rev-parse HEAD: SUCCESS, f822217e, 1.26ms
 ziggit rev-parse HEAD: [Implementation in progress]
 
 Performance Improvements:
-- Status operations: 17.1x faster (1.34ms → 0.08ms)
+- Status operations: 14.8x faster (1.31ms → 0.09ms)
 - Eliminates subprocess overhead (~1-2ms per call)
 - Reduces memory allocations
 - Consistent cross-platform performance
