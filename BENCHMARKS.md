@@ -18,25 +18,25 @@ This document provides comprehensive performance benchmarks comparing ziggit-lib
 
 | Operation | git CLI | ziggit CLI | Speedup | Success Rate |
 |-----------|---------|------------|---------|--------------|
-| **init** | 1.45 ms (±0.20 ms) | 0.66 ms (±0.12 ms) | **2.20x faster** | 100% |
-| **status** | 1.12 ms (±0.14 ms) | 0.68 ms (±0.13 ms) | **1.65x faster** | 100% |
+| **init** | 1.30 ms (±0.26 ms) | 0.59 ms (±0.13 ms) | **2.20x faster** | 100% |
+| **status** | 1.02 ms (±0.17 ms) | 0.63 ms (±0.19 ms) | **1.63x faster** | 100% |
 
 ### Bun Integration Benchmark (Optimized for Bun Use Cases)
 
 | Operation | git CLI | ziggit lib | Speedup | Success Rate |
 |-----------|---------|------------|---------|--------------|
-| **init** | 1.45 ms (±313.32 μs) | 377.38 μs (±128.18 μs) | **3.86x faster** | 100% |
-| **status** | 1.11 ms (±190.88 μs) | 72.91 μs (±93.79 μs) | **15.22x faster** | 100% |
-| **repo_open** | N/A | 12.53 μs (±13.86 μs) | N/A | 100% |
-| **add** | 1.18 ms (±372.21 μs) | N/A* | N/A* | 100% |
+| **init** | 1.28 ms (±412.86 μs) | 329.21 μs (±117.14 μs) | **3.88x faster** | 100% |
+| **status** | 1.05 ms (±2.10 ms) | 62.75 μs (±61.11 μs) | **16.72x faster** | 100% |
+| **repo_open** | N/A | 9.87 μs (±12.04 μs) | N/A | 100% |
+| **add** | 1.05 ms (±164.17 μs) | N/A* | N/A* | 100% |
 
 *Note: add operation testing in progress for ziggit lib version
 
 ### Key Performance Insights
 
 1. **Initialization**: Ziggit consistently outperforms git CLI by 2-4x in repository initialization
-2. **Status Operations**: Massive 15x speedup for status operations, critical for bun's frequent repository state checks
-3. **Repository Opening**: Ultra-fast ~12μs repository opening - ideal for bun's workflow
+2. **Status Operations**: Massive 16.7x speedup for status operations, critical for bun's frequent repository state checks
+3. **Repository Opening**: Ultra-fast ~10μs repository opening - ideal for bun's workflow
 4. **Memory Usage**: Ziggit uses significantly less memory due to Zig's efficient allocation patterns
 
 ## Operations Analysis by Bun Use Case
@@ -80,10 +80,10 @@ This document provides comprehensive performance benchmarks comparing ziggit-lib
 
 Based on these benchmarks, integrating ziggit into bun could provide:
 
-1. **15x faster** repository state checking → Instant file change detection
+1. **16.7x faster** repository state checking → Instant file change detection
 2. **3-4x faster** repository operations → Reduced `bun add` and `bun create` times  
 3. **70-80% less memory usage** → Better performance on resource-constrained systems
-4. **Ultra-fast repository opening** (12μs) → Negligible overhead for git operations
+4. **Ultra-fast repository opening** (10μs) → Negligible overhead for git operations
 
 ## Conclusion
 
