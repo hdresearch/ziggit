@@ -83,6 +83,15 @@ pub fn build(b: *std.Build) void {
     
     // Export functions for browser environment
     wasm_freestanding_exe.rdynamic = true;
+    
+    // Additional WASM optimizations for smaller binary size
+    wasm_freestanding_exe.stack_size = 16 * 1024; // 16KB stack (smaller than default)
+    
+    // Add compile-time option for configurable memory size
+    const freestanding_memory_size = b.option(u32, "freestanding-memory-size", "Memory size for freestanding WASM build (default: 64KB)") orelse (64 * 1024);
+    const options = b.addOptions();
+    options.addOption(u32, "freestanding_memory_size", freestanding_memory_size);
+    wasm_freestanding_exe.root_module.addOptions("config", options);
 
     const wasm_browser_step = b.step("wasm-browser", "Build for WebAssembly (freestanding/browser)");
     wasm_browser_step.dependOn(&b.addInstallArtifact(wasm_freestanding_exe, .{}).step);
