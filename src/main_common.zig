@@ -657,22 +657,71 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
         }
     }
     
-    // For now, just output empty diff like git diff in a clean repository
-    // In a real implementation, this would show actual differences:
-    // - Without --cached: working tree vs index
-    // - With --cached: index vs HEAD
-    
-    // Check if there are any staged changes by loading the index
+    // Load index to check for staged changes
     var index = index_mod.Index.load(git_path, platform_impl, allocator) catch |err| switch (err) {
         error.FileNotFound => index_mod.Index.init(allocator),
         else => return err,
     };
     defer index.deinit();
     
-    // For a basic diff, if there are no changes, output nothing (like git)
-    // This is a placeholder - a real implementation would compare file contents
     if (cached) {
-        // Placeholder for --cached diff implementation
+        // For --cached diff, show differences between index and HEAD
+        // This is a simplified implementation - show message about staged changes
+        if (index.entries.items.len > 0) {
+            try platform_impl.writeStdout("# Changes staged for commit:\n");
+            for (index.entries.items) |entry| {
+                const msg = try std.fmt.allocPrint(allocator, "#\tmodified:   {s}\n", .{entry.path});
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+            }
+            try platform_impl.writeStdout("#\n# To see actual diff content, use a more complete git implementation.\n");
+        }
+    } else {
+        // For regular diff, show differences between working tree and index
+        // This is a simplified implementation that just shows which files have changed
+        const cwd = try platform_impl.fs.getCwd(allocator);
+        defer allocator.free(cwd);
+        
+        var changes_found = false;
+        for (index.entries.items) |entry| {
+            const full_path = if (std.fs.path.isAbsolute(entry.path))
+                try allocator.dupe(u8, entry.path)
+            else
+                try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd, entry.path });
+            defer allocator.free(full_path);
+            
+            // Check if file exists and has changed
+            if (platform_impl.fs.exists(full_path) catch false) {
+                const current_content = platform_impl.fs.readFile(allocator, full_path) catch continue;
+                defer allocator.free(current_content);
+                
+                // Create blob object to get hash
+                const blob = try objects.createBlobObject(current_content, allocator);
+                defer blob.deinit(allocator);
+                
+                const current_hash = try blob.hash(allocator);
+                defer allocator.free(current_hash);
+                
+                // Compare with index hash
+                const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.hash)});
+                defer allocator.free(index_hash);
+                
+                if (!std.mem.eql(u8, current_hash, index_hash)) {
+                    if (!changes_found) {
+                        changes_found = true;
+                        try platform_impl.writeStdout("# Working tree changes (simplified diff):\n");
+                    }
+                    const msg = try std.fmt.allocPrint(allocator, "#\tmodified:   {s}\n", .{entry.path});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStdout(msg);
+                }
+            }
+        }
+        
+        if (changes_found) {
+            try platform_impl.writeStdout("#\n# To see actual diff content, use a more complete git implementation.\n");
+        }
+        // If no changes found, output nothing (like git diff in clean repo)
     }
 }
 
@@ -769,10 +818,24 @@ fn cmdMerge(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         return;
     }
 
-    _ = args;
-    const msg = try std.fmt.allocPrint(allocator, "ziggit merge: not yet implemented\n", .{});
+    // Check if we're in a git repository
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+
+    const branch_to_merge = args.next() orelse {
+        try platform_impl.writeStderr("fatal: no merge target specified\n");
+        std.process.exit(128);
+    };
+
+    const msg = try std.fmt.allocPrint(allocator, "ziggit merge: advanced merge functionality not yet implemented.\n" ++
+        "For now, you can manually checkout '{s}' and copy files, then commit.\n" ++
+        "Full merge support with conflict resolution is planned for future releases.\n", .{branch_to_merge});
     defer allocator.free(msg);
     try platform_impl.writeStderr(msg);
+    std.process.exit(1);
 }
 
 fn isValidHash(hash: []const u8) bool {

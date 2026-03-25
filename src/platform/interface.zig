@@ -60,4 +60,7 @@ pub const FileSystem = struct {
     
     /// Change working directory
     chdir: *const fn (path: []const u8) anyerror!void,
+    
+    /// List directory contents (returns just filenames, not full paths)
+    readDir: *const fn (allocator: std.mem.Allocator, path: []const u8) anyerror![][]u8,
 };

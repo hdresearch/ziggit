@@ -13,6 +13,7 @@ extern fn host_file_exists(path_ptr: [*]const u8, path_len: u32) bool;
 extern fn host_make_dir(path_ptr: [*]const u8, path_len: u32) bool;
 extern fn host_delete_file(path_ptr: [*]const u8, path_len: u32) bool;
 extern fn host_get_cwd(data_ptr: *[*]u8, data_len: *u32) bool;
+extern fn host_read_dir(path_ptr: [*]const u8, path_len: u32, entries_ptr: *[*][*]const u8, entries_len: *[*]u32, count: *u32) bool;
 
 // External functions to get global args from main_freestanding.zig
 extern fn getGlobalArgc() u32;
@@ -112,6 +113,27 @@ fn chdirImpl(path: []const u8) !void {
     return error.NotSupported;
 }
 
+fn readDirImpl(allocator: std.mem.Allocator, path: []const u8) ![][]u8 {
+    var entries_ptr: [*][*]const u8 = undefined;
+    var entries_len: [*]u32 = undefined;
+    var count: u32 = undefined;
+    
+    if (host_read_dir(path.ptr, @intCast(path.len), &entries_ptr, &entries_len, &count)) {
+        var result = try allocator.alloc([]u8, count);
+        
+        for (0..count) |i| {
+            const entry_len = entries_len[i];
+            const entry_data = entries_ptr[i];
+            result[i] = try allocator.alloc(u8, entry_len);
+            @memcpy(result[i], entry_data[0..entry_len]);
+        }
+        
+        return result;
+    }
+    
+    return error.FileNotFound;
+}
+
 pub const freestanding_platform = interface.Platform{
     .getArgs = getArgsImpl,
     .writeStdout = writeStdoutImpl,
@@ -124,5 +146,6 @@ pub const freestanding_platform = interface.Platform{
         .deleteFile = deleteFileImpl,
         .getCwd = getCwdImpl,
         .chdir = chdirImpl,
+        .readDir = readDirImpl,
     },
 };
