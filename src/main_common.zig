@@ -46,6 +46,12 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmdCheckout(allocator, &args, &platform_impl);
     } else if (std.mem.eql(u8, command, "merge")) {
         try cmdMerge(allocator, &args, &platform_impl);
+    } else if (std.mem.eql(u8, command, "fetch")) {
+        try cmdFetch(allocator, &args, &platform_impl);
+    } else if (std.mem.eql(u8, command, "pull")) {
+        try cmdPull(allocator, &args, &platform_impl);
+    } else if (std.mem.eql(u8, command, "push")) {
+        try cmdPush(allocator, &args, &platform_impl);
     } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
         const target_info = switch (@import("builtin").target.os.tag) {
             .wasi => " (WASI)",
@@ -62,6 +68,89 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         defer if (error_msg.ptr != "ziggit: invalid command. See 'ziggit --help'.\n".ptr) allocator.free(error_msg);
         try platform_impl.writeStderr(error_msg);
         std.process.exit(1);
+    }
+}
+
+fn findUntrackedFiles(allocator: std.mem.Allocator, repo_root: []const u8, index: *const index_mod.Index, gitignore: *const gitignore_mod.GitIgnore, platform_impl: *const platform_mod.Platform) !std.ArrayList([]u8) {
+    var untracked_files = std.ArrayList([]u8).init(allocator);
+    
+    // Create a set of tracked file paths for fast lookup
+    var tracked_files = std.StringHashMap(void).init(allocator);
+    defer tracked_files.deinit();
+    
+    for (index.entries.items) |entry| {
+        try tracked_files.put(entry.path, {});
+    }
+    
+    // Recursively scan directory for files
+    scanDirectoryForUntrackedFiles(allocator, repo_root, "", &untracked_files, &tracked_files, gitignore, platform_impl) catch {
+        // If scanning fails, return empty list
+        for (untracked_files.items) |file| {
+            allocator.free(file);
+        }
+        untracked_files.clearAndFree();
+    };
+    
+    return untracked_files;
+}
+
+fn scanDirectoryForUntrackedFiles(
+    allocator: std.mem.Allocator,
+    repo_root: []const u8,
+    relative_path: []const u8,
+    untracked_files: *std.ArrayList([]u8),
+    tracked_files: *const std.StringHashMap(void),
+    gitignore: *const gitignore_mod.GitIgnore,
+    platform_impl: *const platform_mod.Platform,
+) !void {
+    const full_path = if (relative_path.len == 0)
+        try allocator.dupe(u8, repo_root)
+    else
+        try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, relative_path });
+    defer allocator.free(full_path);
+
+    // Try to open directory
+    var dir = std.fs.cwd().openDir(full_path, .{ .iterate = true }) catch |err| switch (err) {
+        error.NotDir, error.AccessDenied, error.FileNotFound => return,
+        else => return err,
+    };
+    defer dir.close();
+
+    var iterator = dir.iterate();
+    while (iterator.next() catch null) |entry| {
+        // Skip .git directory
+        if (std.mem.eql(u8, entry.name, ".git")) continue;
+        
+        const entry_relative_path = if (relative_path.len == 0)
+            try allocator.dupe(u8, entry.name)
+        else
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ relative_path, entry.name });
+        defer allocator.free(entry_relative_path);
+        
+        // Check if ignored
+        if (gitignore.isIgnored(entry_relative_path)) continue;
+        
+        switch (entry.kind) {
+            .file => {
+                // Check if file is tracked
+                if (!tracked_files.contains(entry_relative_path)) {
+                    try untracked_files.append(try allocator.dupe(u8, entry_relative_path));
+                }
+            },
+            .directory => {
+                // Recursively scan subdirectory
+                scanDirectoryForUntrackedFiles(
+                    allocator,
+                    repo_root,
+                    entry_relative_path,
+                    untracked_files,
+                    tracked_files,
+                    gitignore,
+                    platform_impl,
+                ) catch continue; // Continue if subdirectory scan fails
+            },
+            else => continue, // Skip other types (symlinks, etc.)
+        }
     }
 }
 
@@ -214,6 +303,12 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     };
     defer allocator.free(git_path);
 
+    // Get current working directory (repository root)
+    const repo_root = std.fs.path.dirname(git_path) orelse {
+        try platform_impl.writeStderr("fatal: unable to determine repository root\n");
+        std.process.exit(128);
+    };
+
     // Get current branch
     const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch try allocator.dupe(u8, "master");
     defer allocator.free(current_branch);
@@ -237,6 +332,17 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     };
     defer index.deinit();
 
+    // Load gitignore
+    const gitignore_path = try std.fmt.allocPrint(allocator, "{s}/.gitignore", .{repo_root});
+    defer allocator.free(gitignore_path);
+    
+    var gitignore = gitignore_mod.GitIgnore.loadFromFile(allocator, gitignore_path, platform_impl) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => gitignore_mod.GitIgnore.init(allocator),
+    };
+    defer gitignore.deinit();
+
+    // Show staged files
     if (index.entries.items.len > 0) {
         try platform_impl.writeStdout("\nChanges to be committed:\n");
         try platform_impl.writeStdout("  (use \"git reset HEAD <file>...\" to unstage)\n\n");
@@ -253,10 +359,38 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             }
         }
         try platform_impl.writeStdout("\n");
-    } else if (current_commit == null) {
-        try platform_impl.writeStdout("\nnothing to commit (create/copy files and use \"git add\" to track)\n");
-    } else {
-        try platform_impl.writeStdout("\nnothing to commit, working tree clean\n");
+    }
+
+    // Find untracked files
+    var untracked_files = findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.ArrayList([]u8).init(allocator);
+    defer {
+        for (untracked_files.items) |file| {
+            allocator.free(file);
+        }
+        untracked_files.deinit();
+    }
+
+    if (untracked_files.items.len > 0) {
+        try platform_impl.writeStdout("\nUntracked files:\n");
+        try platform_impl.writeStdout("  (use \"git add <file>...\" to include in what will be committed)\n\n");
+        
+        for (untracked_files.items) |file| {
+            const msg = try std.fmt.allocPrint(allocator, "        {s}\n", .{file});
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
+        }
+        try platform_impl.writeStdout("\n");
+    }
+
+    // Final summary message
+    if (index.entries.items.len == 0 and untracked_files.items.len == 0) {
+        if (current_commit == null) {
+            try platform_impl.writeStdout("\nnothing to commit (create/copy files and use \"git add\" to track)\n");
+        } else {
+            try platform_impl.writeStdout("\nnothing to commit, working tree clean\n");
+        }
+    } else if (index.entries.items.len == 0 and untracked_files.items.len > 0) {
+        try platform_impl.writeStdout("nothing added to commit but untracked files present (use \"git add\" to track)\n");
     }
 }
 
@@ -836,6 +970,85 @@ fn cmdMerge(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     defer allocator.free(msg);
     try platform_impl.writeStderr(msg);
     std.process.exit(1);
+}
+
+fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    if (@import("builtin").target.os.tag == .freestanding) {
+        try platform_impl.writeStderr("fetch: not supported in freestanding mode\n");
+        return;
+    }
+
+    // Check if we're in a git repository
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+
+    const remote = args.next() orelse "origin";
+    
+    const msg = try std.fmt.allocPrint(allocator, "ziggit fetch: remote operations not yet fully implemented.\n" ++
+        "This would fetch updates from remote '{s}'.\n" ++
+        "For now, you can manually sync repositories or use git for remote operations.\n" ++
+        "Full remote support is planned for future releases.\n", .{remote});
+    defer allocator.free(msg);
+    try platform_impl.writeStderr(msg);
+}
+
+fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    if (@import("builtin").target.os.tag == .freestanding) {
+        try platform_impl.writeStderr("pull: not supported in freestanding mode\n");
+        return;
+    }
+
+    // Check if we're in a git repository
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+
+    const remote = args.next() orelse "origin";
+    const branch = args.next() orelse blk: {
+        // Try to get current branch
+        break :blk refs.getCurrentBranch(git_path, platform_impl, allocator) catch "master";
+    };
+    defer if (!std.mem.eql(u8, branch, "master")) allocator.free(branch);
+    
+    const msg = try std.fmt.allocPrint(allocator, "ziggit pull: remote operations not yet fully implemented.\n" ++
+        "This would fetch from '{s}' and merge '{s}'.\n" ++
+        "For now, you can use git for remote operations and ziggit for local operations.\n" ++
+        "Full remote support is planned for future releases.\n", .{ remote, branch });
+    defer allocator.free(msg);
+    try platform_impl.writeStderr(msg);
+}
+
+fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    if (@import("builtin").target.os.tag == .freestanding) {
+        try platform_impl.writeStderr("push: not supported in freestanding mode\n");
+        return;
+    }
+
+    // Check if we're in a git repository
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+
+    const remote = args.next() orelse "origin";
+    const branch = args.next() orelse blk: {
+        // Try to get current branch
+        break :blk refs.getCurrentBranch(git_path, platform_impl, allocator) catch "master";
+    };
+    defer if (!std.mem.eql(u8, branch, "master")) allocator.free(branch);
+    
+    const msg = try std.fmt.allocPrint(allocator, "ziggit push: remote operations not yet fully implemented.\n" ++
+        "This would push '{s}' to remote '{s}'.\n" ++
+        "For now, you can use git for remote operations and ziggit for local operations.\n" ++
+        "Full remote support is planned for future releases.\n", .{ branch, remote });
+    defer allocator.free(msg);
+    try platform_impl.writeStderr(msg);
 }
 
 fn isValidHash(hash: []const u8) bool {
