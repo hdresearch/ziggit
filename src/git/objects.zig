@@ -111,7 +111,10 @@ pub const GitObject = struct {
         defer allocator.free(obj_file_path);
 
         const compressed_content = platform_impl.fs.readFile(allocator, obj_file_path) catch |err| switch (err) {
-            error.FileNotFound => return error.ObjectNotFound,
+            error.FileNotFound => {
+                // Try to find object in pack files
+                return loadFromPackFiles(hash_str, git_dir, platform_impl, allocator) catch return error.ObjectNotFound;
+            },
             else => return err,
         };
         defer allocator.free(compressed_content);
@@ -220,4 +223,45 @@ pub fn createCommitObject(tree_hash: []const u8, parent_hashes: []const []const 
 
     const data = try content.toOwnedSlice();
     return GitObject.init(.commit, data);
+}
+
+/// Try to load object from pack files when loose object is not found
+fn loadFromPackFiles(hash_str: []const u8, git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
+    const pack_dir_path = try std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir});
+    defer allocator.free(pack_dir_path);
+    
+    // Open pack directory
+    var pack_dir = std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true }) catch return error.ObjectNotFound;
+    defer pack_dir.close();
+    
+    // Look for .idx files (pack index files)
+    var iterator = pack_dir.iterate();
+    while (try iterator.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
+        
+        // Try to find object in this pack
+        const obj = findObjectInPack(pack_dir_path, entry.name, hash_str, platform_impl, allocator) catch continue;
+        return obj;
+    }
+    
+    return error.ObjectNotFound;
+}
+
+/// Find object in a specific pack file
+fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_str: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
+    // For a simplified implementation, we'll just return an error
+    // A full implementation would:
+    // 1. Parse the .idx file to find the object offset in the .pack file
+    // 2. Read the object data from the .pack file at that offset
+    // 3. Decompress and parse the object data
+    
+    // Pack file format is complex, so for now we'll return ObjectNotFound
+    _ = pack_dir_path;
+    _ = idx_filename;
+    _ = hash_str;
+    _ = platform_impl;
+    _ = allocator;
+    
+    return error.ObjectNotFound;
 }
