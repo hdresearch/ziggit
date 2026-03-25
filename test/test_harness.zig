@@ -257,7 +257,7 @@ pub fn runZiggitCommand(allocator: std.mem.Allocator, args: []const []const u8) 
     defer argv.deinit();
     
     // Add ziggit binary path
-    try argv.append("./zig-out/bin/ziggit");
+    try argv.append(/root/ziggit/zig-out/bin/ziggit");
     for (args) |arg| {
         try argv.append(arg);
     }
@@ -296,7 +296,7 @@ pub fn runTests() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const harness = TestHarness.init(allocator, "/root/ziggit/zig-out/bin/ziggit", "git");
+    const harness = TestHarness.init(allocator, "/root/zigg/root/ziggit/zig-out/bin/ziggit", "git");
 
     // Run test suites
     try testInit(harness);
