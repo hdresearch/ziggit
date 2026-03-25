@@ -124,19 +124,16 @@ pub const Index = struct {
         self.entries.deinit();
     }
 
-    pub fn load(git_dir: []const u8, allocator: std.mem.Allocator) !Index {
+    pub fn load(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !Index {
         const index_path = try std.fmt.allocPrint(allocator, "{s}/index", .{git_dir});
         defer allocator.free(index_path);
 
         var index = Index.init(allocator);
         
-        const file = std.fs.openFileAbsolute(index_path, .{}) catch |err| switch (err) {
+        const data = platform_impl.fs.readFile(allocator, index_path) catch |err| switch (err) {
             error.FileNotFound => return index, // Empty index if file doesn't exist
             else => return err,
         };
-        defer file.close();
-
-        const data = try file.readToEndAlloc(allocator, 1024 * 1024); // 1MB limit
         defer allocator.free(data);
 
         var stream = std.io.fixedBufferStream(data);
@@ -161,12 +158,9 @@ pub const Index = struct {
         return index;
     }
 
-    pub fn save(self: Index, git_dir: []const u8) !void {
+    pub fn save(self: Index, git_dir: []const u8, platform_impl: anytype) !void {
         const index_path = try std.fmt.allocPrint(self.allocator, "{s}/index", .{git_dir});
         defer self.allocator.free(index_path);
-
-        const file = try std.fs.createFileAbsolute(index_path, .{ .truncate = true });
-        defer file.close();
 
         var buffer = std.ArrayList(u8).init(self.allocator);
         defer buffer.deinit();
@@ -190,16 +184,12 @@ pub const Index = struct {
         hasher.final(&checksum);
         try writer.writeAll(&checksum);
 
-        try file.writeAll(buffer.items);
+        try platform_impl.fs.writeFile(index_path, buffer.items);
     }
 
-    pub fn add(self: *Index, path: []const u8, file_path: []const u8) !void {
+    pub fn add(self: *Index, path: []const u8, file_path: []const u8, platform_impl: anytype) !void {
         // Read file content
-        const file = try std.fs.openFileAbsolute(file_path, .{});
-        defer file.close();
-        
-        const stat = try file.stat();
-        const content = try file.readToEndAlloc(self.allocator, @intCast(stat.size));
+        const content = try platform_impl.fs.readFile(self.allocator, file_path);
         defer self.allocator.free(content);
 
         // Create blob object and get hash
@@ -210,18 +200,29 @@ pub const Index = struct {
         var hash_bytes: [20]u8 = undefined;
         _ = try std.fmt.hexToBytes(&hash_bytes, hash_str);
 
+        // Create a simple stat structure (we don't have real stat info from platform abstraction)
+        const fake_stat = std.fs.File.Stat{
+            .inode = 0,
+            .size = content.len,
+            .mode = 33188, // 100644 in octal
+            .kind = .file,
+            .atime = 0,
+            .mtime = 0,
+            .ctime = 0,
+        };
+
         // Find existing entry or add new one
         for (self.entries.items, 0..) |*entry, i| {
             if (std.mem.eql(u8, entry.path, path)) {
                 // Update existing entry
                 entry.deinit(self.allocator);
-                self.entries.items[i] = IndexEntry.init(try self.allocator.dupe(u8, path), stat, hash_bytes);
+                self.entries.items[i] = IndexEntry.init(try self.allocator.dupe(u8, path), fake_stat, hash_bytes);
                 return;
             }
         }
 
         // Add new entry
-        const entry = IndexEntry.init(try self.allocator.dupe(u8, path), stat, hash_bytes);
+        const entry = IndexEntry.init(try self.allocator.dupe(u8, path), fake_stat, hash_bytes);
         try self.entries.append(entry);
 
         // Keep entries sorted by path
