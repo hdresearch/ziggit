@@ -6,7 +6,12 @@ const ChildProcess = std.process.Child;
 // Test binary index format compatibility between git and ziggit
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+    defer {
+        const leaked = gpa.deinit();
+        if (leaked == .leak) {
+            std.debug.print("Warning: memory leaked in index format tests\n", .{});
+        }
+    }
     const allocator = gpa.allocator();
 
     std.debug.print("Running Index Format Compatibility Tests...\n", .{});

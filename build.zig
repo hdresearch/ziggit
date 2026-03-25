@@ -22,6 +22,11 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run ziggit");
     run_step.dependOn(&run_cmd.step);
 
+    // Create ziggit module for importing into other targets
+    const ziggit_module = b.addModule("ziggit", .{
+        .root_source_file = b.path("src/lib/ziggit.zig"),
+    });
+
     // Unit tests for the main library
     const unit_tests = b.addTest(.{
         .root_source_file = b.path("src/main.zig"),
