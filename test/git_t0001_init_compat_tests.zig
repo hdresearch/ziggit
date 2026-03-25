@@ -1,6 +1,6 @@
 // Git source compatibility tests adapted from t0001-init.sh
 const std = @import("std");
-const print = std.debug.print;
+
 
 pub const TestFramework = @import("git_source_test_harness.zig").TestFramework;
 
@@ -12,7 +12,7 @@ pub fn runInitCompatTests() !void {
     var tf = TestFramework.init(allocator);
     defer tf.deinit();
     
-    print("Running git init compatibility tests (adapted from t0001-init.sh)...\n");
+    std.debug.print("Running git init compatibility tests (adapted from t0001-init.sh)...\n", .{});
     
     try testPlainInit(&tf);
     try testInitWithPath(&tf);
@@ -20,7 +20,7 @@ pub fn runInitCompatTests() !void {
     try testReinitExisting(&tf);
     try testInitInExistingRepo(&tf);
     
-    print("✓ All init compatibility tests passed!\n");
+    std.debug.print("✓ All init compatibility tests passed!\n", .{});
 }
 
 fn checkGitConfig(tf: *TestFramework, git_dir: []const u8, expected_bare: bool, expected_worktree: []const u8) !bool {
@@ -39,22 +39,22 @@ fn checkGitConfig(tf: *TestFramework, git_dir: []const u8, expected_bare: bool, 
     
     // Check that essential files/directories exist
     std.fs.cwd().access(config_path, .{}) catch |err| {
-        print("      ❌ config file missing: {any}\n", .{err});
+        std.debug.print("      ❌ config file missing: {any}\n", .{err});
         return false;
     };
     
     std.fs.cwd().access(head_path, .{}) catch |err| {
-        print("      ❌ HEAD file missing: {any}\n", .{err});
+        std.debug.print("      ❌ HEAD file missing: {any}\n", .{err});
         return false;
     };
     
     std.fs.cwd().access(refs_path, .{}) catch |err| {
-        print("      ❌ refs directory missing: {any}\n", .{err});
+        std.debug.print("      ❌ refs directory missing: {any}\n", .{err});
         return false;
     };
     
     std.fs.cwd().access(objects_path, .{}) catch |err| {
-        print("      ❌ objects directory missing: {any}\n", .{err});
+        std.debug.print("      ❌ objects directory missing: {any}\n", .{err});
         return false;
     };
     
@@ -67,7 +67,7 @@ fn checkGitConfig(tf: *TestFramework, git_dir: []const u8, expected_bare: bool, 
 }
 
 fn testPlainInit(tf: *TestFramework) !void {
-    print("  Testing plain init...\n");
+    std.debug.print("  Testing plain init...\n", .{});
     
     const test_dir = try tf.createTempDir("plain-init");
     defer tf.removeTempDir(test_dir);
@@ -79,7 +79,7 @@ fn testPlainInit(tf: *TestFramework) !void {
     defer init_result.deinit();
     
     if (init_result.exit_code != 0) {
-        print("    ❌ ziggit init failed: {s}\n", .{init_result.stderr});
+        std.debug.print("    ❌ ziggit init failed: {s}\n", .{init_result.stderr});
         return;
     }
     
@@ -88,7 +88,7 @@ fn testPlainInit(tf: *TestFramework) !void {
     defer tf.allocator.free(git_dir);
     
     if (!try checkGitConfig(tf, git_dir, false, "unset")) {
-        print("    ❌ .git directory structure is incorrect\n");
+        std.debug.print("    ❌ .git directory structure is incorrect\n", .{});
         return;
     }
     
@@ -102,7 +102,7 @@ fn testPlainInit(tf: *TestFramework) !void {
     defer init_cwd_result.deinit();
     
     if (init_cwd_result.exit_code != 0) {
-        print("    ❌ ziggit init in cwd failed: {s}\n", .{init_cwd_result.stderr});
+        std.debug.print("    ❌ ziggit init in cwd failed: {s}\n", .{init_cwd_result.stderr});
         return;
     }
     
@@ -110,15 +110,15 @@ fn testPlainInit(tf: *TestFramework) !void {
     defer tf.allocator.free(git_dir2);
     
     if (!try checkGitConfig(tf, git_dir2, false, "unset")) {
-        print("    ❌ .git directory structure is incorrect for cwd init\n");
+        std.debug.print("    ❌ .git directory structure is incorrect for cwd init\n", .{});
         return;
     }
     
-    print("    ✓ Plain init test passed\n");
+    std.debug.print("    ✓ Plain init test passed\n", .{});
 }
 
 fn testInitWithPath(tf: *TestFramework) !void {
-    print("  Testing init with various paths...\n");
+    std.debug.print("  Testing init with various paths...\n", .{});
     
     const test_dir = try tf.createTempDir("init-path");
     defer tf.removeTempDir(test_dir);
@@ -130,7 +130,7 @@ fn testInitWithPath(tf: *TestFramework) !void {
     defer init_rel_result.deinit();
     
     if (init_rel_result.exit_code != 0) {
-        print("    ❌ ziggit init with relative path failed: {s}\n", .{init_rel_result.stderr});
+        std.debug.print("    ❌ ziggit init with relative path failed: {s}\n", .{init_rel_result.stderr});
         return;
     }
     
@@ -139,7 +139,7 @@ fn testInitWithPath(tf: *TestFramework) !void {
     defer tf.allocator.free(git_dir);
     
     if (!try checkGitConfig(tf, git_dir, false, "unset")) {
-        print("    ❌ .git directory structure is incorrect for relative path\n");
+        std.debug.print("    ❌ .git directory structure is incorrect for relative path\n", .{});
         return;
     }
     
@@ -150,7 +150,7 @@ fn testInitWithPath(tf: *TestFramework) !void {
     defer init_sub_result.deinit();
     
     if (init_sub_result.exit_code != 0) {
-        print("    ❌ ziggit init with subdirectory path failed: {s}\n", .{init_sub_result.stderr});
+        std.debug.print("    ❌ ziggit init with subdirectory path failed: {s}\n", .{init_sub_result.stderr});
         return;
     }
     
@@ -158,15 +158,15 @@ fn testInitWithPath(tf: *TestFramework) !void {
     defer tf.allocator.free(git_dir2);
     
     if (!try checkGitConfig(tf, git_dir2, false, "unset")) {
-        print("    ❌ .git directory structure is incorrect for subdirectory path\n");
+        std.debug.print("    ❌ .git directory structure is incorrect for subdirectory path\n", .{});
         return;
     }
     
-    print("    ✓ Init with path test passed\n");
+    std.debug.print("    ✓ Init with path test passed\n", .{});
 }
 
 fn testBareInit(tf: *TestFramework) !void {
-    print("  Testing bare repository init...\n");
+    std.debug.print("  Testing bare repository init...\n", .{});
     
     const test_dir = try tf.createTempDir("bare-init");
     defer tf.removeTempDir(test_dir);
@@ -178,7 +178,7 @@ fn testBareInit(tf: *TestFramework) !void {
     defer bare_result.deinit();
     
     if (bare_result.exit_code != 0) {
-        print("    ⚠ ziggit --bare init not implemented: {s}\n", .{bare_result.stderr});
+        std.debug.print("    ⚠ ziggit --bare init not implemented: {s}\n", .{bare_result.stderr});
         return;
     }
     
@@ -187,15 +187,15 @@ fn testBareInit(tf: *TestFramework) !void {
     defer tf.allocator.free(bare_dir);
     
     if (!try checkGitConfig(tf, bare_dir, true, "unset")) {
-        print("    ❌ Bare repository structure is incorrect\n");
+        std.debug.print("    ❌ Bare repository structure is incorrect\n", .{});
         return;
     }
     
-    print("    ✓ Bare init test passed\n");
+    std.debug.print("    ✓ Bare init test passed\n", .{});
 }
 
 fn testReinitExisting(tf: *TestFramework) !void {
-    print("  Testing reinit of existing repository...\n");
+    std.debug.print("  Testing reinit of existing repository...\n", .{});
     
     const test_dir = try tf.createTempDir("reinit");
     defer tf.removeTempDir(test_dir);
@@ -207,7 +207,7 @@ fn testReinitExisting(tf: *TestFramework) !void {
     defer init_result1.deinit();
     
     if (init_result1.exit_code != 0) {
-        print("    ❌ First init failed: {s}\n", .{init_result1.stderr});
+        std.debug.print("    ❌ First init failed: {s}\n", .{init_result1.stderr});
         return;
     }
     
@@ -224,7 +224,7 @@ fn testReinitExisting(tf: *TestFramework) !void {
     defer init_result2.deinit();
     
     if (init_result2.exit_code != 0) {
-        print("    ❌ Reinit failed: {s}\n", .{init_result2.stderr});
+        std.debug.print("    ❌ Reinit failed: {s}\n", .{init_result2.stderr});
         return;
     }
     
@@ -233,7 +233,7 @@ fn testReinitExisting(tf: *TestFramework) !void {
     defer tf.allocator.free(file_path);
     
     std.fs.cwd().access(file_path, .{}) catch |err| {
-        print("    ❌ Existing file was deleted during reinit: {any}\n", .{err});
+        std.debug.print("    ❌ Existing file was deleted during reinit: {any}\n", .{err});
         return;
     };
     
@@ -242,15 +242,15 @@ fn testReinitExisting(tf: *TestFramework) !void {
     defer tf.allocator.free(git_dir);
     
     if (!try checkGitConfig(tf, git_dir, false, "unset")) {
-        print("    ❌ .git directory structure was corrupted during reinit\n");
+        std.debug.print("    ❌ .git directory structure was corrupted during reinit\n", .{});
         return;
     }
     
-    print("    ✓ Reinit test passed\n");
+    std.debug.print("    ✓ Reinit test passed\n", .{});
 }
 
 fn testInitInExistingRepo(tf: *TestFramework) !void {
-    print("  Testing init in existing git repository...\n");
+    std.debug.print("  Testing init in existing git repository...\n", .{});
     
     const test_dir = try tf.createTempDir("init-existing");
     defer tf.removeTempDir(test_dir);
@@ -262,7 +262,7 @@ fn testInitInExistingRepo(tf: *TestFramework) !void {
     defer init_result1.deinit();
     
     if (init_result1.exit_code != 0) {
-        print("    ❌ Initial repo creation failed: {s}\n", .{init_result1.stderr});
+        std.debug.print("    ❌ Initial repo creation failed: {s}\n", .{init_result1.stderr});
         return;
     }
     
@@ -283,21 +283,21 @@ fn testInitInExistingRepo(tf: *TestFramework) !void {
     
     // This should either succeed (creating nested repo) or fail with appropriate error
     if (nested_init_result.exit_code == 0) {
-        print("    ✓ Nested repo creation allowed\n");
+        std.debug.print("    ✓ Nested repo creation allowed\n", .{});
         
         // Check that nested .git exists
         const nested_git_dir = try std.fmt.allocPrint(tf.allocator, "{s}/.git", .{nested_dir});
         defer tf.allocator.free(nested_git_dir);
         
         if (!try checkGitConfig(tf, nested_git_dir, false, "unset")) {
-            print("    ❌ Nested .git directory structure is incorrect\n");
+            std.debug.print("    ❌ Nested .git directory structure is incorrect\n", .{});
             return;
         }
     } else {
-        print("    ✓ Nested repo creation appropriately handled\n");
+        std.debug.print("    ✓ Nested repo creation appropriately handled\n", .{});
     }
     
-    print("    ✓ Init in existing repo test passed\n");
+    std.debug.print("    ✓ Init in existing repo test passed\n", .{});
 }
 
 pub fn main() !void {

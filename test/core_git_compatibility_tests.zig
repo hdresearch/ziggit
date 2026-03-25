@@ -1,5 +1,5 @@
 const std = @import("std");
-const print = std.debug.print;
+
 
 // Git Core Compatibility Tests
 // Adapted from git source test suite (t0001-init.sh, t1300-config.sh, t2000-add.sh, etc.)
@@ -71,7 +71,7 @@ const CommandResult = struct {
 
 // Test: git init functionality (adapted from t0001-init.sh)
 fn testGitInit(tf: *TestFramework) !void {
-    print("  Testing git init compatibility...\n", .{});
+    std.debug.print("  Testing git init compatibility...\n", .{});
     
     // Test 1: Plain init
     const test_dir = try tf.createTestDir("init-plain");
@@ -81,7 +81,7 @@ fn testGitInit(tf: *TestFramework) !void {
     defer result.deinit(tf.allocator);
     
     if (result.exit_code != 0) {
-        print("    ✗ ziggit init failed with code {d}: {s}\n", .{ result.exit_code, result.stderr });
+        std.debug.print("    ✗ ziggit init failed with code {d}: {s}\n", .{ result.exit_code, result.stderr });
         return;
     }
     
@@ -90,7 +90,7 @@ fn testGitInit(tf: *TestFramework) !void {
     defer tf.allocator.free(git_dir_path);
     
     var git_dir = std.fs.cwd().openDir(git_dir_path[1..], .{}) catch {
-        print("    ✗ .git directory not created\n", .{});
+        std.debug.print("    ✗ .git directory not created\n", .{});
         return;
     };
     defer git_dir.close();
@@ -99,12 +99,12 @@ fn testGitInit(tf: *TestFramework) !void {
     const essential_files = [_][]const u8{ "config", "HEAD", "refs", "objects" };
     for (essential_files) |file| {
         git_dir.access(file, .{}) catch {
-            print("    ✗ Missing essential git structure: {s}\n", .{file});
+            std.debug.print("    ✗ Missing essential git structure: {s}\n", .{file});
             return;
         };
     }
     
-    print("    ✓ Plain init works correctly\n", .{});
+    std.debug.print("    ✓ Plain init works correctly\n", .{});
     
     // Test 2: Bare init (adapted from git test suite)
     const bare_dir = try tf.createTestDir("init-bare");
@@ -114,16 +114,16 @@ fn testGitInit(tf: *TestFramework) !void {
     defer bare_result.deinit(tf.allocator);
     
     if (bare_result.exit_code != 0) {
-        print("    ⚠ Bare init not implemented (exit code {d})\n", .{bare_result.exit_code});
+        std.debug.print("    ⚠ Bare init not implemented (exit code {d})\n", .{bare_result.exit_code});
         return;
     }
     
-    print("    ✓ Bare init works correctly\n", .{});
+    std.debug.print("    ✓ Bare init works correctly\n", .{});
 }
 
 // Test: git add functionality (adapted from t2000-add.sh)
 fn testGitAdd(tf: *TestFramework) !void {
-    print("  Testing git add compatibility...\n", .{});
+    std.debug.print("  Testing git add compatibility...\n", .{});
     
     const test_dir = try tf.createTestDir("add-test");
     defer tf.cleanup(test_dir);
@@ -133,7 +133,7 @@ fn testGitAdd(tf: *TestFramework) !void {
     defer init_result.deinit(tf.allocator);
     
     if (init_result.exit_code != 0) {
-        print("    ✗ Failed to initialize repository\n", .{});
+        std.debug.print("    ✗ Failed to initialize repository\n", .{});
         return;
     }
     
@@ -148,7 +148,7 @@ fn testGitAdd(tf: *TestFramework) !void {
     defer add_result.deinit(tf.allocator);
     
     if (add_result.exit_code != 0) {
-        print("    ✗ add failed with code {d}: {s}\n", .{ add_result.exit_code, add_result.stderr });
+        std.debug.print("    ✗ add failed with code {d}: {s}\n", .{ add_result.exit_code, add_result.stderr });
         return;
     }
     
@@ -157,27 +157,27 @@ fn testGitAdd(tf: *TestFramework) !void {
     defer status_result.deinit(tf.allocator);
     
     if (std.mem.indexOf(u8, status_result.stdout, "A ") == null) {
-        print("    ✗ File not properly staged (status: {s})\n", .{status_result.stdout});
+        std.debug.print("    ✗ File not properly staged (status: {s})\n", .{status_result.stdout});
         return;
     }
     
-    print("    ✓ Basic add functionality works\n", .{});
+    std.debug.print("    ✓ Basic add functionality works\n", .{});
     
     // Test adding nonexistent file (should fail)
     var add_fail_result = try tf.runCommand(&[_][]const u8{ "./zig-out/bin/ziggit", "add", "nonexistent.txt" }, test_dir);
     defer add_fail_result.deinit(tf.allocator);
     
     if (add_fail_result.exit_code == 0) {
-        print("    ✗ Adding nonexistent file should fail\n", .{});
+        std.debug.print("    ✗ Adding nonexistent file should fail\n", .{});
         return;
     }
     
-    print("    ✓ Error handling for nonexistent files works\n", .{});
+    std.debug.print("    ✓ Error handling for nonexistent files works\n", .{});
 }
 
 // Test: git commit functionality (adapted from t7500-commit.sh)
 fn testGitCommit(tf: *TestFramework) !void {
-    print("  Testing git commit compatibility...\n", .{});
+    std.debug.print("  Testing git commit compatibility...\n", .{});
     
     const test_dir = try tf.createTestDir("commit-test");
     defer tf.cleanup(test_dir);
@@ -187,7 +187,7 @@ fn testGitCommit(tf: *TestFramework) !void {
     defer init_result.deinit(tf.allocator);
     
     if (init_result.exit_code != 0) {
-        print("    ✗ Failed to initialize repository\n", .{});
+        std.debug.print("    ✗ Failed to initialize repository\n", .{});
         return;
     }
     
@@ -205,7 +205,7 @@ fn testGitCommit(tf: *TestFramework) !void {
     defer commit_result.deinit(tf.allocator);
     
     if (commit_result.exit_code != 0) {
-        print("    ✗ commit failed with code {d}: {s}\n", .{ commit_result.exit_code, commit_result.stderr });
+        std.debug.print("    ✗ commit failed with code {d}: {s}\n", .{ commit_result.exit_code, commit_result.stderr });
         return;
     }
     
@@ -214,26 +214,26 @@ fn testGitCommit(tf: *TestFramework) !void {
     defer log_result.deinit(tf.allocator);
     
     if (std.mem.indexOf(u8, log_result.stdout, "Initial commit") == null) {
-        print("    ✗ Commit not found in log: {s}\n", .{log_result.stdout});
+        std.debug.print("    ✗ Commit not found in log: {s}\n", .{log_result.stdout});
         return;
     }
     
-    print("    ✓ Basic commit functionality works\n", .{});
+    std.debug.print("    ✓ Basic commit functionality works\n", .{});
     
     // Test commit with nothing to commit (should fail)
     var empty_commit_result = try tf.runCommand(&[_][]const u8{ "./zig-out/bin/ziggit", "commit", "-m", "Empty commit" }, test_dir);
     defer empty_commit_result.deinit(tf.allocator);
     
     if (empty_commit_result.exit_code == 0) {
-        print("    ⚠ Empty commit should fail (git behavior)\n", .{});
+        std.debug.print("    ⚠ Empty commit should fail (git behavior)\n", .{});
     } else {
-        print("    ✓ Empty commit properly rejected\n", .{});
+        std.debug.print("    ✓ Empty commit properly rejected\n", .{});
     }
 }
 
 // Test: git status functionality (adapted from t7060-wtstatus.sh)  
 fn testGitStatus(tf: *TestFramework) !void {
-    print("  Testing git status compatibility...\n", .{});
+    std.debug.print("  Testing git status compatibility...\n", .{});
     
     const test_dir = try tf.createTestDir("status-test");
     defer tf.cleanup(test_dir);
@@ -258,11 +258,11 @@ fn testGitStatus(tf: *TestFramework) !void {
     defer clean_status.deinit(tf.allocator);
     
     if (clean_status.stdout.len > 0) {
-        print("    ✗ Clean repository should have empty status: {s}\n", .{clean_status.stdout});
+        std.debug.print("    ✗ Clean repository should have empty status: {s}\n", .{clean_status.stdout});
         return;
     }
     
-    print("    ✓ Clean status works correctly\n", .{});
+    std.debug.print("    ✓ Clean status works correctly\n", .{});
     
     // Modify file and test modified status
     try std.fs.cwd().writeFile(.{ .sub_path = test_file_path[1..], .data = "Modified content\n" });
@@ -271,16 +271,16 @@ fn testGitStatus(tf: *TestFramework) !void {
     defer modified_status.deinit(tf.allocator);
     
     if (std.mem.indexOf(u8, modified_status.stdout, " M ") == null) {
-        print("    ✗ Modified file not detected in status: {s}\n", .{modified_status.stdout});
+        std.debug.print("    ✗ Modified file not detected in status: {s}\n", .{modified_status.stdout});
         return;
     }
     
-    print("    ✓ Modified file detection works\n", .{});
+    std.debug.print("    ✓ Modified file detection works\n", .{});
 }
 
 // Test: git log functionality (adapted from t4202-log.sh)
 fn testGitLog(tf: *TestFramework) !void {
-    print("  Testing git log compatibility...\n", .{});
+    std.debug.print("  Testing git log compatibility...\n", .{});
     
     const test_dir = try tf.createTestDir("log-test");
     defer tf.cleanup(test_dir);
@@ -318,7 +318,7 @@ fn testGitLog(tf: *TestFramework) !void {
     defer log_result.deinit(tf.allocator);
     
     if (log_result.exit_code != 0) {
-        print("    ✗ log failed with code {d}: {s}\n", .{ log_result.exit_code, log_result.stderr });
+        std.debug.print("    ✗ log failed with code {d}: {s}\n", .{ log_result.exit_code, log_result.stderr });
         return;
     }
     
@@ -327,16 +327,16 @@ fn testGitLog(tf: *TestFramework) !void {
     const has_second = std.mem.indexOf(u8, log_result.stdout, "Second commit") != null;
     
     if (!has_first or !has_second) {
-        print("    ✗ Missing commits in log output: {s}\n", .{log_result.stdout});
+        std.debug.print("    ✗ Missing commits in log output: {s}\n", .{log_result.stdout});
         return;
     }
     
-    print("    ✓ Log functionality works correctly\n", .{});
+    std.debug.print("    ✓ Log functionality works correctly\n", .{});
 }
 
 // Test: git diff functionality (adapted from t4041-diff-submodule-option.sh)
 fn testGitDiff(tf: *TestFramework) !void {
-    print("  Testing git diff compatibility...\n", .{});
+    std.debug.print("  Testing git diff compatibility...\n", .{});
     
     const test_dir = try tf.createTestDir("diff-test");
     defer tf.cleanup(test_dir);
@@ -365,7 +365,7 @@ fn testGitDiff(tf: *TestFramework) !void {
     defer diff_result.deinit(tf.allocator);
     
     if (diff_result.exit_code != 0) {
-        print("    ✗ diff failed with code {d}: {s}\n", .{ diff_result.exit_code, diff_result.stderr });
+        std.debug.print("    ✗ diff failed with code {d}: {s}\n", .{ diff_result.exit_code, diff_result.stderr });
         return;
     }
     
@@ -374,16 +374,16 @@ fn testGitDiff(tf: *TestFramework) !void {
     const has_plus = std.mem.indexOf(u8, diff_result.stdout, "+Modified content") != null;
     
     if (!has_minus or !has_plus) {
-        print("    ✗ Diff output doesn't show expected changes: {s}\n", .{diff_result.stdout});
+        std.debug.print("    ✗ Diff output doesn't show expected changes: {s}\n", .{diff_result.stdout});
         return;
     }
     
-    print("    ✓ Diff functionality works correctly\n", .{});
+    std.debug.print("    ✓ Diff functionality works correctly\n", .{});
 }
 
 // Test: git branch functionality (adapted from t3200-branch.sh)
 fn testGitBranch(tf: *TestFramework) !void {
-    print("  Testing git branch compatibility...\n", .{});
+    std.debug.print("  Testing git branch compatibility...\n", .{});
     
     const test_dir = try tf.createTestDir("branch-test");
     defer tf.cleanup(test_dir);
@@ -408,7 +408,7 @@ fn testGitBranch(tf: *TestFramework) !void {
     defer branch_result.deinit(tf.allocator);
     
     if (branch_result.exit_code != 0) {
-        print("    ⚠ Branch creation not implemented (exit code {d}): {s}\n", .{ branch_result.exit_code, branch_result.stderr });
+        std.debug.print("    ⚠ Branch creation not implemented (exit code {d}): {s}\n", .{ branch_result.exit_code, branch_result.stderr });
         return;
     }
     
@@ -417,16 +417,16 @@ fn testGitBranch(tf: *TestFramework) !void {
     defer list_result.deinit(tf.allocator);
     
     if (std.mem.indexOf(u8, list_result.stdout, "feature") == null) {
-        print("    ✗ Created branch not found in branch list: {s}\n", .{list_result.stdout});
+        std.debug.print("    ✗ Created branch not found in branch list: {s}\n", .{list_result.stdout});
         return;
     }
     
-    print("    ✓ Branch functionality works correctly\n", .{});
+    std.debug.print("    ✓ Branch functionality works correctly\n", .{});
 }
 
 // Test: git checkout functionality (adapted from t2013-checkout-submodule.sh)
 fn testGitCheckout(tf: *TestFramework) !void {
-    print("  Testing git checkout compatibility...\n", .{});
+    std.debug.print("  Testing git checkout compatibility...\n", .{});
     
     const test_dir = try tf.createTestDir("checkout-test");
     defer tf.cleanup(test_dir);
@@ -454,15 +454,15 @@ fn testGitCheckout(tf: *TestFramework) !void {
     defer checkout_result.deinit(tf.allocator);
     
     if (checkout_result.exit_code != 0) {
-        print("    ⚠ Checkout not implemented (exit code {d}): {s}\n", .{ checkout_result.exit_code, checkout_result.stderr });
+        std.debug.print("    ⚠ Checkout not implemented (exit code {d}): {s}\n", .{ checkout_result.exit_code, checkout_result.stderr });
         return;
     }
     
-    print("    ✓ Checkout functionality works correctly\n", .{});
+    std.debug.print("    ✓ Checkout functionality works correctly\n", .{});
 }
 
 pub fn runCoreGitCompatibilityTests() !void {
-    print("Running Core Git Compatibility Tests (adapted from git source test suite)...\n", .{});
+    std.debug.print("Running Core Git Compatibility Tests (adapted from git source test suite)...\n", .{});
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -478,7 +478,7 @@ pub fn runCoreGitCompatibilityTests() !void {
     try testGitBranch(&tf);
     try testGitCheckout(&tf);
     
-    print("Core Git Compatibility Tests completed!\n", .{});
+    std.debug.print("Core Git Compatibility Tests completed!\n", .{});
 }
 
 // Unit tests for zig build test
