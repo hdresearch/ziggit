@@ -21,7 +21,7 @@ pub fn testInitPlain(harness: TestHarness) !void {
     try testing.expect(init_result.exit_code == 0);
     
     // Verify .git directory structure
-    var git_dir_path = try std.fmt.allocPrint(harness.allocator, "{s}/.git", .{temp_dir});
+    const git_dir_path = try std.fmt.allocPrint(harness.allocator, "{s}/.git", .{temp_dir});
     defer harness.allocator.free(git_dir_path);
 
     var git_dir = std.fs.openDirAbsolute(git_dir_path, .{}) catch |err| switch (err) {

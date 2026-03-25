@@ -8,7 +8,7 @@ fn testPlainInit(framework: *GitTestFramework) !void {
     defer framework.allocator.free(test_dir);
 
     // Test ziggit init
-    var ziggit_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
+    const ziggit_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
     defer ziggit_result.deinit(framework.allocator);
     
     try framework.expectExitCode(0, ziggit_result);
@@ -42,7 +42,7 @@ fn testPlainInit(framework: *GitTestFramework) !void {
     const git_test_dir = try framework.createTestRepo("plain-init-git");
     defer framework.allocator.free(git_test_dir);
     
-    var git_result = try framework.runGitCommand(git_test_dir, &[_][]const u8{"init"});
+    const git_result = try framework.runGitCommand(git_test_dir, &[_][]const u8{"init"});
     defer git_result.deinit(framework.allocator);
     
     // Both should succeed
@@ -55,7 +55,7 @@ fn testBareInit(framework: *GitTestFramework) !void {
     defer framework.allocator.free(test_dir);
 
     // Test ziggit init --bare
-    var ziggit_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "init", "--bare" });
+    const ziggit_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "init", "--bare" });
     defer ziggit_result.deinit(framework.allocator);
     
     try framework.expectExitCode(0, ziggit_result);
@@ -77,7 +77,7 @@ fn testBareInit(framework: *GitTestFramework) !void {
     const git_test_dir = try framework.createTestRepo("bare-init-git");
     defer framework.allocator.free(git_test_dir);
     
-    var git_result = try framework.runGitCommand(git_test_dir, &[_][]const u8{ "init", "--bare" });
+    const git_result = try framework.runGitCommand(git_test_dir, &[_][]const u8{ "init", "--bare" });
     defer git_result.deinit(framework.allocator);
     
     try framework.expectExitCode(0, git_result);
@@ -89,12 +89,12 @@ fn testReinitExisting(framework: *GitTestFramework) !void {
     defer framework.allocator.free(test_dir);
 
     // First init
-    var first_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
+    const first_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
     defer first_result.deinit(framework.allocator);
     try framework.expectExitCode(0, first_result);
 
     // Second init (should not fail)
-    var second_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
+    const second_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
     defer second_result.deinit(framework.allocator);
     try framework.expectExitCode(0, second_result);
 
@@ -119,7 +119,7 @@ fn testInitWithDirectory(framework: *GitTestFramework) !void {
     const target_repo = "my-new-repo";
     
     // Test ziggit init <directory>
-    var ziggit_result = try framework.runZiggitCommand(base_dir, &[_][]const u8{ "init", target_repo });
+    const ziggit_result = try framework.runZiggitCommand(base_dir, &[_][]const u8{ "init", target_repo });
     defer ziggit_result.deinit(framework.allocator);
     
     try framework.expectExitCode(0, ziggit_result);
@@ -140,7 +140,7 @@ fn testInitWithDirectory(framework: *GitTestFramework) !void {
     const git_base_dir = try framework.createTestRepo("init-with-dir-git");
     defer framework.allocator.free(git_base_dir);
     
-    var git_result = try framework.runGitCommand(git_base_dir, &[_][]const u8{ "init", target_repo });
+    const git_result = try framework.runGitCommand(git_base_dir, &[_][]const u8{ "init", target_repo });
     defer git_result.deinit(framework.allocator);
     
     try framework.expectExitCode(0, git_result);
@@ -149,7 +149,7 @@ fn testInitWithDirectory(framework: *GitTestFramework) !void {
 // Test: Error cases - init in invalid locations
 fn testInitErrorCases(framework: *GitTestFramework) !void {
     // Test init with non-existent parent directory
-    var result = try framework.runZiggitCommand("/tmp", &[_][]const u8{ "init", "/nonexistent/path/repo" });
+    const result = try framework.runZiggitCommand("/tmp", &[_][]const u8{ "init", "/nonexistent/path/repo" });
     defer result.deinit(framework.allocator);
     
     // Should fail with non-zero exit code (like git does)
