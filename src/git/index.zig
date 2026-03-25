@@ -199,7 +199,7 @@ pub const Index = struct {
         defer file.close();
         
         const stat = try file.stat();
-        const content = try file.readToEndAlloc(self.allocator, stat.size);
+        const content = try file.readToEndAlloc(self.allocator, @intCast(stat.size));
         defer self.allocator.free(content);
 
         // Create blob object and get hash

@@ -613,7 +613,7 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *std.process.ArgIterator, stdout:
         // Check if file has been modified (simple comparison by size and mtime)
         if (stat.size != entry.size or @as(u32, @intCast(@divTrunc(stat.mtime, std.time.ns_per_s))) != entry.mtime_sec) {
             // File has been modified
-            const content = try file.readToEndAlloc(allocator, stat.size);
+            const content = try file.readToEndAlloc(allocator, @intCast(stat.size));
             defer allocator.free(content);
             
             // Create blob to get hash
@@ -839,8 +839,17 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *std.process.ArgIterator, std
     
     // Check if we're already on this branch
     if (std.mem.eql(u8, branch_name, current_branch) and !create_branch) {
-        try stdout.print("Already on '{s}'\n", .{branch_name});
-        return;
+        // But first check if there are any commits - in empty repo, branch doesn't really exist
+        const current_commit = refs.getCurrentCommit(git_dir, allocator) catch null;
+        if (current_commit) |c| {
+            allocator.free(c);
+            try stdout.print("Already on '{s}'\n", .{branch_name});
+            return;
+        } else {
+            // Empty repository - branch doesn't really exist yet
+            try stderr.print("error: pathspec '{s}' did not match any file(s) known to git\n", .{branch_name});
+            std.process.exit(1);
+        }
     }
     
     // Handle create branch
@@ -866,8 +875,17 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *std.process.ArgIterator, std
     } else {
         // Check if target branch exists
         if (!(refs.branchExists(git_dir, branch_name, allocator) catch false)) {
-            try stderr.print("error: pathspec '{s}' did not match any file(s) known to git\n", .{branch_name});
-            std.process.exit(1);
+            // Check if this is an empty repository (no commits yet)
+            const current_commit = refs.getCurrentCommit(git_dir, allocator) catch null;
+            if (current_commit) |c| {
+                allocator.free(c);
+                try stderr.print("error: pathspec '{s}' did not match any file(s) known to git\n", .{branch_name});
+                std.process.exit(1);
+            } else {
+                // Empty repository - trying to checkout non-existent branch
+                try stderr.print("fatal: You are on a branch yet to be born\n", .{});
+                std.process.exit(1);
+            }
         }
     }
     
@@ -1045,7 +1063,7 @@ fn addFileToIndex(git_dir: []const u8, idx: *index_mod.Index, rel_path: []const 
     defer file.close();
     
     const stat = try file.stat();
-    const content = try file.readToEndAlloc(allocator, stat.size);
+    const content = try file.readToEndAlloc(allocator, @intCast(stat.size));
     defer allocator.free(content);
 
     // Create blob object and store it
