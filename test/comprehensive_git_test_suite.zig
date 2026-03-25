@@ -16,7 +16,7 @@ pub fn runComprehensiveGitTestSuite() !void {
     
     // Make sure ziggit is built
     var build_child = Child.init(&[_][]const u8{ "zig", "build" }, allocator);
-    const build_result = try build_child.spawnAndWait();
+    var build_result = try build_child.spawnAndWait();
     if (build_result != .Exited or build_result.Exited != 0) {
         std.debug.print("Failed to build ziggit\n", .{});
         return;
@@ -52,7 +52,7 @@ fn testCoreOperations(allocator: Allocator, ziggit_path: []const u8) !void {
     defer fs.cwd().deleteTree(test_dir) catch {};
     
     // Test init
-    const init_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "init"}, test_dir);
+    var init_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "init"}, test_dir);
     if (init_result.exit_code == 0) {
         std.debug.print("    ✓ git init\n", .{});
     } else {
@@ -65,7 +65,7 @@ fn testCoreOperations(allocator: Allocator, ziggit_path: []const u8) !void {
     try fs.cwd().writeFile(.{ .sub_path = test_file_path, .data = "# Test Repository\nThis is a test.\n" });
     
     // Test add
-    const add_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "add", "README.md"}, test_dir);
+    var add_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "add", "README.md"}, test_dir);
     if (add_result.exit_code == 0) {
         std.debug.print("    ✓ git add\n", .{});
     } else {
@@ -74,7 +74,7 @@ fn testCoreOperations(allocator: Allocator, ziggit_path: []const u8) !void {
     }
     
     // Test status
-    const status_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "status"}, test_dir);
+    var status_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "status"}, test_dir);
     if (status_result.exit_code == 0) {
         std.debug.print("    ✓ git status\n", .{});
     } else {
@@ -82,7 +82,7 @@ fn testCoreOperations(allocator: Allocator, ziggit_path: []const u8) !void {
     }
     
     // Test commit
-    const commit_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "commit", "-m", "Initial commit"}, test_dir);
+    var commit_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "commit", "-m", "Initial commit"}, test_dir);
     if (commit_result.exit_code == 0) {
         std.debug.print("    ✓ git commit\n", .{});
     } else {
@@ -90,7 +90,7 @@ fn testCoreOperations(allocator: Allocator, ziggit_path: []const u8) !void {
     }
     
     // Test log
-    const log_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "log"}, test_dir);
+    var log_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "log"}, test_dir);
     if (log_result.exit_code == 0) {
         std.debug.print("    ✓ git log\n", .{});
     } else {
@@ -98,7 +98,7 @@ fn testCoreOperations(allocator: Allocator, ziggit_path: []const u8) !void {
     }
     
     // Test diff (should show no changes after commit)
-    const diff_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "diff"}, test_dir);
+    var diff_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "diff"}, test_dir);
     if (diff_result.exit_code == 0) {
         std.debug.print("    ✓ git diff\n", .{});
     } else {
@@ -125,7 +125,7 @@ fn testBranchingOperations(allocator: Allocator, ziggit_path: []const u8) !void 
     _ = try runCommand(allocator, &[_][]const u8{ziggit_path, "commit", "-m", "Initial commit"}, test_dir);
     
     // Test branch creation
-    const branch_create_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "branch", "feature"}, test_dir);
+    var branch_create_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "branch", "feature"}, test_dir);
     if (branch_create_result.exit_code == 0) {
         std.debug.print("    ✓ git branch create\n", .{});
     } else {
@@ -133,7 +133,7 @@ fn testBranchingOperations(allocator: Allocator, ziggit_path: []const u8) !void 
     }
     
     // Test branch listing
-    const branch_list_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "branch"}, test_dir);
+    var branch_list_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "branch"}, test_dir);
     if (branch_list_result.exit_code == 0) {
         std.debug.print("    ✓ git branch list\n", .{});
     } else {
@@ -141,7 +141,7 @@ fn testBranchingOperations(allocator: Allocator, ziggit_path: []const u8) !void 
     }
     
     // Test checkout
-    const checkout_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "checkout", "feature"}, test_dir);
+    var checkout_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "checkout", "feature"}, test_dir);
     if (checkout_result.exit_code == 0) {
         std.debug.print("    ✓ git checkout\n", .{});
     } else {
@@ -149,7 +149,7 @@ fn testBranchingOperations(allocator: Allocator, ziggit_path: []const u8) !void 
     }
     
     // Test checkout -b
-    const checkout_b_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "checkout", "-b", "new-feature"}, test_dir);
+    var checkout_b_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "checkout", "-b", "new-feature"}, test_dir);
     if (checkout_b_result.exit_code == 0) {
         std.debug.print("    ✓ git checkout -b\n", .{});
     } else {
@@ -170,7 +170,7 @@ fn testRepositoryCompliance(allocator: Allocator, ziggit_path: []const u8) !void
     _ = try runCommand(allocator, &[_][]const u8{ziggit_path, "init"}, test_dir);
     
     // Check .git directory structure
-    const git_dir = try std.fmt.allocPrint(allocator, "{s}/.git", .{test_dir});
+    var git_dir = try std.fmt.allocPrint(allocator, "{s}/.git", .{test_dir});
     
     var structure_ok = true;
     
@@ -209,7 +209,7 @@ fn testErrorHandling(allocator: Allocator, ziggit_path: []const u8) !void {
     defer fs.cwd().deleteTree(test_dir) catch {};
     
     // Test commands outside git repository
-    const status_outside_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "status"}, test_dir);
+    var status_outside_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "status"}, test_dir);
     if (status_outside_result.exit_code != 0) {
         std.debug.print("    ✓ status outside repo fails appropriately\n", .{});
     } else {
@@ -219,7 +219,7 @@ fn testErrorHandling(allocator: Allocator, ziggit_path: []const u8) !void {
     // Test adding non-existent file
     _ = try runCommand(allocator, &[_][]const u8{ziggit_path, "init"}, test_dir);
     
-    const add_nonexistent_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "add", "nonexistent.txt"}, test_dir);
+    var add_nonexistent_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "add", "nonexistent.txt"}, test_dir);
     if (add_nonexistent_result.exit_code != 0) {
         std.debug.print("    ✓ add nonexistent file fails appropriately\n", .{});
     } else {
@@ -227,7 +227,7 @@ fn testErrorHandling(allocator: Allocator, ziggit_path: []const u8) !void {
     }
     
     // Test invalid command
-    const invalid_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "invalid-command"}, test_dir);
+    var invalid_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "invalid-command"}, test_dir);
     if (invalid_result.exit_code != 0) {
         std.debug.print("    ✓ invalid command fails appropriately\n", .{});
     } else {
@@ -245,7 +245,7 @@ fn testOutputFormats(allocator: Allocator, ziggit_path: []const u8) !void {
     defer fs.cwd().deleteTree(test_dir) catch {};
     
     // Test init output
-    const init_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "init"}, test_dir);
+    var init_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "init"}, test_dir);
     if (std.mem.indexOf(u8, init_result.output, "Initialized") != null) {
         std.debug.print("    ✓ init output format compatible\n", .{});
     } else {
@@ -253,14 +253,14 @@ fn testOutputFormats(allocator: Allocator, ziggit_path: []const u8) !void {
     }
     
     // Test version/help availability
-    const version_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "--version"}, test_dir);
+    var version_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "--version"}, test_dir);
     if (version_result.exit_code == 0) {
         std.debug.print("    ✓ version flag supported\n", .{});
     } else {
         std.debug.print("    ⚠ version flag not supported\n", .{});
     }
     
-    const help_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "--help"}, test_dir);
+    var help_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "--help"}, test_dir);
     if (help_result.exit_code == 0) {
         std.debug.print("    ✓ help flag supported\n", .{});
     } else {

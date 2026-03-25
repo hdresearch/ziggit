@@ -153,6 +153,23 @@ pub fn build(b: *std.Build) void {
     const edge_case_test_step = b.step("test-edge-cases", "Run git edge case compatibility tests");
     edge_case_test_step.dependOn(&run_edge_case_tests.step);
 
+    // Comprehensive git compatibility test suite (new git-source-based tests)
+    const comprehensive_git_tests = b.addExecutable(.{
+        .name = "comprehensive_git_tests",
+        .root_source_file = b.path("test/comprehensive_test_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_comprehensive_git_tests = b.addRunArtifact(comprehensive_git_tests);
+    run_comprehensive_git_tests.step.dependOn(b.getInstallStep()); // Ensure ziggit is built first
+
+    const comprehensive_git_test_step = b.step("test-comprehensive", "Run comprehensive git compatibility test suite");
+    comprehensive_git_test_step.dependOn(&run_comprehensive_git_tests.step);
+
+    // Add comprehensive tests to main test step
+    test_step.dependOn(&run_comprehensive_git_tests.step);
+
     // WebAssembly target (WASI)
     const wasm_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,

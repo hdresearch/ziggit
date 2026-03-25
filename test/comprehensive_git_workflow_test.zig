@@ -171,7 +171,7 @@ fn writeFile(dir: []const u8, filename: []const u8, content: []const u8) !void {
 
 fn testVersionAndHelp(allocator: std.mem.Allocator) !void {
     // Test --version
-    const version_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "--version"}, null);
+    var version_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "--version"}, null);
     defer allocator.free(version_result.stdout);
     defer allocator.free(version_result.stderr);
     
@@ -182,7 +182,7 @@ fn testVersionAndHelp(allocator: std.mem.Allocator) !void {
     std.debug.print("  ✓ --version works\n", .{});
     
     // Test --help
-    const help_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "--help"}, null);
+    var help_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "--help"}, null);
     defer allocator.free(help_result.stdout);
     defer allocator.free(help_result.stderr);
     
@@ -199,7 +199,7 @@ fn testRepositoryInit(allocator: std.mem.Allocator) !void {
     defer cleanupTempDir(test_dir);
     
     // Test basic init
-    const init_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "init"}, test_dir);
+    var init_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "init"}, test_dir);
     defer allocator.free(init_result.stdout);
     defer allocator.free(init_result.stderr);
     
@@ -208,7 +208,7 @@ fn testRepositoryInit(allocator: std.mem.Allocator) !void {
     }
     
     // Check .git directory exists
-    const git_path = try std.fmt.allocPrint(allocator, "{s}/.git", .{test_dir});
+    var git_path = try std.fmt.allocPrint(allocator, "{s}/.git", .{test_dir});
     defer allocator.free(git_path);
     
     std.fs.cwd().access(git_path, .{}) catch {
@@ -224,7 +224,7 @@ fn testFileStaging(allocator: std.mem.Allocator) !void {
     defer cleanupTempDir(test_dir);
     
     // Initialize repo
-    const init_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "init"}, test_dir);
+    var init_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "init"}, test_dir);
     defer allocator.free(init_result.stdout);
     defer allocator.free(init_result.stderr);
     
@@ -234,7 +234,7 @@ fn testFileStaging(allocator: std.mem.Allocator) !void {
     try writeFile(test_dir, "test.txt", "Hello, World!\n");
     
     // Test add
-    const add_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "add", "test.txt"}, test_dir);
+    var add_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "add", "test.txt"}, test_dir);
     defer allocator.free(add_result.stdout);
     defer allocator.free(add_result.stderr);
     
@@ -251,14 +251,14 @@ fn testStatusReporting(allocator: std.mem.Allocator) !void {
     defer cleanupTempDir(test_dir);
     
     // Initialize repo
-    const init_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "init"}, test_dir);
+    var init_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "init"}, test_dir);
     defer allocator.free(init_result.stdout);
     defer allocator.free(init_result.stderr);
     
     if (init_result.exit_code != 0) return error.InitFailed;
     
     // Test status on empty repo
-    const status1_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "status"}, test_dir);
+    var status1_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "status"}, test_dir);
     defer allocator.free(status1_result.stdout);
     defer allocator.free(status1_result.stderr);
     
@@ -269,7 +269,7 @@ fn testStatusReporting(allocator: std.mem.Allocator) !void {
     // Create file and test status with untracked files
     try writeFile(test_dir, "untracked.txt", "Untracked content\n");
     
-    const status2_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "status"}, test_dir);
+    var status2_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "status"}, test_dir);
     defer allocator.free(status2_result.stdout);
     defer allocator.free(status2_result.stderr);
     
@@ -286,18 +286,18 @@ fn testCommittingChanges(allocator: std.mem.Allocator) !void {
     defer cleanupTempDir(test_dir);
     
     // Initialize repo and add file
-    const init_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "init"}, test_dir);
+    var init_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "init"}, test_dir);
     defer allocator.free(init_result.stdout);
     defer allocator.free(init_result.stderr);
     
     try writeFile(test_dir, "commit-test.txt", "Test content\n");
     
-    const add_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "add", "commit-test.txt"}, test_dir);
+    var add_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "add", "commit-test.txt"}, test_dir);
     defer allocator.free(add_result.stdout);
     defer allocator.free(add_result.stderr);
     
     // Test commit
-    const commit_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Test commit"}, test_dir);
+    var commit_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Test commit"}, test_dir);
     defer allocator.free(commit_result.stdout);
     defer allocator.free(commit_result.stderr);
     
@@ -314,22 +314,22 @@ fn testCommitHistory(allocator: std.mem.Allocator) !void {
     defer cleanupTempDir(test_dir);
     
     // Setup with commit
-    const init_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "init"}, test_dir);
+    var init_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "init"}, test_dir);
     defer allocator.free(init_result.stdout);
     defer allocator.free(init_result.stderr);
     
     try writeFile(test_dir, "log-test.txt", "Log test content\n");
     
-    const add_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "add", "log-test.txt"}, test_dir);
+    var add_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "add", "log-test.txt"}, test_dir);
     defer allocator.free(add_result.stdout);
     defer allocator.free(add_result.stderr);
     
-    const commit_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Log test commit"}, test_dir);
+    var commit_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Log test commit"}, test_dir);
     defer allocator.free(commit_result.stdout);
     defer allocator.free(commit_result.stderr);
     
     // Test log
-    const log_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "log"}, test_dir);
+    var log_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "log"}, test_dir);
     defer allocator.free(log_result.stdout);
     defer allocator.free(log_result.stderr);
     
@@ -350,17 +350,17 @@ fn testFileDifferences(allocator: std.mem.Allocator) !void {
     defer cleanupTempDir(test_dir);
     
     // Setup with commit
-    const init_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "init"}, test_dir);
+    var init_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "init"}, test_dir);
     defer allocator.free(init_result.stdout);
     defer allocator.free(init_result.stderr);
     
     try writeFile(test_dir, "diff-test.txt", "Original content\n");
     
-    const add_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "add", "diff-test.txt"}, test_dir);
+    var add_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "add", "diff-test.txt"}, test_dir);
     defer allocator.free(add_result.stdout);
     defer allocator.free(add_result.stderr);
     
-    const commit_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Diff test commit"}, test_dir);
+    var commit_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Diff test commit"}, test_dir);
     defer allocator.free(commit_result.stdout);
     defer allocator.free(commit_result.stderr);
     
@@ -368,7 +368,7 @@ fn testFileDifferences(allocator: std.mem.Allocator) !void {
     try writeFile(test_dir, "diff-test.txt", "Modified content\n");
     
     // Test diff
-    const diff_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "diff"}, test_dir);
+    var diff_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "diff"}, test_dir);
     defer allocator.free(diff_result.stdout);
     defer allocator.free(diff_result.stderr);
     
@@ -385,34 +385,34 @@ fn testMultipleCommitsWorkflow(allocator: std.mem.Allocator) !void {
     defer cleanupTempDir(test_dir);
     
     // Initialize repo
-    const init_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "init"}, test_dir);
+    var init_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "init"}, test_dir);
     defer allocator.free(init_result.stdout);
     defer allocator.free(init_result.stderr);
     
     // First commit
     try writeFile(test_dir, "file1.txt", "First file\n");
     
-    const add1_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "add", "file1.txt"}, test_dir);
+    var add1_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "add", "file1.txt"}, test_dir);
     defer allocator.free(add1_result.stdout);
     defer allocator.free(add1_result.stderr);
     
-    const commit1_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "First commit"}, test_dir);
+    var commit1_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "First commit"}, test_dir);
     defer allocator.free(commit1_result.stdout);
     defer allocator.free(commit1_result.stderr);
     
     // Second commit
     try writeFile(test_dir, "file2.txt", "Second file\n");
     
-    const add2_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "add", "file2.txt"}, test_dir);
+    var add2_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "add", "file2.txt"}, test_dir);
     defer allocator.free(add2_result.stdout);
     defer allocator.free(add2_result.stderr);
     
-    const commit2_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Second commit"}, test_dir);
+    var commit2_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Second commit"}, test_dir);
     defer allocator.free(commit2_result.stdout);
     defer allocator.free(commit2_result.stderr);
     
     // Test log shows both commits
-    const log_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "log", "--oneline"}, test_dir);
+    var log_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "log", "--oneline"}, test_dir);
     defer allocator.free(log_result.stdout);
     defer allocator.free(log_result.stderr);
     
@@ -434,7 +434,7 @@ fn testErrorHandling(allocator: std.mem.Allocator) !void {
     defer cleanupTempDir(test_dir);
     
     // Test invalid command
-    const invalid_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "invalid-command"}, test_dir);
+    var invalid_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "invalid-command"}, test_dir);
     defer allocator.free(invalid_result.stdout);
     defer allocator.free(invalid_result.stderr);
     
@@ -443,11 +443,11 @@ fn testErrorHandling(allocator: std.mem.Allocator) !void {
     }
     
     // Test add non-existent file
-    const init_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "init"}, test_dir);
+    var init_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "init"}, test_dir);
     defer allocator.free(init_result.stdout);
     defer allocator.free(init_result.stderr);
     
-    const add_nonexistent_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "add", "nonexistent.txt"}, test_dir);
+    var add_nonexistent_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "add", "nonexistent.txt"}, test_dir);
     defer allocator.free(add_nonexistent_result.stdout);
     defer allocator.free(add_nonexistent_result.stderr);
     
@@ -464,7 +464,7 @@ fn testCompleteWorkflow(allocator: std.mem.Allocator) !void {
     defer cleanupTempDir(test_dir);
     
     // Complete git workflow simulation
-    const init_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "init"}, test_dir);
+    var init_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "init"}, test_dir);
     defer allocator.free(init_result.stdout);
     defer allocator.free(init_result.stderr);
     if (init_result.exit_code != 0) return error.InitFailed;
@@ -474,19 +474,19 @@ fn testCompleteWorkflow(allocator: std.mem.Allocator) !void {
     try writeFile(test_dir, "main.zig", "const std = @import(\"std\");\n\npub fn main() void {\n    std.debug.print(\"Hello, ziggit!\\n\", .{});\n}\n");
     
     // Add files
-    const add_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "add", "."}, test_dir);
+    var add_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "add", "."}, test_dir);
     defer allocator.free(add_result.stdout);
     defer allocator.free(add_result.stderr);
     if (add_result.exit_code != 0) return error.AddFailed;
     
     // Check status
-    const status_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "status"}, test_dir);
+    var status_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "status"}, test_dir);
     defer allocator.free(status_result.stdout);
     defer allocator.free(status_result.stderr);
     if (status_result.exit_code != 0) return error.StatusFailed;
     
     // Commit
-    const commit_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Initial project setup"}, test_dir);
+    var commit_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Initial project setup"}, test_dir);
     defer allocator.free(commit_result.stdout);
     defer allocator.free(commit_result.stderr);
     if (commit_result.exit_code != 0) return error.CommitFailed;
@@ -494,24 +494,24 @@ fn testCompleteWorkflow(allocator: std.mem.Allocator) !void {
     // Modify and test diff
     try writeFile(test_dir, "main.zig", "const std = @import(\"std\");\n\npub fn main() void {\n    std.debug.print(\"Hello, updated ziggit!\\n\", .{});\n}\n");
     
-    const diff_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "diff"}, test_dir);
+    var diff_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "diff"}, test_dir);
     defer allocator.free(diff_result.stdout);
     defer allocator.free(diff_result.stderr);
     if (diff_result.exit_code != 0) return error.DiffFailed;
     
     // Stage and commit changes
-    const add2_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "add", "main.zig"}, test_dir);
+    var add2_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "add", "main.zig"}, test_dir);
     defer allocator.free(add2_result.stdout);
     defer allocator.free(add2_result.stderr);
     if (add2_result.exit_code != 0) return error.Add2Failed;
     
-    const commit2_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Update greeting message"}, test_dir);
+    var commit2_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Update greeting message"}, test_dir);
     defer allocator.free(commit2_result.stdout);
     defer allocator.free(commit2_result.stderr);
     if (commit2_result.exit_code != 0) return error.Commit2Failed;
     
     // Final log check
-    const log_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "log", "--oneline"}, test_dir);
+    var log_result = try runCommand(allocator, &[_][]const u8{"/root/ziggit/zig-out/bin/ziggit", "log", "--oneline"}, test_dir);
     defer allocator.free(log_result.stdout);
     defer allocator.free(log_result.stderr);
     if (log_result.exit_code != 0) return error.LogFailed;
