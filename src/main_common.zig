@@ -305,7 +305,13 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         return;
     }
 
-    _ = args; // No args for basic status
+    // Check for --porcelain flag
+    var porcelain = false;
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--porcelain")) {
+            porcelain = true;
+        }
+    }
     
     // Find .git directory by traversing up
     const git_path = findGitDirectory(allocator, platform_impl) catch {
@@ -324,16 +330,21 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch try allocator.dupe(u8, "master");
     defer allocator.free(current_branch);
 
-    const branch_msg = try std.fmt.allocPrint(allocator, "On branch {s}\n", .{current_branch});
-    defer allocator.free(branch_msg);
-    try platform_impl.writeStdout(branch_msg);
-
     // Check if there are any commits
     const current_commit = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
-    if (current_commit) |hash| {
+    
+    if (!porcelain) {
+        const branch_msg = try std.fmt.allocPrint(allocator, "On branch {s}\n", .{current_branch});
+        defer allocator.free(branch_msg);
+        try platform_impl.writeStdout(branch_msg);
+        
+        if (current_commit) |hash| {
+            allocator.free(hash);
+        } else {
+            try platform_impl.writeStdout("\nNo commits yet\n");
+        }
+    } else if (current_commit) |hash| {
         allocator.free(hash);
-    } else {
-        try platform_impl.writeStdout("\nNo commits yet\n");
     }
 
     // Load index to check for staged files
@@ -404,35 +415,57 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 
     // Show staged files
     if (staged_files.items.len > 0) {
-        try platform_impl.writeStdout("\nChanges to be committed:\n");
-        try platform_impl.writeStdout("  (use \"git reset HEAD <file>...\" to unstage)\n\n");
-        
-        for (staged_files.items) |entry| {
-            if (current_commit == null) {
-                const msg = try std.fmt.allocPrint(allocator, "        new file:   {s}\n", .{entry.path});
-                defer allocator.free(msg);
-                try platform_impl.writeStdout(msg);
-            } else {
-                const msg = try std.fmt.allocPrint(allocator, "        modified:   {s}\n", .{entry.path});
-                defer allocator.free(msg);
-                try platform_impl.writeStdout(msg);
+        if (porcelain) {
+            for (staged_files.items) |entry| {
+                if (current_commit == null) {
+                    const msg = try std.fmt.allocPrint(allocator, "A  {s}\n", .{entry.path});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStdout(msg);
+                } else {
+                    const msg = try std.fmt.allocPrint(allocator, "M  {s}\n", .{entry.path});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStdout(msg);
+                }
             }
+        } else {
+            try platform_impl.writeStdout("\nChanges to be committed:\n");
+            try platform_impl.writeStdout("  (use \"git reset HEAD <file>...\" to unstage)\n\n");
+            
+            for (staged_files.items) |entry| {
+                if (current_commit == null) {
+                    const msg = try std.fmt.allocPrint(allocator, "        new file:   {s}\n", .{entry.path});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStdout(msg);
+                } else {
+                    const msg = try std.fmt.allocPrint(allocator, "        modified:   {s}\n", .{entry.path});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStdout(msg);
+                }
+            }
+            try platform_impl.writeStdout("\n");
         }
-        try platform_impl.writeStdout("\n");
     }
 
     // Show modified but unstaged files
     if (modified_files.items.len > 0) {
-        try platform_impl.writeStdout("\nChanges not staged for commit:\n");
-        try platform_impl.writeStdout("  (use \"git add <file>...\" to update what will be committed)\n");
-        try platform_impl.writeStdout("  (use \"git restore <file>...\" to discard changes in working directory)\n\n");
-        
-        for (modified_files.items) |entry| {
-            const msg = try std.fmt.allocPrint(allocator, "        modified:   {s}\n", .{entry.path});
-            defer allocator.free(msg);
-            try platform_impl.writeStdout(msg);
+        if (porcelain) {
+            for (modified_files.items) |entry| {
+                const msg = try std.fmt.allocPrint(allocator, " M {s}\n", .{entry.path});
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+            }
+        } else {
+            try platform_impl.writeStdout("\nChanges not staged for commit:\n");
+            try platform_impl.writeStdout("  (use \"git add <file>...\" to update what will be committed)\n");
+            try platform_impl.writeStdout("  (use \"git restore <file>...\" to discard changes in working directory)\n\n");
+            
+            for (modified_files.items) |entry| {
+                const msg = try std.fmt.allocPrint(allocator, "        modified:   {s}\n", .{entry.path});
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+            }
+            try platform_impl.writeStdout("\n");
         }
-        try platform_impl.writeStdout("\n");
     }
 
     // Find untracked files
@@ -445,28 +478,38 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     }
 
     if (untracked_files.items.len > 0) {
-        try platform_impl.writeStdout("\nUntracked files:\n");
-        try platform_impl.writeStdout("  (use \"git add <file>...\" to include in what will be committed)\n\n");
-        
-        for (untracked_files.items) |file| {
-            const msg = try std.fmt.allocPrint(allocator, "        {s}\n", .{file});
-            defer allocator.free(msg);
-            try platform_impl.writeStdout(msg);
+        if (porcelain) {
+            for (untracked_files.items) |file| {
+                const msg = try std.fmt.allocPrint(allocator, "?? {s}\n", .{file});
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+            }
+        } else {
+            try platform_impl.writeStdout("\nUntracked files:\n");
+            try platform_impl.writeStdout("  (use \"git add <file>...\" to include in what will be committed)\n\n");
+            
+            for (untracked_files.items) |file| {
+                const msg = try std.fmt.allocPrint(allocator, "        {s}\n", .{file});
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+            }
+            try platform_impl.writeStdout("\n");
         }
-        try platform_impl.writeStdout("\n");
     }
 
-    // Final summary message
-    if (staged_files.items.len == 0 and modified_files.items.len == 0 and untracked_files.items.len == 0) {
-        if (current_commit == null) {
-            try platform_impl.writeStdout("\nnothing to commit (create/copy files and use \"git add\" to track)\n");
-        } else {
-            try platform_impl.writeStdout("\nnothing to commit, working tree clean\n");
+    // Final summary message (only in non-porcelain mode)
+    if (!porcelain) {
+        if (staged_files.items.len == 0 and modified_files.items.len == 0 and untracked_files.items.len == 0) {
+            if (current_commit == null) {
+                try platform_impl.writeStdout("\nnothing to commit (create/copy files and use \"git add\" to track)\n");
+            } else {
+                try platform_impl.writeStdout("\nnothing to commit, working tree clean\n");
+            }
+        } else if (staged_files.items.len == 0 and modified_files.items.len == 0 and untracked_files.items.len > 0) {
+            try platform_impl.writeStdout("nothing added to commit but untracked files present (use \"git add\" to track)\n");
+        } else if (staged_files.items.len == 0 and modified_files.items.len > 0) {
+            try platform_impl.writeStdout("no changes added to commit (use \"git add\" and/or \"git commit -a\")\n");
         }
-    } else if (staged_files.items.len == 0 and modified_files.items.len == 0 and untracked_files.items.len > 0) {
-        try platform_impl.writeStdout("nothing added to commit but untracked files present (use \"git add\" to track)\n");
-    } else if (staged_files.items.len == 0 and modified_files.items.len > 0) {
-        try platform_impl.writeStdout("no changes added to commit (use \"git add\" and/or \"git commit -a\")\n");
     }
 }
 
