@@ -511,6 +511,25 @@ pub fn build(b: *std.Build) void {
     const install_ziggit_bun_integration = b.addInstallArtifact(ziggit_bun_integration_exe, .{});
     bench_bun_integration_step.dependOn(&install_ziggit_bun_integration.step);
 
+    // Bun operations benchmark (pure Zig, no C dependencies)
+    const bun_operations_bench_exe = b.addExecutable(.{
+        .name = "bun-operations-bench",
+        .root_source_file = b.path("benchmarks/bun_operations_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    bun_operations_bench_exe.root_module.addImport("ziggit", ziggit_module);
+
+    const run_bun_operations_bench = b.addRunArtifact(bun_operations_bench_exe);
+
+    const bench_bun_operations_step = b.step("bench-bun-ops", "Run Bun operations benchmark (ziggit vs git CLI for critical operations)");
+    bench_bun_operations_step.dependOn(&run_bun_operations_bench.step);
+
+    // Install the benchmark executable
+    const install_bun_operations_bench = b.addInstallArtifact(bun_operations_bench_exe, .{});
+    bench_bun_operations_step.dependOn(&install_bun_operations_bench.step);
+
     // Simple bun integration benchmark (ziggit vs git CLI only, no libgit2)
     const simple_bun_bench_exe = b.addExecutable(.{
         .name = "simple-bun-bench",
