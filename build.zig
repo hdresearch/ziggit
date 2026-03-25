@@ -139,8 +139,11 @@ pub fn build(b: *std.Build) void {
         .strip = true,
     });
     
-    // Optimize for smaller WASM binary size
-    wasm_exe.stack_size = 32 * 1024; // 32KB stack (optimized for WASI)
+    // Give enough stack and memory for complex git operations including compression
+    wasm_exe.stack_size = 256 * 1024; // 256KB stack (increased for zlib and complex git operations)
+    
+    // Set initial memory size to give more room for operations
+    wasm_exe.initial_memory = 16 * 1024 * 1024; // 16MB initial memory
 
     const wasm_step = b.step("wasm", "Build for WebAssembly (WASI)");
     wasm_step.dependOn(&b.addInstallArtifact(wasm_exe, .{}).step);

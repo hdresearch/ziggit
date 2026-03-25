@@ -82,14 +82,23 @@ pub const GitObject = struct {
         const content = try std.mem.concat(allocator, u8, &[_][]const u8{ header, self.data });
         defer allocator.free(content);
 
-        // Compress the content using zlib for git compatibility
-        var compressed_data = std.ArrayList(u8).init(allocator);
-        defer compressed_data.deinit();
+        // Compress the content using zlib for git compatibility (skip on WASM for stability)
+        const final_content = if (@import("builtin").target.os.tag == .wasi or @import("builtin").target.os.tag == .freestanding) blk: {
+            // For WASM builds, store uncompressed to avoid zlib issues
+            // This is a temporary workaround - full git compatibility requires compression
+            break :blk try allocator.dupe(u8, content);
+        } else blk: {
+            var compressed_data = std.ArrayList(u8).init(allocator);
+            defer compressed_data.deinit();
+            
+            var input_stream = std.io.fixedBufferStream(content);
+            try std.compress.zlib.compress(input_stream.reader(), compressed_data.writer(), .{});
+            
+            break :blk try allocator.dupe(u8, compressed_data.items);
+        };
+        defer allocator.free(final_content);
         
-        var input_stream = std.io.fixedBufferStream(content);
-        try std.compress.zlib.compress(input_stream.reader(), compressed_data.writer(), .{});
-        
-        try platform_impl.fs.writeFile(obj_file_path, compressed_data.items);
+        try platform_impl.fs.writeFile(obj_file_path, final_content);
 
         return try allocator.dupe(u8, hash_str);
     }
@@ -107,12 +116,27 @@ pub const GitObject = struct {
         };
         defer allocator.free(compressed_content);
 
-        // Decompress using zlib for git compatibility
+        // Decompress using zlib for git compatibility (handle uncompressed on WASM)
         var content = std.ArrayList(u8).init(allocator);
         defer content.deinit();
         
-        var compressed_stream = std.io.fixedBufferStream(compressed_content);
-        try std.compress.zlib.decompress(compressed_stream.reader(), content.writer());
+        if (@import("builtin").target.os.tag == .wasi or @import("builtin").target.os.tag == .freestanding) {
+            // For WASM builds, try uncompressed first, fallback to compressed
+            // Check if this looks like a git object header (uncompressed)
+            if (std.mem.indexOf(u8, compressed_content, "\x00")) |_| {
+                try content.appendSlice(compressed_content);
+            } else {
+                // Fallback to decompression
+                var compressed_stream = std.io.fixedBufferStream(compressed_content);
+                std.compress.zlib.decompress(compressed_stream.reader(), content.writer()) catch {
+                    // If decompression fails, treat as uncompressed
+                    try content.appendSlice(compressed_content);
+                };
+            }
+        } else {
+            var compressed_stream = std.io.fixedBufferStream(compressed_content);
+            try std.compress.zlib.decompress(compressed_stream.reader(), content.writer());
+        }
 
         // Parse the object
         const null_pos = std.mem.indexOf(u8, content.items, "\x00") orelse return error.InvalidObject;
