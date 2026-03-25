@@ -11,6 +11,10 @@ const ArrayList = std.ArrayList;
 const TestFramework = struct {
     allocator: std.mem.Allocator,
     
+    pub fn init(allocator: std.mem.Allocator) TestFramework {
+        return TestFramework{ .allocator = allocator };
+    }
+    
     fn runCommand(self: *TestFramework, args: []const []const u8, cwd: ?[]const u8) !struct { 
         exit_code: u32, 
         stdout: []u8, 
@@ -70,19 +74,21 @@ const TestFramework = struct {
     }
     
     fn createFile(self: *TestFramework, dir_path: []const u8, filename: []const u8, content: []const u8) !void {
+        _ = self;
         var buf: [512]u8 = undefined;
         const file_path = try std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir_path, filename });
-        try fs.cwd().writeFile(file_path, content);
+        try fs.cwd().writeFile(.{ .sub_path = file_path, .data = content });
     }
     
-    deinit: fn(*TestFramework) void = struct {
-        fn deinit(_: *TestFramework) void {}
-    }.deinit,
+    
+    pub fn deinit(self: *TestFramework) void {
+        _ = self;
+    }
 };
 
 // Test git init with various scenarios based on t0001-init.sh
 fn testInitAdvanced(tf: *TestFramework) !void {
-    print("  Testing advanced git init scenarios...\n");
+    print("  Testing advanced git init scenarios...\n", .{});
     
     // Test 1: init --bare with custom directory name
     {
@@ -90,7 +96,7 @@ fn testInitAdvanced(tf: *TestFramework) !void {
         defer tf.cleanupDir(test_dir);
         
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init", "--bare", "custom.git" 
+            "/root/ziggit/zig-out/bin/ziggit", "init", "--bare", "custom.git" 
         }, test_dir);
         
         const git_result = try tf.runCommand(&[_][]const u8{ 
@@ -117,7 +123,7 @@ fn testInitAdvanced(tf: *TestFramework) !void {
             return;
         };
         
-        print("    ✓ bare init with custom directory\n");
+        print("    ✓ bare init with custom directory\n", .{});
     }
     
     // Test 2: init in non-empty directory
@@ -130,13 +136,13 @@ fn testInitAdvanced(tf: *TestFramework) !void {
         try tf.createFile(test_dir, "README.md", "# Test\nThis is a test");
         
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init" 
+            "/root/ziggit/zig-out/bin/ziggit", "init" 
         }, test_dir);
         
         if (ziggit_result.exit_code != 0) {
             print("    ⚠ init in non-empty dir failed: exit_code={d}\n", .{ziggit_result.exit_code});
         } else {
-            print("    ✓ init in non-empty directory\n");
+            print("    ✓ init in non-empty directory\n", .{});
         }
     }
     
@@ -146,27 +152,27 @@ fn testInitAdvanced(tf: *TestFramework) !void {
         defer tf.cleanupDir(test_dir);
         
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init", "--quiet" 
+            "/root/ziggit/zig-out/bin/ziggit", "init", "--quiet" 
         }, test_dir);
         
         // Check if --quiet is respected (minimal output)
         if (ziggit_result.stdout.len > 100) {
             print("    ⚠ init --quiet has too much output: {d} bytes\n", .{ziggit_result.stdout.len});
         } else {
-            print("    ✓ init --quiet respects minimal output\n");
+            print("    ✓ init --quiet respects minimal output\n", .{});
         }
     }
 }
 
 // Test git status advanced functionality based on t7508-status.sh 
 fn testStatusAdvanced(tf: *TestFramework) !void {
-    print("  Testing advanced git status functionality...\n");
+    print("  Testing advanced git status functionality...\n", .{});
     
     const test_dir = try tf.createTestDir("status-advanced");
     defer tf.cleanupDir(test_dir);
     
     // Initialize repository
-    _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
     
     // Test 1: Status with mixed file states
     {
@@ -178,12 +184,12 @@ fn testStatusAdvanced(tf: *TestFramework) !void {
         
         // Add some files
         _ = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "add", "tracked.txt", "staged.txt", "modified.txt" 
+            "/root/ziggit/zig-out/bin/ziggit", "add", "tracked.txt", "staged.txt", "modified.txt" 
         }, test_dir);
         
         // Make initial commit
         _ = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Initial commit" 
+            "/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Initial commit" 
         }, test_dir);
         
         // Modify a tracked file
@@ -192,12 +198,12 @@ fn testStatusAdvanced(tf: *TestFramework) !void {
         // Add another file to staging
         try tf.createFile(test_dir, "new_staged.txt", "new staged");
         _ = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "add", "new_staged.txt" 
+            "/root/ziggit/zig-out/bin/ziggit", "add", "new_staged.txt" 
         }, test_dir);
         
         // Get status from both ziggit and git
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "status" 
+            "/root/ziggit/zig-out/bin/ziggit", "status" 
         }, test_dir);
         
         const git_result = try tf.runCommand(&[_][]const u8{ "git", "status" }, test_dir);
@@ -211,32 +217,32 @@ fn testStatusAdvanced(tf: *TestFramework) !void {
                   .{ ziggit_has_untracked, git_has_untracked });
         }
         
-        print("    ✓ mixed file states status test\n");
+        print("    ✓ mixed file states status test\n", .{});
     }
     
     // Test 2: Status --porcelain (if supported)
     {
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "status", "--porcelain" 
+            "/root/ziggit/zig-out/bin/ziggit", "status", "--porcelain" 
         }, test_dir);
         
         if (ziggit_result.exit_code == 0) {
-            print("    ✓ status --porcelain supported\n");
+            print("    ✓ status --porcelain supported\n", .{});
         } else {
-            print("    ⚠ status --porcelain not implemented\n");
+            print("    ⚠ status --porcelain not implemented\n", .{});
         }
     }
 }
 
 // Test git add advanced functionality  
 fn testAddAdvanced(tf: *TestFramework) !void {
-    print("  Testing advanced git add functionality...\n");
+    print("  Testing advanced git add functionality...\n", .{});
     
     const test_dir = try tf.createTestDir("add-advanced");
     defer tf.cleanupDir(test_dir);
     
     // Initialize repository
-    _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
     
     // Test 1: add -A (add all)
     {
@@ -251,11 +257,11 @@ fn testAddAdvanced(tf: *TestFramework) !void {
         try tf.createFile(test_dir, "subdir/file3.txt", "content3");
         
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "add", "-A" 
+            "/root/ziggit/zig-out/bin/ziggit", "add", "-A" 
         }, test_dir);
         
         if (ziggit_result.exit_code == 0) {
-            print("    ✓ add -A supported\n");
+            print("    ✓ add -A supported\n", .{});
         } else {
             print("    ⚠ add -A not implemented (exit_code={d})\n", .{ziggit_result.exit_code});
         }
@@ -268,35 +274,35 @@ fn testAddAdvanced(tf: *TestFramework) !void {
         try tf.createFile(test_dir, "temp.tmp", "ignore this");
         try tf.createFile(test_dir, "debug.log", "ignore this too");
         
-        const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "add", "." 
+        _ = try tf.runCommand(&[_][]const u8{ 
+            "/root/ziggit/zig-out/bin/ziggit", "add", "." 
         }, test_dir);
         
         // Check status to see if gitignore is respected
         const status_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "status" 
+            "/root/ziggit/zig-out/bin/ziggit", "status" 
         }, test_dir);
         
         const shows_ignored = std.mem.indexOf(u8, status_result.stdout, "temp.tmp") != null or
                             std.mem.indexOf(u8, status_result.stdout, "debug.log") != null;
         
         if (shows_ignored) {
-            print("    ⚠ gitignore patterns not fully respected\n");
+            print("    ⚠ gitignore patterns not fully respected\n", .{});
         } else {
-            print("    ✓ gitignore patterns respected\n");
+            print("    ✓ gitignore patterns respected\n", .{});
         }
     }
 }
 
 // Test git commit advanced functionality
 fn testCommitAdvanced(tf: *TestFramework) !void {
-    print("  Testing advanced git commit functionality...\n");
+    print("  Testing advanced git commit functionality...\n", .{});
     
     const test_dir = try tf.createTestDir("commit-advanced");
     defer tf.cleanupDir(test_dir);
     
     // Initialize repository and set up user
-    _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
     _ = try tf.runCommand(&[_][]const u8{ "git", "config", "user.name", "Test User" }, test_dir);
     _ = try tf.runCommand(&[_][]const u8{ "git", "config", "user.email", "test@example.com" }, test_dir);
     
@@ -304,32 +310,32 @@ fn testCommitAdvanced(tf: *TestFramework) !void {
     {
         try tf.createFile(test_dir, "file1.txt", "content");
         _ = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "add", "file1.txt" 
+            "/root/ziggit/zig-out/bin/ziggit", "add", "file1.txt" 
         }, test_dir);
         _ = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Initial commit" 
+            "/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Initial commit" 
         }, test_dir);
         
         try tf.createFile(test_dir, "file2.txt", "more content");
         _ = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "add", "file2.txt" 
+            "/root/ziggit/zig-out/bin/ziggit", "add", "file2.txt" 
         }, test_dir);
         
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "commit", "--amend", "-m", "Amended commit" 
+            "/root/ziggit/zig-out/bin/ziggit", "commit", "--amend", "-m", "Amended commit" 
         }, test_dir);
         
         if (ziggit_result.exit_code == 0) {
-            print("    ✓ commit --amend supported\n");
+            print("    ✓ commit --amend supported\n", .{});
         } else {
-            print("    ⚠ commit --amend not implemented\n");
+            print("    ⚠ commit --amend not implemented\n", .{});
         }
     }
     
     // Test 2: commit with no changes (should fail)
     {
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "No changes" 
+            "/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "No changes" 
         }, test_dir);
         
         const git_result = try tf.runCommand(&[_][]const u8{ 
@@ -338,7 +344,7 @@ fn testCommitAdvanced(tf: *TestFramework) !void {
         
         const both_failed = (ziggit_result.exit_code != 0) and (git_result.exit_code != 0);
         if (both_failed) {
-            print("    ✓ commit with no changes fails appropriately\n");
+            print("    ✓ commit with no changes fails appropriately\n", .{});
         } else {
             print("    ⚠ commit no changes behavior differs: ziggit={d}, git={d}\n", 
                   .{ ziggit_result.exit_code, git_result.exit_code });
@@ -348,73 +354,73 @@ fn testCommitAdvanced(tf: *TestFramework) !void {
 
 // Test git log advanced functionality
 fn testLogAdvanced(tf: *TestFramework) !void {
-    print("  Testing advanced git log functionality...\n");
+    print("  Testing advanced git log functionality...\n", .{});
     
     const test_dir = try tf.createTestDir("log-advanced");
     defer tf.cleanupDir(test_dir);
     
     // Initialize repository and make some commits
-    _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
     _ = try tf.runCommand(&[_][]const u8{ "git", "config", "user.name", "Test User" }, test_dir);
     _ = try tf.runCommand(&[_][]const u8{ "git", "config", "user.email", "test@example.com" }, test_dir);
     
     // Create multiple commits
     try tf.createFile(test_dir, "file1.txt", "first");
-    _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "add", "file1.txt" }, test_dir);
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "file1.txt" }, test_dir);
     _ = try tf.runCommand(&[_][]const u8{ 
-        "/root/zigg/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "First commit" 
+        "/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "First commit" 
     }, test_dir);
     
     try tf.createFile(test_dir, "file2.txt", "second");
-    _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "add", "file2.txt" }, test_dir);
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "file2.txt" }, test_dir);
     _ = try tf.runCommand(&[_][]const u8{ 
-        "/root/zigg/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Second commit" 
+        "/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Second commit" 
     }, test_dir);
     
     // Test 1: log --oneline
     {
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "log", "--oneline" 
+            "/root/ziggit/zig-out/bin/ziggit", "log", "--oneline" 
         }, test_dir);
         
         if (ziggit_result.exit_code == 0) {
-            print("    ✓ log --oneline supported\n");
+            print("    ✓ log --oneline supported\n", .{});
         } else {
-            print("    ⚠ log --oneline not implemented\n");
+            print("    ⚠ log --oneline not implemented\n", .{});
         }
     }
     
     // Test 2: log -n (limit number of commits)
     {
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "log", "-n", "1" 
+            "/root/ziggit/zig-out/bin/ziggit", "log", "-n", "1" 
         }, test_dir);
         
         if (ziggit_result.exit_code == 0) {
-            print("    ✓ log -n supported\n");
+            print("    ✓ log -n supported\n", .{});
         } else {
-            print("    ⚠ log -n not implemented\n");
+            print("    ⚠ log -n not implemented\n", .{});
         }
     }
 }
 
 // Test git diff advanced functionality  
 fn testDiffAdvanced(tf: *TestFramework) !void {
-    print("  Testing advanced git diff functionality...\n");
+    print("  Testing advanced git diff functionality...\n", .{});
     
     const test_dir = try tf.createTestDir("diff-advanced");
     defer tf.cleanupDir(test_dir);
     
     // Initialize repository
-    _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
     _ = try tf.runCommand(&[_][]const u8{ "git", "config", "user.name", "Test User" }, test_dir);
     _ = try tf.runCommand(&[_][]const u8{ "git", "config", "user.email", "test@example.com" }, test_dir);
     
     // Create initial commit
     try tf.createFile(test_dir, "file.txt", "line 1\nline 2\nline 3\n");
-    _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "add", "file.txt" }, test_dir);
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "file.txt" }, test_dir);
     _ = try tf.runCommand(&[_][]const u8{ 
-        "/root/zigg/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Initial" 
+        "/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Initial" 
     }, test_dir);
     
     // Modify file
@@ -423,7 +429,7 @@ fn testDiffAdvanced(tf: *TestFramework) !void {
     // Test 1: diff working directory changes
     {
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "diff" 
+            "/root/ziggit/zig-out/bin/ziggit", "diff" 
         }, test_dir);
         
         const git_result = try tf.runCommand(&[_][]const u8{ "git", "diff" }, test_dir);
@@ -432,7 +438,7 @@ fn testDiffAdvanced(tf: *TestFramework) !void {
         const git_has_output = git_result.stdout.len > 0;
         
         if (ziggit_has_output == git_has_output) {
-            print("    ✓ diff working directory changes\n");
+            print("    ✓ diff working directory changes\n", .{});
         } else {
             print("    ⚠ diff output differs: ziggit_len={d}, git_len={d}\n", 
                   .{ ziggit_result.stdout.len, git_result.stdout.len });
@@ -441,46 +447,46 @@ fn testDiffAdvanced(tf: *TestFramework) !void {
     
     // Test 2: diff --cached (staged changes)
     {
-        _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "add", "file.txt" }, test_dir);
+        _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "file.txt" }, test_dir);
         
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "diff", "--cached" 
+            "/root/ziggit/zig-out/bin/ziggit", "diff", "--cached" 
         }, test_dir);
         
         if (ziggit_result.exit_code == 0) {
-            print("    ✓ diff --cached supported\n");
+            print("    ✓ diff --cached supported\n", .{});
         } else {
-            print("    ⚠ diff --cached not implemented\n");
+            print("    ⚠ diff --cached not implemented\n", .{});
         }
     }
 }
 
 // Test git branch and checkout advanced functionality
 fn testBranchCheckoutAdvanced(tf: *TestFramework) !void {
-    print("  Testing advanced git branch/checkout functionality...\n");
+    print("  Testing advanced git branch/checkout functionality...\n", .{});
     
     const test_dir = try tf.createTestDir("branch-advanced");
     defer tf.cleanupDir(test_dir);
     
     // Initialize repository and make initial commit
-    _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
     _ = try tf.runCommand(&[_][]const u8{ "git", "config", "user.name", "Test User" }, test_dir);
     _ = try tf.runCommand(&[_][]const u8{ "git", "config", "user.email", "test@example.com" }, test_dir);
     
     try tf.createFile(test_dir, "file.txt", "content");
-    _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "add", "file.txt" }, test_dir);
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "file.txt" }, test_dir);
     _ = try tf.runCommand(&[_][]const u8{ 
-        "/root/zigg/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Initial" 
+        "/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Initial" 
     }, test_dir);
     
     // Test 1: branch creation
     {
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "branch", "feature" 
+            "/root/ziggit/zig-out/bin/ziggit", "branch", "feature" 
         }, test_dir);
         
         if (ziggit_result.exit_code == 0) {
-            print("    ✓ branch creation supported\n");
+            print("    ✓ branch creation supported\n", .{});
         } else {
             print("    ⚠ branch creation failed: exit_code={d}\n", .{ziggit_result.exit_code});
         }
@@ -489,13 +495,13 @@ fn testBranchCheckoutAdvanced(tf: *TestFramework) !void {
     // Test 2: branch listing
     {
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "branch" 
+            "/root/ziggit/zig-out/bin/ziggit", "branch" 
         }, test_dir);
         
         const git_result = try tf.runCommand(&[_][]const u8{ "git", "branch" }, test_dir);
         
         if (ziggit_result.exit_code == git_result.exit_code) {
-            print("    ✓ branch listing exit codes match\n");
+            print("    ✓ branch listing exit codes match\n", .{});
         } else {
             print("    ⚠ branch listing exit codes differ: ziggit={d}, git={d}\n", 
                   .{ ziggit_result.exit_code, git_result.exit_code });
@@ -505,11 +511,11 @@ fn testBranchCheckoutAdvanced(tf: *TestFramework) !void {
     // Test 3: checkout branch
     {
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "checkout", "feature" 
+            "/root/ziggit/zig-out/bin/ziggit", "checkout", "feature" 
         }, test_dir);
         
         if (ziggit_result.exit_code == 0) {
-            print("    ✓ checkout branch supported\n");
+            print("    ✓ checkout branch supported\n", .{});
         } else {
             print("    ⚠ checkout branch failed: exit_code={d}\n", .{ziggit_result.exit_code});
         }
@@ -518,19 +524,19 @@ fn testBranchCheckoutAdvanced(tf: *TestFramework) !void {
     // Test 4: checkout -b (create and checkout)
     {
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "checkout", "-b", "development" 
+            "/root/ziggit/zig-out/bin/ziggit", "checkout", "-b", "development" 
         }, test_dir);
         
         if (ziggit_result.exit_code == 0) {
-            print("    ✓ checkout -b supported\n");
+            print("    ✓ checkout -b supported\n", .{});
         } else {
-            print("    ⚠ checkout -b not implemented\n");
+            print("    ⚠ checkout -b not implemented\n", .{});
         }
     }
 }
 
 pub fn runGitAdvancedCompatibilityTests() !void {
-    print("Running advanced git compatibility tests...\n");
+    print("Running advanced git compatibility tests...\n", .{});
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -547,5 +553,5 @@ pub fn runGitAdvancedCompatibilityTests() !void {
     try testDiffAdvanced(&tf);
     try testBranchCheckoutAdvanced(&tf);
     
-    print("Advanced git compatibility tests completed!\n");
+    print("Advanced git compatibility tests completed!\n", .{});
 }

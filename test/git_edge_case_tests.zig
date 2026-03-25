@@ -73,19 +73,21 @@ const TestFramework = struct {
     }
     
     fn createFile(self: *TestFramework, dir_path: []const u8, filename: []const u8, content: []const u8) !void {
+        _ = self;
         var buf: [512]u8 = undefined;
         const file_path = try std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir_path, filename });
-        try fs.cwd().writeFile(file_path, content);
+        try fs.cwd().writeFile(.{ .sub_path = file_path, .data = content });
     }
     
-    deinit: fn(*TestFramework) void = struct {
-        fn deinit(_: *TestFramework) void {}
-    }.deinit,
+    
+    pub fn deinit(self: *TestFramework) void {
+        _ = self;
+    }
 };
 
 // Test git commands with invalid arguments
 fn testInvalidArguments(tf: *TestFramework) !void {
-    print("  Testing invalid argument handling...\n");
+    print("  Testing invalid argument handling...\n", .{});
     
     // Test 1: init with invalid flags
     {
@@ -99,7 +101,7 @@ fn testInvalidArguments(tf: *TestFramework) !void {
         
         const both_failed = (ziggit_result.exit_code != 0) and (git_result.exit_code != 0);
         if (both_failed) {
-            print("    ✓ invalid flag handling matches git\n");
+            print("    ✓ invalid flag handling matches git\n", .{});
         } else {
             print("    ⚠ invalid flag handling differs: ziggit={d}, git={d}\n", 
                   .{ ziggit_result.exit_code, git_result.exit_code });
@@ -120,7 +122,7 @@ fn testInvalidArguments(tf: *TestFramework) !void {
         const git_result = try tf.runCommand(&[_][]const u8{ "git", "add" }, test_dir);
         
         if (ziggit_result.exit_code == git_result.exit_code) {
-            print("    ✓ add with no args exit codes match\n");
+            print("    ✓ add with no args exit codes match\n", .{});
         } else {
             print("    ⚠ add no args exit codes differ: ziggit={d}, git={d}\n", 
                   .{ ziggit_result.exit_code, git_result.exit_code });
@@ -145,7 +147,7 @@ fn testInvalidArguments(tf: *TestFramework) !void {
         }, test_dir);
         
         if ((ziggit_result.exit_code != 0) == (git_result.exit_code != 0)) {
-            print("    ✓ empty commit message handling matches\n");
+            print("    ✓ empty commit message handling matches\n", .{});
         } else {
             print("    ⚠ empty commit message handling differs: ziggit={d}, git={d}\n", 
                   .{ ziggit_result.exit_code, git_result.exit_code });
@@ -155,7 +157,7 @@ fn testInvalidArguments(tf: *TestFramework) !void {
 
 // Test operations outside git repository
 fn testOutsideRepository(tf: *TestFramework) !void {
-    print("  Testing operations outside git repository...\n");
+    print("  Testing operations outside git repository...\n", .{});
     
     const test_dir = try tf.createTestDir("outside-repo");
     defer tf.cleanupDir(test_dir);
@@ -204,7 +206,7 @@ fn testOutsideRepository(tf: *TestFramework) !void {
 
 // Test with special file names and characters
 fn testSpecialFilenames(tf: *TestFramework) !void {
-    print("  Testing special filename handling...\n");
+    print("  Testing special filename handling...\n", .{});
     
     const test_dir = try tf.createTestDir("special-files");
     defer tf.cleanupDir(test_dir);
@@ -249,7 +251,7 @@ fn testSpecialFilenames(tf: *TestFramework) !void {
     }, test_dir);
     
     if (status_result.exit_code == 0) {
-        print("    ✓ status with special filenames works\n");
+        print("    ✓ status with special filenames works\n", .{});
     } else {
         print("    ⚠ status failed with special filenames: exit_code={d}\n", .{status_result.exit_code});
     }
@@ -257,7 +259,7 @@ fn testSpecialFilenames(tf: *TestFramework) !void {
 
 // Test repository corruption scenarios
 fn testCorruptedRepository(tf: *TestFramework) !void {
-    print("  Testing corrupted repository handling...\n");
+    print("  Testing corrupted repository handling...\n", .{});
     
     const test_dir = try tf.createTestDir("corrupted");
     defer tf.cleanupDir(test_dir);
@@ -270,7 +272,7 @@ fn testCorruptedRepository(tf: *TestFramework) !void {
         var buf: [512]u8 = undefined;
         const head_path = try std.fmt.bufPrint(&buf, "{s}/.git/HEAD", .{test_dir});
         
-        fs.cwd().writeFile(head_path, "invalid head content") catch {};
+        fs.cwd().writeFile(.{ .sub_path = head_path, .data = "invalid head content" }) catch {};
         
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
             "/root/zigg/root/ziggit/zig-out/bin/ziggit", "status" 
@@ -280,14 +282,14 @@ fn testCorruptedRepository(tf: *TestFramework) !void {
         
         const both_handle_gracefully = (ziggit_result.exit_code != 0) and (git_result.exit_code != 0);
         if (both_handle_gracefully) {
-            print("    ✓ corrupt HEAD handled gracefully\n");
+            print("    ✓ corrupt HEAD handled gracefully\n", .{});
         } else {
             print("    ⚠ corrupt HEAD handling differs: ziggit={d}, git={d}\n", 
                   .{ ziggit_result.exit_code, git_result.exit_code });
         }
         
         // Restore valid HEAD
-        fs.cwd().writeFile(head_path, "ref: refs/heads/main\n") catch {};
+        fs.cwd().writeFile(.{ .sub_path = head_path, .data = "ref: refs/heads/main\n" }) catch {};
     }
     
     // Test 2: Missing .git/config
@@ -302,7 +304,7 @@ fn testCorruptedRepository(tf: *TestFramework) !void {
         }, test_dir);
         
         if (ziggit_result.exit_code == 0) {
-            print("    ✓ missing config handled (status works)\n");
+            print("    ✓ missing config handled (status works)\n", .{});
         } else {
             print("    ⚠ missing config causes failure: exit_code={d}\n", .{ziggit_result.exit_code});
         }
@@ -311,7 +313,7 @@ fn testCorruptedRepository(tf: *TestFramework) !void {
 
 // Test large file handling
 fn testLargeFiles(tf: *TestFramework) !void {
-    print("  Testing large file handling...\n");
+    print("  Testing large file handling...\n", .{});
     
     const test_dir = try tf.createTestDir("large-files");
     defer tf.cleanupDir(test_dir);
@@ -330,7 +332,7 @@ fn testLargeFiles(tf: *TestFramework) !void {
     var buf: [512]u8 = undefined;
     const large_file_path = try std.fmt.bufPrint(&buf, "{s}/large_file.bin", .{test_dir});
     
-    fs.cwd().writeFile(large_file_path, large_content) catch |err| {
+    fs.cwd().writeFile(.{ .sub_path = large_file_path, .data = large_content }) catch |err| {
         print("    ⚠ Failed to create large file: {}\n", .{err});
         return;
     };
@@ -341,7 +343,7 @@ fn testLargeFiles(tf: *TestFramework) !void {
     }, test_dir);
     
     if (add_result.exit_code == 0) {
-        print("    ✓ large file (1MB) added successfully\n");
+        print("    ✓ large file (1MB) added successfully\n", .{});
         
         // Test status with large file
         const status_result = try tf.runCommand(&[_][]const u8{ 
@@ -349,7 +351,7 @@ fn testLargeFiles(tf: *TestFramework) !void {
         }, test_dir);
         
         if (status_result.exit_code == 0) {
-            print("    ✓ status with large file works\n");
+            print("    ✓ status with large file works\n", .{});
         } else {
             print("    ⚠ status failed with large file: exit_code={d}\n", .{status_result.exit_code});
         }
@@ -360,7 +362,7 @@ fn testLargeFiles(tf: *TestFramework) !void {
 
 // Test deep directory structures
 fn testDeepDirectories(tf: *TestFramework) !void {
-    print("  Testing deep directory structures...\n");
+    print("  Testing deep directory structures...\n", .{});
     
     const test_dir = try tf.createTestDir("deep-dirs");
     defer tf.cleanupDir(test_dir);
@@ -372,7 +374,7 @@ fn testDeepDirectories(tf: *TestFramework) !void {
     var current_path = try tf.allocator.alloc(u8, 1024);
     defer tf.allocator.free(current_path);
     
-    std.mem.copy(u8, current_path, test_dir);
+    @memcpy(current_path[0..test_dir.len], test_dir);
     var current_len = test_dir.len;
     
     var i: usize = 0;
@@ -387,10 +389,10 @@ fn testDeepDirectories(tf: *TestFramework) !void {
     }
     
     // Create file in deepest directory
-    const deep_file_path = try std.fmt.bufPrint(current_path[current_len..], "/deep_file.txt");
+    const deep_file_path = try std.fmt.bufPrint(current_path[current_len..], "/deep_file.txt", .{});
     current_len += deep_file_path.len;
     
-    fs.cwd().writeFile(current_path[0..current_len], "Deep file content") catch |err| {
+    fs.cwd().writeFile(.{ .sub_path = current_path[0..current_len], .data = "Deep file content" }) catch |err| {
         print("    ⚠ Failed to create deep file: {}\n", .{err});
         return;
     };
@@ -413,7 +415,7 @@ fn testDeepDirectories(tf: *TestFramework) !void {
     }, test_dir);
     
     if (add_result.exit_code == 0) {
-        print("    ✓ add deep file successful\n");
+        print("    ✓ add deep file successful\n", .{});
     } else {
         print("    ⚠ add deep file failed: exit_code={d}\n", .{add_result.exit_code});
     }
@@ -421,7 +423,7 @@ fn testDeepDirectories(tf: *TestFramework) !void {
 
 // Test concurrent access simulation
 fn testConcurrentAccess(tf: *TestFramework) !void {
-    print("  Testing concurrent access patterns...\n");
+    print("  Testing concurrent access patterns...\n", .{});
     
     const test_dir = try tf.createTestDir("concurrent");
     defer tf.cleanupDir(test_dir);
@@ -462,11 +464,11 @@ fn testConcurrentAccess(tf: *TestFramework) !void {
         }
     }
     
-    print("    ✓ concurrent access patterns handled\n");
+    print("    ✓ concurrent access patterns handled\n", .{});
 }
 
 pub fn runGitEdgeCaseTests() !void {
-    print("Running git edge case tests...\n");
+    print("Running git edge case tests...\n", .{});
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -483,5 +485,5 @@ pub fn runGitEdgeCaseTests() !void {
     try testDeepDirectories(&tf);
     try testConcurrentAccess(&tf);
     
-    print("Git edge case tests completed!\n");
+    print("Git edge case tests completed!\n", .{});
 }

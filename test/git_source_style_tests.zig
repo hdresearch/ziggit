@@ -23,7 +23,7 @@ pub fn runGitSourceStyleTests() !void {
 
 // Tests based on t0001-init.sh from git source
 fn testInitSourceStyle(allocator: std.mem.Allocator) !void {
-    var harness = TestHarness.init(allocator, /root/ziggit/zig-out/bin/ziggit", "git");
+    var harness = TestHarness.init(allocator, "/root/ziggit/zig-out/bin/ziggit", "git");
 
     print("  Testing init (t0001-init.sh style)...\n", .{});
 
@@ -85,7 +85,7 @@ fn testInitSourceStyle(allocator: std.mem.Allocator) !void {
 
 // Tests based on t7508-status.sh from git source  
 fn testStatusSourceStyle(allocator: std.mem.Allocator) !void {
-    var harness = TestHarness.init(allocator, /root/ziggit/zig-out/bin/ziggit", "git");
+    var harness = TestHarness.init(allocator, "/root/ziggit/zig-out/bin/ziggit", "git");
 
     print("  Testing status (t7508-status.sh style)...\n", .{});
 
@@ -175,7 +175,7 @@ fn testStatusSourceStyle(allocator: std.mem.Allocator) !void {
 
 // Basic add/commit workflow tests
 fn testAddCommitSourceStyle(allocator: std.mem.Allocator) !void {
-    var harness = TestHarness.init(allocator, /root/ziggit/zig-out/bin/ziggit", "git");
+    var harness = TestHarness.init(allocator, "/root/ziggit/zig-out/bin/ziggit", "git");
 
     print("  Testing add/commit workflow...\n", .{});
 
