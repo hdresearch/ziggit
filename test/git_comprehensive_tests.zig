@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const print = std.debug.print;
+
 const test_harness = @import("test_harness.zig");
 const TestHarness = test_harness.TestHarness;
 
@@ -9,7 +9,7 @@ const TestHarness = test_harness.TestHarness;
 
 // Test cases for init command (based on t0001-init.sh)
 pub fn testInitPlain(harness: TestHarness) !void {
-    print("    Testing plain init...\n", .{});
+    std.debug.print("    Testing plain init...\n", .{});
     
     const temp_dir = try harness.createTempDir("test_init_plain");
     defer harness.removeTempDir(temp_dir);
@@ -26,7 +26,7 @@ pub fn testInitPlain(harness: TestHarness) !void {
 
     var git_dir = std.fs.openDirAbsolute(git_dir_path, .{}) catch |err| switch (err) {
         error.FileNotFound => {
-            print("    FAIL: .git directory not created\n", .{});
+            std.debug.print("    FAIL: .git directory not created\n", .{});
             return error.TestFailed;
         },
         else => return err,
@@ -40,7 +40,7 @@ pub fn testInitPlain(harness: TestHarness) !void {
     for (expected_files) |filename| {
         git_dir.access(filename, .{}) catch |err| switch (err) {
             error.FileNotFound => {
-                print("    FAIL: Missing essential file: .git/{s}\n", .{filename});
+                std.debug.print("    FAIL: Missing essential file: .git/{s}\n", .{filename});
                 return error.TestFailed;
             },
             else => return err,
@@ -50,7 +50,7 @@ pub fn testInitPlain(harness: TestHarness) !void {
     for (expected_dirs) |dirname| {
         var dir = git_dir.openDir(dirname, .{}) catch |err| switch (err) {
             error.FileNotFound => {
-                print("    FAIL: Missing essential directory: .git/{s}\n", .{dirname});
+                std.debug.print("    FAIL: Missing essential directory: .git/{s}\n", .{dirname});
                 return error.TestFailed;
             },
             else => return err,
@@ -58,11 +58,11 @@ pub fn testInitPlain(harness: TestHarness) !void {
         dir.close();
     }
 
-    print("    ✓ init plain repository\n", .{});
+    std.debug.print("    ✓ init plain repository\n", .{});
 }
 
 pub fn testInitBare(harness: TestHarness) !void {
-    print("    Testing bare init...\n", .{});
+    std.debug.print("    Testing bare init...\n", .{});
     
     const temp_dir = try harness.createTempDir("test_init_bare");
     defer harness.removeTempDir(temp_dir);
@@ -81,25 +81,25 @@ pub fn testInitBare(harness: TestHarness) !void {
 
     for (expected_files) |filename| {
         dir.access(filename, .{}) catch {
-            print("    FAIL: Missing file in bare repo: {s}\n", .{filename});
+            std.debug.print("    FAIL: Missing file in bare repo: {s}\n", .{filename});
             return error.TestFailed;
         };
     }
 
     for (expected_dirs) |dirname| {
         var subdir = dir.openDir(dirname, .{}) catch {
-            print("    FAIL: Missing directory in bare repo: {s}\n", .{dirname});
+            std.debug.print("    FAIL: Missing directory in bare repo: {s}\n", .{dirname});
             return error.TestFailed;
         };
         subdir.close();
     }
 
-    print("    ✓ init bare repository\n", .{});
+    std.debug.print("    ✓ init bare repository\n", .{});
 }
 
 // Test cases for add command (based on t2200-add-update.sh and others)
 pub fn testAddBasicFile(harness: TestHarness) !void {
-    print("    Testing add basic file...\n", .{});
+    std.debug.print("    Testing add basic file...\n", .{});
     
     const temp_dir = try harness.createTempDir("test_add_basic");
     defer harness.removeTempDir(temp_dir);
@@ -123,11 +123,11 @@ pub fn testAddBasicFile(harness: TestHarness) !void {
 
     try testing.expect(add_result.exit_code == 0);
 
-    print("    ✓ add basic file\n", .{});
+    std.debug.print("    ✓ add basic file\n", .{});
 }
 
 pub fn testAddNonexistentFile(harness: TestHarness) !void {
-    print("    Testing add nonexistent file...\n", .{});
+    std.debug.print("    Testing add nonexistent file...\n", .{});
     
     const temp_dir = try harness.createTempDir("test_add_nonexistent");
     defer harness.removeTempDir(temp_dir);
@@ -144,12 +144,12 @@ pub fn testAddNonexistentFile(harness: TestHarness) !void {
     // Should fail with appropriate error
     try testing.expect(add_result.exit_code != 0);
 
-    print("    ✓ add nonexistent file (correct failure)\n", .{});
+    std.debug.print("    ✓ add nonexistent file (correct failure)\n", .{});
 }
 
 // Test cases for status command
 pub fn testStatusEmptyRepo(harness: TestHarness) !void {
-    print("    Testing status in empty repo...\n", .{});
+    std.debug.print("    Testing status in empty repo...\n", .{});
     
     const temp_dir = try harness.createTempDir("test_status_empty");
     defer harness.removeTempDir(temp_dir);
@@ -165,11 +165,11 @@ pub fn testStatusEmptyRepo(harness: TestHarness) !void {
 
     try testing.expect(status_result.exit_code == 0);
 
-    print("    ✓ status in empty repository\n", .{});
+    std.debug.print("    ✓ status in empty repository\n", .{});
 }
 
 pub fn testStatusUntrackedFiles(harness: TestHarness) !void {
-    print("    Testing status with untracked files...\n", .{});
+    std.debug.print("    Testing status with untracked files...\n", .{});
     
     const temp_dir = try harness.createTempDir("test_status_untracked");
     defer harness.removeTempDir(temp_dir);
@@ -193,12 +193,12 @@ pub fn testStatusUntrackedFiles(harness: TestHarness) !void {
 
     try testing.expect(status_result.exit_code == 0);
 
-    print("    ✓ status with untracked files\n", .{});
+    std.debug.print("    ✓ status with untracked files\n", .{});
 }
 
 // Test cases for commit command
 pub fn testCommitBasic(harness: TestHarness) !void {
-    print("    Testing basic commit...\n", .{});
+    std.debug.print("    Testing basic commit...\n", .{});
     
     const temp_dir = try harness.createTempDir("test_commit_basic");
     defer harness.removeTempDir(temp_dir);
@@ -225,14 +225,14 @@ pub fn testCommitBasic(harness: TestHarness) !void {
     defer commit_result.deinit();
 
     if (commit_result.exit_code == 0) {
-        print("    ✓ basic commit with message\n", .{});
+        std.debug.print("    ✓ basic commit with message\n", .{});
     } else {
-        print("    ⚠ commit failed (implementation needed): {s}\n", .{commit_result.stderr});
+        std.debug.print("    ⚠ commit failed (implementation needed): {s}\n", .{commit_result.stderr});
     }
 }
 
 pub fn testCommitNothingToCommit(harness: TestHarness) !void {
-    print("    Testing commit with nothing to commit...\n", .{});
+    std.debug.print("    Testing commit with nothing to commit...\n", .{});
     
     const temp_dir = try harness.createTempDir("test_commit_nothing");
     defer harness.removeTempDir(temp_dir);
@@ -249,12 +249,12 @@ pub fn testCommitNothingToCommit(harness: TestHarness) !void {
     // Should fail with appropriate error
     try testing.expect(commit_result.exit_code != 0);
 
-    print("    ✓ commit nothing to commit (correct failure)\n", .{});
+    std.debug.print("    ✓ commit nothing to commit (correct failure)\n", .{});
 }
 
 // Test workflow combinations
 pub fn testBasicWorkflow(harness: TestHarness) !void {
-    print("    Testing basic workflow (init -> add -> commit)...\n", .{});
+    std.debug.print("    Testing basic workflow (init -> add -> commit)...\n", .{});
     
     const temp_dir = try harness.createTempDir("test_basic_workflow");
     defer harness.removeTempDir(temp_dir);
@@ -287,14 +287,14 @@ pub fn testBasicWorkflow(harness: TestHarness) !void {
     defer commit_result.deinit();
 
     if (commit_result.exit_code == 0) {
-        print("    ✓ basic workflow completed successfully\n", .{});
+        std.debug.print("    ✓ basic workflow completed successfully\n", .{});
     } else {
-        print("    ⚠ workflow failed at commit step: {s}\n", .{commit_result.stderr});
+        std.debug.print("    ⚠ workflow failed at commit step: {s}\n", .{commit_result.stderr});
     }
 }
 
 pub fn runGitComprehensiveTests() !void {
-    print("Running comprehensive git compatibility tests...\n", .{});
+    std.debug.print("Running comprehensive git compatibility tests...\n", .{});
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -319,17 +319,17 @@ pub fn runGitComprehensiveTests() !void {
     };
 
     for (tests) |test_case| {
-        print("  Testing {s}...\n", .{test_case.name});
+        std.debug.print("  Testing {s}...\n", .{test_case.name});
         
         test_case.func(harness) catch |err| {
-            print("    ❌ FAILED: {any}\n", .{err});
+            std.debug.print("    ❌ FAILED: {any}\n", .{err});
             failed += 1;
             continue;
         };
         passed += 1;
     }
 
-    print("Comprehensive tests completed: {d} passed, {d} failed\n", .{ passed, failed });
+    std.debug.print("Comprehensive tests completed: {d} passed, {d} failed\n", .{ passed, failed });
 
     if (failed > 0) {
         return error.TestsFailed;

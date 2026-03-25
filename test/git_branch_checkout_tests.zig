@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const print = std.debug.print;
+
 const test_harness = @import("test_harness.zig");
 const TestHarness = test_harness.TestHarness;
 
@@ -9,7 +9,7 @@ const TestHarness = test_harness.TestHarness;
 
 // Test branch creation and listing
 pub fn testBranchList(harness: TestHarness) !void {
-    print("    Testing branch list...\n", .{});
+    std.debug.print("    Testing branch list...\n", .{});
     
     const temp_dir = try harness.createTempDir("test_branch_list");
     defer harness.removeTempDir(temp_dir);
@@ -25,11 +25,11 @@ pub fn testBranchList(harness: TestHarness) !void {
 
     try testing.expect(branch_result.exit_code == 0);
 
-    print("    ✓ branch list in empty repository\n", .{});
+    std.debug.print("    ✓ branch list in empty repository\n", .{});
 }
 
 pub fn testCheckoutBranch(harness: TestHarness) !void {
-    print("    Testing checkout in empty repository...\n", .{});
+    std.debug.print("    Testing checkout in empty repository...\n", .{});
     
     const temp_dir = try harness.createTempDir("test_checkout");
     defer harness.removeTempDir(temp_dir);
@@ -46,11 +46,11 @@ pub fn testCheckoutBranch(harness: TestHarness) !void {
     // Should fail in empty repository
     try testing.expect(checkout_result.exit_code != 0);
 
-    print("    ✓ checkout in empty repository (correct failure)\n", .{});
+    std.debug.print("    ✓ checkout in empty repository (correct failure)\n", .{});
 }
 
 pub fn runGitBranchCheckoutTests() !void {
-    print("Running git branch and checkout compatibility tests...\n", .{});
+    std.debug.print("Running git branch and checkout compatibility tests...\n", .{});
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -67,17 +67,17 @@ pub fn runGitBranchCheckoutTests() !void {
     };
 
     for (tests) |test_case| {
-        print("  Testing {s}...\n", .{test_case.name});
+        std.debug.print("  Testing {s}...\n", .{test_case.name});
         
         test_case.func(harness) catch |err| {
-            print("    ❌ FAILED: {any}\n", .{err});
+            std.debug.print("    ❌ FAILED: {any}\n", .{err});
             failed += 1;
             continue;
         };
         passed += 1;
     }
 
-    print("Branch/checkout tests completed: {d} passed, {d} failed\n", .{ passed, failed });
+    std.debug.print("Branch/checkout tests completed: {d} passed, {d} failed\n", .{ passed, failed });
 
     if (failed > 0) {
         return error.TestsFailed;

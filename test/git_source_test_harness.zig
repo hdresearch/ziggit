@@ -1,5 +1,5 @@
 const std = @import("std");
-const print = std.debug.print;
+
 
 pub const TestFramework = struct {
     allocator: std.mem.Allocator,
@@ -69,7 +69,7 @@ pub const TestFramework = struct {
     }
     
     pub fn createTempDir(self: *TestFramework, name: []const u8) ![]u8 {
-        const temp_dir = std.fs.cwd().makeOpenPath("/tmp", .{}) catch |err| switch (err) {
+        var temp_dir = std.fs.cwd().makeOpenPath("/tmp", .{}) catch |err| switch (err) {
             error.PathAlreadyExists => try std.fs.cwd().openDir("/tmp", .{}),
             else => return err,
         };
@@ -86,7 +86,7 @@ pub const TestFramework = struct {
     
     pub fn removeTempDir(self: *TestFramework, path: []const u8) void {
         std.fs.cwd().deleteTree(path) catch |err| {
-            print("Warning: Could not delete temp dir {s}: {any}\n", .{ path, err });
+            std.debug.print("Warning: Could not delete temp dir {s}: {any}\n", .{ path, err });
         };
         self.allocator.free(path);
     }
@@ -110,7 +110,7 @@ pub fn runGitSourceCompatTests() !void {
     var tf = TestFramework.init(allocator);
     defer tf.deinit();
     
-    print("Running git source compatibility tests...\n");
+    std.debug.print("Running git source compatibility tests...\n", .{});
     
     try testBasicInit(&tf);
     try testBasicAdd(&tf);
@@ -119,11 +119,11 @@ pub fn runGitSourceCompatTests() !void {
     try testBasicLog(&tf);
     try testBasicDiff(&tf);
     
-    print("✓ All git source compatibility tests passed!\n");
+    std.debug.print("✓ All git source compatibility tests passed!\n", .{});
 }
 
 fn testBasicInit(tf: *TestFramework) !void {
-    print("  Testing basic init compatibility...\n");
+    std.debug.print("  Testing basic init compatibility...\n", .{});
     
     // Test 1: Basic init
     const test_dir = try tf.createTempDir("init-basic");
@@ -149,12 +149,12 @@ fn testBasicInit(tf: *TestFramework) !void {
     
     // Both should succeed
     if (ziggit_result.exit_code != 0) {
-        print("    ❌ ziggit init failed: {s}\n", .{ziggit_result.stderr});
+        std.debug.print("    ❌ ziggit init failed: {s}\n", .{ziggit_result.stderr});
         return;
     }
     
     if (git_result.exit_code != 0) {
-        print("    ❌ git init failed: {s}\n", .{git_result.stderr});
+        std.debug.print("    ❌ git init failed: {s}\n", .{git_result.stderr});
         return;
     }
     
@@ -162,8 +162,8 @@ fn testBasicInit(tf: *TestFramework) !void {
     const git_dir_path = try std.fmt.allocPrint(tf.allocator, "{s}/.git", .{repo_dir});
     defer tf.allocator.free(git_dir_path);
     
-    const git_dir = std.fs.cwd().openDir(git_dir_path, .{}) catch |err| {
-        print("    ❌ .git directory not created: {any}\n", .{err});
+    var git_dir = std.fs.cwd().openDir(git_dir_path, .{}) catch |err| {
+        std.debug.print("    ❌ .git directory not created: {any}\n", .{err});
         return;
     };
     git_dir.close();
@@ -175,12 +175,12 @@ fn testBasicInit(tf: *TestFramework) !void {
         defer tf.allocator.free(file_path);
         
         std.fs.cwd().access(file_path, .{}) catch |err| {
-            print("    ❌ Essential git file/dir missing: {s} ({any})\n", .{ file, err });
+            std.debug.print("    ❌ Essential git file/dir missing: {s} ({any})\n", .{ file, err });
             return;
         };
     }
     
-    print("    ✓ Basic init test passed\n");
+    std.debug.print("    ✓ Basic init test passed\n", .{});
     
     // Test 2: Bare init
     const bare_test_dir = try tf.createTempDir("init-bare");
@@ -192,14 +192,14 @@ fn testBasicInit(tf: *TestFramework) !void {
     defer ziggit_bare_result.deinit();
     
     if (ziggit_bare_result.exit_code != 0) {
-        print("    ⚠ ziggit bare init not supported yet: {s}\n", .{ziggit_bare_result.stderr});
+        std.debug.print("    ⚠ ziggit bare init not supported yet: {s}\n", .{ziggit_bare_result.stderr});
     } else {
-        print("    ✓ Bare init test passed\n");
+        std.debug.print("    ✓ Bare init test passed\n", .{});
     }
 }
 
 fn testBasicAdd(tf: *TestFramework) !void {
-    print("  Testing basic add compatibility...\n");
+    std.debug.print("  Testing basic add compatibility...\n", .{});
     
     const test_dir = try tf.createTempDir("add-basic");
     defer tf.removeTempDir(test_dir);
@@ -211,7 +211,7 @@ fn testBasicAdd(tf: *TestFramework) !void {
     defer init_result.deinit();
     
     if (init_result.exit_code != 0) {
-        print("    ❌ Failed to init repo for add test: {s}\n", .{init_result.stderr});
+        std.debug.print("    ❌ Failed to init repo for add test: {s}\n", .{init_result.stderr});
         return;
     }
     
@@ -225,7 +225,7 @@ fn testBasicAdd(tf: *TestFramework) !void {
     defer add_result.deinit();
     
     if (add_result.exit_code != 0) {
-        print("    ❌ ziggit add failed: {s}\n", .{add_result.stderr});
+        std.debug.print("    ❌ ziggit add failed: {s}\n", .{add_result.stderr});
         return;
     }
     
@@ -236,15 +236,15 @@ fn testBasicAdd(tf: *TestFramework) !void {
     defer status_result.deinit();
     
     if (std.mem.indexOf(u8, status_result.stdout, "test.txt") == null) {
-        print("    ❌ Added file not shown in status\n");
+        std.debug.print("    ❌ Added file not shown in status\n", .{});
         return;
     }
     
-    print("    ✓ Basic add test passed\n");
+    std.debug.print("    ✓ Basic add test passed\n", .{});
 }
 
 fn testBasicCommit(tf: *TestFramework) !void {
-    print("  Testing basic commit compatibility...\n");
+    std.debug.print("  Testing basic commit compatibility...\n", .{});
     
     const test_dir = try tf.createTempDir("commit-basic");
     defer tf.removeTempDir(test_dir);
@@ -256,7 +256,7 @@ fn testBasicCommit(tf: *TestFramework) !void {
     defer init_result.deinit();
     
     if (init_result.exit_code != 0) {
-        print("    ❌ Failed to init repo for commit test\n");
+        std.debug.print("    ❌ Failed to init repo for commit test\n", .{});
         return;
     }
     
@@ -268,7 +268,7 @@ fn testBasicCommit(tf: *TestFramework) !void {
     defer add_result.deinit();
     
     if (add_result.exit_code != 0) {
-        print("    ❌ Failed to add file for commit test\n");
+        std.debug.print("    ❌ Failed to add file for commit test\n", .{});
         return;
     }
     
@@ -279,7 +279,7 @@ fn testBasicCommit(tf: *TestFramework) !void {
     defer commit_result.deinit();
     
     if (commit_result.exit_code != 0) {
-        print("    ❌ ziggit commit failed: {s}\n", .{commit_result.stderr});
+        std.debug.print("    ❌ ziggit commit failed: {s}\n", .{commit_result.stderr});
         return;
     }
     
@@ -290,20 +290,20 @@ fn testBasicCommit(tf: *TestFramework) !void {
     defer log_result.deinit();
     
     if (log_result.exit_code != 0 or log_result.stdout.len == 0) {
-        print("    ❌ No commits found in log after commit\n");
+        std.debug.print("    ❌ No commits found in log after commit\n", .{});
         return;
     }
     
     if (std.mem.indexOf(u8, log_result.stdout, "Initial commit") == null) {
-        print("    ❌ Commit message not found in log\n");
+        std.debug.print("    ❌ Commit message not found in log\n", .{});
         return;
     }
     
-    print("    ✓ Basic commit test passed\n");
+    std.debug.print("    ✓ Basic commit test passed\n", .{});
 }
 
 fn testBasicStatus(tf: *TestFramework) !void {
-    print("  Testing basic status compatibility...\n");
+    std.debug.print("  Testing basic status compatibility...\n", .{});
     
     const test_dir = try tf.createTempDir("status-basic");
     defer tf.removeTempDir(test_dir);
@@ -315,7 +315,7 @@ fn testBasicStatus(tf: *TestFramework) !void {
     defer init_result.deinit();
     
     if (init_result.exit_code != 0) {
-        print("    ❌ Failed to init repo for status test\n");
+        std.debug.print("    ❌ Failed to init repo for status test\n", .{});
         return;
     }
     
@@ -326,7 +326,7 @@ fn testBasicStatus(tf: *TestFramework) !void {
     defer empty_status_result.deinit();
     
     if (empty_status_result.exit_code != 0) {
-        print("    ❌ Status failed on empty repo: {s}\n", .{empty_status_result.stderr});
+        std.debug.print("    ❌ Status failed on empty repo: {s}\n", .{empty_status_result.stderr});
         return;
     }
     
@@ -339,20 +339,20 @@ fn testBasicStatus(tf: *TestFramework) !void {
     defer untracked_status_result.deinit();
     
     if (untracked_status_result.exit_code != 0) {
-        print("    ❌ Status failed with untracked files: {s}\n", .{untracked_status_result.stderr});
+        std.debug.print("    ❌ Status failed with untracked files: {s}\n", .{untracked_status_result.stderr});
         return;
     }
     
     if (std.mem.indexOf(u8, untracked_status_result.stdout, "test.txt") == null) {
-        print("    ❌ Untracked file not shown in status\n");
+        std.debug.print("    ❌ Untracked file not shown in status\n", .{});
         return;
     }
     
-    print("    ✓ Basic status test passed\n");
+    std.debug.print("    ✓ Basic status test passed\n", .{});
 }
 
 fn testBasicLog(tf: *TestFramework) !void {
-    print("  Testing basic log compatibility...\n");
+    std.debug.print("  Testing basic log compatibility...\n", .{});
     
     const test_dir = try tf.createTempDir("log-basic");
     defer tf.removeTempDir(test_dir);
@@ -364,7 +364,7 @@ fn testBasicLog(tf: *TestFramework) !void {
     defer init_result.deinit();
     
     if (init_result.exit_code != 0) {
-        print("    ❌ Failed to init repo for log test\n");
+        std.debug.print("    ❌ Failed to init repo for log test\n", .{});
         return;
     }
     
@@ -381,7 +381,7 @@ fn testBasicLog(tf: *TestFramework) !void {
     defer commit_result.deinit();
     
     if (commit_result.exit_code != 0) {
-        print("    ❌ Failed to create commit for log test\n");
+        std.debug.print("    ❌ Failed to create commit for log test\n", .{});
         return;
     }
     
@@ -392,12 +392,12 @@ fn testBasicLog(tf: *TestFramework) !void {
     defer log_result.deinit();
     
     if (log_result.exit_code != 0) {
-        print("    ❌ Log failed: {s}\n", .{log_result.stderr});
+        std.debug.print("    ❌ Log failed: {s}\n", .{log_result.stderr});
         return;
     }
     
     if (std.mem.indexOf(u8, log_result.stdout, "Initial commit") == null) {
-        print("    ❌ Commit not found in log output\n");
+        std.debug.print("    ❌ Commit not found in log output\n", .{});
         return;
     }
     
@@ -408,15 +408,15 @@ fn testBasicLog(tf: *TestFramework) !void {
     defer oneline_result.deinit();
     
     if (oneline_result.exit_code != 0) {
-        print("    ❌ Log --oneline failed: {s}\n", .{oneline_result.stderr});
+        std.debug.print("    ❌ Log --oneline failed: {s}\n", .{oneline_result.stderr});
         return;
     }
     
-    print("    ✓ Basic log test passed\n");
+    std.debug.print("    ✓ Basic log test passed\n", .{});
 }
 
 fn testBasicDiff(tf: *TestFramework) !void {
-    print("  Testing basic diff compatibility...\n");
+    std.debug.print("  Testing basic diff compatibility...\n", .{});
     
     const test_dir = try tf.createTempDir("diff-basic");
     defer tf.removeTempDir(test_dir);
@@ -428,7 +428,7 @@ fn testBasicDiff(tf: *TestFramework) !void {
     defer init_result.deinit();
     
     if (init_result.exit_code != 0) {
-        print("    ❌ Failed to init repo for diff test\n");
+        std.debug.print("    ❌ Failed to init repo for diff test\n", .{});
         return;
     }
     
@@ -445,7 +445,7 @@ fn testBasicDiff(tf: *TestFramework) !void {
     defer commit_result.deinit();
     
     if (commit_result.exit_code != 0) {
-        print("    ❌ Failed to create commit for diff test\n");
+        std.debug.print("    ❌ Failed to create commit for diff test\n", .{});
         return;
     }
     
@@ -459,16 +459,16 @@ fn testBasicDiff(tf: *TestFramework) !void {
     defer diff_result.deinit();
     
     if (diff_result.exit_code != 0) {
-        print("    ❌ Diff failed: {s}\n", .{diff_result.stderr});
+        std.debug.print("    ❌ Diff failed: {s}\n", .{diff_result.stderr});
         return;
     }
     
     if (std.mem.indexOf(u8, diff_result.stdout, "+Second line") == null) {
-        print("    ❌ Expected diff output not found\n");
+        std.debug.print("    ❌ Expected diff output not found\n", .{});
         return;
     }
     
-    print("    ✓ Basic diff test passed\n");
+    std.debug.print("    ✓ Basic diff test passed\n", .{});
 }
 
 pub fn main() !void {

@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const print = std.debug.print;
+
 
 const TestHarness = @import("test_harness.zig").TestHarness;
 
@@ -12,20 +12,20 @@ pub fn runGitSourceStyleTests() !void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    print("Running git source style tests...\n", .{});
+    std.debug.print("Running git source style tests...\n", .{});
 
     try testInitSourceStyle(allocator);
     try testStatusSourceStyle(allocator);
     try testAddCommitSourceStyle(allocator);
 
-    print("Git source style tests completed!\n", .{});
+    std.debug.print("Git source style tests completed!\n", .{});
 }
 
 // Tests based on t0001-init.sh from git source
 fn testInitSourceStyle(allocator: std.mem.Allocator) !void {
     var harness = TestHarness.init(allocator, "/root/ziggit/zig-out/bin/ziggit", "git");
 
-    print("  Testing init (t0001-init.sh style)...\n", .{});
+    std.debug.print("  Testing init (t0001-init.sh style)...\n", .{});
 
     const temp_dir = try harness.createTempDir("test_git_init_style");
     defer harness.removeTempDir(temp_dir);
@@ -45,7 +45,7 @@ fn testInitSourceStyle(allocator: std.mem.Allocator) !void {
         defer allocator.free(config_path);
         
         try testing.expect(fileExists(config_path));
-        print("    ✓ plain init creates proper structure\n", .{});
+        std.debug.print("    ✓ plain init creates proper structure\n", .{});
     }
 
     // Test: bare init
@@ -61,7 +61,7 @@ fn testInitSourceStyle(allocator: std.mem.Allocator) !void {
         defer allocator.free(config_path);
         
         try testing.expect(fileExists(config_path));
-        print("    ✓ bare init creates proper structure\n", .{});
+        std.debug.print("    ✓ bare init creates proper structure\n", .{});
     }
 
     // Test: reinit existing
@@ -79,7 +79,7 @@ fn testInitSourceStyle(allocator: std.mem.Allocator) !void {
         defer result2.deinit();
         try testing.expect(result2.exit_code == 0);
         
-        print("    ✓ reinit existing repository works\n", .{});
+        std.debug.print("    ✓ reinit existing repository works\n", .{});
     }
 }
 
@@ -87,7 +87,7 @@ fn testInitSourceStyle(allocator: std.mem.Allocator) !void {
 fn testStatusSourceStyle(allocator: std.mem.Allocator) !void {
     var harness = TestHarness.init(allocator, "/root/ziggit/zig-out/bin/ziggit", "git");
 
-    print("  Testing status (t7508-status.sh style)...\n", .{});
+    std.debug.print("  Testing status (t7508-status.sh style)...\n", .{});
 
     const temp_dir = try harness.createTempDir("test_git_status_style");
     defer harness.removeTempDir(temp_dir);
@@ -106,7 +106,7 @@ fn testStatusSourceStyle(allocator: std.mem.Allocator) !void {
         try testing.expect(std.mem.indexOf(u8, result.stdout, "On branch") != null);
         try testing.expect(std.mem.indexOf(u8, result.stdout, "No commits yet") != null);
         
-        print("    ✓ status in empty repository\n", .{});
+        std.debug.print("    ✓ status in empty repository\n", .{});
     }
 
     // Test: status with untracked files
@@ -133,7 +133,7 @@ fn testStatusSourceStyle(allocator: std.mem.Allocator) !void {
         try testing.expect(std.mem.indexOf(u8, result.stdout, "untracked.txt") != null);
         try testing.expect(std.mem.indexOf(u8, result.stdout, "dir1/tracked") != null);
         
-        print("    ✓ status shows untracked files\n", .{});
+        std.debug.print("    ✓ status shows untracked files\n", .{});
     }
 
     // Test: status after add (staged files)
@@ -149,7 +149,7 @@ fn testStatusSourceStyle(allocator: std.mem.Allocator) !void {
         try testing.expect(std.mem.indexOf(u8, result.stdout, "Changes to be committed:") != null);
         try testing.expect(std.mem.indexOf(u8, result.stdout, "new file:   untracked.txt") != null);
         
-        print("    ✓ status shows staged files\n", .{});
+        std.debug.print("    ✓ status shows staged files\n", .{});
     }
 
     // Test: status with .gitignore
@@ -169,7 +169,7 @@ fn testStatusSourceStyle(allocator: std.mem.Allocator) !void {
         // Ignored file should not appear in status
         try testing.expect(std.mem.indexOf(u8, result.stdout, "ignored.tmp") == null);
         
-        print("    ✓ status respects .gitignore\n", .{});
+        std.debug.print("    ✓ status respects .gitignore\n", .{});
     }
 }
 
@@ -177,7 +177,7 @@ fn testStatusSourceStyle(allocator: std.mem.Allocator) !void {
 fn testAddCommitSourceStyle(allocator: std.mem.Allocator) !void {
     var harness = TestHarness.init(allocator, "/root/ziggit/zig-out/bin/ziggit", "git");
 
-    print("  Testing add/commit workflow...\n", .{});
+    std.debug.print("  Testing add/commit workflow...\n", .{});
 
     const temp_dir = try harness.createTempDir("test_git_workflow_style");
     defer harness.removeTempDir(temp_dir);
@@ -193,7 +193,7 @@ fn testAddCommitSourceStyle(allocator: std.mem.Allocator) !void {
         defer result.deinit();
         
         try testing.expect(result.exit_code != 0);
-        print("    ✓ add nonexistent file fails correctly\n", .{});
+        std.debug.print("    ✓ add nonexistent file fails correctly\n", .{});
     }
 
     // Test: add existing file
@@ -206,7 +206,7 @@ fn testAddCommitSourceStyle(allocator: std.mem.Allocator) !void {
         defer result.deinit();
         
         try testing.expect(result.exit_code == 0);
-        print("    ✓ add existing file works\n", .{});
+        std.debug.print("    ✓ add existing file works\n", .{});
     }
 
     // Test: commit with staged files
@@ -215,7 +215,7 @@ fn testAddCommitSourceStyle(allocator: std.mem.Allocator) !void {
         defer result.deinit();
         
         try testing.expect(result.exit_code == 0);
-        print("    ✓ commit with staged files works\n", .{});
+        std.debug.print("    ✓ commit with staged files works\n", .{});
     }
 
     // Test: commit with nothing staged (should fail)
@@ -225,7 +225,7 @@ fn testAddCommitSourceStyle(allocator: std.mem.Allocator) !void {
         
         try testing.expect(result.exit_code != 0);
         try testing.expect(std.mem.indexOf(u8, result.stderr, "nothing to commit") != null);
-        print("    ✓ commit with nothing staged fails correctly\n", .{});
+        std.debug.print("    ✓ commit with nothing staged fails correctly\n", .{});
     }
 
     // Test: log shows commit
@@ -235,7 +235,7 @@ fn testAddCommitSourceStyle(allocator: std.mem.Allocator) !void {
         
         try testing.expect(result.exit_code == 0);
         try testing.expect(std.mem.indexOf(u8, result.stdout, "test commit") != null);
-        print("    ✓ log shows commit correctly\n", .{});
+        std.debug.print("    ✓ log shows commit correctly\n", .{});
     }
 }
 

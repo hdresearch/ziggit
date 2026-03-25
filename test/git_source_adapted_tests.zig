@@ -1,5 +1,5 @@
 const std = @import("std");
-const print = std.debug.print;
+
 
 // Git Source Adapted Tests
 // Direct adaptations from key git source test files
@@ -107,28 +107,28 @@ const TestResult = struct {
 
 fn expectSuccess(result: *TestResult, context: []const u8) !void {
     if (result.exit_code != 0) {
-        print("    ✗ {s}: exit code {d}, stderr: {s}\n", .{ context, result.exit_code, result.stderr });
+        std.debug.print("    ✗ {s}: exit code {d}, stderr: {s}\n", .{ context, result.exit_code, result.stderr });
         return error.TestFailed;
     }
 }
 
 fn expectFailure(result: *TestResult, context: []const u8) !void {
     if (result.exit_code == 0) {
-        print("    ✗ {s}: expected failure but got success\n", .{context});
+        std.debug.print("    ✗ {s}: expected failure but got success\n", .{context});
         return error.TestFailed;
     }
 }
 
 fn expectOutputContains(result: *TestResult, needle: []const u8, context: []const u8) !void {
     if (std.mem.indexOf(u8, result.stdout, needle) == null) {
-        print("    ✗ {s}: output missing '{s}' in: {s}\n", .{ context, needle, result.stdout });
+        std.debug.print("    ✗ {s}: output missing '{s}' in: {s}\n", .{ context, needle, result.stdout });
         return error.TestFailed;
     }
 }
 
 // Adapted from t0001-init.sh
 fn testT0001Init(env: *TestEnvironment) !void {
-    print("  Running t0001-init.sh adaptations...\n", .{});
+    std.debug.print("  Running t0001-init.sh adaptations...\n", .{});
     
     // test_expect_success 'plain' 'git init plain && check_config plain/.git false unset'
     {
@@ -145,7 +145,7 @@ fn testT0001Init(env: *TestEnvironment) !void {
         defer env.allocator.free(git_dir);
         
         var dir = std.fs.cwd().openDir(git_dir[1..], .{}) catch {
-            print("    ✗ .git directory not created\n", .{});
+            std.debug.print("    ✗ .git directory not created\n", .{});
             return error.TestFailed;
         };
         defer dir.close();
@@ -154,12 +154,12 @@ fn testT0001Init(env: *TestEnvironment) !void {
         const required = [_][]const u8{ "config", "refs", "HEAD", "objects" };
         for (required) |file| {
             dir.access(file, .{}) catch {
-                print("    ✗ Missing required file/dir: {s}\n", .{file});
+                std.debug.print("    ✗ Missing required file/dir: {s}\n", .{file});
                 return error.TestFailed;
             };
         }
         
-        print("    ✓ t0001 plain init test passed\n", .{});
+        std.debug.print("    ✓ t0001 plain init test passed\n", .{});
     }
     
     // test_expect_success 'init in existing empty directory' 'git init'
@@ -175,13 +175,13 @@ fn testT0001Init(env: *TestEnvironment) !void {
         defer result2.deinit();
         try expectSuccess(&result2, "re-init existing");
         
-        print("    ✓ t0001 re-init test passed\n", .{});
+        std.debug.print("    ✓ t0001 re-init test passed\n", .{});
     }
 }
 
 // Adapted from t2000-add.sh  
 fn testT2000Add(env: *TestEnvironment) !void {
-    print("  Running t2000-add.sh adaptations...\n", .{});
+    std.debug.print("  Running t2000-add.sh adaptations...\n", .{});
     
     const repo = try env.createTestRepo("t2000-add");
     defer env.cleanup(repo);
@@ -203,7 +203,7 @@ fn testT2000Add(env: *TestEnvironment) !void {
         defer status.deinit();
         try expectOutputContains(&status, "A", "file staged");
         
-        print("    ✓ t2000 basic add test passed\n", .{});
+        std.debug.print("    ✓ t2000 basic add test passed\n", .{});
     }
     
     // test_expect_success 'Post-check that foo is in the index' 'git ls-files | grep foo'
@@ -213,9 +213,9 @@ fn testT2000Add(env: *TestEnvironment) !void {
         
         if (ls_files.exit_code == 0) {
             try expectOutputContains(&ls_files, "foo", "foo in index");
-            print("    ✓ t2000 ls-files test passed\n", .{});
+            std.debug.print("    ✓ t2000 ls-files test passed\n", .{});
         } else {
-            print("    ⚠ ls-files command not implemented\n", .{});
+            std.debug.print("    ⚠ ls-files command not implemented\n", .{});
         }
     }
     
@@ -227,16 +227,16 @@ fn testT2000Add(env: *TestEnvironment) !void {
         defer result.deinit();
         
         if (result.exit_code == 0) {
-            print("    ✓ t2000 special filename test passed\n", .{});
+            std.debug.print("    ✓ t2000 special filename test passed\n", .{});
         } else {
-            print("    ⚠ Special filename handling not fully implemented\n", .{});
+            std.debug.print("    ⚠ Special filename handling not fully implemented\n", .{});
         }
     }
 }
 
 // Adapted from t7500-commit.sh
 fn testT7500Commit(env: *TestEnvironment) !void {
-    print("  Running t7500-commit.sh adaptations...\n", .{});
+    std.debug.print("  Running t7500-commit.sh adaptations...\n", .{});
     
     const repo = try env.createTestRepo("t7500-commit");
     defer env.cleanup(repo);
@@ -257,7 +257,7 @@ fn testT7500Commit(env: *TestEnvironment) !void {
         defer commit_result.deinit();
         try expectSuccess(&commit_result, "initial commit");
         
-        print("    ✓ t7500 simple commit test passed\n", .{});
+        std.debug.print("    ✓ t7500 simple commit test passed\n", .{});
     }
     
     // test_expect_success 'nothing to commit' 'test_must_fail git commit -m "fail"'
@@ -266,7 +266,7 @@ fn testT7500Commit(env: *TestEnvironment) !void {
         defer empty_commit.deinit();
         try expectFailure(&empty_commit, "empty commit should fail");
         
-        print("    ✓ t7500 nothing to commit test passed\n", .{});
+        std.debug.print("    ✓ t7500 nothing to commit test passed\n", .{});
     }
     
     // test_expect_success 'commit message from file' 'echo "File message" > msg && git add . && echo "more" >> file && git add file && git commit -F msg'
@@ -282,16 +282,16 @@ fn testT7500Commit(env: *TestEnvironment) !void {
         defer commit_result.deinit();
         
         if (commit_result.exit_code == 0) {
-            print("    ✓ t7500 commit from file test passed\n", .{});
+            std.debug.print("    ✓ t7500 commit from file test passed\n", .{});
         } else {
-            print("    ⚠ Commit from file (-F flag) not implemented\n", .{});
+            std.debug.print("    ⚠ Commit from file (-F flag) not implemented\n", .{});
         }
     }
 }
 
 // Adapted from t7060-wtstatus.sh 
 fn testT7060Status(env: *TestEnvironment) !void {
-    print("  Running t7060-wtstatus.sh adaptations...\n", .{});
+    std.debug.print("  Running t7060-wtstatus.sh adaptations...\n", .{});
     
     const repo = try env.createTestRepo("t7060-status");
     defer env.cleanup(repo);
@@ -317,11 +317,11 @@ fn testT7060Status(env: *TestEnvironment) !void {
         try expectSuccess(&status, "clean status");
         
         if (status.stdout.len > 0) {
-            print("    ✗ Clean tree should have empty status, got: {s}\n", .{status.stdout});
+            std.debug.print("    ✗ Clean tree should have empty status, got: {s}\n", .{status.stdout});
             return error.TestFailed;
         }
         
-        print("    ✓ t7060 clean status test passed\n", .{});
+        std.debug.print("    ✓ t7060 clean status test passed\n", .{});
     }
     
     // test_expect_success 'status --porcelain shows modified files'
@@ -333,7 +333,7 @@ fn testT7060Status(env: *TestEnvironment) !void {
         try expectSuccess(&status, "modified status");
         try expectOutputContains(&status, " M", "modified marker");
         
-        print("    ✓ t7060 modified status test passed\n", .{});
+        std.debug.print("    ✓ t7060 modified status test passed\n", .{});
     }
     
     // test_expect_success 'status --porcelain shows staged files'
@@ -347,13 +347,13 @@ fn testT7060Status(env: *TestEnvironment) !void {
         try expectSuccess(&status, "staged status");
         try expectOutputContains(&status, "M ", "staged marker");
         
-        print("    ✓ t7060 staged status test passed\n", .{});
+        std.debug.print("    ✓ t7060 staged status test passed\n", .{});
     }
 }
 
 // Adapted from t4202-log.sh
 fn testT4202Log(env: *TestEnvironment) !void {
-    print("  Running t4202-log.sh adaptations...\n", .{});
+    std.debug.print("  Running t4202-log.sh adaptations...\n", .{});
     
     const repo = try env.createTestRepo("t4202-log");
     defer env.cleanup(repo);
@@ -392,7 +392,7 @@ fn testT4202Log(env: *TestEnvironment) !void {
             try expectOutputContains(&log_result, commit_info.message, "commit message in log");
         }
         
-        print("    ✓ t4202 log --oneline test passed\n", .{});
+        std.debug.print("    ✓ t4202 log --oneline test passed\n", .{});
     }
     
     // test_expect_success 'git log shows commits in reverse order'
@@ -406,17 +406,17 @@ fn testT4202Log(env: *TestEnvironment) !void {
         const first_pos = std.mem.indexOf(u8, log_result.stdout, "first commit");
         
         if (third_pos == null or first_pos == null or third_pos.? > first_pos.?) {
-            print("    ✗ Log not in correct order\n", .{});
+            std.debug.print("    ✗ Log not in correct order\n", .{});
             return error.TestFailed;
         }
         
-        print("    ✓ t4202 log order test passed\n", .{});
+        std.debug.print("    ✓ t4202 log order test passed\n", .{});
     }
 }
 
 // Comparison test: ziggit vs git output format
 fn testOutputCompatibility(env: *TestEnvironment) !void {
-    print("  Testing output format compatibility with git...\n", .{});
+    std.debug.print("  Testing output format compatibility with git...\n", .{});
     
     const repo = try env.createTestRepo("output-compat");
     defer env.cleanup(repo);
@@ -451,16 +451,16 @@ fn testOutputCompatibility(env: *TestEnvironment) !void {
         // Both should show " M test.txt"
         if (std.mem.indexOf(u8, ziggit_status.stdout, " M test.txt") != null and
             std.mem.indexOf(u8, git_status.stdout, " M test.txt") != null) {
-            print("    ✓ Status format compatibility check passed\n", .{});
+            std.debug.print("    ✓ Status format compatibility check passed\n", .{});
         } else {
-            print("    ⚠ Status format differs - ziggit: {s}, git: {s}\n", .{ ziggit_status.stdout, git_status.stdout });
+            std.debug.print("    ⚠ Status format differs - ziggit: {s}, git: {s}\n", .{ ziggit_status.stdout, git_status.stdout });
         }
     }
 }
 
 pub fn runGitSourceAdaptedTests() !void {
-    print("Running Git Source Adapted Tests...\n", .{});
-    print("Adapting core tests from git source tree (t0001, t2000, t7500, t7060, t4202)...\n", .{});
+    std.debug.print("Running Git Source Adapted Tests...\n", .{});
+    std.debug.print("Adapting core tests from git source tree (t0001, t2000, t7500, t7060, t4202)...\n", .{});
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -468,30 +468,30 @@ pub fn runGitSourceAdaptedTests() !void {
     
     // Run adapted git source tests
     testT0001Init(&env) catch |err| {
-        print("  ✗ t0001-init.sh tests failed: {}\n", .{err});
+        std.debug.print("  ✗ t0001-init.sh tests failed: {}\n", .{err});
     };
     
     testT2000Add(&env) catch |err| {
-        print("  ✗ t2000-add.sh tests failed: {}\n", .{err});
+        std.debug.print("  ✗ t2000-add.sh tests failed: {}\n", .{err});
     };
     
     testT7500Commit(&env) catch |err| {
-        print("  ✗ t7500-commit.sh tests failed: {}\n", .{err});
+        std.debug.print("  ✗ t7500-commit.sh tests failed: {}\n", .{err});
     };
     
     testT7060Status(&env) catch |err| {
-        print("  ✗ t7060-wtstatus.sh tests failed: {}\n", .{err});
+        std.debug.print("  ✗ t7060-wtstatus.sh tests failed: {}\n", .{err});
     };
     
     testT4202Log(&env) catch |err| {
-        print("  ✗ t4202-log.sh tests failed: {}\n", .{err});
+        std.debug.print("  ✗ t4202-log.sh tests failed: {}\n", .{err});
     };
     
     testOutputCompatibility(&env) catch |err| {
-        print("  ✗ Output compatibility tests failed: {}\n", .{err});
+        std.debug.print("  ✗ Output compatibility tests failed: {}\n", .{err});
     };
     
-    print("Git Source Adapted Tests completed!\n", .{});
+    std.debug.print("Git Source Adapted Tests completed!\n", .{});
 }
 
 // Unit tests

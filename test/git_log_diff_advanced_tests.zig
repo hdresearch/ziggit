@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const print = std.debug.print;
+
 const test_harness = @import("test_harness.zig");
 const TestHarness = test_harness.TestHarness;
 
@@ -9,7 +9,7 @@ const TestHarness = test_harness.TestHarness;
 
 // Test log command functionality
 pub fn testLogEmptyRepository(harness: TestHarness) !void {
-    print("    Testing log in empty repository...\n", .{});
+    std.debug.print("    Testing log in empty repository...\n", .{});
     
     const temp_dir = try harness.createTempDir("test_log_empty");
     defer harness.removeTempDir(temp_dir);
@@ -26,12 +26,12 @@ pub fn testLogEmptyRepository(harness: TestHarness) !void {
     // Should fail with appropriate error in empty repository
     try testing.expect(log_result.exit_code != 0);
 
-    print("    ✓ log in empty repository (correct failure)\n", .{});
+    std.debug.print("    ✓ log in empty repository (correct failure)\n", .{});
 }
 
 // Test diff command functionality  
 pub fn testDiffEmptyRepository(harness: TestHarness) !void {
-    print("    Testing diff in empty repository...\n", .{});
+    std.debug.print("    Testing diff in empty repository...\n", .{});
     
     const temp_dir = try harness.createTempDir("test_diff_empty");
     defer harness.removeTempDir(temp_dir);
@@ -48,11 +48,11 @@ pub fn testDiffEmptyRepository(harness: TestHarness) !void {
     // Should succeed with no output in empty repository
     try testing.expect(diff_result.exit_code == 0);
 
-    print("    ✓ diff in empty repository\n", .{});
+    std.debug.print("    ✓ diff in empty repository\n", .{});
 }
 
 pub fn testDiffWithChanges(harness: TestHarness) !void {
-    print("    Testing diff with changes...\n", .{});
+    std.debug.print("    Testing diff with changes...\n", .{});
     
     const temp_dir = try harness.createTempDir("test_diff_changes");
     defer harness.removeTempDir(temp_dir);
@@ -74,7 +74,7 @@ pub fn testDiffWithChanges(harness: TestHarness) !void {
     defer add_result.deinit();
 
     if (add_result.exit_code != 0) {
-        print("    ⚠ skipping diff test (add failed)\n", .{});
+        std.debug.print("    ⚠ skipping diff test (add failed)\n", .{});
         return;
     }
 
@@ -82,7 +82,7 @@ pub fn testDiffWithChanges(harness: TestHarness) !void {
     defer commit_result.deinit();
 
     if (commit_result.exit_code != 0) {
-        print("    ⚠ skipping diff test (commit failed)\n", .{});
+        std.debug.print("    ⚠ skipping diff test (commit failed)\n", .{});
         return;
     }
 
@@ -96,14 +96,14 @@ pub fn testDiffWithChanges(harness: TestHarness) !void {
     defer diff_result.deinit();
 
     if (diff_result.exit_code == 0) {
-        print("    ✓ diff with changes\n", .{});
+        std.debug.print("    ✓ diff with changes\n", .{});
     } else {
-        print("    ⚠ diff command failed: {s}\n", .{diff_result.stderr});
+        std.debug.print("    ⚠ diff command failed: {s}\n", .{diff_result.stderr});
     }
 }
 
 pub fn runGitLogDiffAdvancedTests() !void {
-    print("Running git log and diff advanced compatibility tests...\n", .{});
+    std.debug.print("Running git log and diff advanced compatibility tests...\n", .{});
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -121,17 +121,17 @@ pub fn runGitLogDiffAdvancedTests() !void {
     };
 
     for (tests) |test_case| {
-        print("  Testing {s}...\n", .{test_case.name});
+        std.debug.print("  Testing {s}...\n", .{test_case.name});
         
         test_case.func(harness) catch |err| {
-            print("    ❌ FAILED: {any}\n", .{err});
+            std.debug.print("    ❌ FAILED: {any}\n", .{err});
             failed += 1;
             continue;
         };
         passed += 1;
     }
 
-    print("Log/diff advanced tests completed: {d} passed, {d} failed\n", .{ passed, failed });
+    std.debug.print("Log/diff advanced tests completed: {d} passed, {d} failed\n", .{ passed, failed });
 
     if (failed > 0) {
         return error.TestsFailed;

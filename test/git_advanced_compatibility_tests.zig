@@ -1,7 +1,7 @@
 const std = @import("std");
 const fs = std.fs;
 const process = std.process;
-const print = std.debug.print;
+
 const ArrayList = std.ArrayList;
 
 // Advanced git compatibility tests based on git source test suite
@@ -88,7 +88,7 @@ const TestFramework = struct {
 
 // Test git init with various scenarios based on t0001-init.sh
 fn testInitAdvanced(tf: *TestFramework) !void {
-    print("  Testing advanced git init scenarios...\n", .{});
+    std.debug.print("  Testing advanced git init scenarios...\n", .{});
     
     // Test 1: init --bare with custom directory name
     {
@@ -104,7 +104,7 @@ fn testInitAdvanced(tf: *TestFramework) !void {
         }, test_dir);
         
         if (ziggit_result.exit_code != git_result.exit_code) {
-            print("    ⚠ bare init custom dir exit codes differ: ziggit={d}, git={d}\n", 
+            std.debug.print("    ⚠ bare init custom dir exit codes differ: ziggit={d}, git={d}\n", 
                   .{ ziggit_result.exit_code, git_result.exit_code });
         }
         
@@ -115,16 +115,16 @@ fn testInitAdvanced(tf: *TestFramework) !void {
         const config_path = try std.fmt.bufPrint(&buf2, "{s}/config", .{bare_path});
         
         fs.accessAbsolute(bare_path, .{}) catch |err| {
-            print("    ⚠ bare repo directory not created: {}\n", .{err});
+            std.debug.print("    ⚠ bare repo directory not created: {}\n", .{err});
             return;
         };
         
         fs.accessAbsolute(config_path, .{}) catch |err| {
-            print("    ⚠ bare repo config not created: {}\n", .{err});
+            std.debug.print("    ⚠ bare repo config not created: {}\n", .{err});
             return;
         };
         
-        print("    ✓ bare init with custom directory\n", .{});
+        std.debug.print("    ✓ bare init with custom directory\n", .{});
     }
     
     // Test 2: init in non-empty directory
@@ -141,9 +141,9 @@ fn testInitAdvanced(tf: *TestFramework) !void {
         }, test_dir);
         
         if (ziggit_result.exit_code != 0) {
-            print("    ⚠ init in non-empty dir failed: exit_code={d}\n", .{ziggit_result.exit_code});
+            std.debug.print("    ⚠ init in non-empty dir failed: exit_code={d}\n", .{ziggit_result.exit_code});
         } else {
-            print("    ✓ init in non-empty directory\n", .{});
+            std.debug.print("    ✓ init in non-empty directory\n", .{});
         }
     }
     
@@ -158,16 +158,16 @@ fn testInitAdvanced(tf: *TestFramework) !void {
         
         // Check if --quiet is respected (minimal output)
         if (ziggit_result.stdout.len > 100) {
-            print("    ⚠ init --quiet has too much output: {d} bytes\n", .{ziggit_result.stdout.len});
+            std.debug.print("    ⚠ init --quiet has too much output: {d} bytes\n", .{ziggit_result.stdout.len});
         } else {
-            print("    ✓ init --quiet respects minimal output\n", .{});
+            std.debug.print("    ✓ init --quiet respects minimal output\n", .{});
         }
     }
 }
 
 // Test git status advanced functionality based on t7508-status.sh 
 fn testStatusAdvanced(tf: *TestFramework) !void {
-    print("  Testing advanced git status functionality...\n", .{});
+    std.debug.print("  Testing advanced git status functionality...\n", .{});
     
     const test_dir = try tf.createTestDir("status-advanced");
     defer tf.cleanupDir(test_dir);
@@ -214,11 +214,11 @@ fn testStatusAdvanced(tf: *TestFramework) !void {
         const git_has_untracked = std.mem.indexOf(u8, git_result.stdout, "Untracked files") != null;
         
         if (ziggit_has_untracked != git_has_untracked) {
-            print("    ⚠ untracked file display differs: ziggit={}, git={}\n", 
+            std.debug.print("    ⚠ untracked file display differs: ziggit={}, git={}\n", 
                   .{ ziggit_has_untracked, git_has_untracked });
         }
         
-        print("    ✓ mixed file states status test\n", .{});
+        std.debug.print("    ✓ mixed file states status test\n", .{});
     }
     
     // Test 2: Status --porcelain (if supported)
@@ -228,16 +228,16 @@ fn testStatusAdvanced(tf: *TestFramework) !void {
         }, test_dir);
         
         if (ziggit_result.exit_code == 0) {
-            print("    ✓ status --porcelain supported\n", .{});
+            std.debug.print("    ✓ status --porcelain supported\n", .{});
         } else {
-            print("    ⚠ status --porcelain not implemented\n", .{});
+            std.debug.print("    ⚠ status --porcelain not implemented\n", .{});
         }
     }
 }
 
 // Test git add advanced functionality  
 fn testAddAdvanced(tf: *TestFramework) !void {
-    print("  Testing advanced git add functionality...\n", .{});
+    std.debug.print("  Testing advanced git add functionality...\n", .{});
     
     const test_dir = try tf.createTestDir("add-advanced");
     defer tf.cleanupDir(test_dir);
@@ -262,9 +262,9 @@ fn testAddAdvanced(tf: *TestFramework) !void {
         }, test_dir);
         
         if (ziggit_result.exit_code == 0) {
-            print("    ✓ add -A supported\n", .{});
+            std.debug.print("    ✓ add -A supported\n", .{});
         } else {
-            print("    ⚠ add -A not implemented (exit_code={d})\n", .{ziggit_result.exit_code});
+            std.debug.print("    ⚠ add -A not implemented (exit_code={d})\n", .{ziggit_result.exit_code});
         }
     }
     
@@ -288,16 +288,16 @@ fn testAddAdvanced(tf: *TestFramework) !void {
                             std.mem.indexOf(u8, status_result.stdout, "debug.log") != null;
         
         if (shows_ignored) {
-            print("    ⚠ gitignore patterns not fully respected\n", .{});
+            std.debug.print("    ⚠ gitignore patterns not fully respected\n", .{});
         } else {
-            print("    ✓ gitignore patterns respected\n", .{});
+            std.debug.print("    ✓ gitignore patterns respected\n", .{});
         }
     }
 }
 
 // Test git commit advanced functionality
 fn testCommitAdvanced(tf: *TestFramework) !void {
-    print("  Testing advanced git commit functionality...\n", .{});
+    std.debug.print("  Testing advanced git commit functionality...\n", .{});
     
     const test_dir = try tf.createTestDir("commit-advanced");
     defer tf.cleanupDir(test_dir);
@@ -327,9 +327,9 @@ fn testCommitAdvanced(tf: *TestFramework) !void {
         }, test_dir);
         
         if (ziggit_result.exit_code == 0) {
-            print("    ✓ commit --amend supported\n", .{});
+            std.debug.print("    ✓ commit --amend supported\n", .{});
         } else {
-            print("    ⚠ commit --amend not implemented\n", .{});
+            std.debug.print("    ⚠ commit --amend not implemented\n", .{});
         }
     }
     
@@ -345,9 +345,9 @@ fn testCommitAdvanced(tf: *TestFramework) !void {
         
         const both_failed = (ziggit_result.exit_code != 0) and (git_result.exit_code != 0);
         if (both_failed) {
-            print("    ✓ commit with no changes fails appropriately\n", .{});
+            std.debug.print("    ✓ commit with no changes fails appropriately\n", .{});
         } else {
-            print("    ⚠ commit no changes behavior differs: ziggit={d}, git={d}\n", 
+            std.debug.print("    ⚠ commit no changes behavior differs: ziggit={d}, git={d}\n", 
                   .{ ziggit_result.exit_code, git_result.exit_code });
         }
     }
@@ -355,7 +355,7 @@ fn testCommitAdvanced(tf: *TestFramework) !void {
 
 // Test git log advanced functionality
 fn testLogAdvanced(tf: *TestFramework) !void {
-    print("  Testing advanced git log functionality...\n", .{});
+    std.debug.print("  Testing advanced git log functionality...\n", .{});
     
     const test_dir = try tf.createTestDir("log-advanced");
     defer tf.cleanupDir(test_dir);
@@ -385,9 +385,9 @@ fn testLogAdvanced(tf: *TestFramework) !void {
         }, test_dir);
         
         if (ziggit_result.exit_code == 0) {
-            print("    ✓ log --oneline supported\n", .{});
+            std.debug.print("    ✓ log --oneline supported\n", .{});
         } else {
-            print("    ⚠ log --oneline not implemented\n", .{});
+            std.debug.print("    ⚠ log --oneline not implemented\n", .{});
         }
     }
     
@@ -398,16 +398,16 @@ fn testLogAdvanced(tf: *TestFramework) !void {
         }, test_dir);
         
         if (ziggit_result.exit_code == 0) {
-            print("    ✓ log -n supported\n", .{});
+            std.debug.print("    ✓ log -n supported\n", .{});
         } else {
-            print("    ⚠ log -n not implemented\n", .{});
+            std.debug.print("    ⚠ log -n not implemented\n", .{});
         }
     }
 }
 
 // Test git diff advanced functionality  
 fn testDiffAdvanced(tf: *TestFramework) !void {
-    print("  Testing advanced git diff functionality...\n", .{});
+    std.debug.print("  Testing advanced git diff functionality...\n", .{});
     
     const test_dir = try tf.createTestDir("diff-advanced");
     defer tf.cleanupDir(test_dir);
@@ -439,9 +439,9 @@ fn testDiffAdvanced(tf: *TestFramework) !void {
         const git_has_output = git_result.stdout.len > 0;
         
         if (ziggit_has_output == git_has_output) {
-            print("    ✓ diff working directory changes\n", .{});
+            std.debug.print("    ✓ diff working directory changes\n", .{});
         } else {
-            print("    ⚠ diff output differs: ziggit_len={d}, git_len={d}\n", 
+            std.debug.print("    ⚠ diff output differs: ziggit_len={d}, git_len={d}\n", 
                   .{ ziggit_result.stdout.len, git_result.stdout.len });
         }
     }
@@ -455,16 +455,16 @@ fn testDiffAdvanced(tf: *TestFramework) !void {
         }, test_dir);
         
         if (ziggit_result.exit_code == 0) {
-            print("    ✓ diff --cached supported\n", .{});
+            std.debug.print("    ✓ diff --cached supported\n", .{});
         } else {
-            print("    ⚠ diff --cached not implemented\n", .{});
+            std.debug.print("    ⚠ diff --cached not implemented\n", .{});
         }
     }
 }
 
 // Test git branch and checkout advanced functionality
 fn testBranchCheckoutAdvanced(tf: *TestFramework) !void {
-    print("  Testing advanced git branch/checkout functionality...\n", .{});
+    std.debug.print("  Testing advanced git branch/checkout functionality...\n", .{});
     
     const test_dir = try tf.createTestDir("branch-advanced");
     defer tf.cleanupDir(test_dir);
@@ -487,9 +487,9 @@ fn testBranchCheckoutAdvanced(tf: *TestFramework) !void {
         }, test_dir);
         
         if (ziggit_result.exit_code == 0) {
-            print("    ✓ branch creation supported\n", .{});
+            std.debug.print("    ✓ branch creation supported\n", .{});
         } else {
-            print("    ⚠ branch creation failed: exit_code={d}\n", .{ziggit_result.exit_code});
+            std.debug.print("    ⚠ branch creation failed: exit_code={d}\n", .{ziggit_result.exit_code});
         }
     }
     
@@ -502,9 +502,9 @@ fn testBranchCheckoutAdvanced(tf: *TestFramework) !void {
         const git_result = try tf.runCommand(&[_][]const u8{ "git", "branch" }, test_dir);
         
         if (ziggit_result.exit_code == git_result.exit_code) {
-            print("    ✓ branch listing exit codes match\n", .{});
+            std.debug.print("    ✓ branch listing exit codes match\n", .{});
         } else {
-            print("    ⚠ branch listing exit codes differ: ziggit={d}, git={d}\n", 
+            std.debug.print("    ⚠ branch listing exit codes differ: ziggit={d}, git={d}\n", 
                   .{ ziggit_result.exit_code, git_result.exit_code });
         }
     }
@@ -516,9 +516,9 @@ fn testBranchCheckoutAdvanced(tf: *TestFramework) !void {
         }, test_dir);
         
         if (ziggit_result.exit_code == 0) {
-            print("    ✓ checkout branch supported\n", .{});
+            std.debug.print("    ✓ checkout branch supported\n", .{});
         } else {
-            print("    ⚠ checkout branch failed: exit_code={d}\n", .{ziggit_result.exit_code});
+            std.debug.print("    ⚠ checkout branch failed: exit_code={d}\n", .{ziggit_result.exit_code});
         }
     }
     
@@ -529,15 +529,15 @@ fn testBranchCheckoutAdvanced(tf: *TestFramework) !void {
         }, test_dir);
         
         if (ziggit_result.exit_code == 0) {
-            print("    ✓ checkout -b supported\n", .{});
+            std.debug.print("    ✓ checkout -b supported\n", .{});
         } else {
-            print("    ⚠ checkout -b not implemented\n", .{});
+            std.debug.print("    ⚠ checkout -b not implemented\n", .{});
         }
     }
 }
 
 pub fn runGitAdvancedCompatibilityTests() !void {
-    print("Running advanced git compatibility tests...\n", .{});
+    std.debug.print("Running advanced git compatibility tests...\n", .{});
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -554,5 +554,5 @@ pub fn runGitAdvancedCompatibilityTests() !void {
     try testDiffAdvanced(&tf);
     try testBranchCheckoutAdvanced(&tf);
     
-    print("Advanced git compatibility tests completed!\n", .{});
+    std.debug.print("Advanced git compatibility tests completed!\n", .{});
 }

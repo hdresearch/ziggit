@@ -1,5 +1,5 @@
 const std = @import("std");
-const print = std.debug.print;
+
 
 // Git Source Test Suite Adapter
 // Adapted from git/git.git/t/ test directory
@@ -145,10 +145,10 @@ pub const TestRunner = struct {
     pub fn expectExitCode(self: *Self, expected: u8, actual: u8, test_name: []const u8) TestResult {
         _ = self; // unused
         if (expected == actual) {
-            print("    ✓ {s}: exit code {d}\n", .{ test_name, actual });
+            std.debug.print("    ✓ {s}: exit code {d}\n", .{ test_name, actual });
             return .pass;
         } else {
-            print("    ✗ {s}: expected exit code {d}, got {d}\n", .{ test_name, expected, actual });
+            std.debug.print("    ✗ {s}: expected exit code {d}, got {d}\n", .{ test_name, expected, actual });
             return .fail;
         }
     }
@@ -156,31 +156,31 @@ pub const TestRunner = struct {
     pub fn expectContains(self: *Self, haystack: []const u8, needle: []const u8, test_name: []const u8) TestResult {
         _ = self; // unused
         if (std.mem.indexOf(u8, haystack, needle) != null) {
-            print("    ✓ {s}: output contains '{s}'\n", .{ test_name, needle });
+            std.debug.print("    ✓ {s}: output contains '{s}'\n", .{ test_name, needle });
             return .pass;
         } else {
-            print("    ✗ {s}: output does not contain '{s}'\n", .{ test_name, needle });
-            print("      actual output: {s}\n", .{haystack});
+            std.debug.print("    ✗ {s}: output does not contain '{s}'\n", .{ test_name, needle });
+            std.debug.print("      actual output: {s}\n", .{haystack});
             return .fail;
         }
     }
     
     pub fn expectFileExists(self: *Self, path: []const u8, test_name: []const u8) TestResult {
         if (self.fileExists(path)) {
-            print("    ✓ {s}: file {s} exists\n", .{ test_name, path });
+            std.debug.print("    ✓ {s}: file {s} exists\n", .{ test_name, path });
             return .pass;
         } else {
-            print("    ✗ {s}: file {s} does not exist\n", .{ test_name, path });
+            std.debug.print("    ✗ {s}: file {s} does not exist\n", .{ test_name, path });
             return .fail;
         }
     }
     
     pub fn expectDirExists(self: *Self, path: []const u8, test_name: []const u8) TestResult {
         if (self.dirExists(path)) {
-            print("    ✓ {s}: directory {s} exists\n", .{ test_name, path });
+            std.debug.print("    ✓ {s}: directory {s} exists\n", .{ test_name, path });
             return .pass;
         } else {
-            print("    ✗ {s}: directory {s} does not exist\n", .{ test_name, path });
+            std.debug.print("    ✗ {s}: directory {s} does not exist\n", .{ test_name, path });
             return .fail;
         }
     }
@@ -191,17 +191,17 @@ pub fn runTestSuite(test_name: []const u8, test_cases: []const TestCase) !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     
-    print("=== Running {s} ===\n", .{test_name});
+    std.debug.print("=== Running {s} ===\n", .{test_name});
     
     var passed: u32 = 0;
     var failed: u32 = 0;
     var skipped: u32 = 0;
     
     for (test_cases) |test_case| {
-        print("\n{s}: {s}\n", .{ test_case.name, test_case.description });
+        std.debug.print("\n{s}: {s}\n", .{ test_case.name, test_case.description });
         
         var runner = TestRunner.init(allocator, test_case.name) catch |err| {
-            print("  ✗ Failed to initialize test runner: {}\n", .{err});
+            std.debug.print("  ✗ Failed to initialize test runner: {}\n", .{err});
             failed += 1;
             continue;
         };
@@ -210,7 +210,7 @@ pub fn runTestSuite(test_name: []const u8, test_cases: []const TestCase) !void {
         // Setup
         if (test_case.setup_fn) |setup| {
             setup(&runner) catch |err| {
-                print("  ✗ Setup failed: {}\n", .{err});
+                std.debug.print("  ✗ Setup failed: {}\n", .{err});
                 failed += 1;
                 continue;
             };
@@ -218,7 +218,7 @@ pub fn runTestSuite(test_name: []const u8, test_cases: []const TestCase) !void {
         
         // Run test
         const result = test_case.test_fn(&runner) catch |err| {
-            print("  ✗ Test failed with error: {}\n", .{err});
+            std.debug.print("  ✗ Test failed with error: {}\n", .{err});
             failed += 1;
             continue;
         };
@@ -226,7 +226,7 @@ pub fn runTestSuite(test_name: []const u8, test_cases: []const TestCase) !void {
         // Cleanup
         if (test_case.cleanup_fn) |cleanup| {
             cleanup(&runner) catch |err| {
-                print("  ⚠ Cleanup failed: {}\n", .{err});
+                std.debug.print("  ⚠ Cleanup failed: {}\n", .{err});
             };
         }
         
@@ -239,20 +239,20 @@ pub fn runTestSuite(test_name: []const u8, test_cases: []const TestCase) !void {
             },
             .skip => {
                 skipped += 1;
-                print("  ⚠ {s} skipped\n", .{test_case.name});
+                std.debug.print("  ⚠ {s} skipped\n", .{test_case.name});
             },
         }
     }
     
-    print("\n=== Summary ===\n", .{});
-    print("Passed: {d}\n", .{passed});
-    print("Failed: {d}\n", .{failed});
-    print("Skipped: {d}\n", .{skipped});
-    print("Total: {d}\n", .{passed + failed + skipped});
+    std.debug.print("\n=== Summary ===\n", .{});
+    std.debug.print("Passed: {d}\n", .{passed});
+    std.debug.print("Failed: {d}\n", .{failed});
+    std.debug.print("Skipped: {d}\n", .{skipped});
+    std.debug.print("Total: {d}\n", .{passed + failed + skipped});
     
     if (failed > 0) {
-        print("\nSome tests failed. Ziggit may not be fully compatible with git.\n", .{});
+        std.debug.print("\nSome tests failed. Ziggit may not be fully compatible with git.\n", .{});
     } else {
-        print("\nAll tests passed! Ziggit is compatible with git for these operations.\n", .{});
+        std.debug.print("\nAll tests passed! Ziggit is compatible with git for these operations.\n", .{});
     }
 }

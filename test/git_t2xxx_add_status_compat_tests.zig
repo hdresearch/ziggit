@@ -1,6 +1,6 @@
 // Git source compatibility tests adapted from t2xxx (add) and t7xxx (status) test files
 const std = @import("std");
-const print = std.debug.print;
+
 
 pub const TestFramework = @import("git_source_test_harness.zig").TestFramework;
 
@@ -12,7 +12,7 @@ pub fn runAddStatusCompatTests() !void {
     var tf = TestFramework.init(allocator);
     defer tf.deinit();
     
-    print("Running git add/status compatibility tests (adapted from t2xxx/t7xxx)...\n");
+    std.debug.print("Running git add/status compatibility tests (adapted from t2xxx/t7xxx)...\n", .{});
     
     try testAddSingleFile(&tf);
     try testAddMultipleFiles(&tf);
@@ -24,7 +24,7 @@ pub fn runAddStatusCompatTests() !void {
     try testStatusModified(&tf);
     try testAddAll(&tf);
     
-    print("✓ All add/status compatibility tests passed!\n");
+    std.debug.print("✓ All add/status compatibility tests passed!\n", .{});
 }
 
 fn setupTestRepo(tf: *TestFramework, name: []const u8) ![]u8 {
@@ -44,7 +44,7 @@ fn setupTestRepo(tf: *TestFramework, name: []const u8) ![]u8 {
 }
 
 fn testAddSingleFile(tf: *TestFramework) !void {
-    print("  Testing add single file...\n");
+    std.debug.print("  Testing add single file...\n", .{});
     
     const test_dir = try setupTestRepo(tf, "add-single");
     defer tf.removeTempDir(test_dir);
@@ -59,13 +59,13 @@ fn testAddSingleFile(tf: *TestFramework) !void {
     defer add_result.deinit();
     
     if (add_result.exit_code != 0) {
-        print("    ❌ add failed: {s}\n", .{add_result.stderr});
+        std.debug.print("    ❌ add failed: {s}\n", .{add_result.stderr});
         return;
     }
     
     // Add should be silent on success (like git)
     if (add_result.stdout.len > 0) {
-        print("    ⚠ add should be silent on success, but output: {s}\n", .{add_result.stdout});
+        std.debug.print("    ⚠ add should be silent on success, but output: {s}\n", .{add_result.stdout});
     }
     
     // Check status to verify file was staged
@@ -75,13 +75,13 @@ fn testAddSingleFile(tf: *TestFramework) !void {
     defer status_result.deinit();
     
     if (status_result.exit_code != 0) {
-        print("    ❌ status failed after add: {s}\n", .{status_result.stderr});
+        std.debug.print("    ❌ status failed after add: {s}\n", .{status_result.stderr});
         return;
     }
     
     // Should mention the staged file
     if (std.mem.indexOf(u8, status_result.stdout, "test.txt") == null) {
-        print("    ❌ Added file not shown in status\n");
+        std.debug.print("    ❌ Added file not shown in status\n", .{});
         return;
     }
     
@@ -89,14 +89,14 @@ fn testAddSingleFile(tf: *TestFramework) !void {
     if (std.mem.indexOf(u8, status_result.stdout, "new file") == null and
         std.mem.indexOf(u8, status_result.stdout, "Changes to be committed") == null and
         std.mem.indexOf(u8, status_result.stdout, "staged") == null) {
-        print("    ⚠ Status should indicate file is staged for commit\n");
+        std.debug.print("    ⚠ Status should indicate file is staged for commit\n", .{});
     }
     
-    print("    ✓ Add single file test passed\n");
+    std.debug.print("    ✓ Add single file test passed\n", .{});
 }
 
 fn testAddMultipleFiles(tf: *TestFramework) !void {
-    print("  Testing add multiple files...\n");
+    std.debug.print("  Testing add multiple files...\n", .{});
     
     const test_dir = try setupTestRepo(tf, "add-multiple");
     defer tf.removeTempDir(test_dir);
@@ -113,7 +113,7 @@ fn testAddMultipleFiles(tf: *TestFramework) !void {
     defer add_result.deinit();
     
     if (add_result.exit_code != 0) {
-        print("    ❌ add multiple files failed: {s}\n", .{add_result.stderr});
+        std.debug.print("    ❌ add multiple files failed: {s}\n", .{add_result.stderr});
         return;
     }
     
@@ -124,7 +124,7 @@ fn testAddMultipleFiles(tf: *TestFramework) !void {
     defer status_result.deinit();
     
     if (status_result.exit_code != 0) {
-        print("    ❌ status failed after adding multiple files: {s}\n", .{status_result.stderr});
+        std.debug.print("    ❌ status failed after adding multiple files: {s}\n", .{status_result.stderr});
         return;
     }
     
@@ -132,16 +132,16 @@ fn testAddMultipleFiles(tf: *TestFramework) !void {
     const files = [_][]const u8{ "file1.txt", "file2.txt", "file3.txt" };
     for (files) |file| {
         if (std.mem.indexOf(u8, status_result.stdout, file) == null) {
-            print("    ❌ Added file {s} not shown in status\n", .{file});
+            std.debug.print("    ❌ Added file {s} not shown in status\n", .{file});
             return;
         }
     }
     
-    print("    ✓ Add multiple files test passed\n");
+    std.debug.print("    ✓ Add multiple files test passed\n", .{});
 }
 
 fn testAddDirectory(tf: *TestFramework) !void {
-    print("  Testing add directory...\n");
+    std.debug.print("  Testing add directory...\n", .{});
     
     const test_dir = try setupTestRepo(tf, "add-directory");
     defer tf.removeTempDir(test_dir);
@@ -165,7 +165,7 @@ fn testAddDirectory(tf: *TestFramework) !void {
     defer add_result.deinit();
     
     if (add_result.exit_code != 0) {
-        print("    ❌ add directory failed: {s}\n", .{add_result.stderr});
+        std.debug.print("    ❌ add directory failed: {s}\n", .{add_result.stderr});
         return;
     }
     
@@ -176,22 +176,22 @@ fn testAddDirectory(tf: *TestFramework) !void {
     defer status_result.deinit();
     
     if (status_result.exit_code != 0) {
-        print("    ❌ status failed after adding directory: {s}\n", .{status_result.stderr});
+        std.debug.print("    ❌ status failed after adding directory: {s}\n", .{status_result.stderr});
         return;
     }
     
     // Should show files from the subdirectory
     if (std.mem.indexOf(u8, status_result.stdout, "subdir/file1.txt") == null or
         std.mem.indexOf(u8, status_result.stdout, "subdir/file2.txt") == null) {
-        print("    ❌ Files from added directory not shown in status\n");
+        std.debug.print("    ❌ Files from added directory not shown in status\n", .{});
         return;
     }
     
-    print("    ✓ Add directory test passed\n");
+    std.debug.print("    ✓ Add directory test passed\n", .{});
 }
 
 fn testAddNonexistentFile(tf: *TestFramework) !void {
-    print("  Testing add nonexistent file...\n");
+    std.debug.print("  Testing add nonexistent file...\n", .{});
     
     const test_dir = try setupTestRepo(tf, "add-nonexistent");
     defer tf.removeTempDir(test_dir);
@@ -204,26 +204,26 @@ fn testAddNonexistentFile(tf: *TestFramework) !void {
     
     // Should fail
     if (add_result.exit_code == 0) {
-        print("    ❌ add nonexistent file should fail but didn't\n");
+        std.debug.print("    ❌ add nonexistent file should fail but didn't\n", .{});
         return;
     }
     
     // Should have meaningful error message
     if (std.mem.indexOf(u8, add_result.stderr, "does-not-exist.txt") == null) {
-        print("    ⚠ Error message should mention the file name\n");
+        std.debug.print("    ⚠ Error message should mention the file name\n", .{});
     }
     
     if (std.mem.indexOf(u8, add_result.stderr, "not found") == null and
         std.mem.indexOf(u8, add_result.stderr, "does not exist") == null and
         std.mem.indexOf(u8, add_result.stderr, "No such file") == null) {
-        print("    ⚠ Error message should indicate file doesn't exist\n");
+        std.debug.print("    ⚠ Error message should indicate file doesn't exist\n", .{});
     }
     
-    print("    ✓ Add nonexistent file test passed\n");
+    std.debug.print("    ✓ Add nonexistent file test passed\n", .{});
 }
 
 fn testStatusEmpty(tf: *TestFramework) !void {
-    print("  Testing status on empty repository...\n");
+    std.debug.print("  Testing status on empty repository...\n", .{});
     
     const test_dir = try setupTestRepo(tf, "status-empty");
     defer tf.removeTempDir(test_dir);
@@ -235,7 +235,7 @@ fn testStatusEmpty(tf: *TestFramework) !void {
     defer status_result.deinit();
     
     if (status_result.exit_code != 0) {
-        print("    ❌ status failed on empty repo: {s}\n", .{status_result.stderr});
+        std.debug.print("    ❌ status failed on empty repo: {s}\n", .{status_result.stderr});
         return;
     }
     
@@ -244,14 +244,14 @@ fn testStatusEmpty(tf: *TestFramework) !void {
         std.mem.indexOf(u8, status_result.stdout, "working tree clean") == null and
         std.mem.indexOf(u8, status_result.stdout, "no commits yet") == null and
         std.mem.indexOf(u8, status_result.stdout, "Initial commit") == null) {
-        print("    ⚠ Status should indicate empty/clean state\n");
+        std.debug.print("    ⚠ Status should indicate empty/clean state\n", .{});
     }
     
-    print("    ✓ Status empty test passed\n");
+    std.debug.print("    ✓ Status empty test passed\n", .{});
 }
 
 fn testStatusUntracked(tf: *TestFramework) !void {
-    print("  Testing status with untracked files...\n");
+    std.debug.print("  Testing status with untracked files...\n", .{});
     
     const test_dir = try setupTestRepo(tf, "status-untracked");
     defer tf.removeTempDir(test_dir);
@@ -266,28 +266,28 @@ fn testStatusUntracked(tf: *TestFramework) !void {
     defer status_result.deinit();
     
     if (status_result.exit_code != 0) {
-        print("    ❌ status failed with untracked files: {s}\n", .{status_result.stderr});
+        std.debug.print("    ❌ status failed with untracked files: {s}\n", .{status_result.stderr});
         return;
     }
     
     // Should show untracked files
     if (std.mem.indexOf(u8, status_result.stdout, "untracked1.txt") == null or
         std.mem.indexOf(u8, status_result.stdout, "untracked2.txt") == null) {
-        print("    ❌ Untracked files not shown in status\n");
+        std.debug.print("    ❌ Untracked files not shown in status\n", .{});
         return;
     }
     
     // Should indicate they are untracked
     if (std.mem.indexOf(u8, status_result.stdout, "Untracked files") == null and
         std.mem.indexOf(u8, status_result.stdout, "untracked") == null) {
-        print("    ⚠ Should indicate files are untracked\n");
+        std.debug.print("    ⚠ Should indicate files are untracked\n", .{});
     }
     
-    print("    ✓ Status untracked test passed\n");
+    std.debug.print("    ✓ Status untracked test passed\n", .{});
 }
 
 fn testStatusStaged(tf: *TestFramework) !void {
-    print("  Testing status with staged files...\n");
+    std.debug.print("  Testing status with staged files...\n", .{});
     
     const test_dir = try setupTestRepo(tf, "status-staged");
     defer tf.removeTempDir(test_dir);
@@ -301,7 +301,7 @@ fn testStatusStaged(tf: *TestFramework) !void {
     defer add_result.deinit();
     
     if (add_result.exit_code != 0) {
-        print("    ❌ failed to stage file for test: {s}\n", .{add_result.stderr});
+        std.debug.print("    ❌ failed to stage file for test: {s}\n", .{add_result.stderr});
         return;
     }
     
@@ -311,13 +311,13 @@ fn testStatusStaged(tf: *TestFramework) !void {
     defer status_result.deinit();
     
     if (status_result.exit_code != 0) {
-        print("    ❌ status failed with staged files: {s}\n", .{status_result.stderr});
+        std.debug.print("    ❌ status failed with staged files: {s}\n", .{status_result.stderr});
         return;
     }
     
     // Should show staged file
     if (std.mem.indexOf(u8, status_result.stdout, "staged.txt") == null) {
-        print("    ❌ Staged file not shown in status\n");
+        std.debug.print("    ❌ Staged file not shown in status\n", .{});
         return;
     }
     
@@ -325,14 +325,14 @@ fn testStatusStaged(tf: *TestFramework) !void {
     if (std.mem.indexOf(u8, status_result.stdout, "Changes to be committed") == null and
         std.mem.indexOf(u8, status_result.stdout, "new file") == null and
         std.mem.indexOf(u8, status_result.stdout, "staged") == null) {
-        print("    ⚠ Should indicate file is staged for commit\n");
+        std.debug.print("    ⚠ Should indicate file is staged for commit\n", .{});
     }
     
-    print("    ✓ Status staged test passed\n");
+    std.debug.print("    ✓ Status staged test passed\n", .{});
 }
 
 fn testStatusModified(tf: *TestFramework) !void {
-    print("  Testing status with modified files...\n");
+    std.debug.print("  Testing status with modified files...\n", .{});
     
     const test_dir = try setupTestRepo(tf, "status-modified");
     defer tf.removeTempDir(test_dir);
@@ -351,7 +351,7 @@ fn testStatusModified(tf: *TestFramework) !void {
     defer commit_result.deinit();
     
     if (commit_result.exit_code != 0) {
-        print("    ❌ failed to create initial commit for test: {s}\n", .{commit_result.stderr});
+        std.debug.print("    ❌ failed to create initial commit for test: {s}\n", .{commit_result.stderr});
         return;
     }
     
@@ -364,27 +364,27 @@ fn testStatusModified(tf: *TestFramework) !void {
     defer status_result.deinit();
     
     if (status_result.exit_code != 0) {
-        print("    ❌ status failed with modified files: {s}\n", .{status_result.stderr});
+        std.debug.print("    ❌ status failed with modified files: {s}\n", .{status_result.stderr});
         return;
     }
     
     // Should show modified file
     if (std.mem.indexOf(u8, status_result.stdout, "tracked.txt") == null) {
-        print("    ❌ Modified file not shown in status\n");
+        std.debug.print("    ❌ Modified file not shown in status\n", .{});
         return;
     }
     
     // Should indicate it's modified
     if (std.mem.indexOf(u8, status_result.stdout, "Changes not staged") == null and
         std.mem.indexOf(u8, status_result.stdout, "modified") == null) {
-        print("    ⚠ Should indicate file is modified\n");
+        std.debug.print("    ⚠ Should indicate file is modified\n", .{});
     }
     
-    print("    ✓ Status modified test passed\n");
+    std.debug.print("    ✓ Status modified test passed\n", .{});
 }
 
 fn testAddAll(tf: *TestFramework) !void {
-    print("  Testing add all files (add .)...\n");
+    std.debug.print("  Testing add all files (add .)...\n", .{});
     
     const test_dir = try setupTestRepo(tf, "add-all");
     defer tf.removeTempDir(test_dir);
@@ -411,7 +411,7 @@ fn testAddAll(tf: *TestFramework) !void {
     defer add_all_result.deinit();
     
     if (add_all_result.exit_code != 0) {
-        print("    ❌ add . failed: {s}\n", .{add_all_result.stderr});
+        std.debug.print("    ❌ add . failed: {s}\n", .{add_all_result.stderr});
         return;
     }
     
@@ -422,7 +422,7 @@ fn testAddAll(tf: *TestFramework) !void {
     defer status_result.deinit();
     
     if (status_result.exit_code != 0) {
-        print("    ❌ status failed after add .: {s}\n", .{status_result.stderr});
+        std.debug.print("    ❌ status failed after add .: {s}\n", .{status_result.stderr});
         return;
     }
     
@@ -430,12 +430,12 @@ fn testAddAll(tf: *TestFramework) !void {
     const expected_files = [_][]const u8{ "file1.txt", "file2.txt", "subdir/file3.txt" };
     for (expected_files) |file| {
         if (std.mem.indexOf(u8, status_result.stdout, file) == null) {
-            print("    ❌ File {s} not staged by add .\n", .{file});
+            std.debug.print("    ❌ File {s} not staged by add .\n", .{file});
             return;
         }
     }
     
-    print("    ✓ Add all test passed\n");
+    std.debug.print("    ✓ Add all test passed\n", .{});
 }
 
 pub fn main() !void {

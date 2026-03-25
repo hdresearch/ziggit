@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const print = std.debug.print;
+
 const test_harness = @import("test_harness.zig");
 const TestHarness = test_harness.TestHarness;
 
@@ -9,7 +9,7 @@ const TestHarness = test_harness.TestHarness;
 // Based on git's own test suite patterns, particularly focusing on exit codes and basic behavior.
 
 pub fn runEssentialGitCompatibilityTests() !void {
-    print("Running essential git compatibility tests...\n", .{});
+    std.debug.print("Running essential git compatibility tests...\n", .{});
     
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -27,11 +27,11 @@ pub fn runEssentialGitCompatibilityTests() !void {
     try testCheckoutOperations(harness);
     try testBasicWorkflow(harness);
     
-    print("Essential git compatibility tests completed!\n", .{});
+    std.debug.print("Essential git compatibility tests completed!\n", .{});
 }
 
 fn testInitOperations(harness: TestHarness) !void {
-    print("  Testing essential init operations...\n", .{});
+    std.debug.print("  Testing essential init operations...\n", .{});
     
     // Test 1: Basic init
     {
@@ -67,11 +67,11 @@ fn testInitOperations(harness: TestHarness) !void {
         try harness.expectExitCode(z_init2.exit_code, g_init2.exit_code, "reinitialize");
     }
     
-    print("    ✓ essential init operations\n", .{});
+    std.debug.print("    ✓ essential init operations\n", .{});
 }
 
 fn testAddOperations(harness: TestHarness) !void {
-    print("  Testing essential add operations...\n", .{});
+    std.debug.print("  Testing essential add operations...\n", .{});
     
     const temp_dir = try harness.createTempDir("essential_add");
     defer harness.removeTempDir(temp_dir);
@@ -80,7 +80,7 @@ fn testAddOperations(harness: TestHarness) !void {
     var init_result = try harness.runZiggit(&.{"init"}, temp_dir);
     defer init_result.deinit();
     if (init_result.exit_code != 0) {
-        print("    ⚠ skipping add tests (init failed)\n", .{});
+        std.debug.print("    ⚠ skipping add tests (init failed)\n", .{});
         return;
     }
     
@@ -116,7 +116,7 @@ fn testAddOperations(harness: TestHarness) !void {
         
         try harness.expectExitCode(z_result.exit_code, g_result.exit_code, "add nonexistent file");
         if (z_result.exit_code == 0) {
-            print("    ⚠ ziggit incorrectly succeeded adding nonexistent file\n", .{});
+            std.debug.print("    ⚠ ziggit incorrectly succeeded adding nonexistent file\n", .{});
         }
     }
     
@@ -130,11 +130,11 @@ fn testAddOperations(harness: TestHarness) !void {
         try harness.expectExitCode(z_result.exit_code, g_result.exit_code, "add with no args");
     }
     
-    print("    ✓ essential add operations\n", .{});
+    std.debug.print("    ✓ essential add operations\n", .{});
 }
 
 fn testCommitOperations(harness: TestHarness) !void {
-    print("  Testing essential commit operations...\n", .{});
+    std.debug.print("  Testing essential commit operations...\n", .{});
     
     const temp_dir = try harness.createTempDir("essential_commit");
     defer harness.removeTempDir(temp_dir);
@@ -143,7 +143,7 @@ fn testCommitOperations(harness: TestHarness) !void {
     var init_result = try harness.runZiggit(&.{"init"}, temp_dir);
     defer init_result.deinit();
     if (init_result.exit_code != 0) {
-        print("    ⚠ skipping commit tests (init failed)\n", .{});
+        std.debug.print("    ⚠ skipping commit tests (init failed)\n", .{});
         return;
     }
     
@@ -154,7 +154,7 @@ fn testCommitOperations(harness: TestHarness) !void {
     var add_result = try harness.runZiggit(&.{"add", "test.txt"}, temp_dir);
     defer add_result.deinit();
     if (add_result.exit_code != 0) {
-        print("    ⚠ skipping commit tests (add failed)\n", .{});
+        std.debug.print("    ⚠ skipping commit tests (add failed)\n", .{});
         return;
     }
     
@@ -174,7 +174,7 @@ fn testCommitOperations(harness: TestHarness) !void {
         if (z_result.exit_code == 0 and g_result.exit_code == 0) {
             // Both succeeded - ideal case
         } else if (z_result.exit_code == 0 and (g_result.exit_code == 128 or g_result.exit_code == 1)) {
-            print("    ⚠ ziggit doesn't validate git user configuration (git failed with {})\n", .{g_result.exit_code});
+            std.debug.print("    ⚠ ziggit doesn't validate git user configuration (git failed with {})\n", .{g_result.exit_code});
         } else {
             try harness.expectExitCode(z_result.exit_code, g_result.exit_code, "commit with message");
         }
@@ -190,17 +190,17 @@ fn testCommitOperations(harness: TestHarness) !void {
         if (z_result.exit_code == g_result.exit_code) {
             // Both behaved the same way - ideal case
         } else if (z_result.exit_code == 0 and (g_result.exit_code == 128 or g_result.exit_code == 1)) {
-            print("    ⚠ ziggit/git user config difference in nothing-to-commit case\n", .{});
+            std.debug.print("    ⚠ ziggit/git user config difference in nothing-to-commit case\n", .{});
         } else {
             try harness.expectExitCode(z_result.exit_code, g_result.exit_code, "nothing to commit");
         }
     }
     
-    print("    ✓ essential commit operations\n", .{});
+    std.debug.print("    ✓ essential commit operations\n", .{});
 }
 
 fn testStatusOperations(harness: TestHarness) !void {
-    print("  Testing essential status operations...\n", .{});
+    std.debug.print("  Testing essential status operations...\n", .{});
     
     const temp_dir = try harness.createTempDir("essential_status");
     defer harness.removeTempDir(temp_dir);
@@ -214,7 +214,7 @@ fn testStatusOperations(harness: TestHarness) !void {
         
         try harness.expectExitCode(z_result.exit_code, g_result.exit_code, "status outside repo");
         if (z_result.exit_code == 0) {
-            print("    ⚠ ziggit incorrectly succeeded with status outside repository\n", .{});
+            std.debug.print("    ⚠ ziggit incorrectly succeeded with status outside repository\n", .{});
         }
     }
     
@@ -222,7 +222,7 @@ fn testStatusOperations(harness: TestHarness) !void {
     var init_result = try harness.runZiggit(&.{"init"}, temp_dir);
     defer init_result.deinit();
     if (init_result.exit_code != 0) {
-        print("    ⚠ skipping status tests (init failed)\n", .{});
+        std.debug.print("    ⚠ skipping status tests (init failed)\n", .{});
         return;
     }
     
@@ -249,11 +249,11 @@ fn testStatusOperations(harness: TestHarness) !void {
         try harness.expectExitCode(z_result.exit_code, g_result.exit_code, "status with untracked");
     }
     
-    print("    ✓ essential status operations\n", .{});
+    std.debug.print("    ✓ essential status operations\n", .{});
 }
 
 fn testLogOperations(harness: TestHarness) !void {
-    print("  Testing essential log operations...\n", .{});
+    std.debug.print("  Testing essential log operations...\n", .{});
     
     const temp_dir = try harness.createTempDir("essential_log");
     defer harness.removeTempDir(temp_dir);
@@ -262,7 +262,7 @@ fn testLogOperations(harness: TestHarness) !void {
     var init_result = try harness.runZiggit(&.{"init"}, temp_dir);
     defer init_result.deinit();
     if (init_result.exit_code != 0) {
-        print("    ⚠ skipping log tests (init failed)\n", .{});
+        std.debug.print("    ⚠ skipping log tests (init failed)\n", .{});
         return;
     }
     
@@ -276,11 +276,11 @@ fn testLogOperations(harness: TestHarness) !void {
         try harness.expectExitCode(z_result.exit_code, g_result.exit_code, "log in empty repo");
     }
     
-    print("    ✓ essential log operations\n", .{});
+    std.debug.print("    ✓ essential log operations\n", .{});
 }
 
 fn testBranchOperations(harness: TestHarness) !void {
-    print("  Testing essential branch operations...\n", .{});
+    std.debug.print("  Testing essential branch operations...\n", .{});
     
     const temp_dir = try harness.createTempDir("essential_branch");
     defer harness.removeTempDir(temp_dir);
@@ -289,7 +289,7 @@ fn testBranchOperations(harness: TestHarness) !void {
     var init_result = try harness.runZiggit(&.{"init"}, temp_dir);
     defer init_result.deinit();
     if (init_result.exit_code != 0) {
-        print("    ⚠ skipping branch tests (init failed)\n", .{});
+        std.debug.print("    ⚠ skipping branch tests (init failed)\n", .{});
         return;
     }
     
@@ -312,7 +312,7 @@ fn testBranchOperations(harness: TestHarness) !void {
         
         try harness.expectExitCode(z_result.exit_code, g_result.exit_code, "delete nonexistent branch");
         if (z_result.exit_code == 0) {
-            print("    ⚠ ziggit incorrectly succeeded deleting nonexistent branch\n", .{});
+            std.debug.print("    ⚠ ziggit incorrectly succeeded deleting nonexistent branch\n", .{});
         }
     }
     
@@ -326,11 +326,11 @@ fn testBranchOperations(harness: TestHarness) !void {
         try harness.expectExitCode(z_result.exit_code, g_result.exit_code, "branch -d with no name");
     }
     
-    print("    ✓ essential branch operations\n", .{});
+    std.debug.print("    ✓ essential branch operations\n", .{});
 }
 
 fn testCheckoutOperations(harness: TestHarness) !void {
-    print("  Testing essential checkout operations...\n", .{});
+    std.debug.print("  Testing essential checkout operations...\n", .{});
     
     const temp_dir = try harness.createTempDir("essential_checkout");
     defer harness.removeTempDir(temp_dir);
@@ -339,7 +339,7 @@ fn testCheckoutOperations(harness: TestHarness) !void {
     var init_result = try harness.runZiggit(&.{"init"}, temp_dir);
     defer init_result.deinit();
     if (init_result.exit_code != 0) {
-        print("    ⚠ skipping checkout tests (init failed)\n", .{});
+        std.debug.print("    ⚠ skipping checkout tests (init failed)\n", .{});
         return;
     }
     
@@ -352,7 +352,7 @@ fn testCheckoutOperations(harness: TestHarness) !void {
         
         try harness.expectExitCode(z_result.exit_code, g_result.exit_code, "checkout nonexistent");
         if (z_result.exit_code == 0) {
-            print("    ⚠ ziggit incorrectly succeeded checking out nonexistent branch\n", .{});
+            std.debug.print("    ⚠ ziggit incorrectly succeeded checking out nonexistent branch\n", .{});
         }
     }
     
@@ -366,11 +366,11 @@ fn testCheckoutOperations(harness: TestHarness) !void {
         try harness.expectExitCode(z_result.exit_code, g_result.exit_code, "checkout with no args");
     }
     
-    print("    ✓ essential checkout operations\n", .{});
+    std.debug.print("    ✓ essential checkout operations\n", .{});
 }
 
 fn testBasicWorkflow(harness: TestHarness) !void {
-    print("  Testing essential workflow (init→add→commit→status)...\n", .{});
+    std.debug.print("  Testing essential workflow (init→add→commit→status)...\n", .{});
     
     const temp_dir = try harness.createTempDir("essential_workflow");
     defer harness.removeTempDir(temp_dir);
@@ -379,7 +379,7 @@ fn testBasicWorkflow(harness: TestHarness) !void {
     var init_result = try harness.runZiggit(&.{"init"}, temp_dir);
     defer init_result.deinit();
     if (init_result.exit_code != 0) {
-        print("    ❌ workflow init failed\n", .{});
+        std.debug.print("    ❌ workflow init failed\n", .{});
         return;
     }
     
@@ -391,7 +391,7 @@ fn testBasicWorkflow(harness: TestHarness) !void {
     var add_result = try harness.runZiggit(&.{"add", "workflow.txt"}, temp_dir);
     defer add_result.deinit();
     if (add_result.exit_code != 0) {
-        print("    ❌ workflow add failed\n", .{});
+        std.debug.print("    ❌ workflow add failed\n", .{});
         return;
     }
     
@@ -399,7 +399,7 @@ fn testBasicWorkflow(harness: TestHarness) !void {
     var status_result = try harness.runZiggit(&.{"status"}, temp_dir);
     defer status_result.deinit();
     if (status_result.exit_code != 0) {
-        print("    ❌ workflow status failed\n", .{});
+        std.debug.print("    ❌ workflow status failed\n", .{});
         return;
     }
     
@@ -407,7 +407,7 @@ fn testBasicWorkflow(harness: TestHarness) !void {
     var commit_result = try harness.runZiggit(&.{"commit", "-m", "Workflow test commit"}, temp_dir);
     defer commit_result.deinit();
     if (commit_result.exit_code != 0) {
-        print("    ❌ workflow commit failed\n", .{});
+        std.debug.print("    ❌ workflow commit failed\n", .{});
         return;
     }
     
@@ -415,9 +415,9 @@ fn testBasicWorkflow(harness: TestHarness) !void {
     var log_result = try harness.runZiggit(&.{"log"}, temp_dir);
     defer log_result.deinit();
     if (log_result.exit_code != 0) {
-        print("    ❌ workflow log failed\n", .{});
+        std.debug.print("    ❌ workflow log failed\n", .{});
         return;
     }
     
-    print("    ✓ essential workflow completed successfully\n", .{});
+    std.debug.print("    ✓ essential workflow completed successfully\n", .{});
 }
