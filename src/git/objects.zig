@@ -161,6 +161,12 @@ pub const TreeEntry = struct {
             .hash = hash,
         };
     }
+
+    pub fn deinit(self: TreeEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.mode);
+        allocator.free(self.name);
+        allocator.free(self.hash);
+    }
 };
 
 pub fn createCommitObject(tree_hash: []const u8, parent_hashes: []const []const u8, author: []const u8, committer: []const u8, message: []const u8, allocator: std.mem.Allocator) !GitObject {
