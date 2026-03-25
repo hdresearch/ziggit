@@ -218,6 +218,34 @@ pub fn build(b: *std.Build) void {
     const git_source_comprehensive_test_step = b.step("test-git-source-compat", "Run git source comprehensive compatibility tests");
     git_source_comprehensive_test_step.dependOn(&run_git_source_comprehensive_test.step);
 
+    // Git source test suite - Direct adaptations from git's own test files
+    const git_source_test_suite = b.addExecutable(.{
+        .name = "git_source_test_suite",
+        .root_source_file = b.path("test/git_source_test_suite.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_git_source_test_suite = b.addRunArtifact(git_source_test_suite);
+    run_git_source_test_suite.step.dependOn(b.getInstallStep()); // Ensure ziggit is built first
+
+    const git_source_test_suite_step = b.step("test-git-source-suite", "Run git source test suite adapted from git's own tests");
+    git_source_test_suite_step.dependOn(&run_git_source_test_suite.step);
+
+    // Advanced git test suite - Testing edge cases and advanced scenarios
+    const git_advanced_test_suite = b.addExecutable(.{
+        .name = "git_advanced_test_suite",
+        .root_source_file = b.path("test/git_advanced_test_suite.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_git_advanced_test_suite = b.addRunArtifact(git_advanced_test_suite);
+    run_git_advanced_test_suite.step.dependOn(b.getInstallStep()); // Ensure ziggit is built first
+
+    const git_advanced_test_suite_step = b.step("test-git-advanced-suite", "Run advanced git test suite for edge cases");
+    git_advanced_test_suite_step.dependOn(&run_git_advanced_test_suite.step);
+
     // Critical git compatibility test suite (focused on core functionality)
     const critical_compatibility_tests = b.addExecutable(.{
         .name = "critical_compatibility_tests",
@@ -268,6 +296,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_drop_in_compat_test.step);
     test_step.dependOn(&run_git_t0001_init_test.step);
     test_step.dependOn(&run_git_source_comprehensive_test.step);
+    test_step.dependOn(&run_git_source_test_suite.step);
+    test_step.dependOn(&run_git_advanced_test_suite.step);
     test_step.dependOn(&run_comprehensive_git_tests.step);
 
     // Git source compatibility test suite (newly improved)
