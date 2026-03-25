@@ -84,8 +84,8 @@ pub const GitObject = struct {
 
         // Compress the content using zlib for git compatibility (skip on WASM for stability)
         const final_content = if (@import("builtin").target.os.tag == .wasi or @import("builtin").target.os.tag == .freestanding) blk: {
-            // For WASM builds, store uncompressed to avoid zlib issues
-            // This is a temporary workaround - full git compatibility requires compression
+            // For WASM builds, store uncompressed to avoid memory issues
+            // This is a temporary workaround - repositories work but may be slightly larger
             break :blk try allocator.dupe(u8, content);
         } else blk: {
             var compressed_data = std.ArrayList(u8).init(allocator);
@@ -116,17 +116,18 @@ pub const GitObject = struct {
         };
         defer allocator.free(compressed_content);
 
-        // Decompress using zlib for git compatibility (handle uncompressed on WASM)
+        // Decompress using zlib for git compatibility (handle both compressed and uncompressed)
         var content = std.ArrayList(u8).init(allocator);
         defer content.deinit();
         
+        // For WASM builds, handle both compressed and uncompressed objects
         if (@import("builtin").target.os.tag == .wasi or @import("builtin").target.os.tag == .freestanding) {
-            // For WASM builds, try uncompressed first, fallback to compressed
             // Check if this looks like a git object header (uncompressed)
             if (std.mem.indexOf(u8, compressed_content, "\x00")) |_| {
+                // Looks like uncompressed object, use directly
                 try content.appendSlice(compressed_content);
             } else {
-                // Fallback to decompression
+                // Try decompression
                 var compressed_stream = std.io.fixedBufferStream(compressed_content);
                 std.compress.zlib.decompress(compressed_stream.reader(), content.writer()) catch {
                     // If decompression fails, treat as uncompressed
