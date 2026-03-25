@@ -5,6 +5,10 @@ const workflow_tests = @import("workflow_tests.zig");
 const integration_tests = @import("integration_tests.zig");
 const format_tests = @import("format_tests.zig");
 const git_basic_tests = @import("git_basic_tests.zig");
+const git_comprehensive_tests = @import("git_comprehensive_tests.zig");
+const git_branch_checkout_tests = @import("git_branch_checkout_tests.zig");
+const git_log_diff_advanced_tests = @import("git_log_diff_advanced_tests.zig");
+const git_format_compatibility_tests = @import("git_format_compatibility_tests.zig");
 
 pub fn main() !void {
     try test_harness.runTests();
@@ -13,6 +17,10 @@ pub fn main() !void {
     try integration_tests.runIntegrationTests();
     try format_tests.runFormatTests();
     try git_basic_tests.runGitBasicTests();
+    try git_comprehensive_tests.runGitComprehensiveTests();
+    try git_branch_checkout_tests.runGitBranchCheckoutTests();
+    try git_log_diff_advanced_tests.runGitLogDiffAdvancedTests();
+    try git_format_compatibility_tests.runGitFormatCompatibilityTests();
 }
 
 // Import test files for `zig build test`
@@ -23,4 +31,8 @@ test {
     std.testing.refAllDeclsRecursive(@import("integration_tests.zig"));
     std.testing.refAllDeclsRecursive(@import("format_tests.zig"));
     std.testing.refAllDeclsRecursive(@import("git_basic_tests.zig"));
+    std.testing.refAllDeclsRecursive(@import("git_comprehensive_tests.zig"));
+    std.testing.refAllDeclsRecursive(@import("git_branch_checkout_tests.zig"));
+    std.testing.refAllDeclsRecursive(@import("git_log_diff_advanced_tests.zig"));
+    std.testing.refAllDeclsRecursive(@import("git_format_compatibility_tests.zig"));
 }
