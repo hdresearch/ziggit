@@ -1183,9 +1183,21 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             const success_msg = try std.fmt.allocPrint(allocator, "Switched to branch '{s}'\n", .{target});
             defer allocator.free(success_msg);
             try platform_impl.writeStdout(success_msg);
-        } else if (target.len == 40 and isValidHash(target)) {
+        } else if (isValidHashPrefix(target)) {
+            // Try to resolve the hash (short or full)
+            const resolved_hash = resolveCommitHash(git_path, target, platform_impl, allocator) catch |err| switch (err) {
+                error.CommitNotFound => {
+                    const msg = try std.fmt.allocPrint(allocator, "error: pathspec '{s}' did not match any file(s) known to git\n", .{target});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(1);
+                },
+                else => return err,
+            };
+            defer allocator.free(resolved_hash);
+            
             // Detached HEAD checkout
-            refs.updateHEAD(git_path, target, platform_impl, allocator) catch |err| {
+            refs.updateHEAD(git_path, resolved_hash, platform_impl, allocator) catch |err| {
                 const msg = try std.fmt.allocPrint(allocator, "error: failed to checkout commit '{s}': {}\n", .{ target, err });
                 defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
@@ -1193,13 +1205,13 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             };
 
             // Checkout the tree for this commit
-            checkoutCommitTree(git_path, target, allocator, platform_impl) catch |err| {
+            checkoutCommitTree(git_path, resolved_hash, allocator, platform_impl) catch |err| {
                 const msg = try std.fmt.allocPrint(allocator, "error: failed to restore working tree: {}\n", .{err});
                 defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
             };
 
-            const short_hash = target[0..7];
+            const short_hash = if (target.len < 7) target else target[0..7];
             const success_msg = try std.fmt.allocPrint(allocator, "HEAD is now at {s}\n", .{short_hash});
             defer allocator.free(success_msg);
             try platform_impl.writeStdout(success_msg);
@@ -1245,6 +1257,9 @@ fn checkoutCommitTree(git_path: []const u8, commit_hash: []const u8, allocator: 
     // Get repository root (parent of .git directory)
     const repo_root = std.fs.path.dirname(git_path) orelse ".";
     
+    // Clear working directory first (except .git)
+    try clearWorkingDirectory(repo_root, allocator, platform_impl);
+    
     // Recursively checkout the tree
     try checkoutTreeRecursive(git_path, tree_obj.data, repo_root, "", allocator, platform_impl);
     
@@ -1266,6 +1281,30 @@ fn parseCommitTreeHash(commit_data: []const u8, allocator: std.mem.Allocator) ![
     }
     
     return error.NoTreeInCommit;
+}
+
+/// Clear working directory except .git and other hidden directories
+fn clearWorkingDirectory(repo_root: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    _ = platform_impl;
+    var dir = std.fs.cwd().openDir(repo_root, .{ .iterate = true }) catch return;
+    defer dir.close();
+    
+    var iterator = dir.iterate();
+    while (try iterator.next()) |entry| {
+        // Skip .git and other hidden directories/files
+        if (entry.name[0] == '.') continue;
+        
+        switch (entry.kind) {
+            .file => {
+                dir.deleteFile(entry.name) catch {};
+            },
+            .directory => {
+                dir.deleteTree(entry.name) catch {};
+            },
+            else => {},
+        }
+    }
+    _ = allocator; // Suppress unused variable warning
 }
 
 /// Recursively checkout tree entries to working directory
@@ -1808,6 +1847,72 @@ fn isValidHash(hash: []const u8) bool {
         if (!std.ascii.isHex(c)) return false;
     }
     return true;
+}
+
+fn isValidHashPrefix(hash: []const u8) bool {
+    if (hash.len < 4 or hash.len > 40) return false;
+    for (hash) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
+}
+
+fn resolveCommitHash(git_path: []const u8, hash_prefix: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
+    // If it's already a full hash, just validate it exists
+    if (hash_prefix.len == 40) {
+        // Try to load the object to verify it exists
+        const obj = objects.GitObject.load(hash_prefix, git_path, platform_impl, allocator) catch return error.CommitNotFound;
+        obj.deinit(allocator);
+        return try allocator.dupe(u8, hash_prefix);
+    }
+    
+    // For short hashes, we need to scan the objects directory
+    // This is a simplified implementation - a full implementation would be more efficient
+    const objects_path = try std.fmt.allocPrint(allocator, "{s}/objects", .{git_path});
+    defer allocator.free(objects_path);
+    
+    // Get the first two characters for the directory
+    if (hash_prefix.len < 2) return error.CommitNotFound;
+    const dir_name = hash_prefix[0..2];
+    const file_prefix = hash_prefix[2..];
+    
+    const subdir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ objects_path, dir_name });
+    defer allocator.free(subdir_path);
+    
+    var dir = std.fs.cwd().openDir(subdir_path, .{ .iterate = true }) catch return error.CommitNotFound;
+    defer dir.close();
+    
+    var found_hash: ?[]u8 = null;
+    var iterator = dir.iterate();
+    while (try iterator.next()) |entry| {
+        if (entry.kind != .file) continue;
+        
+        if (std.mem.startsWith(u8, entry.name, file_prefix)) {
+            if (found_hash != null) {
+                // Ambiguous hash prefix
+                allocator.free(found_hash.?);
+                return error.CommitNotFound;
+            }
+            
+            // Reconstruct full hash
+            const full_hash = try std.fmt.allocPrint(allocator, "{s}{s}", .{ dir_name, entry.name });
+            
+            // Verify this is a commit object
+            const obj = objects.GitObject.load(full_hash, git_path, platform_impl, allocator) catch {
+                allocator.free(full_hash);
+                continue;
+            };
+            defer obj.deinit(allocator);
+            
+            if (obj.type == .commit) {
+                found_hash = full_hash;
+            } else {
+                allocator.free(full_hash);
+            }
+        }
+    }
+    
+    return found_hash orelse error.CommitNotFound;
 }
 
 fn checkIfDifferentFromHEAD(entry: index_mod.IndexEntry, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !bool {
