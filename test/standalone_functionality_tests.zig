@@ -15,7 +15,7 @@ pub const StandaloneFunctionalityTests = struct {
     pub fn init(allocator: Allocator) StandaloneFunctionalityTests {
         return StandaloneFunctionalityTests{
             .allocator = allocator,
-            .ziggit_path = "/root/zigg/root/ziggit/zig-out/bin/ziggit",
+            .ziggit_path = "/root/ziggit/zig-out/bin/ziggit",
         };
     }
     

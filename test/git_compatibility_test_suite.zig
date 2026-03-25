@@ -32,10 +32,8 @@ fn runZiggit(allocator: Allocator, args: []const []const u8, cwd: ?[]const u8) !
     var cmd = std.ArrayList([]const u8).init(allocator);
     defer cmd.deinit();
     
-    // Get current working directory and construct absolute path
-    var current_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const current_dir = try std.posix.getcwd(&current_dir_buf);
-    const ziggit_path = try std.fmt.allocPrint(allocator, "{/root/ziggit/zig-out/bin/ziggit", .{current_dir});
+    // Use absolute path to ziggit binary
+    const ziggit_path = "/root/ziggit/zig-out/bin/ziggit";
     
     try cmd.append(ziggit_path);
     for (args) |arg| {

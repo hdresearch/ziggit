@@ -22,10 +22,8 @@ pub fn runComprehensiveGitTestSuite() !void {
         return;
     }
     
-    // Get current working directory and construct absolute path
-    var current_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const current_dir = try std.posix.getcwd(&current_dir_buf);
-    const ziggit_path = try std.fmt.allocPrint(allocator, "{/root/ziggit/zig-out/bin/ziggit", .{current_dir});
+    // Use absolute path to ziggit binary
+    const ziggit_path = "/root/ziggit/zig-out/bin/ziggit";
     
     // Test core git operations (init, add, commit, status, log, diff)
     try testCoreOperations(allocator, ziggit_path);

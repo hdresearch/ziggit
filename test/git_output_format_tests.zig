@@ -7,6 +7,12 @@ const print = std.debug.print;
 // Ensures ziggit output matches git's output format exactly for drop-in replacement
 // Based on git source test patterns for output validation
 
+const CommandResult = struct {
+    exit_code: u32,
+    stdout: []u8,
+    stderr: []u8,
+};
+
 const TestFramework = struct {
     allocator: std.mem.Allocator,
     
@@ -14,11 +20,11 @@ const TestFramework = struct {
         return TestFramework{ .allocator = allocator };
     }
     
-    fn runCommand(self: *TestFramework, args: []const []const u8, cwd: ?[]const u8) !struct { 
-        exit_code: u32, 
-        stdout: []u8, 
-        stderr: []u8 
-    } {
+    pub fn deinit(_: *TestFramework) void {
+        // Nothing to clean up for now
+    }
+    
+    fn runCommand(self: *TestFramework, args: []const []const u8, cwd: ?[]const u8) !CommandResult {
         var proc = process.Child.init(args, self.allocator);
         proc.stdout_behavior = .Pipe;
         proc.stderr_behavior = .Pipe;
@@ -72,8 +78,7 @@ const TestFramework = struct {
         self.allocator.free(path);
     }
     
-    fn createFile(self: *TestFramework, dir_path: []const u8, filename: []const u8, content: []const u8) !void {
-        _ = self;
+    fn createFile(_: *TestFramework, dir_path: []const u8, filename: []const u8, content: []const u8) !void {
         var buf: [512]u8 = undefined;
         const file_path = try std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir_path, filename });
         try fs.cwd().writeFile(.{ .sub_path = file_path, .data = content });
@@ -104,11 +109,6 @@ const TestFramework = struct {
             }
         }
     }
-    
-    
-    pub fn deinit(self: *TestFramework) void {
-        _ = self;
-    }
 };
 
 // Test init output format matching
@@ -121,7 +121,7 @@ fn testInitOutputFormat(tf: *TestFramework) !void {
         defer tf.cleanupDir(test_dir);
         
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init", "test-repo" 
+            "/root/ziggit/zig-out/bin/ziggit", "init", "test-repo" 
         }, test_dir);
         
         const git_result = try tf.runCommand(&[_][]const u8{ 
@@ -147,7 +147,7 @@ fn testInitOutputFormat(tf: *TestFramework) !void {
         defer tf.cleanupDir(test_dir);
         
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init", "--bare", "bare-repo.git" 
+            "/root/ziggit/zig-out/bin/ziggit", "init", "--bare", "bare-repo.git" 
         }, test_dir);
         
         const git_result = try tf.runCommand(&[_][]const u8{ 
@@ -175,14 +175,14 @@ fn testStatusOutputFormat(tf: *TestFramework) !void {
     defer tf.cleanupDir(test_dir);
     
     // Initialize repo and set up user
-    _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
     _ = try tf.runCommand(&[_][]const u8{ "git", "config", "user.name", "Test User" }, test_dir);
     _ = try tf.runCommand(&[_][]const u8{ "git", "config", "user.email", "test@example.com" }, test_dir);
     
     // Test 1: Empty repository status
     {
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "status" 
+            "/root/ziggit/zig-out/bin/ziggit", "status" 
         }, test_dir);
         
         const git_result = try tf.runCommand(&[_][]const u8{ "git", "status" }, test_dir);
@@ -206,7 +206,7 @@ fn testStatusOutputFormat(tf: *TestFramework) !void {
         try tf.createFile(test_dir, "untracked2.txt", "content2");
         
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "status" 
+            "/root/ziggit/zig-out/bin/ziggit", "status" 
         }, test_dir);
         
         const git_result = try tf.runCommand(&[_][]const u8{ "git", "status" }, test_dir);
@@ -229,10 +229,10 @@ fn testStatusOutputFormat(tf: *TestFramework) !void {
     
     // Test 3: Status with staged files
     {
-        _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "add", "untracked1.txt" }, test_dir);
+        _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "untracked1.txt" }, test_dir);
         
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "status" 
+            "/root/ziggit/zig-out/bin/ziggit", "status" 
         }, test_dir);
         
         const git_result = try tf.runCommand(&[_][]const u8{ "git", "status" }, test_dir);
@@ -259,13 +259,13 @@ fn testAddOutputFormat(tf: *TestFramework) !void {
     const test_dir = try tf.createTestDir("add-format");
     defer tf.cleanupDir(test_dir);
     
-    _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
     try tf.createFile(test_dir, "test.txt", "content");
     
     // Test successful add (should be silent)
     {
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "add", "test.txt" 
+            "/root/ziggit/zig-out/bin/ziggit", "add", "test.txt" 
         }, test_dir);
         
         const git_result = try tf.runCommand(&[_][]const u8{ 
@@ -285,7 +285,7 @@ fn testAddOutputFormat(tf: *TestFramework) !void {
     // Test add non-existent file (should have error)
     {
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "add", "nonexistent.txt" 
+            "/root/ziggit/zig-out/bin/ziggit", "add", "nonexistent.txt" 
         }, test_dir);
         
         const git_result = try tf.runCommand(&[_][]const u8{ 
@@ -312,17 +312,17 @@ fn testCommitOutputFormat(tf: *TestFramework) !void {
     const test_dir = try tf.createTestDir("commit-format");
     defer tf.cleanupDir(test_dir);
     
-    _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
     _ = try tf.runCommand(&[_][]const u8{ "git", "config", "user.name", "Test User" }, test_dir);
     _ = try tf.runCommand(&[_][]const u8{ "git", "config", "user.email", "test@example.com" }, test_dir);
     
     // Test successful commit
     {
         try tf.createFile(test_dir, "file.txt", "content");
-        _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "add", "file.txt" }, test_dir);
+        _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "file.txt" }, test_dir);
         
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Test commit" 
+            "/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Test commit" 
         }, test_dir);
         
         const git_result = try tf.runCommand(&[_][]const u8{ 
@@ -346,7 +346,7 @@ fn testCommitOutputFormat(tf: *TestFramework) !void {
     // Test commit with nothing to commit
     {
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Nothing to commit" 
+            "/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Nothing to commit" 
         }, test_dir);
         
         const git_result = try tf.runCommand(&[_][]const u8{ 
@@ -370,14 +370,14 @@ fn testLogOutputFormat(tf: *TestFramework) !void {
     const test_dir = try tf.createTestDir("log-format");
     defer tf.cleanupDir(test_dir);
     
-    _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
     _ = try tf.runCommand(&[_][]const u8{ "git", "config", "user.name", "Test User" }, test_dir);
     _ = try tf.runCommand(&[_][]const u8{ "git", "config", "user.email", "test@example.com" }, test_dir);
     
     // Test log in empty repository (should fail)
     {
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "log" 
+            "/root/ziggit/zig-out/bin/ziggit", "log" 
         }, test_dir);
         
         const git_result = try tf.runCommand(&[_][]const u8{ "git", "log" }, test_dir);
@@ -394,11 +394,11 @@ fn testLogOutputFormat(tf: *TestFramework) !void {
     // Test log with commits
     {
         try tf.createFile(test_dir, "file1.txt", "content1");
-        _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "add", "file1.txt" }, test_dir);
-        _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "First commit" }, test_dir);
+        _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "file1.txt" }, test_dir);
+        _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "First commit" }, test_dir);
         
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "log" 
+            "/root/ziggit/zig-out/bin/ziggit", "log" 
         }, test_dir);
         
         const git_result = try tf.runCommand(&[_][]const u8{ "git", "log" }, test_dir);
@@ -424,7 +424,7 @@ fn testHelpVersionFormat(tf: *TestFramework) !void {
     // Test --help
     {
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "--help" 
+            "/root/ziggit/zig-out/bin/ziggit", "--help" 
         }, "/tmp");
         
         const git_result = try tf.runCommand(&[_][]const u8{ "git", "--help" }, "/tmp");
@@ -444,7 +444,7 @@ fn testHelpVersionFormat(tf: *TestFramework) !void {
     // Test --version
     {
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "--version" 
+            "/root/ziggit/zig-out/bin/ziggit", "--version" 
         }, "/tmp");
         
         const git_result = try tf.runCommand(&[_][]const u8{ "git", "--version" }, "/tmp");

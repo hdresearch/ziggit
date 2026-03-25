@@ -29,7 +29,7 @@ pub const GitSourceCompatTests = struct {
     pub fn init(allocator: Allocator) GitSourceCompatTests {
         return GitSourceCompatTests{
             .allocator = allocator,
-            .ziggit_path = "/root/zigg/root/ziggit/zig-out/bin/ziggit",
+            .ziggit_path = "/root/ziggit/zig-out/bin/ziggit",
             .git_path = "git",
         };
     }

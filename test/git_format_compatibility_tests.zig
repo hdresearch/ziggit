@@ -58,7 +58,7 @@ pub fn runGitFormatCompatibilityTests() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const harness = TestHarness.init(allocator, "/root/zigg/root/ziggit/zig-out/bin/ziggit", "git");
+    const harness = TestHarness.init(allocator, "/root/ziggit/zig-out/bin/ziggit", "git");
 
     var failed: u32 = 0;
     var passed: u32 = 0;
