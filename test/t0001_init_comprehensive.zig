@@ -18,7 +18,7 @@ fn testPlainInit(framework: *GitTestFramework) !void {
     defer framework.allocator.free(git_dir);
     
     // Verify .git directory exists
-    var git_stat = std.fs.cwd().statFile(git_dir) catch |err| {
+    const git_stat = std.fs.cwd().statFile(git_dir) catch |err| {
         std.debug.print("Failed to stat .git directory: {}\n", .{err});
         return error.GitDirNotFound;
     };
@@ -39,7 +39,7 @@ fn testPlainInit(framework: *GitTestFramework) !void {
     }
 
     // Compare with git behavior
-    var git_test_dir = try framework.createTestRepo("plain-init-git");
+    const git_test_dir = try framework.createTestRepo("plain-init-git");
     defer framework.allocator.free(git_test_dir);
     
     var git_result = try framework.runGitCommand(git_test_dir, &[_][]const u8{"init"});
@@ -74,7 +74,7 @@ fn testBareInit(framework: *GitTestFramework) !void {
     }
 
     // Compare with git behavior
-    var git_test_dir = try framework.createTestRepo("bare-init-git");
+    const git_test_dir = try framework.createTestRepo("bare-init-git");
     defer framework.allocator.free(git_test_dir);
     
     var git_result = try framework.runGitCommand(git_test_dir, &[_][]const u8{ "init", "--bare" });
@@ -99,7 +99,7 @@ fn testReinitExisting(framework: *GitTestFramework) !void {
     try framework.expectExitCode(0, second_result);
 
     // Compare with git behavior
-    var git_test_dir = try framework.createTestRepo("reinit-git");
+    const git_test_dir = try framework.createTestRepo("reinit-git");
     defer framework.allocator.free(git_test_dir);
     
     var git_first = try framework.runGitCommand(git_test_dir, &[_][]const u8{"init"});
@@ -131,13 +131,13 @@ fn testInitWithDirectory(framework: *GitTestFramework) !void {
     const git_dir = try std.fs.path.join(framework.allocator, &[_][]const u8{ repo_path, ".git" });
     defer framework.allocator.free(git_dir);
     
-    var git_stat = std.fs.cwd().statFile(git_dir) catch return error.GitDirNotFound;
+    const git_stat = std.fs.cwd().statFile(git_dir) catch return error.GitDirNotFound;
     if (git_stat.kind != .directory) {
         return error.GitDirNotDirectory;
     }
 
     // Compare with git behavior
-    var git_base_dir = try framework.createTestRepo("init-with-dir-git");
+    const git_base_dir = try framework.createTestRepo("init-with-dir-git");
     defer framework.allocator.free(git_base_dir);
     
     var git_result = try framework.runGitCommand(git_base_dir, &[_][]const u8{ "init", target_repo });

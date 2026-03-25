@@ -16,7 +16,7 @@ pub fn runComprehensiveGitTestSuite() !void {
     
     // Make sure ziggit is built
     var build_child = Child.init(&[_][]const u8{ "zig", "build" }, allocator);
-    var build_result = try build_child.spawnAndWait();
+    const build_result = try build_child.spawnAndWait();
     if (build_result != .Exited or build_result.Exited != 0) {
         std.debug.print("Failed to build ziggit\n", .{});
         return;
@@ -90,7 +90,7 @@ fn testCoreOperations(allocator: Allocator, ziggit_path: []const u8) !void {
     }
     
     // Test log
-    var log_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "log"}, test_dir);
+    const log_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "log"}, test_dir);
     if (log_result.exit_code == 0) {
         std.debug.print("    ✓ git log\n", .{});
     } else {
@@ -98,7 +98,7 @@ fn testCoreOperations(allocator: Allocator, ziggit_path: []const u8) !void {
     }
     
     // Test diff (should show no changes after commit)
-    var diff_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "diff"}, test_dir);
+    const diff_result = try runCommand(allocator, &[_][]const u8{ziggit_path, "diff"}, test_dir);
     if (diff_result.exit_code == 0) {
         std.debug.print("    ✓ git diff\n", .{});
     } else {
