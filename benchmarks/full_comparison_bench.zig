@@ -57,14 +57,14 @@ fn runCommand(cmd: []const []const u8) !u64 {
     child.stderr_behavior = .Ignore;
     
     const term = child.spawnAndWait() catch |err| {
-        std.debug.print("Command failed: {any}\n", .{cmd});
+        std.debug.print("Command failed: {any}\n", .{err});
         return err;
     };
     
     const end = std.time.nanoTimestamp();
     
     if (term != .Exited or term.Exited != 0) {
-        std.debug.print("Command failed with term {any}: {any}\n", .{term, cmd});
+        std.debug.print("Command failed with term {any}\n", .{term});
         return TestError.CommandFailed;
     }
     
@@ -355,7 +355,7 @@ pub fn main() !void {
         if (ziggit_init_time < fastest_init) fastest_init = ziggit_init_time;
         if (libgit2_init_time < fastest_init) fastest_init = libgit2_init_time;
         if (fastest_init == ziggit_init_time) {
-            print("  ziggit wins! ");
+            print("  ziggit wins! ", .{});
             if (git_init_time > ziggit_init_time) {
                 const speedup = @as(f64, @floatFromInt(git_init_time)) / @as(f64, @floatFromInt(ziggit_init_time));
                 print("{d:.2}x faster than git, ", .{speedup});
@@ -366,7 +366,7 @@ pub fn main() !void {
             }
             print("\n", .{});
         } else if (fastest_init == libgit2_init_time) {
-            print("  libgit2 wins! ");
+            print("  libgit2 wins! ", .{});
             const git_slowdown = @as(f64, @floatFromInt(git_init_time)) / @as(f64, @floatFromInt(libgit2_init_time));
             const ziggit_slowdown = @as(f64, @floatFromInt(ziggit_init_time)) / @as(f64, @floatFromInt(libgit2_init_time));
             print("{d:.2}x faster than git, {d:.2}x faster than ziggit\n", .{git_slowdown, ziggit_slowdown});
@@ -379,7 +379,7 @@ pub fn main() !void {
         if (ziggit_status_time < fastest_status) fastest_status = ziggit_status_time;
         if (libgit2_status_time < fastest_status) fastest_status = libgit2_status_time;
         if (fastest_status == ziggit_status_time) {
-            print("  ziggit wins! ");
+            print("  ziggit wins! ", .{});
             if (git_status_time > ziggit_status_time) {
                 const speedup = @as(f64, @floatFromInt(git_status_time)) / @as(f64, @floatFromInt(ziggit_status_time));
                 print("{d:.2}x faster than git, ", .{speedup});
@@ -390,7 +390,7 @@ pub fn main() !void {
             }
             print("\n", .{});
         } else if (fastest_status == libgit2_status_time) {
-            print("  libgit2 wins! ");
+            print("  libgit2 wins! ", .{});
             const git_slowdown = @as(f64, @floatFromInt(git_status_time)) / @as(f64, @floatFromInt(libgit2_status_time));
             const ziggit_slowdown = @as(f64, @floatFromInt(ziggit_status_time)) / @as(f64, @floatFromInt(libgit2_status_time));
             print("{d:.2}x faster than git, {d:.2}x faster than ziggit\n", .{git_slowdown, ziggit_slowdown});
