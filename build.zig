@@ -42,14 +42,74 @@ pub fn build(b: *std.Build) void {
     const run_compatibility_tests = b.addRunArtifact(compatibility_tests);
     run_compatibility_tests.step.dependOn(b.getInstallStep()); // Ensure ziggit is built first
 
+    // Git source compatibility test suite (focused on drop-in compatibility)
+    const git_compat_tests = b.addExecutable(.{
+        .name = "git_compat_tests",
+        .root_source_file = b.path("test/git_compat_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_git_compat_tests = b.addRunArtifact(git_compat_tests);
+    run_git_compat_tests.step.dependOn(b.getInstallStep()); // Ensure ziggit is built first
+
+    // Simple git compatibility test
+    const simple_git_compat_test = b.addExecutable(.{
+        .name = "simple_git_compat_test",
+        .root_source_file = b.path("test/simple_git_compat_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_simple_git_compat_test = b.addRunArtifact(simple_git_compat_test);
+    run_simple_git_compat_test.step.dependOn(b.getInstallStep());
+
+    // Comprehensive git workflow test
+    const comprehensive_git_workflow_test = b.addExecutable(.{
+        .name = "comprehensive_git_workflow_test",
+        .root_source_file = b.path("test/comprehensive_git_workflow_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_comprehensive_git_workflow_test = b.addRunArtifact(comprehensive_git_workflow_test);
+    run_comprehensive_git_workflow_test.step.dependOn(b.getInstallStep());
+
     // Test step runs both unit tests and compatibility tests
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_compatibility_tests.step);
+    test_step.dependOn(&run_git_compat_tests.step);
 
     // Separate step for just compatibility tests
     const compat_test_step = b.step("test-compat", "Run compatibility tests");
     compat_test_step.dependOn(&run_compatibility_tests.step);
+
+    // Separate step for git source compatibility tests
+    const git_compat_test_step = b.step("test-git-compat", "Run git source compatibility tests");
+    git_compat_test_step.dependOn(&run_git_compat_tests.step);
+
+    // Simple git compatibility test step
+    const simple_git_compat_test_step = b.step("test-simple-git", "Run simple git compatibility test");
+    simple_git_compat_test_step.dependOn(&run_simple_git_compat_test.step);
+
+    // Comprehensive git workflow test step
+    const comprehensive_git_workflow_test_step = b.step("test-comprehensive-git", "Run comprehensive git workflow test");
+    comprehensive_git_workflow_test_step.dependOn(&run_comprehensive_git_workflow_test.step);
+
+    // Focused commit test
+    const focused_commit_test = b.addExecutable(.{
+        .name = "focused_commit_test",
+        .root_source_file = b.path("test/focused_commit_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_focused_commit_test = b.addRunArtifact(focused_commit_test);
+    run_focused_commit_test.step.dependOn(b.getInstallStep());
+
+    const focused_commit_test_step = b.step("test-focused-commit", "Run focused commit test");
+    focused_commit_test_step.dependOn(&run_focused_commit_test.step);
 
     // WebAssembly target (WASI)
     const wasm_target = b.resolveTargetQuery(.{
