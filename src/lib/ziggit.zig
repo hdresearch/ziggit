@@ -405,3 +405,20 @@ fn findGitDir(allocator: std.mem.Allocator) ![]u8 {
     
     return error.NotAGitRepository;
 }
+
+// Version information exports
+export fn ziggit_version() [*:0]const u8 {
+    return "0.1.0";
+}
+
+export fn ziggit_version_major() c_int {
+    return 0;
+}
+
+export fn ziggit_version_minor() c_int {
+    return 1;
+}
+
+export fn ziggit_version_patch() c_int {
+    return 0;
+}

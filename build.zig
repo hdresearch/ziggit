@@ -87,7 +87,7 @@ pub fn build(b: *std.Build) void {
     const wasm_browser_step = b.step("wasm-browser", "Build for WebAssembly (freestanding/browser)");
     wasm_browser_step.dependOn(&b.addInstallArtifact(wasm_freestanding_exe, .{}).step);
 
-    // Benchmark executable
+    // Benchmark executable (original Zig-only benchmarks)
     const benchmark_exe = b.addExecutable(.{
         .name = "ziggit-bench",
         .root_source_file = b.path("benchmarks/bench.zig"),
@@ -101,10 +101,86 @@ pub fn build(b: *std.Build) void {
     benchmark_exe.root_module.addImport("ziggit", ziggit_module);
 
     const run_benchmark = b.addRunArtifact(benchmark_exe);
-    const bench_step = b.step("bench", "Run benchmarks");
+
+    const bench_step = b.step("bench", "Run Zig-only benchmarks");
     bench_step.dependOn(&run_benchmark.step);
 
     // Also install the benchmark executable
     const install_benchmark = b.addInstallArtifact(benchmark_exe, .{});
     bench_step.dependOn(&install_benchmark.step);
+
+    // Library builds for C integration
+    const lib_static = b.addStaticLibrary(.{
+        .name = "ziggit",
+        .root_source_file = b.path("src/lib/ziggit.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    const lib_shared = b.addSharedLibrary(.{
+        .name = "ziggit",
+        .root_source_file = b.path("src/lib/ziggit.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Install libraries
+    const install_lib_static = b.addInstallArtifact(lib_static, .{});
+    const install_lib_shared = b.addInstallArtifact(lib_shared, .{});
+
+    // Library build steps
+    const lib_step = b.step("lib", "Build both static and shared libraries");
+    lib_step.dependOn(&install_lib_static.step);
+    lib_step.dependOn(&install_lib_shared.step);
+
+    const lib_static_step = b.step("lib-static", "Build static library");
+    lib_static_step.dependOn(&install_lib_static.step);
+
+    const lib_shared_step = b.step("lib-shared", "Build shared library");
+    lib_shared_step.dependOn(&install_lib_shared.step);
+    
+    // Also add header installation
+    const install_header = b.addInstallFile(b.path("src/lib/ziggit.h"), "include/ziggit.h");
+    lib_step.dependOn(&install_header.step);
+    lib_static_step.dependOn(&install_header.step);
+    lib_shared_step.dependOn(&install_header.step);
+
+    // Comparison benchmark executable (ziggit vs git CLI) - needs to be after lib declarations
+    const comparison_benchmark_exe = b.addExecutable(.{
+        .name = "ziggit-comparison-bench",
+        .root_source_file = b.path("benchmarks/comparison_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    // Link the static library for C integration testing (avoids TLS issues)
+    comparison_benchmark_exe.linkLibrary(lib_static);
+    comparison_benchmark_exe.linkLibC();
+    comparison_benchmark_exe.addIncludePath(b.path("src/lib"));
+
+    const run_comparison_benchmark = b.addRunArtifact(comparison_benchmark_exe);
+
+    const bench_comparison_step = b.step("bench-comparison", "Run comparison benchmarks (ziggit vs git CLI)");
+    bench_comparison_step.dependOn(&run_comparison_benchmark.step);
+
+    // Install the comparison benchmark executable
+    const install_comparison_benchmark = b.addInstallArtifact(comparison_benchmark_exe, .{});
+    bench_comparison_step.dependOn(&install_comparison_benchmark.step);
+
+    // Simple CLI comparison benchmark (avoids C linking issues)
+    const simple_comparison_exe = b.addExecutable(.{
+        .name = "ziggit-simple-bench",
+        .root_source_file = b.path("benchmarks/simple_comparison.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_simple_comparison = b.addRunArtifact(simple_comparison_exe);
+
+    const bench_simple_step = b.step("bench-simple", "Run simple CLI comparison benchmarks");
+    bench_simple_step.dependOn(&run_simple_comparison.step);
+
+    // Install the simple benchmark executable  
+    const install_simple_comparison = b.addInstallArtifact(simple_comparison_exe, .{});
+    bench_simple_step.dependOn(&install_simple_comparison.step);
 }
