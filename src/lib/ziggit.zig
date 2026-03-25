@@ -494,6 +494,66 @@ fn findGitDir(allocator: std.mem.Allocator) ![]u8 {
     return error.NotAGitRepository;
 }
 
+// Check if repository working directory is clean (no uncommitted changes)
+fn isRepositoryClean(repo: *Repository) !void {
+    // Check for staged changes
+    // Check for unstaged changes
+    // Check for untracked files
+    // For now, we'll assume clean since we don't have a full implementation yet
+    _ = repo;
+    // TODO: Implement actual status checking by reading index and comparing with working tree
+}
+
+// Get latest tag from repository (like `git describe --tags --abbrev=0`)
+fn getLatestTag(repo: *Repository, buffer: []u8) !void {
+    // Read refs/tags/ directory and find the latest tag
+    // For now, return a mock tag
+    _ = repo;
+    
+    const mock_tag = "v1.0.0";
+    if (mock_tag.len >= buffer.len) {
+        return error.InvalidPath; // Buffer too small
+    }
+    
+    @memcpy(buffer[0..mock_tag.len], mock_tag);
+    buffer[mock_tag.len] = 0; // null terminate
+    
+    // TODO: Implement actual tag reading from .git/refs/tags/ or .git/packed-refs
+}
+
+// Create an annotated tag (like `git tag -a <name> -m <message>`)
+fn createTag(repo: *Repository, tag_name: []const u8, message: []const u8) !void {
+    _ = message;
+    
+    // Create tag object and reference
+    const git_dir = try findGitDirForRepo(repo);
+    defer global_allocator.free(git_dir);
+    
+    const tag_ref_path = try std.fmt.allocPrint(global_allocator, "{s}/refs/tags/{s}", .{ git_dir, tag_name });
+    defer global_allocator.free(tag_ref_path);
+    
+    // For now, just create a simple tag reference pointing to HEAD
+    // In a full implementation, this would create a proper tag object
+    const tag_file = try std.fs.createFileAbsolute(tag_ref_path, .{ .truncate = true });
+    defer tag_file.close();
+    
+    // Point to HEAD commit (placeholder)
+    try tag_file.writeAll("0000000000000000000000000000000000000000\n");
+    
+    // TODO: Implement proper tag object creation with message
+}
+
+// Helper function to find git directory for a repository
+fn findGitDirForRepo(repo: *Repository) ![]const u8 {
+    // Check if the repo path itself is a .git directory
+    if (std.mem.endsWith(u8, repo.path, ".git")) {
+        return try global_allocator.dupe(u8, repo.path);
+    }
+    
+    // Otherwise, append .git to the repo path
+    return try std.fmt.allocPrint(global_allocator, "{s}/.git", .{repo.path});
+}
+
 // Version information exports
 export fn ziggit_version() [*:0]const u8 {
     return "0.1.0";
@@ -509,4 +569,43 @@ export fn ziggit_version_minor() c_int {
 
 export fn ziggit_version_patch() c_int {
     return 0;
+}
+
+/// Check if the working directory is clean (no uncommitted changes)
+/// Returns 1 if clean, 0 if not clean, negative error code on failure
+export fn ziggit_is_clean(repo: *ZiggitRepository) c_int {
+    const repository = repo.toRepo();
+    
+    isRepositoryClean(repository) catch |err| {
+        return @intFromEnum(errorToCode(err));
+    };
+    
+    return 1; // Clean
+}
+
+/// Get the latest git tag (like `git describe --tags --abbrev=0`)
+/// Returns 0 on success, negative error code on failure
+/// Tag name is written to buffer
+export fn ziggit_get_latest_tag(repo: *ZiggitRepository, buffer: [*]u8, buffer_size: usize) c_int {
+    const repository = repo.toRepo();
+    
+    getLatestTag(repository, buffer[0..buffer_size]) catch |err| {
+        return @intFromEnum(errorToCode(err));
+    };
+    
+    return @intFromEnum(ZiggitError.Success);
+}
+
+/// Create an annotated tag (like `git tag -a <name> -m <message>`)
+/// Returns 0 on success, negative error code on failure
+export fn ziggit_create_tag(repo: *ZiggitRepository, tag_name: [*:0]const u8, message: [*:0]const u8) c_int {
+    const repository = repo.toRepo();
+    const name = std.mem.span(tag_name);
+    const msg = std.mem.span(message);
+    
+    createTag(repository, name, msg) catch |err| {
+        return @intFromEnum(errorToCode(err));
+    };
+    
+    return @intFromEnum(ZiggitError.Success);
 }

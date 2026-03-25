@@ -6,10 +6,6 @@ extern "C" {
 #endif
 
 #include <stddef.h>
-#include <stdint.h>
-
-// Forward declaration of opaque repository handle
-typedef struct ZiggitRepository ZiggitRepository;
 
 // Error codes
 typedef enum {
@@ -23,41 +19,38 @@ typedef enum {
     ZIGGIT_ERROR_NETWORK_ERROR = -7,
     ZIGGIT_ERROR_INVALID_REF = -8,
     ZIGGIT_ERROR_GENERIC = -100
-} ZiggitError;
+} ziggit_error_t;
 
-// Repository operations
-int ziggit_repo_init(const char* path, int bare);
-ZiggitRepository* ziggit_repo_open(const char* path);
-int ziggit_repo_clone(const char* url, const char* path, int bare);
-void ziggit_repo_close(ZiggitRepository* repo);
-
-// Commit operations
-int ziggit_commit_create(
-    ZiggitRepository* repo, 
-    const char* message,
-    const char* author_name,
-    const char* author_email
-);
-
-// Branch operations
-int ziggit_branch_list(ZiggitRepository* repo, char* buffer, size_t buffer_size);
-
-// Status and diff operations
-int ziggit_status(ZiggitRepository* repo, char* buffer, size_t buffer_size);
-int ziggit_diff(ZiggitRepository* repo, char* buffer, size_t buffer_size);
-
-// Index operations
-int ziggit_add(ZiggitRepository* repo, const char* pathspec);
-
-// Remote operations
-int ziggit_remote_get_url(ZiggitRepository* repo, const char* remote_name, char* buffer, size_t buffer_size);
-int ziggit_remote_set_url(ZiggitRepository* repo, const char* remote_name, const char* url);
+// Opaque repository handle
+typedef struct ziggit_repository ziggit_repository_t;
 
 // Version information
 const char* ziggit_version(void);
 int ziggit_version_major(void);
 int ziggit_version_minor(void);
 int ziggit_version_patch(void);
+
+// Repository management
+int ziggit_repo_init(const char* path, int bare);
+ziggit_repository_t* ziggit_repo_open(const char* path);
+int ziggit_repo_clone(const char* url, const char* path, int bare);
+void ziggit_repo_close(ziggit_repository_t* repo);
+
+// Core git operations
+int ziggit_commit_create(ziggit_repository_t* repo, const char* message, const char* author_name, const char* author_email);
+int ziggit_branch_list(ziggit_repository_t* repo, char* buffer, size_t buffer_size);
+int ziggit_status(ziggit_repository_t* repo, char* buffer, size_t buffer_size);
+int ziggit_diff(ziggit_repository_t* repo, char* buffer, size_t buffer_size);
+int ziggit_add(ziggit_repository_t* repo, const char* pathspec);
+
+// Remote operations
+int ziggit_remote_get_url(ziggit_repository_t* repo, const char* remote_name, char* buffer, size_t buffer_size);
+int ziggit_remote_set_url(ziggit_repository_t* repo, const char* remote_name, const char* url);
+
+// Extended operations (commonly needed by Bun)
+int ziggit_is_clean(ziggit_repository_t* repo);
+int ziggit_get_latest_tag(ziggit_repository_t* repo, char* buffer, size_t buffer_size);
+int ziggit_create_tag(ziggit_repository_t* repo, const char* tag_name, const char* message);
 
 #ifdef __cplusplus
 }
