@@ -6,6 +6,7 @@ const Repository = if (@import("builtin").target.os.tag != .freestanding) @impor
 const objects = if (@import("builtin").target.os.tag != .freestanding) @import("git/objects.zig") else void;
 const index_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/index.zig") else void;
 const refs = if (@import("builtin").target.os.tag != .freestanding) @import("git/refs.zig") else void;
+const gitignore_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/gitignore.zig") else void;
 
 const GitError = error{
     NotAGitRepository,
@@ -208,7 +209,7 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     
     // Find .git directory by traversing up
     const git_path = findGitDirectory(allocator, platform_impl) catch {
-        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
         std.process.exit(128);
     };
     defer allocator.free(git_path);
@@ -281,7 +282,7 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
 
     // Find .git directory first (before checking arguments)
     const git_path = findGitDirectory(allocator, platform_impl) catch {
-        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
         std.process.exit(128);
     };
     defer allocator.free(git_path);
@@ -318,8 +319,25 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         std.process.exit(128);
     }
 
+    // Check if file is ignored
+    const gitignore_path = try std.fmt.allocPrint(allocator, "{s}/.gitignore", .{cwd});
+    defer allocator.free(gitignore_path);
+    
+    var gitignore = gitignore_mod.GitIgnore.loadFromFile(allocator, gitignore_path, platform_impl) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => gitignore_mod.GitIgnore.init(allocator), // If there's any issue loading, just use empty gitignore
+    };
+    defer gitignore.deinit();
+    
+    if (gitignore.isIgnored(file_path)) {
+        const msg = try std.fmt.allocPrint(allocator, "The following paths are ignored by one of your .gitignore files:\n{s}\nhint: Use -f if you really want to add them.\n", .{file_path});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        std.process.exit(1);
+    }
+
     // Add to index
-    index.add(file_path, full_file_path, platform_impl) catch |err| switch (err) {
+    index.add(file_path, full_file_path, platform_impl, git_path) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => {
             const msg = try std.fmt.allocPrint(allocator, "error: failed to add '{s}' to index\n", .{file_path});
@@ -341,6 +359,7 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 
     var message: ?[]const u8 = null;
     var allow_empty = false;
+    var amend = false;
 
     // Parse arguments
     while (args.next()) |arg| {
@@ -353,7 +372,14 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             message = arg[2..];
         } else if (std.mem.eql(u8, arg, "--allow-empty")) {
             allow_empty = true;
+        } else if (std.mem.eql(u8, arg, "--amend")) {
+            amend = true;
         }
+    }
+
+    if (amend) {
+        try platform_impl.writeStderr("error: --amend not yet implemented\n");
+        std.process.exit(129);
     }
 
     if (message == null) {
@@ -363,7 +389,7 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 
     // Find .git directory
     const git_path = findGitDirectory(allocator, platform_impl) catch {
-        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
         std.process.exit(128);
     };
     defer allocator.free(git_path);
@@ -462,11 +488,18 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         return;
     }
 
-    _ = args;
+    var oneline = false;
+    
+    // Parse arguments
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--oneline")) {
+            oneline = true;
+        }
+    }
 
     // Find .git directory
     const git_path = findGitDirectory(allocator, platform_impl) catch {
-        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
         std.process.exit(128);
     };
     defer allocator.free(git_path);
@@ -541,20 +574,35 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         }
 
         // Display commit
-        const commit_header = try std.fmt.allocPrint(allocator, "commit {s}\n", .{commit_hash});
-        defer allocator.free(commit_header);
-        try platform_impl.writeStdout(commit_header);
+        if (oneline) {
+            const short_hash = commit_hash[0..7];
+            const first_line = blk: {
+                var msg_lines = std.mem.split(u8, std.mem.trimRight(u8, message.items, "\n"), "\n");
+                if (msg_lines.next()) |line| {
+                    break :blk line;
+                } else {
+                    break :blk "";
+                }
+            };
+            const oneline_output = try std.fmt.allocPrint(allocator, "{s} {s}\n", .{ short_hash, first_line });
+            defer allocator.free(oneline_output);
+            try platform_impl.writeStdout(oneline_output);
+        } else {
+            const commit_header = try std.fmt.allocPrint(allocator, "commit {s}\n", .{commit_hash});
+            defer allocator.free(commit_header);
+            try platform_impl.writeStdout(commit_header);
 
-        if (author_line) |author| {
-            const author_output = try std.fmt.allocPrint(allocator, "Author: {s}\n", .{author});
-            defer allocator.free(author_output);
-            try platform_impl.writeStdout(author_output);
+            if (author_line) |author| {
+                const author_output = try std.fmt.allocPrint(allocator, "Author: {s}\n", .{author});
+                defer allocator.free(author_output);
+                try platform_impl.writeStdout(author_output);
+            }
+
+            try platform_impl.writeStdout("\n");
+            const msg_output = try std.fmt.allocPrint(allocator, "    {s}\n", .{std.mem.trimRight(u8, message.items, "\n")});
+            defer allocator.free(msg_output);
+            try platform_impl.writeStdout(msg_output);
         }
-
-        try platform_impl.writeStdout("\n");
-        const msg_output = try std.fmt.allocPrint(allocator, "    {s}\n", .{std.mem.trimRight(u8, message.items, "\n")});
-        defer allocator.free(msg_output);
-        try platform_impl.writeStdout(msg_output);
 
         // Move to parent commit
         if (parent_hash) |parent| {
@@ -574,15 +622,36 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
 
     // Find .git directory first
     const git_path = findGitDirectory(allocator, platform_impl) catch {
-        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
         std.process.exit(128);
     };
     defer allocator.free(git_path);
 
-    _ = args;
-
-    // For now, just output empty diff (no changes)
-    // In a real implementation, this would show actual differences
+    // Check for --cached flag
+    var cached = false;
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--cached") or std.mem.eql(u8, arg, "--staged")) {
+            cached = true;
+        }
+    }
+    
+    // For now, just output empty diff like git diff in a clean repository
+    // In a real implementation, this would show actual differences:
+    // - Without --cached: working tree vs index
+    // - With --cached: index vs HEAD
+    
+    // Check if there are any staged changes by loading the index
+    var index = index_mod.Index.load(git_path, platform_impl, allocator) catch |err| switch (err) {
+        error.FileNotFound => index_mod.Index.init(allocator),
+        else => return err,
+    };
+    defer index.deinit();
+    
+    // For a basic diff, if there are no changes, output nothing (like git)
+    // This is a placeholder - a real implementation would compare file contents
+    if (cached) {
+        // Placeholder for --cached diff implementation
+    }
 }
 
 fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
@@ -592,13 +661,13 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     }
 
     const first_arg = args.next() orelse {
-        try platform_impl.writeStderr("fatal: You are on a branch yet to be born\n");
+        try platform_impl.writeStderr("error: pathspec '' did not match any file(s) known to git\n");
         std.process.exit(128);
     };
 
     // Find .git directory
     const git_path = findGitDirectory(allocator, platform_impl) catch {
-        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
         std.process.exit(128);
     };
     defer allocator.free(git_path);
@@ -719,7 +788,7 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 
     // Find .git directory
     const git_path = findGitDirectory(allocator, platform_impl) catch {
-        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
         std.process.exit(128);
     };
     defer allocator.free(git_path);

@@ -187,14 +187,15 @@ pub const Index = struct {
         try platform_impl.fs.writeFile(index_path, buffer.items);
     }
 
-    pub fn add(self: *Index, path: []const u8, file_path: []const u8, platform_impl: anytype) !void {
+    pub fn add(self: *Index, path: []const u8, file_path: []const u8, platform_impl: anytype, git_dir: []const u8) !void {
         // Read file content
         const content = try platform_impl.fs.readFile(self.allocator, file_path);
         defer self.allocator.free(content);
 
-        // Create blob object and get hash
-        const blob = objects.createBlobObject(content);
-        const hash_str = try blob.hash(self.allocator);
+        // Create blob object and store it
+        const blob = try objects.createBlobObject(content, self.allocator);
+        defer blob.deinit(self.allocator);
+        const hash_str = try blob.store(git_dir, platform_impl, self.allocator);
         defer self.allocator.free(hash_str);
 
         var hash_bytes: [20]u8 = undefined;
