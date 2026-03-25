@@ -8,24 +8,24 @@ fn testBasicCommit(framework: *GitTestFramework) !void {
     defer framework.allocator.free(test_dir);
 
     // Initialize repo
-    var init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
+    const init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
     defer init_result.deinit(framework.allocator);
     try framework.expectExitCode(0, init_result);
 
     // Create and add file
     try framework.writeFile(test_dir, "test.txt", "Hello, World!\n");
     
-    var add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "test.txt" });
+    const add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "test.txt" });
     defer add_result.deinit(framework.allocator);
     try framework.expectExitCode(0, add_result);
 
     // Commit with message
-    var commit_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "commit", "-m", "Initial commit" });
+    const commit_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "commit", "-m", "Initial commit" });
     defer commit_result.deinit(framework.allocator);
     try framework.expectExitCode(0, commit_result);
 
     // Verify with log
-    var log_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"log"});
+    const log_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"log"});
     defer log_result.deinit(framework.allocator);
     try framework.expectExitCode(0, log_result);
 
@@ -41,12 +41,12 @@ fn testEmptyCommit(framework: *GitTestFramework) !void {
     defer framework.allocator.free(test_dir);
 
     // Initialize repo
-    var init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
+    const init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
     defer init_result.deinit(framework.allocator);
     try framework.expectExitCode(0, init_result);
 
     // Try to commit without adding anything
-    var commit_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "commit", "-m", "Empty commit" });
+    const commit_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "commit", "-m", "Empty commit" });
     defer commit_result.deinit(framework.allocator);
     
     // Should fail
@@ -76,17 +76,17 @@ fn testAllowEmptyCommit(framework: *GitTestFramework) !void {
     defer framework.allocator.free(test_dir);
 
     // Initialize repo
-    var init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
+    const init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
     defer init_result.deinit(framework.allocator);
     try framework.expectExitCode(0, init_result);
 
     // Commit with --allow-empty
-    var commit_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "commit", "--allow-empty", "-m", "Empty commit allowed" });
+    const commit_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "commit", "--allow-empty", "-m", "Empty commit allowed" });
     defer commit_result.deinit(framework.allocator);
     try framework.expectExitCode(0, commit_result);
 
     // Verify with log
-    var log_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"log"});
+    const log_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"log"});
     defer log_result.deinit(framework.allocator);
     try framework.expectExitCode(0, log_result);
 
@@ -102,7 +102,7 @@ fn testMultipleCommits(framework: *GitTestFramework) !void {
     defer framework.allocator.free(test_dir);
 
     // Initialize repo
-    var init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
+    const init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
     defer init_result.deinit(framework.allocator);
     try framework.expectExitCode(0, init_result);
 
@@ -137,7 +137,7 @@ fn testMultipleCommits(framework: *GitTestFramework) !void {
     try framework.expectExitCode(0, commit3_result);
 
     // Verify log shows all commits in reverse chronological order
-    var log_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"log"});
+    const log_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"log"});
     defer log_result.deinit(framework.allocator);
     try framework.expectExitCode(0, log_result);
 
@@ -163,18 +163,18 @@ fn testCommitWithoutMessage(framework: *GitTestFramework) !void {
     defer framework.allocator.free(test_dir);
 
     // Initialize repo and add file
-    var init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
+    const init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
     defer init_result.deinit(framework.allocator);
     try framework.expectExitCode(0, init_result);
 
     try framework.writeFile(test_dir, "test.txt", "Test content\n");
     
-    var add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "test.txt" });
+    const add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "test.txt" });
     defer add_result.deinit(framework.allocator);
     try framework.expectExitCode(0, add_result);
 
     // Try to commit without -m
-    var commit_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"commit"});
+    const commit_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"commit"});
     defer commit_result.deinit(framework.allocator);
     
     // Should fail (in our simple implementation; git would open editor)
@@ -189,18 +189,18 @@ fn testCommitAmend(framework: *GitTestFramework) !void {
     defer framework.allocator.free(test_dir);
 
     // Initialize repo
-    var init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
+    const init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
     defer init_result.deinit(framework.allocator);
     try framework.expectExitCode(0, init_result);
 
     // Create initial commit
     try framework.writeFile(test_dir, "test.txt", "Initial content\n");
     
-    var add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "test.txt" });
+    const add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "test.txt" });
     defer add_result.deinit(framework.allocator);
     try framework.expectExitCode(0, add_result);
 
-    var commit_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "commit", "-m", "Initial commit" });
+    const commit_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "commit", "-m", "Initial commit" });
     defer commit_result.deinit(framework.allocator);
     try framework.expectExitCode(0, commit_result);
 
@@ -211,12 +211,12 @@ fn testCommitAmend(framework: *GitTestFramework) !void {
     defer add2_result.deinit(framework.allocator);
     try framework.expectExitCode(0, add2_result);
 
-    var amend_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "commit", "--amend", "-m", "Amended commit" });
+    const amend_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "commit", "--amend", "-m", "Amended commit" });
     defer amend_result.deinit(framework.allocator);
     try framework.expectExitCode(0, amend_result);
 
     // Log should show only one commit with amended message
-    var log_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"log"});
+    const log_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"log"});
     defer log_result.deinit(framework.allocator);
     try framework.expectExitCode(0, log_result);
 
@@ -235,7 +235,7 @@ fn testCommitWithAuthor(framework: *GitTestFramework) !void {
     defer framework.allocator.free(test_dir);
 
     // Initialize repo
-    var init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
+    const init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
     defer init_result.deinit(framework.allocator);
     try framework.expectExitCode(0, init_result);
 
@@ -249,16 +249,16 @@ fn testCommitWithAuthor(framework: *GitTestFramework) !void {
     // Create and commit file
     try framework.writeFile(test_dir, "test.txt", "Test content\n");
     
-    var add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "test.txt" });
+    const add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "test.txt" });
     defer add_result.deinit(framework.allocator);
     try framework.expectExitCode(0, add_result);
 
-    var commit_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "commit", "-m", "Test commit with author" });
+    const commit_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "commit", "-m", "Test commit with author" });
     defer commit_result.deinit(framework.allocator);
     try framework.expectExitCode(0, commit_result);
 
     // Log should show author information
-    var log_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"log"});
+    const log_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"log"});
     defer log_result.deinit(framework.allocator);
     try framework.expectExitCode(0, log_result);
 
@@ -273,26 +273,26 @@ fn testCommitLongMessage(framework: *GitTestFramework) !void {
     defer framework.allocator.free(test_dir);
 
     // Initialize repo
-    var init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
+    const init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
     defer init_result.deinit(framework.allocator);
     try framework.expectExitCode(0, init_result);
 
     // Create and add file
     try framework.writeFile(test_dir, "test.txt", "Test content\n");
     
-    var add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "test.txt" });
+    const add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "test.txt" });
     defer add_result.deinit(framework.allocator);
     try framework.expectExitCode(0, add_result);
 
     // Commit with long message
     const long_message = "This is a very long commit message that spans multiple lines and contains detailed information about the changes being made to the repository. It should be properly stored and retrieved when viewing the log.";
     
-    var commit_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "commit", "-m", long_message });
+    const commit_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "commit", "-m", long_message });
     defer commit_result.deinit(framework.allocator);
     try framework.expectExitCode(0, commit_result);
 
     // Verify with log
-    var log_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"log"});
+    const log_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"log"});
     defer log_result.deinit(framework.allocator);
     try framework.expectExitCode(0, log_result);
 

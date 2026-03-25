@@ -8,7 +8,7 @@ fn testBasicAdd(framework: *GitTestFramework) !void {
     defer framework.allocator.free(test_dir);
 
     // Initialize repo
-    var init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
+    const init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
     defer init_result.deinit(framework.allocator);
     try framework.expectExitCode(0, init_result);
 
@@ -16,12 +16,12 @@ fn testBasicAdd(framework: *GitTestFramework) !void {
     try framework.writeFile(test_dir, "test.txt", "Hello, World!\n");
 
     // Add the file
-    var add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "test.txt" });
+    const add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "test.txt" });
     defer add_result.deinit(framework.allocator);
     try framework.expectExitCode(0, add_result);
 
     // Verify with status that file is staged
-    var status_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"status"});
+    const status_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"status"});
     defer status_result.deinit(framework.allocator);
     try framework.expectExitCode(0, status_result);
 
@@ -50,7 +50,7 @@ fn testAddMultipleFiles(framework: *GitTestFramework) !void {
     defer framework.allocator.free(test_dir);
 
     // Initialize repo
-    var init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
+    const init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
     defer init_result.deinit(framework.allocator);
     try framework.expectExitCode(0, init_result);
 
@@ -60,12 +60,12 @@ fn testAddMultipleFiles(framework: *GitTestFramework) !void {
     try framework.writeFile(test_dir, "file3.txt", "Content 3\n");
 
     // Add multiple files
-    var add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "file1.txt", "file2.txt", "file3.txt" });
+    const add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "file1.txt", "file2.txt", "file3.txt" });
     defer add_result.deinit(framework.allocator);
     try framework.expectExitCode(0, add_result);
 
     // Verify with status
-    var status_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"status"});
+    const status_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"status"});
     defer status_result.deinit(framework.allocator);
     try framework.expectExitCode(0, status_result);
 
@@ -83,7 +83,7 @@ fn testAddAll(framework: *GitTestFramework) !void {
     defer framework.allocator.free(test_dir);
 
     // Initialize repo
-    var init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
+    const init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
     defer init_result.deinit(framework.allocator);
     try framework.expectExitCode(0, init_result);
 
@@ -98,12 +98,12 @@ fn testAddAll(framework: *GitTestFramework) !void {
     try framework.writeFile(subdir_path, "file3.txt", "Content 3\n");
 
     // Add all files with '.'
-    var add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "." });
+    const add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "." });
     defer add_result.deinit(framework.allocator);
     try framework.expectExitCode(0, add_result);
 
     // Verify with status
-    var status_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"status"});
+    const status_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"status"});
     defer status_result.deinit(framework.allocator);
     try framework.expectExitCode(0, status_result);
 
@@ -120,12 +120,12 @@ fn testAddNonExistentFile(framework: *GitTestFramework) !void {
     defer framework.allocator.free(test_dir);
 
     // Initialize repo
-    var init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
+    const init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
     defer init_result.deinit(framework.allocator);
     try framework.expectExitCode(0, init_result);
 
     // Try to add non-existent file
-    var add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "nonexistent.txt" });
+    const add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "nonexistent.txt" });
     defer add_result.deinit(framework.allocator);
     
     // Should fail
@@ -155,14 +155,14 @@ fn testAddThenModify(framework: *GitTestFramework) !void {
     defer framework.allocator.free(test_dir);
 
     // Initialize repo
-    var init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
+    const init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
     defer init_result.deinit(framework.allocator);
     try framework.expectExitCode(0, init_result);
 
     // Create and add file
     try framework.writeFile(test_dir, "test.txt", "Original content\n");
     
-    var add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "test.txt" });
+    const add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "test.txt" });
     defer add_result.deinit(framework.allocator);
     try framework.expectExitCode(0, add_result);
 
@@ -170,7 +170,7 @@ fn testAddThenModify(framework: *GitTestFramework) !void {
     try framework.writeFile(test_dir, "test.txt", "Modified content\n");
 
     // Status should show both staged and modified
-    var status_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"status"});
+    const status_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"status"});
     defer status_result.deinit(framework.allocator);
     try framework.expectExitCode(0, status_result);
 
@@ -186,7 +186,7 @@ fn testAddEmptyDirectory(framework: *GitTestFramework) !void {
     defer framework.allocator.free(test_dir);
 
     // Initialize repo
-    var init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
+    const init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
     defer init_result.deinit(framework.allocator);
     try framework.expectExitCode(0, init_result);
 
@@ -196,7 +196,7 @@ fn testAddEmptyDirectory(framework: *GitTestFramework) !void {
     try std.fs.cwd().makeDir(empty_dir_path);
 
     // Try to add empty directory
-    var add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "empty_dir" });
+    const add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "empty_dir" });
     defer add_result.deinit(framework.allocator);
     
     // Git ignores empty directories, so we should too
@@ -204,7 +204,7 @@ fn testAddEmptyDirectory(framework: *GitTestFramework) !void {
     try framework.expectExitCode(0, add_result);
 
     // Status should not show the empty directory
-    var status_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"status"});
+    const status_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"status"});
     defer status_result.deinit(framework.allocator);
     try framework.expectExitCode(0, status_result);
 }
@@ -215,7 +215,7 @@ fn testAddWithPatterns(framework: *GitTestFramework) !void {
     defer framework.allocator.free(test_dir);
 
     // Initialize repo
-    var init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
+    const init_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"init"});
     defer init_result.deinit(framework.allocator);
     try framework.expectExitCode(0, init_result);
 
@@ -226,12 +226,12 @@ fn testAddWithPatterns(framework: *GitTestFramework) !void {
     try framework.writeFile(test_dir, "data.json", "{\"key\": \"value\"}\n");
 
     // Add only .txt files with pattern
-    var add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "*.txt" });
+    const add_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{ "add", "*.txt" });
     defer add_result.deinit(framework.allocator);
     try framework.expectExitCode(0, add_result);
 
     // Status should show only txt files staged
-    var status_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"status"});
+    const status_result = try framework.runZiggitCommand(test_dir, &[_][]const u8{"status"});
     defer status_result.deinit(framework.allocator);
     try framework.expectExitCode(0, status_result);
 
