@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ziggit WebAssembly Demo</title>
+    <style>
+        body { font-family: monospace; margin: 20px; }
+        #output { background: black; color: green; padding: 10px; white-space: pre-wrap; }
+    </style>
+</head>
+<body>
+    <h1>ziggit WebAssembly Demo</h1>
+    <p>This example shows how ziggit could run in a browser with WebAssembly (freestanding target).</p>
+    <p><strong>Note:</strong> Currently disabled due to Zig stdlib POSIX dependencies in freestanding mode.</p>
+    
+    <div id="output">Loading ziggit WASM...</div>
+
+    <script>
+        // Mock filesystem for demonstration
+        const virtualFs = {
+            files: new Map(),
+            dirs: new Set(['/'])
+        };
+
+        // Host functions that would be provided to the WASM module
+        const hostFunctions = {
+            host_write_stdout: (ptr, len) => {
+                const output = document.getElementById('output');
+                const decoder = new TextDecoder();
+                const memory = wasmInstance.exports.memory;
+                const text = decoder.decode(new Uint8Array(memory.buffer, ptr, len));
+                output.textContent += text;
+            },
+            
+            host_write_stderr: (ptr, len) => {
+                // Same as stdout for demo
+                hostFunctions.host_write_stdout(ptr, len);
+            },
+            
+            host_file_exists: (pathPtr, pathLen) => {
+                const decoder = new TextDecoder();
+                const memory = wasmInstance.exports.memory;
+                const path = decoder.decode(new Uint8Array(memory.buffer, pathPtr, pathLen));
+                return virtualFs.files.has(path) || virtualFs.dirs.has(path);
+            },
+            
+            host_make_dir: (pathPtr, pathLen) => {
+                const decoder = new TextDecoder();
+                const memory = wasmInstance.exports.memory;
+                const path = decoder.decode(new Uint8Array(memory.buffer, pathPtr, pathLen));
+                virtualFs.dirs.add(path);
+                return true;
+            },
+            
+            host_write_file: (pathPtr, pathLen, dataPtr, dataLen) => {
+                const decoder = new TextDecoder();
+                const memory = wasmInstance.exports.memory;
+                const path = decoder.decode(new Uint8Array(memory.buffer, pathPtr, pathLen));
+                const data = new Uint8Array(memory.buffer, dataPtr, dataLen);
+                virtualFs.files.set(path, data);
+                return true;
+            },
+            
+            host_read_file: (pathPtr, pathLen, dataPtrPtr, dataLenPtr) => {
+                const decoder = new TextDecoder();
+                const memory = wasmInstance.exports.memory;
+                const path = decoder.decode(new Uint8Array(memory.buffer, pathPtr, pathLen));
+                const data = virtualFs.files.get(path);
+                if (!data) return false;
+                
+                // In a real implementation, we'd allocate memory and return pointer
+                // This is simplified for demo purposes
+                return true;
+            },
+            
+            host_get_cwd: (dataPtrPtr, dataLenPtr) => {
+                // Return root directory
+                const cwd = '/';
+                const encoder = new TextEncoder();
+                const encoded = encoder.encode(cwd);
+                
+                // In a real implementation, we'd allocate memory and set pointers
+                // This is simplified for demo purposes
+                return true;
+            }
+        };
+
+        let wasmInstance;
+
+        // This would load the actual WASM file when the freestanding build is working
+        document.getElementById('output').textContent = `
+ziggit WASM Demo (Placeholder)
+
+This would demonstrate:
+1. Loading ziggit.wasm (freestanding target)
+2. Providing host functions for file I/O
+3. Running git commands in the browser
+4. Virtual filesystem operations
+
+Currently disabled due to:
+- Zig stdlib POSIX dependencies in freestanding target
+- Need to resolve compilation issues
+
+When working, you would see:
+> ziggit init
+Initialized empty ziggit repository
+
+> ziggit status  
+On branch main
+Nothing to commit, working tree clean
+`;
+    </script>
+</body>
+</html>

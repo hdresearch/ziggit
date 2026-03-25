@@ -24,8 +24,19 @@ zig build wasm
 ```
 
 This produces `zig-out/bin/ziggit.wasm` that can be run with WASI runtimes like:
-- [wasmtime](https://wasmtime.dev/): `wasmtime zig-out/bin/ziggit.wasm`
+- [wasmtime](https://wasmtime.dev/): `wasmtime --dir . zig-out/bin/ziggit.wasm init my-repo`
 - [wasmer](https://wasmer.io/): `wasmer zig-out/bin/ziggit.wasm`
+
+Example:
+```bash
+# Install wasmtime
+curl -sSf https://wasmtime.dev/install.sh | bash
+export PATH="$HOME/.wasmtime/bin:$PATH"
+
+# Run ziggit in WASM
+wasmtime --dir . zig-out/bin/ziggit.wasm init my-repo
+cd my-repo && wasmtime --dir . ../zig-out/bin/ziggit.wasm status  # Some commands may have limitations
+```
 
 ### WebAssembly (Browser/Freestanding)
 ```bash
