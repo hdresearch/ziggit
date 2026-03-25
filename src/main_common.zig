@@ -1018,7 +1018,9 @@ fn showWorkingTreeDiff(index: *const index_mod.Index, cwd: []const u8, platform_
                 defer if (indexed_content.len > 0) allocator.free(indexed_content);
                 
                 // Generate unified diff
-                const diff_output = diff_mod.generateUnifiedDiff(indexed_content, current_content, entry.path, allocator) catch |err| switch (err) {
+                const short_index_hash = index_hash[0..7];
+                const short_current_hash = current_hash[0..7];
+                const diff_output = diff_mod.generateUnifiedDiffWithHashes(indexed_content, current_content, entry.path, short_index_hash, short_current_hash, allocator) catch |err| switch (err) {
                     error.OutOfMemory => return err,
                 };
                 defer allocator.free(diff_output);
@@ -1030,7 +1032,19 @@ fn showWorkingTreeDiff(index: *const index_mod.Index, cwd: []const u8, platform_
             const indexed_content = getIndexedFileContent(entry, allocator) catch continue;
             defer allocator.free(indexed_content);
             
-            const diff_output = diff_mod.generateUnifiedDiff(indexed_content, "", entry.path, allocator) catch |err| switch (err) {
+            // Calculate hash for empty content
+            const empty_blob = try objects.createBlobObject("", allocator);
+            defer empty_blob.deinit(allocator);
+            const empty_hash = try empty_blob.hash(allocator);
+            defer allocator.free(empty_hash);
+            
+            // Get index hash
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.hash)});
+            defer allocator.free(index_hash);
+            
+            const short_index_hash = index_hash[0..7];
+            const short_empty_hash = empty_hash[0..7];
+            const diff_output = diff_mod.generateUnifiedDiffWithHashes(indexed_content, "", entry.path, short_index_hash, short_empty_hash, allocator) catch |err| switch (err) {
                 error.OutOfMemory => return err,
             };
             defer allocator.free(diff_output);
@@ -1052,7 +1066,19 @@ fn showStagedDiff(index: *const index_mod.Index, git_path: []const u8, platform_
             const content = getIndexedFileContent(entry, allocator) catch continue;
             defer allocator.free(content);
             
-            const diff_output = diff_mod.generateUnifiedDiff("", content, entry.path, allocator) catch |err| switch (err) {
+            // Calculate hash for empty content
+            const empty_blob = try objects.createBlobObject("", allocator);
+            defer empty_blob.deinit(allocator);
+            const empty_hash = try empty_blob.hash(allocator);
+            defer allocator.free(empty_hash);
+            
+            // Get index hash
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.hash)});
+            defer allocator.free(index_hash);
+            
+            const short_empty_hash = empty_hash[0..7];
+            const short_index_hash = index_hash[0..7];
+            const diff_output = diff_mod.generateUnifiedDiffWithHashes("", content, entry.path, short_empty_hash, short_index_hash, allocator) catch |err| switch (err) {
                 error.OutOfMemory => return err,
             };
             defer allocator.free(diff_output);
@@ -1065,9 +1091,21 @@ fn showStagedDiff(index: *const index_mod.Index, git_path: []const u8, platform_
             const content = getIndexedFileContent(entry, allocator) catch continue;
             defer allocator.free(content);
             
+            // Calculate hash for empty content (simplified - should compare with HEAD tree)
+            const empty_blob = try objects.createBlobObject("", allocator);
+            defer empty_blob.deinit(allocator);
+            const empty_hash = try empty_blob.hash(allocator);
+            defer allocator.free(empty_hash);
+            
+            // Get index hash
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.hash)});
+            defer allocator.free(index_hash);
+            
             // For now, just show all staged files as additions
             // A full implementation would compare against the HEAD tree
-            const diff_output = diff_mod.generateUnifiedDiff("", content, entry.path, allocator) catch |err| switch (err) {
+            const short_empty_hash = empty_hash[0..7];
+            const short_index_hash = index_hash[0..7];
+            const diff_output = diff_mod.generateUnifiedDiffWithHashes("", content, entry.path, short_empty_hash, short_index_hash, allocator) catch |err| switch (err) {
                 error.OutOfMemory => return err,
             };
             defer allocator.free(diff_output);

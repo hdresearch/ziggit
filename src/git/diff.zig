@@ -67,6 +67,10 @@ const Edit = struct {
 };
 
 pub fn generateUnifiedDiff(old_content: []const u8, new_content: []const u8, file_path: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    return generateUnifiedDiffWithHashes(old_content, new_content, file_path, "0000000", "1111111", allocator);
+}
+
+pub fn generateUnifiedDiffWithHashes(old_content: []const u8, new_content: []const u8, file_path: []const u8, old_hash: []const u8, new_hash: []const u8, allocator: std.mem.Allocator) ![]u8 {
     var old_lines = std.ArrayList([]const u8).init(allocator);
     defer old_lines.deinit();
     
@@ -108,7 +112,7 @@ pub fn generateUnifiedDiff(old_content: []const u8, new_content: []const u8, fil
     
     // Diff header
     try writer.print("diff --git a/{s} b/{s}\n", .{ file_path, file_path });
-    try writer.print("index 0000000..1111111 100644\n", .{});
+    try writer.print("index {s}..{s} 100644\n", .{ old_hash, new_hash });
     try writer.print("--- a/{s}\n", .{file_path});
     try writer.print("+++ b/{s}\n", .{file_path});
     
