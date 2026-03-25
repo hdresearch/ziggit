@@ -1,5 +1,6 @@
 const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
+const version_mod = @import("version.zig");
 
 // Only import git modules on platforms that support them
 const Repository = if (@import("builtin").target.os.tag != .freestanding) @import("git/repository.zig").Repository else void;
@@ -54,14 +55,14 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "push")) {
         try cmdPush(allocator, &args, &platform_impl);
     } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
-        const target_info = switch (@import("builtin").target.os.tag) {
-            .wasi => " (WASI)",
-            .freestanding => " (Browser)",
-            else => "",
-        };
-        const version_msg = std.fmt.allocPrint(allocator, "ziggit version 0.1.0{s}\n", .{target_info}) catch "ziggit version 0.1.0\n";
-        defer if (version_msg.ptr != "ziggit version 0.1.0\n".ptr) allocator.free(version_msg);
-        try platform_impl.writeStdout(version_msg);
+        if (version_mod.getVersionString(allocator)) |version_msg| {
+            defer allocator.free(version_msg);
+            const output = try std.fmt.allocPrint(allocator, "{s}\n", .{version_msg});
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+        } else |_| {
+            try platform_impl.writeStdout("ziggit version 0.1.0\n");
+        }
     } else if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
         try showUsage(&platform_impl);
     } else {
@@ -299,7 +300,7 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     
     // Find .git directory by traversing up
     const git_path = findGitDirectory(allocator, platform_impl) catch {
-        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
         std.process.exit(128);
     };
     defer allocator.free(git_path);
@@ -498,7 +499,7 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
 
     // Find .git directory first (before checking arguments)
     const git_path = findGitDirectory(allocator, platform_impl) catch {
-        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
         std.process.exit(128);
     };
     defer allocator.free(git_path);
