@@ -1539,30 +1539,247 @@ fn getCommitTree(git_path: []const u8, commit_hash: []const u8, allocator: std.m
 
 /// Merge three trees and detect conflicts
 fn mergeTreesWithConflicts(git_path: []const u8, base_tree: []const u8, current_tree: []const u8, target_tree: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !bool {
-    _ = base_tree; // TODO: Use in conflict detection
-    _ = current_tree; // TODO: Use in conflict detection
+    // Load all three trees
+    const base_tree_obj = try objects.GitObject.load(base_tree, git_path, platform_impl, allocator);
+    defer base_tree_obj.deinit(allocator);
     
-    // For now, simplified merge: just apply target tree changes
-    // A full implementation would:
-    // 1. Compare base -> current changes
-    // 2. Compare base -> target changes  
-    // 3. Detect conflicts where both sides modified the same file
-    // 4. Create conflict markers for conflicts
-    // 5. Apply non-conflicting changes
+    const current_tree_obj = try objects.GitObject.load(current_tree, git_path, platform_impl, allocator);
+    defer current_tree_obj.deinit(allocator);
     
     const target_tree_obj = try objects.GitObject.load(target_tree, git_path, platform_impl, allocator);
     defer target_tree_obj.deinit(allocator);
     
-    if (target_tree_obj.type != .tree) {
+    if (base_tree_obj.type != .tree or current_tree_obj.type != .tree or target_tree_obj.type != .tree) {
         return error.NotATree;
     }
     
-    // Get repo root and apply target tree
-    const repo_root = std.fs.path.dirname(git_path) orelse ".";
-    try checkoutTreeRecursive(git_path, target_tree_obj.data, repo_root, "", allocator, platform_impl);
+    // Parse trees into file maps
+    var base_files = std.StringHashMap([]const u8).init(allocator);
+    defer {
+        var iterator = base_files.iterator();
+        while (iterator.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.*);
+        }
+        base_files.deinit();
+    }
+    try parseTreeIntoMap(base_tree_obj.data, &base_files, allocator);
     
-    // No conflicts found in this simplified implementation
-    return false;
+    var current_files = std.StringHashMap([]const u8).init(allocator);
+    defer {
+        var iterator = current_files.iterator();
+        while (iterator.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.*);
+        }
+        current_files.deinit();
+    }
+    try parseTreeIntoMap(current_tree_obj.data, &current_files, allocator);
+    
+    var target_files = std.StringHashMap([]const u8).init(allocator);
+    defer {
+        var iterator = target_files.iterator();
+        while (iterator.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.*);
+        }
+        target_files.deinit();
+    }
+    try parseTreeIntoMap(target_tree_obj.data, &target_files, allocator);
+    
+    // Perform 3-way merge
+    return try performThreeWayFileMerge(git_path, &base_files, &current_files, &target_files, allocator, platform_impl);
+}
+
+/// Parse tree data into a map of filename -> blob hash
+fn parseTreeIntoMap(tree_data: []const u8, file_map: *std.StringHashMap([]const u8), allocator: std.mem.Allocator) !void {
+    var i: usize = 0;
+    
+    while (i < tree_data.len) {
+        // Parse tree entry: "<mode> <name>\0<20-byte-hash>"
+        const mode_start = i;
+        const space_pos = std.mem.indexOf(u8, tree_data[i..], " ") orelse break;
+        const mode = tree_data[mode_start..mode_start + space_pos];
+        _ = mode; // We'll ignore mode for simplicity
+        
+        i = mode_start + space_pos + 1;
+        const name_start = i;
+        const null_pos = std.mem.indexOf(u8, tree_data[i..], "\x00") orelse break;
+        const name = tree_data[name_start..name_start + null_pos];
+        
+        i = name_start + null_pos + 1;
+        if (i + 20 > tree_data.len) break;
+        
+        // Extract 20-byte hash and convert to hex string
+        const hash_bytes = tree_data[i..i + 20];
+        const hash_hex = try allocator.alloc(u8, 40);
+        _ = std.fmt.bufPrint(hash_hex, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch {
+            allocator.free(hash_hex);
+            break;
+        };
+        
+        i += 20;
+        
+        // Only handle blob files for now (not subtrees)
+        if (name.len > 0 and name[0] != '.') {
+            const name_copy = try allocator.dupe(u8, name);
+            try file_map.put(name_copy, hash_hex);
+        } else {
+            allocator.free(hash_hex);
+        }
+    }
+}
+
+/// Perform 3-way merge on files and detect conflicts
+fn performThreeWayFileMerge(git_path: []const u8, base_files: *std.StringHashMap([]const u8), current_files: *std.StringHashMap([]const u8), target_files: *std.StringHashMap([]const u8), allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !bool {
+    var conflicts_found = false;
+    const repo_root = std.fs.path.dirname(git_path) orelse ".";
+    
+    // Get all unique filenames across the three trees
+    var all_files = std.StringHashMap(void).init(allocator);
+    defer {
+        var iterator = all_files.iterator();
+        while (iterator.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+        }
+        all_files.deinit();
+    }
+    
+    // Collect all filenames
+    var base_iterator = base_files.iterator();
+    while (base_iterator.next()) |entry| {
+        const name_copy = try allocator.dupe(u8, entry.key_ptr.*);
+        try all_files.put(name_copy, {});
+    }
+    
+    var current_iterator = current_files.iterator();
+    while (current_iterator.next()) |entry| {
+        if (!all_files.contains(entry.key_ptr.*)) {
+            const name_copy = try allocator.dupe(u8, entry.key_ptr.*);
+            try all_files.put(name_copy, {});
+        }
+    }
+    
+    var target_iterator = target_files.iterator();
+    while (target_iterator.next()) |entry| {
+        if (!all_files.contains(entry.key_ptr.*)) {
+            const name_copy = try allocator.dupe(u8, entry.key_ptr.*);
+            try all_files.put(name_copy, {});
+        }
+    }
+    
+    // Process each file
+    var all_files_iterator = all_files.iterator();
+    while (all_files_iterator.next()) |entry| {
+        const filename = entry.key_ptr.*;
+        
+        const base_hash = base_files.get(filename);
+        const current_hash = current_files.get(filename);
+        const target_hash = target_files.get(filename);
+        
+        // Determine merge action
+        if (base_hash == null and current_hash == null and target_hash != null) {
+            // File added in target branch
+            try writeFileFromBlob(git_path, filename, target_hash.?, repo_root, allocator, platform_impl);
+        } else if (base_hash == null and current_hash != null and target_hash == null) {
+            // File added in current branch  
+            try writeFileFromBlob(git_path, filename, current_hash.?, repo_root, allocator, platform_impl);
+        } else if (base_hash != null and current_hash == null and target_hash == null) {
+            // File deleted in both branches - remove it
+            const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, filename });
+            defer allocator.free(file_path);
+            std.fs.cwd().deleteFile(file_path) catch {};
+        } else if (base_hash != null and current_hash != null and target_hash == null) {
+            // File deleted in target branch
+            const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, filename });
+            defer allocator.free(file_path);
+            std.fs.cwd().deleteFile(file_path) catch {};
+        } else if (base_hash != null and current_hash == null and target_hash != null) {
+            // File deleted in current branch
+            const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, filename });
+            defer allocator.free(file_path);
+            std.fs.cwd().deleteFile(file_path) catch {};
+        } else if (current_hash != null and target_hash != null) {
+            if (std.mem.eql(u8, current_hash.?, target_hash.?)) {
+                // No change needed - both have same content
+                try writeFileFromBlob(git_path, filename, current_hash.?, repo_root, allocator, platform_impl);
+            } else {
+                // Conflict: both sides modified the file
+                conflicts_found = true;
+                try createConflictFile(git_path, filename, base_hash, current_hash.?, target_hash.?, repo_root, allocator, platform_impl);
+            }
+        }
+    }
+    
+    return conflicts_found;
+}
+
+/// Write a file from a blob hash
+fn writeFileFromBlob(git_path: []const u8, filename: []const u8, blob_hash: []const u8, repo_root: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    const blob_obj = objects.GitObject.load(blob_hash, git_path, platform_impl, allocator) catch return;
+    defer blob_obj.deinit(allocator);
+    
+    if (blob_obj.type != .blob) return;
+    
+    const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, filename });
+    defer allocator.free(file_path);
+    
+    // Create parent directories if needed
+    if (std.fs.path.dirname(file_path)) |parent_dir| {
+        std.fs.cwd().makePath(parent_dir) catch {};
+    }
+    
+    try platform_impl.fs.writeFile(file_path, blob_obj.data);
+}
+
+/// Create a conflict file with markers
+fn createConflictFile(git_path: []const u8, filename: []const u8, base_hash: ?[]const u8, current_hash: []const u8, target_hash: []const u8, repo_root: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    // Load file contents
+    const current_content = blk: {
+        const blob_obj = objects.GitObject.load(current_hash, git_path, platform_impl, allocator) catch break :blk "";
+        defer blob_obj.deinit(allocator);
+        if (blob_obj.type != .blob) break :blk "";
+        break :blk try allocator.dupe(u8, blob_obj.data);
+    };
+    defer if (current_content.len > 0) allocator.free(current_content);
+    
+    const target_content = blk: {
+        const blob_obj = objects.GitObject.load(target_hash, git_path, platform_impl, allocator) catch break :blk "";
+        defer blob_obj.deinit(allocator);
+        if (blob_obj.type != .blob) break :blk "";
+        break :blk try allocator.dupe(u8, blob_obj.data);
+    };
+    defer if (target_content.len > 0) allocator.free(target_content);
+    
+    // Create conflict content with markers
+    var conflict_content = std.ArrayList(u8).init(allocator);
+    defer conflict_content.deinit();
+    
+    const writer = conflict_content.writer();
+    try writer.print("{s}", .{"<<<<<<< HEAD\n"});
+    try writer.writeAll(current_content);
+    if (current_content.len > 0 and current_content[current_content.len - 1] != '\n') {
+        try writer.writeByte('\n');
+    }
+    try writer.print("{s}", .{"=======\n"});
+    try writer.writeAll(target_content);
+    if (target_content.len > 0 and target_content[target_content.len - 1] != '\n') {
+        try writer.writeByte('\n');
+    }
+    try writer.print("{s}", .{">>>>>>> branch\n"});
+    
+    // Write conflict file
+    const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, filename });
+    defer allocator.free(file_path);
+    
+    // Create parent directories if needed
+    if (std.fs.path.dirname(file_path)) |parent_dir| {
+        std.fs.cwd().makePath(parent_dir) catch {};
+    }
+    
+    try platform_impl.fs.writeFile(file_path, conflict_content.items);
+    
+    _ = base_hash; // TODO: Could use base content for better 3-way merge
 }
 
 /// Create a merge commit with two parents
@@ -1591,7 +1808,7 @@ fn createMergeCommit(git_path: []const u8, current_hash: []const u8, target_hash
     defer allocator.free(commit_hash);
     
     // Update current branch to point to merge commit
-    try refs.updateRef(git_path, try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{current_branch}), commit_hash, platform_impl, allocator);
+    try refs.updateRef(git_path, current_branch, commit_hash, platform_impl, allocator);
 }
 
 fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
