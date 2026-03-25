@@ -59,7 +59,7 @@ pub fn build(b: *std.Build) void {
 
     const wasm_exe = b.addExecutable(.{
         .name = "ziggit",
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("src/main_wasi.zig"),
         .target = wasm_target,
         .optimize = .ReleaseSmall,
     });
