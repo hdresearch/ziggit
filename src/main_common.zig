@@ -538,6 +538,15 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         std.process.exit(1);
     }
 
+    // Check for empty or whitespace-only message (to match git behavior)
+    if (message) |msg| {
+        const trimmed = std.mem.trim(u8, msg, " \t\n\r");
+        if (trimmed.len == 0) {
+            try platform_impl.writeStderr("Aborting commit due to empty commit message.\n");
+            std.process.exit(1);
+        }
+    }
+
     // Find .git directory
     const git_path = findGitDirectory(allocator, platform_impl) catch {
         try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
