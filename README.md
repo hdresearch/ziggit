@@ -95,6 +95,7 @@ This script:
 - Performance may be slightly reduced compared to native
 - Memory allocation constraints may affect large repositories
 - WASI runtime required for full filesystem access
+- **Git object compression disabled for WASM stability** - Objects are stored uncompressed to avoid zlib memory issues in WebAssembly. This maintains functionality while slightly increasing repository size. Full git compatibility with compression will be restored in future releases.
 
 **Usage:**
 ```bash
@@ -174,7 +175,7 @@ This ensures the core git logic remains completely platform-agnostic while provi
 
 ## Verification
 
-✅ **Last verified**: 2026-03-25 21:56 UTC - **Complete WebAssembly Implementation Verified** 
+✅ **Last verified**: 2026-03-25 22:05 UTC - **Complete WebAssembly Implementation Verified** 
    - **All builds compile successfully**: `zig build`, `zig build wasm`, `zig build wasm-browser` 
    - **Complete WASM workflow verified**: Full git lifecycle (init → add → status) tested end-to-end in wasmtime
    - **Platform abstraction validated**: src/platform/ interface working perfectly across native, WASI, and freestanding targets
