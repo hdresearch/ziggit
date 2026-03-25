@@ -11,9 +11,51 @@ A modern version control system written in Zig — a drop-in replacement for git
 
 ## Building
 
+### Native build
 ```bash
+export ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache
 zig build
 ```
+
+### WebAssembly (WASI)
+```bash
+export ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache
+zig build wasm
+```
+
+This produces `zig-out/bin/ziggit.wasm` that can be run with WASI runtimes like:
+- [wasmtime](https://wasmtime.dev/): `wasmtime zig-out/bin/ziggit.wasm`
+- [wasmer](https://wasmer.io/): `wasmer zig-out/bin/ziggit.wasm`
+
+### WebAssembly (Browser/Freestanding)
+```bash
+export ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache  
+zig build wasm-browser  # Currently disabled due to stdlib compatibility issues
+```
+
+## WebAssembly Limitations
+
+### WASI Build
+- Filesystem operations work through WASI APIs
+- Network operations are stubbed/limited by WASI capabilities
+- Working directory changes may not be supported
+- Some system-level git operations may be limited
+
+### Browser/Freestanding Build
+- Currently disabled due to Zig stdlib POSIX dependencies in freestanding target
+- Would require virtual filesystem implementation
+- All I/O operations need JavaScript host functions
+- No direct filesystem access
+- Network operations require JavaScript implementation
+
+## Platform Abstraction
+
+The codebase uses a platform abstraction layer in `src/platform/` that allows ziggit to run on different targets:
+- `native.zig`: Standard POSIX/Windows platforms
+- `wasi.zig`: WebAssembly System Interface
+- `freestanding.zig`: Browser/embedded (in development)
+
+This ensures the core git logic remains platform-agnostic while supporting different runtime environments.
 
 ## License
 
