@@ -556,12 +556,9 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     };
     defer allocator.free(git_path);
 
-    const file_path = args.next() orelse {
-        try platform_impl.writeStderr("Nothing specified, nothing added.\n");
-        try platform_impl.writeStderr("hint: Maybe you wanted to say 'git add .'?\n");
-        return;
-    };
-
+    // Check if any files were specified
+    var has_files = false;
+    
     // Load index
     var index = index_mod.Index.load(git_path, platform_impl, allocator) catch |err| switch (err) {
         error.FileNotFound => index_mod.Index.init(allocator),
@@ -573,41 +570,51 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     const cwd = try platform_impl.fs.getCwd(allocator);
     defer allocator.free(cwd);
 
-    // Handle special cases like "." for current directory
-    if (std.mem.eql(u8, file_path, ".")) {
-        // Add all files in current directory (recursively)
-        try addDirectoryRecursively(allocator, cwd, "", &index, git_path, platform_impl);
-    } else {
-        // Resolve file path 
-        const full_file_path = if (std.fs.path.isAbsolute(file_path))
-            try allocator.dupe(u8, file_path)
-        else
-            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd, file_path });
-        defer allocator.free(full_file_path);
-
-        // Check if path exists
-        if (!(platform_impl.fs.exists(full_file_path) catch false)) {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: pathspec '{s}' did not match any files\n", .{file_path});
-            defer allocator.free(msg);
-            try platform_impl.writeStderr(msg);
-            std.process.exit(128);
-        }
-
-        // Check if it's a directory or file
-        const metadata = std.fs.cwd().statFile(full_file_path) catch {
-            // If we can't stat it, try to add it as a regular file
-            try addSingleFile(allocator, file_path, full_file_path, &index, git_path, platform_impl, cwd);
-            try index.save(git_path, platform_impl);
-            return;
-        };
-
-        if (metadata.kind == .directory) {
-            // Add directory recursively
-            try addDirectoryRecursively(allocator, cwd, file_path, &index, git_path, platform_impl);
+    // Process all file arguments
+    while (args.next()) |file_path| {
+        has_files = true;
+        
+        // Handle special cases like "." for current directory
+        if (std.mem.eql(u8, file_path, ".")) {
+            // Add all files in current directory (recursively)
+            try addDirectoryRecursively(allocator, cwd, "", &index, git_path, platform_impl);
         } else {
-            // Add single file
-            try addSingleFile(allocator, file_path, full_file_path, &index, git_path, platform_impl, cwd);
+            // Resolve file path 
+            const full_file_path = if (std.fs.path.isAbsolute(file_path))
+                try allocator.dupe(u8, file_path)
+            else
+                try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd, file_path });
+            defer allocator.free(full_file_path);
+
+            // Check if path exists
+            if (!(platform_impl.fs.exists(full_file_path) catch false)) {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: pathspec '{s}' did not match any files\n", .{file_path});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            }
+
+            // Check if it's a directory or file
+            const metadata = std.fs.cwd().statFile(full_file_path) catch {
+                // If we can't stat it, try to add it as a regular file
+                try addSingleFile(allocator, file_path, full_file_path, &index, git_path, platform_impl, cwd);
+                continue;
+            };
+
+            if (metadata.kind == .directory) {
+                // Add directory recursively
+                try addDirectoryRecursively(allocator, cwd, file_path, &index, git_path, platform_impl);
+            } else {
+                // Add single file
+                try addSingleFile(allocator, file_path, full_file_path, &index, git_path, platform_impl, cwd);
+            }
         }
+    }
+
+    if (!has_files) {
+        try platform_impl.writeStderr("Nothing specified, nothing added.\n");
+        try platform_impl.writeStderr("hint: Maybe you wanted to say 'git add .'?\n");
+        return;
     }
 
     // Save index
