@@ -226,6 +226,48 @@ pub fn build(b: *std.Build) void {
     // Add comprehensive tests to main test step
     test_step.dependOn(&run_comprehensive_git_tests.step);
 
+    // Git source compatibility test suite (newly improved)
+    const git_source_compatibility = b.addExecutable(.{
+        .name = "git_source_compatibility",
+        .root_source_file = b.path("test/git_source_compatibility.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_git_source_compatibility = b.addRunArtifact(git_source_compatibility);
+    run_git_source_compatibility.step.dependOn(b.getInstallStep()); // Ensure ziggit is built first
+
+    const git_source_compatibility_step = b.step("test-git-source", "Run improved git source compatibility tests");
+    git_source_compatibility_step.dependOn(&run_git_source_compatibility.step);
+
+    // Advanced git compatibility test suite
+    const git_advanced_compatibility = b.addExecutable(.{
+        .name = "git_advanced_compatibility",
+        .root_source_file = b.path("test/git_advanced_compatibility.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_git_advanced_compatibility = b.addRunArtifact(git_advanced_compatibility);
+    run_git_advanced_compatibility.step.dependOn(b.getInstallStep()); // Ensure ziggit is built first
+
+    const git_advanced_compatibility_step = b.step("test-git-advanced", "Run advanced git compatibility tests");
+    git_advanced_compatibility_step.dependOn(&run_git_advanced_compatibility.step);
+
+    // Git output comparison test suite
+    const git_output_comparison = b.addExecutable(.{
+        .name = "git_output_comparison",
+        .root_source_file = b.path("test/git_output_comparison.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_git_output_comparison = b.addRunArtifact(git_output_comparison);
+    run_git_output_comparison.step.dependOn(b.getInstallStep()); // Ensure ziggit is built first
+
+    const git_output_comparison_step = b.step("test-output-comparison", "Run git output format comparison tests");
+    git_output_comparison_step.dependOn(&run_git_output_comparison.step);
+
     // WebAssembly target (WASI)
     const wasm_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
