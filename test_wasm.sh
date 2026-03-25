@@ -1,45 +1,50 @@
 #!/bin/bash
 
-# Test script for WebAssembly builds
+# Test script to demonstrate ziggit WebAssembly functionality
+
 set -e
 
-export ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache
-
-echo "=== Testing ziggit WebAssembly builds ==="
-echo
+echo "🚀 Testing ziggit WebAssembly builds..."
 
 # Build all targets
+export ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache
 echo "Building all targets..."
 zig build
 zig build wasm  
 zig build wasm-browser
 
-echo "✅ All builds completed successfully"
-echo
+echo ""
+echo "📊 Build results:"
+ls -lh zig-out/bin/
 
-# Check file sizes
-echo "Build sizes:"
-ls -lh zig-out/bin/ziggit*
+echo ""
+echo "🧪 Testing WASI build with wasmtime..."
 
-echo
-echo "=== Testing WASI build ==="
+# Test version
+echo "Version check:"
+wasmtime zig-out/bin/ziggit.wasm --version
 
-# Test basic commands
-echo "Testing --version:"
-wasmtime --dir . zig-out/bin/ziggit.wasm --version
+# Test help
+echo ""
+echo "Help output:"
+wasmtime zig-out/bin/ziggit.wasm --help | head -5
 
-echo
-echo "Testing --help:"
-wasmtime --dir . zig-out/bin/ziggit.wasm --help | head -10
+# Test init in a temporary directory
+echo ""
+echo "Testing repository initialization:"
+cd /tmp
+rm -rf wasm-test-repo 2>/dev/null || true
+wasmtime --dir . /root/ziggit/zig-out/bin/ziggit.wasm init wasm-test-repo
 
-# Test in a temporary directory
-echo
-echo "Testing status in non-git directory:"
-mkdir -p /tmp/wasm-test
-cd /tmp/wasm-test
-wasmtime --dir . /root/ziggit/zig-out/bin/ziggit.wasm status 2>&1 | grep -q "not a git repository" && echo "✅ Error handling works correctly"
+# Test status
+echo ""
+echo "Testing status command:"
+cd wasm-test-repo
+wasmtime --dir . /root/ziggit/zig-out/bin/ziggit.wasm status
 
-cd /root/ziggit
-
-echo
-echo "=== WebAssembly builds are working correctly! ==="
+echo ""
+echo "✅ All WebAssembly tests passed!"
+echo ""
+echo "🌐 Browser build is available at zig-out/bin/ziggit-browser.wasm"
+echo "   Size: $(du -h zig-out/bin/ziggit-browser.wasm | cut -f1)"
+echo "   See README.md for JavaScript integration examples."
