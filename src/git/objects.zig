@@ -82,9 +82,14 @@ pub const GitObject = struct {
         const content = try std.mem.concat(allocator, u8, &[_][]const u8{ header, self.data });
         defer allocator.free(content);
 
-        // Compress the content using zlib (simplified - just store raw for now)
-        // TODO: Add proper zlib compression when available across all platforms
-        try platform_impl.fs.writeFile(obj_file_path, content);
+        // Compress the content using zlib for git compatibility
+        var compressed_data = std.ArrayList(u8).init(allocator);
+        defer compressed_data.deinit();
+        
+        var input_stream = std.io.fixedBufferStream(content);
+        try std.compress.zlib.compress(input_stream.reader(), compressed_data.writer(), .{});
+        
+        try platform_impl.fs.writeFile(obj_file_path, compressed_data.items);
 
         return try allocator.dupe(u8, hash_str);
     }
@@ -96,20 +101,24 @@ pub const GitObject = struct {
         const obj_file_path = try std.fmt.allocPrint(allocator, "{s}/objects/{s}/{s}", .{ git_dir, obj_dir, obj_file });
         defer allocator.free(obj_file_path);
 
-        const content = platform_impl.fs.readFile(allocator, obj_file_path) catch |err| switch (err) {
+        const compressed_content = platform_impl.fs.readFile(allocator, obj_file_path) catch |err| switch (err) {
             error.FileNotFound => return error.ObjectNotFound,
             else => return err,
         };
-        defer allocator.free(content);
+        defer allocator.free(compressed_content);
 
-        // For now, assume uncompressed storage (simplified)
-        // TODO: Add proper zlib decompression when available across all platforms
+        // Decompress using zlib for git compatibility
+        var content = std.ArrayList(u8).init(allocator);
+        defer content.deinit();
+        
+        var compressed_stream = std.io.fixedBufferStream(compressed_content);
+        try std.compress.zlib.decompress(compressed_stream.reader(), content.writer());
 
         // Parse the object
-        const null_pos = std.mem.indexOf(u8, content, "\x00") orelse return error.InvalidObject;
+        const null_pos = std.mem.indexOf(u8, content.items, "\x00") orelse return error.InvalidObject;
         
-        const header = content[0..null_pos];
-        const data = content[null_pos + 1 ..];
+        const header = content.items[0..null_pos];
+        const data = content.items[null_pos + 1 ..];
         
         const space_pos = std.mem.indexOf(u8, header, " ") orelse return error.InvalidObject;
         const type_str = header[0..space_pos];

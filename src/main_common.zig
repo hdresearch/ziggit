@@ -631,6 +631,13 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     
     try refs.updateRef(git_path, current_branch, commit_hash, platform_impl, allocator);
 
+    // Clear the index after successful commit (like git does)
+    for (index.entries.items) |entry| {
+        entry.deinit(allocator);
+    }
+    index.entries.clearAndFree();
+    try index.save(git_path, platform_impl);
+
     // Output success message
     const short_hash = commit_hash[0..7];
     const success_msg = try std.fmt.allocPrint(allocator, "[{s} {s}] {s}\n", .{ current_branch, short_hash, message.? });
