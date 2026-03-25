@@ -285,7 +285,11 @@ fn generateHunksFromEdits(old_lines: []const []const u8, new_lines: []const []co
     // Close final hunk if exists
     if (current_hunk != null) {
         // Add trailing context
-        const max_context = @min(context_lines, old_lines.len - edits[last_change_idx].old_index - 1);
+        const remaining_lines = if (edits[last_change_idx].old_index + 1 < old_lines.len) 
+            old_lines.len - (edits[last_change_idx].old_index + 1)
+        else 
+            0;
+        const max_context = @min(context_lines, remaining_lines);
         var ctx_idx: usize = 0;
         while (ctx_idx < max_context and edits[last_change_idx].old_index + 1 + ctx_idx < old_lines.len) : (ctx_idx += 1) {
             try current_hunk.?.addLine(.context, old_lines[edits[last_change_idx].old_index + 1 + ctx_idx], allocator);
