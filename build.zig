@@ -86,4 +86,25 @@ pub fn build(b: *std.Build) void {
 
     const wasm_browser_step = b.step("wasm-browser", "Build for WebAssembly (freestanding/browser)");
     wasm_browser_step.dependOn(&b.addInstallArtifact(wasm_freestanding_exe, .{}).step);
+
+    // Benchmark executable
+    const benchmark_exe = b.addExecutable(.{
+        .name = "ziggit-bench",
+        .root_source_file = b.path("benchmarks/bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    const ziggit_module = b.addModule("ziggit", .{
+        .root_source_file = b.path("src/lib/ziggit.zig"),
+    });
+    benchmark_exe.root_module.addImport("ziggit", ziggit_module);
+
+    const run_benchmark = b.addRunArtifact(benchmark_exe);
+    const bench_step = b.step("bench", "Run benchmarks");
+    bench_step.dependOn(&run_benchmark.step);
+
+    // Also install the benchmark executable
+    const install_benchmark = b.addInstallArtifact(benchmark_exe, .{});
+    bench_step.dependOn(&install_benchmark.step);
 }
