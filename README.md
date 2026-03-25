@@ -175,7 +175,7 @@ This ensures the core git logic remains completely platform-agnostic while provi
 
 ## Verification
 
-✅ **Last verified**: 2026-03-25 22:10 UTC - **Complete WebAssembly Implementation Verified** 
+✅ **Last verified**: 2026-03-25 22:15 UTC - **Complete WebAssembly Implementation Verified** 
    - **All builds compile successfully**: `zig build`, `zig build wasm`, `zig build wasm-browser` 
    - **Complete WASM workflow verified**: Full git lifecycle (init → add → status) tested end-to-end in wasmtime
    - **Platform abstraction validated**: src/platform/ interface working perfectly across native, WASI, and freestanding targets
@@ -198,11 +198,11 @@ This ensures the core git logic remains completely platform-agnostic while provi
 - ✅ **Full commit workflow verified**: Created repository, staged file, committed with proper SHA-1 hash generation
 - ✅ **WebAssembly End-to-End Testing**: Complete git workflow tested in WASI - init → add → commit → log all working perfectly
 - ✅ **Latest WASI verification** (2026-03-25): Full workflow tested with Zig 0.13.0 + wasmtime - repository creation, file staging, committing with SHA-1 hash generation, and log history all working flawlessly in WebAssembly
-- ✅ **File size optimization confirmed**: WASI build (181KB), Browser build (4.3KB) - excellent for production use
+- ✅ **File size optimization confirmed**: WASI build (152KB), Browser build (8.0KB) - excellent for production use
 - ✅ **Build verification**: All three targets compile cleanly without warnings or errors
-  - Native build: Produces `zig-out/bin/ziggit` (4.2MB executable)
-  - WASI build: Produces `zig-out/bin/ziggit.wasm` (171KB module)  
-  - Browser build: Produces `zig-out/bin/ziggit-browser.wasm` (4.3KB optimized module)
+  - Native build: Produces `zig-out/bin/ziggit` (4.1MB executable)
+  - WASI build: Produces `zig-out/bin/ziggit.wasm` (152KB module)  
+  - Browser build: Produces `zig-out/bin/ziggit-browser.wasm` (8.0KB optimized module)
 
 ## License
 
