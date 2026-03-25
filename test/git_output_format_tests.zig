@@ -73,9 +73,10 @@ const TestFramework = struct {
     }
     
     fn createFile(self: *TestFramework, dir_path: []const u8, filename: []const u8, content: []const u8) !void {
+        _ = self;
         var buf: [512]u8 = undefined;
         const file_path = try std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir_path, filename });
-        try fs.cwd().writeFile(file_path, content);
+        try fs.cwd().writeFile(.{ .sub_path = file_path, .data = content });
     }
     
     fn compareOutput(self: *TestFramework, description: []const u8, ziggit_out: []const u8, git_out: []const u8, strict: bool) void {
@@ -104,14 +105,15 @@ const TestFramework = struct {
         }
     }
     
-    deinit: fn(*TestFramework) void = struct {
-        fn deinit(_: *TestFramework) void {}
-    }.deinit,
+    
+    pub fn deinit(self: *TestFramework) void {
+        _ = self;
+    }
 };
 
 // Test init output format matching
 fn testInitOutputFormat(tf: *TestFramework) !void {
-    print("  Testing init output format matching...\n");
+    print("  Testing init output format matching...\n", .{});
     
     // Test 1: Basic init output
     {
@@ -131,9 +133,9 @@ fn testInitOutputFormat(tf: *TestFramework) !void {
         const git_mentions_init = std.mem.indexOf(u8, git_result.stdout, "init") != null;
         
         if (ziggit_mentions_init == git_mentions_init) {
-            print("    ✓ basic init output format matches\n");
+            print("    ✓ basic init output format matches\n", .{});
         } else {
-            print("    ⚠ basic init output format differs\n");
+            print("    ⚠ basic init output format differs\n", .{});
             print("      ziggit: '{s}'\n", .{ziggit_result.stdout});
             print("      git:    '{s}'\n", .{git_result.stdout});
         }
@@ -156,9 +158,9 @@ fn testInitOutputFormat(tf: *TestFramework) !void {
         const git_mentions_bare = std.mem.indexOf(u8, git_result.stdout, "bare") != null;
         
         if (ziggit_mentions_bare and git_mentions_bare) {
-            print("    ✓ bare init output format matches\n");
+            print("    ✓ bare init output format matches\n", .{});
         } else {
-            print("    ⚠ bare init output format differs\n");
+            print("    ⚠ bare init output format differs\n", .{});
             print("      ziggit: '{s}'\n", .{ziggit_result.stdout});
             print("      git:    '{s}'\n", .{git_result.stdout});
         }
@@ -167,7 +169,7 @@ fn testInitOutputFormat(tf: *TestFramework) !void {
 
 // Test status output format matching
 fn testStatusOutputFormat(tf: *TestFramework) !void {
-    print("  Testing status output format matching...\n");
+    print("  Testing status output format matching...\n", .{});
     
     const test_dir = try tf.createTestDir("status-format");
     defer tf.cleanupDir(test_dir);
@@ -190,9 +192,9 @@ fn testStatusOutputFormat(tf: *TestFramework) !void {
         const git_mentions_branch = std.mem.indexOf(u8, git_result.stdout, "branch") != null;
         
         if (ziggit_mentions_branch == git_mentions_branch) {
-            print("    ✓ empty repo status format matches\n");
+            print("    ✓ empty repo status format matches\n", .{});
         } else {
-            print("    ⚠ empty repo status format differs\n");
+            print("    ⚠ empty repo status format differs\n", .{});
             print("      ziggit: '{s}'\n", .{ziggit_result.stdout});
             print("      git:    '{s}'\n", .{git_result.stdout});
         }
@@ -215,9 +217,9 @@ fn testStatusOutputFormat(tf: *TestFramework) !void {
         const git_shows_untracked = std.mem.indexOf(u8, git_result.stdout, "Untracked files") != null;
         
         if (ziggit_shows_untracked == git_shows_untracked) {
-            print("    ✓ untracked files status format matches\n");
+            print("    ✓ untracked files status format matches\n", .{});
         } else {
-            print("    ⚠ untracked files status format differs\n");
+            print("    ⚠ untracked files status format differs\n", .{});
             print("      ziggit shows untracked: {}\n", .{ziggit_shows_untracked});
             print("      git shows untracked: {}\n", .{git_shows_untracked});
             print("      ziggit: '{s}'\n", .{ziggit_result.stdout});
@@ -241,9 +243,9 @@ fn testStatusOutputFormat(tf: *TestFramework) !void {
         const git_shows_staged = std.mem.indexOf(u8, git_result.stdout, "Changes to be committed") != null;
         
         if (ziggit_shows_staged and git_shows_staged) {
-            print("    ✓ staged files status format includes staged section\n");
+            print("    ✓ staged files status format includes staged section\n", .{});
         } else {
-            print("    ⚠ staged files status format missing staged section\n");
+            print("    ⚠ staged files status format missing staged section\n", .{});
             print("      ziggit: '{s}'\n", .{ziggit_result.stdout});
             print("      git:    '{s}'\n", .{git_result.stdout});
         }
@@ -252,7 +254,7 @@ fn testStatusOutputFormat(tf: *TestFramework) !void {
 
 // Test add output format (should be silent on success)
 fn testAddOutputFormat(tf: *TestFramework) !void {
-    print("  Testing add output format matching...\n");
+    print("  Testing add output format matching...\n", .{});
     
     const test_dir = try tf.createTestDir("add-format");
     defer tf.cleanupDir(test_dir);
@@ -272,9 +274,9 @@ fn testAddOutputFormat(tf: *TestFramework) !void {
         
         const both_silent = (ziggit_result.stdout.len == 0) and (git_result.stdout.len == 0);
         if (both_silent and ziggit_result.exit_code == 0 and git_result.exit_code == 0) {
-            print("    ✓ successful add is silent (like git)\n");
+            print("    ✓ successful add is silent (like git)\n", .{});
         } else {
-            print("    ⚠ add output differs from git\n");
+            print("    ⚠ add output differs from git\n", .{});
             print("      ziggit stdout len: {d}, exit: {d}\n", .{ ziggit_result.stdout.len, ziggit_result.exit_code });
             print("      git stdout len: {d}, exit: {d}\n", .{ git_result.stdout.len, git_result.exit_code });
         }
@@ -294,9 +296,9 @@ fn testAddOutputFormat(tf: *TestFramework) !void {
         const both_have_error = (ziggit_result.stderr.len > 0) and (git_result.stderr.len > 0);
         
         if (both_failed and both_have_error) {
-            print("    ✓ add non-existent file errors appropriately\n");
+            print("    ✓ add non-existent file errors appropriately\n", .{});
         } else {
-            print("    ⚠ add non-existent file error format differs\n");
+            print("    ⚠ add non-existent file error format differs\n", .{});
             print("      ziggit stderr: '{s}'\n", .{ziggit_result.stderr});
             print("      git stderr: '{s}'\n", .{git_result.stderr});
         }
@@ -305,7 +307,7 @@ fn testAddOutputFormat(tf: *TestFramework) !void {
 
 // Test commit output format
 fn testCommitOutputFormat(tf: *TestFramework) !void {
-    print("  Testing commit output format matching...\n");
+    print("  Testing commit output format matching...\n", .{});
     
     const test_dir = try tf.createTestDir("commit-format");
     defer tf.cleanupDir(test_dir);
@@ -333,9 +335,9 @@ fn testCommitOutputFormat(tf: *TestFramework) !void {
         const git_mentions_commit = git_result.stdout.len > 0;
         
         if (both_successful and (ziggit_mentions_commit == git_mentions_commit)) {
-            print("    ✓ successful commit format appropriate\n");
+            print("    ✓ successful commit format appropriate\n", .{});
         } else {
-            print("    ⚠ commit output format differs\n");
+            print("    ⚠ commit output format differs\n", .{});
             print("      ziggit: '{s}' (exit: {d})\n", .{ ziggit_result.stdout, ziggit_result.exit_code });
             print("      git:    '{s}' (exit: {d})\n", .{ git_result.stdout, git_result.exit_code });
         }
@@ -353,9 +355,9 @@ fn testCommitOutputFormat(tf: *TestFramework) !void {
         
         const both_failed = (ziggit_result.exit_code != 0) and (git_result.exit_code != 0);
         if (both_failed) {
-            print("    ✓ commit nothing to commit fails appropriately\n");
+            print("    ✓ commit nothing to commit fails appropriately\n", .{});
         } else {
-            print("    ⚠ commit nothing to commit handling differs\n");
+            print("    ⚠ commit nothing to commit handling differs\n", .{});
             print("      ziggit exit: {d}, git exit: {d}\n", .{ ziggit_result.exit_code, git_result.exit_code });
         }
     }
@@ -363,7 +365,7 @@ fn testCommitOutputFormat(tf: *TestFramework) !void {
 
 // Test log output format
 fn testLogOutputFormat(tf: *TestFramework) !void {
-    print("  Testing log output format matching...\n");
+    print("  Testing log output format matching...\n", .{});
     
     const test_dir = try tf.createTestDir("log-format");
     defer tf.cleanupDir(test_dir);
@@ -382,7 +384,7 @@ fn testLogOutputFormat(tf: *TestFramework) !void {
         
         const both_failed = (ziggit_result.exit_code != 0) and (git_result.exit_code != 0);
         if (both_failed) {
-            print("    ✓ log empty repo fails appropriately\n");
+            print("    ✓ log empty repo fails appropriately\n", .{});
         } else {
             print("    ⚠ log empty repo handling differs: ziggit={d}, git={d}\n", 
                   .{ ziggit_result.exit_code, git_result.exit_code });
@@ -406,9 +408,9 @@ fn testLogOutputFormat(tf: *TestFramework) !void {
         const git_shows_commit = std.mem.indexOf(u8, git_result.stdout, "commit") != null;
         
         if (both_successful and ziggit_shows_commit and git_shows_commit) {
-            print("    ✓ log with commits shows commit info\n");
+            print("    ✓ log with commits shows commit info\n", .{});
         } else {
-            print("    ⚠ log with commits format differs\n");
+            print("    ⚠ log with commits format differs\n", .{});
             print("      ziggit success: {}, shows commit: {}\n", .{ ziggit_result.exit_code == 0, ziggit_shows_commit });
             print("      git success: {}, shows commit: {}\n", .{ git_result.exit_code == 0, git_shows_commit });
         }
@@ -417,7 +419,7 @@ fn testLogOutputFormat(tf: *TestFramework) !void {
 
 // Test help and version output format
 fn testHelpVersionFormat(tf: *TestFramework) !void {
-    print("  Testing help and version output format...\n");
+    print("  Testing help and version output format...\n", .{});
     
     // Test --help
     {
@@ -431,9 +433,9 @@ fn testHelpVersionFormat(tf: *TestFramework) !void {
         const git_shows_usage = std.mem.indexOf(u8, git_result.stdout, "usage") != null;
         
         if (ziggit_shows_usage and git_shows_usage) {
-            print("    ✓ --help shows usage information\n");
+            print("    ✓ --help shows usage information\n", .{});
         } else {
-            print("    ⚠ --help format differs\n");
+            print("    ⚠ --help format differs\n", .{});
             print("      ziggit shows usage: {}\n", .{ziggit_shows_usage});
             print("      git shows usage: {}\n", .{git_shows_usage});
         }
@@ -452,9 +454,9 @@ fn testHelpVersionFormat(tf: *TestFramework) !void {
         const git_shows_version = git_result.stdout.len > 0;
         
         if (both_successful and ziggit_shows_version and git_shows_version) {
-            print("    ✓ --version shows version information\n");
+            print("    ✓ --version shows version information\n", .{});
         } else {
-            print("    ⚠ --version format differs\n");
+            print("    ⚠ --version format differs\n", .{});
             print("      ziggit: '{s}' (exit: {d})\n", .{ ziggit_result.stdout, ziggit_result.exit_code });
             print("      git:    '{s}' (exit: {d})\n", .{ git_result.stdout, git_result.exit_code });
         }
@@ -462,7 +464,7 @@ fn testHelpVersionFormat(tf: *TestFramework) !void {
 }
 
 pub fn runGitOutputFormatTests() !void {
-    print("Running git output format tests...\n");
+    print("Running git output format tests...\n", .{});
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -478,5 +480,5 @@ pub fn runGitOutputFormatTests() !void {
     try testLogOutputFormat(&tf);
     try testHelpVersionFormat(&tf);
     
-    print("Git output format tests completed!\n");
+    print("Git output format tests completed!\n", .{});
 }
