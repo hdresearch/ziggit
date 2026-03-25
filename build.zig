@@ -679,4 +679,45 @@ pub fn build(b: *std.Build) void {
     // Install the simple comparison benchmark executable
     const install_simple_comparison_bench = b.addInstallArtifact(simple_comparison_bench_exe, .{});
     bench_simple_comparison_step.dependOn(&install_simple_comparison_bench.step);
+
+    // Real git benchmark (ziggit library vs git CLI with real git repos)
+    const real_git_bench_exe = b.addExecutable(.{
+        .name = "real-git-bench",
+        .root_source_file = b.path("benchmarks/real_git_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    // Link the static library for C integration testing
+    real_git_bench_exe.linkLibrary(lib_static);
+    real_git_bench_exe.linkLibC();
+    real_git_bench_exe.addIncludePath(b.path("src/lib"));
+
+    const run_real_git_bench = b.addRunArtifact(real_git_bench_exe);
+
+    const bench_real_git_step = b.step("bench-real", "Run real git repository benchmark (ziggit library vs git CLI)");
+    bench_real_git_step.dependOn(&run_real_git_bench.step);
+
+    // Install the real git benchmark executable
+    const install_real_git_bench = b.addInstallArtifact(real_git_bench_exe, .{});
+    bench_real_git_step.dependOn(&install_real_git_bench.step);
+
+    // Pure Zig benchmark (no C dependencies)
+    const pure_zig_bench_exe = b.addExecutable(.{
+        .name = "pure-zig-bench",
+        .root_source_file = b.path("benchmarks/pure_zig_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    pure_zig_bench_exe.root_module.addImport("ziggit", ziggit_module);
+
+    const run_pure_zig_bench = b.addRunArtifact(pure_zig_bench_exe);
+
+    const bench_pure_zig_step = b.step("bench-pure", "Run pure Zig benchmark (ziggit Zig API vs git CLI)");
+    bench_pure_zig_step.dependOn(&run_pure_zig_bench.step);
+
+    // Install the pure zig benchmark executable
+    const install_pure_zig_bench = b.addInstallArtifact(pure_zig_bench_exe, .{});
+    bench_pure_zig_step.dependOn(&install_pure_zig_bench.step);
 }
