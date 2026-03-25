@@ -31,7 +31,7 @@ fn testBasicAdd(framework: *GitTestFramework) !void {
     }
 
     // Compare with git behavior
-    var git_test_dir = try framework.createTestRepo("basic-add-git");
+    const git_test_dir = try framework.createTestRepo("basic-add-git");
     defer framework.allocator.free(git_test_dir);
     
     var git_init = try framework.runGitCommand(git_test_dir, &[_][]const u8{"init"});
@@ -134,7 +134,7 @@ fn testAddNonExistentFile(framework: *GitTestFramework) !void {
     }
 
     // Compare with git behavior
-    var git_test_dir = try framework.createTestRepo("add-nonexistent-git");
+    const git_test_dir = try framework.createTestRepo("add-nonexistent-git");
     defer framework.allocator.free(git_test_dir);
     
     var git_init = try framework.runGitCommand(git_test_dir, &[_][]const u8{"init"});

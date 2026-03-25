@@ -55,7 +55,7 @@ fn testEmptyCommit(framework: *GitTestFramework) !void {
     }
 
     // Compare with git behavior
-    var git_test_dir = try framework.createTestRepo("empty-commit-git");
+    const git_test_dir = try framework.createTestRepo("empty-commit-git");
     defer framework.allocator.free(git_test_dir);
     
     var git_init = try framework.runGitCommand(git_test_dir, &[_][]const u8{"init"});
