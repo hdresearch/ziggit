@@ -54,7 +54,10 @@ fn existsImpl(path: []const u8) !bool {
 }
 
 fn makeDirImpl(path: []const u8) !void {
-    try std.fs.cwd().makeDir(path);
+    std.fs.cwd().makeDir(path) catch |err| switch (err) {
+        error.PathAlreadyExists => return error.AlreadyExists,
+        else => return err,
+    };
 }
 
 fn readFileImpl(allocator: std.mem.Allocator, path: []const u8) ![]u8 {

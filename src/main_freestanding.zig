@@ -37,7 +37,7 @@ pub fn main() !void {
 }
 
 fn handleCommand(command: []const u8) !void {
-    if (std.mem.eql(u8, command, "")) {
+    if (std.mem.eql(u8, command, "") or std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
         writeStdout("ziggit: a modern version control system written in Zig\n");
         writeStdout("usage: ziggit <command> [<args>]\n\n");
         writeStdout("Commands:\n");
@@ -54,10 +54,18 @@ fn handleCommand(command: []const u8) !void {
         writeStdout("  pull       Fetch from and integrate with another repository\n");
         writeStdout("  fetch      Download objects and refs from another repository\n");
         writeStdout("  diff       Show changes between commits, commit and working tree, etc\n");
+        writeStdout("\nNote: Browser mode requires JavaScript host functions for file operations.\n");
+    } else if (std.mem.eql(u8, command, "init")) {
+        writeStdout("ziggit init: would create repository (requires JavaScript host filesystem)\n");
+    } else if (std.mem.eql(u8, command, "status")) {
+        writeStdout("On branch main\n\nBrowser mode - status requires JavaScript host filesystem\n");
+    } else if (std.mem.eql(u8, command, "version") or std.mem.eql(u8, command, "--version")) {
+        writeStdout("ziggit version 0.1.0 (Browser/freestanding)\n");
     } else {
         writeStdout("ziggit: '");
         writeStdout(command);
-        writeStdout("' is not yet implemented in browser mode\n");
+        writeStdout("' is not yet fully implemented in browser mode\n");
+        writeStdout("Available commands: init, status, help, version\n");
     }
 }
 
