@@ -109,9 +109,10 @@ fn testInitAdvanced(tf: *TestFramework) !void {
         }
         
         // Check if bare repo was created correctly
-        var buf: [512]u8 = undefined;
-        const bare_path = try std.fmt.bufPrint(&buf, "{s}/custom.git", .{test_dir});
-        const config_path = try std.fmt.bufPrint(&buf, "{s}/config", .{bare_path});
+        var buf1: [512]u8 = undefined;
+        var buf2: [512]u8 = undefined;
+        const bare_path = try std.fmt.bufPrint(&buf1, "{s}/custom.git", .{test_dir});
+        const config_path = try std.fmt.bufPrint(&buf2, "{s}/config", .{bare_path});
         
         fs.accessAbsolute(bare_path, .{}) catch |err| {
             print("    ⚠ bare repo directory not created: {}\n", .{err});
