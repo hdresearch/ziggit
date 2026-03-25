@@ -97,6 +97,62 @@ pub fn build(b: *std.Build) void {
     const comprehensive_git_workflow_test_step = b.step("test-comprehensive-git", "Run comprehensive git workflow test");
     comprehensive_git_workflow_test_step.dependOn(&run_comprehensive_git_workflow_test.step);
 
+    // Basic workflow test
+    const basic_workflow_test = b.addExecutable(.{
+        .name = "basic_workflow_test",
+        .root_source_file = b.path("test/basic_workflow_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_basic_workflow_test = b.addRunArtifact(basic_workflow_test);
+    run_basic_workflow_test.step.dependOn(b.getInstallStep()); // Ensure ziggit is built first
+
+    const basic_workflow_test_step = b.step("test-basic-workflow", "Run basic workflow test");
+    basic_workflow_test_step.dependOn(&run_basic_workflow_test.step);
+
+    // Git compatibility suite test
+    const git_compatibility_suite = b.addExecutable(.{
+        .name = "git_compatibility_suite",
+        .root_source_file = b.path("test/git_compatibility_suite.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_git_compatibility_suite = b.addRunArtifact(git_compatibility_suite);
+    run_git_compatibility_suite.step.dependOn(b.getInstallStep()); // Ensure ziggit is built first
+
+    const git_compatibility_suite_step = b.step("test-git-compatibility-suite", "Run comprehensive git compatibility suite");
+    git_compatibility_suite_step.dependOn(&run_git_compatibility_suite.step);
+
+    // Comprehensive compatibility test
+    const comprehensive_compatibility_test = b.addExecutable(.{
+        .name = "comprehensive_compatibility_test",
+        .root_source_file = b.path("test/comprehensive_compatibility_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_comprehensive_compatibility_test = b.addRunArtifact(comprehensive_compatibility_test);
+    run_comprehensive_compatibility_test.step.dependOn(b.getInstallStep());
+
+    const comprehensive_compatibility_test_step = b.step("test-comprehensive-compatibility", "Run comprehensive compatibility test");
+    comprehensive_compatibility_test_step.dependOn(&run_comprehensive_compatibility_test.step);
+
+    // Git output format test
+    const git_output_format_test = b.addExecutable(.{
+        .name = "git_output_format_test",
+        .root_source_file = b.path("test/git_output_format_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_git_output_format_test = b.addRunArtifact(git_output_format_test);
+    run_git_output_format_test.step.dependOn(b.getInstallStep());
+
+    const git_output_format_test_step = b.step("test-git-format", "Run git output format compatibility test");
+    git_output_format_test_step.dependOn(&run_git_output_format_test.step);
+
     // Focused commit test
     const focused_commit_test = b.addExecutable(.{
         .name = "focused_commit_test",
