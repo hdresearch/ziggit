@@ -94,7 +94,7 @@ fn testRepositoryStatus(allocator: std.mem.Allocator) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     
-    const harness = test_harness.TestHarness.init(gpa.allocator(), /root/ziggit/zig-out/bin/ziggit", "git");
+    const harness = test_harness.TestHarness.init(gpa.allocator(), "/root/ziggit/zig-out/bin/ziggit", "git");
     
     // Test status in empty repository using the test directory as cwd
     var status_result = try harness.runZiggit(&[_][]const u8{"status"}, test_dir);

@@ -11,7 +11,7 @@ pub fn runFormatTests() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const harness = TestHarness.init(allocator, "/root/zigg/root/ziggit/zig-out/bin/ziggit", "git");
+    const harness = TestHarness.init(allocator, "/root/ziggit/zig-out/bin/ziggit", "git");
 
     std.debug.print("Running format compatibility tests...\n", .{});
 

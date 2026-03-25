@@ -7,6 +7,12 @@ const print = std.debug.print;
 // Focuses on error conditions, boundary cases, and unusual scenarios
 // Ensures ziggit handles edge cases the same way git does
 
+const CommandResult = struct {
+    exit_code: u32,
+    stdout: []u8,
+    stderr: []u8,
+};
+
 const TestFramework = struct {
     allocator: std.mem.Allocator,
     
@@ -14,11 +20,11 @@ const TestFramework = struct {
         return TestFramework{ .allocator = allocator };
     }
     
-    fn runCommand(self: *TestFramework, args: []const []const u8, cwd: ?[]const u8) !struct { 
-        exit_code: u32, 
-        stdout: []u8, 
-        stderr: []u8 
-    } {
+    pub fn deinit(_: *TestFramework) void {
+        // Nothing to clean up for now
+    }
+    
+    fn runCommand(self: *TestFramework, args: []const []const u8, cwd: ?[]const u8) !CommandResult {
         var proc = process.Child.init(args, self.allocator);
         proc.stdout_behavior = .Pipe;
         proc.stderr_behavior = .Pipe;
@@ -72,16 +78,10 @@ const TestFramework = struct {
         self.allocator.free(path);
     }
     
-    fn createFile(self: *TestFramework, dir_path: []const u8, filename: []const u8, content: []const u8) !void {
-        _ = self;
+    fn createFile(_: *TestFramework, dir_path: []const u8, filename: []const u8, content: []const u8) !void {
         var buf: [512]u8 = undefined;
         const file_path = try std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir_path, filename });
         try fs.cwd().writeFile(.{ .sub_path = file_path, .data = content });
-    }
-    
-    
-    pub fn deinit(self: *TestFramework) void {
-        _ = self;
     }
 };
 
@@ -92,7 +92,7 @@ fn testInvalidArguments(tf: *TestFramework) !void {
     // Test 1: init with invalid flags
     {
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init", "--invalid-flag" 
+            "/root/ziggit/zig-out/bin/ziggit", "init", "--invalid-flag" 
         }, "/tmp");
         
         const git_result = try tf.runCommand(&[_][]const u8{ 
@@ -113,10 +113,10 @@ fn testInvalidArguments(tf: *TestFramework) !void {
         const test_dir = try tf.createTestDir("add-no-args");
         defer tf.cleanupDir(test_dir);
         
-        _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
+        _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
         
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "add" 
+            "/root/ziggit/zig-out/bin/ziggit", "add" 
         }, test_dir);
         
         const git_result = try tf.runCommand(&[_][]const u8{ "git", "add" }, test_dir);
@@ -134,12 +134,12 @@ fn testInvalidArguments(tf: *TestFramework) !void {
         const test_dir = try tf.createTestDir("commit-empty-msg");
         defer tf.cleanupDir(test_dir);
         
-        _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
+        _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
         try tf.createFile(test_dir, "file.txt", "content");
-        _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "add", "file.txt" }, test_dir);
+        _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "file.txt" }, test_dir);
         
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "" 
+            "/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "" 
         }, test_dir);
         
         const git_result = try tf.runCommand(&[_][]const u8{ 
@@ -178,7 +178,7 @@ fn testOutsideRepository(tf: *TestFramework) !void {
         var ziggit_args = std.ArrayList([]const u8).init(tf.allocator);
         defer ziggit_args.deinit();
         
-        try ziggit_args.append("/root/zigg/root/ziggit/zig-out/bin/ziggit");
+        try ziggit_args.append("/root/ziggit/zig-out/bin/ziggit");
         for (cmd_args) |arg| {
             try ziggit_args.append(arg);
         }
@@ -211,7 +211,7 @@ fn testSpecialFilenames(tf: *TestFramework) !void {
     const test_dir = try tf.createTestDir("special-files");
     defer tf.cleanupDir(test_dir);
     
-    _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
     
     const special_files = [_][]const u8{
         "file with spaces.txt",
@@ -235,7 +235,7 @@ fn testSpecialFilenames(tf: *TestFramework) !void {
         
         // Try to add the file
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "add", filename 
+            "/root/ziggit/zig-out/bin/ziggit", "add", filename 
         }, test_dir);
         
         if (ziggit_result.exit_code == 0) {
@@ -247,7 +247,7 @@ fn testSpecialFilenames(tf: *TestFramework) !void {
     
     // Test status with special files
     const status_result = try tf.runCommand(&[_][]const u8{ 
-        "/root/zigg/root/ziggit/zig-out/bin/ziggit", "status" 
+        "/root/ziggit/zig-out/bin/ziggit", "status" 
     }, test_dir);
     
     if (status_result.exit_code == 0) {
@@ -265,7 +265,7 @@ fn testCorruptedRepository(tf: *TestFramework) !void {
     defer tf.cleanupDir(test_dir);
     
     // Create valid repository first
-    _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
     
     // Test 1: Corrupt HEAD file
     {
@@ -275,7 +275,7 @@ fn testCorruptedRepository(tf: *TestFramework) !void {
         fs.cwd().writeFile(.{ .sub_path = head_path, .data = "invalid head content" }) catch {};
         
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "status" 
+            "/root/ziggit/zig-out/bin/ziggit", "status" 
         }, test_dir);
         
         const git_result = try tf.runCommand(&[_][]const u8{ "git", "status" }, test_dir);
@@ -300,7 +300,7 @@ fn testCorruptedRepository(tf: *TestFramework) !void {
         fs.cwd().deleteFile(config_path) catch {};
         
         const ziggit_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "status" 
+            "/root/ziggit/zig-out/bin/ziggit", "status" 
         }, test_dir);
         
         if (ziggit_result.exit_code == 0) {
@@ -318,7 +318,7 @@ fn testLargeFiles(tf: *TestFramework) !void {
     const test_dir = try tf.createTestDir("large-files");
     defer tf.cleanupDir(test_dir);
     
-    _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
     
     // Create a moderately large file (1MB)
     const large_content = try tf.allocator.alloc(u8, 1024 * 1024);
@@ -339,7 +339,7 @@ fn testLargeFiles(tf: *TestFramework) !void {
     
     // Test adding large file
     const add_result = try tf.runCommand(&[_][]const u8{ 
-        "/root/zigg/root/ziggit/zig-out/bin/ziggit", "add", "large_file.bin" 
+        "/root/ziggit/zig-out/bin/ziggit", "add", "large_file.bin" 
     }, test_dir);
     
     if (add_result.exit_code == 0) {
@@ -347,7 +347,7 @@ fn testLargeFiles(tf: *TestFramework) !void {
         
         // Test status with large file
         const status_result = try tf.runCommand(&[_][]const u8{ 
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit", "status" 
+            "/root/ziggit/zig-out/bin/ziggit", "status" 
         }, test_dir);
         
         if (status_result.exit_code == 0) {
@@ -367,7 +367,7 @@ fn testDeepDirectories(tf: *TestFramework) !void {
     const test_dir = try tf.createTestDir("deep-dirs");
     defer tf.cleanupDir(test_dir);
     
-    _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
     
     // Create deep directory structure
     const max_depth = 10;
@@ -389,7 +389,7 @@ fn testDeepDirectories(tf: *TestFramework) !void {
     }
     
     // Create file in deepest directory
-    const deep_file_path = try std.fmt.bufPrint(current_path[current_len..], "/deep_file.txt", .{});
+    const deep_file_path = try std.fmt.bufPrint(current_path[current_len..], "{s}", .{"/deep_file.txt"});
     current_len += deep_file_path.len;
     
     fs.cwd().writeFile(.{ .sub_path = current_path[0..current_len], .data = "Deep file content" }) catch |err| {
@@ -399,7 +399,7 @@ fn testDeepDirectories(tf: *TestFramework) !void {
     
     // Test status with deep structure
     const status_result = try tf.runCommand(&[_][]const u8{ 
-        "/root/zigg/root/ziggit/zig-out/bin/ziggit", "status" 
+        "/root/ziggit/zig-out/bin/ziggit", "status" 
     }, test_dir);
     
     if (status_result.exit_code == 0) {
@@ -411,7 +411,7 @@ fn testDeepDirectories(tf: *TestFramework) !void {
     // Test add with deep file
     const relative_deep_path = current_path[test_dir.len + 1..current_len]; // Skip test_dir and leading slash
     const add_result = try tf.runCommand(&[_][]const u8{ 
-        "/root/zigg/root/ziggit/zig-out/bin/ziggit", "add", relative_deep_path 
+        "/root/ziggit/zig-out/bin/ziggit", "add", relative_deep_path 
     }, test_dir);
     
     if (add_result.exit_code == 0) {
@@ -428,7 +428,7 @@ fn testConcurrentAccess(tf: *TestFramework) !void {
     const test_dir = try tf.createTestDir("concurrent");
     defer tf.cleanupDir(test_dir);
     
-    _ = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, test_dir);
     
     // Create multiple files rapidly
     var i: usize = 0;
@@ -453,7 +453,7 @@ fn testConcurrentAccess(tf: *TestFramework) !void {
         var args = std.ArrayList([]const u8).init(tf.allocator);
         defer args.deinit();
         
-        try args.append("/root/zigg/root/ziggit/zig-out/bin/ziggit");
+        try args.append("/root/ziggit/zig-out/bin/ziggit");
         for (op) |arg| {
             try args.append(arg);
         }

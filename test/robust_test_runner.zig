@@ -12,8 +12,8 @@ pub const TestRunner = struct {
     pub fn init(allocator: std.mem.Allocator) !TestRunner {
         // Try to find ziggit binary in various locations
         const possible_paths = [_][]const u8{
-            "/root/zigg/root/ziggit/zig-out/bin/ziggit",
-            /root/ziggit/zig-out/bin/ziggit",
+            "/root/ziggit/zig-out/bin/ziggit",
+            "/root/ziggit/zig-out/bin/ziggit",
             "/root/ziggit/zig-out/bin/ziggit",
             "zig-out/bin/ziggit",
         };

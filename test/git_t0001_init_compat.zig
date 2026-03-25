@@ -127,7 +127,7 @@ fn testPlainInit(tf: *TestFramework) !void {
     defer tf.cleanupTestDir("test-plain");
     
     // Test ziggit init
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/zigg/root/ziggit/zig-out/bin/ziggit", "init" }, "test-plain");
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, "test-plain");
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     
@@ -163,7 +163,7 @@ fn testBareInit(tf: *TestFramework) !void {
     tf.cleanupTestDir("test-bare.git");
     
     // Test ziggit init --bare
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init", "--bare", "test-bare.git" }, null);
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init", "--bare", "test-bare.git" }, null);
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     
@@ -200,7 +200,7 @@ fn testInitInExistingDir(tf: *TestFramework) !void {
     defer tf.cleanupTestDir("test-existing");
     
     // Test ziggit init
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init" }, "test-existing");
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, "test-existing");
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     
@@ -227,12 +227,12 @@ fn testReinitialize(tf: *TestFramework) !void {
     defer tf.cleanupTestDir("test-reinit");
     
     // First init
-    const first_result = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init" }, "test-reinit");
+    const first_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, "test-reinit");
     defer tf.*.allocator.free(first_result.stdout);
     defer tf.*.allocator.free(first_result.stderr);
     
     // Second init (reinitialize)
-    const second_result = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init" }, "test-reinit");
+    const second_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, "test-reinit");
     defer tf.*.allocator.free(second_result.stdout);
     defer tf.*.allocator.free(second_result.stderr);
     
@@ -250,7 +250,7 @@ fn testInitTemplate(tf: *TestFramework) !void {
     tf.cleanupTestDir("test-template");
     
     // Test ziggit init --template (may not be implemented yet)
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init", "--template=/dev/null", "test-template" }, null);
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init", "--template=/dev/null", "test-template" }, null);
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     
@@ -277,7 +277,7 @@ fn testInitWithDir(tf: *TestFramework) !void {
     tf.cleanupTestDir("test-newdir");
     
     // Test ziggit init <directory>
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/zigg/root/ziggit/zig-out/bin/ziggit", "init", "test-newdir" }, null);
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init", "test-newdir" }, null);
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     

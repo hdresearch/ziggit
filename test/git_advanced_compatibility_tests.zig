@@ -8,6 +8,12 @@ const ArrayList = std.ArrayList;
 // Focuses on edge cases, advanced functionality, and exact output matching
 // Based on patterns from git t/ directory tests
 
+const CommandResult = struct {
+    exit_code: u32,
+    stdout: []u8,
+    stderr: []u8,
+};
+
 const TestFramework = struct {
     allocator: std.mem.Allocator,
     
@@ -15,11 +21,11 @@ const TestFramework = struct {
         return TestFramework{ .allocator = allocator };
     }
     
-    fn runCommand(self: *TestFramework, args: []const []const u8, cwd: ?[]const u8) !struct { 
-        exit_code: u32, 
-        stdout: []u8, 
-        stderr: []u8 
-    } {
+    pub fn deinit(_: *TestFramework) void {
+        // Nothing to clean up for now
+    }
+    
+    fn runCommand(self: *TestFramework, args: []const []const u8, cwd: ?[]const u8) !CommandResult {
         var proc = process.Child.init(args, self.allocator);
         proc.stdout_behavior = .Pipe;
         proc.stderr_behavior = .Pipe;
@@ -73,16 +79,10 @@ const TestFramework = struct {
         self.allocator.free(path);
     }
     
-    fn createFile(self: *TestFramework, dir_path: []const u8, filename: []const u8, content: []const u8) !void {
-        _ = self;
+    fn createFile(_: *TestFramework, dir_path: []const u8, filename: []const u8, content: []const u8) !void {
         var buf: [512]u8 = undefined;
         const file_path = try std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir_path, filename });
         try fs.cwd().writeFile(.{ .sub_path = file_path, .data = content });
-    }
-    
-    
-    pub fn deinit(self: *TestFramework) void {
-        _ = self;
     }
 };
 
