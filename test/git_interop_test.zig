@@ -14,6 +14,16 @@ pub fn main() !void {
 
     std.debug.print("Running Git Interoperability Tests...\n", .{});
 
+    // Set up global git config for tests
+    _ = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{"git", "config", "--global", "user.name", "Test User"},
+    }) catch {};
+    _ = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{"git", "config", "--global", "user.email", "test@example.com"},
+    }) catch {};
+
     // Create temporary test directory
     const test_dir = try fs.cwd().makeOpenPath("test_tmp", .{});
     defer fs.cwd().deleteTree("test_tmp") catch {};
