@@ -76,7 +76,8 @@ fn getCwdImpl(allocator: std.mem.Allocator) ![]u8 {
     // WASI has limited filesystem capabilities
     // Try to get the current directory from the environment or use a default
     // In WASI, we're typically run with --dir pointing to the working directory
-    return try allocator.dupe(u8, ".");
+    // We could try to use std.process.getCwdAlloc but WASI may not support it
+    return std.process.getCwdAlloc(allocator) catch try allocator.dupe(u8, ".");
 }
 
 fn chdirImpl(path: []const u8) !void {

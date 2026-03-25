@@ -2,7 +2,14 @@
 const std = @import("std");
 
 // Simple fixed buffer allocator for freestanding environment
-var memory_buffer: [64 * 1024]u8 = undefined; // 64KB buffer
+// Can be configured at compile time with -Dfreestanding-memory-size=<size>
+const config = @import("config");
+const MEMORY_SIZE = if (@hasDecl(config, "freestanding_memory_size"))
+    config.freestanding_memory_size
+else 
+    64 * 1024; // Default: 64KB buffer
+
+var memory_buffer: [MEMORY_SIZE]u8 = undefined; 
 var fba: std.heap.FixedBufferAllocator = undefined;
 var allocator_initialized = false;
 

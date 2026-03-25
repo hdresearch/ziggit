@@ -42,6 +42,9 @@ cd my-repo && wasmtime --dir . ../zig-out/bin/ziggit.wasm status  # Some command
 ```bash
 export ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache  
 zig build wasm-browser
+
+# With custom memory size (default: 64KB)
+zig build wasm-browser -Dfreestanding-memory-size=32768  # 32KB
 ```
 
 This produces `zig-out/bin/ziggit-browser.wasm` for browser/JavaScript environments.
@@ -91,11 +94,12 @@ wasmer zig-out/bin/ziggit.wasm -- init my-repo
 
 ### Browser/Freestanding Build (`zig build wasm-browser`)
 **Capabilities:**
-- Minimal binary size (4KB) optimized for browser environments
+- Minimal binary size (4.3KB) optimized for browser environments
 - JavaScript host integration via exported functions
-- Custom memory management with fixed buffer allocator (64KB default)
+- Custom memory management with configurable fixed buffer allocator (64KB default, configurable at build time)
 - Multiple integration patterns for flexibility
 - Core git commands (init, status) with host filesystem delegation
+- Stack size optimized to 16KB for reduced memory footprint
 
 **Requirements:**
 - JavaScript host must implement filesystem operations via extern functions:
@@ -156,7 +160,7 @@ This ensures the core git logic remains completely platform-agnostic while provi
 
 ## Verification
 
-✅ **Last verified**: 2026-03-25 21:16 UTC - **Full End-to-End Workflow Testing Complete**
+✅ **Last verified**: 2026-03-25 21:21 UTC - **Full End-to-End Workflow Testing Complete**
 - ✅ All WebAssembly builds compile successfully (`zig build`, `zig build wasm`, `zig build wasm-browser`)
 - ✅ WASI build tested with wasmtime - Full git workflow verified: init → add → commit → log → status
 - ✅ Complete end-to-end testing confirmed: repository creation, file staging, committing, and history viewing all working  
@@ -171,7 +175,7 @@ This ensures the core git logic remains completely platform-agnostic while provi
 - ✅ **WebAssembly production ready**: Full end-to-end git workflow verified working in WASI runtime with wasmtime
 - ✅ **Full commit workflow verified**: Created repository, staged file, committed with proper SHA-1 hash generation
 - ✅ **WebAssembly End-to-End Testing**: Complete git workflow tested in WASI - init → add → commit → log all working perfectly
-- ✅ **File size optimization confirmed**: WASI build (177KB), Browser build (4.3KB) - excellent for production use
+- ✅ **File size optimization confirmed**: WASI build (181KB), Browser build (4.3KB) - excellent for production use
 - ✅ **Build verification**: All three targets compile cleanly without warnings or errors
   - Native build: Produces `zig-out/bin/ziggit` (4.2MB executable)
   - WASI build: Produces `zig-out/bin/ziggit.wasm` (171KB module)  
