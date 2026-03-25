@@ -75,7 +75,16 @@ pub fn build(b: *std.Build) void {
     const run_comprehensive_git_workflow_test = b.addRunArtifact(comprehensive_git_workflow_test);
     run_comprehensive_git_workflow_test.step.dependOn(b.getInstallStep());
 
+    // Drop-in compatibility test suite - tests that ziggit can replace git
+    const drop_in_compat_test = b.addExecutable(.{
+        .name = "drop_in_compat_test",
+        .root_source_file = b.path("test/git_drop_in_compatibility.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
+    const run_drop_in_compat_test = b.addRunArtifact(drop_in_compat_test);
+    run_drop_in_compat_test.step.dependOn(b.getInstallStep()); // Ensure ziggit is built first
 
     // Separate step for just compatibility tests
     const compat_test_step = b.step("test-compat", "Run compatibility tests");
@@ -92,6 +101,24 @@ pub fn build(b: *std.Build) void {
     // Comprehensive git workflow test step
     const comprehensive_git_workflow_test_step = b.step("test-comprehensive-git", "Run comprehensive git workflow test");
     comprehensive_git_workflow_test_step.dependOn(&run_comprehensive_git_workflow_test.step);
+
+    // Drop-in compatibility test step
+    const drop_in_compat_test_step = b.step("test-drop-in", "Run drop-in git compatibility tests");
+    drop_in_compat_test_step.dependOn(&run_drop_in_compat_test.step);
+
+    // Git t0001-init adapter test - tests based on git's own t0001-init.sh
+    const git_t0001_init_test = b.addExecutable(.{
+        .name = "git_t0001_init_test",
+        .root_source_file = b.path("test/git_t0001_init_adapter.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_git_t0001_init_test = b.addRunArtifact(git_t0001_init_test);
+    run_git_t0001_init_test.step.dependOn(b.getInstallStep()); // Ensure ziggit is built first
+
+    const git_t0001_init_test_step = b.step("test-git-t0001", "Run git t0001-init adapter tests");
+    git_t0001_init_test_step.dependOn(&run_git_t0001_init_test.step);
 
     // Basic workflow test
     const basic_workflow_test = b.addExecutable(.{
@@ -238,6 +265,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_compatibility_tests.step);
     test_step.dependOn(&run_git_compat_tests.step);
+    test_step.dependOn(&run_drop_in_compat_test.step);
+    test_step.dependOn(&run_git_t0001_init_test.step);
     test_step.dependOn(&run_git_source_comprehensive_test.step);
     test_step.dependOn(&run_comprehensive_git_tests.step);
 
