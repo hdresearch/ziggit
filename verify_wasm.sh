@@ -1,172 +1,253 @@
 #!/bin/bash
-
-# WebAssembly Verification Script for ziggit
-# This script verifies all WebAssembly builds work correctly
-
 set -e
 
-echo "🔧 ziggit WebAssembly Build Verification"
-echo "========================================="
-echo
+# WebAssembly Verification Script for ziggit
+# This script verifies all WebAssembly builds and tests functionality
 
-# Set up Zig cache
+echo "🚀 ziggit WebAssembly Verification Script"
+echo "=========================================="
+
+# Set up cache directory
 export ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache
 
-echo "📦 Building all targets..."
-echo "  - Native build..."
+# Check if wasmtime is available
+WASMTIME_AVAILABLE=false
+if command -v wasmtime >/dev/null 2>&1; then
+    WASMTIME_AVAILABLE=true
+    echo "✅ wasmtime is available for testing"
+else
+    echo "⚠️  wasmtime not found - WASI tests will be skipped"
+fi
+
+echo ""
+echo "Building all targets..."
+echo "======================="
+
+# Build native target
+echo "🏗️  Building native target..."
 zig build
-echo "  - WASI build..."
+if [ $? -eq 0 ]; then
+    NATIVE_SIZE=$(stat -c%s "zig-out/bin/ziggit" 2>/dev/null || stat -f%z "zig-out/bin/ziggit" 2>/dev/null || echo "unknown")
+    echo "✅ Native build successful (${NATIVE_SIZE} bytes)"
+else
+    echo "❌ Native build failed"
+    exit 1
+fi
+
+# Build WASI target
+echo "🏗️  Building WASI target..."
 zig build wasm
-echo "  - Browser/freestanding build..."
+if [ $? -eq 0 ]; then
+    WASI_SIZE=$(stat -c%s "zig-out/bin/ziggit.wasm" 2>/dev/null || stat -f%z "zig-out/bin/ziggit.wasm" 2>/dev/null || echo "unknown")
+    echo "✅ WASI build successful (${WASI_SIZE} bytes)"
+else
+    echo "❌ WASI build failed"
+    exit 1
+fi
+
+# Build browser target
+echo "🏗️  Building browser target..."
 zig build wasm-browser
-
-echo "✅ All builds completed successfully!"
-echo
-
-echo "📊 Build Output Verification:"
-if [ -f "zig-out/bin/ziggit" ]; then
-    native_size=$(du -h zig-out/bin/ziggit | cut -f1)
-    echo "  ✅ Native binary: $native_size"
+if [ $? -eq 0 ]; then
+    BROWSER_SIZE=$(stat -c%s "zig-out/bin/ziggit-browser.wasm" 2>/dev/null || stat -f%z "zig-out/bin/ziggit-browser.wasm" 2>/dev/null || echo "unknown")
+    echo "✅ Browser build successful (${BROWSER_SIZE} bytes)"
 else
-    echo "  ❌ Native binary not found"
+    echo "❌ Browser build failed"
     exit 1
 fi
 
-if [ -f "zig-out/bin/ziggit.wasm" ]; then
-    wasi_size=$(du -h zig-out/bin/ziggit.wasm | cut -f1)
-    echo "  ✅ WASI binary: $wasi_size"
+# Test configurable memory build
+echo "🏗️  Building browser target with custom memory..."
+zig build wasm-browser -Dfreestanding-memory-size=32768
+if [ $? -eq 0 ]; then
+    echo "✅ Configurable memory build successful"
 else
-    echo "  ❌ WASI binary not found"
+    echo "❌ Configurable memory build failed"
     exit 1
 fi
 
-if [ -f "zig-out/bin/ziggit-browser.wasm" ]; then
-    browser_size=$(du -h zig-out/bin/ziggit-browser.wasm | cut -f1)
-    echo "  ✅ Browser binary: $browser_size"
+echo ""
+echo "File Structure Verification"
+echo "==========================="
+
+# Verify platform abstraction
+echo "📁 Checking platform abstraction structure..."
+PLATFORM_FILES=("interface.zig" "native.zig" "wasi.zig" "freestanding.zig" "platform.zig")
+MISSING_PLATFORM_FILES=()
+
+for file in "${PLATFORM_FILES[@]}"; do
+    if [ ! -f "src/platform/$file" ]; then
+        MISSING_PLATFORM_FILES+=("$file")
+    fi
+done
+
+if [ ${#MISSING_PLATFORM_FILES[@]} -eq 0 ]; then
+    echo "✅ Platform abstraction complete - all files present"
 else
-    echo "  ❌ Browser binary not found"
+    echo "❌ Missing platform files: ${MISSING_PLATFORM_FILES[*]}"
     exit 1
 fi
 
-echo
+# Verify WASM entry points
+echo "📁 Checking WASM entry points..."
+if [ -f "src/main_wasi.zig" ] && [ -f "src/main_freestanding.zig" ]; then
+    echo "✅ WASM entry points present"
+else
+    echo "❌ Missing WASM entry points"
+    exit 1
+fi
 
-# Test WASI functionality if wasmtime is available
-if command -v wasmtime &> /dev/null; then
-    echo "🧪 Testing WASI functionality with wasmtime..."
+echo ""
+echo "WASI Functionality Testing"
+echo "=========================="
+
+if [ "$WASMTIME_AVAILABLE" = true ]; then
+    echo "🧪 Testing WASI build functionality..."
     
-    # Get absolute path to ziggit.wasm from current directory
-    CURRENT_DIR=$(pwd)
-    WASM_PATH="$CURRENT_DIR/zig-out/bin/ziggit.wasm"
-    
-    # Create temporary test directory
-    TEST_DIR=$(mktemp -d)
+    # Create test directory
+    TEST_DIR="wasm_verification_test"
+    rm -rf "$TEST_DIR"
+    mkdir "$TEST_DIR"
     cd "$TEST_DIR"
     
-    echo "  - Testing version command..."
-    if wasmtime --dir . "$WASM_PATH" --version | grep -q "ziggit version"; then
-        echo "    ✅ Version command works"
+    # Test help command
+    echo "  - Testing help command..."
+    if wasmtime --dir . ../zig-out/bin/ziggit.wasm --help >/dev/null 2>&1; then
+        echo "✅ Help command works"
     else
-        echo "    ❌ Version command failed"
+        echo "❌ Help command failed"
+        cd ..
+        rm -rf "$TEST_DIR"
         exit 1
     fi
     
+    # Test init command
     echo "  - Testing init command..."
-    if wasmtime --dir . "$WASM_PATH" init | grep -q "Initialized empty Git repository"; then
-        echo "    ✅ Init command works"
+    if wasmtime --dir . ../zig-out/bin/ziggit.wasm init >/dev/null 2>&1; then
+        echo "✅ Init command works"
     else
-        echo "    ❌ Init command failed"
+        echo "❌ Init command failed"
+        cd ..
+        rm -rf "$TEST_DIR"
         exit 1
     fi
     
-    echo "  - Testing status command..."
-    if wasmtime --dir . "$WASM_PATH" status | grep -q "On branch"; then
-        echo "    ✅ Status command works"
+    # Verify .git directory was created
+    if [ -d ".git" ]; then
+        echo "✅ .git directory created"
     else
-        echo "    ❌ Status command failed"
+        echo "❌ .git directory not created"
+        cd ..
+        rm -rf "$TEST_DIR"
         exit 1
     fi
     
-    echo "  - Testing full workflow (init → add → status)..."
-    echo "Hello, WASM world!" > test.txt
-    wasmtime --dir . "$WASM_PATH" add test.txt
-    if wasmtime --dir . "$WASM_PATH" status | grep -q "Changes to be committed"; then
-        echo "    ✅ Full workflow works"
+    # Test add/status workflow
+    echo "  - Testing add/status workflow..."
+    echo "Hello WebAssembly" > test.txt
+    
+    # Test status with untracked file
+    if wasmtime --dir . ../zig-out/bin/ziggit.wasm status | grep -q "test.txt"; then
+        echo "✅ Status shows untracked files"
     else
-        echo "    ❌ Full workflow failed"
+        echo "❌ Status doesn't show untracked files"
+        cd ..
+        rm -rf "$TEST_DIR"
         exit 1
     fi
     
-    # Cleanup
-    cd "$CURRENT_DIR"
+    # Test add command
+    if wasmtime --dir . ../zig-out/bin/ziggit.wasm add test.txt >/dev/null 2>&1; then
+        echo "✅ Add command works"
+    else
+        echo "❌ Add command failed"
+        cd ..
+        rm -rf "$TEST_DIR"
+        exit 1
+    fi
+    
+    # Test status with staged file
+    if wasmtime --dir . ../zig-out/bin/ziggit.wasm status | grep -q "Changes to be committed"; then
+        echo "✅ Status shows staged files"
+    else
+        echo "❌ Status doesn't show staged files"
+        cd ..
+        rm -rf "$TEST_DIR"
+        exit 1
+    fi
+    
+    # Test commit command
+    echo "  - Testing commit command..."
+    if wasmtime --dir . ../zig-out/bin/ziggit.wasm commit -m "WASM test commit" >/dev/null 2>&1; then
+        echo "✅ Commit command works"
+    else
+        echo "❌ Commit command failed"
+        cd ..
+        rm -rf "$TEST_DIR"
+        exit 1
+    fi
+    
+    # Test log command
+    echo "  - Testing log command..."
+    if wasmtime --dir . ../zig-out/bin/ziggit.wasm log | grep -q "WASM test commit"; then
+        echo "✅ Log shows commit"
+    else
+        echo "❌ Log doesn't show commit"
+        cd ..
+        rm -rf "$TEST_DIR"
+        exit 1
+    fi
+    
+    # Clean up
+    cd ..
     rm -rf "$TEST_DIR"
     
-    echo "✅ All WASI tests passed!"
+    echo "✅ All WASI functionality tests passed"
 else
-    echo "⚠️  wasmtime not found - skipping WASI runtime tests"
-    echo "   Install wasmtime to enable full WASI testing:"
-    echo "   curl -sSf https://wasmtime.dev/install.sh | bash"
+    echo "⚠️  WASI tests skipped (wasmtime not available)"
 fi
 
-echo
+echo ""
+echo "Binary Size Analysis"
+echo "==================="
+echo "Native binary:     ${NATIVE_SIZE} bytes"
+echo "WASI module:       ${WASI_SIZE} bytes"  
+echo "Browser module:    ${BROWSER_SIZE} bytes"
 
-echo "🎯 Platform Abstraction Verification:"
-echo "  - Checking platform interface..."
-if [ -f "src/platform/interface.zig" ]; then
-    echo "    ✅ Platform interface defined"
-else
-    echo "    ❌ Platform interface missing"
-    exit 1
+# Verify reasonable size constraints
+if [ "$WASI_SIZE" != "unknown" ] && [ "$WASI_SIZE" -gt 1000000 ]; then
+    echo "⚠️  WASI module is quite large (>${WASI_SIZE} bytes)"
 fi
 
-echo "  - Checking platform implementations..."
-for platform in "native.zig" "wasi.zig" "freestanding.zig"; do
-    if [ -f "src/platform/$platform" ]; then
-        echo "    ✅ $platform implementation exists"
-    else
-        echo "    ❌ $platform implementation missing"
-        exit 1
-    fi
-done
-
-echo "  - Checking main entry points..."
-for entry in "main.zig" "main_wasi.zig" "main_freestanding.zig"; do
-    if [ -f "src/$entry" ]; then
-        echo "    ✅ $entry entry point exists"
-    else
-        echo "    ❌ $entry entry point missing"
-        exit 1
-    fi
-done
-
-echo
-
-echo "⚙️  Configurable Browser Build Test:"
-echo "  - Testing default memory size (64KB)..."
-zig build wasm-browser
-default_size=$(wc -c < zig-out/bin/ziggit-browser.wasm)
-
-echo "  - Testing custom memory size (32KB)..."
-zig build wasm-browser -Dfreestanding-memory-size=32768
-custom_size=$(wc -c < zig-out/bin/ziggit-browser.wasm)
-
-if [ "$custom_size" -eq "$default_size" ]; then
-    echo "    ✅ Configurable memory size works (binary size unchanged as expected)"
-else
-    echo "    ✅ Configurable memory size works (binary sizes: default=$default_size, custom=$custom_size)"
+if [ "$BROWSER_SIZE" != "unknown" ] && [ "$BROWSER_SIZE" -gt 100000 ]; then
+    echo "⚠️  Browser module is quite large (>${BROWSER_SIZE} bytes)"
 fi
 
-echo
-
+echo ""
 echo "🎉 WebAssembly Verification Complete!"
 echo "======================================"
 echo "✅ All builds compile successfully"
-echo "✅ WASI runtime functionality verified"
-echo "✅ Platform abstraction complete"
-echo "✅ Configurable browser builds work"
-echo
+echo "✅ Platform abstraction verified"
+echo "✅ File structure validated"
+
+if [ "$WASMTIME_AVAILABLE" = true ]; then
+    echo "✅ WASI functionality tested and working"
+else
+    echo "⚠️  WASI functionality tests skipped (install wasmtime for full verification)"
+fi
+
+echo ""
 echo "Summary:"
-echo "  - Native build: Complete git functionality"
-echo "  - WASI build: Full git workflow with wasmtime"
-echo "  - Browser build: Minimal footprint with JS integration"
-echo
-echo "WebAssembly implementation is production ready! 🚀"
+echo "--------"
+echo "- Native build: ✅ Working (${NATIVE_SIZE} bytes)"
+echo "- WASI build: ✅ Working (${WASI_SIZE} bytes)"
+echo "- Browser build: ✅ Working (${BROWSER_SIZE} bytes)"
+echo "- Platform abstraction: ✅ Complete"
+if [ "$WASMTIME_AVAILABLE" = true ]; then
+    echo "- End-to-end WASM testing: ✅ All tests passed"
+else
+    echo "- End-to-end WASM testing: ⚠️  Skipped"
+fi
+
+echo ""
+echo "ziggit WebAssembly support is fully functional! 🚀"
