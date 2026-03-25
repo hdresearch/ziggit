@@ -261,16 +261,32 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 }
 
 fn findGitDirectory(allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
-    const cwd = try platform_impl.fs.getCwd(allocator);
-    defer allocator.free(cwd);
+    const current_dir = try platform_impl.fs.getCwd(allocator);
+    defer allocator.free(current_dir);
     
-    // For now, just check current directory
-    const git_path = try std.fmt.allocPrint(allocator, "{s}/.git", .{cwd});
-    if (platform_impl.fs.exists(git_path) catch false) {
-        return git_path;
+    // Walk up the directory tree looking for .git
+    var dir_to_check = try allocator.dupe(u8, current_dir);
+    
+    while (true) {
+        const git_path = try std.fmt.allocPrint(allocator, "{s}/.git", .{dir_to_check});
+        if (platform_impl.fs.exists(git_path) catch false) {
+            allocator.free(dir_to_check);
+            return git_path;
+        }
+        allocator.free(git_path);
+        
+        // Check if we're at the root
+        const parent = std.fs.path.dirname(dir_to_check);
+        if (parent == null or std.mem.eql(u8, parent.?, dir_to_check)) {
+            break; // We've reached the root directory
+        }
+        
+        // Move to parent directory
+        allocator.free(dir_to_check);
+        dir_to_check = try allocator.dupe(u8, parent.?);
     }
-    allocator.free(git_path);
     
+    allocator.free(dir_to_check);
     return error.NotAGitRepository;
 }
 
@@ -403,7 +419,13 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 
     // Check if there's anything to commit
     if (index.entries.items.len == 0 and !allow_empty) {
-        try platform_impl.writeStderr("On branch master\n");
+        const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch "master";
+        defer allocator.free(current_branch);
+        
+        const branch_msg = try std.fmt.allocPrint(allocator, "On branch {s}\n", .{current_branch});
+        defer allocator.free(branch_msg);
+        try platform_impl.writeStderr(branch_msg);
+        
         try platform_impl.writeStderr("nothing to commit, working tree clean\n");
         std.process.exit(1);
     }
