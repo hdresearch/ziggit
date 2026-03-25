@@ -63,7 +63,14 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
         } else |_| {
-            try platform_impl.writeStdout("ziggit version 0.1.0\n");
+            try platform_impl.writeStdout("ziggit version 0.1.2\n");
+        }
+    } else if (std.mem.eql(u8, command, "--version-info")) {
+        if (version_mod.getFullVersionInfo(allocator)) |version_info| {
+            defer allocator.free(version_info);
+            try platform_impl.writeStdout(version_info);
+        } else |_| {
+            try platform_impl.writeStdout("ziggit version 0.1.2\nError retrieving version details.\n");
         }
     } else if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "help")) {
         try showUsage(&platform_impl);
@@ -184,7 +191,7 @@ fn showUsage(platform_impl: *const platform_mod.Platform) !void {
         try platform_impl.writeStdout("   push       Update remote refs along with associated objects\n");
     }
     
-    const suffix_msg = std.fmt.allocPrint(std.heap.page_allocator, "\nziggit{s} - A modern version control system written in Zig\n", .{target_info}) catch return;
+    const suffix_msg = std.fmt.allocPrint(std.heap.page_allocator, "\nziggit{s} - A modern version control system written in Zig\n\nOptions:\n  --version, -v       Show version information\n  --version-info      Show detailed version and build information\n  --help, -h          Show this help message\n", .{target_info}) catch return;
     defer std.heap.page_allocator.free(suffix_msg);
     try platform_impl.writeStdout(suffix_msg);
 }
