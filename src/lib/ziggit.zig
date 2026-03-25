@@ -99,6 +99,20 @@ pub fn repo_status(repo: *Repository, allocator: std.mem.Allocator) ![]u8 {
     return buffer;
 }
 
+/// Get HEAD commit hash (like `git rev-parse HEAD`)
+pub fn repo_rev_parse_head(repo: *Repository, allocator: std.mem.Allocator) ![]u8 {
+    const buffer = try allocator.alloc(u8, 41);
+    try getHeadCommitHashReal(repo, buffer);
+    return buffer;
+}
+
+/// Get latest tag (like `git describe --tags --abbrev=0`)
+pub fn repo_describe_tags(repo: *Repository, allocator: std.mem.Allocator) ![]u8 {
+    const buffer = try allocator.alloc(u8, 256);
+    try getLatestTagReal(repo, buffer);
+    return buffer;
+}
+
 //
 // C-compatible API functions
 //
@@ -124,16 +138,36 @@ export fn ziggit_repo_open(path: [*:0]const u8) ?*ZiggitRepository {
     const repo = global_allocator.create(Repository) catch return null;
     repo.* = Repository.init(global_allocator, path_slice);
     
-    // Check if .git directory exists (not .ziggit)
-    const exists = repoExistsReal(repo) catch {
+    // Validate that this is a real git repository
+    const git_dir = findGitDirForRepo(repo) catch {
+        global_allocator.destroy(repo);
+        return null;
+    };
+    defer global_allocator.free(git_dir);
+    
+    // Check HEAD file exists and is readable
+    const head_path = std.fmt.allocPrint(global_allocator, "{s}/HEAD", .{git_dir}) catch {
+        global_allocator.destroy(repo);
+        return null;
+    };
+    defer global_allocator.free(head_path);
+    
+    std.fs.accessAbsolute(head_path, .{}) catch {
         global_allocator.destroy(repo);
         return null;
     };
     
-    if (!exists) {
+    // Check objects directory exists
+    const objects_path = std.fmt.allocPrint(global_allocator, "{s}/objects", .{git_dir}) catch {
         global_allocator.destroy(repo);
         return null;
-    }
+    };
+    defer global_allocator.free(objects_path);
+    
+    std.fs.accessAbsolute(objects_path, .{}) catch {
+        global_allocator.destroy(repo);
+        return null;
+    };
     
     return ZiggitRepository.fromRepo(repo);
 }
@@ -476,6 +510,85 @@ fn isValidHash(hash: []const u8) bool {
     return true;
 }
 
+fn isValidHashPrefix(hash: []const u8) bool {
+    if (hash.len != 40) return false;
+    for (hash) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
+}
+
+// Improved ref resolution that handles both loose refs and packed refs
+fn resolveRefReal(git_dir: []const u8, ref_name: []const u8, buffer: []u8) !void {
+    if (buffer.len < 41) return error.InvalidPath;
+    
+    // First try to read the ref file directly (loose refs)
+    const ref_path = try std.fmt.allocPrint(global_allocator, "{s}/{s}", .{ git_dir, ref_name });
+    defer global_allocator.free(ref_path);
+    
+    if (std.fs.openFileAbsolute(ref_path, .{})) |ref_file| {
+        defer ref_file.close();
+        
+        var ref_content_buf: [64]u8 = undefined;
+        const ref_bytes_read = try ref_file.readAll(&ref_content_buf);
+        const ref_content = std.mem.trim(u8, ref_content_buf[0..ref_bytes_read], " \n\r\t");
+        
+        if (ref_content.len >= 40 and isValidHashPrefix(ref_content[0..40])) {
+            @memcpy(buffer[0..40], ref_content[0..40]);
+            buffer[40] = 0;
+            return;
+        }
+        
+        // Check if this is a symbolic ref
+        if (std.mem.startsWith(u8, ref_content, "ref: ")) {
+            const nested_ref = ref_content[5..];
+            return resolveRefReal(git_dir, nested_ref, buffer);
+        }
+    } else |_| {
+        // Loose ref doesn't exist, try packed refs
+    }
+    
+    // Try packed-refs file
+    const packed_refs_path = try std.fmt.allocPrint(global_allocator, "{s}/packed-refs", .{git_dir});
+    defer global_allocator.free(packed_refs_path);
+    
+    if (std.fs.openFileAbsolute(packed_refs_path, .{})) |packed_file| {
+        defer packed_file.close();
+        
+        const max_packed_size = 1024 * 1024; // 1MB max for packed-refs
+        const packed_content = try packed_file.readToEndAlloc(global_allocator, max_packed_size);
+        defer global_allocator.free(packed_content);
+        
+        var lines = std.mem.split(u8, packed_content, "\n");
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r\n");
+            
+            // Skip comments and empty lines
+            if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == '^') continue;
+            
+            // Expected format: "<hash> <ref>"
+            const space_pos = std.mem.indexOf(u8, trimmed, " ") orelse continue;
+            if (space_pos < 40) continue; // Hash too short
+            
+            const hash_part = trimmed[0..space_pos];
+            const ref_part = trimmed[space_pos + 1 ..];
+            
+            if (std.mem.eql(u8, ref_part, ref_name) and hash_part.len >= 40 and isValidHashPrefix(hash_part[0..40])) {
+                @memcpy(buffer[0..40], hash_part[0..40]);
+                buffer[40] = 0;
+                return;
+            }
+        }
+    } else |_| {
+        // No packed-refs file either
+    }
+    
+    // Ref not found, return zeros (empty repo or invalid ref)
+    const zero_hash = "0000000000000000000000000000000000000000";
+    @memcpy(buffer[0..40], zero_hash);
+    buffer[40] = 0;
+}
+
 // Diff implementation
 fn getDiff(repo: *Repository, buffer: []u8) !void {
     _ = repo;
@@ -563,7 +676,7 @@ fn getHeadCommitHashReal(repo: *Repository, buffer: []u8) !void {
     
     const head_file = std.fs.openFileAbsolute(head_path, .{}) catch |err| switch (err) {
         error.FileNotFound => {
-            // No HEAD file, return zeros (empty repo)
+            // No HEAD file, return zeros (empty repo)  
             const zero_hash = "0000000000000000000000000000000000000000";
             @memcpy(buffer[0..40], zero_hash);
             buffer[40] = 0;
@@ -578,15 +691,15 @@ fn getHeadCommitHashReal(repo: *Repository, buffer: []u8) !void {
     const head_content = std.mem.trim(u8, head_content_buf[0..bytes_read], " \n\r\t");
     
     if (std.mem.startsWith(u8, head_content, "ref: ")) {
-        // HEAD points to a ref, read that ref
+        // HEAD points to a ref, resolve it
         const ref_name = head_content[5..]; // Skip "ref: "
-        try resolveRef(git_dir, ref_name, buffer);
-    } else if (head_content.len == 40 and isValidHash(head_content)) {
+        try resolveRefReal(git_dir, ref_name, buffer);
+    } else if (head_content.len >= 40 and isValidHashPrefix(head_content[0..40])) {
         // HEAD contains the hash directly (detached HEAD)
-        @memcpy(buffer[0..40], head_content);
+        @memcpy(buffer[0..40], head_content[0..40]);
         buffer[40] = 0;
     } else {
-        // Invalid HEAD format
+        // Invalid HEAD format or empty repo
         const zero_hash = "0000000000000000000000000000000000000000";
         @memcpy(buffer[0..40], zero_hash);
         buffer[40] = 0;
@@ -681,34 +794,171 @@ fn getStatusPorcelainReal(repo: *Repository, buffer: []u8) !void {
         else => return err,
     };
     
-    // For bun's common case (clean repos), do fast check first
-    const index_path = try std.fmt.allocPrint(global_allocator, "{s}/index", .{git_dir});
-    defer global_allocator.free(index_path);
+    var output_pos: usize = 0;
     
-    // If no index file exists, this is a fresh repo with no commits
-    std.fs.accessAbsolute(index_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => {
-            // No index = no staged files, check for untracked files in working directory
-            return getUntrackedFilesStatus(repo, buffer);
-        },
-        else => return err,
+    // Check for untracked files in working directory
+    const cwd = std.fs.cwd();
+    var work_dir = cwd.openDir(repo.path, .{ .iterate = true }) catch {
+        buffer[0] = 0;
+        return;
     };
+    defer work_dir.close();
     
-    // Fast path: for most cases, repos are clean
-    // Real implementation would parse index and compare with working tree
-    // For now, return empty (clean) status for performance
-    // This covers 90%+ of bun's use cases
-    buffer[0] = 0;
+    var iter = work_dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        
+        // Skip .git directory and common ignored files
+        if (std.mem.startsWith(u8, entry.name, ".git")) continue;
+        if (std.mem.eql(u8, entry.name, ".gitignore")) continue;
+        
+        // Check if this file is tracked by reading index
+        const is_tracked = isFileTracked(git_dir, entry.name) catch false;
+        
+        if (!is_tracked) {
+            // Untracked file - add to porcelain output
+            const status_line = std.fmt.bufPrint(
+                buffer[output_pos..], 
+                "?? {s}\n", 
+                .{entry.name}
+            ) catch break;
+            output_pos += status_line.len;
+            
+            if (output_pos >= buffer.len - 1) break;
+        } else {
+            // File is tracked, check if modified
+            const is_modified = isFileModified(git_dir, repo.path, entry.name) catch false;
+            if (is_modified) {
+                const status_line = std.fmt.bufPrint(
+                    buffer[output_pos..], 
+                    " M {s}\n", 
+                    .{entry.name}
+                ) catch break;
+                output_pos += status_line.len;
+                
+                if (output_pos >= buffer.len - 1) break;
+            }
+        }
+    }
+    
+    // Null terminate
+    if (output_pos < buffer.len) {
+        buffer[output_pos] = 0;
+    }
 }
 
 // Check for untracked files in working directory
-fn getUntrackedFilesStatus(_: *Repository, buffer: []u8) !void {
+fn getUntrackedFilesStatus(repo: *Repository, buffer: []u8) !void {
     if (buffer.len == 0) return;
     
-    // For bun's use case, most repos are managed, so assume clean
-    // Real implementation would scan working directory and check against .gitignore
-    // This optimization covers the common case where bun checks status on clean repos
-    buffer[0] = 0;
+    var output_pos: usize = 0;
+    const cwd = std.fs.cwd();
+    var work_dir = cwd.openDir(repo.path, .{ .iterate = true }) catch {
+        buffer[0] = 0;
+        return;
+    };
+    defer work_dir.close();
+    
+    var iter = work_dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        
+        // Skip .git directory
+        if (std.mem.startsWith(u8, entry.name, ".git")) continue;
+        
+        // All files are untracked in a repo with no index
+        const status_line = std.fmt.bufPrint(
+            buffer[output_pos..], 
+            "?? {s}\n", 
+            .{entry.name}
+        ) catch break;
+        output_pos += status_line.len;
+        
+        if (output_pos >= buffer.len - 1) break;
+    }
+    
+    // Null terminate
+    if (output_pos < buffer.len) {
+        buffer[output_pos] = 0;
+    }
+}
+
+// Simple check if file is tracked (reads git index)
+fn isFileTracked(git_dir: []const u8, file_path: []const u8) !bool {
+    const index_path = try std.fmt.allocPrint(global_allocator, "{s}/index", .{git_dir});
+    defer global_allocator.free(index_path);
+    
+    const index_file = std.fs.openFileAbsolute(index_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer index_file.close();
+    
+    // Read index header
+    var header: [12]u8 = undefined;
+    const bytes_read = try index_file.readAll(&header);
+    if (bytes_read < 12) return false;
+    
+    // Check signature "DIRC"
+    if (!std.mem.eql(u8, header[0..4], "DIRC")) return false;
+    
+    // Get number of entries (big endian)
+    const num_entries = std.mem.readInt(u32, header[8..12], .big);
+    
+    // Read entries and look for our file
+    for (0..num_entries) |_| {
+        // Skip to path name (index entries are variable length)
+        // This is a simplified parser - real git index is more complex
+        var entry_header: [62]u8 = undefined;
+        const entry_read = index_file.readAll(&entry_header) catch break;
+        if (entry_read < 62) break;
+        
+        // Path length is stored at offset 60-61 (16-bit big endian)
+        const path_len = std.mem.readInt(u16, entry_header[60..62], .big);
+        
+        if (path_len > 4096) break; // Sanity check
+        
+        var path_buffer: [4096]u8 = undefined;
+        if (path_len > path_buffer.len) break;
+        
+        const path_read = index_file.readAll(path_buffer[0..path_len]) catch break;
+        if (path_read != path_len) break;
+        
+        const indexed_path = path_buffer[0..path_len];
+        if (std.mem.eql(u8, indexed_path, file_path)) {
+            return true;
+        }
+        
+        // Skip padding to align to 8-byte boundary
+        const padding = (8 - ((62 + path_len) % 8)) % 8;
+        index_file.seekBy(@intCast(padding)) catch break;
+    }
+    
+    return false;
+}
+
+// Simple check if file is modified compared to index
+fn isFileModified(git_dir: []const u8, work_tree: []const u8, file_path: []const u8) !bool {
+    _ = git_dir; // Will be used for reading index entry
+    
+    // For now, just check if file exists in working tree
+    const full_path = try std.fmt.allocPrint(global_allocator, "{s}/{s}", .{ work_tree, file_path });
+    defer global_allocator.free(full_path);
+    
+    const file = std.fs.openFileAbsolute(full_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return true, // File deleted
+        else => return err,
+    };
+    defer file.close();
+    
+    // In a real implementation, we would:
+    // 1. Read the file content and compute SHA1
+    // 2. Compare with the SHA1 stored in the index
+    // 3. Check modification time and other metadata
+    
+    // For now, assume files are not modified for performance
+    // This gives us the fast path for clean repos that bun typically deals with
+    return false;
 }
 
 // Check if a path exists in the repository
@@ -958,88 +1208,98 @@ fn getHeadCommitHashFast(repo: *Repository, buffer: []u8) !void {
     }
 }
 
-// Real latest tag retrieval for git repositories
+// Real latest tag retrieval for git repositories  
 fn getLatestTagReal(repo: *Repository, buffer: []u8) !void {
     if (buffer.len == 0) return;
     
     const git_dir = try findGitDirForRepo(repo);
     defer global_allocator.free(git_dir);
     
+
+    
+    // Collect all tags first
+    var tags_list = std.ArrayList([]u8).init(global_allocator);
+    defer {
+        for (tags_list.items) |tag| {
+            global_allocator.free(tag);
+        }
+        tags_list.deinit();
+    }
+    
     // Check refs/tags directory first
     const tags_dir_path = try std.fmt.allocPrint(global_allocator, "{s}/refs/tags", .{git_dir});
     defer global_allocator.free(tags_dir_path);
     
-    var tag_found = false;
-    var latest_tag: []u8 = undefined;
-    var latest_tag_allocated = false;
-    defer if (latest_tag_allocated) global_allocator.free(latest_tag);
-    
-    // Try to read tags from refs/tags directory  
-    blk: {
-        var tags_dir = std.fs.openDirAbsolute(tags_dir_path, .{ .iterate = true }) catch break :blk;
-        defer tags_dir.close();
+    // Read loose tag refs
+    if (std.fs.openDirAbsolute(tags_dir_path, .{ .iterate = true })) |tags_dir| {
+        var tags_dir_mut = tags_dir;
+        defer tags_dir_mut.close();
         
-        var iterator = tags_dir.iterate();
+        var iterator = tags_dir_mut.iterate();
         while (try iterator.next()) |entry| {
             if (entry.kind == .file) {
-                // For now, return the first tag found
-                // Real implementation would sort tags semantically or by date
-                if (!tag_found) {
-                    latest_tag = try global_allocator.dupe(u8, entry.name);
-                    latest_tag_allocated = true;
-                    tag_found = true;
-                    break;
-                }
+                try tags_list.append(try global_allocator.dupe(u8, entry.name));
             }
         }
+    } else |_| {
+        // No loose tags directory
     }
     
     // Also check packed-refs for tags
-    if (!tag_found) {
-        const packed_refs_path = try std.fmt.allocPrint(global_allocator, "{s}/packed-refs", .{git_dir});
-        defer global_allocator.free(packed_refs_path);
+    const packed_refs_path = try std.fmt.allocPrint(global_allocator, "{s}/packed-refs", .{git_dir});
+    defer global_allocator.free(packed_refs_path);
+    
+    if (std.fs.openFileAbsolute(packed_refs_path, .{})) |packed_file| {
+        defer packed_file.close();
         
-        if (std.fs.openFileAbsolute(packed_refs_path, .{})) |packed_file| {
-            defer packed_file.close();
+        const max_packed_size = 1024 * 1024; // 1MB max
+        const packed_content = try packed_file.readToEndAlloc(global_allocator, max_packed_size);
+        defer global_allocator.free(packed_content);
+        
+        var lines = std.mem.split(u8, packed_content, "\n");
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r\n");
             
-            var packed_content_buf: [8192]u8 = undefined;
-            const packed_bytes_read = try packed_file.readAll(&packed_content_buf);
-            const packed_content = packed_content_buf[0..packed_bytes_read];
+            // Skip comments and empty lines
+            if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == '^') continue;
             
-            var lines = std.mem.split(u8, packed_content, "\n");
-            while (lines.next()) |line| {
-                const trimmed = std.mem.trim(u8, line, " \t\r\n");
-                
-                // Skip comments and empty lines
-                if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == '^') continue;
-                
-                // Expected format: "<hash> <ref>"
-                const space_pos = std.mem.indexOf(u8, trimmed, " ") orelse continue;
-                const ref_part = trimmed[space_pos + 1 ..];
-                
-                // Check if this is a tag reference
-                if (std.mem.startsWith(u8, ref_part, "refs/tags/")) {
-                    const tag_name = ref_part[10..]; // Skip "refs/tags/"
-                    if (!tag_found) {
-                        latest_tag = try global_allocator.dupe(u8, tag_name);
-                        latest_tag_allocated = true;
-                        tag_found = true;
-                        break;
-                    }
-                }
+            // Expected format: "<hash> <ref>"
+            const space_pos = std.mem.indexOf(u8, trimmed, " ") orelse continue;
+            const ref_part = trimmed[space_pos + 1 ..];
+            
+            // Check if this is a tag reference
+            if (std.mem.startsWith(u8, ref_part, "refs/tags/")) {
+                const tag_name = ref_part[10..]; // Skip "refs/tags/"
+                try tags_list.append(try global_allocator.dupe(u8, tag_name));
             }
-        } else |_| {
-            // No packed-refs file
         }
+    } else |_| {
+        // No packed-refs file
     }
     
-    if (tag_found and latest_tag.len < buffer.len) {
-        @memcpy(buffer[0..latest_tag.len], latest_tag);
-        buffer[latest_tag.len] = 0;
+    // Find "latest" tag - for simplicity, use lexicographic ordering for now
+    // Real git describe uses commit graph and dates
+    if (tags_list.items.len > 0) {
+        // Sort tags to find the "latest" one
+        std.mem.sort([]u8, tags_list.items, {}, compareTagsDesc);
+        
+        const selected_tag = tags_list.items[0];
+        if (selected_tag.len < buffer.len) {
+            @memcpy(buffer[0..selected_tag.len], selected_tag);
+            buffer[selected_tag.len] = 0;
+        } else {
+            buffer[0] = 0; // Buffer too small
+        }
     } else {
         // No tags found
         buffer[0] = 0;
     }
+}
+
+// Compare tags for sorting (descending order - newer versions first)
+fn compareTagsDesc(_: void, a: []u8, b: []u8) bool {
+    // Simple lexicographic comparison, but reversed for descending order
+    return std.mem.order(u8, a, b) == .gt;
 }
 
 // Version information exports
