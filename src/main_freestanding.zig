@@ -27,6 +27,18 @@ export fn ziggit_main() i32 {
 }
 
 // Export function for host to set arguments before calling commands
+// Export functions for platform to access global args
+export fn getGlobalArgc() u32 {
+    return global_argc;
+}
+
+export fn getGlobalArgv() ?[*][]const u8 {
+    if (global_argv) |argv| {
+        return argv.ptr;
+    }
+    return null;
+}
+
 export fn ziggit_set_args(argc: u32, argv_ptr: [*][*:0]const u8) i32 {
     const allocator = getOrInitAllocator();
     
