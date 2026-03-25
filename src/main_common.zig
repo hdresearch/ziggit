@@ -384,7 +384,12 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 
     // Create tree object from index entries
     var tree_entries = std.ArrayList(objects.TreeEntry).init(allocator);
-    defer tree_entries.deinit();
+    defer {
+        for (tree_entries.items) |entry| {
+            entry.deinit(allocator);
+        }
+        tree_entries.deinit();
+    }
 
     for (index.entries.items) |entry| {
         const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.hash)});
@@ -479,7 +484,13 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     defer allocator.free(commit_hash);
 
     var visited = std.StringHashMap(void).init(allocator);
-    defer visited.deinit();
+    defer {
+        var iterator = visited.iterator();
+        while (iterator.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+        }
+        visited.deinit();
+    }
 
     while (true) {
         // Avoid infinite loops
