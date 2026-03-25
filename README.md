@@ -93,7 +93,7 @@ This script:
 - Working directory changes not supported in all WASI runtimes  
 - Some advanced system-level operations unavailable
 - Performance may be slightly reduced compared to native
-- Memory allocation constraints may affect large repositories
+- Memory limited to 32MB maximum (16MB initial) for runtime stability
 - WASI runtime required for full filesystem access
 - **Git object compression disabled for WASM stability** - Objects are stored uncompressed to avoid zlib memory issues in WebAssembly. This maintains functionality while slightly increasing repository size. Full git compatibility with compression will be restored in future releases.
 
@@ -153,7 +153,8 @@ wasmModule.instance.exports.ziggit_command(command.ptr, command.length);
 - No direct filesystem access - requires JavaScript host functions
 - All I/O operations delegated to host environment
 - Network operations must be implemented in JavaScript
-- Memory limited to 64KB fixed buffer (configurable)
+- Memory limited to 4MB maximum (1MB initial) for browser compatibility
+- Fixed buffer allocator with 64KB default size (configurable at build time)
 - Limited git commands compared to WASI build (init, status, help, version)
 - Advanced git features may require additional host implementations
 

@@ -245,6 +245,9 @@ pub fn build(b: *std.Build) void {
     
     // Set initial memory size to give more room for operations
     wasm_exe.initial_memory = 16 * 1024 * 1024; // 16MB initial memory
+    
+    // Set max memory to prevent excessive growth
+    wasm_exe.max_memory = 32 * 1024 * 1024; // 32MB max memory
 
     const wasm_step = b.step("wasm", "Build for WebAssembly (WASI)");
     wasm_step.dependOn(&b.addInstallArtifact(wasm_exe, .{}).step);
@@ -268,6 +271,10 @@ pub fn build(b: *std.Build) void {
     
     // Additional WASM optimizations for smaller binary size
     wasm_freestanding_exe.stack_size = 16 * 1024; // 16KB stack (smaller than default)
+    
+    // Set reasonable memory limits for browser environment
+    wasm_freestanding_exe.initial_memory = 1024 * 1024; // 1MB initial memory
+    wasm_freestanding_exe.max_memory = 4 * 1024 * 1024; // 4MB max memory
     
     // Add compile-time option for configurable memory size
     const freestanding_memory_size = b.option(u32, "freestanding-memory-size", "Memory size for freestanding WASM build (default: 64KB)") orelse (64 * 1024);
