@@ -624,4 +624,44 @@ pub fn build(b: *std.Build) void {
 
     const bench_minimal_step = b.step("bench-minimal", "Run minimal benchmark (ziggit binary vs git CLI)");
     bench_minimal_step.dependOn(&run_minimal_bench.step);
+
+    // Comprehensive bun benchmark (ziggit vs git CLI vs libgit2)
+    const comprehensive_bun_bench_exe = b.addExecutable(.{
+        .name = "comprehensive-bun-bench",
+        .root_source_file = b.path("benchmarks/comprehensive_bun_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Link the static library and libgit2
+    comprehensive_bun_bench_exe.linkLibrary(lib_static);
+    comprehensive_bun_bench_exe.linkLibC();
+    comprehensive_bun_bench_exe.addIncludePath(b.path("src/lib"));
+    comprehensive_bun_bench_exe.linkSystemLibrary("git2");
+
+    const run_comprehensive_bun_bench = b.addRunArtifact(comprehensive_bun_bench_exe);
+
+    const bench_comprehensive_bun_step = b.step("bench-comprehensive-bun", "Run comprehensive bun integration benchmark (ziggit vs git CLI vs libgit2)");
+    bench_comprehensive_bun_step.dependOn(&run_comprehensive_bun_bench.step);
+
+    // Install the comprehensive benchmark executable
+    const install_comprehensive_bun_bench = b.addInstallArtifact(comprehensive_bun_bench_exe, .{});
+    bench_comprehensive_bun_step.dependOn(&install_comprehensive_bun_bench.step);
+
+    // Simple comparison benchmark (ziggit CLI vs git CLI only)
+    const simple_comparison_bench_exe = b.addExecutable(.{
+        .name = "simple-comparison-bench",
+        .root_source_file = b.path("benchmarks/simple_comparison_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_simple_comparison_bench = b.addRunArtifact(simple_comparison_bench_exe);
+
+    const bench_simple_comparison_step = b.step("bench-simple-comparison", "Run simple comparison benchmark (ziggit CLI vs git CLI)");
+    bench_simple_comparison_step.dependOn(&run_simple_comparison_bench.step);
+
+    // Install the simple comparison benchmark executable
+    const install_simple_comparison_bench = b.addInstallArtifact(simple_comparison_bench_exe, .{});
+    bench_simple_comparison_step.dependOn(&install_simple_comparison_bench.step);
 }
