@@ -84,6 +84,33 @@ pub const TestHarness = struct {
         return self.runCommand(self.git_path, args, cwd);
     }
 
+    pub fn expectExitCode(self: TestHarness, actual: u8, expected: u8, test_name: []const u8) !void {
+        _ = self;
+        if (actual != expected) {
+            std.debug.print("    FAIL: {s} - expected exit code {}, got {}\n", .{ test_name, expected, actual });
+            return TestError.ProcessFailed;
+        }
+    }
+
+    pub fn expectOutputContains(self: TestHarness, output: []const u8, needle: []const u8, test_name: []const u8) !void {
+        _ = self;
+        if (!std.mem.containsAtLeast(u8, output, 1, needle)) {
+            std.debug.print("    FAIL: {s} - output doesn't contain '{s}'\n", .{ test_name, needle });
+            std.debug.print("      Actual output: {s}\n", .{output});
+            return TestError.OutputMismatch;
+        }
+    }
+
+    pub fn createTempFile(self: TestHarness, dir: []const u8, filename: []const u8, content: []const u8) !void {
+        const file_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ dir, filename });
+        defer self.allocator.free(file_path);
+        
+        const file = try std.fs.createFileAbsolute(file_path, .{ .truncate = true });
+        defer file.close();
+        
+        try file.writeAll(content);
+    }
+
     pub fn compareCommands(self: TestHarness, args: []const []const u8, cwd: ?[]const u8, comptime ignore_stderr: bool) !void {
         // For init commands, we need fresh directories to compare properly
         var ziggit_cwd = cwd;
