@@ -212,6 +212,57 @@ pub const TestHarness = struct {
     }
 };
 
+// Utility function for cleaning up test directories
+pub fn cleanupTestDir(dir_name: []const u8) void {
+    std.fs.cwd().deleteTree(dir_name) catch |err| {
+        // If deletion fails, it might not exist, which is fine
+        std.debug.print("Warning: failed to delete test dir {s}: {}\n", .{ dir_name, err });
+    };
+}
+
+// Utility function for running ziggit commands directly (simplified interface)
+pub fn runZiggitCommand(allocator: std.mem.Allocator, args: []const []const u8) !struct {
+    stdout: []u8,
+    stderr: []u8,
+    exit_code: u8,
+} {
+    var argv = ArrayList([]const u8).init(allocator);
+    defer argv.deinit();
+    
+    // Add ziggit binary path
+    try argv.append("./zig-out/bin/ziggit");
+    for (args) |arg| {
+        try argv.append(arg);
+    }
+    
+    var proc = Process.Child.init(argv.items, allocator);
+    proc.stdout_behavior = .Pipe;
+    proc.stderr_behavior = .Pipe;
+
+    try proc.spawn();
+
+    var stdout = ArrayList(u8).init(allocator);
+    var stderr = ArrayList(u8).init(allocator);
+    defer {
+        stdout.deinit();
+        stderr.deinit();
+    }
+
+    try proc.collectOutput(&stdout, &stderr, 1024 * 1024); // 1MB limit
+    const term = try proc.wait();
+
+    const exit_code: u8 = switch (term) {
+        .Exited => |code| @intCast(code),
+        .Signal, .Stopped, .Unknown => 1,
+    };
+
+    return .{
+        .stdout = try stdout.toOwnedSlice(),
+        .stderr = try stderr.toOwnedSlice(),
+        .exit_code = exit_code,
+    };
+}
+
 // Test runner
 pub fn runTests() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
