@@ -329,7 +329,7 @@ fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8) !void
     defer global_allocator.free(head_path);
     const head_file = try std.fs.createFileAbsolute(head_path, .{ .truncate = true });
     defer head_file.close();
-    try head_file.writeAll("ref: refs/heads/main\n");
+    try head_file.writeAll("ref: refs/heads/master\n");
     
     // Create config file
     const config_path = try std.fmt.allocPrint(global_allocator, "{s}/config", .{git_dir});
