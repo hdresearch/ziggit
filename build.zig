@@ -75,11 +75,7 @@ pub fn build(b: *std.Build) void {
     const run_comprehensive_git_workflow_test = b.addRunArtifact(comprehensive_git_workflow_test);
     run_comprehensive_git_workflow_test.step.dependOn(b.getInstallStep());
 
-    // Test step runs both unit tests and compatibility tests
-    const test_step = b.step("test", "Run all tests");
-    test_step.dependOn(&run_unit_tests.step);
-    test_step.dependOn(&run_compatibility_tests.step);
-    test_step.dependOn(&run_git_compat_tests.step);
+
 
     // Separate step for just compatibility tests
     const compat_test_step = b.step("test-compat", "Run compatibility tests");
@@ -181,6 +177,20 @@ pub fn build(b: *std.Build) void {
     const git_compatibility_test_step = b.step("test-git-compatibility", "Run comprehensive git compatibility tests");
     git_compatibility_test_step.dependOn(&run_git_compatibility_tests.step);
 
+    // Git source comprehensive compatibility test suite (based on git's own tests)
+    const git_source_comprehensive_test = b.addExecutable(.{
+        .name = "git_source_comprehensive_test",
+        .root_source_file = b.path("test/git_source_comprehensive_compatibility.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_git_source_comprehensive_test = b.addRunArtifact(git_source_comprehensive_test);
+    run_git_source_comprehensive_test.step.dependOn(b.getInstallStep()); // Ensure ziggit is built first
+
+    const git_source_comprehensive_test_step = b.step("test-git-source-compat", "Run git source comprehensive compatibility tests");
+    git_source_comprehensive_test_step.dependOn(&run_git_source_comprehensive_test.step);
+
     // Critical git compatibility test suite (focused on core functionality)
     const critical_compatibility_tests = b.addExecutable(.{
         .name = "critical_compatibility_tests",
@@ -223,7 +233,12 @@ pub fn build(b: *std.Build) void {
     const comprehensive_git_test_step = b.step("test-comprehensive", "Run comprehensive git compatibility test suite");
     comprehensive_git_test_step.dependOn(&run_comprehensive_git_tests.step);
 
-    // Add comprehensive tests to main test step
+    // Main test step runs core compatibility tests
+    const test_step = b.step("test", "Run all tests");
+    test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&run_compatibility_tests.step);
+    test_step.dependOn(&run_git_compat_tests.step);
+    test_step.dependOn(&run_git_source_comprehensive_test.step);
     test_step.dependOn(&run_comprehensive_git_tests.step);
 
     // Git source compatibility test suite (newly improved)
