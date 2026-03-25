@@ -14,7 +14,7 @@ pub const EnhancedGitCompatTests = struct {
     pub fn init(allocator: Allocator) EnhancedGitCompatTests {
         return EnhancedGitCompatTests{
             .allocator = allocator,
-            .ziggit_path = "./zig-out/bin/ziggit",
+            .ziggit_path = "/root/ziggit/zig-out/bin/ziggit",
             .git_path = "git",
         };
     }

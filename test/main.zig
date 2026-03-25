@@ -12,6 +12,7 @@ const git_format_compatibility_tests = @import("git_format_compatibility_tests.z
 const essential_git_compatibility = @import("essential_git_compatibility.zig");
 const git_source_compat_tests = @import("git_source_compat_tests.zig");
 const enhanced_git_compat_tests = @import("enhanced_git_compat_tests.zig");
+const standalone_functionality_tests = @import("standalone_functionality_tests.zig");
 
 pub fn main() !void {
     try test_harness.runTests();
@@ -26,6 +27,7 @@ pub fn main() !void {
     try essential_git_compatibility.runEssentialGitCompatibilityTests();
     try git_source_compat_tests.runGitSourceCompatTests();
     try enhanced_git_compat_tests.runEnhancedGitCompatTests();
+    try standalone_functionality_tests.runStandaloneFunctionalityTests();
     // Note: git_format_compatibility_tests temporarily disabled due to format differences
     // try git_format_compatibility_tests.runGitFormatCompatibilityTests();
 }
@@ -45,4 +47,5 @@ test {
     std.testing.refAllDeclsRecursive(@import("essential_git_compatibility.zig"));
     std.testing.refAllDeclsRecursive(@import("git_source_compat_tests.zig"));
     std.testing.refAllDeclsRecursive(@import("enhanced_git_compat_tests.zig"));
+    std.testing.refAllDeclsRecursive(@import("standalone_functionality_tests.zig"));
 }
