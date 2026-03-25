@@ -46,6 +46,15 @@ zig build wasm-browser
 
 This produces `zig-out/bin/ziggit-browser.wasm` for browser/JavaScript environments.
 
+## WebAssembly Status
+
+**Current Implementation**: Basic WebAssembly support is functional with comprehensive platform abstraction framework.
+
+- ✅ **Working**: `zig build`, `zig build wasm`, `zig build wasm-browser` all compile successfully
+- ✅ **Tested**: Core commands `init` and `status` work correctly on native builds  
+- ✅ **Platform abstraction**: Complete isolation of OS-specific code in `src/platform/`
+- 🚧 **In progress**: Advanced commands need platform.fs API integration for full WASM compatibility
+
 ## WebAssembly Limitations
 
 ### WASI Build
