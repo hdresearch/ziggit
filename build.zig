@@ -22,6 +22,7 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run ziggit");
     run_step.dependOn(&run_cmd.step);
 
+    // Unit tests for the main library
     const unit_tests = b.addTest(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -29,8 +30,26 @@ pub fn build(b: *std.Build) void {
     });
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
-    const test_step = b.step("test", "Run unit tests");
+
+    // Compatibility test suite
+    const compatibility_tests = b.addExecutable(.{
+        .name = "compatibility_tests",
+        .root_source_file = b.path("test/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_compatibility_tests = b.addRunArtifact(compatibility_tests);
+    run_compatibility_tests.step.dependOn(b.getInstallStep()); // Ensure ziggit is built first
+
+    // Test step runs both unit tests and compatibility tests
+    const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&run_compatibility_tests.step);
+
+    // Separate step for just compatibility tests
+    const compat_test_step = b.step("test-compat", "Run compatibility tests");
+    compat_test_step.dependOn(&run_compatibility_tests.step);
 
     // WebAssembly target (WASI)
     const wasm_target = b.resolveTargetQuery(.{
