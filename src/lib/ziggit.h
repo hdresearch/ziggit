@@ -52,6 +52,12 @@ int ziggit_is_clean(ziggit_repository_t* repo);
 int ziggit_get_latest_tag(ziggit_repository_t* repo, char* buffer, size_t buffer_size);
 int ziggit_create_tag(ziggit_repository_t* repo, const char* tag_name, const char* message);
 
+// Advanced operations for better Bun integration
+int ziggit_rev_parse_head(ziggit_repository_t* repo, char* buffer, size_t buffer_size);
+int ziggit_status_porcelain(ziggit_repository_t* repo, char* buffer, size_t buffer_size);
+int ziggit_path_exists(ziggit_repository_t* repo, const char* path);
+int ziggit_get_file_at_ref(ziggit_repository_t* repo, const char* ref, const char* file_path, char* buffer, size_t buffer_size);
+
 #ifdef __cplusplus
 }
 #endif
