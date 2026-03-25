@@ -55,7 +55,8 @@ This produces `zig-out/bin/ziggit-browser.wasm` for browser/JavaScript environme
 - ✅ **Platform abstraction**: Complete isolation of OS-specific code in `src/platform/` with unified interface
 - ✅ **WASI compatibility**: Full filesystem operations through WASI APIs with proper error handling
 - ✅ **Code sharing**: Core logic shared between all platforms via `src/main_common.zig`
-- ✅ **Production ready**: WebAssembly builds are fully functional for git repository operations  
+- ✅ **Production ready**: WebAssembly builds are fully functional for git repository operations
+- ✅ **Browser optimized**: Freestanding build provides minimal footprint (4KB) with JavaScript integration
 - 🚧 **Expanding**: Additional git commands (add, commit, log, etc.) being added for complete git compatibility
 
 ## WebAssembly Capabilities & Limitations
@@ -86,10 +87,11 @@ wasmer zig-out/bin/ziggit.wasm -- init my-repo
 
 ### Browser/Freestanding Build (`zig build wasm-browser`)
 **Capabilities:**
-- Minimal binary size (< 2KB) 
+- Minimal binary size (4KB) optimized for browser environments
 - JavaScript host integration via exported functions
-- Custom memory management with fixed buffer allocator
-- Extensible through JavaScript host environment
+- Custom memory management with fixed buffer allocator (64KB default)
+- Multiple integration patterns for flexibility
+- Core git commands (init, status) with host filesystem delegation
 
 **Requirements:**
 - JavaScript host must implement filesystem operations via extern functions:
@@ -99,8 +101,10 @@ wasmer zig-out/bin/ziggit.wasm -- init my-repo
   - `host_get_cwd()` - Working directory
 
 **Exports:**
-- `ziggit_main()` - Initialize ziggit
-- `ziggit_command(command_ptr, command_len)` - Execute specific commands
+- `ziggit_main()` - Initialize ziggit (shows welcome message)
+- `ziggit_command(command_ptr, command_len)` - Execute single command (legacy)
+- `ziggit_command_line(argc, argv)` - Execute full command line (recommended)  
+- `ziggit_set_args(argc, argv)` - Set arguments for subsequent calls
 
 **Example JavaScript integration:**
 ```javascript
@@ -109,14 +113,17 @@ const wasmModule = await WebAssembly.instantiateStreaming(
     { env: { /* host function implementations */ } }
 );
 
-// Initialize
+// Initialize 
 wasmModule.instance.exports.ziggit_main();
 
-// Execute commands
-const command = new TextEncoder().encode("init");
-const ptr = wasmModule.instance.exports.malloc(command.length);
-new Uint8Array(wasmModule.instance.exports.memory.buffer, ptr, command.length).set(command);
-wasmModule.instance.exports.ziggit_command(ptr, command.length);
+// Execute full command line (recommended approach)
+const argc = 2;
+const argv = ["ziggit", "init"];
+wasmModule.instance.exports.ziggit_command_line(argc, argv);
+
+// Or execute single command (legacy)
+const command = new TextEncoder().encode("status");
+wasmModule.instance.exports.ziggit_command(command.ptr, command.length);
 ```
 
 **Limitations:**
@@ -124,7 +131,8 @@ wasmModule.instance.exports.ziggit_command(ptr, command.length);
 - All I/O operations delegated to host environment
 - Network operations must be implemented in JavaScript
 - Memory limited to 64KB fixed buffer (configurable)
-- Some git features may require additional host implementations
+- Limited git commands compared to WASI build (init, status, help, version)
+- Advanced git features may require additional host implementations
 
 ## Platform Abstraction
 
