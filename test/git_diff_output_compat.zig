@@ -142,9 +142,9 @@ fn testDiffEmptyRepository(tf: *TestFramework) !void {
     try fs.cwd().makeDir("test-diff-empty");
     defer tf.cleanupTestDir("test-diff-empty");
     
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "init" }, "test-diff-empty");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, "test-diff-empty");
     
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "diff" }, "test-diff-empty");
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "diff" }, "test-diff-empty");
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     
@@ -180,12 +180,12 @@ fn testDiffNoChanges(tf: *TestFramework) !void {
     defer tf.cleanupTestDir("test-diff-no-changes");
     
     // Set up repository with committed file
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "init" }, "test-diff-no-changes");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, "test-diff-no-changes");
     try tf.createTestFile("test-diff-no-changes/file.txt", "content\n");
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "add", "file.txt" }, "test-diff-no-changes");
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "commit", "-m", "initial" }, "test-diff-no-changes");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "file.txt" }, "test-diff-no-changes");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "initial" }, "test-diff-no-changes");
     
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "diff" }, "test-diff-no-changes");
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "diff" }, "test-diff-no-changes");
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     
@@ -217,15 +217,15 @@ fn testDiffWorkingDirectoryChanges(tf: *TestFramework) !void {
     defer tf.cleanupTestDir("test-diff-wd-changes");
     
     // Set up repository with committed file, then modify it
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "init" }, "test-diff-wd-changes");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, "test-diff-wd-changes");
     try tf.createTestFile("test-diff-wd-changes/file.txt", "line1\nline2\nline3\n");
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "add", "file.txt" }, "test-diff-wd-changes");
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "commit", "-m", "initial" }, "test-diff-wd-changes");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "file.txt" }, "test-diff-wd-changes");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "initial" }, "test-diff-wd-changes");
     
     // Modify the file
     try tf.createTestFile("test-diff-wd-changes/file.txt", "line1\nmodified line2\nline3\nnew line4\n");
     
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "diff" }, "test-diff-wd-changes");
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "diff" }, "test-diff-wd-changes");
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     
@@ -276,16 +276,16 @@ fn testDiffStagedChanges(tf: *TestFramework) !void {
     defer tf.cleanupTestDir("test-diff-staged");
     
     // Set up repository, commit file, modify and stage
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "init" }, "test-diff-staged");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, "test-diff-staged");
     try tf.createTestFile("test-diff-staged/file.txt", "original content\n");
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "add", "file.txt" }, "test-diff-staged");
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "commit", "-m", "initial" }, "test-diff-staged");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "file.txt" }, "test-diff-staged");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "initial" }, "test-diff-staged");
     
     try tf.createTestFile("test-diff-staged/file.txt", "modified content\n");
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "add", "file.txt" }, "test-diff-staged");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "file.txt" }, "test-diff-staged");
     
     // Test diff (should show no changes since changes are staged)
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "diff" }, "test-diff-staged");
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "diff" }, "test-diff-staged");
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     
@@ -304,15 +304,15 @@ fn testDiffCached(tf: *TestFramework) !void {
     defer tf.cleanupTestDir("test-diff-cached");
     
     // Set up repository with staged changes
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "init" }, "test-diff-cached");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, "test-diff-cached");
     try tf.createTestFile("test-diff-cached/file.txt", "original content\n");
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "add", "file.txt" }, "test-diff-cached");
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "commit", "-m", "initial" }, "test-diff-cached");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "file.txt" }, "test-diff-cached");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "initial" }, "test-diff-cached");
     
     try tf.createTestFile("test-diff-cached/file.txt", "modified content\n");
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "add", "file.txt" }, "test-diff-cached");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "file.txt" }, "test-diff-cached");
     
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "diff", "--cached" }, "test-diff-cached");
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "diff", "--cached" }, "test-diff-cached");
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     
@@ -346,7 +346,7 @@ fn testDiffOutputFormat(tf: *TestFramework) !void {
     defer tf.cleanupTestDir("test-diff-format");
     
     // Create a comprehensive test case for diff format
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "init" }, "test-diff-format");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, "test-diff-format");
     try tf.createTestFile("test-diff-format/test.txt", 
         \\line 1
         \\line 2
@@ -354,8 +354,8 @@ fn testDiffOutputFormat(tf: *TestFramework) !void {
         \\line 4
         \\line 5
     );
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "add", "test.txt" }, "test-diff-format");
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "commit", "-m", "initial" }, "test-diff-format");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "test.txt" }, "test-diff-format");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "initial" }, "test-diff-format");
     
     // Modify file to create a good diff
     try tf.createTestFile("test-diff-format/test.txt", 
@@ -367,7 +367,7 @@ fn testDiffOutputFormat(tf: *TestFramework) !void {
         \\added line 6
     );
     
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "diff" }, "test-diff-format");
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "diff" }, "test-diff-format");
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     
@@ -398,19 +398,19 @@ fn testDiffBinaryFiles(tf: *TestFramework) !void {
     try fs.cwd().makeDir("test-diff-binary");
     defer tf.cleanupTestDir("test-diff-binary");
     
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "init" }, "test-diff-binary");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, "test-diff-binary");
     
     // Create a binary file
     const binary_content = [_]u8{ 0x00, 0x01, 0x02, 0xFF, 0xFE, 0xFD };
     try tf.createTestFile("test-diff-binary/binary.bin", &binary_content);
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "add", "binary.bin" }, "test-diff-binary");
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "commit", "-m", "add binary" }, "test-diff-binary");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "binary.bin" }, "test-diff-binary");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "add binary" }, "test-diff-binary");
     
     // Modify binary file
     const modified_binary = [_]u8{ 0x00, 0x01, 0x03, 0xFF, 0xFE, 0xFC };
     try tf.createTestFile("test-diff-binary/binary.bin", &modified_binary);
     
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "diff" }, "test-diff-binary");
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "diff" }, "test-diff-binary");
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     

@@ -105,7 +105,7 @@ fn testStatusOutsideRepository(tf: *TestFramework) !void {
     defer tf.cleanupTestDir("test-no-repo");
     
     // Test ziggit status
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "status" }, "test-no-repo");
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "status" }, "test-no-repo");
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     
@@ -141,7 +141,7 @@ fn testStatusEmptyRepository(tf: *TestFramework) !void {
     defer tf.cleanupTestDir("test-empty-repo");
     
     // Initialize repositories
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "init" }, "test-empty-repo");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, "test-empty-repo");
     
     tf.cleanupTestDir("test-empty-repo-git");
     try fs.cwd().makeDir("test-empty-repo-git");
@@ -149,7 +149,7 @@ fn testStatusEmptyRepository(tf: *TestFramework) !void {
     _ = try tf.runCommand(&[_][]const u8{ "git", "init" }, "test-empty-repo-git");
     
     // Test status in empty repositories
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "status" }, "test-empty-repo");
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "status" }, "test-empty-repo");
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     
@@ -184,7 +184,7 @@ fn testStatusUntrackedFiles(tf: *TestFramework) !void {
     defer tf.cleanupTestDir("test-untracked");
     
     // Initialize and add untracked file
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "init" }, "test-untracked");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, "test-untracked");
     try tf.createTestFile("test-untracked/untracked.txt", "untracked content\n");
     
     // Git comparison
@@ -194,7 +194,7 @@ fn testStatusUntrackedFiles(tf: *TestFramework) !void {
     _ = try tf.runCommand(&[_][]const u8{ "git", "init" }, "test-untracked-git");
     try tf.createTestFile("test-untracked-git/untracked.txt", "untracked content\n");
     
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "status" }, "test-untracked");
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "status" }, "test-untracked");
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     
@@ -228,9 +228,9 @@ fn testStatusStagedFiles(tf: *TestFramework) !void {
     defer tf.cleanupTestDir("test-staged");
     
     // Initialize, add file, and stage it
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "init" }, "test-staged");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, "test-staged");
     try tf.createTestFile("test-staged/staged.txt", "staged content\n");
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "add", "staged.txt" }, "test-staged");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "staged.txt" }, "test-staged");
     
     // Git comparison
     tf.cleanupTestDir("test-staged-git");
@@ -240,7 +240,7 @@ fn testStatusStagedFiles(tf: *TestFramework) !void {
     try tf.createTestFile("test-staged-git/staged.txt", "staged content\n");
     _ = try tf.runCommand(&[_][]const u8{ "git", "add", "staged.txt" }, "test-staged-git");
     
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "status" }, "test-staged");
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "status" }, "test-staged");
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     
@@ -263,15 +263,15 @@ fn testStatusModifiedFiles(tf: *TestFramework) !void {
     defer tf.cleanupTestDir("test-modified");
     
     // Initialize, add, commit, then modify
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "init" }, "test-modified");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, "test-modified");
     try tf.createTestFile("test-modified/modified.txt", "original content\n");
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "add", "modified.txt" }, "test-modified");
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "commit", "-m", "initial" }, "test-modified");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "modified.txt" }, "test-modified");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "initial" }, "test-modified");
     
     // Modify the file
     try tf.createTestFile("test-modified/modified.txt", "modified content\n");
     
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "status" }, "test-modified");
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "status" }, "test-modified");
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     
@@ -290,9 +290,9 @@ fn testStatusPorcelain(tf: *TestFramework) !void {
     defer tf.cleanupTestDir("test-porcelain");
     
     // Test --porcelain flag
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "init" }, "test-porcelain");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, "test-porcelain");
     
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "status", "--porcelain" }, "test-porcelain");
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "status", "--porcelain" }, "test-porcelain");
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     
@@ -317,7 +317,7 @@ fn testStatusErrorMessages(tf: *TestFramework) !void {
     std.debug.print("  Testing status error message formats...\n", .{});
     
     // Test invalid flags
-    const ziggit_invalid = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "status", "--invalid-flag" }, null);
+    const ziggit_invalid = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "status", "--invalid-flag" }, null);
     defer tf.*.allocator.free(ziggit_invalid.stdout);
     defer tf.*.allocator.free(ziggit_invalid.stderr);
     

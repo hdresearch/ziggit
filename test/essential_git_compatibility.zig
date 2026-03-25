@@ -15,7 +15,7 @@ pub fn runEssentialGitCompatibilityTests() !void {
     defer arena.deinit();
     const allocator = arena.allocator();
     
-    const harness = TestHarness.init(allocator, "/root/ziggit/zig-out/bin/ziggit", "git");
+    const harness = TestHarness.init(allocator, "/root/zigg/root/ziggit/zig-out/bin/ziggit", "git");
     
     // Core repository operations
     try testInitOperations(harness);

@@ -134,11 +134,11 @@ fn testNotAGitRepositoryError(tf: *TestFramework) !void {
     
     // Test various commands that should fail with "not a git repository"
     const commands = [_][]const []const u8{
-        &[_][]const u8{ "../zig-out/bin/ziggit", "status" },
-        &[_][]const u8{ "../zig-out/bin/ziggit", "add", "." },
-        &[_][]const u8{ "../zig-out/bin/ziggit", "commit", "-m", "test" },
-        &[_][]const u8{ "../zig-out/bin/ziggit", "log" },
-        &[_][]const u8{ "../zig-out/bin/ziggit", "diff" },
+        &[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "status" },
+        &[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "." },
+        &[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "test" },
+        &[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "log" },
+        &[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "diff" },
     };
     
     const git_commands = [_][]const []const u8{
@@ -192,9 +192,9 @@ fn testAddNonexistentFileError(tf: *TestFramework) !void {
     try fs.cwd().makeDir("test-add-error");
     defer tf.cleanupTestDir("test-add-error");
     
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "init" }, "test-add-error");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, "test-add-error");
     
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "add", "nonexistent.txt" }, "test-add-error");
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "nonexistent.txt" }, "test-add-error");
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     
@@ -242,7 +242,7 @@ fn testAddNonexistentFileError(tf: *TestFramework) !void {
 fn testInvalidCommandError(tf: *TestFramework) !void {
     std.debug.print("  Testing invalid command error...\n", .{});
     
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "nonexistent-command" }, null);
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "nonexistent-command" }, null);
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     
@@ -284,9 +284,9 @@ fn testNothingToCommitError(tf: *TestFramework) !void {
     try fs.cwd().makeDir("test-nothing-commit");
     defer tf.cleanupTestDir("test-nothing-commit");
     
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "init" }, "test-nothing-commit");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, "test-nothing-commit");
     
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "commit", "-m", "empty commit" }, "test-nothing-commit");
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "empty commit" }, "test-nothing-commit");
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     
@@ -333,9 +333,9 @@ fn testCheckoutNonexistentBranchError(tf: *TestFramework) !void {
     try fs.cwd().makeDir("test-checkout-error");
     defer tf.cleanupTestDir("test-checkout-error");
     
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "init" }, "test-checkout-error");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, "test-checkout-error");
     
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "checkout", "nonexistent-branch" }, "test-checkout-error");
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "checkout", "nonexistent-branch" }, "test-checkout-error");
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     
@@ -380,13 +380,13 @@ fn testInvalidFlagErrors(tf: *TestFramework) !void {
         git_cmd: []const []const u8,
         description: []const u8 
     }{
-        .{ .cmd = &[_][]const u8{ "../zig-out/bin/ziggit", "init", "--invalid-flag" }, 
+        .{ .cmd = &[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init", "--invalid-flag" }, 
            .git_cmd = &[_][]const u8{ "git", "init", "--invalid-flag" },
            .description = "init --invalid-flag" },
-        .{ .cmd = &[_][]const u8{ "../zig-out/bin/ziggit", "status", "--unknown" }, 
+        .{ .cmd = &[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "status", "--unknown" }, 
            .git_cmd = &[_][]const u8{ "git", "status", "--unknown" },
            .description = "status --unknown" },
-        .{ .cmd = &[_][]const u8{ "../zig-out/bin/ziggit", "add", "--badoption" }, 
+        .{ .cmd = &[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "--badoption" }, 
            .git_cmd = &[_][]const u8{ "git", "add", "--badoption" },
            .description = "add --badoption" },
     };
@@ -426,10 +426,10 @@ fn testPathspecErrors(tf: *TestFramework) !void {
     try fs.cwd().makeDir("test-pathspec");
     defer tf.cleanupTestDir("test-pathspec");
     
-    _ = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "init" }, "test-pathspec");
+    _ = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "init" }, "test-pathspec");
     
     // Test adding file outside repository (if supported)
-    const ziggit_result = try tf.runCommand(&[_][]const u8{ "../zig-out/bin/ziggit", "add", "../nonexistent-file" }, "test-pathspec");
+    const ziggit_result = try tf.runCommand(&[_][]const u8{ "/root/ziggit/zig-out/bin/ziggit", "add", "../nonexistent-file" }, "test-pathspec");
     defer tf.*.allocator.free(ziggit_result.stdout);
     defer tf.*.allocator.free(ziggit_result.stderr);
     

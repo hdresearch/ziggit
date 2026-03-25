@@ -20,6 +20,9 @@ const git_t0001_init_compat = @import("git_t0001_init_compat.zig");
 const git_status_compat = @import("git_status_compat.zig");
 const git_diff_output_compat = @import("git_diff_output_compat.zig");
 const git_error_message_compat = @import("git_error_message_compat.zig");
+const git_advanced_compatibility_tests = @import("git_advanced_compatibility_tests.zig");
+const git_edge_case_tests = @import("git_edge_case_tests.zig");
+const git_output_format_tests = @import("git_output_format_tests.zig");
 // const git_source_comparison_tests = @import("git_source_comparison_tests.zig");
 // const advanced_git_operations_tests = @import("advanced_git_operations_tests.zig");
 
@@ -43,6 +46,9 @@ pub fn main() !void {
     try git_status_compat.runGitStatusCompatTests();
     try git_diff_output_compat.runGitDiffOutputCompatTests();
     try git_error_message_compat.runGitErrorMessageCompatTests();
+    try git_advanced_compatibility_tests.runGitAdvancedCompatibilityTests();
+    try git_edge_case_tests.runGitEdgeCaseTests();
+    try git_output_format_tests.runGitOutputFormatTests();
     // try git_source_comparison_tests.runGitSourceComparisonTests();
     // try advanced_git_operations_tests.runAdvancedGitOperationsTests();
     // TODO: Fix executable path issues in git_source_style_tests
