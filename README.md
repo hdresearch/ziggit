@@ -51,13 +51,13 @@ This produces `zig-out/bin/ziggit-browser.wasm` for browser/JavaScript environme
 **Current Implementation**: Complete WebAssembly support with comprehensive platform abstraction framework.
 
 - ✅ **Working**: `zig build`, `zig build wasm`, `zig build wasm-browser` all compile successfully
-- ✅ **Tested**: Core commands `init` and `status` work correctly on both native and WASM builds  
+- ✅ **Tested**: Core commands `init`, `status`, `add`, `commit`, `log`, etc. work correctly on native builds and compile for WASM
 - ✅ **Platform abstraction**: Complete isolation of OS-specific code in `src/platform/` with unified interface
-- ✅ **WASI compatibility**: Full filesystem operations through WASI APIs with proper error handling
+- ✅ **WASI compatibility**: Full filesystem operations through WASI APIs with proper error handling  
 - ✅ **Code sharing**: Core logic shared between all platforms via `src/main_common.zig`
-- ✅ **Production ready**: WebAssembly builds are fully functional for git repository operations
+- ✅ **Production ready**: WebAssembly builds compile and run, supporting all major git operations
 - ✅ **Browser optimized**: Freestanding build provides minimal footprint (4KB) with JavaScript integration
-- 🚧 **Expanding**: Additional git commands (add, commit, log, etc.) being added for complete git compatibility
+- ✅ **Complete git compatibility**: Full command set (add, commit, log, diff, branch, checkout, merge) implemented
 
 ## WebAssembly Capabilities & Limitations
 
@@ -71,9 +71,11 @@ This produces `zig-out/bin/ziggit-browser.wasm` for browser/JavaScript environme
 
 **Limitations:**
 - Network operations limited by WASI capabilities (currently stubbed)
-- Working directory changes not supported in all WASI runtimes
+- Working directory changes not supported in all WASI runtimes  
 - Some advanced system-level operations unavailable
 - Performance may be slightly reduced compared to native
+- Memory allocation constraints may affect large repositories
+- WASI runtime required for full filesystem access
 
 **Usage:**
 ```bash
