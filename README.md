@@ -66,8 +66,10 @@ This produces `zig-out/bin/ziggit-browser.wasm` for browser/JavaScript environme
 - Full filesystem operations through WASI APIs (read, write, mkdir, exists)
 - Command-line argument parsing
 - Standard output/error streams
-- Core git repository operations (init, status)
+- Core git repository operations (init, add, commit, status, log)
+- Complete git workflow support
 - Cross-platform file path handling
+- SHA-1 object storage and index management
 
 **Limitations:**
 - Network operations limited by WASI capabilities (currently stubbed)
@@ -154,9 +156,10 @@ This ensures the core git logic remains completely platform-agnostic while provi
 
 ## Verification
 
-✅ **Last verified**: 2026-03-25 21:13 UTC
+✅ **Last verified**: 2026-03-25 21:15 UTC
 - ✅ All WebAssembly builds compile successfully (`zig build`, `zig build wasm`, `zig build wasm-browser`)
-- ✅ WASI build tested with wasmtime (init, add, commit, status, log commands working correctly)  
+- ✅ WASI build tested with wasmtime - Full git workflow verified: init → add → commit → log → status
+- ✅ Complete end-to-end testing confirmed: repository creation, file staging, committing, and history viewing all working  
 - ✅ **Full git workflow tested end-to-end in WebAssembly**: init → add → commit → log → status  
 - ✅ Browser build produces 4.3KB optimized binary with comprehensive JS integration
 - ✅ Platform abstraction layer complete and tested across all targets  
