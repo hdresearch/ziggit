@@ -425,4 +425,68 @@ pub fn build(b: *std.Build) void {
     // Install the bun integration benchmark executable
     const install_bun_integration = b.addInstallArtifact(bun_integration_exe, .{});
     bench_bun_step.dependOn(&install_bun_integration.step);
+
+    // Ziggit vs Git CLI vs libgit2 benchmark for bun integration analysis
+    const ziggit_bun_integration_exe = b.addExecutable(.{
+        .name = "ziggit-bun-integration-bench",
+        .root_source_file = b.path("benchmarks/ziggit_bun_integration.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    // Link the static library for C integration testing
+    ziggit_bun_integration_exe.linkLibrary(lib_static);
+    ziggit_bun_integration_exe.linkLibC();
+    ziggit_bun_integration_exe.addIncludePath(b.path("src/lib"));
+    
+    // Link libgit2
+    ziggit_bun_integration_exe.linkSystemLibrary("git2");
+    
+    // Add ziggit module
+    ziggit_bun_integration_exe.root_module.addImport("ziggit", ziggit_module);
+
+    const run_ziggit_bun_integration = b.addRunArtifact(ziggit_bun_integration_exe);
+
+    const bench_bun_integration_step = b.step("bench-bun-integration", "Run comprehensive bun integration benchmarks (ziggit vs git CLI vs libgit2)");
+    bench_bun_integration_step.dependOn(&run_ziggit_bun_integration.step);
+
+    // Install the benchmark executable
+    const install_ziggit_bun_integration = b.addInstallArtifact(ziggit_bun_integration_exe, .{});
+    bench_bun_integration_step.dependOn(&install_ziggit_bun_integration.step);
+
+    // Simple bun integration benchmark (ziggit vs git CLI only, no libgit2)
+    const simple_bun_bench_exe = b.addExecutable(.{
+        .name = "simple-bun-bench",
+        .root_source_file = b.path("benchmarks/simple_bun_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    // Link the static library for C integration testing
+    simple_bun_bench_exe.linkLibrary(lib_static);
+    simple_bun_bench_exe.linkLibC();
+    simple_bun_bench_exe.addIncludePath(b.path("src/lib"));
+
+    const run_simple_bun_bench = b.addRunArtifact(simple_bun_bench_exe);
+
+    const bench_simple_bun_step = b.step("bench-simple-bun", "Run simple bun integration benchmark (ziggit vs git CLI)");
+    bench_simple_bun_step.dependOn(&run_simple_bun_bench.step);
+
+    // Install the benchmark executable
+    const install_simple_bun_bench = b.addInstallArtifact(simple_bun_bench_exe, .{});
+    bench_simple_bun_step.dependOn(&install_simple_bun_bench.step);
+
+    // Minimal benchmark (no C library dependencies)
+    const minimal_bench_exe = b.addExecutable(.{
+        .name = "minimal-bench",
+        .root_source_file = b.path("benchmarks/minimal_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_minimal_bench = b.addRunArtifact(minimal_bench_exe);
+    run_minimal_bench.step.dependOn(&b.addInstallArtifact(minimal_bench_exe, .{}).step);
+
+    const bench_minimal_step = b.step("bench-minimal", "Run minimal benchmark (ziggit binary vs git CLI)");
+    bench_minimal_step.dependOn(&run_minimal_bench.step);
 }
