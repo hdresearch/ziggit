@@ -734,4 +734,48 @@ pub fn build(b: *std.Build) void {
     // Install the pure zig benchmark executable
     const install_pure_zig_bench = b.addInstallArtifact(pure_zig_bench_exe, .{});
     bench_pure_zig_step.dependOn(&install_pure_zig_bench.step);
+
+    // Real repository benchmark (ziggit vs git CLI with actual git repositories)
+    const real_repo_bench_exe = b.addExecutable(.{
+        .name = "real-repo-bench",
+        .root_source_file = b.path("benchmarks/real_repo_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    // Link the static library for C integration testing
+    real_repo_bench_exe.linkLibrary(lib_static);
+    real_repo_bench_exe.linkLibC();
+    real_repo_bench_exe.addIncludePath(b.path("src/lib"));
+
+    const run_real_repo_bench = b.addRunArtifact(real_repo_bench_exe);
+
+    const bench_real_repo_step = b.step("bench-real-repo", "Run real git repository benchmark (ziggit vs git CLI with actual git repos)");
+    bench_real_repo_step.dependOn(&run_real_repo_bench.step);
+
+    // Install the real repository benchmark executable
+    const install_real_repo_bench = b.addInstallArtifact(real_repo_bench_exe, .{});
+    bench_real_repo_step.dependOn(&install_real_repo_bench.step);
+
+    // Simple real repository benchmark (ziggit vs git CLI with current repository)
+    const simple_real_bench_exe = b.addExecutable(.{
+        .name = "simple-real-bench",
+        .root_source_file = b.path("benchmarks/simple_real_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    // Link the static library for C integration testing
+    simple_real_bench_exe.linkLibrary(lib_static);
+    simple_real_bench_exe.linkLibC();
+    simple_real_bench_exe.addIncludePath(b.path("src/lib"));
+
+    const run_simple_real_bench = b.addRunArtifact(simple_real_bench_exe);
+
+    const bench_simple_real_step = b.step("bench-simple-real", "Run simple real benchmark (ziggit vs git CLI on current repo)");
+    bench_simple_real_step.dependOn(&run_simple_real_bench.step);
+
+    // Install the simple real benchmark executable
+    const install_simple_real_bench = b.addInstallArtifact(simple_real_bench_exe, .{});
+    bench_simple_real_step.dependOn(&install_simple_real_bench.step);
 }

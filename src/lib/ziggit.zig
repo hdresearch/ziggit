@@ -195,21 +195,11 @@ export fn ziggit_branch_list(repo: *ZiggitRepository, buffer: [*]u8, buffer_size
 /// Returns 0 on success, negative error code on failure
 /// Status information is written to buffer as formatted text
 export fn ziggit_status(repo: *ZiggitRepository, buffer: [*]u8, buffer_size: usize) c_int {
-    _ = repo;
+    const repository = repo.toRepo();
     
-    if (buffer_size < 100) {
-        return @intFromEnum(ZiggitError.InvalidPath);
-    }
-    
-    // Basic status implementation - matches current main.zig implementation
-    const status_text = "On branch master\n\nNo commits yet\n\nnothing to commit (create/copy files and use \"git add\" to track)\n";
-    
-    if (status_text.len >= buffer_size) {
-        return @intFromEnum(ZiggitError.InvalidPath);
-    }
-    
-    @memcpy(buffer[0..status_text.len], status_text);
-    buffer[status_text.len] = 0; // null terminate
+    getStatus(repository, buffer[0..buffer_size]) catch |err| {
+        return @intFromEnum(errorToCode(err));
+    };
     
     return @intFromEnum(ZiggitError.Success);
 }
@@ -390,21 +380,100 @@ fn commitCreate(repo: *Repository, message: []const u8, author_name: []const u8,
     // For now, this is stubbed to return success
 }
 
-// Branch listing implementation
+// Branch listing implementation using real git refs
 fn listBranches(repo: *Repository, buffer: []u8) !usize {
-    _ = repo;
+    const git_dir = try findGitDirForRepo(repo);
+    defer global_allocator.free(git_dir);
     
-    // For now, just return master branch for empty repositories
-    const branch_text = "* master\n";
+    // Get current branch by reading HEAD
+    const current_branch = getCurrentBranchReal(git_dir) catch "master";
+    defer global_allocator.free(current_branch);
     
-    if (branch_text.len >= buffer.len) {
-        return error.InvalidPath; // Buffer too small
+    // Try to read refs/heads directory
+    const refs_heads_path = try std.fmt.allocPrint(global_allocator, "{s}/refs/heads", .{git_dir});
+    defer global_allocator.free(refs_heads_path);
+    
+    var branch_list = std.ArrayList([]u8).init(global_allocator);
+    defer {
+        for (branch_list.items) |branch| {
+            global_allocator.free(branch);
+        }
+        branch_list.deinit();
     }
     
-    @memcpy(buffer[0..branch_text.len], branch_text);
-    buffer[branch_text.len] = 0; // null terminate
+    // Try to read the directory
+    if (std.fs.openDirAbsolute(refs_heads_path, .{ .iterate = true })) |mut_refs_dir| {
+        var refs_dir = mut_refs_dir;
+        defer refs_dir.close();
+        
+        var iterator = refs_dir.iterate();
+        while (try iterator.next()) |entry| {
+            if (entry.kind == .file) {
+                try branch_list.append(try global_allocator.dupe(u8, entry.name));
+            }
+        }
+    } else |_| {
+        // No refs directory or error reading it, add current branch if it's not HEAD
+        if (!std.mem.eql(u8, current_branch, "HEAD")) {
+            try branch_list.append(try global_allocator.dupe(u8, current_branch));
+        } else {
+            try branch_list.append(try global_allocator.dupe(u8, "master"));
+        }
+    }
     
-    return 1; // number of branches
+    // Format branches for output
+    var pos: usize = 0;
+    for (branch_list.items) |branch| {
+        const prefix = if (std.mem.eql(u8, branch, current_branch)) "* " else "  ";
+        const line = try std.fmt.allocPrint(global_allocator, "{s}{s}\n", .{ prefix, branch });
+        defer global_allocator.free(line);
+        
+        if (pos + line.len >= buffer.len) {
+            return error.InvalidPath; // Buffer too small
+        }
+        
+        @memcpy(buffer[pos..pos + line.len], line);
+        pos += line.len;
+    }
+    
+    if (pos < buffer.len) {
+        buffer[pos] = 0; // null terminate
+    }
+    
+    return branch_list.items.len;
+}
+
+// Get current branch from HEAD file (real git implementation)
+fn getCurrentBranchReal(git_dir: []const u8) ![]u8 {
+    const head_path = try std.fmt.allocPrint(global_allocator, "{s}/HEAD", .{git_dir});
+    defer global_allocator.free(head_path);
+
+    const head_file = std.fs.openFileAbsolute(head_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return try global_allocator.dupe(u8, "master"),
+        else => return err,
+    };
+    defer head_file.close();
+
+    var head_content_buf: [512]u8 = undefined;
+    const bytes_read = try head_file.readAll(&head_content_buf);
+    const head_content = std.mem.trim(u8, head_content_buf[0..bytes_read], " \n\r\t");
+    
+    if (std.mem.startsWith(u8, head_content, "ref: refs/heads/")) {
+        return try global_allocator.dupe(u8, head_content["ref: refs/heads/".len..]);
+    } else if (head_content.len == 40 and isValidHash(head_content)) {
+        // Detached HEAD
+        return try global_allocator.dupe(u8, "HEAD");
+    } else {
+        return try global_allocator.dupe(u8, "master");
+    }
+}
+
+fn isValidHash(hash: []const u8) bool {
+    if (hash.len != 40) return false;
+    for (hash) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
 }
 
 // Diff implementation
@@ -512,19 +581,15 @@ fn getHeadCommitHashReal(repo: *Repository, buffer: []u8) !void {
         // HEAD points to a ref, read that ref
         const ref_name = head_content[5..]; // Skip "ref: "
         try resolveRef(git_dir, ref_name, buffer);
-    } else if (head_content.len == 40) {
+    } else if (head_content.len == 40 and isValidHash(head_content)) {
         // HEAD contains the hash directly (detached HEAD)
-        // Validate it's a valid hex string
-        for (head_content) |c| {
-            if (!std.ascii.isHex(c)) {
-                return error.InvalidRef;
-            }
-        }
         @memcpy(buffer[0..40], head_content);
         buffer[40] = 0;
     } else {
         // Invalid HEAD format
-        return error.InvalidRef;
+        const zero_hash = "0000000000000000000000000000000000000000";
+        @memcpy(buffer[0..40], zero_hash);
+        buffer[40] = 0;
     }
 }
 
@@ -541,13 +606,7 @@ fn resolveRef(git_dir: []const u8, ref_name: []const u8, buffer: []u8) !void {
         const ref_bytes_read = try ref_file.readAll(&ref_content_buf);
         const ref_content = std.mem.trim(u8, ref_content_buf[0..ref_bytes_read], " \n\r\t");
         
-        if (ref_content.len == 40) {
-            // Validate hex
-            for (ref_content) |c| {
-                if (!std.ascii.isHex(c)) {
-                    return error.InvalidRef;
-                }
-            }
+        if (ref_content.len == 40 and isValidHash(ref_content)) {
             @memcpy(buffer[0..40], ref_content);
             buffer[40] = 0;
             return;
@@ -580,17 +639,10 @@ fn resolveRef(git_dir: []const u8, ref_name: []const u8, buffer: []u8) !void {
             const hash_part = trimmed[0..space_pos];
             const ref_part = trimmed[space_pos + 1 ..];
             
-            if (std.mem.eql(u8, ref_part, ref_name) and hash_part.len == 40) {
-                // Validate hex
-                for (hash_part) |c| {
-                    if (!std.ascii.isHex(c)) {
-                        break;
-                    }
-                } else {
-                    @memcpy(buffer[0..40], hash_part);
-                    buffer[40] = 0;
-                    return;
-                }
+            if (std.mem.eql(u8, ref_part, ref_name) and hash_part.len == 40 and isValidHash(hash_part)) {
+                @memcpy(buffer[0..40], hash_part);
+                buffer[40] = 0;
+                return;
             }
         }
     } else |_| {
@@ -634,14 +686,13 @@ fn getStatusPorcelainReal(repo: *Repository, buffer: []u8) !void {
     defer global_allocator.free(index_path);
     
     // If no index file exists, this is a fresh repo with no commits
-    const index_file = std.fs.openFileAbsolute(index_path, .{}) catch |err| switch (err) {
+    std.fs.accessAbsolute(index_path, .{}) catch |err| switch (err) {
         error.FileNotFound => {
             // No index = no staged files, check for untracked files in working directory
             return getUntrackedFilesStatus(repo, buffer);
         },
         else => return err,
     };
-    defer index_file.close();
     
     // Fast path: for most cases, repos are clean
     // Real implementation would parse index and compare with working tree
@@ -692,35 +743,6 @@ fn getFileAtRef(repo: *Repository, ref: []const u8, file_path: []const u8, buffe
     if (buffer.len > 0) {
         buffer[0] = 0;
     }
-}
-
-// Find git directory helper - reused from main.zig logic
-fn findGitDir(allocator: std.mem.Allocator) ![]u8 {
-    var cwd_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-    const cwd = try std.process.getCwd(&cwd_buf);
-    
-    var current_dir = try allocator.dupe(u8, cwd);
-    defer allocator.free(current_dir);
-    
-    while (true) {
-        const git_path = try std.fmt.allocPrint(allocator, "{s}/.git", .{current_dir});
-        defer allocator.free(git_path);
-        
-        // Check if .git exists
-        if (std.fs.accessAbsolute(git_path, .{})) {
-            return try allocator.dupe(u8, git_path);
-        } else |_| {
-            // Move up to parent directory
-            const parent = std.fs.path.dirname(current_dir) orelse break;
-            if (std.mem.eql(u8, parent, current_dir)) break; // Reached root
-            
-            const new_current = try allocator.dupe(u8, parent);
-            allocator.free(current_dir);
-            current_dir = new_current;
-        }
-    }
-    
-    return error.NotAGitRepository;
 }
 
 // Check if repository working directory is clean (no uncommitted changes)
