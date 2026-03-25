@@ -236,7 +236,7 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *std.process.ArgIterator, stdout: 
     if (files_to_add.items.len == 0) {
         try stderr.print("Nothing specified, nothing added.\n", .{});
         try stderr.print("hint: Maybe you wanted to say 'git add .'?\n", .{});
-        std.process.exit(128);
+        return; // Git exits with 0, not 128 for this case
     }
     
     // For now, just check that the files exist
