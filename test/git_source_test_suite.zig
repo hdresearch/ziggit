@@ -248,12 +248,10 @@ fn testAddBasic(tf: *TestFramework) !void {
         return error.StatusFailed;
     }
 
-    // Should show file as staged
-    // Note: ziggit currently uses detailed status format instead of porcelain format
-    // Git porcelain: "A  test-file.txt" 
-    // Ziggit current: Shows detailed "new file:" format
+    // Should show file as staged in porcelain format
+    // Git/ziggit porcelain: "A  test-file.txt" 
     if (!std.mem.containsAtLeast(u8, status_result.stdout, 1, "test-file.txt") or
-        !std.mem.containsAtLeast(u8, status_result.stdout, 1, "new file:")) {
+        !std.mem.containsAtLeast(u8, status_result.stdout, 1, "A  ")) {
         print("File not properly staged. Status output: {s}\n", .{status_result.stdout});
         return error.FileNotStaged;
     }
