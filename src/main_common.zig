@@ -580,7 +580,7 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         return;
     }
 
-    const target = args.next() orelse {
+    const first_arg = args.next() orelse {
         try platform_impl.writeStderr("error: pathspec '' did not match any file(s) known to git\n");
         std.process.exit(1);
     };
@@ -592,37 +592,72 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     };
     defer allocator.free(git_path);
 
-    // Check if target is a branch name or commit hash
-    if (refs.branchExists(git_path, target, platform_impl, allocator) catch false) {
-        // Switch to branch
-        refs.updateHEAD(git_path, target, platform_impl, allocator) catch |err| {
-            const msg = try std.fmt.allocPrint(allocator, "error: failed to checkout branch '{s}': {}\n", .{ target, err });
-            defer allocator.free(msg);
-            try platform_impl.writeStderr(msg);
-            return;
+    // Check if this is a -b flag (create new branch)
+    if (std.mem.eql(u8, first_arg, "-b")) {
+        const branch_name = args.next() orelse {
+            try platform_impl.writeStderr("fatal: option '-b' requires a value\n");
+            std.process.exit(128);
         };
 
-        const success_msg = try std.fmt.allocPrint(allocator, "Switched to branch '{s}'\n", .{target});
-        defer allocator.free(success_msg);
-        try platform_impl.writeStdout(success_msg);
-    } else if (target.len == 40 and isValidHash(target)) {
-        // Detached HEAD checkout
-        refs.updateHEAD(git_path, target, platform_impl, allocator) catch |err| {
-            const msg = try std.fmt.allocPrint(allocator, "error: failed to checkout commit '{s}': {}\n", .{ target, err });
-            defer allocator.free(msg);
-            try platform_impl.writeStderr(msg);
-            return;
+        // Create new branch
+        refs.createBranch(git_path, branch_name, null, platform_impl, allocator) catch |err| switch (err) {
+            error.NoCommitsYet => {
+                try platform_impl.writeStderr("fatal: not a valid object name: 'master'\n");
+                std.process.exit(128);
+            },
+            error.InvalidStartPoint => {
+                try platform_impl.writeStderr("fatal: not a valid object name\n");
+                std.process.exit(128);
+            },
+            else => return err,
         };
 
-        const short_hash = target[0..7];
-        const success_msg = try std.fmt.allocPrint(allocator, "HEAD is now at {s}\n", .{short_hash});
+        // Switch to the new branch
+        refs.updateHEAD(git_path, branch_name, platform_impl, allocator) catch |err| {
+            const msg = try std.fmt.allocPrint(allocator, "error: failed to checkout branch '{s}': {}\n", .{ branch_name, err });
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(1);
+        };
+
+        const success_msg = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
         defer allocator.free(success_msg);
         try platform_impl.writeStdout(success_msg);
     } else {
-        const msg = try std.fmt.allocPrint(allocator, "error: pathspec '{s}' did not match any file(s) known to git\n", .{target});
-        defer allocator.free(msg);
-        try platform_impl.writeStderr(msg);
-        std.process.exit(1);
+        const target = first_arg;
+
+        // Check if target is a branch name or commit hash
+        if (refs.branchExists(git_path, target, platform_impl, allocator) catch false) {
+            // Switch to branch
+            refs.updateHEAD(git_path, target, platform_impl, allocator) catch |err| {
+                const msg = try std.fmt.allocPrint(allocator, "error: failed to checkout branch '{s}': {}\n", .{ target, err });
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(1);
+            };
+
+            const success_msg = try std.fmt.allocPrint(allocator, "Switched to branch '{s}'\n", .{target});
+            defer allocator.free(success_msg);
+            try platform_impl.writeStdout(success_msg);
+        } else if (target.len == 40 and isValidHash(target)) {
+            // Detached HEAD checkout
+            refs.updateHEAD(git_path, target, platform_impl, allocator) catch |err| {
+                const msg = try std.fmt.allocPrint(allocator, "error: failed to checkout commit '{s}': {}\n", .{ target, err });
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(1);
+            };
+
+            const short_hash = target[0..7];
+            const success_msg = try std.fmt.allocPrint(allocator, "HEAD is now at {s}\n", .{short_hash});
+            defer allocator.free(success_msg);
+            try platform_impl.writeStdout(success_msg);
+        } else {
+            const msg = try std.fmt.allocPrint(allocator, "error: pathspec '{s}' did not match any file(s) known to git\n", .{target});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(1);
+        }
     }
 }
 
@@ -702,16 +737,18 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     } else if (std.mem.eql(u8, first_arg.?, "-d")) {
         // Delete branch
         const branch_name = args.next() orelse {
-            try platform_impl.writeStderr("error: branch name required\n");
-            return;
+            try platform_impl.writeStderr("fatal: branch name required\n");
+            std.process.exit(128);
         };
 
         const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch "master";
         defer allocator.free(current_branch);
 
         if (std.mem.eql(u8, branch_name, current_branch)) {
-            try platform_impl.writeStderr("error: Cannot delete branch 'master' checked out at 'HEAD'\n");
-            return;
+            const msg = try std.fmt.allocPrint(allocator, "error: cannot delete branch '{s}' used by worktree at '{s}'\n", .{ branch_name, "." });
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(1);
         }
 
         refs.deleteBranch(git_path, branch_name, platform_impl, allocator) catch |err| switch (err) {
@@ -719,7 +756,7 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 const msg = try std.fmt.allocPrint(allocator, "error: branch '{s}' not found.\n", .{branch_name});
                 defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
-                return;
+                std.process.exit(1);
             },
             else => return err,
         };
@@ -734,14 +771,14 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 
         refs.createBranch(git_path, branch_name, start_point, platform_impl, allocator) catch |err| switch (err) {
             error.NoCommitsYet => {
-                try platform_impl.writeStderr("fatal: Not a valid object name: 'HEAD'.\n");
-                return;
+                try platform_impl.writeStderr("fatal: not a valid object name: 'master'\n");
+                std.process.exit(128);
             },
             error.InvalidStartPoint => {
-                const msg = try std.fmt.allocPrint(allocator, "fatal: Not a valid object name: '{s}'.\n", .{start_point.?});
+                const msg = try std.fmt.allocPrint(allocator, "fatal: not a valid object name: '{s}'\n", .{start_point.?});
                 defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
-                return;
+                std.process.exit(128);
             },
             else => return err,
         };
