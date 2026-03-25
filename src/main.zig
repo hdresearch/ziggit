@@ -16,7 +16,15 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var args = std.process.args();
+    // Use platform-specific argument handling for WASM compatibility
+    const args_result = if (@import("builtin").target.os.tag == .wasi) 
+        try std.process.ArgIterator.initWithAllocator(allocator) 
+    else 
+        std.process.args();
+    
+    var args = args_result;
+    defer if (@import("builtin").target.os.tag == .wasi) args.deinit();
+    
     _ = args.skip(); // skip program name
 
     const command = args.next() orelse {
