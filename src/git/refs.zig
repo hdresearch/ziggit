@@ -102,19 +102,44 @@ pub fn updateHEAD(git_dir: []const u8, branch_or_hash: []const u8, platform_impl
 pub fn listBranches(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.ArrayList([]u8) {
     var branches = std.ArrayList([]u8).init(allocator);
     
-    // For now, manually check for common branch files since we don't have directory iteration in platform abstraction
-    const common_branches = [_][]const u8{ "master", "main", "develop", "dev" };
+    const refs_heads_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads", .{git_dir});
+    defer allocator.free(refs_heads_path);
     
-    for (common_branches) |branch_name| {
-        const branch_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_dir, branch_name });
-        defer allocator.free(branch_path);
-        
-        if (platform_impl.fs.exists(branch_path) catch false) {
-            try branches.append(try allocator.dupe(u8, branch_name));
+    // Try to read the directory directly
+    const entries = platform_impl.fs.readDir(allocator, refs_heads_path) catch |err| switch (err) {
+        error.FileNotFound => {
+            // Directory doesn't exist, no branches yet
+            return branches;
+        },
+        error.NotSupported => {
+            // Platform doesn't support readDir, fall back to common names
+            const common_branches = [_][]const u8{ "master", "main", "develop", "dev", "feature1" };
+            
+            for (common_branches) |branch_name| {
+                const branch_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_dir, branch_name });
+                defer allocator.free(branch_path);
+                
+                if (platform_impl.fs.exists(branch_path) catch false) {
+                    try branches.append(try allocator.dupe(u8, branch_name));
+                }
+            }
+            return branches;
+        },
+        else => return err,
+    };
+    defer {
+        for (entries) |entry| {
+            allocator.free(entry);
         }
+        allocator.free(entries);
     }
     
-    // If no branches found, check if master exists via HEAD
+    // Add all branch files found
+    for (entries) |entry| {
+        try branches.append(try allocator.dupe(u8, entry));
+    }
+    
+    // If no branches found, check if master exists via HEAD as fallback
     if (branches.items.len == 0) {
         const current_branch = getCurrentBranch(git_dir, platform_impl, allocator) catch "master";
         defer allocator.free(current_branch);

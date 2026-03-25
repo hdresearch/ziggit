@@ -86,6 +86,27 @@ fn chdirImpl(path: []const u8) !void {
     return error.NotSupported;
 }
 
+fn readDirImpl(allocator: std.mem.Allocator, path: []const u8) ![][]u8 {
+    var dir = std.fs.cwd().openDir(path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return error.FileNotFound,
+        else => return err,
+    };
+    defer dir.close();
+    
+    var entries = std.ArrayList([]u8).init(allocator);
+    defer entries.deinit();
+    
+    var iterator = dir.iterate();
+    while (try iterator.next()) |entry| {
+        if (entry.kind == .file) {
+            const name = try allocator.dupe(u8, entry.name);
+            try entries.append(name);
+        }
+    }
+    
+    return try entries.toOwnedSlice();
+}
+
 pub const wasi_platform = interface.Platform{
     .getArgs = getArgsImpl,
     .writeStdout = writeStdoutImpl,
@@ -98,5 +119,6 @@ pub const wasi_platform = interface.Platform{
         .deleteFile = deleteFileImpl,
         .getCwd = getCwdImpl,
         .chdir = chdirImpl,
+        .readDir = readDirImpl,
     },
 };
