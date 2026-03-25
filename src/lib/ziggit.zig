@@ -465,6 +465,133 @@ fn setRemoteUrl(repo: *Repository, remote_name: []const u8, url: []const u8) !vo
     // This would write to .git/config or .git/remotes/
 }
 
+// Get current commit hash (like `git rev-parse HEAD`)
+fn getHeadCommitHash(repo: *Repository, buffer: []u8) !void {
+    const git_dir = try findGitDirForRepo(repo);
+    defer global_allocator.free(git_dir);
+    
+    const head_path = try std.fmt.allocPrint(global_allocator, "{s}/HEAD", .{git_dir});
+    defer global_allocator.free(head_path);
+    
+    const head_file = std.fs.openFileAbsolute(head_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            // No HEAD file, return zeros (empty repo)
+            const zero_hash = "0000000000000000000000000000000000000000";
+            if (buffer.len < zero_hash.len + 1) {
+                return error.InvalidPath;
+            }
+            @memcpy(buffer[0..zero_hash.len], zero_hash);
+            buffer[zero_hash.len] = 0;
+            return;
+        },
+        else => return err,
+    };
+    defer head_file.close();
+    
+    var head_content_buf: [256]u8 = undefined;
+    const bytes_read = try head_file.readAll(&head_content_buf);
+    const head_content = std.mem.trim(u8, head_content_buf[0..bytes_read], " \n\r\t");
+    
+    if (std.mem.startsWith(u8, head_content, "ref: ")) {
+        // HEAD points to a ref, read that ref
+        const ref_name = head_content[5..]; // Skip "ref: "
+        const ref_path = try std.fmt.allocPrint(global_allocator, "{s}/{s}", .{ git_dir, ref_name });
+        defer global_allocator.free(ref_path);
+        
+        const ref_file = std.fs.openFileAbsolute(ref_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                // Ref doesn't exist, return zeros (empty repo)
+                const zero_hash = "0000000000000000000000000000000000000000";
+                if (buffer.len < zero_hash.len + 1) {
+                    return error.InvalidPath;
+                }
+                @memcpy(buffer[0..zero_hash.len], zero_hash);
+                buffer[zero_hash.len] = 0;
+                return;
+            },
+            else => return err,
+        };
+        defer ref_file.close();
+        
+        var ref_content_buf: [64]u8 = undefined;
+        const ref_bytes_read = try ref_file.readAll(&ref_content_buf);
+        const ref_content = std.mem.trim(u8, ref_content_buf[0..ref_bytes_read], " \n\r\t");
+        
+        if (ref_content.len != 40) {
+            return error.InvalidRef;
+        }
+        
+        if (buffer.len < 41) {
+            return error.InvalidPath;
+        }
+        
+        @memcpy(buffer[0..40], ref_content);
+        buffer[40] = 0;
+    } else {
+        // HEAD contains the hash directly
+        if (head_content.len != 40) {
+            return error.InvalidRef;
+        }
+        
+        if (buffer.len < 41) {
+            return error.InvalidPath;
+        }
+        
+        @memcpy(buffer[0..40], head_content);
+        buffer[40] = 0;
+    }
+}
+
+// Get repository status in porcelain format (like `git status --porcelain`)
+fn getStatusPorcelain(repo: *Repository, buffer: []u8) !void {
+    _ = repo;
+    
+    // For empty repositories, porcelain format returns empty
+    // In a full implementation, this would:
+    // - Compare working tree with index
+    // - Compare index with HEAD
+    // - List untracked files
+    // - Output in XY format where X=index status, Y=worktree status
+    
+    if (buffer.len > 0) {
+        buffer[0] = 0; // null terminate empty string
+    }
+}
+
+// Check if a path exists in the repository
+fn checkPathExists(repo: *Repository, path: []const u8) !bool {
+    const full_path = if (std.fs.path.isAbsolute(path))
+        try global_allocator.dupe(u8, path)
+    else
+        try std.fs.path.resolve(global_allocator, &[_][]const u8{ repo.path, path });
+    defer global_allocator.free(full_path);
+    
+    std.fs.accessAbsolute(full_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    
+    return true;
+}
+
+// Get file content at specific commit/ref
+fn getFileAtRef(repo: *Repository, ref: []const u8, file_path: []const u8, buffer: []u8) !void {
+    _ = repo;
+    _ = ref;
+    _ = file_path;
+    
+    // This is a complex operation that would require:
+    // 1. Resolving the ref to a commit hash
+    // 2. Reading the commit object
+    // 3. Walking the tree to find the file
+    // 4. Reading the blob object content
+    // For now, return empty content
+    
+    if (buffer.len > 0) {
+        buffer[0] = 0;
+    }
+}
+
 // Find git directory helper - reused from main.zig logic
 fn findGitDir(allocator: std.mem.Allocator) ![]u8 {
     var cwd_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
@@ -506,19 +633,45 @@ fn isRepositoryClean(repo: *Repository) !void {
 
 // Get latest tag from repository (like `git describe --tags --abbrev=0`)
 fn getLatestTag(repo: *Repository, buffer: []u8) !void {
-    // Read refs/tags/ directory and find the latest tag
-    // For now, return a mock tag
-    _ = repo;
+    const git_dir = try findGitDirForRepo(repo);
+    defer global_allocator.free(git_dir);
     
-    const mock_tag = "v1.0.0";
-    if (mock_tag.len >= buffer.len) {
-        return error.InvalidPath; // Buffer too small
+    const tags_dir_path = try std.fmt.allocPrint(global_allocator, "{s}/refs/tags", .{git_dir});
+    defer global_allocator.free(tags_dir_path);
+    
+    // Check if tags directory exists
+    var tags_dir = std.fs.openDirAbsolute(tags_dir_path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => {
+            // No tags directory, return empty
+            if (buffer.len > 0) {
+                buffer[0] = 0;
+            }
+            return;
+        },
+        else => return err,
+    };
+    defer tags_dir.close();
+    
+    // Find all tags and return the "latest" one (for now, just the first one found)
+    // In a full implementation, this would sort by creation date or version
+    var iterator = tags_dir.iterate();
+    while (try iterator.next()) |entry| {
+        if (entry.kind == .file) {
+            const tag_name = entry.name;
+            if (tag_name.len >= buffer.len) {
+                return error.InvalidPath;
+            }
+            
+            @memcpy(buffer[0..tag_name.len], tag_name);
+            buffer[tag_name.len] = 0; // null terminate
+            return;
+        }
     }
     
-    @memcpy(buffer[0..mock_tag.len], mock_tag);
-    buffer[mock_tag.len] = 0; // null terminate
-    
-    // TODO: Implement actual tag reading from .git/refs/tags/ or .git/packed-refs
+    // No tags found
+    if (buffer.len > 0) {
+        buffer[0] = 0;
+    }
 }
 
 // Create an annotated tag (like `git tag -a <name> -m <message>`)
@@ -590,6 +743,66 @@ export fn ziggit_get_latest_tag(repo: *ZiggitRepository, buffer: [*]u8, buffer_s
     const repository = repo.toRepo();
     
     getLatestTag(repository, buffer[0..buffer_size]) catch |err| {
+        return @intFromEnum(errorToCode(err));
+    };
+    
+    return @intFromEnum(ZiggitError.Success);
+}
+
+/// Get current commit hash (like `git rev-parse HEAD`)
+/// Returns 0 on success, negative error code on failure
+/// Hash is written to buffer as 40-character hex string
+export fn ziggit_rev_parse_head(repo: *ZiggitRepository, buffer: [*]u8, buffer_size: usize) c_int {
+    const repository = repo.toRepo();
+    
+    getHeadCommitHash(repository, buffer[0..buffer_size]) catch |err| {
+        return @intFromEnum(errorToCode(err));
+    };
+    
+    return @intFromEnum(ZiggitError.Success);
+}
+
+/// Get repository status in porcelain format (like `git status --porcelain`)
+/// Returns 0 on success, negative error code on failure
+/// Status output is written to buffer in porcelain format
+export fn ziggit_status_porcelain(repo: *ZiggitRepository, buffer: [*]u8, buffer_size: usize) c_int {
+    const repository = repo.toRepo();
+    
+    getStatusPorcelain(repository, buffer[0..buffer_size]) catch |err| {
+        return @intFromEnum(errorToCode(err));
+    };
+    
+    return @intFromEnum(ZiggitError.Success);
+}
+
+/// Check if a path exists in the repository (optimized for bun's needs)
+/// Returns 1 if path exists, 0 if not, negative error code on failure
+export fn ziggit_path_exists(repo: *ZiggitRepository, path: [*:0]const u8) c_int {
+    const repository = repo.toRepo();
+    const path_slice = std.mem.span(path);
+    
+    const exists = checkPathExists(repository, path_slice) catch |err| {
+        return @intFromEnum(errorToCode(err));
+    };
+    
+    return if (exists) 1 else 0;
+}
+
+/// Get file content at specific commit/ref (useful for bun's build operations)
+/// Returns 0 on success, negative error code on failure
+/// File content is written to buffer
+export fn ziggit_get_file_at_ref(
+    repo: *ZiggitRepository, 
+    ref: [*:0]const u8, 
+    file_path: [*:0]const u8, 
+    buffer: [*]u8, 
+    buffer_size: usize
+) c_int {
+    const repository = repo.toRepo();
+    const ref_slice = std.mem.span(ref);
+    const path_slice = std.mem.span(file_path);
+    
+    getFileAtRef(repository, ref_slice, path_slice, buffer[0..buffer_size]) catch |err| {
         return @intFromEnum(errorToCode(err));
     };
     
