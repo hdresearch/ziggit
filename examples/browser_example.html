@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ziggit WebAssembly Browser Example</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 2rem; }
+        .output { background: #f5f5f5; padding: 1rem; margin: 1rem 0; white-space: pre-wrap; font-family: monospace; }
+        button { margin: 0.5rem; padding: 0.5rem 1rem; }
+    </style>
+</head>
+<body>
+    <h1>ziggit WebAssembly Browser Integration</h1>
+    
+    <p>This example demonstrates running ziggit in the browser using WebAssembly.</p>
+    
+    <div>
+        <button onclick="initZiggit()">Initialize ziggit</button>
+        <button onclick="runHelp()">Show Help</button>
+        <button onclick="runVersion()">Show Version</button>
+        <button onclick="runInit()">Init Repository</button>
+        <button onclick="runStatus()">Status</button>
+    </div>
+    
+    <div id="output" class="output">Click a button to run ziggit commands...</div>
+
+    <script>
+        let wasmModule;
+        let memory;
+        
+        // Host functions that ziggit will call
+        const hostFunctions = {
+            host_write_stdout: (ptr, len) => {
+                const text = new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len));
+                document.getElementById('output').textContent += text;
+            },
+            host_write_stderr: (ptr, len) => {
+                const text = new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len));
+                document.getElementById('output').textContent += '[ERROR] ' + text;
+            },
+            host_file_exists: (pathPtr, pathLen) => {
+                const path = new TextDecoder().decode(new Uint8Array(memory.buffer, pathPtr, pathLen));
+                // Simulate filesystem - for demo purposes, .git always exists after init
+                console.log('Checking if file exists:', path);
+                return path === '.git' || path === '.git/HEAD';
+            },
+            host_make_dir: (pathPtr, pathLen) => {
+                const path = new TextDecoder().decode(new Uint8Array(memory.buffer, pathPtr, pathLen));
+                console.log('Creating directory:', path);
+                return true; // Simulate successful directory creation
+            },
+            host_read_file: (pathPtr, pathLen, dataPtrPtr, dataLenPtr) => {
+                const path = new TextDecoder().decode(new Uint8Array(memory.buffer, pathPtr, pathLen));
+                console.log('Reading file:', path);
+                // Simulate reading a file - return empty content for demo
+                return false; // File not found for simplicity
+            },
+            host_write_file: (pathPtr, pathLen, dataPtr, dataLen) => {
+                const path = new TextDecoder().decode(new Uint8Array(memory.buffer, pathPtr, pathLen));
+                const data = new TextDecoder().decode(new Uint8Array(memory.buffer, dataPtr, dataLen));
+                console.log('Writing file:', path, 'with data:', data);
+                return true; // Simulate successful write
+            },
+            host_delete_file: (pathPtr, pathLen) => {
+                const path = new TextDecoder().decode(new Uint8Array(memory.buffer, pathPtr, pathLen));
+                console.log('Deleting file:', path);
+                return true;
+            },
+            host_get_cwd: (dataPtrPtr, dataLenPtr) => {
+                const cwd = '/';
+                const encoder = new TextEncoder();
+                const data = encoder.encode(cwd);
+                // For demo, we'd need to allocate memory and return the pointer
+                // This is simplified for the example
+                console.log('Getting current working directory:', cwd);
+                return false; // Simplified implementation
+            }
+        };
+
+        async function loadWasm() {
+            try {
+                const wasmPath = '../zig-out/bin/ziggit-browser.wasm'; // Adjust path as needed
+                const wasmModule = await WebAssembly.instantiateStreaming(
+                    fetch(wasmPath),
+                    { env: hostFunctions }
+                );
+                
+                memory = wasmModule.instance.exports.memory;
+                return wasmModule.instance.exports;
+            } catch (error) {
+                document.getElementById('output').textContent = 
+                    'Error loading WASM: ' + error.message + 
+                    '\n\nMake sure ziggit-browser.wasm is built and accessible at the correct path.';
+                throw error;
+            }
+        }
+
+        function clearOutput() {
+            document.getElementById('output').textContent = '';
+        }
+
+        async function initZiggit() {
+            clearOutput();
+            try {
+                if (!wasmModule) {
+                    wasmModule = await loadWasm();
+                }
+                wasmModule.ziggit_main();
+            } catch (error) {
+                console.error('Error:', error);
+            }
+        }
+
+        async function runHelp() {
+            clearOutput();
+            try {
+                if (!wasmModule) {
+                    wasmModule = await loadWasm();
+                }
+                
+                // Create argument array
+                const args = ["ziggit", "--help"];
+                wasmModule.ziggit_command_line(args.length, args);
+            } catch (error) {
+                console.error('Error:', error);
+            }
+        }
+
+        async function runVersion() {
+            clearOutput();
+            try {
+                if (!wasmModule) {
+                    wasmModule = await loadWasm();
+                }
+                
+                const args = ["ziggit", "--version"];
+                wasmModule.ziggit_command_line(args.length, args);
+            } catch (error) {
+                console.error('Error:', error);
+            }
+        }
+
+        async function runInit() {
+            clearOutput();
+            try {
+                if (!wasmModule) {
+                    wasmModule = await loadWasm();
+                }
+                
+                const args = ["ziggit", "init"];
+                wasmModule.ziggit_command_line(args.length, args);
+            } catch (error) {
+                console.error('Error:', error);
+            }
+        }
+
+        async function runStatus() {
+            clearOutput();
+            try {
+                if (!wasmModule) {
+                    wasmModule = await loadWasm();
+                }
+                
+                const args = ["ziggit", "status"];
+                wasmModule.ziggit_command_line(args.length, args);
+            } catch (error) {
+                console.error('Error:', error);
+            }
+        }
+
+        // Show initial message
+        document.getElementById('output').textContent = 
+            'Click "Initialize ziggit" to load the WebAssembly module and start using ziggit in the browser!\n\n' +
+            'Note: This example requires ziggit-browser.wasm to be built and served from a web server\n' +
+            '(file:// URLs may not work due to CORS restrictions).';
+    </script>
+</body>
+</html>
