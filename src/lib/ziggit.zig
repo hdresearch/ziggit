@@ -13,7 +13,17 @@ const Repository = struct {
     }
 
     pub fn exists(self: *const Repository) !bool {
-        const git_dir = try std.fmt.allocPrint(self.allocator, "{s}/.git", .{self.path});
+        // Convert to absolute path if needed
+        const abs_path = if (std.fs.path.isAbsolute(self.path))
+            try self.allocator.dupe(u8, self.path)
+        else blk: {
+            var cwd_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            const cwd = try std.process.getCwd(&cwd_buf);
+            break :blk try std.fs.path.resolve(self.allocator, &[_][]const u8{ cwd, self.path });
+        };
+        defer self.allocator.free(abs_path);
+        
+        const git_dir = try std.fmt.allocPrint(self.allocator, "{s}/.git", .{abs_path});
         defer self.allocator.free(git_dir);
         
         std.fs.accessAbsolute(git_dir, .{}) catch |err| switch (err) {
@@ -1084,13 +1094,23 @@ fn repoExistsReal(repo: *Repository) !bool {
 
 // Helper function to find git directory for a repository
 fn findGitDirForRepo(repo: *Repository) ![]const u8 {
+    // Convert repo path to absolute path
+    const abs_repo_path = if (std.fs.path.isAbsolute(repo.path))
+        try global_allocator.dupe(u8, repo.path)
+    else blk: {
+        var cwd_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const cwd = try std.process.getCwd(&cwd_buf);
+        break :blk try std.fs.path.resolve(global_allocator, &[_][]const u8{ cwd, repo.path });
+    };
+    defer global_allocator.free(abs_repo_path);
+    
     // First check if the repo path itself is a .git directory
-    if (std.mem.endsWith(u8, repo.path, ".git")) {
-        return try global_allocator.dupe(u8, repo.path);
+    if (std.mem.endsWith(u8, abs_repo_path, ".git")) {
+        return try global_allocator.dupe(u8, abs_repo_path);
     }
     
     // Check if .git exists and what type it is
-    const git_file_path = try std.fmt.allocPrint(global_allocator, "{s}/.git", .{repo.path});
+    const git_file_path = try std.fmt.allocPrint(global_allocator, "{s}/.git", .{abs_repo_path});
     defer global_allocator.free(git_file_path);
     
     // First check if .git exists at all
@@ -1111,7 +1131,7 @@ fn findGitDirForRepo(repo: *Repository) ![]const u8 {
         const bytes_read = file.readAll(&buffer) catch |err| switch (err) {
             error.IsDir => {
                 // .git is a directory, not a file
-                return try std.fmt.allocPrint(global_allocator, "{s}/.git", .{repo.path});
+                return try std.fmt.allocPrint(global_allocator, "{s}/.git", .{abs_repo_path});
             },
             else => return err,
         };
@@ -1124,16 +1144,16 @@ fn findGitDirForRepo(repo: *Repository) ![]const u8 {
                 return try global_allocator.dupe(u8, gitdir);
             } else {
                 // Relative path from the .git file location
-                return try std.fs.path.resolve(global_allocator, &[_][]const u8{ repo.path, gitdir });
+                return try std.fs.path.resolve(global_allocator, &[_][]const u8{ abs_repo_path, gitdir });
             }
         }
         
         // Invalid .git file format, fall back to directory
-        return try std.fmt.allocPrint(global_allocator, "{s}/.git", .{repo.path});
+        return try std.fmt.allocPrint(global_allocator, "{s}/.git", .{abs_repo_path});
     } else |err| switch (err) {
         error.IsDir => {
             // .git is a directory, which is the normal case
-            return try std.fmt.allocPrint(global_allocator, "{s}/.git", .{repo.path});
+            return try std.fmt.allocPrint(global_allocator, "{s}/.git", .{abs_repo_path});
         },
         else => return err,
     }
