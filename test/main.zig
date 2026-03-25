@@ -14,6 +14,11 @@ const git_source_compat_tests = @import("git_source_compat_tests.zig");
 const enhanced_git_compat_tests = @import("enhanced_git_compat_tests.zig");
 const standalone_functionality_tests = @import("standalone_functionality_tests.zig");
 const git_source_style_tests = @import("git_source_style_tests.zig");
+const git_compatibility_test_suite = @import("git_compatibility_test_suite.zig");
+const comprehensive_git_test_suite = @import("comprehensive_git_test_suite.zig");
+// const git_source_comparison_tests = @import("git_source_comparison_tests.zig");
+// const advanced_git_operations_tests = @import("advanced_git_operations_tests.zig");
+// const git_t0001_init_tests = @import("git_t0001_init_tests.zig");
 
 pub fn main() !void {
     try test_harness.runTests();
@@ -29,6 +34,11 @@ pub fn main() !void {
     try git_source_compat_tests.runGitSourceCompatTests();
     try enhanced_git_compat_tests.runEnhancedGitCompatTests();
     try standalone_functionality_tests.runStandaloneFunctionalityTests();
+    try git_compatibility_test_suite.runGitCompatibilityTestSuite();
+    try comprehensive_git_test_suite.runComprehensiveGitTestSuite();
+    // try git_source_comparison_tests.runGitSourceComparisonTests();
+    // try advanced_git_operations_tests.runAdvancedGitOperationsTests();
+    // try git_t0001_init_tests.runGitT0001InitTests();
     // TODO: Fix executable path issues in git_source_style_tests
     // try git_source_style_tests.runGitSourceStyleTests();
     // Note: git_format_compatibility_tests temporarily disabled due to format differences
@@ -52,4 +62,9 @@ test {
     std.testing.refAllDeclsRecursive(@import("enhanced_git_compat_tests.zig"));
     std.testing.refAllDeclsRecursive(@import("standalone_functionality_tests.zig"));
     std.testing.refAllDeclsRecursive(@import("git_source_style_tests.zig"));
+    std.testing.refAllDeclsRecursive(@import("git_compatibility_test_suite.zig"));
+    std.testing.refAllDeclsRecursive(@import("comprehensive_git_test_suite.zig"));
+    // std.testing.refAllDeclsRecursive(@import("git_source_comparison_tests.zig"));
+    // std.testing.refAllDeclsRecursive(@import("advanced_git_operations_tests.zig"));
+    // std.testing.refAllDeclsRecursive(@import("git_t0001_init_tests.zig"));
 }
