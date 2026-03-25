@@ -23,11 +23,11 @@ pub const Repository = struct {
             };
         }
 
-        const ziggit_dir = try std.fmt.allocPrint(self.allocator, "{s}/.ziggit", .{self.path});
-        defer self.allocator.free(ziggit_dir);
+        const git_dir = try std.fmt.allocPrint(self.allocator, "{s}/.git", .{self.path});
+        defer self.allocator.free(git_dir);
 
-        // Create .ziggit directory
-        self.plat.fs.makeDir(ziggit_dir) catch |err| switch (err) {
+        // Create .git directory
+        self.plat.fs.makeDir(git_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {}, // Already exists, that's fine
             else => return err,
         };
@@ -35,7 +35,7 @@ pub const Repository = struct {
         // Create subdirectories
         const subdirs = [_][]const u8{ "objects", "refs", "refs/heads", "refs/remotes" };
         for (subdirs) |subdir| {
-            const full_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ ziggit_dir, subdir });
+            const full_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ git_dir, subdir });
             defer self.allocator.free(full_path);
             
             self.plat.fs.makeDir(full_path) catch |err| switch (err) {
@@ -45,16 +45,16 @@ pub const Repository = struct {
         }
 
         // Create HEAD file
-        const head_file = try std.fmt.allocPrint(self.allocator, "{s}/HEAD", .{ziggit_dir});
+        const head_file = try std.fmt.allocPrint(self.allocator, "{s}/HEAD", .{git_dir});
         defer self.allocator.free(head_file);
         try self.plat.fs.writeFile(head_file, "ref: refs/heads/master\n");
 
-        try self.plat.writeStdout("Initialized empty ziggit repository\n");
+        try self.plat.writeStdout("Initialized empty Git repository\n");
     }
 
     pub fn exists(self: *Repository) !bool {
-        const ziggit_dir = try std.fmt.allocPrint(self.allocator, "{s}/.ziggit", .{self.path});
-        defer self.allocator.free(ziggit_dir);
-        return self.plat.fs.exists(ziggit_dir);
+        const git_dir = try std.fmt.allocPrint(self.allocator, "{s}/.git", .{self.path});
+        defer self.allocator.free(git_dir);
+        return self.plat.fs.exists(git_dir);
     }
 };

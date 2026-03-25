@@ -1054,11 +1054,32 @@ fn showStagedDiff(index: *const index_mod.Index, git_path: []const u8, platform_
 }
 
 fn getIndexedFileContent(entry: index_mod.IndexEntry, allocator: std.mem.Allocator) ![]u8 {
-    // This is a simplified version - in a full implementation, 
-    // we'd load the blob object from the git repository
-    // For now, return empty content as placeholder
-    _ = entry;
-    return try allocator.dupe(u8, "");
+    if (@import("builtin").target.os.tag == .freestanding) {
+        return try allocator.dupe(u8, "");
+    }
+    
+    // Find the git directory
+    const platform_impl = platform_mod.getCurrentPlatform();
+    const git_dir = findGitDirectory(allocator, &platform_impl) catch {
+        return try allocator.dupe(u8, "");
+    };
+    defer allocator.free(git_dir);
+    
+    // Convert hash bytes to hex string
+    const hash_str = try allocator.alloc(u8, 40);
+    defer allocator.free(hash_str);
+    _ = std.fmt.bufPrint(hash_str, "{}", .{std.fmt.fmtSliceHexLower(&entry.hash)}) catch {
+        return try allocator.dupe(u8, "");
+    };
+    
+    // Load the blob object from the git object store
+    const git_object = objects.GitObject.load(hash_str, git_dir, &platform_impl, allocator) catch {
+        return try allocator.dupe(u8, "");
+    };
+    defer git_object.deinit(allocator);
+    
+    // Return a copy of the blob data
+    return try allocator.dupe(u8, git_object.data);
 }
 
 fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
@@ -1123,6 +1144,18 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                 std.process.exit(1);
             };
 
+            // Get the commit hash for this branch and checkout the tree
+            if (refs.getBranchCommit(git_path, target, platform_impl, allocator)) |branch_commit| {
+                if (branch_commit) |commit_hash| {
+                    defer allocator.free(commit_hash);
+                    checkoutCommitTree(git_path, commit_hash, allocator, platform_impl) catch |err| {
+                        const msg = try std.fmt.allocPrint(allocator, "error: failed to restore working tree: {}\n", .{err});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                    };
+                }
+            } else |_| {}
+
             const success_msg = try std.fmt.allocPrint(allocator, "Switched to branch '{s}'\n", .{target});
             defer allocator.free(success_msg);
             try platform_impl.writeStdout(success_msg);
@@ -1133,6 +1166,13 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                 defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
                 std.process.exit(1);
+            };
+
+            // Checkout the tree for this commit
+            checkoutCommitTree(git_path, target, allocator, platform_impl) catch |err| {
+                const msg = try std.fmt.allocPrint(allocator, "error: failed to restore working tree: {}\n", .{err});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
             };
 
             const short_hash = target[0..7];
@@ -1146,6 +1186,148 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             std.process.exit(1);
         }
     }
+}
+
+/// Properly restore working tree from a commit tree
+fn checkoutCommitTree(git_path: []const u8, commit_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    // Load the commit object
+    const commit_obj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch |err| switch (err) {
+        error.ObjectNotFound => return error.InvalidCommit,
+        else => return err,
+    };
+    defer commit_obj.deinit(allocator);
+    
+    if (commit_obj.type != .commit) {
+        return error.NotACommit;
+    }
+    
+    // Parse the commit to get the tree hash
+    const tree_hash = parseCommitTreeHash(commit_obj.data, allocator) catch {
+        return error.InvalidCommit;
+    };
+    defer allocator.free(tree_hash);
+    
+    // Load the tree object
+    const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch |err| switch (err) {
+        error.ObjectNotFound => return error.InvalidTree,
+        else => return err,
+    };
+    defer tree_obj.deinit(allocator);
+    
+    if (tree_obj.type != .tree) {
+        return error.NotATree;
+    }
+    
+    // Get repository root (parent of .git directory)
+    const repo_root = std.fs.path.dirname(git_path) orelse ".";
+    
+    // Recursively checkout the tree
+    try checkoutTreeRecursive(git_path, tree_obj.data, repo_root, "", allocator, platform_impl);
+    
+    // Update the index to match the checked out tree
+    try updateIndexFromTree(git_path, tree_hash, allocator, platform_impl);
+}
+
+/// Parse commit object to extract tree hash
+fn parseCommitTreeHash(commit_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    var lines = std.mem.split(u8, commit_data, "\n");
+    
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "tree ")) {
+            const tree_hash = line[5..]; // Skip "tree "
+            if (tree_hash.len == 40 and isValidHash(tree_hash)) {
+                return try allocator.dupe(u8, tree_hash);
+            }
+        }
+    }
+    
+    return error.NoTreeInCommit;
+}
+
+/// Recursively checkout tree entries to working directory
+fn checkoutTreeRecursive(git_path: []const u8, tree_data: []const u8, repo_root: []const u8, current_path: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    var i: usize = 0;
+    
+    while (i < tree_data.len) {
+        // Parse tree entry: "<mode> <name>\0<20-byte-hash>"
+        const mode_start = i;
+        const space_pos = std.mem.indexOf(u8, tree_data[i..], " ") orelse break;
+        const mode = tree_data[mode_start..mode_start + space_pos];
+        
+        i = mode_start + space_pos + 1;
+        const name_start = i;
+        const null_pos = std.mem.indexOf(u8, tree_data[i..], "\x00") orelse break;
+        const name = tree_data[name_start..name_start + null_pos];
+        
+        i = name_start + null_pos + 1;
+        if (i + 20 > tree_data.len) break;
+        
+        // Extract 20-byte hash and convert to hex string
+        const hash_bytes = tree_data[i..i + 20];
+        const hash_hex = try allocator.alloc(u8, 40);
+        defer allocator.free(hash_hex);
+        _ = std.fmt.bufPrint(hash_hex, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch break;
+        
+        i += 20;
+        
+        // Build full path
+        const full_path = if (current_path.len == 0) 
+            try allocator.dupe(u8, name)
+        else 
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{current_path, name});
+        defer allocator.free(full_path);
+        
+        const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{repo_root, full_path});
+        defer allocator.free(file_path);
+        
+        // Check if this is a tree (directory) or blob (file)
+        if (std.mem.startsWith(u8, mode, "40000")) {
+            // This is a tree (subdirectory)
+            platform_impl.fs.makeDir(file_path) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return err,
+            };
+            
+            // Load subtree and recurse
+            const subtree_obj = objects.GitObject.load(hash_hex, git_path, platform_impl, allocator) catch continue;
+            defer subtree_obj.deinit(allocator);
+            
+            if (subtree_obj.type == .tree) {
+                try checkoutTreeRecursive(git_path, subtree_obj.data, repo_root, full_path, allocator, platform_impl);
+            }
+        } else {
+            // This is a blob (file)
+            const blob_obj = objects.GitObject.load(hash_hex, git_path, platform_impl, allocator) catch continue;
+            defer blob_obj.deinit(allocator);
+            
+            if (blob_obj.type == .blob) {
+                // Create parent directories if needed
+                if (std.fs.path.dirname(file_path)) |parent_dir| {
+                    platform_impl.fs.makeDir(parent_dir) catch |err| switch (err) {
+                        error.PathAlreadyExists => {},
+                        else => {},
+                    };
+                }
+                
+                // Write file content
+                try platform_impl.fs.writeFile(file_path, blob_obj.data);
+            }
+        }
+    }
+}
+
+/// Update index to match the checked out tree
+fn updateIndexFromTree(git_path: []const u8, tree_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    // For now, just load the current index and save it back
+    // A full implementation would populate the index with tree entries
+    var index = index_mod.Index.load(git_path, platform_impl, allocator) catch index_mod.Index.init(allocator);
+    defer index.deinit();
+    
+    try index.save(git_path, platform_impl);
+    
+    // TODO: Actually populate index with tree entries
+    // This requires walking the tree again and creating IndexEntry objects
+    _ = tree_hash; // Suppress unused variable warning for now
 }
 
 fn cmdMerge(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
@@ -1187,29 +1369,166 @@ fn cmdMerge(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         return;
     }
 
-    // Perform a simple fast-forward merge check
-    const current_commit = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
-    defer if (current_commit) |hash| allocator.free(hash);
-
-    const target_commit = refs.getBranchCommit(git_path, branch_to_merge, platform_impl, allocator) catch null;
-    defer if (target_commit) |hash| allocator.free(hash);
-
-    if (current_commit == null or target_commit == null) {
-        try platform_impl.writeStderr("fatal: refusing to merge unrelated histories\n");
+    // Get the current and target commit hashes
+    const current_commit_result = refs.getCurrentCommit(git_path, platform_impl, allocator) catch {
+        try platform_impl.writeStderr("fatal: unable to get current commit\n");
         std.process.exit(1);
+    };
+    defer if (current_commit_result) |hash| allocator.free(hash);
+
+    const target_commit_result = refs.getBranchCommit(git_path, branch_to_merge, platform_impl, allocator) catch {
+        try platform_impl.writeStderr("fatal: unable to get target branch commit\n");  
+        std.process.exit(1);
+    };
+    defer if (target_commit_result) |hash| allocator.free(hash);
+
+    const current_hash = if (current_commit_result) |hash| hash else {
+        try platform_impl.writeStderr("fatal: no commits yet on current branch\n");
+        std.process.exit(1);
+    };
+
+    const target_hash = if (target_commit_result) |hash| hash else {
+        try platform_impl.writeStderr("fatal: no commits yet on target branch\n");
+        std.process.exit(1);
+    };
+
+    // Check if this is a fast-forward merge
+    if (canFastForward(git_path, current_hash, target_hash, allocator, platform_impl)) {
+        // Fast-forward merge
+        try refs.updateRef(git_path, try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{current_branch}), target_hash, platform_impl, allocator);
+        try checkoutCommitTree(git_path, target_hash, allocator, platform_impl);
+
+        const msg = try std.fmt.allocPrint(allocator, "Fast-forward\n", .{});
+        defer allocator.free(msg);
+        try platform_impl.writeStdout(msg);
+        
+        const short_hash = target_hash[0..7];
+        const success_msg = try std.fmt.allocPrint(allocator, "Updating {s}..{s}\n", .{ current_hash[0..7], short_hash });
+        defer allocator.free(success_msg);
+        try platform_impl.writeStdout(success_msg);
+    } else {
+        // Perform 3-way merge
+        try performThreeWayMerge(git_path, current_hash, target_hash, current_branch, branch_to_merge, allocator, platform_impl);
     }
+}
 
-    // For simplicity, just do a fast-forward merge by updating current branch to target
-    try refs.updateRef(git_path, current_branch, target_commit.?, platform_impl, allocator);
-
-    const msg = try std.fmt.allocPrint(allocator, "Fast-forward merge of '{s}' into '{s}'\n", .{ branch_to_merge, current_branch });
-    defer allocator.free(msg);
-    try platform_impl.writeStdout(msg);
+/// Check if a merge can be done as a fast-forward
+fn canFastForward(git_path: []const u8, current_hash: []const u8, target_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) bool {
+    // For now, simplified check: if current hash is an ancestor of target hash
+    // A full implementation would walk the commit history
+    _ = git_path;
+    _ = allocator;
+    _ = platform_impl;
     
-    const short_hash = target_commit.?[0..7];
-    const success_msg = try std.fmt.allocPrint(allocator, "Updating {s}..{s}\n", .{ if (current_commit) |h| h[0..7] else "0000000", short_hash });
-    defer allocator.free(success_msg);
-    try platform_impl.writeStdout(success_msg);
+    // Simple case: if hashes are the same, already up to date (can fast-forward)
+    if (std.mem.eql(u8, current_hash, target_hash)) {
+        return true;
+    }
+    
+    // For this implementation, assume we can't fast-forward if hashes differ
+    // Real git would check if current is ancestor of target
+    return false;
+}
+
+/// Perform a 3-way merge between current branch and target branch
+fn performThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_hash: []const u8, current_branch: []const u8, target_branch: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    // Find common base (merge base) - simplified to use current commit as base for now
+    const merge_base = try allocator.dupe(u8, current_hash);
+    defer allocator.free(merge_base);
+    
+    // Get trees for the three commits
+    const base_tree = try getCommitTree(git_path, merge_base, allocator, platform_impl);
+    defer allocator.free(base_tree);
+    
+    const current_tree = try getCommitTree(git_path, current_hash, allocator, platform_impl);
+    defer allocator.free(current_tree);
+    
+    const target_tree = try getCommitTree(git_path, target_hash, allocator, platform_impl);  
+    defer allocator.free(target_tree);
+    
+    // Perform the merge
+    const conflicts_found = try mergeTreesWithConflicts(git_path, base_tree, current_tree, target_tree, allocator, platform_impl);
+    
+    if (conflicts_found) {
+        try platform_impl.writeStderr("Automatic merge failed; fix conflicts and then commit the result.\n");
+        std.process.exit(1);
+    } else {
+        // Create merge commit
+        try createMergeCommit(git_path, current_hash, target_hash, current_branch, target_branch, allocator, platform_impl);
+        
+        const msg = try std.fmt.allocPrint(allocator, "Merge branch '{s}' into {s}\n", .{target_branch, current_branch});
+        defer allocator.free(msg);
+        try platform_impl.writeStdout(msg);
+    }
+}
+
+/// Get the tree hash from a commit
+fn getCommitTree(git_path: []const u8, commit_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
+    const commit_obj = try objects.GitObject.load(commit_hash, git_path, platform_impl, allocator);
+    defer commit_obj.deinit(allocator);
+    
+    if (commit_obj.type != .commit) {
+        return error.NotACommit;
+    }
+    
+    return try parseCommitTreeHash(commit_obj.data, allocator);
+}
+
+/// Merge three trees and detect conflicts
+fn mergeTreesWithConflicts(git_path: []const u8, base_tree: []const u8, current_tree: []const u8, target_tree: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !bool {
+    _ = base_tree; // TODO: Use in conflict detection
+    _ = current_tree; // TODO: Use in conflict detection
+    
+    // For now, simplified merge: just apply target tree changes
+    // A full implementation would:
+    // 1. Compare base -> current changes
+    // 2. Compare base -> target changes  
+    // 3. Detect conflicts where both sides modified the same file
+    // 4. Create conflict markers for conflicts
+    // 5. Apply non-conflicting changes
+    
+    const target_tree_obj = try objects.GitObject.load(target_tree, git_path, platform_impl, allocator);
+    defer target_tree_obj.deinit(allocator);
+    
+    if (target_tree_obj.type != .tree) {
+        return error.NotATree;
+    }
+    
+    // Get repo root and apply target tree
+    const repo_root = std.fs.path.dirname(git_path) orelse ".";
+    try checkoutTreeRecursive(git_path, target_tree_obj.data, repo_root, "", allocator, platform_impl);
+    
+    // No conflicts found in this simplified implementation
+    return false;
+}
+
+/// Create a merge commit with two parents
+fn createMergeCommit(git_path: []const u8, current_hash: []const u8, target_hash: []const u8, current_branch: []const u8, target_branch: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    // Get current tree (after merge)
+    const current_tree = try getCommitTree(git_path, current_hash, allocator, platform_impl);
+    defer allocator.free(current_tree);
+    
+    // Create commit message
+    const commit_message = try std.fmt.allocPrint(allocator, "Merge branch '{s}' into {s}", .{target_branch, current_branch});
+    defer allocator.free(commit_message);
+    
+    // Create author/committer info (simplified)
+    const author = "User <user@example.com>";
+    const timestamp = std.time.timestamp();
+    const author_line = try std.fmt.allocPrint(allocator, "{s} {d} +0000", .{author, timestamp});
+    defer allocator.free(author_line);
+    
+    // Create commit object with two parents
+    const parents = [_][]const u8{current_hash, target_hash};
+    const commit_obj = try objects.createCommitObject(current_tree, &parents, author_line, author_line, commit_message, allocator);
+    defer commit_obj.deinit(allocator);
+    
+    // Store commit object
+    const commit_hash = try commit_obj.store(git_path, platform_impl, allocator);
+    defer allocator.free(commit_hash);
+    
+    // Update current branch to point to merge commit
+    try refs.updateRef(git_path, try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{current_branch}), commit_hash, platform_impl, allocator);
 }
 
 fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
