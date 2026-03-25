@@ -56,6 +56,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmdPush(allocator, &args, &platform_impl);
     } else if (std.mem.eql(u8, command, "clone")) {
         try cmdClone(allocator, &args, &platform_impl);
+    } else if (std.mem.eql(u8, command, "config")) {
+        try cmdConfig(allocator, &args, &platform_impl);
     } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
         if (version_mod.getVersionString(allocator)) |version_msg| {
             defer allocator.free(version_msg);
@@ -517,16 +519,38 @@ fn findGitDirectory(allocator: std.mem.Allocator, platform_impl: *const platform
     const current_dir = try platform_impl.fs.getCwd(allocator);
     defer allocator.free(current_dir);
     
-    // Walk up the directory tree looking for .git
+    // Walk up the directory tree looking for .git or bare repository
     var dir_to_check = try allocator.dupe(u8, current_dir);
     
     while (true) {
+        // First check for .git subdirectory (normal repository)
         const git_path = try std.fmt.allocPrint(allocator, "{s}/.git", .{dir_to_check});
         if (platform_impl.fs.exists(git_path) catch false) {
             allocator.free(dir_to_check);
             return git_path;
         }
         allocator.free(git_path);
+        
+        // Check if current directory is a bare repository
+        // A bare repository has HEAD, config, objects, and refs directly in the directory
+        const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{dir_to_check});
+        defer allocator.free(head_path);
+        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{dir_to_check});
+        defer allocator.free(config_path);
+        const objects_path = try std.fmt.allocPrint(allocator, "{s}/objects", .{dir_to_check});
+        defer allocator.free(objects_path);
+        const refs_path = try std.fmt.allocPrint(allocator, "{s}/refs", .{dir_to_check});
+        defer allocator.free(refs_path);
+        
+        if ((platform_impl.fs.exists(head_path) catch false) and 
+            (platform_impl.fs.exists(config_path) catch false) and
+            (platform_impl.fs.exists(objects_path) catch false) and
+            (platform_impl.fs.exists(refs_path) catch false)) {
+            // This looks like a bare repository
+            const bare_path = try allocator.dupe(u8, dir_to_check);
+            allocator.free(dir_to_check);
+            return bare_path;
+        }
         
         // Check if we're at the root
         const parent = std.fs.path.dirname(dir_to_check);
@@ -1634,6 +1658,111 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             "network operations. Both tools are fully interoperable.\n", .{url});
     defer allocator.free(msg);
     try platform_impl.writeStdout(msg);
+}
+
+fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    if (@import("builtin").target.os.tag == .freestanding) {
+        try platform_impl.writeStderr("config: not supported in freestanding mode\n");
+        return;
+    }
+
+    const config_key = args.next() orelse {
+        try platform_impl.writeStderr("usage: git config <name>\n");
+        std.process.exit(128);
+    };
+
+    // Find .git directory
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+
+    // Read config file
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+    defer allocator.free(config_path);
+
+    const config_content = platform_impl.fs.readFile(allocator, config_path) catch |err| switch (err) {
+        error.FileNotFound => {
+            try platform_impl.writeStderr("fatal: unable to read config file\n");
+            std.process.exit(1);
+        },
+        else => return err,
+    };
+    defer allocator.free(config_content);
+
+    // Parse config file for the requested key
+    const value = parseConfigValue(config_content, config_key, allocator) catch |err| switch (err) {
+        error.KeyNotFound => {
+            std.process.exit(1); // git exits with 1 when key not found
+        },
+        else => return err,
+    };
+    defer if (value) |v| allocator.free(v);
+
+    if (value) |v| {
+        const output = try std.fmt.allocPrint(allocator, "{s}\n", .{v});
+        defer allocator.free(output);
+        try platform_impl.writeStdout(output);
+    }
+}
+
+// Parse git config file to find a specific key's value
+fn parseConfigValue(config_content: []const u8, key: []const u8, allocator: std.mem.Allocator) !?[]u8 {
+    var lines = std.mem.split(u8, config_content, "\n");
+    var current_section: ?[]const u8 = null;
+    var current_section_owned: ?[]u8 = null;
+    defer if (current_section_owned) |sec| allocator.free(sec);
+
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len == 0 or trimmed[0] == '#') continue;
+
+        // Check for section header [section] or [section "subsection"]
+        if (trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']') {
+            if (current_section_owned) |sec| {
+                allocator.free(sec);
+                current_section_owned = null;
+            }
+            current_section_owned = try allocator.dupe(u8, trimmed[1..trimmed.len - 1]);
+            current_section = current_section_owned;
+            continue;
+        }
+
+        // Check for key = value
+        if (std.mem.indexOf(u8, trimmed, " = ")) |eq_pos| {
+            const config_key_part = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
+            const value_part = std.mem.trim(u8, trimmed[eq_pos + 3..], " \t");
+
+            // Build full key name
+            const full_key = if (current_section) |section|
+                try std.fmt.allocPrint(allocator, "{s}.{s}", .{ section, config_key_part })
+            else
+                try allocator.dupe(u8, config_key_part);
+            defer allocator.free(full_key);
+
+            if (std.mem.eql(u8, full_key, key)) {
+                return try allocator.dupe(u8, value_part);
+            }
+        } else if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
+            // Handle key=value without spaces
+            const config_key_part = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
+            const value_part = std.mem.trim(u8, trimmed[eq_pos + 1..], " \t");
+
+            // Build full key name
+            const full_key = if (current_section) |section|
+                try std.fmt.allocPrint(allocator, "{s}.{s}", .{ section, config_key_part })
+            else
+                try allocator.dupe(u8, config_key_part);
+            defer allocator.free(full_key);
+
+            if (std.mem.eql(u8, full_key, key)) {
+                return try allocator.dupe(u8, value_part);
+            }
+        }
+    }
+
+    return error.KeyNotFound;
 }
 
 fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {

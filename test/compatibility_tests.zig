@@ -401,20 +401,34 @@ fn normalizeStatusOutput(allocator: std.mem.Allocator, output: []u8) ![]u8 {
 fn testInitWithTemplate(harness: TestHarness) !void {
     std.debug.print("  Testing git init --template...\n", .{});
     
+    // Create a proper template directory
+    const template_dir = try harness.createTempDir("template");
+    defer harness.removeTempDir(template_dir);
+    
+    // Create a minimal template structure
+    const hooks_dir = try std.fmt.allocPrint(harness.allocator, "{s}/hooks", .{template_dir});
+    defer harness.allocator.free(hooks_dir);
+    try std.fs.cwd().makeDir(hooks_dir);
+    
     const ziggit_dir = try harness.createTempDir("ziggit_init_template");
     defer harness.removeTempDir(ziggit_dir);
     const git_dir = try harness.createTempDir("git_init_template");
     defer harness.removeTempDir(git_dir);
     
-    var ziggit_result = try harness.runZiggit(&[_][]const u8{"init", "--template=/tmp"}, ziggit_dir);
+    const template_arg = try std.fmt.allocPrint(harness.allocator, "--template={s}", .{template_dir});
+    defer harness.allocator.free(template_arg);
+    
+    var ziggit_result = try harness.runZiggit(&[_][]const u8{"init", template_arg}, ziggit_dir);
     defer ziggit_result.deinit();
     
-    var git_result = try harness.runGit(&[_][]const u8{"init", "--template=/tmp"}, git_dir);
+    var git_result = try harness.runGit(&[_][]const u8{"init", template_arg}, git_dir);
     defer git_result.deinit();
     
     // Both should succeed (ziggit ignores template for now)
     if (ziggit_result.exit_code != 0 or git_result.exit_code != 0) {
         std.debug.print("    FAIL: ziggit exit_code={}, git exit_code={}\n", .{ ziggit_result.exit_code, git_result.exit_code });
+        std.debug.print("    ziggit stderr: {s}\n", .{ziggit_result.stderr});
+        std.debug.print("    git stderr: {s}\n", .{git_result.stderr});
         return test_harness.TestError.ProcessFailed;
     }
     
