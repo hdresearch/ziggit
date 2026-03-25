@@ -11,6 +11,16 @@ pub fn main() !void {
 
     std.debug.print("Running Command Output Format Tests...\n", .{});
 
+    // Set up global git config for tests
+    _ = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{"git", "config", "--global", "user.name", "Test User"},
+    }) catch {};
+    _ = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{"git", "config", "--global", "user.email", "test@example.com"},
+    }) catch {};
+
     // Create temporary test directory
     const test_dir = try fs.cwd().makeOpenPath("test_tmp_output", .{});
     defer fs.cwd().deleteTree("test_tmp_output") catch {};
@@ -110,7 +120,7 @@ fn testLogOnelineOutput(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
     };
 
     for (commits) |commit| {
-        try repo_path.writeFile(commit.file, "content\n");
+        try repo_path.writeFile(.{.sub_path = commit.file, .data = "content\n"});
         _ = try runGitCommand(allocator, &.{"add", commit.file}, repo_path);
         _ = try runGitCommand(allocator, &.{"commit", "-m", commit.msg}, repo_path);
     }
@@ -231,15 +241,27 @@ fn testErrorMessages(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
     const git_error = runGitCommand(allocator, &.{"status"}, non_repo_path);
     const ziggit_error = runZiggitCommand(allocator, &.{"status"}, non_repo_path);
 
-    if (git_error) |_| {
-        std.debug.print("    Unexpected: git status succeeded in non-repo\n", .{});
-        return error.TestFailed;
-    } else |_| {}
+    // Expect both to fail
+    var git_failed = false;
+    var ziggit_failed = false;
 
-    if (ziggit_error) |_| {
+    if (git_error) |output| {
+        defer allocator.free(output);
+        std.debug.print("    Unexpected: git status succeeded in non-repo\n", .{});
+    } else |_| {
+        git_failed = true;
+    }
+
+    if (ziggit_error) |output| {
+        defer allocator.free(output);
         std.debug.print("    Unexpected: ziggit status succeeded in non-repo\n", .{});
+    } else |_| {
+        ziggit_failed = true;
+    }
+
+    if (!git_failed or !ziggit_failed) {
         return error.TestFailed;
-    } else |_| {}
+    }
 
     std.debug.print("    Both tools correctly fail in non-git directory\n", .{});
 
@@ -247,15 +269,26 @@ fn testErrorMessages(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
     const git_invalid = runGitCommand(allocator, &.{"invalidcommand"}, non_repo_path);
     const ziggit_invalid = runZiggitCommand(allocator, &.{"invalidcommand"}, non_repo_path);
 
-    if (git_invalid) |_| {
-        std.debug.print("    Unexpected: git invalidcommand succeeded\n", .{});
-        return error.TestFailed;
-    } else |_| {}
+    var git_invalid_failed = false;
+    var ziggit_invalid_failed = false;
 
-    if (ziggit_invalid) |_| {
+    if (git_invalid) |output| {
+        defer allocator.free(output);
+        std.debug.print("    Unexpected: git invalidcommand succeeded\n", .{});
+    } else |_| {
+        git_invalid_failed = true;
+    }
+
+    if (ziggit_invalid) |output| {
+        defer allocator.free(output);
         std.debug.print("    Unexpected: ziggit invalidcommand succeeded\n", .{});  
+    } else |_| {
+        ziggit_invalid_failed = true;
+    }
+
+    if (!git_invalid_failed or !ziggit_invalid_failed) {
         return error.TestFailed;
-    } else |_| {}
+    }
 
     std.debug.print("    Both tools correctly reject invalid commands\n", .{});
     std.debug.print("  ✓ Test 4 passed\n", .{});
@@ -340,7 +373,7 @@ fn runZiggitCommand(allocator: std.mem.Allocator, args: []const []const u8, cwd:
     var full_args = std.ArrayList([]const u8).init(allocator);
     defer full_args.deinit();
     
-    try full_args.append("./zig-out/bin/ziggit");
+    try full_args.append("/root/ziggit/zig-out/bin/ziggit");
     for (args) |arg| {
         try full_args.append(arg);
     }
