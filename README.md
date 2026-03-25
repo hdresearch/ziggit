@@ -133,7 +133,24 @@ wasmer zig-out/bin/ziggit.wasm -- init my-repo
 ```javascript
 const wasmModule = await WebAssembly.instantiateStreaming(
     fetch('ziggit-browser.wasm'), 
-    { env: { /* host function implementations */ } }
+    { 
+        env: { 
+            // Required host function implementations
+            host_write_stdout: (ptr, len) => { 
+                const data = new Uint8Array(wasmModule.instance.exports.memory.buffer, ptr, len);
+                console.log(new TextDecoder().decode(data)); 
+            },
+            host_write_stderr: (ptr, len) => { 
+                const data = new Uint8Array(wasmModule.instance.exports.memory.buffer, ptr, len);
+                console.error(new TextDecoder().decode(data)); 
+            },
+            host_file_exists: (pathPtr, pathLen) => { /* implement file check */ },
+            host_read_file: (pathPtr, pathLen, dataPtr, dataLen) => { /* implement file read */ },
+            host_write_file: (pathPtr, pathLen, dataPtr, dataLen) => { /* implement file write */ },
+            host_make_dir: (pathPtr, pathLen) => { /* implement directory creation */ },
+            // ... other host functions
+        } 
+    }
 );
 
 // Initialize 

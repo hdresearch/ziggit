@@ -74,7 +74,7 @@ fn readFileImpl(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     if (host_read_file(path.ptr, @intCast(path.len), &data_ptr, &data_len)) {
         if (data_len == 0) {
             // Return empty slice for empty files
-            return allocator.alloc(u8, 0);
+            return try allocator.alloc(u8, 0);
         }
         // Copy the data to our allocator-managed memory
         const result = try allocator.alloc(u8, data_len);
