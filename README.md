@@ -48,13 +48,14 @@ This produces `zig-out/bin/ziggit-browser.wasm` for browser/JavaScript environme
 
 ## WebAssembly Status
 
-**Current Implementation**: Full WebAssembly support with comprehensive platform abstraction framework.
+**Current Implementation**: Complete WebAssembly support with comprehensive platform abstraction framework.
 
 - ✅ **Working**: `zig build`, `zig build wasm`, `zig build wasm-browser` all compile successfully
 - ✅ **Tested**: Core commands `init` and `status` work correctly on both native and WASM builds  
-- ✅ **Platform abstraction**: Complete isolation of OS-specific code in `src/platform/`
-- ✅ **WASI compatibility**: Full filesystem operations through WASI APIs
-- ✅ **Production ready**: WebAssembly builds are fully functional for git repository operations
+- ✅ **Platform abstraction**: Complete isolation of OS-specific code in `src/platform/` with unified interface
+- ✅ **WASI compatibility**: Full filesystem operations through WASI APIs with proper error handling
+- ✅ **Code sharing**: Core logic shared between all platforms via `src/main_common.zig`
+- ✅ **Production ready**: WebAssembly builds are fully functional for git repository operations  
 - 🚧 **Expanding**: Additional git commands (add, commit, log, etc.) being added for complete git compatibility
 
 ## WebAssembly Capabilities & Limitations
@@ -127,12 +128,19 @@ wasmModule.instance.exports.ziggit_command(ptr, command.length);
 
 ## Platform Abstraction
 
-The codebase uses a platform abstraction layer in `src/platform/` that allows ziggit to run on different targets:
+The codebase uses a comprehensive platform abstraction layer in `src/platform/` that allows ziggit to run on different targets:
 - `native.zig`: Standard POSIX/Windows platforms
 - `wasi.zig`: WebAssembly System Interface
-- `freestanding.zig`: Browser/embedded (in development)
+- `freestanding.zig`: Browser/embedded environments
 
-This ensures the core git logic remains platform-agnostic while supporting different runtime environments.
+### Architecture
+- **Unified Interface**: All platforms implement the same `Platform` interface defined in `src/platform/interface.zig`
+- **Automatic Selection**: Platform implementation is selected at compile time based on target OS
+- **Shared Core Logic**: `src/main_common.zig` contains platform-agnostic command handling shared across all builds
+- **Error Normalization**: Platform-specific errors are normalized to consistent error types across all platforms
+- **Conditional Compilation**: Advanced git features are conditionally compiled based on platform capabilities
+
+This ensures the core git logic remains completely platform-agnostic while providing optimal performance on each runtime environment.
 
 ## License
 
