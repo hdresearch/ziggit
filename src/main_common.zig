@@ -592,8 +592,8 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     }
 
     const first_arg = args.next() orelse {
-        try platform_impl.writeStderr("error: pathspec '' did not match any file(s) known to git\n");
-        std.process.exit(1);
+        try platform_impl.writeStderr("fatal: You are on a branch yet to be born\n");
+        std.process.exit(128);
     };
 
     // Find .git directory
