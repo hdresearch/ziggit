@@ -71,8 +71,9 @@ fn deleteFileImpl(path: []const u8) !void {
 
 fn getCwdImpl(allocator: std.mem.Allocator) ![]u8 {
     // WASI has limited filesystem capabilities
-    // For now, return a default path
-    return try allocator.dupe(u8, "/");
+    // Try to get the current directory from the environment or use a default
+    // In WASI, we're typically run with --dir pointing to the working directory
+    return try allocator.dupe(u8, ".");
 }
 
 fn chdirImpl(path: []const u8) !void {

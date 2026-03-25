@@ -1,47 +1,70 @@
+// Minimal freestanding main that avoids Zig stdlib POSIX dependencies
 const std = @import("std");
-const platform = @import("platform/platform.zig");
 
-// Simple allocator for freestanding environment
+// Simple fixed buffer allocator for freestanding environment
 var memory_buffer: [64 * 1024]u8 = undefined; // 64KB buffer
-var fba = std.heap.FixedBufferAllocator.init(&memory_buffer);
+var fba: std.heap.FixedBufferAllocator = undefined;
+var allocator_initialized = false;
 
+// External functions that must be provided by the JavaScript host environment
+extern fn host_write_stdout(ptr: [*]const u8, len: u32) void;
+extern fn host_write_stderr(ptr: [*]const u8, len: u32) void;
+
+// Export main function for WASM
 export fn ziggit_main() i32 {
     main() catch return 1;
     return 0;
 }
 
+// Export function for host to call specific commands
+export fn ziggit_command(command_ptr: [*]const u8, command_len: u32) i32 {
+    const command = command_ptr[0..command_len];
+    handleCommand(command) catch return 1;
+    return 0;
+}
+
+fn getOrInitAllocator() std.mem.Allocator {
+    if (!allocator_initialized) {
+        fba = std.heap.FixedBufferAllocator.init(&memory_buffer);
+        allocator_initialized = true;
+    }
+    return fba.allocator();
+}
+
 pub fn main() !void {
-    const allocator = fba.allocator();
-    
-    const plat = platform.getCurrentPlatform();
-    var args = try plat.getArgs(allocator);
-    defer args.deinit();
-    
-    _ = args.skip(); // skip program name
+    writeStdout("ziggit: a modern version control system written in Zig (WASM/Browser mode)\n");
+    writeStdout("Use ziggit_command() function to execute commands.\n");
+}
 
-    const command = args.next() orelse {
-        try plat.writeStdout("ziggit: a modern version control system written in Zig\n");
-        try plat.writeStdout("usage: ziggit <command> [<args>]\n\n");
-        try plat.writeStdout("Commands:\n");
-        try plat.writeStdout("  init       Create an empty repository\n");
-        try plat.writeStdout("  add        Add file contents to the index\n");
-        try plat.writeStdout("  commit     Record changes to the repository\n");
-        try plat.writeStdout("  status     Show the working tree status\n");
-        try plat.writeStdout("  log        Show commit logs\n");
-        try plat.writeStdout("  checkout   Switch branches or restore working tree files\n");
-        try plat.writeStdout("  branch     List, create, or delete branches\n");
-        try plat.writeStdout("  merge      Join two or more development histories together\n");
-        try plat.writeStdout("  clone      Clone a repository into a new directory\n");
-        try plat.writeStdout("  push       Update remote refs along with associated objects\n");
-        try plat.writeStdout("  pull       Fetch from and integrate with another repository\n");
-        try plat.writeStdout("  fetch      Download objects and refs from another repository\n");
-        try plat.writeStdout("  diff       Show changes between commits, commit and working tree, etc\n");
-        return;
-    };
+fn handleCommand(command: []const u8) !void {
+    if (std.mem.eql(u8, command, "")) {
+        writeStdout("ziggit: a modern version control system written in Zig\n");
+        writeStdout("usage: ziggit <command> [<args>]\n\n");
+        writeStdout("Commands:\n");
+        writeStdout("  init       Create an empty repository\n");
+        writeStdout("  add        Add file contents to the index\n");
+        writeStdout("  commit     Record changes to the repository\n");
+        writeStdout("  status     Show the working tree status\n");
+        writeStdout("  log        Show commit logs\n");
+        writeStdout("  checkout   Switch branches or restore working tree files\n");
+        writeStdout("  branch     List, create, or delete branches\n");
+        writeStdout("  merge      Join two or more development histories together\n");
+        writeStdout("  clone      Clone a repository into a new directory\n");
+        writeStdout("  push       Update remote refs along with associated objects\n");
+        writeStdout("  pull       Fetch from and integrate with another repository\n");
+        writeStdout("  fetch      Download objects and refs from another repository\n");
+        writeStdout("  diff       Show changes between commits, commit and working tree, etc\n");
+    } else {
+        writeStdout("ziggit: '");
+        writeStdout(command);
+        writeStdout("' is not yet implemented in browser mode\n");
+    }
+}
 
-    // TODO: Implement all git commands as drop-in replacements
-    // For now, just output a simple message without formatting
-    try plat.writeStdout("ziggit: '");
-    try plat.writeStdout(command);
-    try plat.writeStdout("' is not yet implemented\n");
+fn writeStdout(data: []const u8) void {
+    host_write_stdout(data.ptr, @intCast(data.len));
+}
+
+fn writeStderr(data: []const u8) void {
+    host_write_stderr(data.ptr, @intCast(data.len));
 }

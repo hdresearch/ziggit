@@ -41,8 +41,10 @@ cd my-repo && wasmtime --dir . ../zig-out/bin/ziggit.wasm status  # Some command
 ### WebAssembly (Browser/Freestanding)
 ```bash
 export ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache  
-zig build wasm-browser  # Currently disabled due to stdlib compatibility issues
+zig build wasm-browser
 ```
+
+This produces `zig-out/bin/ziggit-browser.wasm` for browser/JavaScript environments.
 
 ## WebAssembly Limitations
 
@@ -53,11 +55,12 @@ zig build wasm-browser  # Currently disabled due to stdlib compatibility issues
 - Some system-level git operations may be limited
 
 ### Browser/Freestanding Build
-- Currently disabled due to Zig stdlib POSIX dependencies in freestanding target
-- Would require virtual filesystem implementation
-- All I/O operations need JavaScript host functions
-- No direct filesystem access
+- Minimal implementation to avoid Zig stdlib POSIX dependencies  
+- Requires virtual filesystem implementation via JavaScript host functions
+- All I/O operations delegated to JavaScript host environment
+- No direct filesystem access - uses host_* extern functions
 - Network operations require JavaScript implementation
+- Provides `ziggit_main()` and `ziggit_command()` exports for host integration
 
 ## Platform Abstraction
 
