@@ -49,6 +49,20 @@ zig build wasm-browser -Dfreestanding-memory-size=32768  # 32KB
 
 This produces `zig-out/bin/ziggit-browser.wasm` for browser/JavaScript environments.
 
+### WebAssembly Verification
+Run the comprehensive WebAssembly verification script to ensure all builds work correctly:
+
+```bash
+./verify_wasm.sh
+```
+
+This script:
+- ✅ Builds all targets (native, WASI, browser)
+- ✅ Verifies output file sizes and structure
+- ✅ Tests WASI functionality with wasmtime (if available)
+- ✅ Validates platform abstraction completeness
+- ✅ Confirms configurable browser builds work
+
 ## WebAssembly Status
 
 **Current Implementation**: ✅ **COMPLETE** - WebAssembly support with comprehensive platform abstraction framework is fully functional.
