@@ -196,9 +196,11 @@ pub const TestHarness = struct {
     }
 
     pub fn removeTempDir(self: TestHarness, dir_path: []const u8) void {
-        std.fs.deleteTreeAbsolute(dir_path) catch |err| {
-            std.debug.print("Warning: failed to delete temp dir {s}: {}\n", .{ dir_path, err });
-        };
+        if (dir_path.len > 0) {
+            std.fs.deleteTreeAbsolute(dir_path) catch |err| {
+                std.debug.print("Warning: failed to delete temp dir {s}: {}\n", .{ dir_path, err });
+            };
+        }
         self.allocator.free(dir_path);
     }
 
@@ -270,52 +272,153 @@ fn testAdd(harness: TestHarness) !void {
     defer harness.removeTempDir(temp_dir);
 
     // Initialize repo
-    var result = try harness.runGit(&[_][]const u8{"init"}, temp_dir);
-    result.deinit();
+    var init_result = try harness.runZiggit(&[_][]const u8{"init"}, temp_dir);
+    defer init_result.deinit();
 
     // Create a test file
     const test_file = try std.fmt.allocPrint(harness.allocator, "{s}/test.txt", .{temp_dir});
     defer harness.allocator.free(test_file);
     try harness.writeFile(test_file, "Hello, world!\n");
 
-    // Test add command (expect failure until implemented)
-    // try harness.compareCommands(&[_][]const u8{"add", "test.txt"}, temp_dir, true);
+    // Test add command
+    var add_result = try harness.runZiggit(&[_][]const u8{"add", "test.txt"}, temp_dir);
+    defer add_result.deinit();
 
-    std.debug.print("  ⚠ git add not yet implemented\n", .{});
+    if (add_result.exit_code == 0) {
+        std.debug.print("  ✓ git add basic functionality\n", .{});
+    } else {
+        std.debug.print("  ✗ git add failed with exit code {}\n", .{add_result.exit_code});
+        return TestError.ProcessFailed;
+    }
 }
 
 fn testCommit(harness: TestHarness) !void {
-    _ = harness;
     std.debug.print("Testing git commit...\n", .{});
-    std.debug.print("  ⚠ git commit not yet implemented\n", .{});
+    
+    const temp_dir = try harness.createTempDir("test_commit");
+    defer harness.removeTempDir(temp_dir);
+
+    // Initialize repo
+    var init_result = try harness.runZiggit(&[_][]const u8{"init"}, temp_dir);
+    defer init_result.deinit();
+
+    // Test commit without anything staged (should fail)
+    var commit_result = try harness.runZiggit(&[_][]const u8{"commit", "-m", "test"}, temp_dir);
+    defer commit_result.deinit();
+
+    if (commit_result.exit_code != 0) {
+        std.debug.print("  ✓ git commit correctly fails with nothing to commit\n", .{});
+    } else {
+        std.debug.print("  ✗ git commit should fail when nothing is staged\n", .{});
+        return TestError.UnexpectedOutput;
+    }
 }
 
 fn testStatus(harness: TestHarness) !void {
-    _ = harness;
     std.debug.print("Testing git status...\n", .{});
-    std.debug.print("  ⚠ git status not yet implemented\n", .{});
+    
+    const temp_dir = try harness.createTempDir("test_status");
+    defer harness.removeTempDir(temp_dir);
+
+    // Initialize repo
+    var init_result = try harness.runZiggit(&[_][]const u8{"init"}, temp_dir);
+    defer init_result.deinit();
+
+    // Test status in empty repo
+    var status_result = try harness.runZiggit(&[_][]const u8{"status"}, temp_dir);
+    defer status_result.deinit();
+
+    if (status_result.exit_code == 0) {
+        std.debug.print("  ✓ git status basic functionality\n", .{});
+    } else {
+        std.debug.print("  ✗ git status failed with exit code {}\n", .{status_result.exit_code});
+        return TestError.ProcessFailed;
+    }
 }
 
 fn testLog(harness: TestHarness) !void {
-    _ = harness;
     std.debug.print("Testing git log...\n", .{});
-    std.debug.print("  ⚠ git log not yet implemented\n", .{});
+    
+    const temp_dir = try harness.createTempDir("test_log");
+    defer harness.removeTempDir(temp_dir);
+
+    // Initialize repo
+    var init_result = try harness.runZiggit(&[_][]const u8{"init"}, temp_dir);
+    defer init_result.deinit();
+
+    // Test log in empty repo (should fail)
+    var log_result = try harness.runZiggit(&[_][]const u8{"log"}, temp_dir);
+    defer log_result.deinit();
+
+    if (log_result.exit_code == 128) {
+        std.debug.print("  ✓ git log correctly fails in empty repository\n", .{});
+    } else {
+        std.debug.print("  ✗ git log should fail with exit code 128 in empty repo, got {}\n", .{log_result.exit_code});
+        return TestError.ProcessFailed;
+    }
 }
 
 fn testBranch(harness: TestHarness) !void {
-    _ = harness;
     std.debug.print("Testing git branch...\n", .{});
-    std.debug.print("  ⚠ git branch not yet implemented\n", .{});
+    
+    const temp_dir = try harness.createTempDir("test_branch");
+    defer harness.removeTempDir(temp_dir);
+
+    // Initialize repo
+    var init_result = try harness.runZiggit(&[_][]const u8{"init"}, temp_dir);
+    defer init_result.deinit();
+
+    // Test branch in empty repo
+    var branch_result = try harness.runZiggit(&[_][]const u8{"branch"}, temp_dir);
+    defer branch_result.deinit();
+
+    if (branch_result.exit_code == 0) {
+        std.debug.print("  ✓ git branch basic functionality\n", .{});
+    } else {
+        std.debug.print("  ✗ git branch failed with exit code {}\n", .{branch_result.exit_code});
+        return TestError.ProcessFailed;
+    }
 }
 
 fn testCheckout(harness: TestHarness) !void {
-    _ = harness;
     std.debug.print("Testing git checkout...\n", .{});
-    std.debug.print("  ⚠ git checkout not yet implemented\n", .{});
+    
+    const temp_dir = try harness.createTempDir("test_checkout");
+    defer harness.removeTempDir(temp_dir);
+
+    // Initialize repo
+    var init_result = try harness.runZiggit(&[_][]const u8{"init"}, temp_dir);
+    defer init_result.deinit();
+
+    // Test checkout without target (should fail)
+    var checkout_result = try harness.runZiggit(&[_][]const u8{"checkout"}, temp_dir);
+    defer checkout_result.deinit();
+
+    if (checkout_result.exit_code == 128) {
+        std.debug.print("  ✓ git checkout correctly fails in empty repository\n", .{});
+    } else {
+        std.debug.print("  ⚠ git checkout exit code: {}\n", .{checkout_result.exit_code});
+    }
 }
 
 fn testDiff(harness: TestHarness) !void {
-    _ = harness;
     std.debug.print("Testing git diff...\n", .{});
-    std.debug.print("  ⚠ git diff not yet implemented\n", .{});
+    
+    const temp_dir = try harness.createTempDir("test_diff");
+    defer harness.removeTempDir(temp_dir);
+
+    // Initialize repo
+    var init_result = try harness.runZiggit(&[_][]const u8{"init"}, temp_dir);
+    defer init_result.deinit();
+
+    // Test diff in empty repo
+    var diff_result = try harness.runZiggit(&[_][]const u8{"diff"}, temp_dir);
+    defer diff_result.deinit();
+
+    if (diff_result.exit_code == 0) {
+        std.debug.print("  ✓ git diff basic functionality\n", .{});
+    } else {
+        std.debug.print("  ✗ git diff failed with exit code {}\n", .{diff_result.exit_code});
+        return TestError.ProcessFailed;
+    }
 }

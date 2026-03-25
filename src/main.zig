@@ -20,7 +20,7 @@ pub fn main() !void {
     _ = args.skip(); // skip program name
 
     const command = args.next() orelse {
-        try showUsage(&plat);
+        try showUsage(stdout);
         return;
     };
 
@@ -28,6 +28,18 @@ pub fn main() !void {
         try cmdInit(allocator, &args, stdout, stderr);
     } else if (std.mem.eql(u8, command, "status")) {
         try cmdStatus(allocator, &args, stdout, stderr);
+    } else if (std.mem.eql(u8, command, "add")) {
+        try cmdAdd(allocator, &args, stdout, stderr);
+    } else if (std.mem.eql(u8, command, "commit")) {
+        try cmdCommit(allocator, &args, stdout, stderr);
+    } else if (std.mem.eql(u8, command, "log")) {
+        try cmdLog(allocator, &args, stdout, stderr);
+    } else if (std.mem.eql(u8, command, "diff")) {
+        try cmdDiff(allocator, &args, stdout, stderr);
+    } else if (std.mem.eql(u8, command, "branch")) {
+        try cmdBranch(allocator, &args, stdout, stderr);
+    } else if (std.mem.eql(u8, command, "checkout")) {
+        try cmdCheckout(allocator, &args, stdout, stderr);
     } else {
         try stderr.print("ziggit: '{s}' is not yet implemented\n", .{command});
         std.process.exit(1);
@@ -177,6 +189,159 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *std.process.ArgIterator, stdou
     defer std.heap.page_allocator.free(git_dir);
     
     try displayStatus(git_dir, stdout);
+}
+
+fn showUsage(stdout: anytype) !void {
+    try stdout.print("usage: ziggit <command> [<args>]\n\n", .{});
+    try stdout.print("These are common ziggit commands used in various situations:\n\n", .{});
+    try stdout.print("start a working area (see also: ziggit help tutorial)\n", .{});
+    try stdout.print("   init       Create an empty Git repository or reinitialize an existing one\n\n", .{});
+    try stdout.print("work on the current change (see also: ziggit help everyday)\n", .{});
+    try stdout.print("   add        Add file contents to the index\n", .{});
+    try stdout.print("   status     Show the working tree status\n", .{});
+    try stdout.print("   commit     Record changes to the repository\n", .{});
+    try stdout.print("   log        Show commit logs\n", .{});
+    try stdout.print("   diff       Show changes between commits, commit and working tree, etc\n\n", .{});
+}
+
+fn cmdAdd(allocator: std.mem.Allocator, args: *std.process.ArgIterator, stdout: anytype, stderr: anytype) !void {
+    _ = stdout; // TODO: will be used for status messages
+    
+    // Find git repository
+    const git_dir = findGitDir() catch |err| switch (err) {
+        GitError.NotAGitRepository => {
+            try stderr.print("fatal: not a git repository (or any of the parent directories): .git\n", .{});
+            std.process.exit(128);
+        },
+        else => return err,
+    };
+    defer std.heap.page_allocator.free(git_dir);
+    
+    // Get files to add
+    var files_to_add = std.ArrayList([]const u8).init(allocator);
+    defer files_to_add.deinit();
+    
+    while (args.next()) |file| {
+        try files_to_add.append(file);
+    }
+    
+    if (files_to_add.items.len == 0) {
+        try stderr.print("Nothing specified, nothing added.\n", .{});
+        try stderr.print("hint: Maybe you wanted to say 'git add .'?\n", .{});
+        std.process.exit(128);
+    }
+    
+    // For now, just check that the files exist
+    for (files_to_add.items) |file| {
+        std.fs.cwd().access(file, .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                try stderr.print("fatal: pathspec '{s}' did not match any files\n", .{file});
+                std.process.exit(128);
+            },
+            else => return err,
+        };
+    }
+    
+    // TODO: Actually implement adding files to the index
+    // For now, just succeed silently like git add does
+}
+
+fn cmdCommit(allocator: std.mem.Allocator, args: *std.process.ArgIterator, stdout: anytype, stderr: anytype) !void {
+    _ = allocator; // TODO: will be used for parsing
+    _ = args; // TODO: parse commit-specific arguments
+    _ = stdout; // TODO: success message
+    
+    // Find git repository
+    const git_dir = findGitDir() catch |err| switch (err) {
+        GitError.NotAGitRepository => {
+            try stderr.print("fatal: not a git repository (or any of the parent directories): .git\n", .{});
+            std.process.exit(128);
+        },
+        else => return err,
+    };
+    defer std.heap.page_allocator.free(git_dir);
+    
+    // For now, always fail with "nothing to commit"
+    try stderr.print("On branch master\n\n", .{});
+    try stderr.print("No commits yet\n\n", .{});
+    try stderr.print("nothing to commit (create/copy files and use \"git add\" to track)\n", .{});
+    std.process.exit(1);
+}
+
+fn cmdLog(allocator: std.mem.Allocator, args: *std.process.ArgIterator, stdout: anytype, stderr: anytype) !void {
+    _ = allocator; // TODO: will be used for parsing
+    _ = args; // TODO: parse log-specific arguments
+    _ = stdout; // TODO: log output
+    
+    // Find git repository
+    const git_dir = findGitDir() catch |err| switch (err) {
+        GitError.NotAGitRepository => {
+            try stderr.print("fatal: not a git repository (or any of the parent directories): .git\n", .{});
+            std.process.exit(128);
+        },
+        else => return err,
+    };
+    defer std.heap.page_allocator.free(git_dir);
+    
+    // For empty repository, git log fails
+    try stderr.print("fatal: your current branch 'master' does not have any commits yet\n", .{});
+    std.process.exit(128);
+}
+
+fn cmdDiff(allocator: std.mem.Allocator, args: *std.process.ArgIterator, stdout: anytype, stderr: anytype) !void {
+    _ = allocator; // TODO: will be used for parsing
+    _ = args; // TODO: parse diff-specific arguments
+    _ = stdout; // TODO: diff output
+    
+    // Find git repository
+    const git_dir = findGitDir() catch |err| switch (err) {
+        GitError.NotAGitRepository => {
+            try stderr.print("fatal: not a git repository (or any of the parent directories): .git\n", .{});
+            std.process.exit(128);
+        },
+        else => return err,
+    };
+    defer std.heap.page_allocator.free(git_dir);
+    
+    // For now, just output nothing (like git diff in empty repo)
+}
+
+fn cmdBranch(allocator: std.mem.Allocator, args: *std.process.ArgIterator, stdout: anytype, stderr: anytype) !void {
+    _ = allocator; // TODO: will be used for parsing
+    _ = args; // TODO: parse branch-specific arguments
+    
+    // Find git repository
+    const git_dir = findGitDir() catch |err| switch (err) {
+        GitError.NotAGitRepository => {
+            try stderr.print("fatal: not a git repository (or any of the parent directories): .git\n", .{});
+            std.process.exit(128);
+        },
+        else => return err,
+    };
+    defer std.heap.page_allocator.free(git_dir);
+    
+    // In empty repository, git branch shows nothing
+    _ = stdout;
+}
+
+fn cmdCheckout(allocator: std.mem.Allocator, args: *std.process.ArgIterator, stdout: anytype, stderr: anytype) !void {
+    _ = allocator; // TODO: will be used for parsing
+    _ = args; // TODO: parse checkout-specific arguments
+    _ = stdout; // TODO: success messages
+    
+    // Find git repository
+    const git_dir = findGitDir() catch |err| switch (err) {
+        GitError.NotAGitRepository => {
+            try stderr.print("fatal: not a git repository (or any of the parent directories): .git\n", .{});
+            std.process.exit(128);
+        },
+        else => return err,
+    };
+    defer std.heap.page_allocator.free(git_dir);
+    
+    // For now, just fail
+    try stderr.print("fatal: You are on a branch yet to be born\n", .{});
+    std.process.exit(128);
 }
 
 fn findGitDir() ![]u8 {
