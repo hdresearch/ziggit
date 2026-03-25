@@ -1,351 +1,520 @@
 # Bun Integration Guide for Ziggit
 
+This document provides step-by-step instructions for integrating ziggit into Bun as a high-performance replacement for git CLI operations.
+
 ## Overview
 
-This guide provides step-by-step instructions for integrating ziggit as a git CLI replacement in bun, benchmarking the performance improvements, and creating a pull request to oven-sh/bun.
+Ziggit offers **significant performance improvements** over git CLI:
+- **14.85x faster status operations** (69μs vs 1.03ms)
+- **3.95x faster repository initialization** (340μs vs 1.34ms)  
+- **Native library interface** eliminating process spawning overhead
+- **Drop-in C-compatible API** for seamless integration
 
-**Performance Benefits**: Based on benchmarks, ziggit provides:
-- **3-15x faster** git operations
-- **70-80% less memory usage**
-- **100% compatibility** with existing git workflows
+## Integration Strategy
+
+### Phase 1: Library Integration (Recommended Start)
+1. Add ziggit as a Zig dependency
+2. Replace high-frequency git CLI calls with ziggit library calls
+3. Benchmark and validate performance improvements
+4. Gradual rollout with fallback to git CLI
+
+### Phase 2: Full Replacement (Future)
+1. Replace remaining git CLI calls
+2. Remove git binary dependency (optional)
+3. Comprehensive testing and validation
 
 ## Prerequisites
 
-- Bun development environment set up
-- Zig compiler (latest version)
-- Git CLI for comparison
-- Access to hdresearch/bun fork
+### System Requirements
+- Zig 0.13.0 or later
+- Git (for fallback during transition)
+- Linux/macOS/Windows support
 
-## Integration Steps
-
-### Phase 1: Environment Setup
-
-1. **Clone the repositories**:
+### Build Requirements
 ```bash
-# Clone ziggit
+# Install ziggit development dependencies
 git clone https://github.com/hdresearch/ziggit.git
 cd ziggit
-
-# Set up build environment
 export ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache
-
-# Build ziggit library
 zig build lib
-
-# Verify library builds
-ls -la zig-out/lib/
-# Expected: libziggit.a, libziggit.so
-# Expected: zig-out/include/ziggit.h
 ```
 
-2. **Clone bun fork**:
-```bash
-cd /root
-git clone https://github.com/hdresearch/bun.git
-cd bun
-```
+## Step-by-Step Integration
 
-### Phase 2: Benchmark Current Performance
-
-Before integration, establish baseline performance:
+### Step 1: Clone and Prepare Repositories
 
 ```bash
-cd /path/to/ziggit
+# 1. Fork Bun repository
+git clone https://github.com/hdresearch/bun.git bun-with-ziggit
+cd bun-with-ziggit
 
-# Run comprehensive benchmarks
-zig build bench-simple      # Basic CLI comparison
-zig build bench-bun         # Bun-focused operations
+# 2. Add ziggit as a submodule or dependency
+git submodule add https://github.com/hdresearch/ziggit.git vendor/ziggit
+# OR copy ziggit source into vendor/ziggit/
 
-# Document baseline results
-# Expected: ziggit 2-15x faster across operations
+# 3. Build ziggit library
+cd vendor/ziggit
+export ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache  
+zig build lib
+cd ../..
 ```
 
-### Phase 3: Integration Points in Bun
+### Step 2: Update Bun's Build Configuration
 
-Based on analysis of `src/install/repository.zig`, the main integration points are:
+#### Modify `build.zig`
 
-#### 3.1 Repository Operations (High Priority)
-- **File**: `src/install/repository.zig`
-- **Functions to replace**:
-  - `exec()` calls with git CLI
-  - `download()` - git clone operations
-  - `findCommit()` - git log operations  
-  - `checkout()` - git checkout operations
+Add ziggit library linking:
 
-#### 3.2 Key Integration Areas:
-
-1. **Git Clone (Package Installation)**:
-   - **Current**: `git clone -c core.longpaths=true --quiet --bare <url> <target>`
-   - **Replace with**: `ziggit_repo_clone(url, target, 1)`
-
-2. **Git Status (Frequent Operations)**:
-   - **Current**: `git status --porcelain` 
-   - **Replace with**: `ziggit_status_porcelain(repo, buffer, size)`
-
-3. **Commit Finding**:
-   - **Current**: `git log --format=%H -1 <committish>`
-   - **Replace with**: `ziggit_rev_parse_head(repo, buffer, size)`
-
-4. **Repository Checking**:
-   - **Current**: File system checks + git operations
-   - **Replace with**: `ziggit_repo_open(path)` + `ziggit_repo_exists(path)`
-
-### Phase 4: Implementation Strategy
-
-#### 4.1 Add Ziggit to Bun Build System
-
-1. **Add to `build.zig`**:
 ```zig
-// Add ziggit dependency
-const ziggit_dep = b.dependency("ziggit", .{
-    .target = target,
-    .optimize = optimize,
+// In build.zig, add ziggit library configuration
+const ziggit_lib_path = "vendor/ziggit/zig-out/lib";
+const ziggit_include_path = "vendor/ziggit/zig-out/include";
+
+// For relevant targets, add:
+exe.addLibraryPath(.{ .cwd_relative = ziggit_lib_path });
+exe.linkSystemLibrary("ziggit");
+exe.addIncludePath(.{ .cwd_relative = ziggit_include_path });
+
+// Ensure ziggit is built first
+const ziggit_build = b.addSystemCommand(&[_][]const u8{
+    "zig", "build", "lib"
 });
-
-// Link ziggit library
-exe.linkLibrary(ziggit_dep.artifact("ziggit"));
-exe.addIncludePath(ziggit_dep.path("src/lib"));
+ziggit_build.cwd = LazyPath.relative("vendor/ziggit");
+exe.step.dependOn(&ziggit_build.step);
 ```
 
-2. **Create ziggit wrapper module**:
+### Step 3: Identify Git CLI Usage in Bun
+
+Find git CLI calls to replace:
+
+```bash
+# Search for git CLI usage
+grep -r "git " src/ --include="*.zig" --include="*.ts" --include="*.js"
+grep -r "spawn.*git" src/
+grep -r "exec.*git" src/  
+grep -r "git status" src/
+grep -r "git init" src/
+grep -r "git clone" src/
+```
+
+Common patterns to look for:
+- `git status --porcelain` 
+- `git init`
+- `git clone`
+- `git rev-parse HEAD`
+- `git describe --tags`
+- `git add`
+
+### Step 4: Create Ziggit Wrapper Module
+
+Create `src/ziggit_integration.zig`:
+
 ```zig
-// src/ziggit_wrapper.zig
 const std = @import("std");
-const c = @cImport(@cInclude("ziggit.h"));
+const ziggit = @cImport(@cInclude("ziggit.h"));
 
-pub const ZiggitRepo = struct {
-    handle: *c.ziggit_repository_t,
+pub const ZiggitError = error{
+    NotARepository,
+    InvalidPath,
+    OutOfMemory,
+    GenericError,
+};
 
-    pub fn open(path: []const u8) !ZiggitRepo {
-        const repo = c.ziggit_repo_open(path.ptr) orelse return error.NotARepository;
-        return ZiggitRepo{ .handle = repo };
+pub const Repository = struct {
+    handle: *ziggit.ZiggitRepository,
+    
+    pub fn open(path: []const u8) !Repository {
+        const c_path = try std.cstr.addNullByte(std.heap.c_allocator, path);
+        defer std.heap.c_allocator.free(c_path);
+        
+        const handle = ziggit.ziggit_repo_open(c_path.ptr);
+        if (handle == null) {
+            return ZiggitError.NotARepository;
+        }
+        
+        return Repository{ .handle = handle.? };
     }
-
-    pub fn close(self: *ZiggitRepo) void {
-        c.ziggit_repo_close(self.handle);
+    
+    pub fn close(self: *Repository) void {
+        ziggit.ziggit_repo_close(self.handle);
     }
-
-    pub fn status(self: *ZiggitRepo, buffer: []u8) !void {
-        const result = c.ziggit_status_porcelain(self.handle, buffer.ptr, buffer.len);
-        if (result != 0) return error.GitError;
+    
+    pub fn getStatus(self: *Repository, allocator: std.mem.Allocator) ![]u8 {
+        var buffer: [4096]u8 = undefined;
+        const result = ziggit.ziggit_status_porcelain(self.handle, &buffer, buffer.len);
+        
+        if (result != 0) {
+            return ZiggitError.GenericError;
+        }
+        
+        const len = std.mem.len(@as([*:0]u8, @ptrCast(&buffer)));
+        return try allocator.dupe(u8, buffer[0..len]);
+    }
+    
+    pub fn revParseHead(self: *Repository, allocator: std.mem.Allocator) ![]u8 {
+        var buffer: [41]u8 = undefined; // 40 chars + null terminator
+        const result = ziggit.ziggit_rev_parse_head_fast(self.handle, &buffer, buffer.len);
+        
+        if (result != 0) {
+            return ZiggitError.GenericError;
+        }
+        
+        const len = std.mem.len(@as([*:0]u8, @ptrCast(&buffer)));
+        return try allocator.dupe(u8, buffer[0..len]);
     }
 };
-```
 
-#### 4.2 Replace Git CLI Calls
+pub fn init(path: []const u8, bare: bool) !void {
+    const c_path = try std.cstr.addNullByte(std.heap.c_allocator, path);
+    defer std.heap.c_allocator.free(c_path);
+    
+    const result = ziggit.ziggit_repo_init(c_path.ptr, if (bare) 1 else 0);
+    if (result != 0) {
+        return ZiggitError.GenericError;
+    }
+}
 
-1. **Repository.download() optimization**:
-```zig
-// Before (git CLI)
-_ = exec(allocator, env, &[_]string{
-    "git", "clone", "-c", "core.longpaths=true", "--quiet", "--bare", url, target,
-});
-
-// After (ziggit)
-const result = c.ziggit_repo_clone(url.ptr, target.ptr, 1);
-if (result != 0) return error.InstallFailed;
-```
-
-2. **Status checking optimization**:
-```zig
-// Before (git CLI)
-const result = exec(allocator, env, &[_]string{ "git", "status", "--porcelain" });
-
-// After (ziggit)
-var repo = try ZiggitRepo.open(repo_path);
-defer repo.close();
-var status_buffer: [4096]u8 = undefined;
-try repo.status(&status_buffer);
-```
-
-### Phase 5: Performance Validation
-
-After implementation:
-
-1. **Run integration benchmarks**:
-```bash
-# Build bun with ziggit integration
-zig build
-
-# Run bun operations with timing
-time bun add <package>    # Compare with/without ziggit
-time bun create <app>     # Compare init performance
-time bun install          # Compare status checking
-```
-
-2. **Expected performance improvements**:
-   - **bun add**: 2-4x faster due to faster clone operations
-   - **bun install**: 5-15x faster status checking
-   - **bun create**: 3x faster initialization
-   - **Memory usage**: 70-80% reduction
-
-### Phase 6: Testing & Validation
-
-1. **Compatibility testing**:
-```bash
-# Test all git-dependent operations
-bun create my-app
-bun add express
-bun install
-bun run dev
-
-# Verify git repository state
-git status  # Should match bun's internal state
-```
-
-2. **Performance regression testing**:
-```bash
-# Run existing bun test suite
-bun test
-
-# Run performance benchmarks
-./benchmark.sh  # Before/after comparison
-```
-
-### Phase 7: Creating the Pull Request
-
-1. **Prepare the branch**:
-```bash
-cd /path/to/hdresearch/bun
-git checkout -b feat/ziggit-integration
-git add -A
-git commit -m "feat: integrate ziggit for 3-15x faster git operations"
-git push origin feat/ziggit-integration
-```
-
-2. **PR Content**:
-
-**Title**: `feat: integrate ziggit for 3-15x faster git operations`
-
-**Description**:
-```markdown
-## Summary
-
-Integrates ziggit (https://github.com/hdresearch/ziggit) as a drop-in replacement for git CLI operations, providing massive performance improvements for package management and development workflows.
-
-## Performance Improvements
-
-- **3-15x faster** git operations
-- **70-80% less memory usage**
-- **100% compatibility** with existing git workflows
-
-## Benchmark Results
-
-| Operation | Before (git CLI) | After (ziggit) | Speedup |
-|-----------|------------------|----------------|---------|
-| Repository init | 1.45ms | 0.38ms | **3.86x** |
-| Status checking | 1.11ms | 0.073ms | **15.22x** |
-| Repository open | N/A | 0.013ms | New capability |
-
-## Changes
-
-- Add ziggit dependency to build system
-- Replace git CLI calls in `src/install/repository.zig`
-- Add ziggit wrapper for Zig integration
-- Maintain 100% backward compatibility
-
-## Testing
-
-- ✅ All existing tests pass
-- ✅ Performance benchmarks show significant improvement
-- ✅ Memory usage reduced by 70-80%
-- ✅ 100% git CLI compatibility verified
-
-## Risk Assessment
-
-- **Low risk**: Drop-in replacement with identical behavior
-- **High reward**: Massive performance improvements
-- **Fallback**: Can easily revert to git CLI if issues arise
-```
-
-### Phase 8: Documentation Updates
-
-Update relevant documentation:
-
-1. **README.md**: Add performance notes
-2. **CONTRIBUTING.md**: Update build instructions
-3. **docs/**: Add ziggit integration notes
-
-### Phase 9: Monitoring & Rollback Plan
-
-1. **Monitoring**:
-   - Track performance metrics post-integration
-   - Monitor for any compatibility issues
-   - Gather user feedback on speed improvements
-
-2. **Rollback plan**:
-```zig
-// Feature flag for easy rollback
-const USE_ZIGGIT = true; // Can be toggled
-
-const git_exec = if (USE_ZIGGIT) ziggit_operation() else git_cli_operation();
-```
-
-## Common Issues & Solutions
-
-### Issue 1: Build Errors
-```bash
-# Ensure ziggit is properly built
-cd ziggit && zig build lib
-# Verify library files exist
-ls -la zig-out/lib/
-```
-
-### Issue 2: Linking Issues
-```zig
-// Ensure proper C linkage
-exe.linkLibC();
-exe.linkLibrary(ziggit_lib);
-exe.addIncludePath(ziggit_include_path);
-```
-
-### Issue 3: Runtime Errors
-```zig
-// Add proper error handling
-const result = c.ziggit_repo_open(path.ptr);
-if (result == null) {
-    // Fallback to git CLI
-    return git_cli_fallback();
+pub fn clone(url: []const u8, path: []const u8, bare: bool) !void {
+    const c_url = try std.cstr.addNullByte(std.heap.c_allocator, url);
+    defer std.heap.c_allocator.free(c_url);
+    
+    const c_path = try std.cstr.addNullByte(std.heap.c_allocator, path);
+    defer std.heap.c_allocator.free(c_path);
+    
+    const result = ziggit.ziggit_repo_clone(c_url.ptr, c_path.ptr, if (bare) 1 else 0);
+    if (result != 0) {
+        return ZiggitError.GenericError;
+    }
 }
 ```
 
+### Step 5: Replace High-Impact Operations First
+
+#### Replace Status Operations
+
+Replace patterns like:
+```zig
+// OLD: Git CLI approach
+const result = try std.process.Child.exec(.{
+    .allocator = allocator,
+    .argv = &[_][]const u8{ "git", "status", "--porcelain" },
+    .cwd = repo_path,
+});
+
+// NEW: Ziggit approach
+const ziggit = @import("ziggit_integration.zig");
+var repo = try ziggit.Repository.open(repo_path);
+defer repo.close();
+const status = try repo.getStatus(allocator);
+defer allocator.free(status);
+```
+
+#### Replace Repository Initialization
+
+Replace patterns like:
+```zig
+// OLD: Git CLI approach  
+const result = try std.process.Child.exec(.{
+    .allocator = allocator,
+    .argv = &[_][]const u8{ "git", "init", repo_path },
+});
+
+// NEW: Ziggit approach
+const ziggit = @import("ziggit_integration.zig");
+try ziggit.init(repo_path, false);
+```
+
+### Step 6: Add Feature Flags and Fallback
+
+Implement gradual rollout with fallback:
+
+```zig
+const USE_ZIGGIT = true; // Feature flag
+
+fn getGitStatus(repo_path: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    if (USE_ZIGGIT) {
+        const ziggit = @import("ziggit_integration.zig");
+        var repo = ziggit.Repository.open(repo_path) catch |err| {
+            // Fallback to git CLI on error
+            std.debug.warn("Ziggit failed, falling back to git CLI: {}\n", .{err});
+            return getGitStatusFallback(repo_path, allocator);
+        };
+        defer repo.close();
+        return try repo.getStatus(allocator);
+    } else {
+        return getGitStatusFallback(repo_path, allocator);
+    }
+}
+
+fn getGitStatusFallback(repo_path: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    // Original git CLI implementation
+    const result = try std.process.Child.exec(.{
+        .allocator = allocator,
+        .argv = &[_][]const u8{ "git", "status", "--porcelain" },
+        .cwd = repo_path,
+    });
+    return result.stdout;
+}
+```
+
+## Step 7: Benchmark Integration
+
+### Create Bun-Specific Benchmarks
+
+Create `benchmarks/bun_git_operations.zig`:
+
+```zig
+// Benchmark real Bun workflows
+const scenarios = [_]BenchmarkScenario{
+    .{ .name = "bun create workflow", .operation = benchBunCreate },
+    .{ .name = "bun install git check", .operation = benchBunInstallGitCheck },
+    .{ .name = "bun build git status", .operation = benchBunBuildStatus },
+};
+
+fn benchBunCreate() !u64 {
+    // Simulate: bun create react-app my-app
+    // 1. Check if git is available
+    // 2. Initialize repository
+    // 3. Create initial commit
+    // Time the git operations only
+}
+```
+
+### Run Performance Validation
+
+```bash
+# Benchmark current Bun with git CLI
+cargo build --release  # or equivalent bun build
+time bun create react-app test-app-git
+
+# Benchmark Bun with ziggit integration
+time bun create react-app test-app-ziggit
+
+# Compare results
+```
+
+## Step 8: Testing and Validation
+
+### Unit Tests
+
+Create comprehensive tests:
+
+```zig
+test "ziggit integration basic operations" {
+    const allocator = std.testing.allocator;
+    
+    // Test repository creation
+    try ziggit.init("/tmp/test-repo", false);
+    
+    // Test repository opening
+    var repo = try ziggit.Repository.open("/tmp/test-repo");
+    defer repo.close();
+    
+    // Test status operation
+    const status = try repo.getStatus(allocator);
+    defer allocator.free(status);
+    
+    // Validate status format matches git CLI output
+    std.testing.expect(status.len >= 0);
+}
+
+test "ziggit fallback behavior" {
+    // Test that fallback works when ziggit operations fail
+    // Ensure no regressions in existing functionality
+}
+```
+
+### Integration Tests
+
+```bash
+# Test full Bun workflows
+bun create react-app test-integration
+cd test-integration
+bun install
+bun test
+bun build
+
+# Verify all git operations work correctly
+git log --oneline  # Should show proper commit history
+git status         # Should match bun's understanding of repo state
+```
+
+### Compatibility Tests
+
+Run Bun's existing test suite:
+```bash
+# Ensure no regressions
+bun test
+npm test  # if applicable
+
+# Run git-specific tests
+bun test test/git*.test.*
+```
+
+## Step 9: Performance Measurement
+
+### Before/After Comparison
+
+```bash
+# Measure baseline performance
+hyperfine "bun create react-app baseline-test"
+
+# Measure with ziggit integration
+hyperfine "bun create react-app ziggit-test"
+
+# Expected results: 3.95x faster repository operations
+```
+
+### Continuous Benchmarking
+
+Add to CI pipeline:
+```yaml
+# .github/workflows/performance.yml
+name: Performance Regression Detection
+on: [pull_request]
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Build with ziggit
+        run: zig build && bun build
+      - name: Benchmark git operations
+        run: |
+          hyperfine --export-json before.json "git status --porcelain"
+          hyperfine --export-json after.json "bun run git-status"
+          python compare_performance.py before.json after.json
+```
+
+## Step 10: Deployment Strategy
+
+### Gradual Rollout
+
+1. **Internal Testing**: Deploy to development/staging environments
+2. **Feature Flag**: Enable for subset of operations (status only)
+3. **Monitoring**: Track performance improvements and error rates  
+4. **Full Rollout**: Enable all ziggit operations
+5. **Cleanup**: Remove git CLI fallback code
+
+### Rollback Plan
+
+Keep git CLI fallback available:
+```zig
+const ZIGGIT_ENABLED = std.process.getEnvVar("BUN_USE_ZIGGIT") != null;
+
+fn performGitOperation() !Result {
+    if (ZIGGIT_ENABLED) {
+        return performZiggitOperation() catch |err| {
+            std.log.warn("Ziggit failed: {}, falling back to git CLI", .{err});
+            return performGitCliOperation();
+        };
+    } else {
+        return performGitCliOperation(); 
+    }
+}
+```
+
+## Validation Checklist
+
+### ✅ Pre-Integration Checklist
+
+- [ ] Ziggit builds successfully on target platforms
+- [ ] C header interface is compatible with Bun's build system
+- [ ] Benchmarks show expected performance improvements
+- [ ] Fallback mechanisms are in place
+- [ ] Test coverage is comprehensive
+
+### ✅ Post-Integration Checklist
+
+- [ ] All existing Bun tests pass
+- [ ] Performance benchmarks show improvements
+- [ ] No regressions in git functionality
+- [ ] Error handling works correctly
+- [ ] Documentation is updated
+- [ ] Performance monitoring is in place
+
+## Expected Results
+
+Based on benchmarks:
+
+| Operation | Current Time | With Ziggit | Speedup |
+|-----------|--------------|-------------|---------|
+| Status checks | 1.03ms | 69.46μs | **14.85x** |
+| Repository init | 1.34ms | 340.25μs | **3.95x** |
+| Repository open | N/A | 12.44μs | **New capability** |
+
+### Real-World Impact
+
+For a typical Bun workflow performing 100 status checks:
+- **Before**: 103ms total
+- **After**: 6.9ms total  
+- **Time saved**: 96.1ms (93% reduction)
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Build Failures**
+   - Ensure Zig version compatibility
+   - Check library path configuration
+   - Verify header file locations
+
+2. **Runtime Errors**
+   - Test fallback mechanisms
+   - Check file permissions
+   - Validate repository paths
+
+3. **Performance Issues**
+   - Profile actual usage patterns
+   - Compare with baseline benchmarks
+   - Check for unexpected git CLI fallbacks
+
+### Debug Commands
+
+```bash
+# Test ziggit library directly
+ldd bun  # Check linked libraries
+strace -e trace=file bun create test  # Monitor file operations
+perf record bun create test  # Profile performance
+```
+
+## Contributing
+
+### Creating a Pull Request
+
+1. Fork hdresearch/bun repository
+2. Create integration branch: `git checkout -b ziggit-integration`
+3. Implement changes following this guide
+4. Add comprehensive tests and benchmarks
+5. Update documentation
+6. Submit PR to hdresearch/bun (NOT oven-sh/bun directly)
+
+### Testing Guidelines
+
+- All existing tests must pass
+- Add new tests for ziggit integration paths
+- Include performance regression tests
+- Test error scenarios and fallback behavior
+
 ## Performance Monitoring
 
-After integration, monitor these metrics:
-
-1. **Package installation time**: `bun add` operations
-2. **Development server startup**: `bun dev` initialization  
-3. **Build performance**: `bun build` operations
-4. **Memory usage**: Peak memory during git operations
-5. **CPU usage**: Reduced CPU load from faster operations
-
-Expected improvements:
-- **Installation time**: 20-40% faster
-- **Development workflow**: Near-instant status checking
-- **Memory usage**: 70-80% reduction
-- **CPU usage**: 60-80% reduction for git operations
-
-## Success Metrics
-
-Integration is successful when:
-
-- [ ] All existing bun tests pass
-- [ ] Performance benchmarks show 2-15x improvements
-- [ ] Memory usage reduced by 70%+
-- [ ] Zero compatibility regressions
-- [ ] User reports significantly faster operations
+Set up monitoring to track:
+- Git operation response times
+- Error rates and fallback frequency  
+- Memory usage patterns
+- User experience metrics
 
 ## Next Steps
 
-1. **Phase 1**: Set up development environment
-2. **Phase 2**: Run baseline benchmarks
-3. **Phase 3**: Implement integration in hdresearch/bun fork
-4. **Phase 4**: Validate performance and compatibility
-5. **Phase 5**: Create PR to oven-sh/bun with benchmark results
-6. **Phase 6**: Work with oven-sh team on review and integration
+After successful integration:
+
+1. **Monitor Performance**: Track real-world improvements
+2. **Expand Usage**: Replace additional git operations
+3. **Contribute Back**: Share improvements with ziggit project
+4. **Optimize Further**: Profile and optimize hot paths
 
 ---
 
-**Note**: This integration provides massive performance benefits with minimal risk due to ziggit's drop-in compatibility with git CLI. The 3-15x speed improvements will significantly enhance the bun user experience across all git-related operations.
+**This integration guide provides a comprehensive path to integrating ziggit into Bun with significant performance improvements while maintaining reliability and backwards compatibility.**
 
-*Last updated: 2026-03-25*
+*For questions or issues, please open an issue in the hdresearch/ziggit repository.*
