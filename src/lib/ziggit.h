@@ -58,6 +58,14 @@ int ziggit_status_porcelain(ziggit_repository_t* repo, char* buffer, size_t buff
 int ziggit_path_exists(ziggit_repository_t* repo, const char* path);
 int ziggit_get_file_at_ref(ziggit_repository_t* repo, const char* ref, const char* file_path, char* buffer, size_t buffer_size);
 
+// Bun-specific operations (matching bun's git usage patterns)
+int ziggit_repo_exists(const char* path);
+int ziggit_fetch(ziggit_repository_t* repo);
+int ziggit_find_commit(ziggit_repository_t* repo, const char* committish, char* buffer, size_t buffer_size);
+int ziggit_checkout(ziggit_repository_t* repo, const char* committish);
+int ziggit_clone_bare(const char* url, const char* target);
+int ziggit_clone_no_checkout(const char* source, const char* target);
+
 #ifdef __cplusplus
 }
 #endif

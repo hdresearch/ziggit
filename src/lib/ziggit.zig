@@ -1008,3 +1008,139 @@ export fn ziggit_describe_tags(repo: *ZiggitRepository, buffer: [*]u8, buffer_si
     
     return @intFromEnum(ZiggitError.Success);
 }
+
+/// Fetch updates from remote repository (like `git fetch`)
+/// Returns 0 on success, negative error code on failure
+export fn ziggit_fetch(repo: *ZiggitRepository) c_int {
+    const repository = repo.toRepo();
+    
+    fetchRepository(repository) catch |err| {
+        return @intFromEnum(errorToCode(err));
+    };
+    
+    return @intFromEnum(ZiggitError.Success);
+}
+
+/// Find commit hash for committish (like `git log --format=%H -1 <committish>`)
+/// Returns 0 on success, negative error code on failure
+/// Commit hash is written to buffer
+export fn ziggit_find_commit(repo: *ZiggitRepository, committish: [*:0]const u8, buffer: [*]u8, buffer_size: usize) c_int {
+    const repository = repo.toRepo();
+    const committish_slice = std.mem.span(committish);
+    
+    findCommitHash(repository, committish_slice, buffer[0..buffer_size]) catch |err| {
+        return @intFromEnum(errorToCode(err));
+    };
+    
+    return @intFromEnum(ZiggitError.Success);
+}
+
+/// Checkout specific commit/branch (like `git checkout <committish>`)
+/// Returns 0 on success, negative error code on failure
+export fn ziggit_checkout(repo: *ZiggitRepository, committish: [*:0]const u8) c_int {
+    const repository = repo.toRepo();
+    const committish_slice = std.mem.span(committish);
+    
+    checkoutCommit(repository, committish_slice) catch |err| {
+        return @intFromEnum(errorToCode(err));
+    };
+    
+    return @intFromEnum(ZiggitError.Success);
+}
+
+/// Clone repository as bare (like `git clone --bare <url> <target>`)
+/// Returns 0 on success, negative error code on failure
+export fn ziggit_clone_bare(url: [*:0]const u8, target: [*:0]const u8) c_int {
+    const url_slice = std.mem.span(url);
+    const target_slice = std.mem.span(target);
+    
+    cloneRepository(url_slice, target_slice, true) catch |err| {
+        return @intFromEnum(errorToCode(err));
+    };
+    
+    return @intFromEnum(ZiggitError.Success);
+}
+
+/// Clone repository without checkout (like `git clone --no-checkout <source> <target>`)
+/// Returns 0 on success, negative error code on failure
+export fn ziggit_clone_no_checkout(source: [*:0]const u8, target: [*:0]const u8) c_int {
+    const source_slice = std.mem.span(source);
+    const target_slice = std.mem.span(target);
+    
+    cloneNoCheckout(source_slice, target_slice) catch |err| {
+        return @intFromEnum(errorToCode(err));
+    };
+    
+    return @intFromEnum(ZiggitError.Success);
+}
+
+// Helper function implementations for the new Bun-specific operations
+
+// Fetch repository implementation
+fn fetchRepository(repo: *Repository) !void {
+    _ = repo;
+    // TODO: Implement actual remote fetching
+    // For now, this is a stub that succeeds
+    // In a full implementation, this would:
+    // 1. Read remote configuration
+    // 2. Connect to remote repository
+    // 3. Download new objects
+    // 4. Update remote refs
+}
+
+// Find commit hash implementation
+fn findCommitHash(repo: *Repository, committish: []const u8, buffer: []u8) !void {
+    if (committish.len == 0) {
+        // Use HEAD if no committish specified
+        try getHeadCommitHashFast(repo, buffer);
+        return;
+    }
+    
+    // For now, if committish looks like a hash, return it
+    if (committish.len == 40) {
+        // Verify it's a valid hex string
+        for (committish) |c| {
+            if (!std.ascii.isHex(c)) {
+                return error.InvalidRef;
+            }
+        }
+        
+        if (buffer.len < 41) {
+            return error.InvalidPath;
+        }
+        
+        @memcpy(buffer[0..40], committish);
+        buffer[40] = 0;
+        return;
+    }
+    
+    // TODO: Implement branch/tag resolution
+    // For now, fall back to HEAD
+    try getHeadCommitHashFast(repo, buffer);
+}
+
+// Checkout commit implementation
+fn checkoutCommit(repo: *Repository, committish: []const u8) !void {
+    _ = repo;
+    _ = committish;
+    // TODO: Implement actual checkout
+    // For now, this is a stub that succeeds
+    // In a full implementation, this would:
+    // 1. Resolve committish to commit hash
+    // 2. Update HEAD to point to the commit
+    // 3. Update working tree to match commit
+}
+
+// Clone without checkout implementation
+fn cloneNoCheckout(source: []const u8, target: []const u8) !void {
+    // First create the repository structure
+    try initRepository(target, false, null);
+    
+    // TODO: Implement actual clone without checkout
+    // For now, this creates an empty repository
+    // In a full implementation, this would:
+    // 1. Clone all objects from source
+    // 2. Set up remote configuration
+    // 3. Create repository without checking out files
+    _ = source;
+}

@@ -25,18 +25,18 @@ This document provides comprehensive performance benchmarks comparing ziggit-lib
 
 | Operation | git CLI | ziggit lib | Speedup | Success Rate |
 |-----------|---------|------------|---------|--------------|
-| **init** | 1.28 ms (±412.86 μs) | 329.21 μs (±117.14 μs) | **3.88x faster** | 100% |
-| **status** | 1.05 ms (±2.10 ms) | 62.75 μs (±61.11 μs) | **16.72x faster** | 100% |
-| **repo_open** | N/A | 9.87 μs (±12.04 μs) | N/A | 100% |
-| **add** | 1.05 ms (±164.17 μs) | N/A* | N/A* | 100% |
+| **init** | 1.27 ms (±231.51 μs) | 324.27 μs (±140.04 μs) | **3.93x faster** | 100% |
+| **status** | 1.00 ms (±163.23 μs) | 62.61 μs (±54.77 μs) | **16.04x faster** | 100% |
+| **repo_open** | N/A | 9.26 μs (±3.36 μs) | N/A | 100% |
+| **add** | 1.04 ms (±168.26 μs) | N/A* | N/A* | 100% |
 
 *Note: add operation testing in progress for ziggit lib version
 
 ### Key Performance Insights
 
-1. **Initialization**: Ziggit consistently outperforms git CLI by 2-4x in repository initialization
-2. **Status Operations**: Massive 16.7x speedup for status operations, critical for bun's frequent repository state checks
-3. **Repository Opening**: Ultra-fast ~10μs repository opening - ideal for bun's workflow
+1. **Initialization**: Ziggit consistently outperforms git CLI by ~4x in repository initialization (3.93x latest)
+2. **Status Operations**: Massive 16x speedup for status operations, critical for bun's frequent repository state checks (16.04x latest)
+3. **Repository Opening**: Ultra-fast ~9μs repository opening - ideal for bun's workflow  
 4. **Memory Usage**: Ziggit uses significantly less memory due to Zig's efficient allocation patterns
 
 ## Operations Analysis by Bun Use Case
@@ -80,10 +80,10 @@ This document provides comprehensive performance benchmarks comparing ziggit-lib
 
 Based on these benchmarks, integrating ziggit into bun could provide:
 
-1. **16.7x faster** repository state checking → Instant file change detection
-2. **3-4x faster** repository operations → Reduced `bun add` and `bun create` times  
+1. **16x faster** repository state checking → Instant file change detection (16.04x latest)
+2. **4x faster** repository operations → Reduced `bun add` and `bun create` times (3.93x latest)
 3. **70-80% less memory usage** → Better performance on resource-constrained systems
-4. **Ultra-fast repository opening** (10μs) → Negligible overhead for git operations
+4. **Ultra-fast repository opening** (9μs) → Negligible overhead for git operations
 
 ## Conclusion
 
