@@ -100,13 +100,32 @@ pub fn updateHEAD(git_dir: []const u8, branch_or_hash: []const u8, platform_impl
 }
 
 pub fn listBranches(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.ArrayList([]u8) {
-    _ = git_dir;
-    _ = platform_impl;
-    
-    // Simplified implementation - just return master branch for now
-    // TODO: Implement proper directory iteration with platform abstraction
     var branches = std.ArrayList([]u8).init(allocator);
-    try branches.append(try allocator.dupe(u8, "master"));
+    
+    // For now, manually check for common branch files since we don't have directory iteration in platform abstraction
+    const common_branches = [_][]const u8{ "master", "main", "develop", "dev" };
+    
+    for (common_branches) |branch_name| {
+        const branch_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_dir, branch_name });
+        defer allocator.free(branch_path);
+        
+        if (platform_impl.fs.exists(branch_path) catch false) {
+            try branches.append(try allocator.dupe(u8, branch_name));
+        }
+    }
+    
+    // If no branches found, check if master exists via HEAD
+    if (branches.items.len == 0) {
+        const current_branch = getCurrentBranch(git_dir, platform_impl, allocator) catch "master";
+        defer allocator.free(current_branch);
+        
+        if (!std.mem.eql(u8, current_branch, "HEAD")) {
+            try branches.append(try allocator.dupe(u8, current_branch));
+        } else {
+            try branches.append(try allocator.dupe(u8, "master"));
+        }
+    }
+    
     return branches;
 }
 
