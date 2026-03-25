@@ -55,7 +55,7 @@ fn existsImpl(path: []const u8) !bool {
 
 fn makeDirImpl(path: []const u8) !void {
     std.fs.cwd().makeDir(path) catch |err| switch (err) {
-        error.PathAlreadyExists => return error.AlreadyExists,
+        error.PathAlreadyExists => {}, // Ignore if directory already exists
         else => return err,
     };
 }
