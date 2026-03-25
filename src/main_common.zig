@@ -343,12 +343,61 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     };
     defer gitignore.deinit();
 
+    // Detect staged files vs modified files vs clean files
+    var staged_files = std.ArrayList(index_mod.IndexEntry).init(allocator);
+    var modified_files = std.ArrayList(index_mod.IndexEntry).init(allocator);
+    defer staged_files.deinit();
+    defer modified_files.deinit();
+
+    for (index.entries.items) |entry| {
+        // Check if working directory version is different from index version
+        const full_path = if (std.fs.path.isAbsolute(entry.path))
+            try allocator.dupe(u8, entry.path)
+        else
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path });
+        defer allocator.free(full_path);
+        
+        const working_modified = blk: {
+            const current_content = platform_impl.fs.readFile(allocator, full_path) catch break :blk false;
+            defer allocator.free(current_content);
+            
+            // Create blob object to get hash
+            const blob = objects.createBlobObject(current_content, allocator) catch break :blk false;
+            defer blob.deinit(allocator);
+            
+            const current_hash = blob.hash(allocator) catch break :blk false;
+            defer allocator.free(current_hash);
+            
+            // Compare with index hash
+            const index_hash = std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.hash)}) catch break :blk false;
+            defer allocator.free(index_hash);
+            
+            break :blk !std.mem.eql(u8, current_hash, index_hash);
+        };
+        
+        if (working_modified) {
+            try modified_files.append(entry);
+        } else if (current_commit == null) {
+            // No commits yet, so anything in index is staged
+            try staged_files.append(entry);
+        } else {
+            // File is in index and matches working directory.
+            // Check if it's different from what's in HEAD tree (i.e., staged)
+            const is_different_from_head = checkIfDifferentFromHEAD(entry, git_path, platform_impl, allocator) catch false;
+            
+            if (is_different_from_head) {
+                try staged_files.append(entry);
+            }
+            // If same as HEAD, file is clean (don't show it)
+        }
+    }
+
     // Show staged files
-    if (index.entries.items.len > 0) {
+    if (staged_files.items.len > 0) {
         try platform_impl.writeStdout("\nChanges to be committed:\n");
         try platform_impl.writeStdout("  (use \"git reset HEAD <file>...\" to unstage)\n\n");
         
-        for (index.entries.items) |entry| {
+        for (staged_files.items) |entry| {
             if (current_commit == null) {
                 const msg = try std.fmt.allocPrint(allocator, "        new file:   {s}\n", .{entry.path});
                 defer allocator.free(msg);
@@ -358,6 +407,20 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
             }
+        }
+        try platform_impl.writeStdout("\n");
+    }
+
+    // Show modified but unstaged files
+    if (modified_files.items.len > 0) {
+        try platform_impl.writeStdout("\nChanges not staged for commit:\n");
+        try platform_impl.writeStdout("  (use \"git add <file>...\" to update what will be committed)\n");
+        try platform_impl.writeStdout("  (use \"git restore <file>...\" to discard changes in working directory)\n\n");
+        
+        for (modified_files.items) |entry| {
+            const msg = try std.fmt.allocPrint(allocator, "        modified:   {s}\n", .{entry.path});
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
         }
         try platform_impl.writeStdout("\n");
     }
@@ -384,14 +447,16 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     }
 
     // Final summary message
-    if (index.entries.items.len == 0 and untracked_files.items.len == 0) {
+    if (staged_files.items.len == 0 and modified_files.items.len == 0 and untracked_files.items.len == 0) {
         if (current_commit == null) {
             try platform_impl.writeStdout("\nnothing to commit (create/copy files and use \"git add\" to track)\n");
         } else {
             try platform_impl.writeStdout("\nnothing to commit, working tree clean\n");
         }
-    } else if (index.entries.items.len == 0 and untracked_files.items.len > 0) {
+    } else if (staged_files.items.len == 0 and modified_files.items.len == 0 and untracked_files.items.len > 0) {
         try platform_impl.writeStdout("nothing added to commit but untracked files present (use \"git add\" to track)\n");
+    } else if (staged_files.items.len == 0 and modified_files.items.len > 0) {
+        try platform_impl.writeStdout("no changes added to commit (use \"git add\" and/or \"git commit -a\")\n");
     }
 }
 
@@ -641,11 +706,8 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     
     try refs.updateRef(git_path, current_branch, commit_hash, platform_impl, allocator);
 
-    // Clear the index after successful commit (like git does)
-    for (index.entries.items) |entry| {
-        entry.deinit(allocator);
-    }
-    index.entries.clearAndFree();
+    // After a successful commit, the index should remain but be consistent with the new commit
+    // We don't clear the index, but we save it to ensure it's properly persisted
     try index.save(git_path, platform_impl);
 
     // Output success message
@@ -1159,6 +1221,67 @@ fn isValidHash(hash: []const u8) bool {
     for (hash) |c| {
         if (!std.ascii.isHex(c)) return false;
     }
+    return true;
+}
+
+fn checkIfDifferentFromHEAD(entry: index_mod.IndexEntry, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !bool {
+    // Get current HEAD commit
+    const head_hash_opt = refs.getCurrentCommit(git_path, platform_impl, allocator) catch return false;
+    const head_hash = head_hash_opt orelse return false; // No HEAD commit
+    defer allocator.free(head_hash);
+    
+    // Load HEAD commit
+    const commit_obj = objects.GitObject.load(head_hash, git_path, platform_impl, allocator) catch return false;
+    defer commit_obj.deinit(allocator);
+    
+    if (commit_obj.type != .commit) return false;
+    
+    // Parse commit to get tree hash
+    var lines = std.mem.split(u8, commit_obj.data, "\n");
+    const tree_line = lines.next() orelse return false;
+    if (!std.mem.startsWith(u8, tree_line, "tree ")) return false;
+    const tree_hash = tree_line["tree ".len..];
+    
+    // Load tree object  
+    const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch return false;
+    defer tree_obj.deinit(allocator);
+    
+    if (tree_obj.type != .tree) return false;
+    
+    // Parse tree entries to find our file
+    const entry_hash_str = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.hash)});
+    defer allocator.free(entry_hash_str);
+    
+    // Simple tree parsing - look for the file name and hash
+    // Tree format is: <mode> <name>\0<20-byte-hash>
+    var i: usize = 0;
+    while (i < tree_obj.data.len) {
+        // Find space
+        const space_pos = std.mem.indexOfScalarPos(u8, tree_obj.data, i, ' ') orelse break;
+        _ = tree_obj.data[i..space_pos]; // mode (unused for now)
+        
+        // Find null terminator
+        const null_pos = std.mem.indexOfScalarPos(u8, tree_obj.data, space_pos + 1, 0) orelse break;
+        const name = tree_obj.data[space_pos + 1..null_pos];
+        
+        // Skip the 20-byte hash
+        const hash_start = null_pos + 1;
+        if (hash_start + 20 > tree_obj.data.len) break;
+        const hash_bytes = tree_obj.data[hash_start..hash_start + 20];
+        
+        // Check if this is our file
+        if (std.mem.eql(u8, name, entry.path)) {
+            // Convert hash bytes to hex string and compare
+            const tree_hash_str = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
+            defer allocator.free(tree_hash_str);
+            
+            return !std.mem.eql(u8, entry_hash_str, tree_hash_str);
+        }
+        
+        i = hash_start + 20;
+    }
+    
+    // File not found in tree - it's new, so it's staged
     return true;
 }
 
