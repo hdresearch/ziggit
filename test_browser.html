@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ziggit Browser Test</title>
+    <style>
+        body { font-family: monospace; margin: 20px; }
+        .output { background: #f0f0f0; padding: 10px; margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <h1>ziggit Browser/WebAssembly Test</h1>
+    <p>Testing ziggit compiled to WebAssembly for browser environments.</p>
+    
+    <button onclick="runTests()">Run Tests</button>
+    <button onclick="clearOutput()">Clear Output</button>
+    
+    <div id="output"></div>
+
+    <script>
+        let wasmModule = null;
+        let outputDiv = null;
+
+        // Mock filesystem for testing
+        const mockFs = {
+            files: {},
+            dirs: new Set(['/'])
+        };
+
+        // Host functions required by ziggit-browser.wasm
+        const hostFunctions = {
+            host_write_stdout(ptr, len) {
+                const data = new Uint8Array(wasmModule.exports.memory.buffer, ptr, len);
+                const text = new TextDecoder().decode(data);
+                appendOutput(text);
+                console.log('[STDOUT]', text);
+            },
+            
+            host_write_stderr(ptr, len) {
+                const data = new Uint8Array(wasmModule.exports.memory.buffer, ptr, len);
+                const text = new TextDecoder().decode(data);
+                appendOutput(`<span style="color: red">${text}</span>`);
+                console.error('[STDERR]', text);
+            },
+            
+            host_file_exists(path_ptr, path_len) {
+                const pathData = new Uint8Array(wasmModule.exports.memory.buffer, path_ptr, path_len);
+                const path = new TextDecoder().decode(pathData);
+                const exists = mockFs.files.hasOwnProperty(path) || mockFs.dirs.has(path);
+                console.log(`[FS] file_exists(${path}) -> ${exists}`);
+                return exists ? 1 : 0;
+            },
+            
+            host_read_file(path_ptr, path_len, data_ptr_ptr, data_len_ptr) {
+                const pathData = new Uint8Array(wasmModule.exports.memory.buffer, path_ptr, path_len);
+                const path = new TextDecoder().decode(pathData);
+                
+                if (mockFs.files[path]) {
+                    const content = mockFs.files[path];
+                    const encoded = new TextEncoder().encode(content);
+                    
+                    // Allocate memory for the file content (simplified)
+                    const dataPtr = encoded.byteOffset || 0;
+                    
+                    // Write pointers back to WASM memory
+                    const view = new DataView(wasmModule.exports.memory.buffer);
+                    view.setUint32(data_ptr_ptr, dataPtr, true);
+                    view.setUint32(data_len_ptr, encoded.length, true);
+                    
+                    console.log(`[FS] read_file(${path}) -> ${content.length} bytes`);
+                    return 1;
+                }
+                console.log(`[FS] read_file(${path}) -> not found`);
+                return 0;
+            },
+            
+            host_write_file(path_ptr, path_len, data_ptr, data_len) {
+                const pathData = new Uint8Array(wasmModule.exports.memory.buffer, path_ptr, path_len);
+                const path = new TextDecoder().decode(pathData);
+                const contentData = new Uint8Array(wasmModule.exports.memory.buffer, data_ptr, data_len);
+                const content = new TextDecoder().decode(contentData);
+                
+                mockFs.files[path] = content;
+                console.log(`[FS] write_file(${path}) -> ${content.length} bytes`);
+                return 1;
+            },
+            
+            host_make_dir(path_ptr, path_len) {
+                const pathData = new Uint8Array(wasmModule.exports.memory.buffer, path_ptr, path_len);
+                const path = new TextDecoder().decode(pathData);
+                
+                mockFs.dirs.add(path);
+                console.log(`[FS] make_dir(${path}) -> success`);
+                return 1;
+            },
+            
+            host_delete_file(path_ptr, path_len) {
+                const pathData = new Uint8Array(wasmModule.exports.memory.buffer, path_ptr, path_len);
+                const path = new TextDecoder().decode(pathData);
+                
+                delete mockFs.files[path];
+                console.log(`[FS] delete_file(${path}) -> success`);
+                return 1;
+            },
+            
+            host_get_cwd(data_ptr_ptr, data_len_ptr) {
+                const cwd = "/";
+                const encoded = new TextEncoder().encode(cwd);
+                
+                // Simplified - in real implementation you'd allocate WASM memory
+                const view = new DataView(wasmModule.exports.memory.buffer);
+                view.setUint32(data_ptr_ptr, 0, true); // Simplified pointer
+                view.setUint32(data_len_ptr, encoded.length, true);
+                
+                console.log(`[FS] get_cwd() -> ${cwd}`);
+                return 1;
+            }
+        };
+
+        async function loadWasm() {
+            try {
+                const wasmFile = await fetch('zig-out/bin/ziggit-browser.wasm');
+                const wasmModule = await WebAssembly.instantiateStreaming(wasmFile, {
+                    env: hostFunctions
+                });
+                return wasmModule.instance;
+            } catch (error) {
+                appendOutput(`<span style="color: red">Error loading WASM: ${error}</span>`);
+                return null;
+            }
+        }
+
+        function appendOutput(text) {
+            if (!outputDiv) outputDiv = document.getElementById('output');
+            outputDiv.innerHTML += text.replace(/\n/g, '<br>');
+            outputDiv.scrollTop = outputDiv.scrollHeight;
+        }
+
+        function clearOutput() {
+            document.getElementById('output').innerHTML = '';
+        }
+
+        function writeStringToWasm(str) {
+            const encoded = new TextEncoder().encode(str);
+            // In a real implementation, you'd properly allocate WASM memory
+            // For this test, we'll use a simplified approach
+            return { ptr: encoded.byteOffset || 0, len: encoded.length };
+        }
+
+        async function runTests() {
+            appendOutput('<h3>Starting ziggit Browser Tests...</h3>');
+            
+            if (!wasmModule) {
+                wasmModule = await loadWasm();
+                if (!wasmModule) return;
+            }
+
+            try {
+                // Test 1: Initialize ziggit
+                appendOutput('<h4>Test 1: Initialize ziggit</h4>');
+                wasmModule.exports.ziggit_main();
+                
+                // Test 2: Run help command
+                appendOutput('<h4>Test 2: Help command</h4>');
+                const helpCmd = writeStringToWasm("help");
+                wasmModule.exports.ziggit_command(helpCmd.ptr, helpCmd.len);
+                
+                // Test 3: Version command
+                appendOutput('<h4>Test 3: Version command</h4>');
+                const versionCmd = writeStringToWasm("version");
+                wasmModule.exports.ziggit_command(versionCmd.ptr, versionCmd.len);
+                
+                // Test 4: Init command
+                appendOutput('<h4>Test 4: Init command</h4>');
+                const initCmd = writeStringToWasm("init");
+                wasmModule.exports.ziggit_command(initCmd.ptr, initCmd.len);
+                
+                // Test 5: Status command
+                appendOutput('<h4>Test 5: Status command</h4>');
+                const statusCmd = writeStringToWasm("status");
+                wasmModule.exports.ziggit_command(statusCmd.ptr, statusCmd.len);
+
+                appendOutput('<h4>✅ Tests completed!</h4>');
+                
+            } catch (error) {
+                appendOutput(`<span style="color: red">Test error: ${error}</span>`);
+            }
+        }
+
+        // Auto-load WASM on page load
+        window.onload = async function() {
+            appendOutput('Loading ziggit WebAssembly module...<br>');
+            wasmModule = await loadWasm();
+            if (wasmModule) {
+                appendOutput('✅ WASM module loaded successfully!<br>');
+                appendOutput('Click "Run Tests" to test ziggit functionality.<br><br>');
+            }
+        };
+    </script>
+</body>
+</html>
