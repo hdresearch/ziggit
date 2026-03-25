@@ -14,7 +14,6 @@ pub const TestRunner = struct {
         const possible_paths = [_][]const u8{
             "/root/ziggit/zig-out/bin/ziggit",
             "/root/ziggit/zig-out/bin/ziggit",
-            "/root/ziggit/zig-out/bin/ziggit",
             "zig-out/bin/ziggit",
         };
         
