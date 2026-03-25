@@ -129,8 +129,9 @@ pub const GitObject = struct {
     }
 };
 
-pub fn createBlobObject(data: []const u8) GitObject {
-    return GitObject.init(.blob, data);
+pub fn createBlobObject(data: []const u8, allocator: std.mem.Allocator) !GitObject {
+    const data_copy = try allocator.dupe(u8, data);
+    return GitObject.init(.blob, data_copy);
 }
 
 pub fn createTreeObject(entries: []const TreeEntry, allocator: std.mem.Allocator) !GitObject {
