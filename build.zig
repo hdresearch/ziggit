@@ -86,6 +86,17 @@ pub fn build(b: *std.Build) void {
     const run_drop_in_compat_test = b.addRunArtifact(drop_in_compat_test);
     run_drop_in_compat_test.step.dependOn(b.getInstallStep()); // Ensure ziggit is built first
 
+    // Bun compatibility test - proves ziggit works as drop-in replacement with bun
+    const bun_compat_test = b.addExecutable(.{
+        .name = "bun_compat_test",
+        .root_source_file = b.path("test/bun_compatibility_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_bun_compat_test = b.addRunArtifact(bun_compat_test);
+    run_bun_compat_test.step.dependOn(b.getInstallStep()); // Ensure ziggit is built first
+
     // Separate step for just compatibility tests
     const compat_test_step = b.step("test-compat", "Run compatibility tests");
     compat_test_step.dependOn(&run_compatibility_tests.step);
@@ -105,6 +116,9 @@ pub fn build(b: *std.Build) void {
     // Drop-in compatibility test step
     const drop_in_compat_test_step = b.step("test-drop-in", "Run drop-in git compatibility tests");
     drop_in_compat_test_step.dependOn(&run_drop_in_compat_test.step);
+
+    const bun_compat_test_step = b.step("test-bun", "Run bun compatibility tests");
+    bun_compat_test_step.dependOn(&run_bun_compat_test.step);
 
     // Git t0001-init adapter test - tests based on git's own t0001-init.sh
     const git_t0001_init_test = b.addExecutable(.{
