@@ -288,6 +288,20 @@ pub fn build(b: *std.Build) void {
     const comprehensive_git_test_step = b.step("test-comprehensive", "Run comprehensive git compatibility test suite");
     comprehensive_git_test_step.dependOn(&run_comprehensive_git_tests.step);
 
+    // Core git compatibility test suite (essential functionality tests)
+    const core_git_compat_test = b.addExecutable(.{
+        .name = "core_git_compat_test",
+        .root_source_file = b.path("test/git_compatibility_test_suite_simple.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_core_git_compat_test = b.addRunArtifact(core_git_compat_test);
+    run_core_git_compat_test.step.dependOn(b.getInstallStep()); // Ensure ziggit is built first
+
+    const core_git_compat_test_step = b.step("test-core-compat", "Run core git compatibility tests for essential functionality");
+    core_git_compat_test_step.dependOn(&run_core_git_compat_test.step);
+
     // Main test step runs core compatibility tests
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_unit_tests.step);
@@ -299,6 +313,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_git_source_test_suite.step);
     test_step.dependOn(&run_git_advanced_test_suite.step);
     test_step.dependOn(&run_comprehensive_git_tests.step);
+    test_step.dependOn(&run_core_git_compat_test.step);
 
     // Git source compatibility test suite (newly improved)
     const git_source_compatibility = b.addExecutable(.{
