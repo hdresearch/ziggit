@@ -122,7 +122,11 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main_wasi.zig"),
         .target = wasm_target,
         .optimize = .ReleaseSmall,
+        .strip = true,
     });
+    
+    // Optimize for smaller WASM binary size
+    wasm_exe.stack_size = 32 * 1024; // 32KB stack (optimized for WASI)
 
     const wasm_step = b.step("wasm", "Build for WebAssembly (WASI)");
     wasm_step.dependOn(&b.addInstallArtifact(wasm_exe, .{}).step);
