@@ -31,15 +31,7 @@ echo -n "describe --always: "
 echo -n "diff --cached: "
 ./zig-out/bin/ziggit diff --cached > /dev/null 2>&1 && echo "OK" || echo "FAIL"
 
-# Test git fallback commands work
-echo "Testing git fallback commands..."
-echo -n "stash list: "
-./zig-out/bin/ziggit stash list > /dev/null 2>&1 && echo "OK" || echo "FAIL"
-
-echo -n "remote -v: "
-./zig-out/bin/ziggit remote -v > /dev/null 2>&1 && echo "OK" || echo "FAIL"
-
-echo -n "show HEAD --name-only: "
+echo -n "show HEAD: "
 ./zig-out/bin/ziggit show HEAD --name-only > /dev/null 2>&1 && echo "OK" || echo "FAIL"
 
 echo -n "ls-files: "
@@ -51,11 +43,31 @@ echo -n "cat-file -t HEAD: "
 echo -n "rev-list --count HEAD: "
 ./zig-out/bin/ziggit rev-list --count HEAD > /dev/null 2>&1 && echo "OK" || echo "FAIL"
 
+echo -n "remote -v: "
+./zig-out/bin/ziggit remote -v > /dev/null 2>&1 && echo "OK" || echo "FAIL"
+
+echo -n "reset --help (should fail natively): "
+./zig-out/bin/ziggit reset --help > /dev/null 2>&1 && echo "FAIL" || echo "OK"
+
+echo -n "rm --help (should fail natively): "
+./zig-out/bin/ziggit rm --help > /dev/null 2>&1 && echo "FAIL" || echo "OK"
+
+# Test git fallback commands work (commands not yet implemented natively)
+echo "Testing git fallback commands..."
+echo -n "stash list: "
+./zig-out/bin/ziggit stash list > /dev/null 2>&1 && echo "OK" || echo "FAIL"
+
 echo -n "log --graph --oneline -5: "
 ./zig-out/bin/ziggit log --graph --oneline -5 > /dev/null 2>&1 && echo "OK" || echo "FAIL"
 
 echo -n "shortlog -sn -1: "
 ./zig-out/bin/ziggit shortlog -sn -1 > /dev/null 2>&1 && echo "OK" || echo "FAIL"
+
+echo -n "rebase --help: "
+./zig-out/bin/ziggit rebase --help > /dev/null 2>&1 && echo "OK" || echo "FAIL"
+
+echo -n "cherry-pick --help: "
+./zig-out/bin/ziggit cherry-pick --help > /dev/null 2>&1 && echo "OK" || echo "FAIL"
 
 # Test error handling when git is not in PATH
 echo "Testing error handling when git is not found..."
