@@ -26,10 +26,49 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     // Skip program name
     _ = args.skip();
 
-    const command = args.next() orelse {
+    // Check for -C flag first
+    var first_arg = args.next() orelse {
         try showUsage(&platform_impl);
         return;
     };
+    
+    if (std.mem.eql(u8, first_arg, "-C")) {
+        const dir_path = args.next() orelse {
+            try platform_impl.writeStderr("error: option '-C' requires a directory path\n");
+            std.process.exit(128);
+        };
+        
+        // Change to the specified directory
+        std.process.changeCurDir(dir_path) catch |err| switch (err) {
+            error.AccessDenied => {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: cannot change to '{s}': Permission denied\n", .{dir_path});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            },
+            error.FileNotFound => {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: cannot change to '{s}': No such file or directory\n", .{dir_path});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            },
+            error.NotDir => {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: cannot change to '{s}': Not a directory\n", .{dir_path});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            },
+            else => return err,
+        };
+        
+        // Get the next argument as the command
+        first_arg = args.next() orelse {
+            try showUsage(&platform_impl);
+            return;
+        };
+    }
+    
+    const command = first_arg;
 
     if (std.mem.eql(u8, command, "init")) {
         try cmdInit(allocator, &args, &platform_impl);
