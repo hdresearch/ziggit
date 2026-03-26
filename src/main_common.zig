@@ -27,6 +27,7 @@ const NATIVE_COMMANDS = [_][]const u8{
     "show", "cat-file", "rev-list", "remote", "reset", "rm",
     "hash-object", "write-tree", "commit-tree", "update-ref", "symbolic-ref",
     "update-index", "ls-files", "ls-tree", "read-tree", "diff-files",
+    "version",
     "--version", "-v", "--version-info", "--help", "-h", "help", "--exec-path",
 };
 
@@ -237,6 +238,13 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         } else {
             try cmdConfig(allocator, &args_iter, &platform_impl);
         }
+    } else if (std.mem.eql(u8, command, "version")) {
+        // Forward 'version' to real git, but ensure default-hash is in build-options output
+        if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
+            try forwardVersionToGit(allocator, all_original_args.items, &platform_impl);
+        } else {
+            try forwardCmdToGit(allocator, all_original_args.items, &platform_impl);
+        }
     // Commands that forward to real git for full compatibility
     } else if (std.mem.eql(u8, command, "commit") or
         std.mem.eql(u8, command, "log") or
@@ -315,6 +323,56 @@ fn findRealGit() []const u8 {
         return candidate;
     }
     return "git";
+}
+
+fn forwardVersionToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_impl: *const platform_mod.Platform) !void {
+    // Run real git version --build-options, capture output, inject default-hash if missing
+    var has_build_options = false;
+    for (all_args) |arg| {
+        if (std.mem.eql(u8, arg, "--build-options")) {
+            has_build_options = true;
+            break;
+        }
+    }
+    
+    if (!has_build_options) {
+        // Just forward normally
+        try forwardToGit(allocator, all_args, platform_impl);
+        return;
+    }
+    
+    // Capture output from real git using collectOutput
+    var argv = std.ArrayList([]const u8).init(allocator);
+    defer argv.deinit();
+    try argv.append(findRealGit());
+    for (all_args) |arg| {
+        try argv.append(arg);
+    }
+    
+    var child = std.process.Child.init(argv.items, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Inherit;
+    
+    _ = try child.spawn();
+    const stdout = child.stdout.?.reader().readAllAlloc(allocator, 1024 * 1024) catch "";
+    defer allocator.free(stdout);
+    const term = try child.wait();
+    
+    // Output the captured stdout
+    try platform_impl.writeStdout(stdout);
+    
+    // If default-hash is missing, append it
+    if (std.mem.indexOf(u8, stdout, "default-hash:") == null) {
+        try platform_impl.writeStdout("default-hash: sha1\n");
+    }
+    
+    switch (term) {
+        .Exited => |code| if (code != 0) std.process.exit(@intCast(code)),
+        .Signal => |_| std.process.exit(128),
+        .Stopped => |_| std.process.exit(128),
+        .Unknown => |_| std.process.exit(1),
+    }
 }
 
 fn forwardToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_impl: *const platform_mod.Platform) !void {
