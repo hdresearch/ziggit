@@ -46,7 +46,7 @@ Date: 2026-03-26
   t5317-pack-objects-filter-objects.sh: 33/33 passed ✓
   t5310-pack-bitmaps.sh: 215/236 passed
   t5300-pack-object.sh: 49/63 passed
-  t5100-mailinfo.sh: 51/52 passed
+  t5100-mailinfo.sh: 50/52 passed
   t4200-rerere.sh: 31/36 passed
   t4150-am.sh: 85/87 passed
   t4057-diff-combined-paths.sh: 4/4 passed ✓
@@ -165,7 +165,7 @@ Date: 2026-03-26
   t0005-signals.sh: 1/5 passed
   t0000-basic.sh: 87/92 passed
 
-TOTAL: 11041/11494 passed (453 failed) across 163 scripts
+TOTAL: 11040/11494 passed (454 failed) across 163 scripts
 Pass rate: 96.0% — 111 scripts at 100%
 
 CLI Fixes Applied:
@@ -174,6 +174,10 @@ CLI Fixes Applied:
 - Translate status.showuntrackedfiles config: false→no, true→normal, 0→no, 1→normal
 - Translate merge.stat config: diffstat→true, compact→true
 - Translate 'git config set --append' to 'git config --add'
+- Translate 'git config unset --all' to 'git config --unset-all'
+- Translate 'git config get --all' to 'git config --get-all'
+- Translate 'git config get --regexp' to 'git config --get-regexp'
 - Strip --i-still-use-this flag (deprecated command acknowledgment)
 - Strip --ref-format= and --no-advice flags
 - Implement rev-list -z via NUL-byte output conversion
+- Translate -c key=value pairs for config value compatibility
