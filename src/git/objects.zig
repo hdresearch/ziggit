@@ -1818,7 +1818,7 @@ pub const PackOptimizationResult = struct {
     errors: std.ArrayList([]const u8),
     
     pub fn deinit(self: PackOptimizationResult) void {
-        for (self.errors.items) |error_msg| {
+        for (self.errors.items) |_| {
             // Note: errors are owned by the allocator passed to optimization
         }
         self.errors.deinit();
