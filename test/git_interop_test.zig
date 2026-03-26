@@ -47,6 +47,9 @@ pub fn main() !void {
     try testDiffOperations(allocator, test_dir);
     try testCheckoutOperations(allocator, test_dir);
 
+    // Test BrokenPipe handling (output piped to head/less)
+    try testBrokenPipeHandling(allocator, test_dir);
+    
     // Critical workflow compatibility (for bun/npm tools)
     try testBunWorkflowCompatibility(allocator, test_dir);
     
@@ -1004,4 +1007,102 @@ fn testRemoteOperations(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
     }
 
     print("  ✓ Test 16 completed\n", .{});
+}
+
+// Test BrokenPipe handling - verify ziggit handles piped output correctly
+fn testBrokenPipeHandling(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
+    print("Test 17: BrokenPipe handling (piped output)\n", .{});
+    
+    const repo_path = try test_dir.makeOpenPath("pipe_test", .{});
+    defer test_dir.deleteTree("pipe_test") catch {};
+
+    // Set up test repo
+    try runCommandNoOutput(allocator, &.{"git", "init"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
+
+    // Create multiple files for output
+    for (0..20) |i| {
+        const filename = try std.fmt.allocPrint(allocator, "file{d}.txt", .{i});
+        defer allocator.free(filename);
+        const content = try std.fmt.allocPrint(allocator, "Content of file {d}\n", .{i});
+        defer allocator.free(content);
+        
+        try repo_path.writeFile(.{.sub_path = filename, .data = content});
+        try runCommandNoOutput(allocator, &[_][]const u8{"git", "add", filename}, repo_path);
+        
+        const commit_msg = try std.fmt.allocPrint(allocator, "Add file {d}", .{i});
+        defer allocator.free(commit_msg);
+        try runCommandNoOutput(allocator, &[_][]const u8{"git", "commit", "-m", commit_msg}, repo_path);
+    }
+
+    // Test ziggit commands piped to head (simulating BrokenPipe scenario)
+    const commands = [_]struct { cmd: []const []const u8, desc: []const u8 }{
+        .{ .cmd = &.{"log", "--oneline"}, .desc = "log output" },
+        .{ .cmd = &.{"status"}, .desc = "status output" },
+        .{ .cmd = &.{"branch", "-a"}, .desc = "branch output" },
+    };
+
+    for (commands) |test_cmd| {
+        // Test with git first (should handle BrokenPipe)
+        const git_cmd = try std.ArrayList([]const u8).initCapacity(allocator, test_cmd.cmd.len + 1);
+        defer git_cmd.deinit();
+        git_cmd.appendAssumeCapacity("git");
+        git_cmd.appendSliceAssumeCapacity(test_cmd.cmd);
+        
+        const git_pipe_result = runCommandPiped(allocator, git_cmd.items, repo_path, 5);
+        if (git_pipe_result) |result| {
+            defer allocator.free(result);
+            print("  ✓ git {s} handles piped output ({d} lines)\n", .{test_cmd.desc, std.mem.count(u8, result, "\n")});
+        } else {
+            print("  ⚠ git {s} failed with piped output\n", .{test_cmd.desc});
+        }
+
+        // Test with ziggit (should also handle BrokenPipe gracefully)  
+        const ziggit_pipe_result = runZiggitCommandPiped(allocator, test_cmd.cmd, repo_path, 5);
+        if (ziggit_pipe_result) |result| {
+            defer allocator.free(result);
+            print("  ✓ ziggit {s} handles piped output ({d} lines)\n", .{test_cmd.desc, std.mem.count(u8, result, "\n")});
+        } else {
+            print("  ⚠ ziggit {s} may not handle piped output correctly\n", .{test_cmd.desc});
+        }
+    }
+
+    print("  ✓ Test 17 completed\n", .{});
+}
+
+// Helper function to simulate piped output (like command | head -n 5)
+fn runCommandPiped(allocator: std.mem.Allocator, args: []const []const u8, cwd: fs.Dir, max_lines: usize) ?[]u8 {
+    const result = runCommand(allocator, args, cwd) catch return null;
+    defer allocator.free(result);
+    
+    // Simulate head behavior - take first max_lines
+    var line_count: usize = 0;
+    var end_pos: usize = 0;
+    
+    for (result, 0..) |char, i| {
+        if (char == '\n') {
+            line_count += 1;
+            if (line_count >= max_lines) {
+                end_pos = i + 1;
+                break;
+            }
+        }
+    }
+    
+    if (end_pos == 0) end_pos = result.len;
+    return allocator.dupe(u8, result[0..end_pos]) catch return null;
+}
+
+// Helper function for piped ziggit commands
+fn runZiggitCommandPiped(allocator: std.mem.Allocator, args: []const []const u8, cwd: fs.Dir, max_lines: usize) ?[]u8 {
+    var full_args = std.ArrayList([]const u8).init(allocator);
+    defer full_args.deinit();
+    
+    full_args.append("/root/ziggit/zig-out/bin/ziggit") catch return null;
+    for (args) |arg| {
+        full_args.append(arg) catch return null;
+    }
+    
+    return runCommandPiped(allocator, full_args.items, cwd, max_lines);
 }

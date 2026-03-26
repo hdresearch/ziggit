@@ -128,14 +128,6 @@ pub fn build(b: *std.Build) void {
 
     // ========== BENCHMARKS ==========
     
-    // Simple benchmark optimized for minimal disk usage
-    const simple_benchmark = b.addExecutable(.{
-        .name = "simple_benchmark",
-        .root_source_file = b.path("benchmarks/simple_benchmark.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    
     // CLI benchmark (ziggit vs git performance)
     const cli_benchmark = b.addExecutable(.{
         .name = "cli_benchmark",
@@ -153,15 +145,6 @@ pub fn build(b: *std.Build) void {
     });
     lib_benchmark.root_module.addImport("ziggit", ziggit_module);
     
-    // API vs CLI spawn benchmark - critical for proving performance advantage
-    const api_vs_cli_benchmark = b.addExecutable(.{
-        .name = "api_vs_cli_benchmark",
-        .root_source_file = b.path("benchmarks/api_vs_cli_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    api_vs_cli_benchmark.root_module.addImport("ziggit", ziggit_module);
-    
     // Bun/npm workflow scenario benchmark
     const bun_scenario_benchmark = b.addExecutable(.{
         .name = "bun_scenario_benchmark",
@@ -172,14 +155,9 @@ pub fn build(b: *std.Build) void {
     bun_scenario_benchmark.root_module.addImport("ziggit", ziggit_module);
 
     const bench_step = b.step("bench", "Run all benchmarks");
-    bench_step.dependOn(&b.addRunArtifact(simple_benchmark).step);
     bench_step.dependOn(&b.addRunArtifact(cli_benchmark).step);
     bench_step.dependOn(&b.addRunArtifact(lib_benchmark).step);
-    bench_step.dependOn(&b.addRunArtifact(api_vs_cli_benchmark).step);
     bench_step.dependOn(&b.addRunArtifact(bun_scenario_benchmark).step);
-    
-    const simple_bench_step = b.step("bench-simple", "Run simple benchmark only");
-    simple_bench_step.dependOn(&b.addRunArtifact(simple_benchmark).step);
 
     // ========== WASM TARGET ==========
     const wasm_target = b.resolveTargetQuery(.{
