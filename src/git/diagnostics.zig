@@ -190,13 +190,13 @@ pub const GitDiagnostics = struct {
                         try self.addIssue(.error, .dangling_ref, "Branch has no commit", current_branch);
                     }
                 } else |err| {
-                    const err_msg = try std.fmt.allocPrint(self.allocator, "Failed to resolve branch: {}", .{err});
+                    const err_msg = try std.fmt.allocPrint(self.allocator, "Failed to resolve branch: {!}", .{err});
                     defer self.allocator.free(err_msg);
                     try self.addIssue(.error, .invalid_ref, err_msg, current_branch);
                 }
             }
         } else |err| {
-            const err_msg = try std.fmt.allocPrint(self.allocator, "Cannot read HEAD: {}", .{err});
+            const err_msg = try std.fmt.allocPrint(self.allocator, "Cannot read HEAD: {!}", .{err});
             defer self.allocator.free(err_msg);
             try self.addIssue(.critical, .invalid_ref, err_msg, null);
         }
