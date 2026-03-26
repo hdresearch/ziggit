@@ -114,6 +114,51 @@ pub fn build(b: *std.Build) void {
     });
     const run_pack_comprehensive_test = b.addRunArtifact(pack_comprehensive_test);
 
+    // Comprehensive pack file delta tests
+    const pack_delta_test = b.addTest(.{
+        .root_source_file = b.path("test/pack_delta_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_pack_delta_test = b.addRunArtifact(pack_delta_test);
+
+    // Git config comprehensive tests
+    const config_test = b.addTest(.{
+        .root_source_file = b.path("test/config_comprehensive_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_config_test = b.addRunArtifact(config_test);
+
+    // Index extensions and versions tests
+    const index_test = b.addTest(.{
+        .root_source_file = b.path("test/index_extensions_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_index_test = b.addRunArtifact(index_test);
+
+    // Symbolic refs and resolution tests
+    const refs_test = b.addTest(.{
+        .root_source_file = b.path("test/refs_symbolic_resolution_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_refs_test = b.addRunArtifact(refs_test);
+
+    // Individual test steps
+    const test_pack_step = b.step("test-pack", "Run pack file tests");
+    test_pack_step.dependOn(&run_pack_delta_test.step);
+
+    const test_config_step = b.step("test-config", "Run config parsing tests");
+    test_config_step.dependOn(&run_config_test.step);
+
+    const test_index_step = b.step("test-index", "Run index tests");
+    test_index_step.dependOn(&run_index_test.step);
+
+    const test_refs_step = b.step("test-refs", "Run refs resolution tests");
+    test_refs_step.dependOn(&run_refs_test.step);
+
     // Test step runs all tests
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_platform_tests.step);
@@ -123,6 +168,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_broken_pipe_test.step);
     test_step.dependOn(&run_core_interop_test.step);
     test_step.dependOn(&run_pack_comprehensive_test.step);
+    test_step.dependOn(&run_pack_delta_test.step);
+    test_step.dependOn(&run_config_test.step);
+    test_step.dependOn(&run_index_test.step);
+    test_step.dependOn(&run_refs_test.step);
 
     // ========== BENCHMARKS ==========
     const cli_benchmark = b.addExecutable(.{
