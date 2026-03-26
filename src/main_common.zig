@@ -2874,43 +2874,147 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         }
     }
 
-    // Shell out to real git for non-HTTPS --bare/--no-checkout
-    if (is_bare or is_no_checkout) {
-        var git_args = std.ArrayList([]const u8).init(allocator);
-        defer git_args.deinit();
-
-        try git_args.append("git");
-        try git_args.append("clone");
-
+    // Handle --no-checkout with HTTPS URLs natively
+    if (is_no_checkout) {
+        var clone_url: ?[]const u8 = null;
+        var clone_target: ?[]const u8 = null;
         for (all_args.items) |arg| {
-            try git_args.append(arg);
+            if (std.mem.startsWith(u8, arg, "-")) continue;
+            if (clone_url == null) {
+                clone_url = arg;
+            } else if (clone_target == null) {
+                clone_target = arg;
+            }
         }
 
-        var child = std.process.Child.init(git_args.items, allocator);
-        const result = child.spawnAndWait() catch |err| {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: failed to execute git: {}\n", .{err});
-            defer allocator.free(msg);
-            try platform_impl.writeStderr(msg);
-            std.process.exit(128);
-        };
+        if (clone_url) |url_val| {
+            if (std.mem.startsWith(u8, url_val, "https://") or std.mem.startsWith(u8, url_val, "http://")) {
+                const final_target = clone_target orelse blk: {
+                    if (std.mem.lastIndexOfScalar(u8, url_val, '/')) |last_slash| {
+                        const repo_name = url_val[last_slash + 1..];
+                        if (std.mem.endsWith(u8, repo_name, ".git")) {
+                            break :blk repo_name[0..repo_name.len - 4];
+                        } else {
+                            break :blk repo_name;
+                        }
+                    } else {
+                        break :blk "repository";
+                    }
+                };
 
-        switch (result) {
-            .Exited => |code| {
-                if (code != 0) {
-                    std.process.exit(@intCast(code));
+                const clone_msg = try std.fmt.allocPrint(allocator, "Cloning into '{s}'...\n", .{final_target});
+                defer allocator.free(clone_msg);
+                try platform_impl.writeStderr(clone_msg);
+
+                // Use cloneBare to download everything into a temp bare dir, then convert to non-bare
+                const ziggit = @import("ziggit.zig");
+                const bare_target = try std.fmt.allocPrint(allocator, "{s}/.git", .{final_target});
+                defer allocator.free(bare_target);
+
+                // Create the worktree directory first
+                std.fs.cwd().makePath(final_target) catch |err| switch (err) {
+                    error.PathAlreadyExists => {
+                        const msg = try std.fmt.allocPrint(allocator, "fatal: destination path '{s}' already exists and is not an empty directory.\n", .{final_target});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                        std.process.exit(128);
+                    },
+                    else => return err,
+                };
+
+                // Clone bare into .git subdirectory
+                var repo = ziggit.Repository.cloneBare(allocator, url_val, bare_target) catch |err| {
+                    // Clean up on failure
+                    std.fs.cwd().deleteTree(final_target) catch {};
+                    const emsg = try std.fmt.allocPrint(allocator, "fatal: {}\n", .{err});
+                    defer allocator.free(emsg);
+                    try platform_impl.writeStderr(emsg);
+                    std.process.exit(128);
+                };
+                repo.close();
+
+                // Convert bare repo to non-bare: update config to set bare = false
+                const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{bare_target});
+                defer allocator.free(config_path);
+                const config_content = std.fs.cwd().readFileAlloc(allocator, config_path, 1024 * 1024) catch |err| {
+                    const emsg = try std.fmt.allocPrint(allocator, "fatal: failed to read config: {}\n", .{err});
+                    defer allocator.free(emsg);
+                    try platform_impl.writeStderr(emsg);
+                    std.process.exit(128);
+                };
+                defer allocator.free(config_content);
+
+                // Replace bare = true with bare = false
+                var new_config = std.ArrayList(u8).init(allocator);
+                defer new_config.deinit();
+                var config_lines = std.mem.splitSequence(u8, config_content, "\n");
+                var first = true;
+                while (config_lines.next()) |cline| {
+                    if (!first) try new_config.appendSlice("\n");
+                    first = false;
+                    const trimmed = std.mem.trim(u8, cline, " \t\r");
+                    if (std.mem.eql(u8, trimmed, "bare = true")) {
+                        // Preserve leading whitespace
+                        for (cline) |c| {
+                            if (c == ' ' or c == '\t') {
+                                try new_config.append(c);
+                            } else break;
+                        }
+                        try new_config.appendSlice("bare = false");
+                    } else {
+                        try new_config.appendSlice(cline);
+                    }
                 }
-            },
-            .Signal => |_| {
-                std.process.exit(128);
-            },
-            .Stopped => |_| {
-                std.process.exit(128);
-            },
-            .Unknown => |_| {
-                std.process.exit(128);
-            },
+
+                const cf = try std.fs.cwd().createFile(config_path, .{});
+                defer cf.close();
+                try cf.writeAll(new_config.items);
+
+                return; // --no-checkout means skip checkout
+            }
         }
-        return;
+
+        // Non-HTTPS --no-checkout: fall through to git
+    }
+
+    // Shell out to real git for non-HTTPS cases that need --bare or other unsupported combos
+    if (is_bare) {
+        // This shouldn't be reached for HTTPS (handled above), only non-HTTPS bare clones
+        if (build_options.enable_git_fallback) {
+            var git_args = std.ArrayList([]const u8).init(allocator);
+            defer git_args.deinit();
+
+            try git_args.append("git");
+            try git_args.append("clone");
+
+            for (all_args.items) |arg| {
+                try git_args.append(arg);
+            }
+
+            var child = std.process.Child.init(git_args.items, allocator);
+            child.stdin_behavior = .Inherit;
+            child.stdout_behavior = .Inherit;
+            child.stderr_behavior = .Inherit;
+            const result = child.spawnAndWait() catch |err| {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: failed to execute git: {}\n", .{err});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            };
+
+            switch (result) {
+                .Exited => |code| {
+                    if (code != 0) std.process.exit(@intCast(code));
+                },
+                .Signal => |_| std.process.exit(128),
+                .Stopped => |_| std.process.exit(128),
+                .Unknown => |_| std.process.exit(1),
+            }
+            return;
+        } else {
+            try platform_impl.writeStderr("fatal: non-HTTPS clone not supported without git fallback\n");
+            std.process.exit(128);
+        }
     }
 
     // Parse arguments for our internal implementation
