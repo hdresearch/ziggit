@@ -836,6 +836,26 @@ pub fn build(b: *std.Build) void {
     fast_index_parser_tests.root_module.addImport("ziggit", ziggit_module);
     test_step.dependOn(&b.addRunArtifact(fast_index_parser_tests).step);
 
+    // Short hash and findCommit tests
+    const short_hash_tests = b.addTest(.{
+        .root_source_file = b.path("test/short_hash_and_findcommit_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    short_hash_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(short_hash_tests).step);
+
+    // Object create and parse tests (internal git module)
+    const object_create_parse_tests = b.addTest(.{
+        .root_source_file = b.path("test/object_create_and_parse_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    object_create_parse_tests.root_module.addAnonymousImport("git", .{
+        .root_source_file = b.path("src/git/git.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(object_create_parse_tests).step);
+
     // ========== BENCHMARKS ==========
     
     // CLI benchmark (ziggit vs git performance)
