@@ -90,9 +90,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const run_comprehensive_git_interop_test = b.addRunArtifact(comprehensive_git_interop_test);
-    
-    const comprehensive_interop_step = b.step("comprehensive-interop", "Run comprehensive git interoperability test");
-    comprehensive_interop_step.dependOn(&run_comprehensive_git_interop_test.step);
 
     // Tool compatibility test (critical for bun/npm workflows)
     const tool_compat_test = b.addExecutable(.{
@@ -136,6 +133,15 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const run_broken_pipe_test = b.addRunArtifact(broken_pipe_test);
+
+    // Basic interoperability test (CLI-only, no library dependencies)
+    const basic_interop_test = b.addExecutable(.{
+        .name = "basic_interop_test",
+        .root_source_file = b.path("test/basic_interop_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_basic_interop_test = b.addRunArtifact(basic_interop_test);
 
     // Library status test (requires ziggit module)
     const lib_status_test = b.addTest(.{
@@ -184,6 +190,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_lib_comprehensive_status_test.step);
     test_step.dependOn(&run_bun_zig_api_test.step);
 
+    // Basic interop test (can run independently)
+    const basic_interop_step = b.step("basic-interop", "Run basic git/ziggit interoperability test");
+    basic_interop_step.dependOn(&run_basic_interop_test.step);
+
     // ========== BENCHMARKS ==========
     const cli_benchmark = b.addExecutable(.{
         .name = "cli_benchmark",
@@ -211,142 +221,10 @@ pub fn build(b: *std.Build) void {
     bun_scenario_benchmark.root_module.addImport("ziggit", ziggit_module);
     const run_bun_scenario_benchmark = b.addRunArtifact(bun_scenario_benchmark);
 
-    // Zig API vs Git CLI benchmark (ITEM 7)
-    const zig_api_benchmark = b.addExecutable(.{
-        .name = "zig_api_benchmark",
-        .root_source_file = b.path("benchmarks/zig_api_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    zig_api_benchmark.root_module.addImport("ziggit", ziggit_module);
-    const run_zig_api_benchmark = b.addRunArtifact(zig_api_benchmark);
-
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&run_cli_benchmark.step);
     bench_step.dependOn(&run_lib_benchmark.step);
     bench_step.dependOn(&run_bun_scenario_benchmark.step);
-    bench_step.dependOn(&run_zig_api_benchmark.step);
-    
-    const zig_api_bench_step = b.step("zig-api-bench", "Run Zig API vs Git CLI benchmark");
-    zig_api_bench_step.dependOn(&run_zig_api_benchmark.step);
-    
-    // API vs CLI benchmark (minimal essential benchmark)
-    const api_vs_cli_benchmark = b.addExecutable(.{
-        .name = "api_vs_cli_bench",
-        .root_source_file = b.path("benchmarks/api_vs_cli_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    api_vs_cli_benchmark.root_module.addImport("ziggit", ziggit_module);
-    const run_api_vs_cli_benchmark = b.addRunArtifact(api_vs_cli_benchmark);
-    
-    const perf_step = b.step("perf", "Run performance benchmark");
-    perf_step.dependOn(&run_api_vs_cli_benchmark.step);
-    
-    // Status micro-benchmark to analyze bottlenecks
-    const status_micro_benchmark = b.addExecutable(.{
-        .name = "status_micro_bench",
-        .root_source_file = b.path("benchmarks/status_micro_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    status_micro_benchmark.root_module.addImport("ziggit", ziggit_module);
-    const run_status_micro_benchmark = b.addRunArtifact(status_micro_benchmark);
-    
-    const micro_step = b.step("micro", "Run status micro-benchmark");
-    micro_step.dependOn(&run_status_micro_benchmark.step);
-    
-    // Simple status analysis
-    const simple_status_analysis = b.addExecutable(.{
-        .name = "simple_status_analysis",
-        .root_source_file = b.path("benchmarks/simple_status_analysis.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    simple_status_analysis.root_module.addImport("ziggit", ziggit_module);
-    const run_simple_status_analysis = b.addRunArtifact(simple_status_analysis);
-    
-    const analyze_step = b.step("analyze", "Run simple status analysis");
-    analyze_step.dependOn(&run_simple_status_analysis.step);
-    
-    // Debug add operation
-    const debug_add_operation = b.addExecutable(.{
-        .name = "debug_add_operation",
-        .root_source_file = b.path("benchmarks/debug_add_operation.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    debug_add_operation.root_module.addImport("ziggit", ziggit_module);
-    const run_debug_add_operation = b.addRunArtifact(debug_add_operation);
-    
-    const debug_step = b.step("debug-add", "Debug add operation");
-    debug_step.dependOn(&run_debug_add_operation.step);
-    
-    // Debug benchmark setup
-    const debug_benchmark_setup = b.addExecutable(.{
-        .name = "debug_benchmark_setup",
-        .root_source_file = b.path("benchmarks/debug_benchmark_setup.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    debug_benchmark_setup.root_module.addImport("ziggit", ziggit_module);
-    const run_debug_benchmark_setup = b.addRunArtifact(debug_benchmark_setup);
-    
-    const debug_bench_step = b.step("debug-bench", "Debug benchmark setup");
-    debug_bench_step.dependOn(&run_debug_benchmark_setup.step);
-    
-    // Debug scale test
-    const debug_scale_test = b.addExecutable(.{
-        .name = "debug_scale_test",
-        .root_source_file = b.path("benchmarks/debug_scale_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    debug_scale_test.root_module.addImport("ziggit", ziggit_module);
-    const run_debug_scale_test = b.addRunArtifact(debug_scale_test);
-    
-    const debug_scale_step = b.step("debug-scale", "Debug scale test (100 files)");
-    debug_scale_step.dependOn(&run_debug_scale_test.step);
-    
-    // Debug index corruption
-    const debug_index_corruption = b.addExecutable(.{
-        .name = "debug_index_corruption",
-        .root_source_file = b.path("benchmarks/debug_index_corruption.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    debug_index_corruption.root_module.addImport("ziggit", ziggit_module);
-    const run_debug_index_corruption = b.addRunArtifact(debug_index_corruption);
-    
-    const debug_index_step = b.step("debug-index", "Debug index corruption");
-    debug_index_step.dependOn(&run_debug_index_corruption.step);
-    
-    // Status bottleneck benchmark 
-    const status_bottleneck_bench = b.addExecutable(.{
-        .name = "status_bottleneck_bench",
-        .root_source_file = b.path("benchmarks/status_bottleneck_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    status_bottleneck_bench.root_module.addImport("ziggit", ziggit_module);
-    const run_status_bottleneck_bench = b.addRunArtifact(status_bottleneck_bench);
-    
-    const bottleneck_step = b.step("bottleneck", "Analyze status operation bottlenecks");
-    bottleneck_step.dependOn(&run_status_bottleneck_bench.step);
-    
-    // Index optimization benchmark
-    const index_optimization_bench = b.addExecutable(.{
-        .name = "index_optimization_bench",
-        .root_source_file = b.path("benchmarks/index_optimization_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    index_optimization_bench.root_module.addImport("ziggit", ziggit_module);
-    const run_index_optimization_bench = b.addRunArtifact(index_optimization_bench);
-    
-    const index_opt_step = b.step("index-opt", "Benchmark index parser optimizations");
-    index_opt_step.dependOn(&run_index_optimization_bench.step);
-
 
     // ========== WASM TARGET ==========
     const wasm_target = b.resolveTargetQuery(.{
