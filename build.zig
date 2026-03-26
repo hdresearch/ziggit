@@ -543,6 +543,24 @@ pub fn build(b: *std.Build) void {
     index_write_verify_tests.root_module.addImport("ziggit", ziggit_module);
     test_step.dependOn(&b.addRunArtifact(index_write_verify_tests).step);
 
+    // Tree sorting tests
+    const tree_sorting_tests = b.addTest(.{
+        .root_source_file = b.path("test/tree_sorting_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    tree_sorting_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(tree_sorting_tests).step);
+
+    // Repository lifecycle tests
+    const repo_lifecycle_tests = b.addTest(.{
+        .root_source_file = b.path("test/repo_lifecycle_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    repo_lifecycle_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(repo_lifecycle_tests).step);
+
     // E2E validation: ziggit writes, git reads
     const ziggit_writes_test = b.addTest(.{
         .root_source_file = b.path("test/ziggit_writes_git_reads_test.zig"),
