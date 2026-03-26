@@ -503,6 +503,18 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(pack_infrastructure_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_git_exact_compat_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_end_to_end_tests).step);
+
+    // Pack idx compatibility and saveReceivedPack tests
+    const pack_idx_compat_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_idx_compat_and_save_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_idx_compat_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(pack_idx_compat_tests).step);
+
     // New tests from other agents (may be slow, included for completeness)
     test_step.dependOn(&b.addRunArtifact(repo_api_tests).step);
     test_step.dependOn(&b.addRunArtifact(object_integrity_tests).step);
