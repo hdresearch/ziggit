@@ -114,56 +114,10 @@ pub fn build(b: *std.Build) void {
     bun_scenario_benchmark.root_module.addImport("ziggit", ziggit_module);
     const run_bun_scenario_benchmark = b.addRunArtifact(bun_scenario_benchmark);
 
-    // ITEM 7: Zig API vs Git CLI benchmark (from remote)
-    const zig_api_benchmark = b.addExecutable(.{
-        .name = "zig_api_benchmark",
-        .root_source_file = b.path("benchmarks/zig_api_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    zig_api_benchmark.root_module.addImport("ziggit", ziggit_module);
-    const run_zig_api_benchmark = b.addRunArtifact(zig_api_benchmark);
-
-    // Performance optimization benchmark (my addition)
-    const api_vs_cli_benchmark = b.addExecutable(.{
-        .name = "api_vs_cli_benchmark",
-        .root_source_file = b.path("benchmarks/api_vs_cli_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    api_vs_cli_benchmark.root_module.addImport("ziggit", ziggit_module);
-    const run_api_vs_cli_benchmark = b.addRunArtifact(api_vs_cli_benchmark);
-
-    const optimization_benchmark = b.addExecutable(.{
-        .name = "optimization_benchmark",
-        .root_source_file = b.path("benchmarks/optimization_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    optimization_benchmark.root_module.addImport("ziggit", ziggit_module);
-    const run_optimization_benchmark = b.addRunArtifact(optimization_benchmark);
-
-    // Comprehensive performance benchmark
-    const comprehensive_perf_benchmark = b.addExecutable(.{
-        .name = "comprehensive_perf_benchmark",
-        .root_source_file = b.path("benchmarks/comprehensive_perf_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    comprehensive_perf_benchmark.root_module.addImport("ziggit", ziggit_module);
-    const run_comprehensive_perf_benchmark = b.addRunArtifact(comprehensive_perf_benchmark);
     const bench_step = b.step("bench", "Run all benchmarks");
     bench_step.dependOn(&run_cli_benchmark.step);
     bench_step.dependOn(&run_lib_benchmark.step);
     bench_step.dependOn(&run_bun_scenario_benchmark.step);
-    bench_step.dependOn(&run_zig_api_benchmark.step);
-    bench_step.dependOn(&run_api_vs_cli_benchmark.step);
-    bench_step.dependOn(&run_optimization_benchmark.step);
-    bench_step.dependOn(&run_comprehensive_perf_benchmark.step);
-
-    // Standalone step for ITEM 7 benchmark
-    const bench_zig_api_step = b.step("bench-zig-api", "Run Zig API vs Git CLI benchmark (ITEM 7)");
-    bench_zig_api_step.dependOn(&run_zig_api_benchmark.step);
 
     // ========== WASM TARGET ==========
     const wasm_target = b.resolveTargetQuery(.{
