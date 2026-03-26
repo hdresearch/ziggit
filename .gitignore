@@ -4,3 +4,4 @@ zig-out/
 *.o
 *.a
 test_git_creates/
+cache/
