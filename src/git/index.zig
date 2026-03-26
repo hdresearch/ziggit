@@ -162,6 +162,11 @@ pub const Index = struct {
     pub fn parseIndexData(self: *Index, data: []const u8) !void {
         if (data.len < 12) return error.InvalidIndex;
         
+        // Additional sanity checks
+        if (data.len > 100 * 1024 * 1024) { // 100MB max index size
+            return error.IndexTooLarge;
+        }
+        
         var stream = std.io.fixedBufferStream(data);
         const reader = stream.reader();
 
@@ -183,6 +188,12 @@ pub const Index = struct {
         }
 
         const entry_count = try reader.readInt(u32, .big);
+        
+        // Sanity check entry count
+        const max_reasonable_entries = 1_000_000; // 1M files max
+        if (entry_count > max_reasonable_entries) {
+            return error.TooManyIndexEntries;
+        }
 
         // Read entries
         var i: u32 = 0;

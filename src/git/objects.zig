@@ -782,6 +782,7 @@ fn findOffsetInIdx(idx_data: []const u8, target_hash: [20]u8) ?usize {
 fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
     if (delta_data.len < 2) return error.DeltaTooShort; // Need at least base_size and result_size
     if (base_data.len > 1024 * 1024 * 1024) return error.BaseTooLarge; // 1GB limit
+    if (delta_data.len > 100 * 1024 * 1024) return error.DeltaTooLarge; // 100MB delta limit
     
     var pos: usize = 0;
     
