@@ -1153,6 +1153,326 @@ pub fn suggestSimilarRefs(git_dir: []const u8, partial_name: []const u8, platfor
     
     // Find refs that contain the partial name
     for (all_refs) |ref| {
+        if (std.mem.indexOf(u8, ref, partial_name) != null) {
+            try suggestions.append(try allocator.dupe(u8, ref));
+        }
+    }
+    
+    // If no exact matches, try fuzzy matching
+    if (suggestions.items.len == 0) {
+        for (all_refs) |ref| {
+            if (fuzzyMatch(ref, partial_name)) {
+                try suggestions.append(try allocator.dupe(u8, ref));
+            }
+        }
+    }
+    
+    return suggestions.toOwnedSlice();
+}
+
+/// Advanced ref management operations
+pub const RefManager = struct {
+    git_dir: []const u8,
+    allocator: std.mem.Allocator,
+    
+    pub fn init(git_dir: []const u8, allocator: std.mem.Allocator) RefManager {
+        return RefManager{
+            .git_dir = git_dir,
+            .allocator = allocator,
+        };
+    }
+    
+    /// Create a new branch reference
+    pub fn createBranch(self: RefManager, branch_name: []const u8, commit_hash: []const u8, platform_impl: anytype) !void {
+        // Validate inputs
+        if (branch_name.len == 0) return error.EmptyBranchName;
+        if (commit_hash.len != 40 or !isValidHash(commit_hash)) return error.InvalidCommitHash;
+        
+        // Check if branch already exists
+        const ref_name = try std.fmt.allocPrint(self.allocator, "refs/heads/{s}", .{branch_name});
+        defer self.allocator.free(ref_name);
+        
+        if (refExists(self.git_dir, ref_name, platform_impl, self.allocator)) |exists| {
+            if (exists) return error.BranchAlreadyExists;
+        } else |_| {}
+        
+        // Create branch ref file
+        const ref_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.git_dir, ref_name });
+        defer self.allocator.free(ref_path);
+        
+        // Ensure refs/heads directory exists
+        const refs_heads_dir = try std.fmt.allocPrint(self.allocator, "{s}/refs/heads", .{self.git_dir});
+        defer self.allocator.free(refs_heads_dir);
+        
+        std.fs.cwd().makePath(refs_heads_dir) catch {};
+        
+        try platform_impl.fs.writeFile(ref_path, commit_hash);
+    }
+    
+    /// Delete a branch reference
+    pub fn deleteBranch(self: RefManager, branch_name: []const u8, platform_impl: anytype) !void {
+        if (branch_name.len == 0) return error.EmptyBranchName;
+        
+        // Don't allow deleting current branch
+        const current_branch = getCurrentBranch(self.git_dir, platform_impl, self.allocator) catch null;
+        if (current_branch) |current| {
+            defer self.allocator.free(current);
+            if (std.mem.eql(u8, current, branch_name)) {
+                return error.CannotDeleteCurrentBranch;
+            }
+        }
+        
+        const ref_name = try std.fmt.allocPrint(self.allocator, "refs/heads/{s}", .{branch_name});
+        defer self.allocator.free(ref_name);
+        
+        const ref_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.git_dir, ref_name });
+        defer self.allocator.free(ref_path);
+        
+        // Try to delete the file
+        platform_impl.fs.deleteFile(ref_path) catch |err| switch (err) {
+            error.FileNotFound => return error.BranchNotFound,
+            else => return err,
+        };
+    }
+    
+    /// Update HEAD to point to a different branch
+    pub fn checkoutBranch(self: RefManager, branch_name: []const u8, platform_impl: anytype) !void {
+        if (branch_name.len == 0) return error.EmptyBranchName;
+        
+        // Verify branch exists
+        const ref_name = try std.fmt.allocPrint(self.allocator, "refs/heads/{s}", .{branch_name});
+        defer self.allocator.free(ref_name);
+        
+        if (refExists(self.git_dir, ref_name, platform_impl, self.allocator)) |exists| {
+            if (!exists) return error.BranchNotFound;
+        } else |_| {
+            return error.BranchNotFound;
+        }
+        
+        // Update HEAD
+        const head_path = try std.fmt.allocPrint(self.allocator, "{s}/HEAD", .{self.git_dir});
+        defer self.allocator.free(head_path);
+        
+        const head_content = try std.fmt.allocPrint(self.allocator, "ref: {s}\n", .{ref_name});
+        defer self.allocator.free(head_content);
+        
+        try platform_impl.fs.writeFile(head_path, head_content);
+    }
+    
+    /// Get detailed information about a ref
+    pub fn getRefInfo(self: RefManager, ref_name: []const u8, platform_impl: anytype) !RefInfo {
+        const resolved_hash = resolveRef(self.git_dir, ref_name, platform_impl, self.allocator) catch |err| switch (err) {
+            error.RefNotFound => return error.RefNotFound,
+            else => return err,
+        };
+        
+        if (resolved_hash) |hash| {
+            defer self.allocator.free(hash);
+            
+            // Determine ref type
+            var ref_type: RefType = .branch;
+            if (std.mem.startsWith(u8, ref_name, "refs/heads/")) {
+                ref_type = .branch;
+            } else if (std.mem.startsWith(u8, ref_name, "refs/tags/")) {
+                ref_type = .tag;
+            } else if (std.mem.startsWith(u8, ref_name, "refs/remotes/")) {
+                ref_type = .remote_branch;
+            } else if (std.mem.eql(u8, ref_name, "HEAD")) {
+                ref_type = .head;
+            } else {
+                ref_type = .other;
+            }
+            
+            // Check if it's symbolic
+            const resolution = resolveRefOnce(self.git_dir, ref_name, platform_impl, self.allocator) catch {
+                return RefInfo{
+                    .name = try self.allocator.dupe(u8, ref_name),
+                    .hash = try self.allocator.dupe(u8, hash),
+                    .ref_type = ref_type,
+                    .is_symbolic = false,
+                    .target = null,
+                };
+            };
+            defer if (resolution.target) |target| self.allocator.free(target);
+            
+            return RefInfo{
+                .name = try self.allocator.dupe(u8, ref_name),
+                .hash = try self.allocator.dupe(u8, hash),
+                .ref_type = ref_type,
+                .is_symbolic = resolution.is_symbolic,
+                .target = if (resolution.is_symbolic) try self.allocator.dupe(u8, resolution.target) else null,
+            };
+        } else {
+            return error.RefNotFound;
+        }
+    }
+    
+    /// List all refs with their information
+    pub fn getAllRefsInfo(self: RefManager, platform_impl: anytype) ![]RefInfo {
+        var refs_info = std.ArrayList(RefInfo).init(self.allocator);
+        
+        const all_refs = listAllRefs(self.git_dir, platform_impl, self.allocator) catch return refs_info.toOwnedSlice();
+        defer {
+            for (all_refs) |ref| {
+                self.allocator.free(ref);
+            }
+            self.allocator.free(all_refs);
+        }
+        
+        for (all_refs) |ref| {
+            if (self.getRefInfo(ref, platform_impl)) |info| {
+                try refs_info.append(info);
+            } else |_| {}
+        }
+        
+        return refs_info.toOwnedSlice();
+    }
+};
+
+/// Detailed information about a reference
+pub const RefInfo = struct {
+    name: []const u8,
+    hash: []const u8,
+    ref_type: RefType,
+    is_symbolic: bool,
+    target: ?[]const u8, // For symbolic refs
+    
+    pub fn deinit(self: RefInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.hash);
+        if (self.target) |target| allocator.free(target);
+    }
+    
+    pub fn print(self: RefInfo) void {
+        const type_str = switch (self.ref_type) {
+            .branch => "branch",
+            .tag => "tag",
+            .remote_branch => "remote-branch",
+            .head => "HEAD",
+            .other => "other",
+        };
+        
+        if (self.is_symbolic and self.target != null) {
+            std.debug.print("{s} -> {s} ({s}) [{s}]\n", .{ self.name, self.target.?, self.hash, type_str });
+        } else {
+            std.debug.print("{s} {s} [{s}]\n", .{ self.name, self.hash, type_str });
+        }
+    }
+};
+
+/// Types of git references
+pub const RefType = enum {
+    branch,
+    tag,
+    remote_branch,
+    head,
+    other,
+};
+
+/// Simple fuzzy matching for ref name suggestions
+fn fuzzyMatch(ref: []const u8, pattern: []const u8) bool {
+    if (pattern.len == 0) return false;
+    if (pattern.len > ref.len) return false;
+    
+    var ref_i: usize = 0;
+    var pattern_i: usize = 0;
+    
+    while (ref_i < ref.len and pattern_i < pattern.len) {
+        if (std.ascii.toLower(ref[ref_i]) == std.ascii.toLower(pattern[pattern_i])) {
+            pattern_i += 1;
+        }
+        ref_i += 1;
+    }
+    
+    return pattern_i == pattern.len;
+}
+
+/// List all refs in the repository
+fn listAllRefs(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![][]u8 {
+    var all_refs = std.ArrayList([]u8).init(allocator);
+    
+    // Add HEAD
+    const head_exists = refExists(git_dir, "HEAD", platform_impl, allocator) catch false;
+    if (head_exists) {
+        try all_refs.append(try allocator.dupe(u8, "HEAD"));
+    }
+    
+    // List refs from filesystem
+    const refs_path = try std.fmt.allocPrint(allocator, "{s}/refs", .{git_dir});
+    defer allocator.free(refs_path);
+    
+    try listRefsInDir(refs_path, "refs", platform_impl, allocator, &all_refs);
+    
+    // Add refs from packed-refs
+    try listRefsFromPackedRefs(git_dir, platform_impl, allocator, &all_refs);
+    
+    return all_refs.toOwnedSlice();
+}
+
+/// Recursively list refs in a directory
+fn listRefsInDir(dir_path: []const u8, prefix: []const u8, platform_impl: anytype, allocator: std.mem.Allocator, refs_list: *std.ArrayList([]u8)) !void {
+    _ = platform_impl;
+    _ = allocator;
+    _ = refs_list;
+    
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+    
+    var iterator = dir.iterate();
+    while (try iterator.next()) |entry| {
+        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
+        defer allocator.free(full_path);
+        
+        if (entry.kind == .directory) {
+            const new_prefix = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, entry.name });
+            defer allocator.free(new_prefix);
+            try listRefsInDir(full_path, new_prefix, platform_impl, allocator, refs_list);
+        } else if (entry.kind == .file) {
+            const ref_name = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, entry.name });
+            try refs_list.append(ref_name);
+        }
+    }
+}
+
+/// List refs from packed-refs file
+fn listRefsFromPackedRefs(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator, refs_list: *std.ArrayList([]u8)) !void {
+    const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir});
+    defer allocator.free(packed_refs_path);
+    
+    const content = platform_impl.fs.readFile(allocator, packed_refs_path) catch return;
+    defer allocator.free(content);
+    
+    var lines = std.mem.split(u8, content, "\n");
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\n\r");
+        
+        // Skip comments, empty lines, and peeled refs
+        if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == '^') continue;
+        
+        // Format: "<hash> <ref_name>"
+        if (std.mem.indexOf(u8, trimmed, " ")) |space_pos| {
+            const ref_name = trimmed[space_pos + 1..];
+            
+            // Check if we already have this ref
+            var already_added = false;
+            for (refs_list.items) |existing_ref| {
+                if (std.mem.eql(u8, existing_ref, ref_name)) {
+                    already_added = true;
+                    break;
+                }
+            }
+            
+            if (!already_added) {
+                try refs_list.append(try allocator.dupe(u8, ref_name));
+            }
+        }
+    }
+        }
+        allocator.free(all_refs);
+    }
+    
+    // Find refs that contain the partial name
+    for (all_refs) |ref| {
         if (std.ascii.indexOfIgnoreCase(ref, partial_name) != null) {
             try suggestions.append(try allocator.dupe(u8, ref));
         }

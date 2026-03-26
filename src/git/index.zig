@@ -741,6 +741,187 @@ pub fn validateIndex(git_dir: []const u8, platform_impl: anytype, allocator: std
         return issues.toOwnedSlice();
     }
     
+    // Load and validate index
+    const data = platform_impl.fs.readFile(allocator, index_path) catch |err| {
+        const issue = try std.fmt.allocPrint(allocator, "Cannot read index file: {}", .{err});
+        try issues.append(issue);
+        return issues.toOwnedSlice();
+    };
+    defer allocator.free(data);
+    
+    // Basic structure validation
+    if (data.len < 12) {
+        try issues.append(try allocator.dupe(u8, "Index file too small (corrupted)"));
+        return issues.toOwnedSlice();
+    }
+    
+    // Check signature
+    if (!std.mem.eql(u8, data[0..4], "DIRC")) {
+        try issues.append(try allocator.dupe(u8, "Invalid index signature (not 'DIRC')"));
+    }
+    
+    // Check version
+    const version = std.mem.readInt(u32, @ptrCast(data[4..8]), .big);
+    if (version < 2 or version > 4) {
+        const issue = try std.fmt.allocPrint(allocator, "Unsupported index version: {}", .{version});
+        try issues.append(issue);
+    }
+    
+    // Validate entry count
+    const entry_count = std.mem.readInt(u32, @ptrCast(data[8..12]), .big);
+    if (entry_count > 10_000_000) { // More than 10M files seems excessive
+        const issue = try std.fmt.allocPrint(allocator, "Suspiciously high entry count: {}", .{entry_count});
+        try issues.append(issue);
+    }
+    
+    // Try to parse the index to find structural issues
+    var test_index = Index.init(allocator);
+    defer test_index.deinit();
+    
+    test_index.parseIndexData(data) catch |err| {
+        const issue = try std.fmt.allocPrint(allocator, "Index parsing failed: {}", .{err});
+        try issues.append(issue);
+    };
+    
+    return issues.toOwnedSlice();
+}
+
+/// Advanced index operations for better git compatibility
+pub const IndexOperations = struct {
+    allocator: std.mem.Allocator,
+    
+    pub fn init(allocator: std.mem.Allocator) IndexOperations {
+        return IndexOperations{ .allocator = allocator };
+    }
+    
+    /// Check if index has conflicts (REUC extension or high-stage entries)
+    pub fn hasConflicts(self: IndexOperations, git_dir: []const u8, platform_impl: anytype) !bool {
+        const stats = analyzeIndex(git_dir, platform_impl, self.allocator) catch return false;
+        return stats.has_conflicts;
+    }
+    
+    /// Get conflicted files from index
+    pub fn getConflictedFiles(self: IndexOperations, git_dir: []const u8, platform_impl: anytype) ![][]const u8 {
+        var conflicts = std.ArrayList([]const u8).init(self.allocator);
+        
+        // Load index and look for entries with stage > 0
+        var index = Index.load(git_dir, platform_impl, self.allocator) catch return conflicts.toOwnedSlice();
+        defer index.deinit();
+        
+        for (index.entries.items) |entry| {
+            // Check if this is a conflict entry (stage bits set in flags)
+            const stage = (entry.flags >> 12) & 0x3;
+            if (stage > 0) {
+                // This is a conflicted file
+                var already_added = false;
+                for (conflicts.items) |existing| {
+                    if (std.mem.eql(u8, existing, entry.path)) {
+                        already_added = true;
+                        break;
+                    }
+                }
+                
+                if (!already_added) {
+                    try conflicts.append(try self.allocator.dupe(u8, entry.path));
+                }
+            }
+        }
+        
+        return conflicts.toOwnedSlice();
+    }
+    
+    /// Check if a file is ignored according to .gitignore rules
+    pub fn isIgnored(self: IndexOperations, git_dir: []const u8, file_path: []const u8, platform_impl: anytype) !bool {
+        // This would integrate with gitignore.zig
+        const gitignore = @import("gitignore.zig");
+        
+        var ignore_checker = gitignore.GitIgnore.init(self.allocator);
+        defer ignore_checker.deinit();
+        
+        try ignore_checker.loadFromGitDir(git_dir, platform_impl);
+        return ignore_checker.isIgnored(file_path);
+    }
+    
+    /// Get index statistics with more detailed information
+    pub fn getDetailedStats(self: IndexOperations, git_dir: []const u8, platform_impl: anytype) !DetailedIndexStats {
+        const stats = analyzeIndex(git_dir, platform_impl, self.allocator) catch return DetailedIndexStats{
+            .basic = IndexStats{
+                .total_entries = 0,
+                .version = 0,
+                .extensions = 0,
+                .file_size = 0,
+                .checksum_valid = false,
+                .has_conflicts = false,
+                .has_sparse_checkout = false,
+            },
+            .staged_files = 0,
+            .modified_files = 0,
+            .deleted_files = 0,
+            .largest_file_size = 0,
+            .total_tracked_size = 0,
+        };
+        
+        var detailed_stats = DetailedIndexStats{
+            .basic = stats,
+            .staged_files = 0,
+            .modified_files = 0,
+            .deleted_files = 0,
+            .largest_file_size = 0,
+            .total_tracked_size = 0,
+        };
+        
+        // Load index for detailed analysis
+        var index = Index.load(git_dir, platform_impl, self.allocator) catch return detailed_stats;
+        defer index.deinit();
+        
+        for (index.entries.items) |entry| {
+            detailed_stats.total_tracked_size += entry.size;
+            if (entry.size > detailed_stats.largest_file_size) {
+                detailed_stats.largest_file_size = entry.size;
+            }
+            
+            // Check file status on disk vs index
+            const working_dir = std.fs.path.dirname(git_dir) orelse ".";
+            const full_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ working_dir, entry.path });
+            defer self.allocator.free(full_path);
+            
+            const stat = std.fs.cwd().statFile(full_path) catch {
+                detailed_stats.deleted_files += 1;
+                continue;
+            };
+            
+            // Compare timestamps and size for modifications
+            const file_mtime_sec = @as(u32, @intCast(@divTrunc(stat.mtime, std.time.ns_per_s)));
+            const file_size = @as(u32, @intCast(stat.size));
+            
+            if (file_mtime_sec != entry.mtime_sec or file_size != entry.size) {
+                detailed_stats.modified_files += 1;
+            }
+        }
+        
+        return detailed_stats;
+    }
+};
+
+/// Detailed index statistics
+pub const DetailedIndexStats = struct {
+    basic: IndexStats,
+    staged_files: u32,
+    modified_files: u32,
+    deleted_files: u32,
+    largest_file_size: u32,
+    total_tracked_size: u64,
+    
+    pub fn print(self: DetailedIndexStats) void {
+        self.basic.print();
+        std.debug.print("Working tree status:\n");
+        std.debug.print("  - Modified files: {}\n", .{self.modified_files});
+        std.debug.print("  - Deleted files: {}\n", .{self.deleted_files});
+        std.debug.print("  - Largest file: {} bytes\n", .{self.largest_file_size});
+        std.debug.print("  - Total tracked size: {} bytes\n", .{self.total_tracked_size});
+    }
+}
+    
     const stats = analyzeIndex(git_dir, platform_impl, allocator) catch |err| {
         try issues.append(try std.fmt.allocPrint(allocator, "Failed to analyze index: {}", .{err}));
         return issues.toOwnedSlice();
