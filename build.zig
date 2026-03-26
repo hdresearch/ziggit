@@ -594,6 +594,17 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(pack_deep_codec_tests).step);
 
+    // Git GC interop tests (aggressive gc, deep deltas, binary, large files, multi-pack)
+    const pack_git_gc_interop_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_git_gc_interop_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_git_gc_interop_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(pack_git_gc_interop_tests).step);
+
     // Pack format unit tests (byte-level pack construction, all object types, delta chains)
     const pack_format_unit_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_format_unit_test.zig"),
