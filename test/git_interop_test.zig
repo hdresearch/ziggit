@@ -28,6 +28,16 @@ pub fn main() !void {
         .allocator = allocator,
         .argv = &.{"git", "config", "--global", "user.email", "test@example.com"},
     }) catch {};
+    
+    // Also set system-wide for safety
+    _ = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{"git", "config", "--system", "user.name", "Test User"},
+    }) catch {};
+    _ = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{"git", "config", "--system", "user.email", "test@example.com"},
+    }) catch {};
 
     // Create temporary test directory
     const test_dir = try fs.cwd().makeOpenPath("test_tmp", .{});
@@ -73,6 +83,10 @@ fn testGitInitZiggitStatus(allocator: std.mem.Allocator, test_dir: fs.Dir) !void
     // Use git to initialize repository
     const git_init_result = try runCommand(allocator, &.{"git", "init"}, repo_path);
     defer allocator.free(git_init_result);
+    
+    // Configure git user for this repo
+    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    _ = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
     
     // Create a test file
     try repo_path.writeFile(.{.sub_path = "test.txt", .data = "Hello World\n"});
