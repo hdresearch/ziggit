@@ -67,7 +67,7 @@ pub fn decompressAndHash(
     var decompressor = std.compress.flate.Decompress.init(&adapter.new_interface, .zlib, &window_buf);
 
     var total_decompressed: usize = 0;
-    var chunk_buf: [16384]u8 = undefined;
+    var chunk_buf: [32768]u8 = undefined; // 32KB chunks
 
     while (true) {
         var bufs = [_][]u8{chunk_buf[0..]};
