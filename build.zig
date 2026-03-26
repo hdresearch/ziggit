@@ -179,6 +179,16 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/git/objects.zig"),
     });
 
+    // Clone workflow integration tests (full clone simulation: pack save + ref update + git cross-validation)
+    const clone_workflow_integration_tests = b.addTest(.{
+        .root_source_file = b.path("test/clone_workflow_integration_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    clone_workflow_integration_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+
     // Delta strict correctness tests (byte-exact verification of delta application)
     const delta_strict_correctness_tests = b.addTest(.{
         .root_source_file = b.path("test/delta_strict_correctness_test.zig"),
@@ -510,6 +520,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(pack_write_read_tests).step);
     test_step.dependOn(&b.addRunArtifact(delta_edge_cases_tests).step);
     test_step.dependOn(&b.addRunArtifact(delta_strict_correctness_tests).step);
+    test_step.dependOn(&b.addRunArtifact(clone_workflow_integration_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_index_gen_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_delta_integration_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_format_groundtruth_tests).step);
