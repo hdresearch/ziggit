@@ -201,37 +201,12 @@ pub fn build(b: *std.Build) void {
     bun_scenario_benchmark.root_module.addImport("ziggit", ziggit_module);
     const run_bun_scenario_benchmark = b.addRunArtifact(bun_scenario_benchmark);
 
-    // API vs CLI benchmark (PHASE 1 goal)
-    const api_vs_cli_bench = b.addExecutable(.{
-        .name = "api-vs-cli-bench",
-        .root_source_file = b.path("benchmarks/api_vs_cli_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    api_vs_cli_bench.root_module.addImport("ziggit", ziggit_module);
-    const run_api_vs_cli_bench = b.addRunArtifact(api_vs_cli_bench);
-    
-    const api_vs_cli_step = b.step("api-vs-cli", "Run API vs CLI benchmark");
-    api_vs_cli_step.dependOn(&run_api_vs_cli_bench.step);
-
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&run_cli_benchmark.step);
     bench_step.dependOn(&run_lib_benchmark.step);
     bench_step.dependOn(&run_bun_scenario_benchmark.step);
-    bench_step.dependOn(&run_api_vs_cli_bench.step);
 
-    // ========== DEMO EXECUTABLE ==========
-    const demo_exe = b.addExecutable(.{
-        .name = "bun-integration-demo",
-        .root_source_file = b.path("example_bun_integration.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    demo_exe.root_module.addImport("ziggit", ziggit_module);
-    
-    const run_demo = b.addRunArtifact(demo_exe);
-    const demo_step = b.step("demo", "Run bun integration demonstration");
-    demo_step.dependOn(&run_demo.step);
+
 
     // ========== WASM TARGET ==========
     const wasm_target = b.resolveTargetQuery(.{
