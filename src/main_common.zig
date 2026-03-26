@@ -439,16 +439,20 @@ fn forwardConfigToGit(allocator: std.mem.Allocator, all_args: [][]const u8, comm
                 // → git config --get [--flags] <key>
                 // → git config --get-all [--flags] <key> (if --all present)
                 var get_has_all = false;
+                var get_has_regexp = false;
                 for (all_args[rest_start..]) |a| {
                     if (std.mem.eql(u8, a, "--all")) get_has_all = true;
+                    if (std.mem.eql(u8, a, "--regexp")) get_has_regexp = true;
                 }
-                if (get_has_all) {
+                if (get_has_regexp) {
+                    try new_args.append("--get-regexp");
+                } else if (get_has_all) {
                     try new_args.append("--get-all");
                 } else {
                     try new_args.append("--get");
                 }
                 for (all_args[rest_start..]) |arg| {
-                    if (std.mem.eql(u8, arg, "--all")) continue;
+                    if (std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "--regexp")) continue;
                     try new_args.append(arg);
                 }
             } else if (std.mem.eql(u8, subcmd, "unset")) {
