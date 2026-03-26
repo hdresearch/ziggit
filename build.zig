@@ -560,6 +560,17 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(pack_idx_compat_tests).step);
 
+    // Pack save+load integration tests (full clone/fetch path)
+    const pack_save_load_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_save_and_load_integration_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_save_load_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(pack_save_load_tests).step);
+
     // New tests from other agents (may be slow, included for completeness)
     test_step.dependOn(&b.addRunArtifact(repo_api_tests).step);
     test_step.dependOn(&b.addRunArtifact(object_integrity_tests).step);
