@@ -1,471 +1,510 @@
 const std = @import("std");
-const refs = @import("refs.zig");
+const refs_mod = @import("refs.zig");
 
-/// Advanced reference management with enhanced features
-pub const AdvancedRefs = struct {
-    git_dir: []const u8,
+/// Advanced ref operations and utilities
+pub const RefsAdvanced = struct {
     allocator: std.mem.Allocator,
-    ref_cache: std.HashMap([]const u8, CachedRef, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
+    git_dir: []const u8,
     
-    pub fn init(allocator: std.mem.Allocator, git_dir: []const u8) !AdvancedRefs {
-        return AdvancedRefs{
-            .git_dir = try allocator.dupe(u8, git_dir),
+    pub fn init(allocator: std.mem.Allocator, git_dir: []const u8) !RefsAdvanced {
+        return RefsAdvanced{
             .allocator = allocator,
-            .ref_cache = std.HashMap([]const u8, CachedRef, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
+            .git_dir = try allocator.dupe(u8, git_dir),
         };
     }
     
-    pub fn deinit(self: *AdvancedRefs) void {
-        // Clear cache
-        var iter = self.ref_cache.iterator();
-        while (iter.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            entry.value_ptr.deinit(self.allocator);
-        }
-        self.ref_cache.deinit();
-        
+    pub fn deinit(self: *RefsAdvanced) void {
         self.allocator.free(self.git_dir);
     }
     
-    /// Resolve ref with caching and enhanced error handling
-    pub fn resolveRefCached(self: *AdvancedRefs, ref_name: []const u8, platform_impl: anytype) !?[]u8 {
-        // Check cache first
-        if (self.ref_cache.get(ref_name)) |cached| {
-            const current_time = std.time.timestamp();
-            if (current_time - cached.timestamp < 60) { // 1 minute cache
-                if (cached.hash) |hash| {
-                    return try self.allocator.dupe(u8, hash);
-                } else {
-                    return null;
-                }
+    /// Get detailed information about a ref including its resolution chain
+    pub fn getRefInfo(self: RefsAdvanced, ref_name: []const u8, platform_impl: anytype) !RefInfo {
+        var info = RefInfo.init(self.allocator);
+        
+        // Track resolution chain
+        var current_ref = try self.allocator.dupe(u8, ref_name);
+        defer self.allocator.free(current_ref);
+        
+        var depth: u32 = 0;
+        const max_depth = 20;
+        
+        while (depth < max_depth) {
+            defer depth += 1;
+            
+            // Add to resolution chain
+            try info.resolution_chain.append(try self.allocator.dupe(u8, current_ref));
+            
+            // Try to resolve this ref
+            const resolution = self.resolveRefOnce(current_ref, platform_impl) catch |err| {
+                info.error_msg = try std.fmt.allocPrint(self.allocator, "Failed to resolve {s}: {}", .{ current_ref, err });
+                break;
+            };
+            defer self.allocator.free(resolution.target);
+            
+            if (resolution.is_symbolic) {
+                // Continue following the chain
+                self.allocator.free(current_ref);
+                current_ref = try self.allocator.dupe(u8, resolution.target);
+                info.is_symbolic = true;
+            } else {
+                // Found final hash
+                info.final_hash = try self.allocator.dupe(u8, resolution.target);
+                break;
             }
         }
         
-        // Resolve ref and update cache
-        const resolved = refs.resolveRef(self.git_dir, ref_name, platform_impl, self.allocator) catch |err| switch (err) {
-            error.RefNotFound => null,
-            else => return err,
-        };
-        
-        // Update cache
-        const cache_key = try self.allocator.dupe(u8, ref_name);
-        const cached_ref = CachedRef{
-            .hash = if (resolved) |hash| try self.allocator.dupe(u8, hash) else null,
-            .timestamp = std.time.timestamp(),
-        };
-        
-        try self.ref_cache.put(cache_key, cached_ref);
-        
-        return resolved;
-    }
-    
-    /// Get comprehensive ref information
-    pub fn getRefInfo(self: *AdvancedRefs, ref_name: []const u8, platform_impl: anytype) !RefInfo {
-        var info = RefInfo{
-            .name = try self.allocator.dupe(u8, ref_name),
-            .hash = null,
-            .target = null,
-            .is_symbolic = false,
-            .is_tag = false,
-            .is_branch = false,
-            .is_remote = false,
-            .object_type = null,
-        };
+        if (depth >= max_depth) {
+            info.error_msg = try std.fmt.allocPrint(self.allocator, "Too many symbolic ref levels (>{} )", .{max_depth});
+        }
         
         // Determine ref type
-        if (std.mem.startsWith(u8, ref_name, "refs/heads/")) {
-            info.is_branch = true;
-        } else if (std.mem.startsWith(u8, ref_name, "refs/tags/")) {
-            info.is_tag = true;
-        } else if (std.mem.startsWith(u8, ref_name, "refs/remotes/")) {
-            info.is_remote = true;
-        }
-        
-        // Resolve the reference
-        const resolved = self.resolveRefCached(ref_name, platform_impl) catch |err| switch (err) {
-            error.RefNotFound => return info,
-            else => return err,
-        };
-        
-        if (resolved) |hash| {
-            info.hash = hash;
-            
-            // Determine object type by loading the object
-            const objects = @import("objects.zig");
-            const obj = objects.GitObject.load(hash, self.git_dir, platform_impl, self.allocator) catch |err| switch (err) {
-                error.ObjectNotFound => {
-                    info.object_type = .unknown;
-                    return info;
-                },
-                else => return err,
-            };
-            defer obj.deinit(self.allocator);
-            
-            info.object_type = switch (obj.type) {
-                .blob => .blob,
-                .tree => .tree,
-                .commit => .commit,
-                .tag => .tag,
-            };
-        }
+        info.ref_type = determineRefType(ref_name);
         
         return info;
     }
     
-    /// Get all references with their information
-    pub fn getAllRefs(self: *AdvancedRefs, platform_impl: anytype) !std.ArrayList(RefInfo) {
-        var all_refs = std.ArrayList(RefInfo).init(self.allocator);
+    /// Get all refs in the repository
+    pub fn getAllRefs(self: RefsAdvanced, platform_impl: anytype) !RefList {
+        var ref_list = RefList.init(self.allocator);
         
-        const ref_dirs = [_][]const u8{ "refs/heads", "refs/tags", "refs/remotes" };
+        // Collect from loose refs
+        try self.collectLooseRefs(&ref_list, platform_impl);
         
-        for (ref_dirs) |ref_dir| {
-            const full_ref_dir = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.git_dir, ref_dir });
-            defer self.allocator.free(full_ref_dir);
-            
-            const entries = platform_impl.fs.readDir(self.allocator, full_ref_dir) catch |err| switch (err) {
-                error.FileNotFound, error.NotSupported => continue,
+        // Collect from packed-refs
+        try self.collectPackedRefs(&ref_list, platform_impl);
+        
+        // Sort refs by name
+        std.sort.block(RefEntry, ref_list.refs.items, {}, struct {
+            fn lessThan(context: void, lhs: RefEntry, rhs: RefEntry) bool {
+                _ = context;
+                return std.mem.lessThan(u8, lhs.name, rhs.name);
+            }
+        }.lessThan);
+        
+        return ref_list;
+    }
+    
+    /// Update a ref safely (with reflog)
+    pub fn updateRef(self: RefsAdvanced, ref_name: []const u8, new_hash: []const u8, old_hash: ?[]const u8, message: []const u8, platform_impl: anytype) !void {
+        // Validate hash format
+        if (new_hash.len != 40 or !isValidHash(new_hash)) {
+            return error.InvalidHash;
+        }
+        
+        // Check if ref exists and get current value
+        const current_hash = refs_mod.resolveRef(self.git_dir, ref_name, platform_impl, self.allocator) catch null;
+        defer if (current_hash) |ch| self.allocator.free(ch);
+        
+        // Verify old hash if provided
+        if (old_hash) |expected| {
+            if (current_hash) |current| {
+                if (!std.mem.eql(u8, current, expected)) {
+                    return error.RefUpdateConflict;
+                }
+            } else {
+                // Expected specific hash but ref doesn't exist
+                return error.RefUpdateConflict;
+            }
+        }
+        
+        // Write new ref value
+        const ref_path = try self.getRefPath(ref_name);
+        defer self.allocator.free(ref_path);
+        
+        // Ensure parent directory exists
+        if (std.fs.path.dirname(ref_path)) |parent_dir| {
+            std.fs.cwd().makePath(parent_dir) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
                 else => return err,
             };
-            defer {
-                for (entries) |entry| {
-                    self.allocator.free(entry);
-                }
-                self.allocator.free(entries);
-            }
-            
-            for (entries) |entry| {
-                const full_ref_name = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ ref_dir, entry });
-                defer self.allocator.free(full_ref_name);
-                
-                const ref_info = self.getRefInfo(full_ref_name, platform_impl) catch |err| {
-                    std.debug.print("Warning: Failed to get info for ref {s}: {}\n", .{ full_ref_name, err });
-                    continue;
-                };
-                
-                try all_refs.append(ref_info);
+        }
+        
+        // Write new hash
+        try platform_impl.fs.writeFile(ref_path, new_hash);
+        
+        // Update reflog
+        try self.addReflogEntry(ref_name, current_hash orelse "0000000000000000000000000000000000000000", new_hash, message, platform_impl);
+    }
+    
+    /// Create a symbolic ref
+    pub fn createSymbolicRef(self: RefsAdvanced, ref_name: []const u8, target: []const u8, platform_impl: anytype) !void {
+        const ref_path = try self.getRefPath(ref_name);
+        defer self.allocator.free(ref_path);
+        
+        const content = try std.fmt.allocPrint(self.allocator, "ref: {s}", .{target});
+        defer self.allocator.free(content);
+        
+        try platform_impl.fs.writeFile(ref_path, content);
+    }
+    
+    /// Delete a ref
+    pub fn deleteRef(self: RefsAdvanced, ref_name: []const u8, old_hash: ?[]const u8, platform_impl: anytype) !void {
+        // Get current value for verification
+        const current_hash = refs_mod.resolveRef(self.git_dir, ref_name, platform_impl, self.allocator) catch {
+            return error.RefNotFound;
+        };
+        defer self.allocator.free(current_hash);
+        
+        // Verify old hash if provided
+        if (old_hash) |expected| {
+            if (!std.mem.eql(u8, current_hash, expected)) {
+                return error.RefDeleteConflict;
             }
         }
+        
+        // Delete the ref file
+        const ref_path = try self.getRefPath(ref_name);
+        defer self.allocator.free(ref_path);
+        
+        std.fs.cwd().deleteFile(ref_path) catch |err| switch (err) {
+            error.FileNotFound => {}, // Already deleted, that's OK
+            else => return err,
+        };
+        
+        // Add deletion to reflog
+        try self.addReflogEntry(ref_name, current_hash, "0000000000000000000000000000000000000000", "deleted", platform_impl);
+    }
+    
+    /// Get the path for a ref file
+    fn getRefPath(self: RefsAdvanced, ref_name: []const u8) ![]u8 {
+        if (std.mem.eql(u8, ref_name, "HEAD")) {
+            return try std.fmt.allocPrint(self.allocator, "{s}/HEAD", .{self.git_dir});
+        } else if (std.mem.startsWith(u8, ref_name, "refs/")) {
+            return try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.git_dir, ref_name });
+        } else {
+            return try std.fmt.allocPrint(self.allocator, "{s}/refs/heads/{s}", .{ self.git_dir, ref_name });
+        }
+    }
+    
+    /// Resolve a ref one level
+    fn resolveRefOnce(self: RefsAdvanced, ref_name: []const u8, platform_impl: anytype) !RefResolution {
+        const ref_path = try self.getRefPath(ref_name);
+        defer self.allocator.free(ref_path);
+        
+        const content = platform_impl.fs.readFile(self.allocator, ref_path) catch |err| switch (err) {
+            error.FileNotFound => {
+                // Try packed-refs
+                return self.resolveFromPackedRefs(ref_name, platform_impl);
+            },
+            else => return err,
+        };
+        defer self.allocator.free(content);
+        
+        const trimmed = std.mem.trim(u8, content, " \t\n\r");
+        
+        if (std.mem.startsWith(u8, trimmed, "ref: ")) {
+            return RefResolution{
+                .target = try self.allocator.dupe(u8, trimmed[5..]),
+                .is_symbolic = true,
+            };
+        } else if (trimmed.len == 40 and isValidHash(trimmed)) {
+            return RefResolution{
+                .target = try self.allocator.dupe(u8, trimmed),
+                .is_symbolic = false,
+            };
+        } else {
+            return error.InvalidRef;
+        }
+    }
+    
+    /// Resolve from packed-refs file
+    fn resolveFromPackedRefs(self: RefsAdvanced, ref_name: []const u8, platform_impl: anytype) !RefResolution {
+        const packed_refs_path = try std.fmt.allocPrint(self.allocator, "{s}/packed-refs", .{self.git_dir});
+        defer self.allocator.free(packed_refs_path);
+        
+        const content = platform_impl.fs.readFile(self.allocator, packed_refs_path) catch {
+            return error.RefNotFound;
+        };
+        defer self.allocator.free(content);
+        
+        var lines = std.mem.split(u8, content, "\n");
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == '^') continue;
+            
+            // Format: <hash> <ref>
+            const space_pos = std.mem.indexOf(u8, trimmed, " ") orelse continue;
+            const hash = trimmed[0..space_pos];
+            const ref = trimmed[space_pos + 1..];
+            
+            if (std.mem.eql(u8, ref, ref_name)) {
+                return RefResolution{
+                    .target = try self.allocator.dupe(u8, hash),
+                    .is_symbolic = false,
+                };
+            }
+        }
+        
+        return error.RefNotFound;
+    }
+    
+    /// Collect loose refs from filesystem
+    fn collectLooseRefs(self: RefsAdvanced, ref_list: *RefList, platform_impl: anytype) !void {
+        const refs_path = try std.fmt.allocPrint(self.allocator, "{s}/refs", .{self.git_dir});
+        defer self.allocator.free(refs_path);
+        
+        try self.walkRefsDir(refs_path, "refs", ref_list, platform_impl);
         
         // Also check HEAD
-        const head_info = self.getRefInfo("HEAD", platform_impl) catch |err| {
-            std.debug.print("Warning: Failed to get HEAD info: {}\n", .{err});
-            return all_refs;
-        };
-        try all_refs.append(head_info);
-        
-        // Check packed-refs for additional refs
-        try self.addPackedRefs(&all_refs, platform_impl);
-        
-        return all_refs;
+        if (refs_mod.resolveRef(self.git_dir, "HEAD", platform_impl, self.allocator)) |hash| {
+            defer self.allocator.free(hash);
+            try ref_list.addRef("HEAD", hash, .head);
+        } else |_| {}
     }
     
-    /// Add refs from packed-refs file
-    fn addPackedRefs(self: *AdvancedRefs, all_refs: *std.ArrayList(RefInfo), platform_impl: anytype) !void {
+    /// Recursively walk refs directory
+    fn walkRefsDir(self: RefsAdvanced, dir_path: []const u8, prefix: []const u8, ref_list: *RefList, platform_impl: anytype) !void {
+        _ = platform_impl;
+        
+        var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
+        defer dir.close();
+        
+        var iterator = dir.iterate();
+        while (iterator.next() catch null) |entry| {
+            const full_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ dir_path, entry.name });
+            defer self.allocator.free(full_path);
+            
+            const ref_name = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, entry.name });
+            defer self.allocator.free(ref_name);
+            
+            if (entry.kind == .directory) {
+                try self.walkRefsDir(full_path, ref_name, ref_list, platform_impl);
+            } else if (entry.kind == .file) {
+                // Try to read the ref
+                const content = std.fs.cwd().readFileAlloc(self.allocator, full_path, 1024) catch continue;
+                defer self.allocator.free(content);
+                
+                const trimmed = std.mem.trim(u8, content, " \t\n\r");
+                if (trimmed.len == 40 and isValidHash(trimmed)) {
+                    const ref_type = determineRefType(ref_name);
+                    try ref_list.addRef(ref_name, trimmed, ref_type);
+                }
+            }
+        }
+    }
+    
+    /// Collect refs from packed-refs file
+    fn collectPackedRefs(self: RefsAdvanced, ref_list: *RefList, platform_impl: anytype) !void {
         const packed_refs_path = try std.fmt.allocPrint(self.allocator, "{s}/packed-refs", .{self.git_dir});
         defer self.allocator.free(packed_refs_path);
-
-        const content = platform_impl.fs.readFile(self.allocator, packed_refs_path) catch |err| switch (err) {
-            error.FileNotFound => return,
-            else => return err,
-        };
+        
+        const content = platform_impl.fs.readFile(self.allocator, packed_refs_path) catch return; // File doesn't exist
         defer self.allocator.free(content);
-
+        
         var lines = std.mem.split(u8, content, "\n");
         while (lines.next()) |line| {
             const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == '^') continue;
             
-            // Skip comments and empty lines
-            if (trimmed.len == 0 or trimmed[0] == '#') continue;
+            const space_pos = std.mem.indexOf(u8, trimmed, " ") orelse continue;
+            const hash = trimmed[0..space_pos];
+            const ref_name = trimmed[space_pos + 1..];
             
-            // Skip peeled refs
-            if (trimmed[0] == '^') continue;
-            
-            // Format: "<hash> <ref_name>"
-            if (std.mem.indexOf(u8, trimmed, " ")) |space_pos| {
-                const hash = trimmed[0..space_pos];
-                const ref_path = trimmed[space_pos + 1..];
-                
-                // Check if we already have this ref
-                var found = false;
-                for (all_refs.items) |existing_ref| {
-                    if (std.mem.eql(u8, existing_ref.name, ref_path)) {
-                        found = true;
-                        break;
-                    }
-                }
-                
-                if (!found and refs.isValidHash(hash)) {
-                    var info = RefInfo{
-                        .name = try self.allocator.dupe(u8, ref_path),
-                        .hash = try self.allocator.dupe(u8, hash),
-                        .target = null,
-                        .is_symbolic = false,
-                        .is_tag = std.mem.startsWith(u8, ref_path, "refs/tags/"),
-                        .is_branch = std.mem.startsWith(u8, ref_path, "refs/heads/"),
-                        .is_remote = std.mem.startsWith(u8, ref_path, "refs/remotes/"),
-                        .object_type = .unknown, // We could determine this, but it's expensive
-                    };
-                    
-                    try all_refs.append(info);
-                }
+            if (hash.len == 40 and isValidHash(hash)) {
+                const ref_type = determineRefType(ref_name);
+                try ref_list.addRef(ref_name, hash, ref_type);
             }
         }
     }
     
-    /// Find dangling references (refs that point to non-existent objects)
-    pub fn findDanglingRefs(self: *AdvancedRefs, platform_impl: anytype) !std.ArrayList(DanglingRef) {
-        var dangling = std.ArrayList(DanglingRef).init(self.allocator);
+    /// Add entry to reflog
+    fn addReflogEntry(self: RefsAdvanced, ref_name: []const u8, old_hash: []const u8, new_hash: []const u8, message: []const u8, platform_impl: anytype) !void {
+        const reflog_dir = try std.fmt.allocPrint(self.allocator, "{s}/logs", .{self.git_dir});
+        defer self.allocator.free(reflog_dir);
         
-        var all_refs = try self.getAllRefs(platform_impl);
-        defer {
-            for (all_refs.items) |*ref_info| {
-                ref_info.deinit(self.allocator);
-            }
-            all_refs.deinit();
-        }
-        
-        const objects = @import("objects.zig");
-        
-        for (all_refs.items) |ref_info| {
-            if (ref_info.hash) |hash| {
-                // Try to load the object
-                const obj = objects.GitObject.load(hash, self.git_dir, platform_impl, self.allocator) catch |err| switch (err) {
-                    error.ObjectNotFound => {
-                        try dangling.append(DanglingRef{
-                            .ref_name = try self.allocator.dupe(u8, ref_info.name),
-                            .hash = try self.allocator.dupe(u8, hash),
-                            .error_type = .object_not_found,
-                        });
-                        continue;
-                    },
-                    error.InvalidObject => {
-                        try dangling.append(DanglingRef{
-                            .ref_name = try self.allocator.dupe(u8, ref_info.name),
-                            .hash = try self.allocator.dupe(u8, hash),
-                            .error_type = .invalid_object,
-                        });
-                        continue;
-                    },
-                    else => return err,
-                };
-                obj.deinit(self.allocator);
-            }
-        }
-        
-        return dangling;
-    }
-    
-    /// Prune dangling references
-    pub fn pruneDanglingRefs(self: *AdvancedRefs, platform_impl: anytype, dry_run: bool) !u32 {
-        const dangling = try self.findDanglingRefs(platform_impl);
-        defer {
-            for (dangling.items) |*dang| {
-                dang.deinit(self.allocator);
-            }
-            dangling.deinit();
-        }
-        
-        if (dry_run) {
-            std.debug.print("Would prune {} dangling references:\n", .{dangling.items.len});
-            for (dangling.items) |dang| {
-                std.debug.print("  {s} -> {s} ({})\n", .{ dang.ref_name, dang.hash, dang.error_type });
-            }
-            return @intCast(dangling.items.len);
-        }
-        
-        var pruned: u32 = 0;
-        for (dangling.items) |dang| {
-            // Only prune if it's safe to do so
-            if (dang.error_type == .object_not_found) {
-                const ref_path = if (std.mem.eql(u8, dang.ref_name, "HEAD"))
-                    try std.fmt.allocPrint(self.allocator, "{s}/HEAD", .{self.git_dir})
-                else
-                    try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.git_dir, dang.ref_name });
-                defer self.allocator.free(ref_path);
-                
-                platform_impl.fs.deleteFile(ref_path) catch |err| {
-                    std.debug.print("Failed to delete ref {s}: {}\n", .{ dang.ref_name, err });
-                    continue;
-                };
-                
-                std.debug.print("Pruned dangling ref: {s}\n", .{dang.ref_name});
-                pruned += 1;
-            }
-        }
-        
-        // Clear cache since we modified refs
-        self.clearCache();
-        
-        return pruned;
-    }
-    
-    /// Clear the reference cache
-    pub fn clearCache(self: *AdvancedRefs) void {
-        var iter = self.ref_cache.iterator();
-        while (iter.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            entry.value_ptr.deinit(self.allocator);
-        }
-        self.ref_cache.clearAndFree();
-    }
-    
-    /// Get reference statistics
-    pub fn getRefStats(self: *AdvancedRefs, platform_impl: anytype) !RefStats {
-        var all_refs = try self.getAllRefs(platform_impl);
-        defer {
-            for (all_refs.items) |*ref_info| {
-                ref_info.deinit(self.allocator);
-            }
-            all_refs.deinit();
-        }
-        
-        var stats = RefStats{
-            .total_refs = all_refs.items.len,
-            .branches = 0,
-            .tags = 0,
-            .remotes = 0,
-            .symbolic_refs = 0,
-            .packed_refs = 0,
-        };
-        
-        for (all_refs.items) |ref_info| {
-            if (ref_info.is_branch) stats.branches += 1;
-            if (ref_info.is_tag) stats.tags += 1;
-            if (ref_info.is_remote) stats.remotes += 1;
-            if (ref_info.is_symbolic) stats.symbolic_refs += 1;
-        }
-        
-        // Count packed refs
-        const packed_refs_path = try std.fmt.allocPrint(self.allocator, "{s}/packed-refs", .{self.git_dir});
-        defer self.allocator.free(packed_refs_path);
-
-        const content = platform_impl.fs.readFile(self.allocator, packed_refs_path) catch |err| switch (err) {
-            error.FileNotFound => return stats,
+        // Ensure logs directory exists
+        std.fs.cwd().makePath(reflog_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
             else => return err,
         };
-        defer self.allocator.free(content);
-
-        var lines = std.mem.split(u8, content, "\n");
-        while (lines.next()) |line| {
-            const trimmed = std.mem.trim(u8, line, " \t\r");
-            if (trimmed.len > 0 and trimmed[0] != '#' and trimmed[0] != '^') {
-                if (std.mem.indexOf(u8, trimmed, " ")) |_| {
-                    stats.packed_refs += 1;
-                }
-            }
+        
+        const reflog_path = if (std.mem.eql(u8, ref_name, "HEAD"))
+            try std.fmt.allocPrint(self.allocator, "{s}/logs/HEAD", .{self.git_dir})
+        else if (std.mem.startsWith(u8, ref_name, "refs/"))
+            try std.fmt.allocPrint(self.allocator, "{s}/logs/{s}", .{ self.git_dir, ref_name })
+        else
+            try std.fmt.allocPrint(self.allocator, "{s}/logs/refs/heads/{s}", .{ self.git_dir, ref_name });
+        defer self.allocator.free(reflog_path);
+        
+        // Ensure parent directory exists
+        if (std.fs.path.dirname(reflog_path)) |parent_dir| {
+            std.fs.cwd().makePath(parent_dir) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return err,
+            };
         }
         
-        return stats;
+        // Format: <old_hash> <new_hash> <name> <email> <timestamp> <timezone> \t<message>
+        const timestamp = std.time.timestamp();
+        const entry = try std.fmt.allocPrint(self.allocator, "{s} {s} Unknown <unknown@localhost> {} +0000\t{s}\n", .{ old_hash, new_hash, timestamp, message });
+        defer self.allocator.free(entry);
+        
+        // Append to reflog file
+        var file = std.fs.cwd().openFile(reflog_path, .{ .mode = .write_only }) catch {
+            // File doesn't exist, create it
+            var new_file = try std.fs.cwd().createFile(reflog_path, .{});
+            try new_file.writeAll(entry);
+            new_file.close();
+            return;
+        };
+        defer file.close();
+        
+        try file.seekToEnd();
+        try file.writeAll(entry);
     }
 };
 
-/// Cached reference entry
-const CachedRef = struct {
-    hash: ?[]const u8,
-    timestamp: i64,
-    
-    fn deinit(self: CachedRef, allocator: std.mem.Allocator) void {
-        if (self.hash) |hash| {
-            allocator.free(hash);
-        }
-    }
-};
-
-/// Reference information structure
-pub const RefInfo = struct {
-    name: []const u8,
-    hash: ?[]const u8,
-    target: ?[]const u8,
+/// Reference resolution result
+const RefResolution = struct {
+    target: []u8,
     is_symbolic: bool,
-    is_tag: bool,
-    is_branch: bool,
-    is_remote: bool,
-    object_type: ?ObjectType,
+};
+
+/// Detailed information about a ref
+pub const RefInfo = struct {
+    allocator: std.mem.Allocator,
+    resolution_chain: std.ArrayList([]u8),
+    final_hash: ?[]u8 = null,
+    is_symbolic: bool = false,
+    ref_type: RefType = .unknown,
+    error_msg: ?[]u8 = null,
     
-    pub fn deinit(self: *RefInfo, allocator: std.mem.Allocator) void {
-        allocator.free(self.name);
-        if (self.hash) |hash| allocator.free(hash);
-        if (self.target) |target| allocator.free(target);
+    pub fn init(allocator: std.mem.Allocator) RefInfo {
+        return RefInfo{
+            .allocator = allocator,
+            .resolution_chain = std.ArrayList([]u8).init(allocator),
+        };
+    }
+    
+    pub fn deinit(self: *RefInfo) void {
+        for (self.resolution_chain.items) |item| {
+            self.allocator.free(item);
+        }
+        self.resolution_chain.deinit();
+        
+        if (self.final_hash) |hash| {
+            self.allocator.free(hash);
+        }
+        
+        if (self.error_msg) |msg| {
+            self.allocator.free(msg);
+        }
+    }
+    
+    pub fn print(self: RefInfo) void {
+        std.debug.print("Reference Information:\n", .{});
+        std.debug.print("  Type: {s}\n", .{@tagName(self.ref_type)});
+        std.debug.print("  Symbolic: {}\n", .{self.is_symbolic});
+        
+        if (self.resolution_chain.items.len > 0) {
+            std.debug.print("  Resolution chain:\n", .{});
+            for (self.resolution_chain.items) |ref| {
+                std.debug.print("    -> {s}\n", .{ref});
+            }
+        }
+        
+        if (self.final_hash) |hash| {
+            std.debug.print("  Final hash: {s}\n", .{hash});
+        }
+        
+        if (self.error_msg) |msg| {
+            std.debug.print("  Error: {s}\n", .{msg});
+        }
     }
 };
 
-/// Object type enum
-const ObjectType = enum {
-    blob,
-    tree,
-    commit,
-    tag,
-    unknown,
+/// Collection of refs
+pub const RefList = struct {
+    allocator: std.mem.Allocator,
+    refs: std.ArrayList(RefEntry),
+    
+    pub fn init(allocator: std.mem.Allocator) RefList {
+        return RefList{
+            .allocator = allocator,
+            .refs = std.ArrayList(RefEntry).init(allocator),
+        };
+    }
+    
+    pub fn deinit(self: *RefList) void {
+        for (self.refs.items) |ref| {
+            ref.deinit(self.allocator);
+        }
+        self.refs.deinit();
+    }
+    
+    pub fn addRef(self: *RefList, name: []const u8, hash: []const u8, ref_type: RefType) !void {
+        try self.refs.append(RefEntry{
+            .name = try self.allocator.dupe(u8, name),
+            .hash = try self.allocator.dupe(u8, hash),
+            .ref_type = ref_type,
+        });
+    }
+    
+    /// Filter refs by type
+    pub fn filterByType(self: RefList, ref_type: RefType, allocator: std.mem.Allocator) ![]RefEntry {
+        var filtered = std.ArrayList(RefEntry).init(allocator);
+        defer filtered.deinit();
+        
+        for (self.refs.items) |ref| {
+            if (ref.ref_type == ref_type) {
+                try filtered.append(RefEntry{
+                    .name = try allocator.dupe(u8, ref.name),
+                    .hash = try allocator.dupe(u8, ref.hash),
+                    .ref_type = ref.ref_type,
+                });
+            }
+        }
+        
+        return try filtered.toOwnedSlice();
+    }
+    
+    pub fn print(self: RefList) void {
+        std.debug.print("Refs ({} total):\n", .{self.refs.items.len});
+        for (self.refs.items) |ref| {
+            std.debug.print("  {s:<30} {s} ({s})\n", .{ ref.name, ref.hash, @tagName(ref.ref_type) });
+        }
+    }
 };
 
-/// Dangling reference
-const DanglingRef = struct {
-    ref_name: []const u8,
-    hash: []const u8,
-    error_type: enum { object_not_found, invalid_object },
+pub const RefEntry = struct {
+    name: []u8,
+    hash: []u8,
+    ref_type: RefType,
     
-    fn deinit(self: *DanglingRef, allocator: std.mem.Allocator) void {
-        allocator.free(self.ref_name);
+    pub fn deinit(self: RefEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
         allocator.free(self.hash);
     }
 };
 
-/// Reference statistics
-pub const RefStats = struct {
-    total_refs: usize,
-    branches: usize,
-    tags: usize,
-    remotes: usize,
-    symbolic_refs: usize,
-    packed_refs: usize,
+pub const RefType = enum {
+    head,
+    branch,
+    tag,
+    remote,
+    unknown,
 };
 
-/// Validate all references in a repository
-pub fn validateAllRefs(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !RefValidationResult {
-    var adv_refs = try AdvancedRefs.init(allocator, git_dir);
-    defer adv_refs.deinit();
-    
-    const stats = try adv_refs.getRefStats(platform_impl);
-    const dangling = try adv_refs.findDanglingRefs(platform_impl);
-    defer {
-        for (dangling.items) |*dang| {
-            dang.deinit(allocator);
-        }
-        dangling.deinit();
+fn determineRefType(ref_name: []const u8) RefType {
+    if (std.mem.eql(u8, ref_name, "HEAD")) {
+        return .head;
+    } else if (std.mem.startsWith(u8, ref_name, "refs/heads/")) {
+        return .branch;
+    } else if (std.mem.startsWith(u8, ref_name, "refs/tags/")) {
+        return .tag;
+    } else if (std.mem.startsWith(u8, ref_name, "refs/remotes/")) {
+        return .remote;
+    } else {
+        return .unknown;
     }
-    
-    return RefValidationResult{
-        .stats = stats,
-        .dangling_count = dangling.items.len,
-        .is_healthy = dangling.items.len == 0,
-    };
 }
 
-/// Reference validation result
-pub const RefValidationResult = struct {
-    stats: RefStats,
-    dangling_count: usize,
-    is_healthy: bool,
-};
-
-test "advanced refs basic functionality" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
+fn isValidHash(hash: []const u8) bool {
+    if (hash.len != 40) return false;
     
-    // Test RefInfo structure
-    var ref_info = RefInfo{
-        .name = try allocator.dupe(u8, "refs/heads/main"),
-        .hash = try allocator.dupe(u8, "1234567890abcdef1234567890abcdef12345678"),
-        .target = null,
-        .is_symbolic = false,
-        .is_tag = false,
-        .is_branch = true,
-        .is_remote = false,
-        .object_type = .commit,
-    };
-    defer ref_info.deinit(allocator);
+    for (hash) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
     
-    try testing.expect(ref_info.is_branch);
-    try testing.expect(!ref_info.is_tag);
-    try testing.expectEqualStrings("refs/heads/main", ref_info.name);
+    return true;
 }
