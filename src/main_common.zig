@@ -442,11 +442,25 @@ fn forwardConfigToGit(allocator: std.mem.Allocator, all_args: [][]const u8, comm
                     try new_args.append(arg);
                 }
             } else if (std.mem.eql(u8, subcmd, "unset")) {
-                // git config unset [--flags] <key>
+                // git config unset [--all] [--flags] <key>
                 // → git config --unset [--flags] <key>
-                try new_args.append("--unset");
+                // → git config --unset-all [--flags] <key> (if --all present)
+                var has_all = false;
+                for (all_args[rest_start..]) |a| {
+                    if (std.mem.eql(u8, a, "--all")) {
+                        has_all = true;
+                        break;
+                    }
+                }
+                if (has_all) {
+                    try new_args.append("--unset-all");
+                } else {
+                    try new_args.append("--unset");
+                }
                 for (all_args[rest_start..]) |arg| {
-                    try new_args.append(arg);
+                    if (!std.mem.eql(u8, arg, "--all")) {
+                        try new_args.append(arg);
+                    }
                 }
             } else if (std.mem.eql(u8, subcmd, "list")) {
                 // git config list [--flags]
