@@ -622,6 +622,15 @@ pub fn build(b: *std.Build) void {
     status_porcelain_compat_tests.root_module.addImport("ziggit", ziggit_module);
     test_step.dependOn(&b.addRunArtifact(status_porcelain_compat_tests).step);
 
+    // Comprehensive Repository API tests
+    const repo_api_comprehensive_tests = b.addTest(.{
+        .root_source_file = b.path("test/repo_api_comprehensive_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    repo_api_comprehensive_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(repo_api_comprehensive_tests).step);
+
     // Refs validation tests (internal git module)
     const refs_validation_tests = b.addTest(.{
         .root_source_file = b.path("test/refs_validation_test.zig"),
