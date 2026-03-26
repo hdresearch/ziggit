@@ -45,7 +45,7 @@ test "pack file delta application" {
     try testing.expect(result_size == expected_result.len);
 }
 
-/// Test pack index version detection
+// Test pack index version detection
 test "pack index version detection" {
     const allocator = testing.allocator;
     
@@ -77,7 +77,7 @@ test "pack index version detection" {
     std.debug.print("Pack index format tests completed\n", .{});
 }
 
-/// Test object type encoding in pack files
+// Test object type encoding in pack files
 test "pack object type encoding" {
     // Test the pack object type enum values match Git's specification
     const PackObjectType = enum(u3) {
@@ -99,7 +99,7 @@ test "pack object type encoding" {
     std.debug.print("Pack object type encoding tests completed\n", .{});
 }
 
-/// Test variable-length integer encoding (used in pack files)
+// Test variable-length integer encoding (used in pack files)
 test "varint encoding" {
     const allocator = testing.allocator;
     
@@ -154,7 +154,7 @@ fn decodeVarint(data: []const u8) !struct { value: usize, bytes_read: usize } {
     return .{ .value = value, .bytes_read = bytes_read };
 }
 
-/// Test SHA-1 hash validation utility
+// Test SHA-1 hash validation utility
 test "hash validation" {
     const valid_hashes = [_][]const u8{
         "2fd4e1c67a2d28fced849ee1bb76e7391b93eb12",
