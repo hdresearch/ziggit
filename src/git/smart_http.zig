@@ -167,10 +167,11 @@ pub fn buildUploadPackRequestWithDepth(allocator: std.mem.Allocator, wants: []co
     errdefer body.deinit();
 
     // Include "shallow" and "deepen-since" in capabilities when doing shallow clone
+    // "no-progress" suppresses progress messages, reducing response size and parse work
     const capabilities = if (depth > 0)
-        "multi_ack_detailed thin-pack side-band-64k ofs-delta shallow deepen-since deepen-not"
+        "multi_ack_detailed thin-pack side-band-64k ofs-delta shallow deepen-since deepen-not no-progress"
     else
-        "multi_ack_detailed thin-pack side-band-64k ofs-delta";
+        "multi_ack_detailed thin-pack side-band-64k ofs-delta no-progress";
 
     for (wants, 0..) |want, i| {
         var line_buf: [256]u8 = undefined;
