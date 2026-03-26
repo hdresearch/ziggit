@@ -1863,6 +1863,48 @@ pub fn build(b: *std.Build) void {
     const copy_to_browser = b.addInstallFile(browser_wasm.getEmittedBin(), "../browser/ziggit-browser.wasm");
     browser_step.dependOn(&copy_to_browser.step);
 
+    // Git objects cross-validation tests (internal git module)
+    const git_objects_crossval_tests = b.addTest(.{
+        .root_source_file = b.path("test/git_objects_crossval_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    git_objects_crossval_tests.root_module.addAnonymousImport("git", .{
+        .root_source_file = b.path("src/git/git.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(git_objects_crossval_tests).step);
+
+    // Refs resolve cross-validation tests (internal git module)
+    const refs_resolve_crossval_tests = b.addTest(.{
+        .root_source_file = b.path("test/refs_resolve_crossval_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    refs_resolve_crossval_tests.root_module.addAnonymousImport("git", .{
+        .root_source_file = b.path("src/git/git.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(refs_resolve_crossval_tests).step);
+
+    // Index binary roundtrip tests (internal git module)
+    const index_binary_roundtrip_tests = b.addTest(.{
+        .root_source_file = b.path("test/index_binary_roundtrip_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    index_binary_roundtrip_tests.root_module.addAnonymousImport("git", .{
+        .root_source_file = b.path("src/git/git.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(index_binary_roundtrip_tests).step);
+
+    // Repository API git cross-validation tests
+    const repo_api_git_crossval_tests = b.addTest(.{
+        .root_source_file = b.path("test/repo_api_git_crossval_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    repo_api_git_crossval_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(repo_api_git_crossval_tests).step);
+
     // ========== UTILITY COMMANDS ==========
     
     // Clean command (manual: rm -rf zig-cache zig-out)
