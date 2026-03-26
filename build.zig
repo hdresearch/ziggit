@@ -1611,6 +1611,17 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(validation_sha1_edge_tests).step);
 
+    // Smart HTTP protocol tests
+    const smart_http_tests = b.addTest(.{
+        .root_source_file = b.path("test/smart_http_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    smart_http_tests.root_module.addAnonymousImport("smart_http", .{
+        .root_source_file = b.path("src/git/smart_http.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(smart_http_tests).step);
+
     // ========== BENCHMARKS ==========
     
     // CLI benchmark (ziggit vs git performance)
