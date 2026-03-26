@@ -11,7 +11,7 @@ pub fn getVersionString(allocator: std.mem.Allocator) ![]u8 {
         else => "",
     };
     
-    return try std.fmt.allocPrint(allocator, "ziggit version {s}{s}", .{ VERSION, target_info });
+    return try std.fmt.allocPrint(allocator, "git version {s}{s}", .{ VERSION, target_info });
 }
 
 pub fn getFullVersionInfo(allocator: std.mem.Allocator) ![]u8 {
