@@ -426,6 +426,33 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(objects_parser_unit_tests).step);
     test_step.dependOn(&b.addRunArtifact(cross_validation_tests).step);
 
+    // Status modified files tests
+    const status_modified_files_tests = b.addTest(.{
+        .root_source_file = b.path("test/status_modified_files_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    status_modified_files_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(status_modified_files_tests).step);
+
+    // Commit/checkout cycle tests
+    const commit_checkout_cycle_tests = b.addTest(.{
+        .root_source_file = b.path("test/commit_checkout_cycle_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    commit_checkout_cycle_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(commit_checkout_cycle_tests).step);
+
+    // Index write verification tests
+    const index_write_verify_tests = b.addTest(.{
+        .root_source_file = b.path("test/index_write_verify_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    index_write_verify_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(index_write_verify_tests).step);
+
     // E2E validation: ziggit writes, git reads
     const ziggit_writes_test = b.addTest(.{
         .root_source_file = b.path("test/ziggit_writes_git_reads_test.zig"),
