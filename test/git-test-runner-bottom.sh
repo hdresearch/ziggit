@@ -82,6 +82,9 @@ for test_script in \
         continue
     fi
     
+    # Clean up trash directories from previous tests to avoid /tmp filling up
+    rm -rf /tmp/git-tests/t/trash\ directory.* 2>/dev/null
+    
     OUTPUT=$(GIT_TEST_INSTALLED=/tmp/ziggit-as-git \
              GIT_TEST_TEMPLATE_DIR=/tmp/git-tests/templates/blt \
              timeout 120 bash "$test_script" 2>&1)
