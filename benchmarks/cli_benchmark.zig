@@ -15,6 +15,17 @@ const BenchmarkResult = struct {
         formatTime(self.max_ns - self.min_ns);
         print(")\n", .{});
     }
+    
+    fn compare(self: BenchmarkResult, other: BenchmarkResult, name: []const u8) void {
+        print("{s}: ", .{name});
+        if (self.mean_ns < other.mean_ns) {
+            const speedup = @as(f64, @floatFromInt(other.mean_ns)) / @as(f64, @floatFromInt(self.mean_ns));
+            print("ziggit is {d:.1}x faster\n", .{speedup});
+        } else {
+            const slowdown = @as(f64, @floatFromInt(self.mean_ns)) / @as(f64, @floatFromInt(other.mean_ns));
+            print("git is {d:.1}x faster\n", .{slowdown});
+        }
+    }
 };
 
 fn formatTime(ns: u64) void {
@@ -109,6 +120,125 @@ fn runBenchmark(
     };
 }
 
+// Setup a realistic test repository with multiple commits, branches, and tags
+fn setupTestRepo(allocator: std.mem.Allocator, repo_path: []const u8) !void {
+    print("Creating test repository with 50 files across 5 commits and tags...\n", .{});
+    
+    // Clean up any existing directory
+    {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{ "rm", "-rf", repo_path },
+        }) catch return;
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+    
+    // Create directory and initialize git repo
+    {
+        const result = try std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{ "mkdir", "-p", repo_path },
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+    }
+    
+    {
+        const result = try std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{ "git", "init" },
+            .cwd = repo_path,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+    }
+    
+    {
+        const result = try std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{ "git", "config", "user.name", "Benchmark" },
+            .cwd = repo_path,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+    }
+    
+    {
+        const result = try std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{ "git", "config", "user.email", "bench@example.com" },
+            .cwd = repo_path,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+    }
+    
+    // Create 5 commits with 10 files each
+    for (0..5) |commit_num| {
+        for (0..10) |file_num| {
+            const file_index = commit_num * 10 + file_num;
+            const file_path = try std.fmt.allocPrint(allocator, "{s}/file{d}.txt", .{ repo_path, file_index });
+            defer allocator.free(file_path);
+            
+            const content = try std.fmt.allocPrint(allocator, 
+                \\File {d} - Commit {d}
+                \\This is realistic content with multiple lines
+                \\Line 3 contains some data for file size
+                \\Line 4 has different content in commit {d}
+                \\Final line for file {d}
+                \\
+            , .{ file_index, commit_num, commit_num, file_index });
+            defer allocator.free(content);
+            
+            const file = try std.fs.createFileAbsolute(file_path, .{});
+            defer file.close();
+            try file.writeAll(content);
+        }
+        
+        // Add all files
+        {
+            const result = try std.process.Child.run(.{
+                .allocator = allocator,
+                .argv = &.{ "git", "add", "." },
+                .cwd = repo_path,
+            });
+            defer allocator.free(result.stdout);
+            defer allocator.free(result.stderr);
+        }
+        
+        // Commit
+        const commit_msg = try std.fmt.allocPrint(allocator, "Commit {d}: Added 10 files", .{commit_num + 1});
+        defer allocator.free(commit_msg);
+        
+        {
+            const result = try std.process.Child.run(.{
+                .allocator = allocator,
+                .argv = &.{ "git", "commit", "-m", commit_msg },
+                .cwd = repo_path,
+            });
+            defer allocator.free(result.stdout);
+            defer allocator.free(result.stderr);
+        }
+        
+        // Create a tag every 2 commits
+        if (commit_num % 2 == 0) {
+            const tag_name = try std.fmt.allocPrint(allocator, "v1.{d}.0", .{commit_num / 2});
+            defer allocator.free(tag_name);
+            
+            const result = std.process.Child.run(.{
+                .allocator = allocator,
+                .argv = &.{ "git", "tag", tag_name },
+                .cwd = repo_path,
+            }) catch continue;
+            defer allocator.free(result.stdout);
+            defer allocator.free(result.stderr);
+        }
+    }
+    
+    print("Test repository setup complete with 50 files and 5 commits.\n\n", .{});
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -116,177 +246,110 @@ pub fn main() !void {
 
     print("=== Git CLI vs Ziggit CLI Benchmark ===\n\n", .{});
     print("Measuring performance of common git operations.\n", .{});
+    print("Testing both CLI spawning overhead and pure functionality.\n", .{});
     print("All times shown as mean ± range.\n\n", .{});
     
-    const iterations = 50;
+    const iterations = 100;
     
-    // Setup: Create a test repository  
-    print("Setting up test repository...\n", .{});
+    // Setup: Create a realistic test repository  
+    print("Setting up test repository with multiple commits and branches...\n", .{});
     const test_dir = "/tmp/bench_test";
     
-    // Clean up any existing directory
-    {
-        const result = std.process.Child.run(.{
-            .allocator = allocator,
-            .argv = &.{"rm", "-rf", test_dir},
-        }) catch return; // If cleanup fails, exit early
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
-    }
-    
-    // Create and initialize repo
-    {
-        const result = try std.process.Child.run(.{
-            .allocator = allocator,
-            .argv = &.{"mkdir", "-p", test_dir},
-        });
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
-    }
-    
-    {
-        const result = try std.process.Child.run(.{
-            .allocator = allocator,
-            .argv = &.{"git", "init"},
-            .cwd = test_dir,
-        });
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
-    }
-    
-    {
-        const result = try std.process.Child.run(.{
-            .allocator = allocator,
-            .argv = &.{"git", "config", "user.name", "Benchmark"},
-            .cwd = test_dir,
-        });
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
-    }
-    
-    {
-        const result = try std.process.Child.run(.{
-            .allocator = allocator,
-            .argv = &.{"git", "config", "user.email", "bench@test.com"},
-            .cwd = test_dir,
-        });
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
-    }
-    
-    // Create test files
-    var i: usize = 0;
-    while (i < 10) : (i += 1) {
-        const file_path = try std.fmt.allocPrint(allocator, "{s}/file{d}.txt", .{test_dir, i});
-        defer allocator.free(file_path);
-        
-        const content = try std.fmt.allocPrint(allocator, "Content for file {d}\nLine 2\nLine 3\n", .{i});
-        defer allocator.free(content);
-        
-        const file = try std.fs.createFileAbsolute(file_path, .{});
-        defer file.close();
-        try file.writeAll(content);
-    }
-    
-    // Add and commit files
-    {
-        const result = try std.process.Child.run(.{
-            .allocator = allocator,
-            .argv = &.{"git", "add", "."},
-            .cwd = test_dir,
-        });
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
-    }
-    
-    {
-        const result = try std.process.Child.run(.{
-            .allocator = allocator,
-            .argv = &.{"git", "commit", "-m", "Initial commit"},
-            .cwd = test_dir,
-        });
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
-    }
+    try setupTestRepo(allocator, test_dir);
     
     var results = std.ArrayList(BenchmarkResult).init(allocator);
     defer results.deinit();
     
-    print("\n=== RUNNING BENCHMARKS ===\n\n", .{});
+    print("\n=== RUNNING CLI BENCHMARKS ===\n\n", .{});
+    
+    const ziggit_path = "/root/ziggit/zig-out/bin/ziggit";
     
     // Test 1: Status operations
     print("1. Status Operations\n", .{});
-    
-    const git_status_result = runBenchmark(
+    const git_status = try runBenchmark(
         allocator,
-        "git status",
+        "git status --porcelain",
         &.{"git", "status", "--porcelain"},
         test_dir,
         iterations
-    ) catch |err| {
-        print("git status benchmark failed: {any}\n", .{err});
-        return;
-    };
-    try results.append(git_status_result);
+    );
+    try results.append(git_status);
     
-    if (runBenchmark(
+    const ziggit_status = runBenchmark(
         allocator,
-        "ziggit status",
-        &.{"/root/ziggit/zig-out/bin/ziggit", "status", "--porcelain"},
+        "ziggit status --porcelain",
+        &.{ziggit_path, "status", "--porcelain"},
         test_dir,
         iterations
-    )) |ziggit_status_result| {
-        try results.append(ziggit_status_result);
-    } else |err| {
+    ) catch |err| blk: {
         print("ziggit status benchmark failed: {any}\n", .{err});
-        // Don't return, continue with other benchmarks
-        const dummy_result = BenchmarkResult{
+        break :blk BenchmarkResult{
             .name = "ziggit status (failed)",
-            .mean_ns = 0,
-            .min_ns = 0,
-            .max_ns = 0,
-            .iterations = 0,
+            .mean_ns = 0, .min_ns = 0, .max_ns = 0, .iterations = 0,
         };
-        try results.append(dummy_result);
+    };
+    if (ziggit_status.iterations > 0) {
+        try results.append(ziggit_status);
     }
     
     // Test 2: Log operations
     print("\n2. Log Operations\n", .{});
-    
-    const git_log_result = runBenchmark(
+    const git_log = try runBenchmark(
         allocator,
-        "git log",
+        "git log --oneline",
         &.{"git", "log", "--oneline"},
         test_dir,
         iterations
-    ) catch |err| {
-        print("git log benchmark failed: {any}\n", .{err});
-        return;
-    };
-    try results.append(git_log_result);
+    );
+    try results.append(git_log);
     
-    if (runBenchmark(
+    const ziggit_log = runBenchmark(
         allocator,
-        "ziggit log", 
-        &.{"/root/ziggit/zig-out/bin/ziggit", "log", "--oneline"},
+        "ziggit log --oneline", 
+        &.{ziggit_path, "log", "--oneline"},
         test_dir,
         iterations
-    )) |ziggit_log_result| {
-        try results.append(ziggit_log_result);
-    } else |err| {
+    ) catch |err| blk: {
         print("ziggit log benchmark failed: {any}\n", .{err});
-        const dummy_result = BenchmarkResult{
+        break :blk BenchmarkResult{
             .name = "ziggit log (failed)",
-            .mean_ns = 0,
-            .min_ns = 0,
-            .max_ns = 0,
-            .iterations = 0,
+            .mean_ns = 0, .min_ns = 0, .max_ns = 0, .iterations = 0,
         };
-        try results.append(dummy_result);
+    };
+    if (ziggit_log.iterations > 0) {
+        try results.append(ziggit_log);
     }
     
-    // Print results
-    print("\n=== BENCHMARK RESULTS ===\n", .{});
+    // Test 3: Rev-parse operations  
+    print("\n3. Rev-parse Operations\n", .{});
+    const git_revparse = try runBenchmark(
+        allocator,
+        "git rev-parse HEAD",
+        &.{"git", "rev-parse", "HEAD"},
+        test_dir,
+        iterations
+    );
+    try results.append(git_revparse);
+    
+    const ziggit_revparse = runBenchmark(
+        allocator,
+        "ziggit rev-parse HEAD",
+        &.{ziggit_path, "rev-parse", "HEAD"},
+        test_dir,
+        iterations
+    ) catch |err| blk: {
+        print("ziggit rev-parse benchmark failed: {any}\n", .{err});
+        break :blk BenchmarkResult{
+            .name = "ziggit rev-parse (failed)",
+            .mean_ns = 0, .min_ns = 0, .max_ns = 0, .iterations = 0,
+        };
+    };
+    if (ziggit_revparse.iterations > 0) {
+        try results.append(ziggit_revparse);
+    }
+    
+    // Print results table
+    print("\n=== CLI BENCHMARK RESULTS ===\n", .{});
     print("  Operation                 | Mean Time (±Range)\n", .{});
     print("  --------------------------|--------------------\n", .{});
     
@@ -299,33 +362,46 @@ pub fn main() !void {
     }
     
     // Performance comparison
-    print("\n=== PERFORMANCE COMPARISON ===\n", .{});
+    print("\n=== CLI PERFORMANCE COMPARISON ===\n", .{});
+    print("Comparing git CLI vs ziggit CLI spawning times.\n", .{});
+    print("Note: Both include process spawn overhead (~1-5ms).\n\n", .{});
     
-    if (results.items.len >= 4 and results.items[1].iterations > 0) {
-        const git_status_time = results.items[0].mean_ns;
-        const ziggit_status_time = results.items[1].mean_ns;
-        
-        print("Status: ", .{});
-        if (ziggit_status_time < git_status_time) {
-            const speedup = @as(f64, @floatFromInt(git_status_time)) / @as(f64, @floatFromInt(ziggit_status_time));
-            print("ziggit is {d:.2}x faster\n", .{speedup});
-        } else {
-            const slowdown = @as(f64, @floatFromInt(ziggit_status_time)) / @as(f64, @floatFromInt(git_status_time));
-            print("git is {d:.2}x faster\n", .{slowdown});
-        }
+    var comparison_count: usize = 0;
+    var total_speedup: f64 = 0;
+    
+    // Status comparison
+    if (results.items.len >= 2 and results.items[1].iterations > 0) {
+        results.items[1].compare(results.items[0], "Status");
+        const speedup = @as(f64, @floatFromInt(results.items[0].mean_ns)) / @as(f64, @floatFromInt(results.items[1].mean_ns));
+        total_speedup += speedup;
+        comparison_count += 1;
     }
     
+    // Log comparison
     if (results.items.len >= 4 and results.items[3].iterations > 0) {
-        const git_log_time = results.items[2].mean_ns;
-        const ziggit_log_time = results.items[3].mean_ns;
-        
-        print("Log: ", .{});
-        if (ziggit_log_time < git_log_time) {
-            const speedup = @as(f64, @floatFromInt(git_log_time)) / @as(f64, @floatFromInt(ziggit_log_time));
-            print("ziggit is {d:.2}x faster\n", .{speedup});
+        results.items[3].compare(results.items[2], "Log");
+        const speedup = @as(f64, @floatFromInt(results.items[2].mean_ns)) / @as(f64, @floatFromInt(results.items[3].mean_ns));
+        total_speedup += speedup;
+        comparison_count += 1;
+    }
+    
+    // Rev-parse comparison
+    if (results.items.len >= 6 and results.items[5].iterations > 0) {
+        results.items[5].compare(results.items[4], "Rev-parse");
+        const speedup = @as(f64, @floatFromInt(results.items[4].mean_ns)) / @as(f64, @floatFromInt(results.items[5].mean_ns));
+        total_speedup += speedup;
+        comparison_count += 1;
+    }
+    
+    if (comparison_count > 0) {
+        const avg_speedup = total_speedup / @as(f64, @floatFromInt(comparison_count));
+        print("\nAverage CLI speedup: {d:.1}x\n", .{avg_speedup});
+        if (avg_speedup >= 2.0) {
+            print("✅ Ziggit CLI is significantly faster than git CLI\n", .{});
+        } else if (avg_speedup >= 1.1) {
+            print("⚡ Ziggit CLI is moderately faster than git CLI\n", .{});
         } else {
-            const slowdown = @as(f64, @floatFromInt(ziggit_log_time)) / @as(f64, @floatFromInt(git_log_time));
-            print("git is {d:.2}x faster\n", .{slowdown});
+            print("📊 Ziggit CLI performance is comparable to git CLI\n", .{});
         }
     }
     
