@@ -107,12 +107,11 @@ test "lib status vs git status --porcelain" {
     
     // Test 1: Clean repository (should be empty)
     {
-        var repo = try ziggit.openRepository(repo_path);
-        defer ziggit.closeRepository(&repo);
+        var repo = try ziggit.repo_open(allocator, repo_path);
         
-        var buffer: [4096]u8 = undefined;
-        try ziggit.getStatusPorcelain(&repo, &buffer);
-        const lib_status = std.mem.trim(u8, std.mem.sliceTo(&buffer, 0), " \n\r\t");
+        const lib_status_raw = try ziggit.repo_status(&repo, allocator);
+        defer allocator.free(lib_status_raw);
+        const lib_status = std.mem.trim(u8, lib_status_raw, " \n\r\t");
         
         const git_status_raw = try git_ops.get_status_porcelain();
         defer allocator.free(git_status_raw);
@@ -125,12 +124,11 @@ test "lib status vs git status --porcelain" {
     {
         try writeFile(file1_path, "Modified content", allocator);
         
-        var repo = try ziggit.openRepository(repo_path);
-        defer ziggit.closeRepository(&repo);
+        var repo = try ziggit.repo_open(allocator, repo_path);
         
-        var buffer: [4096]u8 = undefined;
-        try ziggit.getStatusPorcelain(&repo, &buffer);
-        const lib_status = std.mem.trim(u8, std.mem.sliceTo(&buffer, 0), " \n\r\t");
+        const lib_status_raw = try ziggit.repo_status(&repo, allocator);
+        defer allocator.free(lib_status_raw);
+        const lib_status = std.mem.trim(u8, lib_status_raw, " \n\r\t");
         
         const git_status_raw = try git_ops.get_status_porcelain();
         defer allocator.free(git_status_raw);
@@ -145,12 +143,11 @@ test "lib status vs git status --porcelain" {
         defer allocator.free(file2_path);
         try writeFile(file2_path, "New file content", allocator);
         
-        var repo = try ziggit.openRepository(repo_path);
-        defer ziggit.closeRepository(&repo);
+        var repo = try ziggit.repo_open(allocator, repo_path);
         
-        var buffer: [4096]u8 = undefined;
-        try ziggit.getStatusPorcelain(&repo, &buffer);
-        const lib_status = std.mem.trim(u8, std.mem.sliceTo(&buffer, 0), " \n\r\t");
+        const lib_status_raw = try ziggit.repo_status(&repo, allocator);
+        defer allocator.free(lib_status_raw);
+        const lib_status = std.mem.trim(u8, lib_status_raw, " \n\r\t");
         
         const git_status_raw = try git_ops.get_status_porcelain();
         defer allocator.free(git_status_raw);
@@ -169,12 +166,11 @@ test "lib status vs git status --porcelain" {
         // Now delete the file
         try deleteFile(file1_path);
         
-        var repo = try ziggit.openRepository(repo_path);
-        defer ziggit.closeRepository(&repo);
+        var repo = try ziggit.repo_open(allocator, repo_path);
         
-        var buffer: [4096]u8 = undefined;
-        try ziggit.getStatusPorcelain(&repo, &buffer);
-        const lib_status = std.mem.trim(u8, std.mem.sliceTo(&buffer, 0), " \n\r\t");
+        const lib_status_raw = try ziggit.repo_status(&repo, allocator);
+        defer allocator.free(lib_status_raw);
+        const lib_status = std.mem.trim(u8, lib_status_raw, " \n\r\t");
         
         const git_status_raw = try git_ops.get_status_porcelain();
         defer allocator.free(git_status_raw);
@@ -182,4 +178,9 @@ test "lib status vs git status --porcelain" {
         
         try testing.expectEqualStrings(git_status, lib_status);
     }
+}
+
+pub fn main() !void {
+    // Run the test
+    std.testing.refAllDecls(@This());
 }
