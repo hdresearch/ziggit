@@ -595,4 +595,21 @@ pub fn build(b: *std.Build) void {
     // Install the zig benchmark executable
     const install_zig_benchmark = b.addInstallArtifact(zig_benchmark_exe, .{});
     bench_zig_step.dependOn(&install_zig_benchmark.step);
+    
+    // Final working benchmark (comprehensive git CLI measurement) 
+    const final_benchmark_exe = b.addExecutable(.{
+        .name = "final-benchmark",
+        .root_source_file = b.path("benchmarks/final_benchmark.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_final_benchmark = b.addRunArtifact(final_benchmark_exe);
+
+    const bench_final_step = b.step("bench-final", "Run comprehensive git CLI benchmark (final)");
+    bench_final_step.dependOn(&run_final_benchmark.step);
+
+    // Install the final benchmark executable
+    const install_final_benchmark = b.addInstallArtifact(final_benchmark_exe, .{});
+    bench_final_step.dependOn(&install_final_benchmark.step);
 }
