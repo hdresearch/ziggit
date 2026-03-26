@@ -769,8 +769,9 @@ fn testEmptyRepositoryEdgeCases(allocator: std.mem.Allocator, test_dir: fs.Dir) 
     const ziggit_log = runZiggitCommand(allocator, &.{"log"}, repo_path) catch |err| {
         // This is expected to fail on empty repository
         std.debug.print("  ziggit log on empty repo (expected to fail): {}\n", .{err});
+        return; // Exit early on expected failure
     };
-    if (ziggit_log.len > 0) defer allocator.free(ziggit_log);
+    defer allocator.free(ziggit_log);
 
     // Now test after creating and removing a file
     try repo_path.writeFile(.{.sub_path = "temp.txt", .data = "temporary\n"});

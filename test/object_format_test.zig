@@ -5,7 +5,7 @@ const ChildProcess = std.process.Child;
 
 // Get path to ziggit executable
 fn getZiggitPath() []const u8 {
-    return "zig-out/bin/ziggit";
+    return "/root/ziggit/zig-out/bin/ziggit";
 }
 
 // Object store format compatibility tests
@@ -298,8 +298,7 @@ fn testPackFileObjects(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
         defer allocator.free(gc_output);
     } else |err| {
         // gc might fail in some environments, continue test
-        std.debug.print("  Note: git gc failed, continuing without pack files\n", .{});
-        _ = err;
+        std.debug.print("  Note: git gc failed ({}), continuing without pack files\n", .{err});
     }
     
     // Test ziggit can still read objects (whether packed or not)

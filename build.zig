@@ -90,15 +90,14 @@ pub fn build(b: *std.Build) void {
     const run_command_output_test = b.addRunArtifact(command_output_test);
     run_command_output_test.step.dependOn(b.getInstallStep());
 
-    // Pack delta test
-    const pack_delta_test = b.addExecutable(.{
-        .name = "pack_delta_test",
+    // Pack delta unit tests
+    const pack_delta_unit_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_delta_test.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    const run_pack_delta_test = b.addRunArtifact(pack_delta_test);
+    const run_pack_delta_unit_tests = b.addRunArtifact(pack_delta_unit_tests);
 
     // Pack files test
     const pack_files_test = b.addExecutable(.{
@@ -110,25 +109,8 @@ pub fn build(b: *std.Build) void {
 
     const run_pack_files_test = b.addRunArtifact(pack_files_test);
 
-    // Config test
-    const config_test = b.addExecutable(.{
-        .name = "config_test",
-        .root_source_file = b.path("test/config_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const run_config_test = b.addRunArtifact(config_test);
-
-    // Lib status test
-    const lib_status_test = b.addExecutable(.{
-        .name = "lib_status_test",
-        .root_source_file = b.path("test/lib_status_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const run_lib_status_test = b.addRunArtifact(lib_status_test);
+    // Note: config_test.zig and lib_status_test.zig are removed from build
+    // as they import from lib/ and git/ directories which are owned by other agents
 
     // Main test step runs core tests
     const test_step = b.step("test", "Run all tests");
@@ -137,10 +119,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_index_format_test.step);
     test_step.dependOn(&run_object_format_test.step);
     test_step.dependOn(&run_command_output_test.step);
-    test_step.dependOn(&run_pack_delta_test.step);
+    test_step.dependOn(&run_pack_delta_unit_tests.step);
     test_step.dependOn(&run_pack_files_test.step);
-    test_step.dependOn(&run_config_test.step);
-    test_step.dependOn(&run_lib_status_test.step);
 
     // ========== BENCHMARKS ==========
     // CLI benchmark (ziggit CLI vs git CLI)

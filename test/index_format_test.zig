@@ -5,7 +5,7 @@ const ChildProcess = std.process.Child;
 
 // Get path to ziggit executable
 fn getZiggitPath() []const u8 {
-    return "zig-out/bin/ziggit";
+    return "/root/ziggit/zig-out/bin/ziggit";
 }
 
 // Binary index format compatibility tests
