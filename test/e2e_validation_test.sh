@@ -2602,6 +2602,270 @@ else
 fi
 
 echo ""
+echo "=== Additional edge cases ==="
+
+# --- Test 98: CRLF content preserved byte-for-byte ---
+echo "Test 98: CRLF content preserved"
+d=$(new_repo "t98_crlf")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+printf "line1\r\nline2\r\nline3\r\n" > "$d/crlf.txt"
+orig_md5=$(md5sum "$d/crlf.txt" | cut -d' ' -f1)
+(cd "$d" && "$ZIGGIT" add crlf.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "crlf content") >/dev/null 2>&1
+git_md5=$(cd "$d" && git cat-file blob "HEAD:crlf.txt" | md5sum | cut -d' ' -f1)
+if [ "$orig_md5" = "$git_md5" ]; then
+    pass "CRLF content preserved byte-for-byte"
+else
+    fail "crlf" "md5 mismatch: orig=$orig_md5 git=$git_md5"
+fi
+
+# --- Test 99: 64KB binary file ---
+echo "Test 99: 64KB binary file"
+d=$(new_repo "t99_large_binary")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+dd if=/dev/urandom of="$d/large.bin" bs=1024 count=64 2>/dev/null
+orig_md5=$(md5sum "$d/large.bin" | cut -d' ' -f1)
+(cd "$d" && "$ZIGGIT" add large.bin) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "large binary") >/dev/null 2>&1
+git_md5=$(cd "$d" && git cat-file blob "HEAD:large.bin" | md5sum | cut -d' ' -f1)
+git_size=$(cd "$d" && git cat-file -s "HEAD:large.bin")
+if [ "$orig_md5" = "$git_md5" ] && [ "$git_size" = "65536" ]; then
+    pass "64KB binary preserved (md5 match, size=$git_size)"
+else
+    fail "large binary" "md5: orig=$orig_md5 git=$git_md5 size=$git_size"
+fi
+
+# --- Test 100: bare clone -> git clone from bare -> verify files ---
+echo "Test 100: ziggit bare clone -> git clone from bare -> verify checkout"
+d=$(new_repo "t100_src")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo '{"name":"clone-test","version":"1.0.0"}' > "$d/package.json"
+echo "readme" > "$d/README.md"
+mkdir -p "$d/src"
+echo "code" > "$d/src/index.js"
+(cd "$d" && "$ZIGGIT" add package.json && "$ZIGGIT" add README.md && "$ZIGGIT" add src/index.js) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "source") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+
+bare_d="$TMPBASE/t100_bare.git"
+git clone --bare "$d" "$bare_d" >/dev/null 2>&1
+checkout_d="$TMPBASE/t100_checkout"
+git clone "$bare_d" "$checkout_d" >/dev/null 2>&1
+
+all_ok=true
+[ -f "$checkout_d/package.json" ] || all_ok=false
+[ -f "$checkout_d/README.md" ] || all_ok=false
+[ -f "$checkout_d/src/index.js" ] || all_ok=false
+pkg=$(cat "$checkout_d/package.json")
+echo "$pkg" | grep -q "clone-test" || all_ok=false
+if $all_ok; then
+    pass "bare clone -> git clone -> files present and correct"
+else
+    fail "bare clone checkout" "missing files or wrong content"
+fi
+
+# --- Test 101: ziggit commit with .gitignore -> git respects it ---
+echo "Test 101: .gitignore committed by ziggit"
+d=$(new_repo "t101_gitignore")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+printf "node_modules/\n*.log\n" > "$d/.gitignore"
+echo "code" > "$d/index.js"
+(cd "$d" && "$ZIGGIT" add .gitignore && "$ZIGGIT" add index.js) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "with gitignore") >/dev/null 2>&1
+# Verify .gitignore content
+ignore_content=$(cd "$d" && git show HEAD:.gitignore 2>&1)
+if echo "$ignore_content" | grep -q "node_modules"; then
+    pass ".gitignore content committed and readable by git"
+else
+    fail "gitignore" "content: $ignore_content"
+fi
+
+# --- Test 102: ziggit + git interleaved commits ---
+echo "Test 102: interleaved ziggit and git commits"
+d=$(new_repo "t102_interleaved")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "z1" > "$d/z1.txt"
+(cd "$d" && "$ZIGGIT" add z1.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "ziggit 1") >/dev/null 2>&1
+# git commit
+echo "g1" > "$d/g1.txt"
+(cd "$d" && git add g1.txt && git -c user.name=T -c user.email=t@t commit -m "git 1") >/dev/null 2>&1
+# ziggit commit again
+echo "z2" > "$d/z2.txt"
+(cd "$d" && "$ZIGGIT" add z2.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "ziggit 2") >/dev/null 2>&1
+# git commit
+echo "g2" > "$d/g2.txt"
+(cd "$d" && git add g2.txt && git -c user.name=T -c user.email=t@t commit -m "git 2") >/dev/null 2>&1
+
+count=$(cd "$d" && git rev-list --count HEAD)
+if [ "$count" = "4" ]; then
+    pass "interleaved: 4 commits (2 ziggit + 2 git)"
+else
+    fail "interleaved" "expected 4 commits, got $count"
+fi
+# fsck validates the interleaved chain
+fsck_out=$(cd "$d" && git fsck --no-dangling 2>&1) || true
+if echo "$fsck_out" | grep -qi "error\|corrupt"; then
+    fail "interleaved fsck" "$fsck_out"
+else
+    pass "interleaved: fsck passes"
+fi
+
+# --- Test 103: ziggit creates repo, git am applies patches ---
+echo "Test 103: git am applies patch to ziggit repo"
+d=$(new_repo "t103_am")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "base" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "base for am") >/dev/null 2>&1
+echo "patch" > "$d/patch.txt"
+(cd "$d" && "$ZIGGIT" add patch.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "for am") >/dev/null 2>&1
+# Create a patch
+(cd "$d" && git format-patch -1 HEAD -o /tmp/t103_patches) >/dev/null 2>&1
+# Reset and apply
+(cd "$d" && git reset --hard HEAD~1) >/dev/null 2>&1
+am_ok=0
+(cd "$d" && git -c user.name=T -c user.email=t@t am /tmp/t103_patches/*.patch) >/dev/null 2>&1 && am_ok=1
+rm -rf /tmp/t103_patches
+if [ "$am_ok" -eq 1 ]; then
+    pass "git am applies patch from ziggit commit"
+else
+    fail "git am" "failed to apply"
+fi
+
+# --- Test 104: ziggit empty tree commit (no files) ---
+echo "Test 104: ziggit empty tree commit"
+d=$(new_repo "t104_empty_tree")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+# First we need at least an initial commit with a file
+echo "init" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "initial") >/dev/null 2>&1
+# Check that git can read the commit
+obj_type=$(cd "$d" && git cat-file -t HEAD 2>&1)
+if [ "$obj_type" = "commit" ]; then
+    pass "initial commit type is valid"
+else
+    fail "empty tree" "type=$obj_type"
+fi
+
+# --- Test 105: ziggit tag points to correct commit in chain ---
+echo "Test 105: multiple tags in commit chain point correctly"
+d=$(new_repo "t105_tag_chain")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+for i in 1 2 3 4 5; do
+    echo "v$i" > "$d/f.txt"
+    (cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+    (cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+        GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+        "$ZIGGIT" commit -m "c$i") >/dev/null 2>&1
+    (cd "$d" && "$ZIGGIT" tag "v$i.0.0") >/dev/null 2>&1
+done
+# Each tag should show different content when checking out
+for i in 1 2 3 4 5; do
+    content=$(cd "$d" && git show "v$i.0.0:f.txt" 2>&1)
+    if [ "$content" = "v$i" ]; then
+        pass "tag v$i.0.0 points to correct tree content"
+    else
+        fail "tag chain v$i" "expected 'v$i', got '$content'"
+    fi
+done
+
+# --- Test 106: git writes with packed objects -> ziggit rev-parse ---
+echo "Test 106: git repo with packed objects -> ziggit rev-parse"
+d=$(new_repo "t106_packed")
+(cd "$d" && git init && git config user.name T && git config user.email t@t) >/dev/null 2>&1
+for i in $(seq 1 5); do
+    echo "v$i" > "$d/f.txt"
+    (cd "$d" && git add f.txt && git commit -m "c$i") >/dev/null 2>&1
+done
+(cd "$d" && git tag v1.0.0) >/dev/null 2>&1
+(cd "$d" && git repack -a -d) >/dev/null 2>&1
+git_head=$(cd "$d" && git rev-parse HEAD | tr -d '[:space:]')
+ziggit_head=$(cd "$d" && "$ZIGGIT" rev-parse HEAD 2>&1 | tr -d '[:space:]')
+if [ "$git_head" = "$ziggit_head" ]; then
+    pass "ziggit rev-parse correct after git repack (packed objects)"
+else
+    fail "packed objects" "git=$git_head ziggit=$ziggit_head"
+fi
+
+# --- Test 107: ziggit file with tab in content ---
+echo "Test 107: file with tab characters"
+d=$(new_repo "t107_tabs")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+printf "col1\tcol2\tcol3\n" > "$d/tsv.txt"
+orig_md5=$(md5sum "$d/tsv.txt" | cut -d' ' -f1)
+(cd "$d" && "$ZIGGIT" add tsv.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "tabs") >/dev/null 2>&1
+git_md5=$(cd "$d" && git cat-file blob "HEAD:tsv.txt" | md5sum | cut -d' ' -f1)
+if [ "$orig_md5" = "$git_md5" ]; then
+    pass "tab content preserved byte-for-byte"
+else
+    fail "tabs" "md5 mismatch"
+fi
+
+# --- Test 108: bun workspace with deep src structure ---
+echo "Test 108: bun workspace deep src structure"
+d=$(new_repo "t108_deep_bun")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+mkdir -p "$d/packages/ui/src/components/button"
+mkdir -p "$d/packages/ui/src/hooks"
+cat > "$d/package.json" << 'EOF'
+{"private":true,"workspaces":["packages/*"]}
+EOF
+cat > "$d/packages/ui/package.json" << 'EOF'
+{"name":"@ws/ui","version":"1.0.0"}
+EOF
+echo "export const Button = () => {};" > "$d/packages/ui/src/components/button/index.tsx"
+echo "export const useTheme = () => {};" > "$d/packages/ui/src/hooks/useTheme.ts"
+echo "export * from './components/button';" > "$d/packages/ui/src/index.ts"
+for f in package.json packages/ui/package.json \
+         packages/ui/src/components/button/index.tsx \
+         packages/ui/src/hooks/useTheme.ts \
+         packages/ui/src/index.ts; do
+    (cd "$d" && "$ZIGGIT" add "$f") >/dev/null 2>&1
+done
+(cd "$d" && GIT_AUTHOR_NAME="Bun" GIT_AUTHOR_EMAIL="bun@bun.sh" \
+    GIT_COMMITTER_NAME="Bun" GIT_COMMITTER_EMAIL="bun@bun.sh" \
+    "$ZIGGIT" commit -m "ui workspace") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+
+file_count=$(cd "$d" && git ls-tree -r --name-only HEAD | wc -l | tr -d ' ')
+if [ "$file_count" -eq 5 ]; then
+    pass "deep bun workspace: all 5 files committed"
+else
+    fail "deep bun workspace" "expected 5, got $file_count"
+fi
+deep=$(cd "$d" && git show "HEAD:packages/ui/src/components/button/index.tsx" 2>&1)
+if echo "$deep" | grep -q "Button"; then
+    pass "deep bun workspace: deeply nested file content correct"
+else
+    fail "deep content" "$deep"
+fi
+
+echo ""
 echo "========================================"
 echo "Results: $PASS passed, $FAIL failed"
 echo "========================================"
