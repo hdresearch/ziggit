@@ -73,8 +73,33 @@ pub fn getCurrentCommit(git_dir: []const u8, platform_impl: anytype, allocator: 
     }
 }
 
+/// Get the hash for any ref (including remote tracking refs)
+pub fn getRef(git_dir: []const u8, ref_name: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![]u8 {
+    const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_name });
+    defer allocator.free(ref_path);
+
+    const content = platform_impl.fs.readFile(allocator, ref_path) catch |err| switch (err) {
+        error.FileNotFound => {
+            // Try to find it in packed-refs
+            return readFromPackedRefs(git_dir, ref_name, platform_impl, allocator);
+        },
+        else => return err,
+    };
+    defer allocator.free(content);
+
+    const hash = std.mem.trim(u8, content, " \t\n\r");
+    if (hash.len == 40 and isValidHash(hash)) {
+        return try allocator.dupe(u8, hash);
+    } else {
+        return error.InvalidHash;
+    }
+}
+
 pub fn updateRef(git_dir: []const u8, ref_name: []const u8, hash: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !void {
-    const ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_dir, ref_name });
+    const ref_path = if (std.mem.startsWith(u8, ref_name, "refs/"))
+        try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_name })
+    else
+        try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_dir, ref_name });
     defer allocator.free(ref_path);
 
     // Create parent directory if it doesn't exist
