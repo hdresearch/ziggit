@@ -11,6 +11,15 @@ pub const RefUpdate = struct {
 /// For non-bare repos: writes refs/remotes/origin/* for branches, refs/tags/* for tags, and sets HEAD.
 pub fn updateRefsAfterClone(allocator: std.mem.Allocator, git_dir: []const u8, ref_updates: []const RefUpdate, bare: bool) !void {
     var head_ref: ?[]const u8 = null;
+    var head_hash: ?[]const u8 = null;
+
+    // First pass: find HEAD hash if present (remote tells us what the default branch is)
+    for (ref_updates) |ref| {
+        if (std.mem.eql(u8, ref.name, "HEAD")) {
+            head_hash = ref.hash;
+            break;
+        }
+    }
 
     for (ref_updates) |ref| {
         if (std.mem.startsWith(u8, ref.name, "refs/heads/")) {
@@ -28,10 +37,19 @@ pub fn updateRefsAfterClone(allocator: std.mem.Allocator, git_dir: []const u8, r
             if (head_ref == null) {
                 head_ref = ref.name;
             }
-            // Prefer "main" or "master" as HEAD
+            // If remote's HEAD hash matches this branch, prefer it
+            if (head_hash) |hh| {
+                if (std.mem.eql(u8, ref.hash, hh)) {
+                    head_ref = ref.name;
+                }
+            }
+            // Prefer "main" or "master" as fallback
             const branch = ref.name["refs/heads/".len..];
             if (std.mem.eql(u8, branch, "main") or std.mem.eql(u8, branch, "master")) {
-                head_ref = ref.name;
+                // Only override if we don't already have a HEAD-hash match
+                if (head_hash == null) {
+                    head_ref = ref.name;
+                }
             }
         } else if (std.mem.startsWith(u8, ref.name, "refs/tags/")) {
             // Tags always go to refs/tags/* in both bare and non-bare
