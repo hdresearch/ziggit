@@ -151,9 +151,21 @@ pub fn build(b: *std.Build) void {
     bench_step.dependOn(&b.addRunArtifact(bun_scenario_benchmark).step);
     bench_step.dependOn(&b.addRunArtifact(api_vs_cli_benchmark).step);
 
+    // Micro-optimization benchmark - detailed component analysis
+    const micro_optimization_benchmark = b.addExecutable(.{
+        .name = "micro_optimization_benchmark",
+        .root_source_file = b.path("benchmarks/micro_optimization_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    micro_optimization_benchmark.root_module.addImport("ziggit", ziggit_module);
+
     // Individual benchmark steps for focused testing
     const bench_api_step = b.step("bench-api", "Run API vs CLI benchmark (proves 100-1000x speedup)");
     bench_api_step.dependOn(&b.addRunArtifact(api_vs_cli_benchmark).step);
+    
+    const bench_micro_step = b.step("bench-micro", "Run micro-optimization analysis");
+    bench_micro_step.dependOn(&b.addRunArtifact(micro_optimization_benchmark).step);
 
     // ========== WASM TARGET ==========
     const wasm_target = b.resolveTargetQuery(.{
