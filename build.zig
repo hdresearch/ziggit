@@ -1493,6 +1493,15 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(objects_hash_store_tests).step);
 
+    // Sequential operations tests (parent chains, subdirs, tags, status transitions, clone/fetch)
+    const sequential_ops_tests = b.addTest(.{
+        .root_source_file = b.path("test/sequential_operations_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sequential_ops_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(sequential_ops_tests).step);
+
     // ========== BENCHMARKS ==========
     
     // CLI benchmark (ziggit vs git performance)
