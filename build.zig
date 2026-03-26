@@ -72,7 +72,7 @@ pub fn build(b: *std.Build) void {
     git_interop_test.root_module.addImport("ziggit", ziggit_module);
     const run_git_interop_test = b.addRunArtifact(git_interop_test);
 
-    // Additional integration tests
+    // Broken pipe test
     const broken_pipe_test = b.addExecutable(.{
         .name = "broken_pipe_test",
         .root_source_file = b.path("test/broken_pipe_test.zig"),
@@ -82,11 +82,22 @@ pub fn build(b: *std.Build) void {
     broken_pipe_test.root_module.addImport("ziggit", ziggit_module);
     const run_broken_pipe_test = b.addRunArtifact(broken_pipe_test);
 
+    // Integration test suite
+    const integration_test_suite = b.addExecutable(.{
+        .name = "integration_test_suite",
+        .root_source_file = b.path("test/integration_test_suite.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    integration_test_suite.root_module.addImport("ziggit", ziggit_module);
+    const run_integration_test_suite = b.addRunArtifact(integration_test_suite);
+
     // Test step runs all tests
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_platform_tests.step);
     test_step.dependOn(&run_git_interop_test.step);
     test_step.dependOn(&run_broken_pipe_test.step);
+    test_step.dependOn(&run_integration_test_suite.step);
 
     // ========== BENCHMARKS ==========
     const cli_benchmark = b.addExecutable(.{
@@ -121,17 +132,7 @@ pub fn build(b: *std.Build) void {
     bench_step.dependOn(&run_bun_scenario_benchmark.step);
 
 
-    const api_vs_cli_bench = b.addExecutable(.{
-        .name = "api_vs_cli_bench",
-        .root_source_file = b.path("benchmarks/api_vs_cli_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    api_vs_cli_bench.root_module.addImport("ziggit", ziggit_module);
-    const run_api_vs_cli_bench = b.addRunArtifact(api_vs_cli_bench);
 
-    const api_bench_step = b.step("bench-api", "Run API vs CLI benchmark (PHASE 1)");
-    api_bench_step.dependOn(&run_api_vs_cli_bench.step);
 
     const debug_vs_release_bench = b.addExecutable(.{
         .name = "debug_vs_release_bench",
