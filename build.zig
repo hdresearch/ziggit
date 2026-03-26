@@ -216,7 +216,96 @@ pub fn build(b: *std.Build) void {
     bench_step.dependOn(&run_lib_benchmark.step);
     bench_step.dependOn(&run_bun_scenario_benchmark.step);
     
-
+    // API vs CLI benchmark (minimal essential benchmark)
+    const api_vs_cli_benchmark = b.addExecutable(.{
+        .name = "api_vs_cli_bench",
+        .root_source_file = b.path("benchmarks/api_vs_cli_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    api_vs_cli_benchmark.root_module.addImport("ziggit", ziggit_module);
+    const run_api_vs_cli_benchmark = b.addRunArtifact(api_vs_cli_benchmark);
+    
+    const perf_step = b.step("perf", "Run performance benchmark");
+    perf_step.dependOn(&run_api_vs_cli_benchmark.step);
+    
+    // Status micro-benchmark to analyze bottlenecks
+    const status_micro_benchmark = b.addExecutable(.{
+        .name = "status_micro_bench",
+        .root_source_file = b.path("benchmarks/status_micro_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    status_micro_benchmark.root_module.addImport("ziggit", ziggit_module);
+    const run_status_micro_benchmark = b.addRunArtifact(status_micro_benchmark);
+    
+    const micro_step = b.step("micro", "Run status micro-benchmark");
+    micro_step.dependOn(&run_status_micro_benchmark.step);
+    
+    // Simple status analysis
+    const simple_status_analysis = b.addExecutable(.{
+        .name = "simple_status_analysis",
+        .root_source_file = b.path("benchmarks/simple_status_analysis.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    simple_status_analysis.root_module.addImport("ziggit", ziggit_module);
+    const run_simple_status_analysis = b.addRunArtifact(simple_status_analysis);
+    
+    const analyze_step = b.step("analyze", "Run simple status analysis");
+    analyze_step.dependOn(&run_simple_status_analysis.step);
+    
+    // Debug add operation
+    const debug_add_operation = b.addExecutable(.{
+        .name = "debug_add_operation",
+        .root_source_file = b.path("benchmarks/debug_add_operation.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    debug_add_operation.root_module.addImport("ziggit", ziggit_module);
+    const run_debug_add_operation = b.addRunArtifact(debug_add_operation);
+    
+    const debug_step = b.step("debug-add", "Debug add operation");
+    debug_step.dependOn(&run_debug_add_operation.step);
+    
+    // Debug benchmark setup
+    const debug_benchmark_setup = b.addExecutable(.{
+        .name = "debug_benchmark_setup",
+        .root_source_file = b.path("benchmarks/debug_benchmark_setup.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    debug_benchmark_setup.root_module.addImport("ziggit", ziggit_module);
+    const run_debug_benchmark_setup = b.addRunArtifact(debug_benchmark_setup);
+    
+    const debug_bench_step = b.step("debug-bench", "Debug benchmark setup");
+    debug_bench_step.dependOn(&run_debug_benchmark_setup.step);
+    
+    // Debug scale test
+    const debug_scale_test = b.addExecutable(.{
+        .name = "debug_scale_test",
+        .root_source_file = b.path("benchmarks/debug_scale_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    debug_scale_test.root_module.addImport("ziggit", ziggit_module);
+    const run_debug_scale_test = b.addRunArtifact(debug_scale_test);
+    
+    const debug_scale_step = b.step("debug-scale", "Debug scale test (100 files)");
+    debug_scale_step.dependOn(&run_debug_scale_test.step);
+    
+    // Debug index corruption
+    const debug_index_corruption = b.addExecutable(.{
+        .name = "debug_index_corruption",
+        .root_source_file = b.path("benchmarks/debug_index_corruption.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    debug_index_corruption.root_module.addImport("ziggit", ziggit_module);
+    const run_debug_index_corruption = b.addRunArtifact(debug_index_corruption);
+    
+    const debug_index_step = b.step("debug-index", "Debug index corruption");
+    debug_index_step.dependOn(&run_debug_index_corruption.step);
 
 
     // ========== WASM TARGET ==========
