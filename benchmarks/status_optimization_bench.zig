@@ -1,9 +1,10 @@
-// Status Optimization Benchmark - Before and After
-// Measures the current slow status vs optimized version
+// Status-specific optimization benchmark
+// Focus: Measure impact of specific optimizations on statusPorcelain performance
 const std = @import("std");
+const Repository = @import("ziggit").Repository;
 
-const ITERATIONS = 10; // Fewer iterations since status is slow
-const TEST_REPO_PATH = "/tmp/ziggit_status_opt_bench";
+const ITERATIONS = 100;
+const TEST_REPO_PATH = "/tmp/ziggit_status_bench";
 
 const Stats = struct {
     min: u64,
@@ -33,99 +34,165 @@ const Stats = struct {
     }
 };
 
-fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8, cwd: ?[]const u8) !std.process.Child.RunResult {
-    return try std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = argv,
-        .cwd = cwd,
-    });
-}
-
-fn setupLargeTestRepo(allocator: std.mem.Allocator) !void {
-    std.debug.print("Setting up large test repository for status optimization benchmark...\n", .{});
-    
-    // Clean up any existing repo
+fn setupLargeTestRepo(allocator: std.mem.Allocator, file_count: u32) !void {
     std.fs.deleteTreeAbsolute(TEST_REPO_PATH) catch {};
+    std.fs.makeDirAbsolute(TEST_REPO_PATH) catch {};
     
-    // Create new repo
-    try std.fs.makeDirAbsolute(TEST_REPO_PATH);
+    var repo = try Repository.init(allocator, TEST_REPO_PATH);
+    defer repo.close();
     
-    // Initialize git repo
-    {
-        const result = try runCommand(allocator, &.{"git", "init"}, TEST_REPO_PATH);
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
-    }
-    {
-        const result = try runCommand(allocator, &.{"git", "config", "user.name", "Benchmark User"}, TEST_REPO_PATH);
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
-    }
-    {
-        const result = try runCommand(allocator, &.{"git", "config", "user.email", "bench@example.com"}, TEST_REPO_PATH);
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
-    }
-    
-    // Create 100 files (like bun's node_modules would have many files)
+    // Create many files to stress-test the status operation
     var i: u32 = 0;
-    while (i < 100) : (i += 1) {
-        const filename = try std.fmt.allocPrint(allocator, "{s}/file{d}.txt", .{TEST_REPO_PATH, i});
+    while (i < file_count) : (i += 1) {
+        const filename = try std.fmt.allocPrint(allocator, "file{d}.txt", .{i});
         defer allocator.free(filename);
         
-        const file = try std.fs.createFileAbsolute(filename, .{ .truncate = true });
+        const filepath = try std.fmt.allocPrint(allocator, "{s}/{s}", .{TEST_REPO_PATH, filename});
+        defer allocator.free(filepath);
+        
+        const file = try std.fs.createFileAbsolute(filepath, .{ .truncate = true });
         defer file.close();
         
-        // Create larger files (like real source files)
-        const content = try std.fmt.allocPrint(allocator, 
-            \\// File {d}
-            \\const std = @import("std");
-            \\
-            \\pub fn main() !void {{
-            \\    var gpa = std.heap.GeneralPurposeAllocator(.{{}}{{}};
-            \\    defer _ = gpa.deinit();
-            \\    const allocator = gpa.allocator();
-            \\    
-            \\    const result = try std.fmt.allocPrint(allocator, "Hello from file {{d}}!", .{{{d}}});
-            \\    defer allocator.free(result);
-            \\    std.debug.print("{{s}}\n", .{{result}});
-            \\}}
-        , .{i, i});
+        const content = try std.fmt.allocPrint(allocator, "Content of file {d}\n", .{i});
         defer allocator.free(content);
         
         try file.writeAll(content);
+        try repo.add(filename);
     }
     
-    // Add all files and commit (creates a large index)
-    {
-        const result = try runCommand(allocator, &.{"git", "add", "."}, TEST_REPO_PATH);
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
-    }
-    {
-        const result = try runCommand(allocator, &.{"git", "commit", "-m", "Initial commit with 100 files"}, TEST_REPO_PATH);
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
-    }
-    
-    std.debug.print("Created repository with 100 files for status optimization testing.\n", .{});
+    _ = try repo.commit("Initial commit with many files", "Bench User", "bench@example.com");
 }
 
-fn printStats(name: []const u8, stats: Stats) void {
-    const min_ms = @as(f64, @floatFromInt(stats.min)) / 1000000.0;
-    const max_ms = @as(f64, @floatFromInt(stats.max)) / 1000000.0;
-    const mean_ms = @as(f64, @floatFromInt(stats.mean)) / 1000000.0;
-    const median_ms = @as(f64, @floatFromInt(stats.median)) / 1000000.0;
-    const p95_ms = @as(f64, @floatFromInt(stats.p95)) / 1000000.0;
-    const p99_ms = @as(f64, @floatFromInt(stats.p99)) / 1000000.0;
+fn benchmarkStatusByFileCount(allocator: std.mem.Allocator) !void {
+    const file_counts = [_]u32{ 10, 50, 100, 500 };
     
-    std.debug.print("{s}:\n", .{name});
-    std.debug.print("  min:    {d:.1}ms\n", .{min_ms});
-    std.debug.print("  median: {d:.1}ms\n", .{median_ms});
-    std.debug.print("  mean:   {d:.1}ms\n", .{mean_ms});
-    std.debug.print("  p95:    {d:.1}ms\n", .{p95_ms});
-    std.debug.print("  p99:    {d:.1}ms\n", .{p99_ms});
-    std.debug.print("  max:    {d:.1}ms\n", .{max_ms});
+    std.debug.print("\n=== STATUS PERFORMANCE BY FILE COUNT ===\n", .{});
+    
+    for (file_counts) |file_count| {
+        std.debug.print("\nBenchmarking with {d} files:\n", .{file_count});
+        
+        try setupLargeTestRepo(allocator, file_count);
+        
+        var repo = try Repository.open(allocator, TEST_REPO_PATH);
+        defer repo.close();
+        
+        var times = try allocator.alloc(u64, ITERATIONS);
+        defer allocator.free(times);
+        
+        // Benchmark statusPorcelain
+        for (0..ITERATIONS) |i| {
+            const start = std.time.nanoTimestamp();
+            
+            const status = try repo.statusPorcelain(allocator);
+            defer allocator.free(status);
+            
+            const end = std.time.nanoTimestamp();
+            times[i] = @intCast(end - start);
+        }
+        
+        const stats = Stats.compute(times);
+        const mean_us = @as(f64, @floatFromInt(stats.mean)) / 1000.0;
+        const per_file_us = mean_us / @as(f64, @floatFromInt(file_count));
+        
+        std.debug.print("  Files: {d}, Mean: {d:.2}μs, Per-file: {d:.2}μs\n", .{ file_count, mean_us, per_file_us });
+    }
+}
+
+fn benchmarkGitStatusByFileCount(allocator: std.mem.Allocator) !void {
+    const file_counts = [_]u32{ 10, 50, 100, 500 };
+    
+    std.debug.print("\n=== GIT CLI STATUS BY FILE COUNT ===\n", .{});
+    
+    for (file_counts) |file_count| {
+        try setupLargeTestRepo(allocator, file_count);
+        
+        var times = try allocator.alloc(u64, 25); // Fewer iterations for CLI
+        defer allocator.free(times);
+        
+        for (0..25) |i| {
+            const start = std.time.nanoTimestamp();
+            
+            var child = std.process.Child.init(&[_][]const u8{ "git", "status", "--porcelain" }, allocator);
+            child.cwd = TEST_REPO_PATH;
+            child.stdout_behavior = .Pipe;
+            child.stderr_behavior = .Pipe;
+            
+            try child.spawn();
+            
+            const output = try child.stdout.?.readToEndAlloc(allocator, 100 * 1024);
+            defer allocator.free(output);
+            
+            _ = try child.wait();
+            
+            const end = std.time.nanoTimestamp();
+            times[i] = @intCast(end - start);
+        }
+        
+        const stats = Stats.compute(times);
+        const mean_us = @as(f64, @floatFromInt(stats.mean)) / 1000.0;
+        const per_file_us = mean_us / @as(f64, @floatFromInt(file_count));
+        
+        std.debug.print("  Files: {d}, Mean: {d:.2}μs, Per-file: {d:.2}μs\n", .{ file_count, mean_us, per_file_us });
+    }
+}
+
+fn benchmarkCleanVsDirtyStatus(allocator: std.mem.Allocator) !void {
+    std.debug.print("\n=== CLEAN VS DIRTY STATUS COMPARISON ===\n", .{});
+    
+    try setupLargeTestRepo(allocator, 100);
+    
+    var repo = try Repository.open(allocator, TEST_REPO_PATH);
+    defer repo.close();
+    
+    var times = try allocator.alloc(u64, ITERATIONS);
+    defer allocator.free(times);
+    
+    // Benchmark clean status (all files unchanged)
+    std.debug.print("\nClean repository (all files unchanged):\n", .{});
+    for (0..ITERATIONS) |i| {
+        const start = std.time.nanoTimestamp();
+        
+        const status = try repo.statusPorcelain(allocator);
+        defer allocator.free(status);
+        
+        const end = std.time.nanoTimestamp();
+        times[i] = @intCast(end - start);
+    }
+    
+    const clean_stats = Stats.compute(times);
+    const clean_mean = @as(f64, @floatFromInt(clean_stats.mean)) / 1000.0;
+    std.debug.print("  Clean status mean: {d:.2}μs\n", .{clean_mean});
+    
+    // Modify some files to make repository dirty
+    const dirty_files = [_][]const u8{ "file1.txt", "file5.txt", "file10.txt" };
+    for (dirty_files) |filename| {
+        const filepath = try std.fmt.allocPrint(allocator, "{s}/{s}", .{TEST_REPO_PATH, filename});
+        defer allocator.free(filepath);
+        
+        const file = try std.fs.createFileAbsolute(filepath, .{ .truncate = true });
+        defer file.close();
+        
+        try file.writeAll("MODIFIED CONTENT - This file has been changed\n");
+    }
+    
+    // Benchmark dirty status (some files changed)
+    std.debug.print("\nDirty repository (3 files modified):\n", .{});
+    for (0..ITERATIONS) |i| {
+        const start = std.time.nanoTimestamp();
+        
+        const status = try repo.statusPorcelain(allocator);
+        defer allocator.free(status);
+        
+        const end = std.time.nanoTimestamp();
+        times[i] = @intCast(end - start);
+    }
+    
+    const dirty_stats = Stats.compute(times);
+    const dirty_mean = @as(f64, @floatFromInt(dirty_stats.mean)) / 1000.0;
+    std.debug.print("  Dirty status mean: {d:.2}μs\n", .{dirty_mean});
+    
+    const slowdown = dirty_mean / clean_mean;
+    std.debug.print("  Dirty vs Clean ratio: {d:.2}x slower\n", .{slowdown});
 }
 
 pub fn main() !void {
@@ -133,65 +200,19 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     
-    try setupLargeTestRepo(allocator);
+    std.debug.print("=== STATUS OPTIMIZATION BENCHMARK ===\n", .{});
+    std.debug.print("Analyzing statusPorcelain performance characteristics\n", .{});
     
-    std.debug.print("Running {d} iterations of status benchmarks...\n", .{ITERATIONS});
+    try benchmarkStatusByFileCount(allocator);
+    try benchmarkGitStatusByFileCount(allocator);
+    try benchmarkCleanVsDirtyStatus(allocator);
     
-    var times = try allocator.alloc(u64, ITERATIONS);
-    defer allocator.free(times);
+    std.debug.print("\n=== ANALYSIS ===\n", .{});
+    std.debug.print("This benchmark helps identify:\n", .{});
+    std.debug.print("1. How status performance scales with repository size\n", .{});
+    std.debug.print("2. The efficiency of mtime/size fast path (clean vs dirty)\n", .{});
+    std.debug.print("3. Ziggit's per-file overhead compared to git CLI\n", .{});
     
-    // Benchmark git status (baseline)
-    std.debug.print("\n=== BASELINE: git status --porcelain ===\n", .{});
-    for (0..ITERATIONS) |i| {
-        const start = std.time.nanoTimestamp();
-        const result = try runCommand(allocator, &.{"git", "-C", TEST_REPO_PATH, "status", "--porcelain"}, null);
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
-        const end = std.time.nanoTimestamp();
-        times[i] = @intCast(end - start);
-    }
-    const git_status_stats = Stats.compute(times);
-    printStats("git status --porcelain", git_status_stats);
-    
-    // Benchmark ziggit status (current slow implementation)
-    std.debug.print("\n=== BEFORE OPTIMIZATION: ziggit status --porcelain ===\n", .{});
-    const ziggit_path = "/root/ziggit/zig-out/bin/ziggit";
-    
-    var ziggit_failed = false;
-    for (0..ITERATIONS) |i| {
-        const start = std.time.nanoTimestamp();
-        const result = runCommand(allocator, &.{ziggit_path, "-C", TEST_REPO_PATH, "status", "--porcelain"}, null) catch {
-            ziggit_failed = true;
-            times[i] = 0;
-            continue;
-        };
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
-        const end = std.time.nanoTimestamp();
-        times[i] = @intCast(end - start);
-    }
-    
-    if (!ziggit_failed) {
-        const ziggit_status_stats = Stats.compute(times);
-        printStats("ziggit status --porcelain (SLOW)", ziggit_status_stats);
-        
-        // Calculate how much slower ziggit is
-        const slowdown_factor = @as(f64, @floatFromInt(ziggit_status_stats.mean)) / @as(f64, @floatFromInt(git_status_stats.mean));
-        std.debug.print("ziggit is {d:.1}x slower than git\n", .{slowdown_factor});
-        
-        std.debug.print("\n=== PERFORMANCE ANALYSIS ===\n", .{});
-        std.debug.print("The ziggit status implementation is slow because it:\n", .{});
-        std.debug.print("1. Reads full content of every file in the index\n", .{});
-        std.debug.print("2. Computes SHA-1 hash for every file\n", .{});
-        std.debug.print("3. Does this even when files haven't changed (no mtime/size fast path)\n", .{});
-        std.debug.print("\nOptimization needed: Use mtime/size fast path to skip unchanged files.\n", .{});
-        
-    } else {
-        std.debug.print("ziggit status failed - this explains the performance issue.\n", .{});
-        std.debug.print("The index parsing is broken, causing failures and slowdowns.\n", .{});
-    }
-    
-    // Cleanup
     std.fs.deleteTreeAbsolute(TEST_REPO_PATH) catch {};
     
     std.debug.print("\nStatus optimization benchmark completed!\n", .{});
