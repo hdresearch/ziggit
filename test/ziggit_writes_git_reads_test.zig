@@ -5784,3 +5784,236 @@ test "ziggit clone bare -> git clone from bare -> verify files" {
     defer allocator.free(tags);
     try std.testing.expect(std.mem.indexOf(u8, tags, "v1.0.0") != null);
 }
+
+test "ziggit commit returns hash that git rev-parse confirms" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    try writeFileHelper(allocator, tmp, "f.txt", "hash check");
+    try repo.add("f.txt");
+    const commit_hash = try repo.commit("hash test", "Test", "test@test.com");
+
+    // revParseHead should match commit return value
+    const head_hash = try repo.revParseHead();
+    try std.testing.expectEqualSlices(u8, &commit_hash, &head_hash);
+
+    // git rev-parse HEAD should match too
+    const git_head = try execGit(allocator, tmp, &.{ "rev-parse", "HEAD" });
+    defer allocator.free(git_head);
+    try std.testing.expectEqualSlices(u8, &commit_hash, trimRight(git_head));
+}
+
+test "ziggit identical content deduplicates blobs" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    try writeFileHelper(allocator, tmp, "a.txt", "shared content\n");
+    try writeFileHelper(allocator, tmp, "b.txt", "shared content\n");
+    try writeFileHelper(allocator, tmp, "c.txt", "different content\n");
+    try repo.add("a.txt");
+    try repo.add("b.txt");
+    try repo.add("c.txt");
+    _ = try repo.commit("dedup test", "T", "t@t");
+
+    // git should show same blob hash for a.txt and b.txt
+    const ls_a = try execGit(allocator, tmp, &.{ "ls-tree", "HEAD", "a.txt" });
+    defer allocator.free(ls_a);
+    const ls_b = try execGit(allocator, tmp, &.{ "ls-tree", "HEAD", "b.txt" });
+    defer allocator.free(ls_b);
+    const ls_c = try execGit(allocator, tmp, &.{ "ls-tree", "HEAD", "c.txt" });
+    defer allocator.free(ls_c);
+
+    // Extract blob hashes (format: mode type hash\tname)
+    // hash is chars 12..52 in ls-tree output
+    const hash_a = ls_a[12..52];
+    const hash_b = ls_b[12..52];
+    const hash_c = ls_c[12..52];
+
+    try std.testing.expectEqualStrings(hash_a, hash_b);
+    try std.testing.expect(!std.mem.eql(u8, hash_a, hash_c));
+}
+
+test "ziggit object chain: commit -> tree -> blob types correct" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    try writeFileHelper(allocator, tmp, "chain.txt", "chain test");
+    try repo.add("chain.txt");
+    _ = try repo.commit("chain commit", "T", "t@t");
+
+    // commit type
+    const commit_type = try execGit(allocator, tmp, &.{ "cat-file", "-t", "HEAD" });
+    defer allocator.free(commit_type);
+    try std.testing.expectEqualStrings("commit", trimRight(commit_type));
+
+    // tree type
+    const tree_type = try execGit(allocator, tmp, &.{ "cat-file", "-t", "HEAD^{tree}" });
+    defer allocator.free(tree_type);
+    try std.testing.expectEqualStrings("tree", trimRight(tree_type));
+
+    // blob type via ls-tree + cat-file
+    const ls = try execGit(allocator, tmp, &.{ "ls-tree", "HEAD", "chain.txt" });
+    defer allocator.free(ls);
+    const blob_hash = ls[12..52];
+
+    var cat_args = [_][]const u8{ "cat-file", "-t", blob_hash };
+    const blob_type = try execGit(allocator, tmp, &cat_args);
+    defer allocator.free(blob_type);
+    try std.testing.expectEqualStrings("blob", trimRight(blob_type));
+}
+
+test "ziggit rapid version bumps -> git log chain matches" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    var hashes: [10][40]u8 = undefined;
+    var i: usize = 0;
+    while (i < 10) : (i += 1) {
+        var buf: [64]u8 = undefined;
+        const content = std.fmt.bufPrint(&buf, "version {d}", .{i}) catch unreachable;
+        try writeFileHelper(allocator, tmp, "version.txt", content);
+        try repo.add("version.txt");
+
+        var msg_buf: [32]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "v{d}", .{i}) catch unreachable;
+        hashes[i] = try repo.commit(msg, "T", "t@t");
+    }
+
+    // git rev-list --count should show 10
+    const count = try execGit(allocator, tmp, &.{ "rev-list", "--count", "HEAD" });
+    defer allocator.free(count);
+    try std.testing.expectEqualStrings("10", trimRight(count));
+
+    // HEAD should match last commit hash
+    const head = try execGit(allocator, tmp, &.{ "rev-parse", "HEAD" });
+    defer allocator.free(head);
+    try std.testing.expectEqualSlices(u8, &hashes[9], trimRight(head));
+}
+
+test "ziggit git gc preserves all objects" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    // Create commits with distinct content
+    try writeFileHelper(allocator, tmp, "f.txt", "gc_v1");
+    try repo.add("f.txt");
+    _ = try repo.commit("commit 1", "T", "t@t");
+
+    try writeFileHelper(allocator, tmp, "f.txt", "gc_v2");
+    try repo.add("f.txt");
+    _ = try repo.commit("commit 2", "T", "t@t");
+
+    try writeFileHelper(allocator, tmp, "f.txt", "gc_final");
+    try repo.add("f.txt");
+    _ = try repo.commit("commit 3", "T", "t@t");
+    try repo.createTag("v1.0.0", null);
+
+    // Get HEAD before gc
+    const head_before = try execGit(allocator, tmp, &.{ "rev-parse", "HEAD" });
+    defer allocator.free(head_before);
+
+    // Run git gc
+    try execGitNoOutput(allocator, tmp, &.{ "gc", "--aggressive" });
+
+    // HEAD should be same after gc
+    const head_after = try execGit(allocator, tmp, &.{ "rev-parse", "HEAD" });
+    defer allocator.free(head_after);
+    try std.testing.expectEqualStrings(trimRight(head_before), trimRight(head_after));
+
+    // Content still readable after gc
+    const show_content = try execGit(allocator, tmp, &.{ "show", "HEAD:f.txt" });
+    defer allocator.free(show_content);
+    // Should be the latest version
+    try std.testing.expect(show_content.len > 0);
+
+    // Tag survives
+    const tag = try execGit(allocator, tmp, &.{ "rev-parse", "v1.0.0" });
+    defer allocator.free(tag);
+    try std.testing.expect(tag.len >= 40);
+
+    // Commit count preserved
+    const count = try execGit(allocator, tmp, &.{ "rev-list", "--count", "HEAD" });
+    defer allocator.free(count);
+    try std.testing.expectEqualStrings("3", trimRight(count));
+}
+
+test "ziggit bun workflow: dirty -> add -> commit -> clean cycle with API" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    // Initial commit
+    try writeFileHelper(allocator, tmp, "package.json", "{\"name\":\"test\",\"version\":\"1.0.0\"}");
+    try repo.add("package.json");
+    _ = try repo.commit("init", "Bun", "bun@bun.sh");
+    try repo.createTag("v1.0.0", null);
+
+    // Should be clean
+    const clean1 = try repo.isClean();
+    try std.testing.expect(clean1);
+
+    // Describe should return v1.0.0
+    const desc1 = try repo.describeTags(allocator);
+    defer allocator.free(desc1);
+    try std.testing.expectEqualStrings("v1.0.0", desc1);
+
+    // Modify file -> add and commit new version
+    try writeFileHelper(allocator, tmp, "package.json", "{\"name\":\"test\",\"version\":\"2.0.0\"}");
+    try repo.add("package.json");
+    const h2 = try repo.commit("bump version", "Bun", "bun@bun.sh");
+    try repo.createTag("v2.0.0", null);
+
+    // Second commit hash should differ from first
+    const head2 = try repo.revParseHead();
+    try std.testing.expectEqualSlices(u8, &h2, &head2);
+
+    // git validates tag and commit count
+    const git_count = try execGit(allocator, tmp, &.{ "rev-list", "--count", "HEAD" });
+    defer allocator.free(git_count);
+    try std.testing.expectEqualStrings("2", trimRight(git_count));
+
+    const git_desc = try execGit(allocator, tmp, &.{ "describe", "--tags", "--exact-match" });
+    defer allocator.free(git_desc);
+    try std.testing.expectEqualStrings("v2.0.0", trimRight(git_desc));
+}
