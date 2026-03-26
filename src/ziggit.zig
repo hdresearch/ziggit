@@ -2241,6 +2241,17 @@ pub const Repository = struct {
         };
         defer git_index.deinit();
 
+        // Remove existing entry with the same path (if any)
+        var i: usize = 0;
+        while (i < git_index.entries.items.len) {
+            if (std.mem.eql(u8, git_index.entries.items[i].path, path)) {
+                self.allocator.free(git_index.entries.items[i].path);
+                _ = git_index.entries.orderedRemove(i);
+            } else {
+                i += 1;
+            }
+        }
+
         // Add new entry
         try git_index.entries.append(index_parser.IndexEntry{
             .ctime_seconds = @intCast(@divTrunc(file_stat.ctime, 1_000_000_000)),
@@ -2262,14 +2273,111 @@ pub const Repository = struct {
     }
 
     fn createTreeFromIndex(self: *Repository, git_index: *const index_parser.GitIndex) ![40]u8 {
+        return self.createTreeForPrefix(git_index, "");
+    }
+
+    /// Build a tree object for all index entries under a given path prefix.
+    /// Recursively creates subtrees for directories.
+    fn createTreeForPrefix(self: *Repository, git_index: *const index_parser.GitIndex, prefix: []const u8) ![40]u8 {
+        // Collect direct children (blobs) and unique subdirectory names at this level
+        const TreeItem = struct {
+            name: []const u8,
+            mode: []const u8,
+            hash: [20]u8,
+        };
+        var items = std.ArrayList(TreeItem).init(self.allocator);
+        defer {
+            for (items.items) |item| {
+                self.allocator.free(item.name);
+                self.allocator.free(item.mode);
+            }
+            items.deinit();
+        }
+
+        // Track which subdirectory names we've already processed
+        var seen_dirs = std.StringHashMap(void).init(self.allocator);
+        defer {
+            var kit = seen_dirs.keyIterator();
+            while (kit.next()) |key| self.allocator.free(key.*);
+            seen_dirs.deinit();
+        }
+
+        for (git_index.entries.items) |entry| {
+            // Only consider entries under our prefix
+            const rel_path = if (prefix.len == 0)
+                entry.path
+            else blk: {
+                if (std.mem.startsWith(u8, entry.path, prefix) and
+                    entry.path.len > prefix.len and
+                    entry.path[prefix.len] == '/')
+                {
+                    break :blk entry.path[prefix.len + 1 ..];
+                } else continue;
+            };
+
+            // Check if this is a direct child or lives in a subdirectory
+            if (std.mem.indexOfScalar(u8, rel_path, '/')) |slash_pos| {
+                // It's inside a subdirectory — record the dir name
+                const dir_name = rel_path[0..slash_pos];
+                if (!seen_dirs.contains(dir_name)) {
+                    const duped = try self.allocator.dupe(u8, dir_name);
+                    try seen_dirs.put(duped, {});
+                }
+            } else {
+                // Direct child (blob)
+                try items.append(.{
+                    .name = try self.allocator.dupe(u8, rel_path),
+                    .mode = try self.allocator.dupe(u8, "100644"),
+                    .hash = entry.sha1,
+                });
+            }
+        }
+
+        // Now recurse into each subdirectory
+        var dir_it = seen_dirs.keyIterator();
+        while (dir_it.next()) |dir_name_ptr| {
+            const dir_name = dir_name_ptr.*;
+            const sub_prefix = if (prefix.len == 0)
+                try self.allocator.dupe(u8, dir_name)
+            else
+                try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, dir_name });
+            defer self.allocator.free(sub_prefix);
+
+            const sub_hash_hex = try self.createTreeForPrefix(git_index, sub_prefix);
+            var sub_hash: [20]u8 = undefined;
+            _ = std.fmt.hexToBytes(&sub_hash, &sub_hash_hex) catch unreachable;
+
+            try items.append(.{
+                .name = try self.allocator.dupe(u8, dir_name),
+                .mode = try self.allocator.dupe(u8, "40000"),
+                .hash = sub_hash,
+            });
+        }
+
+        // Sort items by name (git requires sorted tree entries)
+        std.sort.block(TreeItem, items.items, {}, struct {
+            fn lessThan(_: void, a: TreeItem, b: TreeItem) bool {
+                // Git sorts tree entries: directories get a trailing '/' for comparison
+                const a_suffix: []const u8 = if (std.mem.eql(u8, a.mode, "40000")) "/" else "";
+                const b_suffix: []const u8 = if (std.mem.eql(u8, b.mode, "40000")) "/" else "";
+                const a_key = std.fmt.allocPrint(std.heap.page_allocator, "{s}{s}", .{ a.name, a_suffix }) catch return std.mem.lessThan(u8, a.name, b.name);
+                defer std.heap.page_allocator.free(a_key);
+                const b_key = std.fmt.allocPrint(std.heap.page_allocator, "{s}{s}", .{ b.name, b_suffix }) catch return std.mem.lessThan(u8, a.name, b.name);
+                defer std.heap.page_allocator.free(b_key);
+                return std.mem.lessThan(u8, a_key, b_key);
+            }
+        }.lessThan);
+
+        // Build tree content
         var tree_content = std.ArrayList(u8).init(self.allocator);
         defer tree_content.deinit();
 
-        for (git_index.entries.items) |entry| {
-            try tree_content.appendSlice("100644 ");
-            try tree_content.appendSlice(entry.path);
+        for (items.items) |item| {
+            try tree_content.appendSlice(item.mode);
+            try tree_content.append(' ');
+            try tree_content.appendSlice(item.name);
             try tree_content.append(0);
-            try tree_content.appendSlice(&entry.sha1);
+            try tree_content.appendSlice(&item.hash);
         }
 
         const tree_header = try std.fmt.allocPrint(self.allocator, "tree {}\x00", .{tree_content.items.len});

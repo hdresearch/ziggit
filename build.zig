@@ -491,6 +491,14 @@ pub fn build(b: *std.Build) void {
     });
     dirty_detection_tests.root_module.addImport("ziggit", ziggit_module);
 
+    // Add+commit pure-Zig tests
+    const add_commit_tests = b.addTest(.{
+        .root_source_file = b.path("test/add_commit_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    add_commit_tests.root_module.addImport("ziggit", ziggit_module);
+
     // Objects parser tests
     const objects_parser_tests = b.addTest(.{
         .root_source_file = b.path("test/objects_parser_test.zig"),

@@ -9,6 +9,7 @@ const objects = if (@import("builtin").target.os.tag != .freestanding) @import("
 const index_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/index.zig") else void;
 const refs = if (@import("builtin").target.os.tag != .freestanding) @import("git/refs.zig") else void;
 const gitignore_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/gitignore.zig") else void;
+const config_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/config.zig") else void;
 const diff_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/diff.zig") else void;
 const network = if (@import("builtin").target.os.tag != .freestanding) @import("git/network.zig") else void;
 
@@ -983,46 +984,17 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     };
     defer allocator.free(git_path);
 
-    // If -a flag is set, run "git add -u" first to stage all modified tracked files
-    if (add_all) {
-        var git_args = std.ArrayList([]const u8).init(allocator);
-        defer git_args.deinit();
-        
-        try git_args.append("git");
-        try git_args.append("add");
-        try git_args.append("-u");
-
-        var child = std.process.Child.init(git_args.items, allocator);
-        const result = child.spawnAndWait() catch |err| {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: failed to execute git add -u: {}\n", .{err});
-            defer allocator.free(msg);
-            try platform_impl.writeStderr(msg);
-            std.process.exit(128);
-        };
-        
-        switch (result) {
-            .Exited => |code| {
-                if (code != 0) {
-                    std.process.exit(@intCast(code));
-                }
-            },
-            .Signal => |_| {
-                std.process.exit(128);
-            },
-            .Stopped => |_| {
-                std.process.exit(128);
-            },
-            .Unknown => |_| {
-                std.process.exit(128);
-            },
-        }
-    }
-
     // Load index
     var index = index_mod.Index.load(git_path, platform_impl, allocator) catch |err| switch (err) {
         error.FileNotFound => index_mod.Index.init(allocator),
         else => return err,
     };
+
+    // If -a flag is set, update all tracked files in the index (pure Zig, no git CLI)
+    if (add_all) {
+        const repo_root = std.fs.path.dirname(git_path) orelse ".";
+        try stageTrackedChanges(allocator, &index, git_path, repo_root, platform_impl);
+    }
     defer index.deinit();
 
     // Check if there's anything to commit
@@ -1107,14 +1079,32 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 
     // Create commit object
     const timestamp = std.time.timestamp();
-    const author_info = try std.fmt.allocPrint(allocator, "ziggit <ziggit@example.com> {d} +0000", .{timestamp});
+    const tz_offset = getTimezoneOffset(timestamp);
+    const tz_sign: u8 = if (tz_offset < 0) '-' else '+';
+    const tz_abs: u32 = @intCast(if (tz_offset < 0) -tz_offset else tz_offset);
+    const tz_hours = tz_abs / 3600;
+    const tz_minutes = (tz_abs % 3600) / 60;
+
+    // Resolve author/committer identity
+    const author_name = resolveAuthorName(allocator, git_path) catch "ziggit";
+    defer if (!std.mem.eql(u8, author_name, "ziggit")) allocator.free(author_name);
+    const author_email = resolveAuthorEmail(allocator, git_path) catch "ziggit@example.com";
+    defer if (!std.mem.eql(u8, author_email, "ziggit@example.com")) allocator.free(author_email);
+    const committer_name = resolveCommitterName(allocator, git_path, author_name) catch author_name;
+    defer if (!std.mem.eql(u8, committer_name, author_name) and !std.mem.eql(u8, committer_name, "ziggit")) allocator.free(committer_name);
+    const committer_email = resolveCommitterEmail(allocator, git_path, author_email) catch author_email;
+    defer if (!std.mem.eql(u8, committer_email, author_email) and !std.mem.eql(u8, committer_email, "ziggit@example.com")) allocator.free(committer_email);
+
+    const author_info = try std.fmt.allocPrint(allocator, "{s} <{s}> {d} {c}{d:0>2}{d:0>2}", .{ author_name, author_email, timestamp, tz_sign, tz_hours, tz_minutes });
     defer allocator.free(author_info);
+    const committer_info = try std.fmt.allocPrint(allocator, "{s} <{s}> {d} {c}{d:0>2}{d:0>2}", .{ committer_name, committer_email, timestamp, tz_sign, tz_hours, tz_minutes });
+    defer allocator.free(committer_info);
 
     const commit_object = try objects.createCommitObject(
         tree_hash,
         parent_hashes.items,
         author_info,
-        author_info,
+        committer_info,
         message.?,
         allocator,
     );
@@ -3558,6 +3548,202 @@ fn addDirectoryRecursively(allocator: std.mem.Allocator, repo_root: []const u8, 
             else => continue, // Skip other types (symlinks, etc.)
         }
     }
+}
+
+/// Stage all tracked file changes into the index (pure Zig replacement for `git add -u`).
+/// For each entry in the index, check if the working-tree file was modified or deleted,
+/// then update or remove the index entry accordingly.
+fn stageTrackedChanges(allocator: std.mem.Allocator, index: *index_mod.Index, git_path: []const u8, repo_root: []const u8, platform_impl: *const platform_mod.Platform) !void {
+    // Collect paths to remove (deleted files) and paths to re-add (modified files).
+    // We collect first to avoid mutating the list while iterating.
+    var to_remove = std.ArrayList([]const u8).init(allocator);
+    defer {
+        for (to_remove.items) |p| allocator.free(p);
+        to_remove.deinit();
+    }
+    var to_readd = std.ArrayList([]const u8).init(allocator);
+    defer {
+        for (to_readd.items) |p| allocator.free(p);
+        to_readd.deinit();
+    }
+
+    for (index.entries.items) |entry| {
+        const full_path = if (repo_root.len > 0 and !std.mem.eql(u8, repo_root, "."))
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path })
+        else
+            try allocator.dupe(u8, entry.path);
+        defer allocator.free(full_path);
+
+        // Check if file still exists
+        const file_exists = if (std.fs.path.isAbsolute(full_path))
+            blk: {
+                std.fs.accessAbsolute(full_path, .{}) catch break :blk false;
+                break :blk true;
+            }
+        else
+            blk: {
+                std.fs.cwd().access(full_path, .{}) catch break :blk false;
+                break :blk true;
+            };
+
+        if (!file_exists) {
+            try to_remove.append(try allocator.dupe(u8, entry.path));
+            continue;
+        }
+
+        // Read file content and hash it to see if it changed
+        const content = platform_impl.fs.readFile(allocator, full_path) catch continue;
+        defer allocator.free(content);
+
+        // Compute blob hash
+        const header = try std.fmt.allocPrint(allocator, "blob {d}\x00", .{content.len});
+        defer allocator.free(header);
+
+        var hasher = std.crypto.hash.Sha1.init(.{});
+        hasher.update(header);
+        hasher.update(content);
+        var new_hash: [20]u8 = undefined;
+        hasher.final(&new_hash);
+
+        if (!std.mem.eql(u8, &new_hash, &entry.sha1)) {
+            try to_readd.append(try allocator.dupe(u8, entry.path));
+        }
+    }
+
+    // Remove deleted files from index
+    for (to_remove.items) |path| {
+        try index.remove(path);
+    }
+
+    // Re-add modified files (this re-hashes and stores the blob)
+    for (to_readd.items) |path| {
+        const full_path = if (repo_root.len > 0 and !std.mem.eql(u8, repo_root, "."))
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, path })
+        else
+            try allocator.dupe(u8, path);
+        defer allocator.free(full_path);
+        index.add(path, full_path, platform_impl, git_path) catch continue;
+    }
+
+    // Save the updated index
+    try index.save(git_path, platform_impl);
+}
+
+/// Get timezone offset in seconds from UTC.
+/// Reads from the TZ environment variable or /etc/timezone, /etc/localtime.
+/// For simplicity, uses the TZ env var if set (e.g. "EST+5" or numeric offset),
+/// otherwise returns 0.
+fn getTimezoneOffset(timestamp: i64) i32 {
+    _ = timestamp;
+    // Try TZ environment variable for simple offset formats
+    if (std.posix.getenv("TZ")) |tz| {
+        // Handle formats like "UTC-5", "EST+5", or just "+0530"
+        return parseTzOffset(tz);
+    }
+    return 0;
+}
+
+fn parseTzOffset(tz: []const u8) i32 {
+    // Find first +/- that indicates offset
+    var i: usize = 0;
+    while (i < tz.len) : (i += 1) {
+        if (tz[i] == '+' or tz[i] == '-') {
+            const sign: i32 = if (tz[i] == '-') 1 else -1; // TZ convention: UTC-5 means +5 hours ahead... actually POSIX TZ is inverted
+            // Actually in POSIX, TZ=EST5EDT means EST is UTC-5. The number is positive for west of UTC.
+            // So TZ offset sign is inverted: positive number = west = negative UTC offset
+            const rest = tz[i + 1 ..];
+            // Parse hours (and optional :minutes)
+            var colon_pos: ?usize = null;
+            for (rest, 0..) |c, j| {
+                if (c == ':') {
+                    colon_pos = j;
+                    break;
+                }
+            }
+            if (colon_pos) |cp| {
+                const hours = std.fmt.parseInt(i32, rest[0..cp], 10) catch return 0;
+                const minutes = std.fmt.parseInt(i32, rest[cp + 1 ..], 10) catch return 0;
+                return sign * (hours * 3600 + minutes * 60);
+            } else {
+                // Just hours
+                var end: usize = rest.len;
+                for (rest, 0..) |c, j| {
+                    if (!std.ascii.isDigit(c)) {
+                        end = j;
+                        break;
+                    }
+                }
+                if (end == 0) return 0;
+                const hours = std.fmt.parseInt(i32, rest[0..end], 10) catch return 0;
+                return sign * hours * 3600;
+            }
+        }
+    }
+    return 0;
+}
+
+/// Resolve author name from environment or git config.
+fn resolveAuthorName(allocator: std.mem.Allocator, git_path: []const u8) ![]const u8 {
+    // 1. GIT_AUTHOR_NAME env var takes highest precedence
+    if (std.posix.getenv("GIT_AUTHOR_NAME")) |name| {
+        return try allocator.dupe(u8, name);
+    }
+    // 2. Git config user.name
+    if (readConfigUserName(allocator, git_path)) |name| {
+        return name;
+    }
+    return error.NotFound;
+}
+
+/// Resolve author email from environment or git config.
+fn resolveAuthorEmail(allocator: std.mem.Allocator, git_path: []const u8) ![]const u8 {
+    if (std.posix.getenv("GIT_AUTHOR_EMAIL")) |email| {
+        return try allocator.dupe(u8, email);
+    }
+    if (readConfigUserEmail(allocator, git_path)) |email| {
+        return email;
+    }
+    return error.NotFound;
+}
+
+/// Resolve committer name from environment, config, or fall back to author name.
+fn resolveCommitterName(allocator: std.mem.Allocator, git_path: []const u8, fallback: []const u8) ![]const u8 {
+    if (std.posix.getenv("GIT_COMMITTER_NAME")) |name| {
+        return try allocator.dupe(u8, name);
+    }
+    if (readConfigUserName(allocator, git_path)) |name| {
+        return name;
+    }
+    _ = fallback;
+    return error.NotFound;
+}
+
+/// Resolve committer email from environment, config, or fall back to author email.
+fn resolveCommitterEmail(allocator: std.mem.Allocator, git_path: []const u8, fallback: []const u8) ![]const u8 {
+    if (std.posix.getenv("GIT_COMMITTER_EMAIL")) |email| {
+        return try allocator.dupe(u8, email);
+    }
+    if (readConfigUserEmail(allocator, git_path)) |email| {
+        return email;
+    }
+    _ = fallback;
+    return error.NotFound;
+}
+
+/// Read user.name from git config (local then global).
+fn readConfigUserName(allocator: std.mem.Allocator, git_path: []const u8) ?[]const u8 {
+    var config = config_mod.loadGitConfig(git_path, allocator) catch return null;
+    defer config.deinit();
+    const name = config.getUserName() orelse return null;
+    return allocator.dupe(u8, name) catch null;
+}
+
+/// Read user.email from git config (local then global).
+fn readConfigUserEmail(allocator: std.mem.Allocator, git_path: []const u8) ?[]const u8 {
+    var config = config_mod.loadGitConfig(git_path, allocator) catch return null;
+    defer config.deinit();
+    const email = config.getUserEmail() orelse return null;
+    return allocator.dupe(u8, email) catch null;
 }
 
 fn createDirectoryRecursive(path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
