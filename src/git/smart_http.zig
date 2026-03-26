@@ -1164,6 +1164,9 @@ pub fn clonePackShallow(allocator: std.mem.Allocator, url: []const u8, depth: u3
     // For shallow clones of repos like express (3692 refs), v2 ls-refs with prefix
     // filtering is dramatically faster than v1's GET /info/refs which returns all refs.
     // Fall back to v1 if server doesn't support v2.
+    if (std.posix.getenv("ZIGGIT_FORCE_V1") != null) {
+        return clonePackShallowV1(allocator, &client, url, depth);
+    }
     return clonePackShallowV2(allocator, &client, url, depth) catch |e| {
         if (std.posix.getenv("ZIGGIT_TRACE_TIMING") != null)
             std.debug.print("[debug] v2 failed: {}, falling back to v1\n", .{e});
