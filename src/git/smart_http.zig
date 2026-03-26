@@ -224,7 +224,7 @@ fn extractAuth(allocator: std.mem.Allocator, url: []const u8) !AuthInfo {
         }
     }
 
-    // Check GITHUB_TOKEN or GIT_TOKEN env vars
+    // Check GITHUB_TOKEN env var, then fall back to GIT_TOKEN
     const env_token = std.process.getEnvVarOwned(allocator, "GITHUB_TOKEN") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => std.process.getEnvVarOwned(allocator, "GIT_TOKEN") catch |err2| switch (err2) {
             error.EnvironmentVariableNotFound => null,
