@@ -1,5 +1,24 @@
 const std = @import("std");
 
+/// Validate a git ref name according to git ref naming rules
+fn isValidRefName(name: []const u8) bool {
+    // Basic validation - reject empty names, names starting with dot, etc.
+    if (name.len == 0) return false;
+    if (name[0] == '.') return false;
+    if (std.mem.indexOf(u8, name, "..") != null) return false;
+    if (std.mem.indexOf(u8, name, " ") != null) return false;
+    if (std.mem.indexOf(u8, name, "~") != null) return false;
+    if (std.mem.indexOf(u8, name, "^") != null) return false;
+    if (std.mem.indexOf(u8, name, ":") != null) return false;
+    if (std.mem.indexOf(u8, name, "?") != null) return false;
+    if (std.mem.indexOf(u8, name, "*") != null) return false;
+    if (std.mem.indexOf(u8, name, "[") != null) return false;
+    if (std.mem.indexOf(u8, name, "\\") != null) return false;
+    if (std.mem.endsWith(u8, name, "/")) return false;
+    if (std.mem.endsWith(u8, name, ".lock")) return false;
+    return true;
+}
+
 pub const Ref = struct {
     name: []const u8,
     hash: []const u8,
