@@ -282,17 +282,19 @@ pub const Index = struct {
         
         _ = try reader.readAll(path_bytes);
         
-        // Calculate and skip padding
+        // Calculate and skip padding (nul-terminated path + padding to 8-byte alignment)
+        // In git's index v2/v3, entries are padded to a multiple of 8 bytes.
+        // The total entry size is 62 bytes fixed header + extended flags (if any) + path bytes.
+        // After the path, there are 1-8 nul bytes to reach the next 8-byte boundary.
         const entry_size = 62 + (if (version >= 3 and (flags & 0x4000) != 0) @as(usize, 2) else @as(usize, 0)) + actual_path_len;
-        const pad_len = (8 - (entry_size % 8)) % 8;
-        if (pad_len > 0) {
+        const pad_len = 8 - (entry_size % 8);
+        // pad_len is 1-8 bytes (always at least 1 for the nul terminator)
+        if (version < 4) {
             const current_pos3 = try reader.context.getPos();
             const remaining_bytes3 = reader.context.buffer.len - current_pos3;
             
-            if (pad_len <= remaining_bytes3 - 20) { // Check if padding fits before checksum
-                reader.skipBytes(pad_len, .{}) catch {
-                    // Sometimes the last entry doesn't have full padding, that's OK
-                };
+            if (pad_len <= remaining_bytes3 - 20) {
+                reader.skipBytes(pad_len, .{}) catch {};
             }
         }
 
