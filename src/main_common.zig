@@ -124,11 +124,24 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 try platform_impl.writeStderr("error: invalid global flag usage\n");
                 std.process.exit(128);
             }
-        } else if (std.mem.startsWith(u8, arg, "--ref-format=") or 
+        } else if (std.mem.startsWith(u8, arg, "--git-dir=") or
+                   std.mem.startsWith(u8, arg, "--work-tree=") or
+                   std.mem.startsWith(u8, arg, "--ref-format=") or 
                    std.mem.startsWith(u8, arg, "--no-advice") or
                    std.mem.startsWith(u8, arg, "--config-env=") or
-                   std.mem.startsWith(u8, arg, "--namespace=")) {
-            // New global flags (git 2.44+) - skip them (strip for older git compat)
+                   std.mem.startsWith(u8, arg, "--namespace=") or
+                   std.mem.startsWith(u8, arg, "--super-prefix=") or
+                   std.mem.eql(u8, arg, "--bare") or
+                   std.mem.eql(u8, arg, "--no-replace-objects") or
+                   std.mem.eql(u8, arg, "--literal-pathspecs") or
+                   std.mem.eql(u8, arg, "--glob-pathspecs") or
+                   std.mem.eql(u8, arg, "--noglob-pathspecs") or
+                   std.mem.eql(u8, arg, "--icase-pathspecs") or
+                   std.mem.eql(u8, arg, "--no-optional-locks") or
+                   std.mem.eql(u8, arg, "--no-lazy-fetch") or
+                   std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--paginate") or
+                   std.mem.eql(u8, arg, "-P") or std.mem.eql(u8, arg, "--no-pager")) {
+            // Global flags with = form, or boolean global flags
             command_index += 1;
         } else {
             // This must be the command
@@ -430,7 +443,41 @@ fn forwardConfigToGit(allocator: std.mem.Allocator, all_args: [][]const u8, comm
     // git config unset <key> [--flags]        → git config --unset [--flags] <key>
     // git config list [--flags]               → git config --list [--flags]
     
+    // Check for "git config" with no action - newer git (2.46+) outputs
+    // "error: no action specified" instead of full usage
     const subcmd_index = command_index + 1;
+    {
+        var has_action = false;
+        var i = subcmd_index;
+        while (i < all_args.len) : (i += 1) {
+            const a = all_args[i];
+            // Skip location/scope flags and their values
+            if (std.mem.eql(u8, a, "--global") or std.mem.eql(u8, a, "--system") or
+                std.mem.eql(u8, a, "--local") or std.mem.eql(u8, a, "--worktree") or
+                std.mem.eql(u8, a, "--show-origin") or std.mem.eql(u8, a, "--show-scope") or
+                std.mem.eql(u8, a, "--includes") or std.mem.eql(u8, a, "--no-includes") or
+                std.mem.eql(u8, a, "-z") or std.mem.eql(u8, a, "--null") or
+                std.mem.eql(u8, a, "--name-only")) {
+                continue;
+            }
+            if (std.mem.eql(u8, a, "-f") or std.mem.eql(u8, a, "--file") or
+                std.mem.eql(u8, a, "--blob")) {
+                i += 1; // skip value
+                continue;
+            }
+            if (std.mem.startsWith(u8, a, "--file=") or std.mem.startsWith(u8, a, "--blob=") or
+                std.mem.startsWith(u8, a, "-f")) {
+                continue;
+            }
+            has_action = true;
+            break;
+        }
+        if (!has_action) {
+            try platform_impl.writeStderr("error: no action specified\n");
+            std.process.exit(1);
+        }
+    }
+    
     if (subcmd_index < all_args.len) {
         const subcmd = all_args[subcmd_index];
         const is_new_style = std.mem.eql(u8, subcmd, "set") or 

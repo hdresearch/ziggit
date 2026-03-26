@@ -1,594 +1,522 @@
-=== Git Test Suite Results (t0000-t4999) ===
-Date: 2026-03-26
-Range: t0000-t4999
-System git: 2.43.0
-Test suite: git ~2.48+ (newer than system git)
+=== Git Test Results (t0000-t4999) ===
+Date: Thu Mar 26 23:44:21 UTC 2026
+Git under test: ziggit wrapper -> git 2.43.0
 
-NOTE: Many failures are due to git 2.43 vs 2.48+ feature differences:
-- reftable backend (git 2.45+)
-- --ref-format flag (git 2.45+)
-- config --comment flag (git 2.45+)
-- diff --no-renames abbreviation (git 2.48+)
-- show-ref --exists exit code 2 (git 2.45+)
-- test-tool built-in tests (not part of ziggit)
-
-=== t00xx: Basic/Infrastructure ===
-t0000-basic: 87/92 (failed 5)
-t0001-init: 80/102 (failed 22)
-t0002-gitfile: ALL PASSED (14)
-t0003-attributes: 45/55 (failed 10)
-t0004-unwritable: ALL PASSED (9)
-t0005-signals: 1/5 (failed 4)
-t0006-date: 16/129 (failed 113)
-t0007-git-var: ALL PASSED (27)
-t0008-ignores: 397/398 (failed 1)
-t0009-git-dir-validation: 4/6 (failed 2)
-t0010-racy-git: ALL PASSED (10)
-t0012-help: 103/172 (failed 69)
-t0013-sha1dc: 0/1 (failed 1)
-t0014-alias: 8/21 (failed 13)
-t0017-env-helper: 1/5 (failed 4)
-t0018-advice: 2/6 (failed 4)
-t0019-json-writer: 2/16 (failed 14)
-t0020-crlf: ALL PASSED (36)
-t0021-conversion: 27/42 (failed 15)
-t0022-crlf-rename: ALL PASSED (2)
-t0023-crlf-am: ALL PASSED (2)
-t0024-crlf-archive: ALL PASSED (3)
-t0025-crlf-renormalize: ALL PASSED (3)
-t0026-eol-config: ALL PASSED (6)
-t0027-auto-crlf: ALL PASSED (2600)
-t0028-working-tree-encoding: ALL PASSED (22)
-t0029-core-unsetenvvars: SKIP (Windows-specific)
-t0030-stripspace: 28/30 (failed 2)
-t0031-lockfile-pid: 4/7 (failed 3)
-t0033-safe-directory: 17/22 (failed 5)
-t0034-root-safe-directory: SKIP (requires GIT_TEST_ALLOW_SUDO)
-t0035-safe-bare-repository: 8/12 (failed 4)
-t0040-parse-options: 32/94 (failed 62)
-t0041-usage: ALL PASSED (16)
-t0050-filesystem: ALL PASSED (13)
-t0051-windows-named-pipe: SKIP (Windows-specific)
-t0052-simple-ipc: 1/9 (failed 8)
-t0055-beyond-symlinks: ALL PASSED (3)
-t0056-git-C: ALL PASSED (11)
-t0060-path-utils: 146/219 (failed 73)
-t0061-run-command: 4/24 (failed 20)
-t0062-revision-walking: 1/2 (failed 1)
-t0066-dir-iterator: 4/10 (failed 6)
-t0067-parse_pathspec_file: 0/8 (failed 8)
-t0068-for-each-repo: 3/5 (failed 2)
-t0070-fundamental: 3/11 (failed 8)
-t0071-sort: ALL PASSED (1)
-t0080-unit-test-output: 0/1 (failed 1)
-t0081-find-pack: 1/4 (failed 3)
-t0090-cache-tree: 3/22 (failed 19)
-t0091-bugreport: 12/13 (failed 1)
-t0092-diagnose: ALL PASSED (4)
-t0095-bloom: 1/11 (failed 10)
-
-=== t01xx: Previous/At-syntax ===
-t0100-previous: ALL PASSED (6)
-t0101-at-syntax: ALL PASSED (8)
-
-=== t10xx: Read-tree/Cat-file/Hash-object ===
-t1000-read-tree-m-3way: ALL PASSED (83)
-t1001-read-tree-m-2way: ALL PASSED (29)
-t1002-read-tree-m-u-2way: ALL PASSED (22)
-t1003-read-tree-prefix: ALL PASSED (3)
-t1004-read-tree-m-u-wf: ALL PASSED (17)
-t1005-read-tree-reset: ALL PASSED (7)
-t1006-cat-file: 243/290 (failed 47)
-t1007-hash-object: 39/40 (failed 1)
-t1008-read-tree-overlay: ALL PASSED (2)
-t1009-read-tree-new-index: ALL PASSED (3)
-t1010-mktree: ALL PASSED (8)
-t1011-read-tree-sparse-checkout: ALL PASSED (23)
-t1012-read-tree-df: ALL PASSED (5)
-t1013-read-tree-submodule: ALL PASSED (68)
-t1014-read-tree-confusing: ALL PASSED (28)
-t1015-read-index-unmerged: ALL PASSED (6)
-t1016-compatObjectFormat: SKIP (requires Rust)
-t1020-subdirectory: ALL PASSED (15)
-t1022-read-tree-partial-clone: ALL PASSED (1)
-t1050-large: 20/29 (failed 9)
-t1051-large-conversion: ALL PASSED (12)
-t1060-object-corruption: ALL PASSED (17)
-t1090-sparse-checkout-scope: ALL PASSED (7)
-t1091-sparse-checkout-builtin: 72/77 (failed 4)
-t1092-sparse-checkout-compatibility: 95/106 (failed 9)
-
-=== t11xx-t13xx: Config ===
-t1100-commit-tree-options: ALL PASSED (5)
-t1300-config: 443/497 (failed 54)
-t1301-shared-repo: ALL PASSED (22)
-t1302-repo-version: ALL PASSED (18)
-t1303-wacky-config: ALL PASSED (11)
-t1304-default-acl: ALL PASSED (4)
-t1305-config-include: 36/37 (failed 1)
-t1306-xdg-files: ALL PASSED (21)
-t1307-config-blob: ALL PASSED (13)
-t1308-config-set: 6/39 (failed 33)
-t1309-early-config: 3/10 (failed 5)
-t1310-config-default: ALL PASSED (5)
-t1311-config-optional: 0/3 (failed 3)
-t1350-config-hooks-path: ALL PASSED (4)
-
-=== t14xx: Refs/Update-ref ===
-t1400-update-ref: 179/313 (failed 134)
-t1401-symbolic-ref: ALL PASSED (25)
-t1402-check-ref-format: ALL PASSED (99)
-t1403-show-ref: 8/12 (failed 4)
-t1404-update-ref-errors: ALL PASSED (38)
-t1405-main-ref-store: 5/16 (failed 11)
-t1406-submodule-ref-store: 4/15 (failed 11)
-t1407-worktree-ref-store: 1/4 (failed 3)
-t1408-packed-refs: ALL PASSED (3)
-t1409-avoid-packing-refs: ALL PASSED (11)
-t1410-reflog: 25/41 (failed 15)
-t1411-reflog-show: ALL PASSED (17)
-t1412-reflog-loop: ALL PASSED (3)
-t1413-reflog-detach: ALL PASSED (7)
-t1414-reflog-walk: ALL PASSED (12)
-t1415-worktree-refs: ALL PASSED (10)
-t1416-ref-transaction-hooks: 4/9 (failed 5)
-t1417-reflog-updateref: ALL PASSED (21)
-t1418-reflog-exists: ALL PASSED (6)
-t1419-exclude-refs: 1/13 (failed 12)
-t1420-lost-found: ALL PASSED (2)
-t1421-reflog-write: 0/10 (failed 10)
-t1422-show-ref-exists: 8/13 (failed 5)
-t1423-ref-backend: 3/36 (failed 33)
-t1430-bad-ref-name: 25/42 (failed 15)
-t1450-fsck: 84/96 (failed 12)
-t1451-fsck-buffer: ALL PASSED (72)
-t1460-refs-migrate: 1/37 (failed 36)
-t1461-refs-list: 33/428 (failed 395)
-t1462-refs-exists: 1/13 (failed 12)
-t1463-refs-optimize: 14/47 (failed 33)
-
-=== t15xx: Rev-parse ===
-t1500-rev-parse: 80/81 (failed 1)
-t1501-work-tree: 34/39 (failed 5)
-t1502-rev-parse-parseopt: 36/37 (failed 1)
-t1503-rev-parse-verify: ALL PASSED (12)
-t1504-ceiling-dirs: ALL PASSED (44)
-t1505-rev-parse-last: ALL PASSED (7)
-t1506-rev-parse-diagnosis: ALL PASSED (30)
-t1507-rev-parse-upstream: ALL PASSED (29)
-t1508-at-combinations: ALL PASSED (35)
-t1509-root-work-tree: SKIP (requires IKNOWWHATIAMDOING)
-t1510-repo-setup: ALL PASSED (109)
-t1511-rev-parse-caret: ALL PASSED (17)
-t1512-rev-parse-disambiguation: 34/38 (failed 1)
-t1513-rev-parse-prefix: ALL PASSED (11)
-t1514-rev-parse-push: ALL PASSED (9)
-t1515-rev-parse-outside-repo: ALL PASSED (4)
-t1517-outside-repo: 139/337 (failed 142)
-
-=== t16xx-t19xx: Index/Hook/Repo ===
-t1600-index: 6/7 (failed 1)
-t1601-index-bogus: ALL PASSED (4)
-t1700-split-index: 10/29 (failed 19)
-t1701-racy-split-index: ALL PASSED (31)
-t1800-hook: 28/44 (failed 16)
-t1900-repo-info: 9/37 (failed 28)
-t1901-repo-structure: 0/4 (failed 4)
-
-=== t20xx: Checkout ===
-t2000-conflict-when-checking-files-out: ALL PASSED (14)
-t2002-checkout-cache-u: ALL PASSED (3)
-t2003-checkout-cache-mkdir: ALL PASSED (10)
-t2004-checkout-cache-temp: ALL PASSED (23)
-t2005-checkout-index-symlinks: ALL PASSED (3)
-t2006-checkout-index-basic: 8/9 (failed 1)
-t2007-checkout-symlink: ALL PASSED (4)
-t2008-checkout-subdir: ALL PASSED (9)
-t2009-checkout-statinfo: ALL PASSED (3)
-t2010-checkout-ambiguous: ALL PASSED (10)
-t2011-checkout-invalid-head: ALL PASSED (10)
-t2012-checkout-last: ALL PASSED (22)
-t2013-checkout-submodule: ALL PASSED (74)
-t2014-checkout-switch: ALL PASSED (4)
-t2015-checkout-unborn: ALL PASSED (6)
-t2016-checkout-patch: 16/19 (failed 3)
-t2017-checkout-orphan: ALL PASSED (13)
-t2018-checkout-branch: ALL PASSED (25)
-t2019-checkout-ambiguous-ref: ALL PASSED (9)
-t2020-checkout-detach: 24/26 (failed 2)
-t2021-checkout-overwrite: ALL PASSED (9)
-t2022-checkout-paths: ALL PASSED (5)
-t2023-checkout-m: ALL PASSED (5)
-t2024-checkout-dwim: ALL PASSED (23)
-t2025-checkout-no-overlay: ALL PASSED (6)
-t2026-checkout-pathspec-file: ALL PASSED (11)
-t2027-checkout-track: 4/5 (failed 1)
-t2030-unresolve-info: ALL PASSED (14)
-t2050-git-dir-relative: ALL PASSED (4)
-t2060-switch: 15/16 (failed 1)
-t2070-restore: ALL PASSED (15)
-t2071-restore-patch: 14/15 (failed 1)
-t2072-restore-pathspec-file: ALL PASSED (12)
-t2080-parallel-checkout-basics: 10/11 (failed 1)
-t2081-parallel-checkout-collisions: ALL PASSED (6)
-t2082-parallel-checkout-attributes: 4/5 (failed 1)
-
-=== t21xx: Update-index ===
-t2100-update-cache-badpath: ALL PASSED (5)
-t2101-update-index-reupdate: ALL PASSED (7)
-t2102-update-index-symlinks: ALL PASSED (3)
-t2103-update-index-ignore-missing: ALL PASSED (5)
-t2104-update-index-skip-worktree: ALL PASSED (7)
-t2105-update-index-gitfile: ALL PASSED (4)
-t2106-update-index-assume-unchanged: ALL PASSED (2)
-t2107-update-index-basic: ALL PASSED (10)
-t2108-update-index-refresh-racy: ALL PASSED (6)
-
-=== t22xx: Add ===
-t2200-add-update: 18/19 (failed 1)
-t2201-add-update-typechange: ALL PASSED (6)
-t2202-add-addremove: ALL PASSED (3)
-t2203-add-intent: ALL PASSED (19)
-t2204-add-ignored: ALL PASSED (47)
-t2205-add-worktree-config: ALL PASSED (13)
-t2206-add-submodule-ignored: 6/8 (failed 2)
-
-=== t23xx-t25xx: Worktree/CD ===
-t2300-cd-to-toplevel: ALL PASSED (5)
-t2400-worktree-add: 203/232 (failed 29)
-t2401-worktree-prune: ALL PASSED (13)
-t2402-worktree-list: 22/27 (failed 5)
-t2403-worktree-move: 31/33 (failed 2)
-t2404-worktree-config: ALL PASSED (12)
-t2405-worktree-submodule: ALL PASSED (11)
-t2406-worktree-repair: 20/24 (failed 4)
-t2407-worktree-heads: ALL PASSED (12)
-t2500-untracked-overwriting: ALL PASSED (10)
-t2501-cwd-empty: ALL PASSED (24)
-
-=== t30xx: Ls-files ===
-t3000-ls-files-others: ALL PASSED (15)
-t3001-ls-files-others-exclude: ALL PASSED (27)
-t3002-ls-files-dashpath: ALL PASSED (6)
-t3003-ls-files-exclude: ALL PASSED (7)
-t3004-ls-files-basic: 5/6 (failed 1)
-t3005-ls-files-relative: ALL PASSED (4)
-t3006-ls-files-long: ALL PASSED (3)
-t3007-ls-files-recurse-submodules: ALL PASSED (24)
-t3008-ls-files-lazy-init-name-hash: ALL PASSED (1)
-t3009-ls-files-others-nonsubmodule: ALL PASSED (2)
-t3010-ls-files-killed-modified: ALL PASSED (6)
-t3011-common-prefixes-and-directory-traversal: ALL PASSED (21)
-t3012-ls-files-dedup: ALL PASSED (3)
-t3013-ls-files-format: ALL PASSED (20)
-t3020-ls-files-error-unmatch: ALL PASSED (3)
-
-=== t30xx: Subprojects/Ls-files-with-tree ===
-t3040-subprojects-basic: ALL PASSED (11)
-t3050-subprojects-fetch: ALL PASSED (4)
-t3060-ls-files-with-tree: ALL PASSED (8)
-t3070-wildmatch: 1810/1901 (failed 51)
-
-=== t31xx: Ls-tree ===
-t3100-ls-tree-restrict: ALL PASSED (14)
-t3101-ls-tree-dirname: ALL PASSED (19)
-t3102-ls-tree-wildcards: ALL PASSED (4)
-t3103-ls-tree-misc: ALL PASSED (10)
-t3104-ls-tree-format: ALL PASSED (19)
-t3105-ls-tree-output: ALL PASSED (60)
-
-=== t32xx: Branch ===
-t3200-branch: 164/167 (failed 3)
-t3201-branch-contains: ALL PASSED (24)
-t3202-show-branch: 25/27 (failed 2)
-t3203-branch-output: 40/41 (failed 1)
-t3204-branch-name-interpretation: ALL PASSED (16)
-t3205-branch-color: ALL PASSED (4)
-t3206-range-diff: 45/48 (failed 3)
-t3207-branch-submodule: ALL PASSED (20)
-t3211-peel-ref: ALL PASSED (8)
-
-=== t33xx: Notes ===
-t3300-funny-names: ALL PASSED (21)
-t3301-notes: 149/153 (failed 4)
-t3302-notes-index-expensive: ALL PASSED (12)
-t3303-notes-subtrees: ALL PASSED (23)
-t3304-notes-mixed: ALL PASSED (6)
-t3305-notes-fanout: ALL PASSED (7)
-t3306-notes-prune: ALL PASSED (12)
-t3307-notes-man: ALL PASSED (3)
-t3308-notes-merge: ALL PASSED (19)
-t3309-notes-merge-auto-resolve: ALL PASSED (31)
-t3310-notes-merge-manual-resolve: ALL PASSED (22)
-t3311-notes-merge-fanout: ALL PASSED (24)
-t3320-notes-merge-worktrees: ALL PASSED (9)
-t3321-notes-stripspace: ALL PASSED (27)
-
-=== t34xx: Rebase ===
-t3400-rebase: 35/39 (failed 4)
-t3401-rebase-and-am-rename: ALL PASSED (10)
-t3402-rebase-merge: ALL PASSED (13)
-t3403-rebase-skip: ALL PASSED (20)
-t3404-rebase-interactive: 101/132 (failed 31)
-t3405-rebase-malformed: ALL PASSED (5)
-t3406-rebase-message: ALL PASSED (32)
-t3407-rebase-abort: 5/17 (failed 12)
-t3408-rebase-multi-line: ALL PASSED (2)
-t3409-rebase-environ: ALL PASSED (3)
-t3412-rebase-root: ALL PASSED (25)
-t3413-rebase-hook: 14/15 (failed 1)
-t3415-rebase-autosquash: 14/28 (failed 14)
-t3416-rebase-onto-threedots: ALL PASSED (18)
-t3417-rebase-whitespace-fix: ALL PASSED (4)
-t3418-rebase-continue: ALL PASSED (30)
-t3419-rebase-patch-id: ALL PASSED (8)
-t3420-rebase-autostash: 42/52 (failed 10)
-t3421-rebase-topology-linear: ALL PASSED (64)
-t3422-rebase-incompatible-options: ALL PASSED (52)
-t3423-rebase-reword: ALL PASSED (3)
-t3424-rebase-empty: 16/20 (failed 3)
-t3425-rebase-topology-merges: ALL PASSED (13)
-t3426-rebase-submodule: ALL PASSED (29)
-t3427-rebase-subtree: ALL PASSED (3)
-t3428-rebase-signoff: 5/7 (failed 2)
-t3429-rebase-edit-todo: ALL PASSED (7)
-t3430-rebase-merges: 32/34 (failed 2)
-t3431-rebase-fork-point: ALL PASSED (26)
-t3432-rebase-fast-forward: ALL PASSED (225)
-t3433-rebase-across-mode-change: ALL PASSED (4)
-t3434-rebase-i18n: ALL PASSED (6)
-t3435-rebase-gpg-sign: ALL PASSED (19)
-t3436-rebase-more-options: ALL PASSED (19)
-t3437-rebase-fixup-options: ALL PASSED (13)
-t3438-rebase-broken-files: ALL PASSED (9)
-t3440-rebase-trailer: 1/10 (failed 9)
-t3450-history: 0/2 (failed 2)
-t3451-history-reword: 0/14 (failed 14)
-t3452-history-split: 0/25 (failed 25)
-
-=== t35xx: Cherry-pick/Revert ===
-t3500-cherry: ALL PASSED (4)
-t3501-revert-cherry-pick: 17/21 (failed 4)
-t3502-cherry-pick-merge: ALL PASSED (12)
-t3503-cherry-pick-root: ALL PASSED (6)
-t3504-cherry-pick-rerere: ALL PASSED (9)
-t3505-cherry-pick-empty: 12/17 (failed 5)
-t3506-cherry-pick-ff: ALL PASSED (11)
-t3507-cherry-pick-conflict: 42/44 (failed 2)
-t3508-cherry-pick-many-commits: ALL PASSED (14)
-t3509-cherry-pick-merge-df: ALL PASSED (9)
-t3510-cherry-pick-sequence: 49/55 (failed 3)
-t3511-cherry-pick-x: ALL PASSED (22)
-t3512-cherry-pick-submodule: ALL PASSED (15)
-t3513-revert-submodule: ALL PASSED (14)
-t3514-cherry-pick-revert-gpg: ALL PASSED (36)
-
-=== t36xx: Rm/Replay ===
-t3600-rm: 80/82 (failed 1)
-t3601-rm-pathspec-file: ALL PASSED (5)
-t3602-rm-sparse-checkout: 8/13 (failed 5)
-t3650-replay-basics: 6/31 (failed 25)
-
-=== t37xx: Add ===
-t3700-add: 53/58 (failed 5)
-t3701-add-interactive: 79/130 (failed 51)
-t3702-add-edit: ALL PASSED (3)
-t3703-add-magic-pathspec: ALL PASSED (6)
-t3704-add-pathspec-file: ALL PASSED (11)
-t3705-add-sparse-checkout: 8/20 (failed 12)
-
-=== t38xx: Mktag ===
-t3800-mktag: 131/151 (failed 20)
-
-=== t39xx: I18n/Stash ===
-t3900-i18n-commit: ALL PASSED (38)
-t3901-i18n-patch: ALL PASSED (20)
-t3902-quoted: ALL PASSED (13)
-t3903-stash: 123/142 (failed 17)
-t3904-stash-patch: 8/10 (failed 2)
-t3905-stash-include-untracked: ALL PASSED (34)
-t3906-stash-submodule: ALL PASSED (16)
-t3907-stash-show-config: ALL PASSED (10)
-t3908-stash-in-worktree: ALL PASSED (2)
-t3909-stash-pathspec-file: ALL PASSED (5)
-t3910-mac-os-precompose: SKIP (filesystem)
-t3920-crlf-messages: ALL PASSED (18)
-
-=== t40xx: Diff ===
-t4000-diff-format: ALL PASSED (41)
-t4001-diff-rename: 22/23 (failed 1)
-t4002-diff-basic: ALL PASSED (63)
-t4003-diff-rename-1: ALL PASSED (7)
-t4004-diff-rename-symlink: ALL PASSED (4)
-t4005-diff-rename-2: ALL PASSED (4)
-t4006-diff-mode: ALL PASSED (7)
-t4007-rename-3: 11/13 (failed 2)
-t4008-diff-break-rewrite: ALL PASSED (14)
-t4009-diff-rename-4: ALL PASSED (7)
-t4010-diff-pathspec: ALL PASSED (17)
-t4011-diff-symlink: ALL PASSED (8)
-t4012-diff-binary: ALL PASSED (13)
-t4013-diff-various: 224/230 (failed 6)
-t4014-format-patch: 198/215 (failed 12)
-t4015-diff-whitespace: 128/136 (failed 8)
-t4016-diff-quote: ALL PASSED (5)
-t4017-diff-retval: 37/38 (failed 1)
-t4018-diff-funcname: 105/197 (failed 92)
-t4019-diff-wserror: ALL PASSED (21)
-t4020-diff-external: 56/72 (failed 16)
-t4021-format-patch-numbered: ALL PASSED (14)
-t4022-diff-rewrite: ALL PASSED (11)
-t4023-diff-rename-typechange: ALL PASSED (4)
-t4024-diff-optimize-common: ALL PASSED (2)
-t4025-hunk-header: ALL PASSED (2)
-t4026-color: 33/34 (failed 1)
-t4027-diff-submodule: ALL PASSED (20)
-t4028-format-patch-mime-headers: ALL PASSED (3)
-t4029-diff-trailing-space: ALL PASSED (1)
-t4030-diff-textconv: ALL PASSED (19)
-t4031-diff-rewrite-binary: 7/8 (failed 1)
-t4032-diff-inter-hunk-context: ALL PASSED (37)
-t4033-diff-patience: ALL PASSED (11)
-t4034-diff-words: 64/66 (failed 2)
-t4035-diff-quiet: ALL PASSED (23)
-t4036-format-patch-signer-mime: ALL PASSED (5)
-t4037-diff-r-t-dirs: ALL PASSED (2)
-t4038-diff-combined: ALL PASSED (26)
-t4039-diff-assume-unchanged: ALL PASSED (4)
-t4040-whitespace-status: ALL PASSED (11)
-t4041-diff-submodule-option: ALL PASSED (47)
-t4042-diff-textconv-caching: 7/8 (failed 1)
-t4043-diff-rename-binary: ALL PASSED (3)
-t4044-diff-index-unique-abbrev: ALL PASSED (2)
-t4045-diff-relative: ALL PASSED (39)
-t4046-diff-unmerged: 7/8 (failed 1)
-t4047-diff-dirstat: ALL PASSED (41)
-t4048-diff-combined-binary: ALL PASSED (14)
-t4049-diff-stat-count: ALL PASSED (4)
-t4050-diff-histogram: ALL PASSED (10)
-t4051-diff-function-context: ALL PASSED (42)
-t4052-stat-output: 88/89 (failed 1)
-t4053-diff-no-index: 29/41 (failed 12)
-t4054-diff-bogus-tree: ALL PASSED (14)
-t4055-diff-context: ALL PASSED (10)
-t4056-diff-order: ALL PASSED (23)
-t4057-diff-combined-paths: ALL PASSED (4)
-t4058-diff-duplicates: 7/16 (failed 6)
-t4059-diff-submodule-not-initialized: ALL PASSED (8)
-t4060-diff-submodule-option-diff-format: ALL PASSED (51)
-t4061-diff-indent: ALL PASSED (33)
-t4062-diff-pickaxe: ALL PASSED (3)
-t4063-diff-blobs: ALL PASSED (18)
-t4064-diff-oidfind: ALL PASSED (10)
-t4065-diff-anchored: ALL PASSED (7)
-t4066-diff-emit-delay: ALL PASSED (2)
-t4067-diff-partial-clone: 7/9 (failed 2)
-t4068-diff-symmetric-merge-base: ALL PASSED (36)
-t4069-remerge-diff: 14/16 (failed 2)
-t4070-diff-pairs: 1/7 (failed 6)
-t4071-diff-minimal: 0/1 (failed 1)
-t4072-diff-max-depth: 2/76 (failed 48)
-t4073-diff-stat-name-width: 5/6 (failed 1)
-t4074-diff-shifted-matched-group: 0/4 (failed 4)
-
-=== t41xx: Apply ===
-t4100-apply-stat: 18/19 (failed 1)
-t4101-apply-nonl: ALL PASSED (12)
-t4102-apply-rename: ALL PASSED (5)
-t4103-apply-binary: 22/23 (failed 1)
-t4104-apply-boundary: ALL PASSED (24)
-t4105-apply-fuzz: ALL PASSED (9)
-t4106-apply-stdin: ALL PASSED (3)
-t4107-apply-ignore-whitespace: ALL PASSED (11)
-t4108-apply-threeway: 11/18 (failed 7)
-t4109-apply-multifrag: ALL PASSED (3)
-t4110-apply-scan: ALL PASSED (1)
-t4111-apply-subdir: ALL PASSED (10)
-t4112-apply-renames: ALL PASSED (2)
-t4113-apply-ending: ALL PASSED (3)
-t4114-apply-typechange: ALL PASSED (12)
-t4115-apply-symlink: ALL PASSED (8)
-t4116-apply-reverse: ALL PASSED (7)
-t4117-apply-reject: ALL PASSED (8)
-t4118-apply-empty-context: ALL PASSED (3)
-t4119-apply-config: ALL PASSED (11)
-t4120-apply-popt: ALL PASSED (8)
-t4121-apply-diffs: ALL PASSED (2)
-t4122-apply-symlink-inside: ALL PASSED (7)
-t4123-apply-shrink: ALL PASSED (2)
-t4124-apply-ws-rule: 80/85 (failed 5)
-t4125-apply-ws-fuzz: ALL PASSED (4)
-t4126-apply-empty: 7/8 (failed 1)
-t4127-apply-same-fn: ALL PASSED (7)
-t4128-apply-root: 8/12 (failed 4)
-t4129-apply-samemode: 18/23 (failed 5)
-t4130-apply-criss-cross-rename: ALL PASSED (7)
-t4131-apply-fake-ancestor: ALL PASSED (3)
-t4132-apply-removal: ALL PASSED (14)
-t4133-apply-filenames: ALL PASSED (4)
-t4134-apply-submodule: ALL PASSED (2)
-t4135-apply-weird-filenames: ALL PASSED (20)
-t4136-apply-check: ALL PASSED (6)
-t4137-apply-submodule: ALL PASSED (28)
-t4138-apply-ws-expansion: ALL PASSED (5)
-t4139-apply-escape: ALL PASSED (12)
-t4140-apply-ita: 5/7 (failed 2)
-t4141-apply-too-large: ALL PASSED (1)
-
-=== t415x: Am ===
-t4150-am: 85/87 (failed 2)
-t4151-am-abort: ALL PASSED (20)
-t4152-am-subjects: ALL PASSED (13)
-t4153-am-resume-override-opts: 3/6 (failed 3)
-
-=== t42xx: Log/Rerere/Shortlog ===
-t4200-rerere: 31/36 (failed 5)
-t4201-shortlog: ALL PASSED (32)
-t4202-log: 146/149 (failed 3)
-t4203-mailmap: 68/74 (failed 6)
-t4204-patch-id: ALL PASSED (26)
-t4205-log-pretty-formats: 122/125 (failed 1)
-t4206-log-follow-harder-copies: 6/7 (failed 1)
-t4207-log-decoration-colors: 3/4 (failed 1)
-t4208-log-magic-pathspec: ALL PASSED (21)
-t4209-log-pickaxe: 47/48 (failed 1)
-t4210-log-i18n: ALL PASSED (21)
-t4211-line-log: 50/53 (failed 3)
-t4212-log-corrupt: ALL PASSED (13)
-t4213-log-tabexpand: ALL PASSED (9)
-t4214-log-graph-octopus: ALL PASSED (17)
-t4215-log-skewed-merges: ALL PASSED (10)
-t4216-log-bloom: 146/167 (failed 21)
-t4217-log-limit: ALL PASSED (3)
-
-=== t425x: Am options ===
-t4252-am-options: ALL PASSED (8)
-t4253-am-keep-cr-dos: ALL PASSED (7)
-t4254-am-corrupt: ALL PASSED (4)
-t4255-am-submodule: 27/33 (failed 2)
-t4256-am-format-flowed: ALL PASSED (2)
-t4257-am-interactive: ALL PASSED (4)
-t4258-am-quoted-cr: ALL PASSED (4)
-
-=== t43xx: Merge-tree ===
-t4300-merge-tree: ALL PASSED (22)
-t4301-merge-tree-write-tree: 35/43 (failed 8)
+t0000-basic: ok=87 fail=5 (94%) OK
+t0001-init: ok=80 fail=22 (78%) OK
+t0002-gitfile: ok=14 fail=0 (100%) OK
+t0003-attributes: ok=45 fail=10 (81%) OK
+t0004-unwritable: ok=9 fail=0 (100%) OK
+t0005-signals: ok=1 fail=4 (20%) OK
+t0006-date: ok=16 fail=113 (12%) OK
+t0007-git-var: ok=27 fail=0 (100%) OK
+t0008-ignores: ok=397 fail=1 (99%) OK
+t0009-git-dir-validation: ok=4 fail=2 (66%) OK
+t0010-racy-git: ok=10 fail=0 (100%) OK
+t0012-help: ok=143 fail=29 (83%) OK
+t0013-sha1dc: ok=0 fail=1 (0%) OK
+t0014-alias: ok=9 fail=12 (42%) OK
+t0017-env-helper: ok=1 fail=4 (20%) OK
+t0018-advice: ok=2 fail=4 (33%) OK
+t0019-json-writer: ok=2 fail=14 (12%) OK
+t0020-crlf: ok=36 fail=0 (100%) OK
+t0021-conversion: ok=27 fail=15 (64%) OK
+t0022-crlf-rename: ok=2 fail=0 (100%) OK
+t0023-crlf-am: ok=2 fail=0 (100%) OK
+t0024-crlf-archive: ok=3 fail=0 (100%) OK
+t0025-crlf-renormalize: ok=3 fail=0 (100%) OK
+t0026-eol-config: ok=6 fail=0 (100%) OK
+t0027-auto-crlf: ok=2600 fail=0 (100%) OK
+t0028-working-tree-encoding: ok=22 fail=0 (100%) OK
+t0029-core-unsetenvvars: ok=0 fail=0 (0%) OK
+t0030-stripspace: ok=28 fail=2 (93%) OK
+t0031-lockfile-pid: ok=4 fail=3 (57%) OK
+t0033-safe-directory: ok=17 fail=5 (77%) OK
+t0034-root-safe-directory: ok=0 fail=0 (0%) OK
+t0035-safe-bare-repository: ok=8 fail=4 (66%) OK
+t0040-parse-options: ok=32 fail=62 (34%) OK
+t0041-usage: ok=16 fail=0 (100%) OK
+t0050-filesystem: ok=13 fail=0 (100%) OK
+t0051-windows-named-pipe: ok=0 fail=0 (0%) OK
+t0052-simple-ipc: ok=1 fail=8 (11%) OK
+t0055-beyond-symlinks: ok=3 fail=0 (100%) OK
+t0056-git-C: ok=11 fail=0 (100%) OK
+t0060-path-utils: ok=146 fail=73 (66%) OK
+t0061-run-command: ok=4 fail=20 (16%) OK
+t0062-revision-walking: ok=1 fail=1 (50%) OK
+t0066-dir-iterator: ok=4 fail=6 (40%) OK
+t0067-parse_pathspec_file: ok=0 fail=8 (0%) OK
+t0068-for-each-repo: ok=3 fail=2 (60%) OK
+t0070-fundamental: ok=3 fail=8 (27%) OK
+t0071-sort: ok=1 fail=0 (100%) OK
+t0080-unit-test-output: ok=0 fail=1 (0%) OK
+t0081-find-pack: ok=1 fail=3 (25%) OK
+t0090-cache-tree: ok=3 fail=19 (13%) OK
+t0091-bugreport: ok=12 fail=1 (92%) OK
+t0092-diagnose: ok=4 fail=0 (100%) OK
+t0095-bloom: ok=1 fail=10 (9%) OK
+t0100-previous: ok=6 fail=0 (100%) OK
+t0101-at-syntax: ok=8 fail=0 (100%) OK
+t0200-gettext-basic: ok=13 fail=3 (81%) OK
+t0201-gettext-fallbacks: ok=8 fail=0 (100%) OK
+t0202-gettext-perl: ok=1 fail=0 (100%) OK
+t0203-gettext-setlocale-sanity: ok=2 fail=0 (100%) OK
+t0204-gettext-reencode-sanity: ok=8 fail=0 (100%) OK
+t0210-trace2-normal: ok=1 fail=13 (7%) OK
+t0211-trace2-perf: ok=3 fail=14 (17%) OK
+t0212-trace2-event: ok=0 fail=11 (0%) OK
+t0213-trace2-ancestry: ok=5 fail=0 (100%) OK
+t0300-credentials: ok=49 fail=7 (87%) OK
+t0301-credential-cache: ok=50 fail=2 (96%) OK
+t0302-credential-store: ok=65 fail=0 (100%) OK
+t0303-credential-external: ok=23 fail=0 (100%) OK
+t0410-partial-clone: ok=35 fail=2 (94%) OK
+t0411-clone-from-partial: ok=7 fail=0 (100%) OK
+t0450-txt-doc-vs-help: ok=580 fail=262 (68%) OK
+t0500-progress-display: ok=1 fail=15 (6%) OK
+t0600-reffiles-backend: ok=29 fail=4 (87%) OK
+t0601-reffiles-pack-refs: ok=39 fail=8 (82%) OK
+t0602-reffiles-fsck: ok=0 fail=23 (0%) OK
+t0610-reftable-basics: ok=33 fail=58 (36%) OK
+t0611-reftable-httpd: ok=0 fail=0 (0%) OK
+t0612-reftable-jgit-compatibility: ok=0 fail=0 (0%) OK
+t0613-reftable-write-options: ok=0 fail=11 (0%) OK
+t0614-reftable-fsck: ok=0 fail=7 (0%) OK
+t1000-read-tree-m-3way: ok=83 fail=0 (100%) OK
+t1001-read-tree-m-2way: ok=29 fail=0 (100%) OK
+t1002-read-tree-m-u-2way: ok=22 fail=0 (100%) OK
+t1003-read-tree-prefix: ok=3 fail=0 (100%) OK
+t1004-read-tree-m-u-wf: ok=17 fail=0 (100%) OK
+t1005-read-tree-reset: ok=7 fail=0 (100%) OK
+t1006-cat-file: ok=243 fail=48 (83%) OK
+t1007-hash-object: ok=39 fail=1 (97%) OK
+t1008-read-tree-overlay: ok=2 fail=0 (100%) OK
+t1009-read-tree-new-index: ok=3 fail=0 (100%) OK
+t1010-mktree: ok=8 fail=0 (100%) OK
+t1011-read-tree-sparse-checkout: ok=23 fail=0 (100%) OK
+t1012-read-tree-df: ok=5 fail=0 (100%) OK
+t1013-read-tree-submodule: ok=58 fail=10 (85%) OK
+t1014-read-tree-confusing: ok=28 fail=0 (100%) OK
+t1015-read-index-unmerged: ok=6 fail=0 (100%) OK
+t1016-compatObjectFormat: ok=0 fail=0 (0%) OK
+t1020-subdirectory: ok=15 fail=0 (100%) OK
+t1022-read-tree-partial-clone: ok=1 fail=0 (100%) OK
+t1050-large: ok=20 fail=9 (68%) OK
+t1051-large-conversion: ok=12 fail=0 (100%) OK
+t1060-object-corruption: ok=16 fail=1 (94%) OK
+t1090-sparse-checkout-scope: ok=7 fail=0 (100%) OK
+t1091-sparse-checkout-builtin: ok=72 fail=5 (93%) OK
+t1092-sparse-checkout-compatibility: ok=95 fail=11 (89%) OK
+t1100-commit-tree-options: ok=5 fail=0 (100%) OK
+t1300-config: ok=446 fail=51 (89%) OK
+t1301-shared-repo: ok=22 fail=0 (100%) OK
+t1302-repo-version: ok=18 fail=0 (100%) OK
+t1303-wacky-config: ok=11 fail=0 (100%) OK
+t1304-default-acl: ok=4 fail=0 (100%) OK
+t1305-config-include: ok=36 fail=1 (97%) OK
+t1306-xdg-files: ok=21 fail=0 (100%) OK
+t1307-config-blob: ok=13 fail=0 (100%) OK
+t1308-config-set: ok=6 fail=33 (15%) OK
+t1309-early-config: ok=5 fail=5 (50%) OK
+t1310-config-default: ok=5 fail=0 (100%) OK
+t1311-config-optional: ok=0 fail=3 (0%) OK
+t1350-config-hooks-path: ok=4 fail=0 (100%) OK
+t1400-update-ref: ok=179 fail=134 (57%) OK
+t1401-symbolic-ref: ok=25 fail=0 (100%) OK
+t1402-check-ref-format: ok=99 fail=0 (100%) OK
+t1403-show-ref: ok=8 fail=4 (66%) OK
+t1404-update-ref-errors: ok=38 fail=0 (100%) OK
+t1405-main-ref-store: ok=5 fail=11 (31%) OK
+t1406-submodule-ref-store: ok=4 fail=11 (26%) OK
+t1407-worktree-ref-store: ok=1 fail=3 (25%) OK
+t1408-packed-refs: ok=3 fail=0 (100%) OK
+t1409-avoid-packing-refs: ok=11 fail=0 (100%) OK
+t1410-reflog: ok=25 fail=16 (60%) OK
+t1411-reflog-show: ok=17 fail=0 (100%) OK
+t1412-reflog-loop: ok=3 fail=0 (100%) OK
+t1413-reflog-detach: ok=7 fail=0 (100%) OK
+t1414-reflog-walk: ok=12 fail=0 (100%) OK
+t1415-worktree-refs: ok=10 fail=0 (100%) OK
+t1416-ref-transaction-hooks: ok=4 fail=5 (44%) OK
+t1417-reflog-updateref: ok=21 fail=0 (100%) OK
+t1418-reflog-exists: ok=6 fail=0 (100%) OK
+t1419-exclude-refs: ok=1 fail=12 (7%) OK
+t1420-lost-found: ok=2 fail=0 (100%) OK
+t1421-reflog-write: ok=0 fail=10 (0%) OK
+t1422-show-ref-exists: ok=8 fail=5 (61%) OK
+t1423-ref-backend: ok=3 fail=33 (8%) OK
+t1430-bad-ref-name: ok=26 fail=16 (61%) OK
+t1450-fsck: ok=84 fail=12 (87%) OK
+t1451-fsck-buffer: ok=72 fail=0 (100%) OK
+t1460-refs-migrate: ok=1 fail=36 (2%) OK
+t1461-refs-list: ok=33 fail=395 (7%) OK
+t1462-refs-exists: ok=1 fail=12 (7%) OK
+t1463-refs-optimize: ok=14 fail=33 (29%) OK
+t1500-rev-parse: ok=80 fail=1 (98%) OK
+t1501-work-tree: ok=34 fail=5 (87%) OK
+t1502-rev-parse-parseopt: ok=36 fail=1 (97%) OK
+t1503-rev-parse-verify: ok=12 fail=0 (100%) OK
+t1504-ceiling-dirs: ok=44 fail=0 (100%) OK
+t1505-rev-parse-last: ok=7 fail=0 (100%) OK
+t1506-rev-parse-diagnosis: ok=30 fail=0 (100%) OK
+t1507-rev-parse-upstream: ok=29 fail=0 (100%) OK
+t1508-at-combinations: ok=35 fail=0 (100%) OK
+t1509-root-work-tree: ok=0 fail=0 (0%) OK
+t1510-repo-setup: ok=109 fail=0 (100%) OK
+t1511-rev-parse-caret: ok=17 fail=0 (100%) OK
+t1512-rev-parse-disambiguation: ok=34 fail=4 (89%) OK
+t1513-rev-parse-prefix: ok=11 fail=0 (100%) OK
+t1514-rev-parse-push: ok=9 fail=0 (100%) OK
+t1515-rev-parse-outside-repo: ok=4 fail=0 (100%) OK
+t1517-outside-repo: ok=299 fail=38 (88%) OK
+t1600-index: ok=6 fail=1 (85%) OK
+t1601-index-bogus: ok=4 fail=0 (100%) OK
+t1700-split-index: ok=10 fail=19 (34%) OK
+t1701-racy-split-index: ok=31 fail=0 (100%) OK
+t1800-hook: ok=28 fail=16 (63%) OK
+t1900-repo-info: ok=9 fail=28 (24%) OK
+t1901-repo-structure: ok=0 fail=4 (0%) OK
+t2000-conflict-when-checking-files-out: ok=14 fail=0 (100%) OK
+t2002-checkout-cache-u: ok=3 fail=0 (100%) OK
+t2003-checkout-cache-mkdir: ok=10 fail=0 (100%) OK
+t2004-checkout-cache-temp: ok=23 fail=0 (100%) OK
+t2005-checkout-index-symlinks: ok=3 fail=0 (100%) OK
+t2006-checkout-index-basic: ok=9 fail=0 (100%) OK
+t2007-checkout-symlink: ok=4 fail=0 (100%) OK
+t2008-checkout-subdir: ok=9 fail=0 (100%) OK
+t2009-checkout-statinfo: ok=3 fail=0 (100%) OK
+t2010-checkout-ambiguous: ok=10 fail=0 (100%) OK
+t2011-checkout-invalid-head: ok=10 fail=0 (100%) OK
+t2012-checkout-last: ok=22 fail=0 (100%) OK
+t2013-checkout-submodule: ok=64 fail=10 (86%) OK
+t2014-checkout-switch: ok=4 fail=0 (100%) OK
+t2015-checkout-unborn: ok=6 fail=0 (100%) OK
+t2016-checkout-patch: ok=16 fail=3 (84%) OK
+t2017-checkout-orphan: ok=13 fail=0 (100%) OK
+t2018-checkout-branch: ok=25 fail=0 (100%) OK
+t2019-checkout-ambiguous-ref: ok=9 fail=0 (100%) OK
+t2020-checkout-detach: ok=24 fail=2 (92%) OK
+t2021-checkout-overwrite: ok=9 fail=0 (100%) OK
+t2022-checkout-paths: ok=5 fail=0 (100%) OK
+t2023-checkout-m: ok=5 fail=0 (100%) OK
+t2024-checkout-dwim: ok=23 fail=0 (100%) OK
+t2025-checkout-no-overlay: ok=6 fail=0 (100%) OK
+t2026-checkout-pathspec-file: ok=11 fail=0 (100%) OK
+t2027-checkout-track: ok=4 fail=1 (80%) OK
+t2030-unresolve-info: ok=14 fail=0 (100%) OK
+t2050-git-dir-relative: ok=4 fail=0 (100%) OK
+t2060-switch: ok=15 fail=1 (93%) OK
+t2070-restore: ok=15 fail=0 (100%) OK
+t2071-restore-patch: ok=14 fail=1 (93%) OK
+t2072-restore-pathspec-file: ok=12 fail=0 (100%) OK
+t2080-parallel-checkout-basics: ok=10 fail=1 (90%) OK
+t2081-parallel-checkout-collisions: ok=6 fail=0 (100%) OK
+t2082-parallel-checkout-attributes: ok=4 fail=1 (80%) OK
+t2100-update-cache-badpath: ok=5 fail=0 (100%) OK
+t2101-update-index-reupdate: ok=7 fail=0 (100%) OK
+t2102-update-index-symlinks: ok=3 fail=0 (100%) OK
+t2103-update-index-ignore-missing: ok=5 fail=0 (100%) OK
+t2104-update-index-skip-worktree: ok=7 fail=0 (100%) OK
+t2105-update-index-gitfile: ok=4 fail=0 (100%) OK
+t2106-update-index-assume-unchanged: ok=2 fail=0 (100%) OK
+t2107-update-index-basic: ok=10 fail=0 (100%) OK
+t2108-update-index-refresh-racy: ok=6 fail=0 (100%) OK
+t2200-add-update: ok=18 fail=1 (94%) OK
+t2201-add-update-typechange: ok=6 fail=0 (100%) OK
+t2202-add-addremove: ok=3 fail=0 (100%) OK
+t2203-add-intent: ok=19 fail=0 (100%) OK
+t2204-add-ignored: ok=47 fail=0 (100%) OK
+t2205-add-worktree-config: ok=13 fail=0 (100%) OK
+t2206-add-submodule-ignored: ok=6 fail=2 (75%) OK
+t2300-cd-to-toplevel: ok=5 fail=0 (100%) OK
+t2400-worktree-add: ok=203 fail=29 (87%) OK
+t2401-worktree-prune: ok=13 fail=0 (100%) OK
+t2402-worktree-list: ok=22 fail=5 (81%) OK
+t2403-worktree-move: ok=31 fail=2 (93%) OK
+t2404-worktree-config: ok=12 fail=0 (100%) OK
+t2405-worktree-submodule: ok=10 fail=1 (90%) OK
+t2406-worktree-repair: ok=20 fail=4 (83%) OK
+t2407-worktree-heads: ok=12 fail=0 (100%) OK
+t2500-untracked-overwriting: ok=8 fail=2 (80%) OK
+t2501-cwd-empty: ok=24 fail=0 (100%) OK
+t3000-ls-files-others: ok=15 fail=0 (100%) OK
+t3001-ls-files-others-exclude: ok=27 fail=0 (100%) OK
+t3002-ls-files-dashpath: ok=6 fail=0 (100%) OK
+t3003-ls-files-exclude: ok=7 fail=0 (100%) OK
+t3004-ls-files-basic: ok=6 fail=0 (100%) OK
+t3005-ls-files-relative: ok=4 fail=0 (100%) OK
+t3006-ls-files-long: ok=3 fail=0 (100%) OK
+t3007-ls-files-recurse-submodules: ok=24 fail=0 (100%) OK
+t3008-ls-files-lazy-init-name-hash: ok=1 fail=0 (100%) OK
+t3009-ls-files-others-nonsubmodule: ok=2 fail=0 (100%) OK
+t3010-ls-files-killed-modified: ok=6 fail=0 (100%) OK
+t3011-common-prefixes-and-directory-traversal: ok=20 fail=1 (95%) OK
+t3012-ls-files-dedup: ok=3 fail=0 (100%) OK
+t3013-ls-files-format: ok=20 fail=0 (100%) OK
+t3020-ls-files-error-unmatch: ok=3 fail=0 (100%) OK
+t3040-subprojects-basic: ok=11 fail=0 (100%) OK
+t3050-subprojects-fetch: ok=4 fail=0 (100%) OK
+t3060-ls-files-with-tree: ok=8 fail=0 (100%) OK
+t3070-wildmatch: ok=1810 fail=91 (95%) OK
+t3100-ls-tree-restrict: ok=14 fail=0 (100%) OK
+t3101-ls-tree-dirname: ok=19 fail=0 (100%) OK
+t3102-ls-tree-wildcards: ok=3 fail=1 (75%) OK
+t3103-ls-tree-misc: ok=10 fail=0 (100%) OK
+t3104-ls-tree-format: ok=19 fail=0 (100%) OK
+t3105-ls-tree-output: ok=60 fail=0 (100%) OK
+t3200-branch: ok=164 fail=3 (98%) OK
+t3201-branch-contains: ok=24 fail=0 (100%) OK
+t3202-show-branch: ok=25 fail=2 (92%) OK
+t3203-branch-output: ok=40 fail=1 (97%) OK
+t3204-branch-name-interpretation: ok=16 fail=0 (100%) OK
+t3205-branch-color: ok=4 fail=0 (100%) OK
+t3206-range-diff: ok=45 fail=3 (93%) OK
+t3207-branch-submodule: ok=20 fail=0 (100%) OK
+t3211-peel-ref: ok=8 fail=0 (100%) OK
+t3300-funny-names: ok=21 fail=0 (100%) OK
+t3301-notes: ok=149 fail=4 (97%) OK
+t3302-notes-index-expensive: ok=12 fail=0 (100%) OK
+t3303-notes-subtrees: ok=23 fail=0 (100%) OK
+t3304-notes-mixed: ok=6 fail=0 (100%) OK
+t3305-notes-fanout: ok=7 fail=0 (100%) OK
+t3306-notes-prune: ok=12 fail=0 (100%) OK
+t3307-notes-man: ok=3 fail=0 (100%) OK
+t3308-notes-merge: ok=19 fail=0 (100%) OK
+t3309-notes-merge-auto-resolve: ok=31 fail=0 (100%) OK
+t3310-notes-merge-manual-resolve: ok=22 fail=0 (100%) OK
+t3311-notes-merge-fanout: ok=24 fail=0 (100%) OK
+t3320-notes-merge-worktrees: ok=9 fail=0 (100%) OK
+t3321-notes-stripspace: ok=27 fail=0 (100%) OK
+t3400-rebase: ok=35 fail=4 (89%) OK
+t3401-rebase-and-am-rename: ok=8 fail=2 (80%) OK
+t3402-rebase-merge: ok=13 fail=0 (100%) OK
+t3403-rebase-skip: ok=20 fail=0 (100%) OK
+t3404-rebase-interactive: ok=101 fail=31 (76%) OK
+t3405-rebase-malformed: ok=5 fail=0 (100%) OK
+t3406-rebase-message: ok=32 fail=0 (100%) OK
+t3407-rebase-abort: ok=5 fail=12 (29%) OK
+t3408-rebase-multi-line: ok=2 fail=0 (100%) OK
+t3409-rebase-environ: ok=3 fail=0 (100%) OK
+t3412-rebase-root: ok=25 fail=0 (100%) OK
+t3413-rebase-hook: ok=14 fail=1 (93%) OK
+t3415-rebase-autosquash: ok=14 fail=14 (50%) OK
+t3416-rebase-onto-threedots: ok=18 fail=0 (100%) OK
+t3417-rebase-whitespace-fix: ok=4 fail=0 (100%) OK
+t3418-rebase-continue: ok=30 fail=0 (100%) OK
+t3419-rebase-patch-id: ok=8 fail=0 (100%) OK
+t3420-rebase-autostash: ok=42 fail=10 (80%) OK
+t3421-rebase-topology-linear: ok=63 fail=1 (98%) OK
+t3422-rebase-incompatible-options: ok=52 fail=0 (100%) OK
+t3423-rebase-reword: ok=3 fail=0 (100%) OK
+t3424-rebase-empty: ok=16 fail=4 (80%) OK
+t3425-rebase-topology-merges: ok=13 fail=0 (100%) OK
+t3426-rebase-submodule: ok=25 fail=4 (86%) OK
+t3427-rebase-subtree: ok=3 fail=0 (100%) OK
+t3428-rebase-signoff: ok=5 fail=2 (71%) OK
+t3429-rebase-edit-todo: ok=7 fail=0 (100%) OK
+t3430-rebase-merges: ok=32 fail=2 (94%) OK
+t3431-rebase-fork-point: ok=26 fail=0 (100%) OK
+t3432-rebase-fast-forward: ok=219 fail=6 (97%) OK
+t3433-rebase-across-mode-change: ok=4 fail=0 (100%) OK
+t3434-rebase-i18n: ok=6 fail=0 (100%) OK
+t3435-rebase-gpg-sign: ok=19 fail=0 (100%) OK
+t3436-rebase-more-options: ok=19 fail=0 (100%) OK
+t3437-rebase-fixup-options: ok=13 fail=0 (100%) OK
+t3438-rebase-broken-files: ok=9 fail=0 (100%) OK
+t3440-rebase-trailer: ok=1 fail=9 (10%) OK
+t3450-history: ok=0 fail=2 (0%) OK
+t3451-history-reword: ok=0 fail=14 (0%) OK
+t3452-history-split: ok=0 fail=25 (0%) OK
+t3500-cherry: ok=4 fail=0 (100%) OK
+t3501-revert-cherry-pick: ok=17 fail=4 (80%) OK
+t3502-cherry-pick-merge: ok=12 fail=0 (100%) OK
+t3503-cherry-pick-root: ok=6 fail=0 (100%) OK
+t3504-cherry-pick-rerere: ok=9 fail=0 (100%) OK
+t3505-cherry-pick-empty: ok=12 fail=5 (70%) OK
+t3506-cherry-pick-ff: ok=11 fail=0 (100%) OK
+t3507-cherry-pick-conflict: ok=42 fail=2 (95%) OK
+t3508-cherry-pick-many-commits: ok=14 fail=0 (100%) OK
+t3509-cherry-pick-merge-df: ok=9 fail=0 (100%) OK
+t3510-cherry-pick-sequence: ok=49 fail=6 (89%) OK
+t3511-cherry-pick-x: ok=22 fail=0 (100%) OK
+t3512-cherry-pick-submodule: ok=13 fail=2 (86%) OK
+t3513-revert-submodule: ok=12 fail=2 (85%) OK
+t3514-cherry-pick-revert-gpg: ok=36 fail=0 (100%) OK
+t3600-rm: ok=80 fail=2 (97%) OK
+t3601-rm-pathspec-file: ok=5 fail=0 (100%) OK
+t3602-rm-sparse-checkout: ok=8 fail=5 (61%) OK
+t3650-replay-basics: ok=6 fail=25 (19%) OK
+t3700-add: ok=53 fail=5 (91%) OK
+t3701-add-interactive: ok=79 fail=51 (60%) OK
+t3702-add-edit: ok=3 fail=0 (100%) OK
+t3703-add-magic-pathspec: ok=6 fail=0 (100%) OK
+t3704-add-pathspec-file: ok=11 fail=0 (100%) OK
+t3705-add-sparse-checkout: ok=8 fail=12 (40%) OK
+t3800-mktag: ok=131 fail=20 (86%) OK
+t3900-i18n-commit: ok=38 fail=0 (100%) OK
+t3901-i18n-patch: ok=20 fail=0 (100%) OK
+t3902-quoted: ok=13 fail=0 (100%) OK
+t3903-stash: ok=123 fail=19 (86%) OK
+t3904-stash-patch: ok=8 fail=2 (80%) OK
+t3905-stash-include-untracked: ok=34 fail=0 (100%) OK
+t3906-stash-submodule: ok=6 fail=10 (37%) OK
+t3907-stash-show-config: ok=10 fail=0 (100%) OK
+t3908-stash-in-worktree: ok=2 fail=0 (100%) OK
+t3909-stash-pathspec-file: ok=5 fail=0 (100%) OK
+t3910-mac-os-precompose: ok=0 fail=0 (0%) OK
+t3920-crlf-messages: ok=18 fail=0 (100%) OK
+t4000-diff-format: ok=41 fail=0 (100%) OK
+t4001-diff-rename: ok=22 fail=1 (95%) OK
+t4002-diff-basic: ok=63 fail=0 (100%) OK
+t4003-diff-rename-1: ok=7 fail=0 (100%) OK
+t4004-diff-rename-symlink: ok=4 fail=0 (100%) OK
+t4005-diff-rename-2: ok=4 fail=0 (100%) OK
+t4006-diff-mode: ok=7 fail=0 (100%) OK
+t4007-rename-3: ok=11 fail=2 (84%) OK
+t4008-diff-break-rewrite: ok=14 fail=0 (100%) OK
+t4009-diff-rename-4: ok=7 fail=0 (100%) OK
+t4010-diff-pathspec: ok=17 fail=0 (100%) OK
+t4011-diff-symlink: ok=8 fail=0 (100%) OK
+t4012-diff-binary: ok=13 fail=0 (100%) OK
+t4013-diff-various: ok=224 fail=6 (97%) OK
+t4014-format-patch: ok=197 fail=18 (91%) OK
+t4015-diff-whitespace: ok=128 fail=8 (94%) OK
+t4016-diff-quote: ok=5 fail=0 (100%) OK
+t4017-diff-retval: ok=37 fail=1 (97%) OK
+t4018-diff-funcname: ok=105 fail=92 (53%) OK
+t4019-diff-wserror: ok=21 fail=0 (100%) OK
+t4020-diff-external: ok=56 fail=16 (77%) OK
+t4021-format-patch-numbered: ok=14 fail=0 (100%) OK
+t4022-diff-rewrite: ok=11 fail=0 (100%) OK
+t4023-diff-rename-typechange: ok=4 fail=0 (100%) OK
+t4024-diff-optimize-common: ok=2 fail=0 (100%) OK
+t4025-hunk-header: ok=2 fail=0 (100%) OK
+t4026-color: ok=33 fail=1 (97%) OK
+t4027-diff-submodule: ok=20 fail=0 (100%) OK
+t4028-format-patch-mime-headers: ok=3 fail=0 (100%) OK
+t4029-diff-trailing-space: ok=1 fail=0 (100%) OK
+t4030-diff-textconv: ok=19 fail=0 (100%) OK
+t4031-diff-rewrite-binary: ok=7 fail=1 (87%) OK
+t4032-diff-inter-hunk-context: ok=37 fail=0 (100%) OK
+t4033-diff-patience: ok=11 fail=0 (100%) OK
+t4034-diff-words: ok=64 fail=2 (96%) OK
+t4035-diff-quiet: ok=23 fail=0 (100%) OK
+t4036-format-patch-signer-mime: ok=5 fail=0 (100%) OK
+t4037-diff-r-t-dirs: ok=2 fail=0 (100%) OK
+t4038-diff-combined: ok=25 fail=1 (96%) OK
+t4039-diff-assume-unchanged: ok=4 fail=0 (100%) OK
+t4040-whitespace-status: ok=11 fail=0 (100%) OK
+t4041-diff-submodule-option: ok=47 fail=0 (100%) OK
+t4042-diff-textconv-caching: ok=7 fail=1 (87%) OK
+t4043-diff-rename-binary: ok=3 fail=0 (100%) OK
+t4044-diff-index-unique-abbrev: ok=2 fail=0 (100%) OK
+t4045-diff-relative: ok=38 fail=1 (97%) OK
+t4046-diff-unmerged: ok=7 fail=1 (87%) OK
+t4047-diff-dirstat: ok=41 fail=0 (100%) OK
+t4048-diff-combined-binary: ok=14 fail=0 (100%) OK
+t4049-diff-stat-count: ok=4 fail=0 (100%) OK
+t4050-diff-histogram: ok=10 fail=0 (100%) OK
+t4051-diff-function-context: ok=42 fail=0 (100%) OK
+t4052-stat-output: ok=88 fail=1 (98%) OK
+t4053-diff-no-index: ok=29 fail=12 (70%) OK
+t4054-diff-bogus-tree: ok=14 fail=0 (100%) OK
+t4055-diff-context: ok=10 fail=0 (100%) OK
+t4056-diff-order: ok=23 fail=0 (100%) OK
+t4057-diff-combined-paths: ok=4 fail=0 (100%) OK
+t4058-diff-duplicates: ok=7 fail=9 (43%) OK
+t4059-diff-submodule-not-initialized: ok=8 fail=0 (100%) OK
+t4060-diff-submodule-option-diff-format: ok=51 fail=0 (100%) OK
+t4061-diff-indent: ok=33 fail=0 (100%) OK
+t4062-diff-pickaxe: ok=3 fail=0 (100%) OK
+t4063-diff-blobs: ok=18 fail=0 (100%) OK
+t4064-diff-oidfind: ok=10 fail=0 (100%) OK
+t4065-diff-anchored: ok=7 fail=0 (100%) OK
+t4066-diff-emit-delay: ok=2 fail=0 (100%) OK
+t4067-diff-partial-clone: ok=7 fail=2 (77%) OK
+t4068-diff-symmetric-merge-base: ok=36 fail=0 (100%) OK
+t4069-remerge-diff: ok=14 fail=2 (87%) OK
+t4070-diff-pairs: ok=1 fail=6 (14%) OK
+t4071-diff-minimal: ok=0 fail=1 (0%) OK
+t4072-diff-max-depth: ok=2 fail=74 (2%) OK
+t4073-diff-stat-name-width: ok=5 fail=1 (83%) OK
+t4074-diff-shifted-matched-group: ok=0 fail=4 (0%) OK
+t4100-apply-stat: ok=18 fail=1 (94%) OK
+t4101-apply-nonl: ok=12 fail=0 (100%) OK
+t4102-apply-rename: ok=5 fail=0 (100%) OK
+t4103-apply-binary: ok=22 fail=1 (95%) OK
+t4104-apply-boundary: ok=24 fail=0 (100%) OK
+t4105-apply-fuzz: ok=9 fail=0 (100%) OK
+t4106-apply-stdin: ok=3 fail=0 (100%) OK
+t4107-apply-ignore-whitespace: ok=11 fail=0 (100%) OK
+t4108-apply-threeway: ok=11 fail=7 (61%) OK
+t4109-apply-multifrag: ok=3 fail=0 (100%) OK
+t4110-apply-scan: ok=1 fail=0 (100%) OK
+t4111-apply-subdir: ok=10 fail=0 (100%) OK
+t4112-apply-renames: ok=2 fail=0 (100%) OK
+t4113-apply-ending: ok=3 fail=0 (100%) OK
+t4114-apply-typechange: ok=12 fail=0 (100%) OK
+t4115-apply-symlink: ok=8 fail=0 (100%) OK
+t4116-apply-reverse: ok=7 fail=0 (100%) OK
+t4117-apply-reject: ok=8 fail=0 (100%) OK
+t4118-apply-empty-context: ok=3 fail=0 (100%) OK
+t4119-apply-config: ok=11 fail=0 (100%) OK
+t4120-apply-popt: ok=8 fail=0 (100%) OK
+t4121-apply-diffs: ok=2 fail=0 (100%) OK
+t4122-apply-symlink-inside: ok=7 fail=0 (100%) OK
+t4123-apply-shrink: ok=2 fail=0 (100%) OK
+t4124-apply-ws-rule: ok=80 fail=5 (94%) OK
+t4125-apply-ws-fuzz: ok=4 fail=0 (100%) OK
+t4126-apply-empty: ok=7 fail=1 (87%) OK
+t4127-apply-same-fn: ok=7 fail=0 (100%) OK
+t4128-apply-root: ok=8 fail=4 (66%) OK
+t4129-apply-samemode: ok=18 fail=5 (78%) OK
+t4130-apply-criss-cross-rename: ok=7 fail=0 (100%) OK
+t4131-apply-fake-ancestor: ok=3 fail=0 (100%) OK
+t4132-apply-removal: ok=14 fail=0 (100%) OK
+t4133-apply-filenames: ok=4 fail=0 (100%) OK
+t4134-apply-submodule: ok=2 fail=0 (100%) OK
+t4135-apply-weird-filenames: ok=19 fail=1 (95%) OK
+t4136-apply-check: ok=6 fail=0 (100%) OK
+t4137-apply-submodule: ok=24 fail=4 (85%) OK
+t4138-apply-ws-expansion: ok=5 fail=0 (100%) OK
+t4139-apply-escape: ok=12 fail=0 (100%) OK
+t4140-apply-ita: ok=5 fail=2 (71%) OK
+t4141-apply-too-large: ok=1 fail=0 (100%) OK
+t4150-am: ok=85 fail=2 (97%) OK
+t4151-am-abort: ok=20 fail=0 (100%) OK
+t4152-am-subjects: ok=13 fail=0 (100%) OK
+t4153-am-resume-override-opts: ok=3 fail=3 (50%) OK
+t4200-rerere: ok=31 fail=5 (86%) OK
+t4201-shortlog: ok=32 fail=0 (100%) OK
+t4202-log: ok=146 fail=3 (97%) OK
+t4203-mailmap: ok=68 fail=6 (91%) OK
+t4204-patch-id: ok=25 fail=1 (96%) OK
+t4205-log-pretty-formats: ok=122 fail=3 (97%) OK
+t4206-log-follow-harder-copies: ok=6 fail=1 (85%) OK
+t4207-log-decoration-colors: ok=3 fail=1 (75%) OK
+t4208-log-magic-pathspec: ok=21 fail=0 (100%) OK
+t4209-log-pickaxe: ok=47 fail=1 (97%) OK
+t4210-log-i18n: ok=21 fail=0 (100%) OK
+t4211-line-log: ok=50 fail=3 (94%) OK
+t4212-log-corrupt: ok=13 fail=0 (100%) OK
+t4213-log-tabexpand: ok=9 fail=0 (100%) OK
+t4214-log-graph-octopus: ok=17 fail=0 (100%) OK
+t4215-log-skewed-merges: ok=10 fail=0 (100%) OK
+t4216-log-bloom: ok=146 fail=21 (87%) OK
+t4217-log-limit: ok=3 fail=0 (100%) OK
+t4252-am-options: ok=8 fail=0 (100%) OK
+t4253-am-keep-cr-dos: ok=7 fail=0 (100%) OK
+t4254-am-corrupt: ok=4 fail=0 (100%) OK
+t4255-am-submodule: ok=27 fail=6 (81%) OK
+t4256-am-format-flowed: ok=2 fail=0 (100%) OK
+t4257-am-interactive: ok=4 fail=0 (100%) OK
+t4258-am-quoted-cr: ok=4 fail=0 (100%) OK
+t4300-merge-tree: ok=22 fail=0 (100%) OK
+t4301-merge-tree-write-tree: ok=35 fail=8 (81%) OK
 
 === SUMMARY ===
-Total test scripts run: 511
-Scripts that ALL PASSED: 264 (51.7%)
-Scripts with failures: 240
-Scripts SKIPPED: 7
-
-Tests with >95% pass rate (near-perfect):
-  t0000: 87/92, t0008: 397/398, t0030: 28/30, t0091: 12/13
-  t1007: 39/40, t1305: 36/37, t1500: 80/81, t1502: 36/37
-  t1512: 34/38, t1600: 6/7, t2006: 8/9, t2060: 15/16
-  t2071: 14/15, t2080: 10/11, t2082: 4/5, t2200: 18/19
-  t3004: 5/6, t3200: 164/167, t3203: 40/41, t3600: 80/82
-  t4001: 22/23, t4013: 224/230, t4017: 37/38, t4026: 33/34
-  t4031: 7/8, t4042: 7/8, t4046: 7/8, t4052: 88/89
-  t4073: 5/6, t4100: 18/19, t4103: 22/23, t4126: 7/8
-  t4150: 85/87, t4202: 146/149, t4205: 122/125
-  t4206: 6/7, t4207: 3/4, t4209: 47/48
-
-Total individual tests: 18,857
-Tests passing: 16,111
-Tests failing: 2,746
-Pass rate: 85.4%
-
-Scripts fully passing: 309/511 (60.5%)
-Scripts with failures: 175/511
-Scripts skipped: 27 (various prereqs)
-
-Key fixes applied:
-1. config set --all → --replace-all translation
-2. config set --comment → stripped (git 2.45+)
-3. config get --value/--url/--show-names translation
-4. config get --regexp → --get-regexp with proper flag stripping
-5. config unset --value translation
-6. config edit/rename-section/remove-section as new-style subcommands
-7. rev-parse --show-ref-format → "files" intercept
-8. Non-HTTP clone forwarding to system git (local/ssh/git paths)
-9. --ref-format, --no-advice, --i-still-use-this global flag stripping
-10. Untracked-files flag value translation (false→no, true→normal)
+Total test scripts: 511
+Perfect (100%) scripts: 311
+Total subtests passed: 16773
+Total subtests failed: 2801
+Overall pass rate: 85% (16773/19574)

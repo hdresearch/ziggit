@@ -1,42 +1,66 @@
 #!/bin/bash
-# Test runner for git test suite t0000-t4999
-# Usage: bash test/git-test-runner-top.sh [pattern]
-# e.g., bash test/git-test-runner-top.sh "t00" for t00xx tests only
+# Git test runner for t0000-t4999 range
+# Usage: bash test/git-test-runner-top.sh [start_pattern] [end_pattern]
 
-PATTERN="${1:-t[0-4]}"
 RESULTS_FILE="test/git-test-results-top.txt"
 TEST_DIR="/tmp/git-tests/t"
+GIT_TEST_INSTALLED="/tmp/ziggit-as-git"
+GIT_TEST_TEMPLATE_DIR="/tmp/git-tests/templates/blt"
 
-echo "=== Git Test Suite Results (t0000-t4999) ===" > "$RESULTS_FILE"
+START="${1:-t0000}"
+END="${2:-t4999}"
+
+echo "=== Git Test Results (t0000-t4999) ===" > "$RESULTS_FILE"
 echo "Date: $(date)" >> "$RESULTS_FILE"
-echo "Range: $PATTERN" >> "$RESULTS_FILE"
+echo "Range: $START - $END" >> "$RESULTS_FILE"
 echo "" >> "$RESULTS_FILE"
 
 total_pass=0
 total_fail=0
 total_error=0
-total_skip=0
 total_tests=0
 
-for test_script in "$TEST_DIR"/${PATTERN}*.sh; do
-    test_name=$(basename "$test_script" .sh)
-    echo "Running $test_name..."
+for test_script in "$TEST_DIR"/${START}*.sh "$TEST_DIR"/t[0-4]*.sh; do
+    [ -f "$test_script" ] || continue
+    name=$(basename "$test_script" .sh)
     
-    output=$(cd "$TEST_DIR" && \
-        GIT_TEST_INSTALLED=/tmp/ziggit-as-git \
-        GIT_TEST_TEMPLATE_DIR=/tmp/git-tests/templates/blt \
-        timeout 120 bash "$test_script" 2>&1)
+    # Skip if outside range
+    num="${name%%-*}"
+    num="${num#t}"
+    if [ "$num" -lt "${START#t}" ] 2>/dev/null || [ "$num" -gt "${END#t}" ] 2>/dev/null; then
+        continue
+    fi
+
+    cd "$TEST_DIR"
+    output=$(GIT_TEST_INSTALLED="$GIT_TEST_INSTALLED" \
+             GIT_TEST_TEMPLATE_DIR="$GIT_TEST_TEMPLATE_DIR" \
+             timeout 120 bash "$test_script" 2>&1)
+    exit_code=$?
     
-    # Parse results from last lines
-    pass=$(echo "$output" | grep -oP 'passed \K\d+' | tail -1)
-    fail=$(echo "$output" | grep -oP 'failed \K\d+' | tail -1) 
+    # Count pass/fail from output
+    passed=$(echo "$output" | grep -c "^ok ")
+    failed=$(echo "$output" | grep -c "^not ok ")
     
-    # Get summary line
-    summary=$(echo "$output" | tail -3)
+    total_pass=$((total_pass + passed))
+    total_fail=$((total_fail + failed))
+    total_tests=$((total_tests + 1))
     
-    echo "$test_name: $summary" >> "$RESULTS_FILE"
-    echo "---" >> "$RESULTS_FILE"
+    if [ $exit_code -eq 124 ]; then
+        status="TIMEOUT"
+        total_error=$((total_error + 1))
+    elif [ $exit_code -eq 0 ]; then
+        status="PASS"
+    else
+        status="FAIL"
+    fi
+    
+    echo "$name: $status (ok=$passed, fail=$failed, exit=$exit_code)" >> "$RESULTS_FILE"
+    echo "$name: $status (ok=$passed, fail=$failed)"
 done
 
 echo "" >> "$RESULTS_FILE"
-echo "=== Done ===" >> "$RESULTS_FILE"
+echo "=== SUMMARY ===" >> "$RESULTS_FILE"
+echo "Total test scripts: $total_tests" >> "$RESULTS_FILE"
+echo "Total subtests passed: $total_pass" >> "$RESULTS_FILE"
+echo "Total subtests failed: $total_fail" >> "$RESULTS_FILE"
+echo "Errors/timeouts: $total_error" >> "$RESULTS_FILE"
