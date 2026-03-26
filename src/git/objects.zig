@@ -1100,10 +1100,7 @@ fn applyDeltaWithFallback(base_data: []const u8, delta_data: []const u8, allocat
             
             // Validate copy parameters
             if (copy_offset >= base_data.len) return error.InvalidDelta;
-            if (copy_offset + copy_size > base_data.len) {
-                // Clamp to available data rather than failing completely
-                copy_size = base_data.len - copy_offset;
-            }
+            if (copy_offset + copy_size > base_data.len) return error.InvalidDelta;
             if (copy_size == 0) return error.InvalidDelta;
             
             // Prevent result from growing too large
