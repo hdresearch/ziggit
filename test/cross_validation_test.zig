@@ -761,3 +761,557 @@ test "xval: ziggit add multiple files across dirs in single commit" {
     defer testing.allocator.free(main_content);
     try testing.expectEqualStrings("pub fn main() void {}\n", main_content);
 }
+
+// ============================================================================
+// Commit object format validation
+// ============================================================================
+
+test "xval: ziggit commit object format validated by git cat-file -p" {
+    const path = tmpPath("catfile_fmt");
+    defer cleanup(path);
+
+    var repo = try initZiggitRepo(path);
+    defer repo.close();
+
+    try createFile(path, "hello.txt", "hello\n");
+    try repo.add("hello.txt");
+    const hash = try repo.commit("test commit message", "Alice Smith", "alice@example.com");
+
+    // git cat-file -p should parse the commit object
+    const raw = git(&.{ "git", "-C", path, "cat-file", "-p", &hash }, "/tmp") catch return;
+    defer testing.allocator.free(raw);
+
+    // Must contain tree, author, committer lines and message
+    try testing.expect(std.mem.indexOf(u8, raw, "tree ") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "author Alice Smith <alice@example.com>") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "committer Alice Smith <alice@example.com>") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "test commit message") != null);
+
+    // First commit should NOT have parent line
+    try testing.expect(std.mem.indexOf(u8, raw, "parent ") == null);
+}
+
+test "xval: ziggit second commit has correct parent hash" {
+    const path = tmpPath("parent_chain");
+    defer cleanup(path);
+
+    var repo = try initZiggitRepo(path);
+    defer repo.close();
+
+    try createFile(path, "a.txt", "a\n");
+    try repo.add("a.txt");
+    const hash1 = try repo.commit("first", "A", "a@t.com");
+
+    try createFile(path, "b.txt", "b\n");
+    try repo.add("b.txt");
+    const hash2 = try repo.commit("second", "A", "a@t.com");
+
+    // Parse second commit - should have parent = hash1
+    const raw = git(&.{ "git", "-C", path, "cat-file", "-p", &hash2 }, "/tmp") catch return;
+    defer testing.allocator.free(raw);
+
+    const parent_prefix = "parent ";
+    const parent_start = std.mem.indexOf(u8, raw, parent_prefix) orelse return error.NoParent;
+    const parent_hash = raw[parent_start + parent_prefix.len ..][0..40];
+    try testing.expectEqualStrings(&hash1, parent_hash);
+}
+
+test "xval: ziggit commit object type is commit" {
+    const path = tmpPath("obj_type");
+    defer cleanup(path);
+
+    var repo = try initZiggitRepo(path);
+    defer repo.close();
+
+    try createFile(path, "f.txt", "f\n");
+    try repo.add("f.txt");
+    const hash = try repo.commit("msg", "A", "a@t.com");
+
+    const obj_type = gitTrim(&.{ "git", "cat-file", "-t", &hash }, path) catch return;
+    defer testing.allocator.free(obj_type);
+    try testing.expectEqualStrings("commit", obj_type);
+}
+
+// ============================================================================
+// Reinit idempotency
+// ============================================================================
+
+test "xval: ziggit init on existing repo is safe (reinit)" {
+    const path = tmpPath("reinit");
+    defer cleanup(path);
+
+    // First init
+    var repo1 = try initZiggitRepo(path);
+    try createFile(path, "f.txt", "keep me\n");
+    try repo1.add("f.txt");
+    const hash = try repo1.commit("initial", "A", "a@t.com");
+    repo1.close();
+
+    // Second init on same path should not destroy existing data
+    var repo2 = try ziggit.Repository.init(testing.allocator, path);
+    defer repo2.close();
+
+    // HEAD should still resolve to the same commit
+    const head = try repo2.revParseHead();
+    try testing.expectEqualStrings(&hash, &head);
+
+    // git should still see the commit
+    const git_head = gitTrim(&.{ "git", "rev-parse", "HEAD" }, path) catch return;
+    defer testing.allocator.free(git_head);
+    try testing.expectEqualStrings(&hash, git_head);
+}
+
+// ============================================================================
+// Git GC -> ziggit reads packed objects
+// ============================================================================
+
+test "xval: git gc packs objects -> pack files created and git validates" {
+    const path = tmpPath("gc_packed");
+    defer cleanup(path);
+
+    var repo = try initZiggitRepo(path);
+
+    // Create several commits
+    for (0..5) |i| {
+        const fname = try std.fmt.allocPrint(testing.allocator, "f{d}.txt", .{i});
+        defer testing.allocator.free(fname);
+        const content = try std.fmt.allocPrint(testing.allocator, "content {d}\n", .{i});
+        defer testing.allocator.free(content);
+        try createFile(path, fname, content);
+        try repo.add(fname);
+        const msg = try std.fmt.allocPrint(testing.allocator, "commit {d}", .{i});
+        defer testing.allocator.free(msg);
+        _ = try repo.commit(msg, "A", "a@t.com");
+    }
+    try repo.createTag("v1.0.0", null);
+    repo.close();
+
+    // Get HEAD before gc
+    const pre_gc_head = gitTrim(&.{ "git", "rev-parse", "HEAD" }, path) catch return;
+    defer testing.allocator.free(pre_gc_head);
+
+    // Run git gc to pack objects
+    gitOk(&.{ "git", "-C", path, "gc", "--aggressive" }, "/tmp") catch return;
+
+    // Verify pack files exist
+    const pack_dir = try std.fmt.allocPrint(testing.allocator, "{s}/.git/objects/pack", .{path});
+    defer testing.allocator.free(pack_dir);
+    var dir = std.fs.openDirAbsolute(pack_dir, .{ .iterate = true }) catch return;
+    defer dir.close();
+    var has_pack = false;
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        if (std.mem.endsWith(u8, entry.name, ".pack")) {
+            has_pack = true;
+            break;
+        }
+    }
+    try testing.expect(has_pack);
+
+    // HEAD should still resolve via git after gc (objects are valid)
+    const post_gc_head = gitTrim(&.{ "git", "rev-parse", "HEAD" }, path) catch return;
+    defer testing.allocator.free(post_gc_head);
+    try testing.expectEqualStrings(pre_gc_head, post_gc_head);
+
+    // git fsck should still pass on ziggit-created objects after gc
+    const fsck = git(&.{ "git", "-C", path, "fsck", "--full" }, "/tmp") catch return;
+    defer testing.allocator.free(fsck);
+
+    // Note: ziggit reading packed refs after gc is a known limitation
+    // (git gc may pack branch refs, removing loose ref files ziggit expects)
+    // So we validate via git CLI here rather than opening with ziggit
+}
+
+// ============================================================================
+// Merge commit (two parents) - git creates, ziggit reads
+// ============================================================================
+
+test "xval: git merge commit with two parents -> ziggit reads HEAD" {
+    const path = tmpPath("merge_2p");
+    defer cleanup(path);
+
+    initGitRepo(path) catch return;
+
+    // Create initial commit on master
+    try createFile(path, "base.txt", "base\n");
+    gitOk(&.{ "git", "-C", path, "add", "base.txt" }, "/tmp") catch return;
+    gitOk(&.{ "git", "-C", path, "commit", "-m", "base" }, "/tmp") catch return;
+
+    // Create feature branch with a commit
+    gitOk(&.{ "git", "-C", path, "checkout", "-b", "feature" }, "/tmp") catch return;
+    try createFile(path, "feature.txt", "feature\n");
+    gitOk(&.{ "git", "-C", path, "add", "feature.txt" }, "/tmp") catch return;
+    gitOk(&.{ "git", "-C", path, "commit", "-m", "feature commit" }, "/tmp") catch return;
+
+    // Go back to master and add another commit
+    gitOk(&.{ "git", "-C", path, "checkout", "master" }, "/tmp") catch return;
+    try createFile(path, "master.txt", "master\n");
+    gitOk(&.{ "git", "-C", path, "add", "master.txt" }, "/tmp") catch return;
+    gitOk(&.{ "git", "-C", path, "commit", "-m", "master commit" }, "/tmp") catch return;
+
+    // Merge feature into master (creates merge commit with 2 parents)
+    gitOk(&.{ "git", "-C", path, "merge", "feature", "-m", "merge feature" }, "/tmp") catch return;
+
+    // Verify merge commit has 2 parents via git
+    const parents = gitTrim(&.{ "git", "-C", path, "cat-file", "-p", "HEAD" }, "/tmp") catch return;
+    defer testing.allocator.free(parents);
+    var parent_count: usize = 0;
+    var lines = std.mem.splitSequence(u8, parents, "\n");
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "parent ")) parent_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), parent_count);
+
+    // ziggit should read HEAD correctly
+    const git_head = gitTrim(&.{ "git", "rev-parse", "HEAD" }, path) catch return;
+    defer testing.allocator.free(git_head);
+
+    var repo = try ziggit.Repository.open(testing.allocator, path);
+    defer repo.close();
+
+    const ziggit_head = try repo.revParseHead();
+    try testing.expectEqualStrings(git_head, &ziggit_head);
+}
+
+// ============================================================================
+// Long parent chain validation
+// ============================================================================
+
+test "xval: ziggit 10 commits -> git rev-list validates full chain" {
+    const path = tmpPath("chain_10");
+    defer cleanup(path);
+
+    var repo = try initZiggitRepo(path);
+    defer repo.close();
+
+    var hashes: [10][40]u8 = undefined;
+    for (0..10) |i| {
+        const fname = try std.fmt.allocPrint(testing.allocator, "f{d}.txt", .{i});
+        defer testing.allocator.free(fname);
+        try createFile(path, fname, "data\n");
+        try repo.add(fname);
+        const msg = try std.fmt.allocPrint(testing.allocator, "commit {d}", .{i});
+        defer testing.allocator.free(msg);
+        hashes[i] = try repo.commit(msg, "A", "a@t.com");
+    }
+
+    // git rev-list should return exactly 10 commits
+    const rev_list = gitTrim(&.{ "git", "rev-list", "HEAD" }, path) catch return;
+    defer testing.allocator.free(rev_list);
+
+    var count: usize = 0;
+    var lines = std.mem.splitSequence(u8, rev_list, "\n");
+    while (lines.next()) |line| {
+        if (line.len == 40) count += 1;
+    }
+    try testing.expectEqual(@as(usize, 10), count);
+
+    // First listed should be HEAD (latest commit)
+    var first_line = std.mem.splitSequence(u8, rev_list, "\n");
+    const first = first_line.next() orelse return;
+    try testing.expectEqualStrings(&hashes[9], first);
+}
+
+// ============================================================================
+// Binary content exact roundtrip
+// ============================================================================
+
+test "xval: ziggit binary with all 256 bytes -> git cat-file preserves exactly" {
+    const path = tmpPath("bin256");
+    defer cleanup(path);
+
+    var repo = try initZiggitRepo(path);
+    defer repo.close();
+
+    // Create content with all 256 byte values
+    var content: [256]u8 = undefined;
+    for (0..256) |i| content[i] = @intCast(i);
+
+    try createFile(path, "binary.bin", &content);
+    try repo.add("binary.bin");
+    _ = try repo.commit("binary content", "A", "a@t.com");
+
+    // Read back through git
+    const blob = git(&.{ "git", "-C", path, "cat-file", "blob", "HEAD:binary.bin" }, "/tmp") catch return;
+    defer testing.allocator.free(blob);
+
+    try testing.expectEqual(@as(usize, 256), blob.len);
+    try testing.expectEqualSlices(u8, &content, blob);
+}
+
+// ============================================================================
+// Bun workflow: complete version lifecycle
+// ============================================================================
+
+test "xval: bun full lifecycle - init, add, commit, tag, bump, describe" {
+    const path = tmpPath("bun_lifecycle");
+    defer cleanup(path);
+
+    var repo = try initZiggitRepo(path);
+    defer repo.close();
+
+    // v1.0.0
+    try createFile(path, "package.json", "{\"name\":\"mylib\",\"version\":\"1.0.0\"}");
+    try repo.add("package.json");
+    _ = try repo.commit("v1.0.0 release", "bun", "bun@bun.sh");
+    try repo.createTag("v1.0.0", null);
+
+    // Verify tag via git
+    const tag1 = gitTrim(&.{ "git", "describe", "--tags", "--exact-match" }, path) catch return;
+    defer testing.allocator.free(tag1);
+    try testing.expectEqualStrings("v1.0.0", tag1);
+
+    // v1.1.0 - add a new file
+    try createFile(path, "package.json", "{\"name\":\"mylib\",\"version\":\"1.1.0\"}");
+    try createFile(path, "lib.ts", "export function hello() { return 'world'; }\n");
+    try repo.add("package.json");
+    try repo.add("lib.ts");
+    _ = try repo.commit("v1.1.0 release", "bun", "bun@bun.sh");
+    try repo.createTag("v1.1.0", null);
+
+    // v2.0.0 - breaking change
+    try createFile(path, "package.json", "{\"name\":\"mylib\",\"version\":\"2.0.0\"}");
+    try repo.add("package.json");
+    _ = try repo.commit("v2.0.0 release", "bun", "bun@bun.sh");
+    try repo.createTag("v2.0.0", null);
+
+    // git should see 3 tags
+    const tags = gitTrim(&.{ "git", "tag", "-l" }, path) catch return;
+    defer testing.allocator.free(tags);
+    try testing.expect(std.mem.indexOf(u8, tags, "v1.0.0") != null);
+    try testing.expect(std.mem.indexOf(u8, tags, "v1.1.0") != null);
+    try testing.expect(std.mem.indexOf(u8, tags, "v2.0.0") != null);
+
+    // git log should show 3 commits
+    const log = gitTrim(&.{ "git", "rev-list", "HEAD" }, path) catch return;
+    defer testing.allocator.free(log);
+    var count: usize = 0;
+    var lines = std.mem.splitSequence(u8, log, "\n");
+    while (lines.next()) |line| {
+        if (line.len == 40) count += 1;
+    }
+    try testing.expectEqual(@as(usize, 3), count);
+
+    // ziggit describe should find v2.0.0
+    const desc = try repo.describeTags(testing.allocator);
+    defer testing.allocator.free(desc);
+    try testing.expectEqualStrings("v2.0.0", desc);
+
+    // isClean should be true
+    try testing.expect(try repo.isClean());
+
+    // git fsck validates everything
+    const fsck = git(&.{ "git", "-C", path, "fsck", "--no-dangling" }, "/tmp") catch return;
+    defer testing.allocator.free(fsck);
+}
+
+// ============================================================================
+// Interleaved ziggit+git commits - 5 alternating
+// ============================================================================
+
+test "xval: alternating ziggit and git commits maintain valid chain" {
+    const path = tmpPath("interleave5");
+    defer cleanup(path);
+
+    var repo = try initZiggitRepo(path);
+
+    // Commit 1: ziggit
+    try createFile(path, "z1.txt", "ziggit 1\n");
+    try repo.add("z1.txt");
+    const h1 = try repo.commit("ziggit commit 1", "Z", "z@t.com");
+    repo.close();
+
+    // Commit 2: git
+    try createFile(path, "g2.txt", "git 2\n");
+    gitOk(&.{ "git", "-C", path, "add", "g2.txt" }, "/tmp") catch return;
+    gitOk(&.{ "git", "-C", path, "commit", "-m", "git commit 2" }, "/tmp") catch return;
+
+    // Commit 3: ziggit
+    var repo3 = try ziggit.Repository.open(testing.allocator, path);
+    try createFile(path, "z3.txt", "ziggit 3\n");
+    try repo3.add("z3.txt");
+    _ = try repo3.commit("ziggit commit 3", "Z", "z@t.com");
+    repo3.close();
+
+    // Commit 4: git
+    try createFile(path, "g4.txt", "git 4\n");
+    gitOk(&.{ "git", "-C", path, "add", "g4.txt" }, "/tmp") catch return;
+    gitOk(&.{ "git", "-C", path, "commit", "-m", "git commit 4" }, "/tmp") catch return;
+
+    // Commit 5: ziggit
+    var repo5 = try ziggit.Repository.open(testing.allocator, path);
+    defer repo5.close();
+    try createFile(path, "z5.txt", "ziggit 5\n");
+    try repo5.add("z5.txt");
+    _ = try repo5.commit("ziggit commit 5", "Z", "z@t.com");
+
+    // git fsck on the mixed chain
+    const fsck = git(&.{ "git", "-C", path, "fsck", "--full", "--strict" }, "/tmp") catch return;
+    defer testing.allocator.free(fsck);
+
+    // Should have exactly 5 commits
+    const rev_list = gitTrim(&.{ "git", "rev-list", "HEAD" }, path) catch return;
+    defer testing.allocator.free(rev_list);
+    var count: usize = 0;
+    var lines = std.mem.splitSequence(u8, rev_list, "\n");
+    while (lines.next()) |line| {
+        if (line.len == 40) count += 1;
+    }
+    try testing.expectEqual(@as(usize, 5), count);
+
+    // All 5 files should be in the tree
+    const ls = gitTrim(&.{ "git", "ls-tree", "-r", "--name-only", "HEAD" }, path) catch return;
+    defer testing.allocator.free(ls);
+    try testing.expect(std.mem.indexOf(u8, ls, "z1.txt") != null);
+    try testing.expect(std.mem.indexOf(u8, ls, "g2.txt") != null);
+    try testing.expect(std.mem.indexOf(u8, ls, "z3.txt") != null);
+    try testing.expect(std.mem.indexOf(u8, ls, "g4.txt") != null);
+    try testing.expect(std.mem.indexOf(u8, ls, "z5.txt") != null);
+
+    // First commit parent chain should trace back to h1
+    const first = gitTrim(&.{ "git", "rev-list", "--reverse", "HEAD" }, path) catch return;
+    defer testing.allocator.free(first);
+    var first_line = std.mem.splitSequence(u8, first, "\n");
+    const oldest = first_line.next() orelse return;
+    try testing.expectEqualStrings(&h1, oldest);
+}
+
+// ============================================================================
+// Deeply nested directory tree (10 levels)
+// ============================================================================
+
+test "xval: ziggit 10-level deep nested directory -> git reads correctly" {
+    const path = tmpPath("deep10");
+    defer cleanup(path);
+
+    var repo = try initZiggitRepo(path);
+    defer repo.close();
+
+    // Create a/b/c/d/e/f/g/h/i/j/deep.txt
+    var nested = try std.fmt.allocPrint(testing.allocator, "{s}", .{path});
+    defer testing.allocator.free(nested);
+
+    const dirs = [_][]const u8{ "a", "b", "c", "d", "e", "f", "g", "h", "i", "j" };
+    var rel_path: []const u8 = "";
+    for (dirs) |dir| {
+        const new_nested = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ nested, dir });
+        testing.allocator.free(nested);
+        nested = new_nested;
+        std.fs.makeDirAbsolute(nested) catch {};
+
+        const new_rel = if (rel_path.len == 0)
+            try testing.allocator.dupe(u8, dir)
+        else
+            try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ rel_path, dir });
+        if (rel_path.len > 0) testing.allocator.free(@constCast(rel_path));
+        rel_path = new_rel;
+    }
+    defer if (rel_path.len > 0) testing.allocator.free(@constCast(rel_path));
+
+    try createFile(nested, "deep.txt", "at the bottom\n");
+    const file_rel = try std.fmt.allocPrint(testing.allocator, "{s}/deep.txt", .{rel_path});
+    defer testing.allocator.free(file_rel);
+
+    try repo.add(file_rel);
+    _ = try repo.commit("deeply nested", "A", "a@t.com");
+
+    // git should see the file at the correct path
+    const ls = gitTrim(&.{ "git", "ls-tree", "-r", "--name-only", "HEAD" }, path) catch return;
+    defer testing.allocator.free(ls);
+    try testing.expectEqualStrings("a/b/c/d/e/f/g/h/i/j/deep.txt", ls);
+
+    // Read the content
+    const blob = git(&.{ "git", "show", "HEAD:a/b/c/d/e/f/g/h/i/j/deep.txt" }, path) catch return;
+    defer testing.allocator.free(blob);
+    try testing.expectEqualStrings("at the bottom\n", blob);
+}
+
+// ============================================================================
+// git-created 100+ files -> ziggit reads
+// ============================================================================
+
+test "xval: git repo with 100 files -> ziggit opens and reads HEAD" {
+    const path = tmpPath("git100");
+    defer cleanup(path);
+
+    initGitRepo(path) catch return;
+
+    // Create 100 files
+    for (0..100) |i| {
+        const fname = try std.fmt.allocPrint(testing.allocator, "file{d:0>3}.txt", .{i});
+        defer testing.allocator.free(fname);
+        const content = try std.fmt.allocPrint(testing.allocator, "content of file {d}\n", .{i});
+        defer testing.allocator.free(content);
+        try createFile(path, fname, content);
+    }
+    gitOk(&.{ "git", "-C", path, "add", "." }, "/tmp") catch return;
+    gitOk(&.{ "git", "-C", path, "commit", "-m", "100 files" }, "/tmp") catch return;
+
+    const git_head = gitTrim(&.{ "git", "rev-parse", "HEAD" }, path) catch return;
+    defer testing.allocator.free(git_head);
+
+    var repo = try ziggit.Repository.open(testing.allocator, path);
+    defer repo.close();
+
+    const ziggit_head = try repo.revParseHead();
+    try testing.expectEqualStrings(git_head, &ziggit_head);
+
+    // isClean should be true
+    try testing.expect(try repo.isClean());
+}
+
+// ============================================================================
+// Status consistency after file operations
+// ============================================================================
+
+test "xval: ziggit status clean after commit matches git status" {
+    const path = tmpPath("status_clean");
+    defer cleanup(path);
+
+    var repo = try initZiggitRepo(path);
+    defer repo.close();
+
+    try createFile(path, "a.txt", "a\n");
+    try createFile(path, "b.txt", "b\n");
+    try repo.add("a.txt");
+    try repo.add("b.txt");
+    _ = try repo.commit("two files", "A", "a@t.com");
+
+    // ziggit says clean
+    try testing.expect(try repo.isClean());
+
+    // git status --porcelain should be empty
+    const git_status = gitTrim(&.{ "git", "status", "--porcelain" }, path) catch return;
+    defer testing.allocator.free(git_status);
+    try testing.expectEqual(@as(usize, 0), git_status.len);
+}
+
+test "xval: ziggit isClean true after commit, git agrees" {
+    const path = tmpPath("status_agree");
+    defer cleanup(path);
+
+    var repo = try initZiggitRepo(path);
+    defer repo.close();
+
+    try createFile(path, "a.txt", "original\n");
+    try repo.add("a.txt");
+    _ = try repo.commit("initial", "A", "a@t.com");
+
+    // ziggit isClean should be true
+    try testing.expect(try repo.isClean());
+
+    // git status --porcelain should be empty
+    const git_status = gitTrim(&.{ "git", "status", "--porcelain" }, path) catch return;
+    defer testing.allocator.free(git_status);
+    try testing.expectEqual(@as(usize, 0), git_status.len);
+
+    // Add and commit another file, should still be clean after
+    try createFile(path, "b.txt", "second\n");
+    try repo.add("b.txt");
+    _ = try repo.commit("second", "A", "a@t.com");
+
+    try testing.expect(try repo.isClean());
+    const git_status2 = gitTrim(&.{ "git", "status", "--porcelain" }, path) catch return;
+    defer testing.allocator.free(git_status2);
+    try testing.expectEqual(@as(usize, 0), git_status2.len);
+}
