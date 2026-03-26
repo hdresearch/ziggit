@@ -569,3 +569,293 @@ fn getGroupId() u32 {
         else => 0, // Default to 0 for unknown platforms
     };
 }
+
+/// Index statistics and validation
+pub const IndexStats = struct {
+    total_entries: usize,
+    version: u32,
+    extensions: usize,
+    file_size: u64,
+    checksum_valid: bool,
+    has_conflicts: bool,
+    has_sparse_checkout: bool,
+    
+    pub fn print(self: IndexStats) void {
+        std.debug.print("Index Statistics:\n");
+        std.debug.print("  Total entries: {}\n", .{self.total_entries});
+        std.debug.print("  Version: {}\n", .{self.version});
+        std.debug.print("  Extensions: {}\n", .{self.extensions});
+        std.debug.print("  File size: {} bytes\n", .{self.file_size});
+        std.debug.print("  Checksum valid: {}\n", .{self.checksum_valid});
+        std.debug.print("  Has conflicts: {}\n", .{self.has_conflicts});
+        std.debug.print("  Has sparse checkout: {}\n", .{self.has_sparse_checkout});
+    }
+};
+
+/// Analyze index file and return statistics
+pub fn analyzeIndex(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !IndexStats {
+    const index_path = try std.fmt.allocPrint(allocator, "{s}/index", .{git_dir});
+    defer allocator.free(index_path);
+    
+    const data = platform_impl.fs.readFile(allocator, index_path) catch return IndexStats{
+        .total_entries = 0,
+        .version = 0,
+        .extensions = 0,
+        .file_size = 0,
+        .checksum_valid = false,
+        .has_conflicts = false,
+        .has_sparse_checkout = false,
+    };
+    defer allocator.free(data);
+    
+    var stats = IndexStats{
+        .total_entries = 0,
+        .version = 0,
+        .extensions = 0,
+        .file_size = data.len,
+        .checksum_valid = false,
+        .has_conflicts = false,
+        .has_sparse_checkout = false,
+    };
+    
+    if (data.len < 12) return stats;
+    
+    // Check signature
+    if (!std.mem.eql(u8, data[0..4], "DIRC")) return stats;
+    
+    stats.version = std.mem.readInt(u32, @ptrCast(data[4..8]), .big);
+    stats.total_entries = std.mem.readInt(u32, @ptrCast(data[8..12]), .big);
+    
+    // Verify checksum
+    if (data.len >= 20) {
+        const content = data[0..data.len - 20];
+        const stored_checksum = data[data.len - 20..];
+        
+        var hasher = std.crypto.hash.Sha1.init(.{});
+        hasher.update(content);
+        var computed_checksum: [20]u8 = undefined;
+        hasher.final(&computed_checksum);
+        
+        stats.checksum_valid = std.mem.eql(u8, &computed_checksum, stored_checksum);
+    }
+    
+    // Check for conflicts (stage != 0 in any entry)
+    var pos: usize = 12;
+    var entries_checked: u32 = 0;
+    
+    while (entries_checked < stats.total_entries and pos + 62 <= data.len) {
+        // Skip to flags (at offset 60 in entry)
+        const flags_pos = pos + 60;
+        if (flags_pos + 2 > data.len) break;
+        
+        const flags = std.mem.readInt(u16, @ptrCast(data[flags_pos..flags_pos + 2]), .big);
+        const stage = (flags >> 12) & 0x3;
+        
+        if (stage != 0) {
+            stats.has_conflicts = true;
+        }
+        
+        // Calculate entry size to move to next entry
+        const path_len = flags & 0xFFF;
+        const base_entry_size = 62;
+        const extended_flags_size = if (stats.version >= 3 and (flags & 0x4000) != 0) @as(usize, 2) else @as(usize, 0);
+        const actual_path_len = if (stats.version >= 4 and path_len == 0xFFF) {
+            // For v4, we'd need to read the varint path length, but for analysis we'll approximate
+            100 // Rough estimate
+        } else path_len;
+        
+        const total_entry_size = base_entry_size + extended_flags_size + actual_path_len;
+        const padded_size = ((total_entry_size + 7) / 8) * 8; // Round up to 8 bytes
+        
+        pos += padded_size;
+        entries_checked += 1;
+        
+        // Safety check to prevent infinite loop
+        if (pos >= data.len - 20) break;
+    }
+    
+    // Count extensions by looking for extension signatures after entries
+    while (pos < data.len - 20) {
+        // Check if we have enough bytes for an extension header
+        if (pos + 8 > data.len - 20) break;
+        
+        // Read potential signature
+        const sig = data[pos..pos + 4];
+        const ext_size = std.mem.readInt(u32, @ptrCast(data[pos + 4..pos + 8]), .big);
+        
+        // Check if this looks like a valid extension
+        if (isValidExtensionSignature(sig) and pos + 8 + ext_size <= data.len - 20) {
+            stats.extensions += 1;
+            
+            // Check for specific extensions
+            if (std.mem.eql(u8, sig, "TREE")) {
+                // Tree cache extension
+            } else if (std.mem.eql(u8, sig, "REUC")) {
+                // Resolve undo extension (indicates previous conflicts)
+                stats.has_conflicts = true;
+            } else if (std.mem.eql(u8, sig, "UNTR")) {
+                // Untracked cache extension
+            } else if (std.mem.eql(u8, sig, "FSMN")) {
+                // File system monitor extension
+            }
+            
+            pos += 8 + ext_size;
+        } else {
+            // Doesn't look like an extension, probably reached checksum
+            break;
+        }
+    }
+    
+    return stats;
+}
+
+/// Check if a 4-byte signature looks like a valid extension
+fn isValidExtensionSignature(sig: []const u8) bool {
+    if (sig.len != 4) return false;
+    
+    const known_extensions = [_][]const u8{ "TREE", "REUC", "link", "UNTR", "FSMN", "IEOT", "EOIE" };
+    
+    for (known_extensions) |ext| {
+        if (std.mem.eql(u8, sig, ext)) return true;
+    }
+    
+    // Check if it's printable ASCII (likely an extension)
+    for (sig) |c| {
+        if (c < 32 or c > 126) return false;
+    }
+    
+    return true;
+}
+
+/// Check for index corruption or unusual conditions
+pub fn validateIndex(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![][]const u8 {
+    var issues = std.ArrayList([]const u8).init(allocator);
+    
+    const stats = analyzeIndex(git_dir, platform_impl, allocator) catch |err| {
+        try issues.append(try std.fmt.allocPrint(allocator, "Failed to analyze index: {}", .{err}));
+        return issues.toOwnedSlice();
+    };
+    
+    // Check version
+    if (stats.version < 2 or stats.version > 4) {
+        try issues.append(try std.fmt.allocPrint(allocator, "Unsupported index version: {}", .{stats.version}));
+    }
+    
+    // Check checksum
+    if (!stats.checksum_valid) {
+        try issues.append(try allocator.dupe(u8, "Index checksum is invalid - file may be corrupted"));
+    }
+    
+    // Check file size
+    if (stats.file_size > 100 * 1024 * 1024) {
+        try issues.append(try std.fmt.allocPrint(allocator, "Index file is very large: {} bytes", .{stats.file_size}));
+    }
+    
+    // Check entry count
+    if (stats.total_entries > 1_000_000) {
+        try issues.append(try std.fmt.allocPrint(allocator, "Very large number of entries: {}", .{stats.total_entries}));
+    }
+    
+    // Report conflicts
+    if (stats.has_conflicts) {
+        try issues.append(try allocator.dupe(u8, "Index contains merge conflicts that need to be resolved"));
+    }
+    
+    // Report sparse checkout
+    if (stats.has_sparse_checkout) {
+        try issues.append(try allocator.dupe(u8, "Repository uses sparse-checkout"));
+    }
+    
+    return issues.toOwnedSlice();
+}
+
+/// Optimize index performance by sorting and compacting entries
+pub fn optimizeIndex(self: *Index) void {
+    // Sort entries by path for better cache locality and faster lookups
+    std.sort.block(IndexEntry, self.entries.items, {}, struct {
+        fn lessThan(context: void, lhs: IndexEntry, rhs: IndexEntry) bool {
+            _ = context;
+            return std.mem.lessThan(u8, lhs.path, rhs.path);
+        }
+    }.lessThan);
+    
+    // Remove duplicate entries (keep the last one)
+    var i: usize = 0;
+    while (i + 1 < self.entries.items.len) {
+        if (std.mem.eql(u8, self.entries.items[i].path, self.entries.items[i + 1].path)) {
+            self.entries.items[i].deinit(self.allocator);
+            _ = self.entries.orderedRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// Get index entries that match a path pattern (simple glob support)
+pub fn getEntriesMatching(self: Index, pattern: []const u8, allocator: std.mem.Allocator) ![]IndexEntry {
+    var matching = std.ArrayList(IndexEntry).init(allocator);
+    
+    for (self.entries.items) |entry| {
+        if (pathMatches(entry.path, pattern)) {
+            // Create a copy of the entry
+            try matching.append(IndexEntry{
+                .ctime_sec = entry.ctime_sec,
+                .ctime_nsec = entry.ctime_nsec,
+                .mtime_sec = entry.mtime_sec,
+                .mtime_nsec = entry.mtime_nsec,
+                .dev = entry.dev,
+                .ino = entry.ino,
+                .mode = entry.mode,
+                .uid = entry.uid,
+                .gid = entry.gid,
+                .size = entry.size,
+                .sha1 = entry.sha1,
+                .flags = entry.flags,
+                .extended_flags = entry.extended_flags,
+                .path = try allocator.dupe(u8, entry.path),
+            });
+        }
+    }
+    
+    return matching.toOwnedSlice();
+}
+
+/// Simple path matching with basic glob support (* and ?)
+fn pathMatches(path: []const u8, pattern: []const u8) bool {
+    return pathMatchesImpl(path, pattern, 0, 0);
+}
+
+fn pathMatchesImpl(path: []const u8, pattern: []const u8, path_idx: usize, pattern_idx: usize) bool {
+    if (pattern_idx >= pattern.len) {
+        return path_idx >= path.len;
+    }
+    
+    if (path_idx >= path.len) {
+        // Check if remaining pattern is all *
+        for (pattern[pattern_idx..]) |c| {
+            if (c != '*') return false;
+        }
+        return true;
+    }
+    
+    const pattern_char = pattern[pattern_idx];
+    
+    switch (pattern_char) {
+        '*' => {
+            // Try matching zero or more characters
+            return pathMatchesImpl(path, pattern, path_idx, pattern_idx + 1) or
+                   pathMatchesImpl(path, pattern, path_idx + 1, pattern_idx);
+        },
+        '?' => {
+            // Match exactly one character
+            return pathMatchesImpl(path, pattern, path_idx + 1, pattern_idx + 1);
+        },
+        else => {
+            // Match exact character
+            if (path[path_idx] == pattern_char) {
+                return pathMatchesImpl(path, pattern, path_idx + 1, pattern_idx + 1);
+            }
+            return false;
+        },
+    }
+}

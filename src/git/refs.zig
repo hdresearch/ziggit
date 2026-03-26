@@ -767,6 +767,259 @@ pub fn clearPackedRefsCache() void {
     }
 }
 
+/// Optimized ref resolution with caching and batch operations
+pub const RefResolver = struct {
+    git_dir: []const u8,
+    allocator: std.mem.Allocator,
+    ref_cache: std.HashMap([]const u8, []const u8, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
+    cache_valid_until: i64,
+    cache_duration: i64, // Cache validity duration in seconds
+    
+    const Self = @This();
+    
+    pub fn init(git_dir: []const u8, allocator: std.mem.Allocator) Self {
+        return Self{
+            .git_dir = git_dir,
+            .allocator = allocator,
+            .ref_cache = std.HashMap([]const u8, []const u8, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
+            .cache_valid_until = 0,
+            .cache_duration = 30, // 30 seconds cache
+        };
+    }
+    
+    pub fn deinit(self: *Self) void {
+        self.clearCache();
+        self.ref_cache.deinit();
+    }
+    
+    /// Clear the internal ref cache
+    pub fn clearCache(self: *Self) void {
+        var iter = self.ref_cache.iterator();
+        while (iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.ref_cache.clearRetainingCapacity();
+        self.cache_valid_until = 0;
+    }
+    
+    /// Check if cache is still valid
+    fn isCacheValid(self: Self) bool {
+        return std.time.timestamp() < self.cache_valid_until;
+    }
+    
+    /// Resolve a ref with caching
+    pub fn resolve(self: *Self, ref_name: []const u8, platform_impl: anytype) !?[]u8 {
+        // Check cache first
+        if (self.isCacheValid()) {
+            if (self.ref_cache.get(ref_name)) |cached_value| {
+                return try self.allocator.dupe(u8, cached_value);
+            }
+        } else {
+            // Cache expired, clear it
+            self.clearCache();
+        }
+        
+        // Resolve using standard method
+        const result = resolveRef(self.git_dir, ref_name, platform_impl, self.allocator) catch |err| switch (err) {
+            error.RefNotFound => return null,
+            else => return err,
+        };
+        
+        if (result) |hash| {
+            // Cache the result
+            self.ref_cache.put(
+                try self.allocator.dupe(u8, ref_name),
+                try self.allocator.dupe(u8, hash)
+            ) catch {}; // Ignore cache errors
+            
+            // Update cache validity
+            self.cache_valid_until = std.time.timestamp() + self.cache_duration;
+            
+            return hash;
+        }
+        
+        return null;
+    }
+    
+    /// Batch resolve multiple refs efficiently
+    pub fn resolveBatch(self: *Self, ref_names: []const []const u8, platform_impl: anytype) ![]?[]u8 {
+        var results = try self.allocator.alloc(?[]u8, ref_names.len);
+        
+        // Refresh cache if needed by pre-loading refs
+        if (!self.isCacheValid()) {
+            try self.preloadRefs(platform_impl);
+        }
+        
+        for (ref_names, 0..) |ref_name, i| {
+            results[i] = try self.resolve(ref_name, platform_impl);
+        }
+        
+        return results;
+    }
+    
+    /// Pre-load common refs into cache for better performance
+    fn preloadRefs(self: *Self, platform_impl: anytype) !void {
+        self.clearCache();
+        
+        // Load packed-refs if available
+        const packed_refs_path = try std.fmt.allocPrint(self.allocator, "{s}/packed-refs", .{self.git_dir});
+        defer self.allocator.free(packed_refs_path);
+        
+        const content = platform_impl.fs.readFile(self.allocator, packed_refs_path) catch return;
+        defer self.allocator.free(content);
+        
+        var lines = std.mem.split(u8, content, "\n");
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            
+            // Skip comments and empty lines
+            if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == '^') continue;
+            
+            if (std.mem.indexOf(u8, trimmed, " ")) |space_pos| {
+                const hash = trimmed[0..space_pos];
+                const ref_path = trimmed[space_pos + 1..];
+                
+                if (isValidHash(hash)) {
+                    self.ref_cache.put(
+                        try self.allocator.dupe(u8, ref_path),
+                        try self.allocator.dupe(u8, hash)
+                    ) catch continue;
+                }
+            }
+        }
+        
+        // Load common loose refs
+        const common_refs = [_][]const u8{ "HEAD", "refs/heads/master", "refs/heads/main" };
+        for (common_refs) |ref_name| {
+            const ref_path = if (std.mem.eql(u8, ref_name, "HEAD"))
+                try std.fmt.allocPrint(self.allocator, "{s}/HEAD", .{self.git_dir})
+            else
+                try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.git_dir, ref_name });
+            defer self.allocator.free(ref_path);
+            
+            const ref_content = platform_impl.fs.readFile(self.allocator, ref_path) catch continue;
+            defer self.allocator.free(ref_content);
+            
+            const trimmed = std.mem.trim(u8, ref_content, " \t\n\r");
+            if (std.mem.startsWith(u8, trimmed, "ref: ")) {
+                // Symbolic ref - don't cache directly, let normal resolution handle it
+                continue;
+            } else if (isValidHash(trimmed)) {
+                self.ref_cache.put(
+                    try self.allocator.dupe(u8, ref_name),
+                    try self.allocator.dupe(u8, trimmed)
+                ) catch continue;
+            }
+        }
+        
+        self.cache_valid_until = std.time.timestamp() + self.cache_duration;
+    }
+    
+    /// Set cache duration (in seconds)
+    pub fn setCacheDuration(self: *Self, duration: i64) void {
+        self.cache_duration = duration;
+    }
+    
+    /// Get cache statistics
+    pub fn getCacheStats(self: Self) struct {
+        entries: usize,
+        is_valid: bool,
+        expires_in: i64,
+    } {
+        const now = std.time.timestamp();
+        return .{
+            .entries = self.ref_cache.count(),
+            .is_valid = self.isCacheValid(),
+            .expires_in = if (self.cache_valid_until > now) self.cache_valid_until - now else 0,
+        };
+    }
+};
+
+/// Smart ref name expansion - tries to find the best match for partial ref names
+pub fn expandRefName(git_dir: []const u8, partial_name: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !?[]u8 {
+    // If it's already a full ref, check if it exists
+    if (std.mem.startsWith(u8, partial_name, "refs/")) {
+        if (resolveRef(git_dir, partial_name, platform_impl, allocator)) |hash| {
+            defer allocator.free(hash);
+            return try allocator.dupe(u8, partial_name);
+        } else |_| {}
+    }
+    
+    // Try different prefixes in order of likelihood
+    const prefixes = [_][]const u8{
+        "refs/heads/",     // Local branches (most common)
+        "refs/tags/",      // Tags
+        "refs/remotes/",   // Remote branches
+        "refs/",           // Other refs
+    };
+    
+    for (prefixes) |prefix| {
+        const full_ref = try std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, partial_name });
+        defer allocator.free(full_ref);
+        
+        if (resolveRef(git_dir, full_ref, platform_impl, allocator)) |hash| {
+            defer allocator.free(hash);
+            return try allocator.dupe(u8, full_ref);
+        } else |_| {}
+    }
+    
+    return null;
+}
+
+/// Check if a ref exists without resolving it fully
+pub fn refExists(git_dir: []const u8, ref_name: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !bool {
+    const result = resolveRef(git_dir, ref_name, platform_impl, allocator) catch |err| switch (err) {
+        error.RefNotFound => return false,
+        else => return err,
+    };
+    
+    if (result) |hash| {
+        allocator.free(hash);
+        return true;
+    }
+    
+    return false;
+}
+
+/// Get the short name of a ref (removes refs/heads/, refs/tags/, etc.)
+pub fn getShortRefName(ref_name: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    if (std.mem.startsWith(u8, ref_name, "refs/heads/")) {
+        return try allocator.dupe(u8, ref_name["refs/heads/".len..]);
+    } else if (std.mem.startsWith(u8, ref_name, "refs/tags/")) {
+        return try allocator.dupe(u8, ref_name["refs/tags/".len..]);
+    } else if (std.mem.startsWith(u8, ref_name, "refs/remotes/")) {
+        return try allocator.dupe(u8, ref_name["refs/remotes/".len..]);
+    } else if (std.mem.startsWith(u8, ref_name, "refs/")) {
+        return try allocator.dupe(u8, ref_name["refs/".len..]);
+    } else {
+        return try allocator.dupe(u8, ref_name);
+    }
+}
+
+/// Get the type of a ref based on its prefix
+pub const RefType = enum {
+    branch,
+    tag,
+    remote,
+    other,
+    head,
+};
+
+pub fn getRefType(ref_name: []const u8) RefType {
+    if (std.mem.eql(u8, ref_name, "HEAD")) {
+        return .head;
+    } else if (std.mem.startsWith(u8, ref_name, "refs/heads/")) {
+        return .branch;
+    } else if (std.mem.startsWith(u8, ref_name, "refs/tags/")) {
+        return .tag;
+    } else if (std.mem.startsWith(u8, ref_name, "refs/remotes/")) {
+        return .remote;
+    } else {
+        return .other;
+    }
+}
+
 /// Enhanced ref validation function
 pub fn validateRefName(ref_name: []const u8) !void {
     if (ref_name.len == 0) return error.EmptyRefName;
