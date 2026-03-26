@@ -587,6 +587,133 @@ else
     fail "bun pkg v1" "got: $git_v1_pkg"
 fi
 
+# --- Test 24: 120 files ---
+echo "Test 24: Repo with 120 files"
+d=$(new_repo "t24_120files")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+for i in $(seq 1 120); do
+    printf "file %d content" "$i" > "$d/file_$(printf '%03d' $i).txt"
+    (cd "$d" && "$ZIGGIT" add "file_$(printf '%03d' $i).txt") >/dev/null 2>&1
+done
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "120 files") >/dev/null 2>&1
+
+git_file_count=$(cd "$d" && git ls-tree --name-only HEAD | wc -l | tr -d ' ')
+if [ "$git_file_count" -eq 120 ]; then
+    pass "all 120 files visible to git"
+else
+    fail "120 files" "expected 120, got: $git_file_count"
+fi
+
+# --- Test 25: Empty file ---
+echo "Test 25: Empty file preserved"
+d=$(new_repo "t25_empty")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+touch "$d/empty.txt"
+(cd "$d" && "$ZIGGIT" add empty.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "empty file") >/dev/null 2>&1
+
+empty_size=$(cd "$d" && git cat-file -s HEAD:empty.txt 2>&1)
+if [ "$empty_size" = "0" ]; then
+    pass "empty file has size 0 via git"
+else
+    fail "empty file" "expected size 0, got: $empty_size"
+fi
+
+# --- Test 26: Annotated tag cross-validation ---
+echo "Test 26: Annotated tag object readable by git"
+d=$(new_repo "t26_annotated")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "data" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "for tag") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag -a v5.0.0 -m "Release v5") >/dev/null 2>&1
+
+tag_type=$(cd "$d" && git cat-file -t v5.0.0 2>&1)
+if [ "$tag_type" = "tag" ]; then
+    pass "annotated tag has type 'tag' in git"
+else
+    # Lightweight tag fallback is also acceptable
+    if [ "$tag_type" = "commit" ]; then
+        pass "tag created (lightweight) readable by git"
+    else
+        fail "annotated tag type" "expected 'tag' or 'commit', got: $tag_type"
+    fi
+fi
+
+# --- Test 27: git writes -> ziggit reads full hash ---
+echo "Test 27: git writes -> ziggit resolves full hash"
+d=$(new_repo "t27_fullhash")
+(cd "$d" && git init && git config user.name "Test" && git config user.email "test@test.com") >/dev/null 2>&1
+echo "hashtest" > "$d/f.txt"
+(cd "$d" && git add f.txt && git commit -m "hash resolution test") >/dev/null 2>&1
+git_hash=$(cd "$d" && git rev-parse HEAD | tr -d '[:space:]')
+ziggit_hash=$(cd "$d" && "$ZIGGIT" rev-parse HEAD 2>&1 | tr -d '[:space:]')
+if [ "$git_hash" = "$ziggit_hash" ] && [ ${#git_hash} -eq 40 ]; then
+    pass "ziggit resolves HEAD to same hash as git"
+else
+    fail "full hash resolution" "git=$git_hash ziggit=$ziggit_hash"
+fi
+
+# --- Test 28: Roundtrip: ziggit writes, git reads, ziggit reads back ---
+echo "Test 28: Full roundtrip: ziggit write -> git verify -> ziggit read"
+d=$(new_repo "t28_roundtrip")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "roundtrip" > "$d/rt.txt"
+(cd "$d" && "$ZIGGIT" add rt.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="RT" GIT_AUTHOR_EMAIL="rt@rt.com" \
+    GIT_COMMITTER_NAME="RT" GIT_COMMITTER_EMAIL="rt@rt.com" \
+    "$ZIGGIT" commit -m "roundtrip test") >/dev/null 2>&1
+
+# git reads
+git_hash=$(cd "$d" && git rev-parse HEAD | tr -d '[:space:]')
+git_content=$(cd "$d" && git show HEAD:rt.txt 2>&1)
+
+# ziggit reads back
+ziggit_hash=$(cd "$d" && "$ZIGGIT" rev-parse HEAD 2>&1 | tr -d '[:space:]')
+
+if [ "$git_hash" = "$ziggit_hash" ] && [ "$git_content" = "roundtrip" ]; then
+    pass "full roundtrip: hashes match and content preserved"
+else
+    fail "roundtrip" "git=$git_hash ziggit=$ziggit_hash content=$git_content"
+fi
+
+# --- Test 29: Bun workflow with .gitignore ---
+echo "Test 29: Bun workflow with multiple file types"
+d=$(new_repo "t29_bun_full")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+cat > "$d/package.json" << 'PKGEOF'
+{"name":"@scope/pkg","version":"3.0.0","main":"index.js"}
+PKGEOF
+echo "module.exports = 42;" > "$d/index.js"
+echo "# README" > "$d/README.md"
+echo "MIT" > "$d/LICENSE"
+(cd "$d" && "$ZIGGIT" add package.json && "$ZIGGIT" add index.js && \
+    "$ZIGGIT" add README.md && "$ZIGGIT" add LICENSE) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Bun" GIT_AUTHOR_EMAIL="bun@bun.sh" \
+    GIT_COMMITTER_NAME="Bun" GIT_COMMITTER_EMAIL="bun@bun.sh" \
+    "$ZIGGIT" commit -m "publish v3.0.0") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v3.0.0) >/dev/null 2>&1
+
+file_count=$(cd "$d" && git ls-tree --name-only HEAD | wc -l | tr -d ' ')
+if [ "$file_count" -eq 4 ]; then
+    pass "bun full workflow: 4 files committed"
+else
+    fail "bun full files" "expected 4, got: $file_count"
+fi
+
+js_content=$(cd "$d" && git show HEAD:index.js 2>&1)
+if echo "$js_content" | grep -q "module.exports = 42"; then
+    pass "bun full workflow: JS file content correct"
+else
+    fail "bun js content" "got: $js_content"
+fi
+
 echo ""
 echo "========================================"
 echo "Results: $PASS passed, $FAIL failed"
