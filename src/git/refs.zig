@@ -1468,3 +1468,82 @@ fn listRefsFromPackedRefs(git_dir: []const u8, platform_impl: anytype, allocator
     }
 }
 
+/// Enhanced branch management with upstream tracking
+pub const BranchManager = struct {
+    allocator: std.mem.Allocator,
+    git_dir: []const u8,
+    
+    pub fn init(allocator: std.mem.Allocator, git_dir: []const u8) BranchManager {
+        return BranchManager{
+            .allocator = allocator,
+            .git_dir = git_dir,
+        };
+    }
+    
+    /// Create a new branch
+    pub fn createBranch(self: BranchManager, branch_name: []const u8, start_point: ?[]const u8, platform_impl: anytype) !void {
+        // Validate branch name
+        if (!isValidRefName(branch_name)) {
+            return error.InvalidBranchName;
+        }
+        
+        // Resolve start point (default to HEAD)
+        const start_hash = if (start_point) |sp|
+            (try resolveRef(self.git_dir, sp, platform_impl, self.allocator)) orelse return error.InvalidStartPoint
+        else
+            (try resolveRef(self.git_dir, "HEAD", platform_impl, self.allocator)) orelse return error.NoHEAD;
+        
+        defer self.allocator.free(start_hash);
+        
+        // Create branch ref
+        const branch_path = try std.fmt.allocPrint(self.allocator, "{s}/refs/heads/{s}", .{self.git_dir, branch_name});
+        defer self.allocator.free(branch_path);
+        
+        try std.fs.cwd().writeFile(branch_path, start_hash);
+    }
+    
+    /// Delete a branch
+    pub fn deleteBranch(self: BranchManager, branch_name: []const u8, force: bool, platform_impl: anytype) !void {
+        // Prevent deleting current branch
+        const current_branch = getCurrentBranch(self.git_dir, platform_impl, self.allocator) catch null;
+        if (current_branch) |current| {
+            defer self.allocator.free(current);
+            if (std.mem.eql(u8, current, branch_name)) {
+                return error.CannotDeleteCurrentBranch;
+            }
+        }
+        
+        // Check if branch is merged (unless force)
+        if (!force) {
+            // TODO: Check if branch is merged into HEAD
+            // For now, we'll just allow deletion
+        }
+        
+        const branch_path = try std.fmt.allocPrint(self.allocator, "{s}/refs/heads/{s}", .{self.git_dir, branch_name});
+        defer self.allocator.free(branch_path);
+        
+        std.fs.cwd().deleteFile(branch_path) catch |err| switch (err) {
+            error.FileNotFound => return error.BranchNotFound,
+            else => return err,
+        };
+    }
+    
+    /// Set upstream tracking for a branch
+    pub fn setUpstream(self: BranchManager, branch_name: []const u8, upstream_remote: []const u8, upstream_branch: []const u8) !void {
+        const config = @import("config.zig");
+        var git_config = config.loadGitConfig(self.git_dir, self.allocator) catch config.GitConfig.init(self.allocator);
+        defer git_config.deinit();
+        
+        try git_config.setValue("branch", branch_name, "remote", upstream_remote);
+        
+        const merge_ref = try std.fmt.allocPrint(self.allocator, "refs/heads/{s}", .{upstream_branch});
+        defer self.allocator.free(merge_ref);
+        try git_config.setValue("branch", branch_name, "merge", merge_ref);
+        
+        // Write config back
+        const config_path = try std.fmt.allocPrint(self.allocator, "{s}/config", .{self.git_dir});
+        defer self.allocator.free(config_path);
+        try git_config.writeToFile(config_path);
+    }
+};
+
