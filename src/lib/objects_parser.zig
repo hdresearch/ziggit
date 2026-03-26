@@ -80,8 +80,8 @@ pub fn readObject(allocator: std.mem.Allocator, objects_dir: []const u8, sha_hex
     defer allocator.free(compressed_content);
     
     // Decompress using zlib
-    var decompressor = try zlib.decompressor(allocator, std.io.fixedBufferStream(compressed_content).reader());
-    defer decompressor.deinit();
+    var buffer_stream = std.io.fixedBufferStream(compressed_content);
+    var decompressor = zlib.decompressor(buffer_stream.reader());
     
     const decompressed = try decompressor.reader().readAllAlloc(allocator, 10 * 1024 * 1024);
     errdefer allocator.free(decompressed);

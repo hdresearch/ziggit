@@ -1075,11 +1075,21 @@ fn getStatusPorcelainReal(repo: *Repository, buffer: []u8) !void {
                 output_pos += status_line.len;
                 if (output_pos >= buffer.len - 1) break;
             } else if (is_staged) {
-                // Only staged changes
+                // Only staged changes - determine if this is an addition or modification
+                const was_in_head = blk: {
+                    if (head_hash_str.len == 0 or std.mem.eql(u8, head_hash_str, "0000000000000000000000000000000000000000")) {
+                        // No HEAD commit, so this is definitely an addition
+                        break :blk false;
+                    }
+                    // Check if file existed in HEAD tree by trying to find it
+                    break :blk fileExistsInHead(repo.path, entry.path, head_hash_str) catch false;
+                };
+                
+                const status_prefix = if (was_in_head) "M  " else "A  ";
                 const status_line = std.fmt.bufPrint(
                     buffer[output_pos..],
-                    "M  {s}\n",
-                    .{entry.path}
+                    "{s}{s}\n",
+                    .{status_prefix, entry.path}
                 ) catch break;
                 output_pos += status_line.len;
                 if (output_pos >= buffer.len - 1) break;
@@ -1663,21 +1673,151 @@ fn isFileModifiedReal(git_dir: []const u8, work_tree: []const u8, file_path: []c
 
 // Check if a file in the index is staged (different from HEAD)
 fn isFileStagedAgainstHead(repo_path: []const u8, file_path: []const u8, index_hash: [20]u8) !bool {
-    _ = repo_path;
-    _ = file_path;
-    _ = index_hash;
+    // Get git directory
+    const git_dir = blk: {
+        const potential_git_dir = try std.fmt.allocPrint(global_allocator, "{s}/.git", .{repo_path});
+        defer global_allocator.free(potential_git_dir);
+        
+        std.fs.accessAbsolute(potential_git_dir, .{}) catch {
+            // Not found, try repo_path itself as git_dir
+            break :blk try global_allocator.dupe(u8, repo_path);
+        };
+        break :blk try global_allocator.dupe(u8, potential_git_dir);
+    };
+    defer global_allocator.free(git_dir);
     
-    // For now, assume all files in index are staged if we have a HEAD commit
-    // This is a conservative approach - real implementation would:
-    // 1. Load HEAD commit object
-    // 2. Parse commit to get tree hash
-    // 3. Load tree object and find file hash
-    // 4. Compare with index hash
+    // Get HEAD commit hash
+    var head_buf: [41]u8 = undefined;
+    var temp_repo = Repository{ .path = @constCast(repo_path), .allocator = global_allocator };
+    getHeadCommitHashReal(&temp_repo, &head_buf) catch {
+        // No HEAD, so everything in index is staged
+        return true;
+    };
+    const head_hash_str = std.mem.trim(u8, &head_buf, "\x00");
     
-    // TODO: Implement proper HEAD tree comparison
-    // For now, return false to indicate no staged changes (files match HEAD)
-    // This gives cleaner status output for most common cases
-    return false;
+    if (head_hash_str.len == 0 or std.mem.eql(u8, head_hash_str, "0000000000000000000000000000000000000000")) {
+        // Empty repo, everything in index is staged
+        return true;
+    }
+    
+    // Read HEAD commit object
+    const objects_dir = try std.fmt.allocPrint(global_allocator, "{s}/objects", .{git_dir});
+    defer global_allocator.free(objects_dir);
+    
+    var head_commit = objects_parser.readObject(global_allocator, objects_dir, head_hash_str) catch {
+        // Can't read HEAD commit, assume staged
+        return true;
+    };
+    defer head_commit.deinit();
+    
+    if (head_commit.type != .commit) {
+        return true; // Not a commit, assume staged
+    }
+    
+    // Parse commit to get tree hash
+    var commit_info = objects_parser.parseCommit(global_allocator, head_commit.content) catch {
+        return true; // Can't parse commit, assume staged
+    };
+    defer commit_info.deinit();
+    
+    // Convert tree SHA to hex
+    var tree_hash_hex: [40]u8 = undefined;
+    objects_parser.shaToHex(@as([]const u8, &commit_info.tree_sha), &tree_hash_hex);
+    
+    // Read tree object
+    var tree_object = objects_parser.readObject(global_allocator, objects_dir, &tree_hash_hex) catch {
+        return true; // Can't read tree, assume staged
+    };
+    defer tree_object.deinit();
+    
+    if (tree_object.type != .tree) {
+        return true; // Not a tree, assume staged
+    }
+    
+    // Parse tree to find file
+    var tree_entries = std.ArrayList(objects_parser.TreeEntry).init(global_allocator);
+    defer tree_entries.deinit();
+    
+    objects_parser.parseTree(tree_object.content, &tree_entries) catch {
+        return true; // Can't parse tree, assume staged
+    };
+    
+    // Find file in tree
+    for (tree_entries.items) |entry| {
+        if (std.mem.eql(u8, entry.name, file_path)) {
+            // Compare hashes
+            return !std.mem.eql(u8, @as([]const u8, &entry.sha1), @as([]const u8, &index_hash));
+        }
+    }
+    
+    // File not in HEAD tree, so it's a new file (staged addition)
+    return true;
+}
+
+// Check if a file exists in the HEAD tree
+fn fileExistsInHead(repo_path: []const u8, file_path: []const u8, head_hash_str: []const u8) !bool {
+    // Get git directory
+    const git_dir = blk: {
+        const potential_git_dir = try std.fmt.allocPrint(global_allocator, "{s}/.git", .{repo_path});
+        defer global_allocator.free(potential_git_dir);
+        
+        std.fs.accessAbsolute(potential_git_dir, .{}) catch {
+            // Not found, try repo_path itself as git_dir
+            break :blk try global_allocator.dupe(u8, repo_path);
+        };
+        break :blk try global_allocator.dupe(u8, potential_git_dir);
+    };
+    defer global_allocator.free(git_dir);
+    
+    // Read HEAD commit object
+    const objects_dir = try std.fmt.allocPrint(global_allocator, "{s}/objects", .{git_dir});
+    defer global_allocator.free(objects_dir);
+    
+    var head_commit = objects_parser.readObject(global_allocator, objects_dir, head_hash_str) catch {
+        return false; // Can't read HEAD commit
+    };
+    defer head_commit.deinit();
+    
+    if (head_commit.type != .commit) {
+        return false; // Not a commit
+    }
+    
+    // Parse commit to get tree hash
+    var commit_info = objects_parser.parseCommit(global_allocator, head_commit.content) catch {
+        return false; // Can't parse commit
+    };
+    defer commit_info.deinit();
+    
+    // Convert tree SHA to hex
+    var tree_hash_hex: [40]u8 = undefined;
+    objects_parser.shaToHex(@as([]const u8, &commit_info.tree_sha), &tree_hash_hex);
+    
+    // Read tree object
+    var tree_object = objects_parser.readObject(global_allocator, objects_dir, &tree_hash_hex) catch {
+        return false; // Can't read tree
+    };
+    defer tree_object.deinit();
+    
+    if (tree_object.type != .tree) {
+        return false; // Not a tree
+    }
+    
+    // Parse tree to find file
+    var tree_entries = std.ArrayList(objects_parser.TreeEntry).init(global_allocator);
+    defer tree_entries.deinit();
+    
+    objects_parser.parseTree(tree_object.content, &tree_entries) catch {
+        return false; // Can't parse tree
+    };
+    
+    // Check if file exists in tree
+    for (tree_entries.items) |entry| {
+        if (std.mem.eql(u8, entry.name, file_path)) {
+            return true;
+        }
+    }
+    
+    return false; // File not found in HEAD tree
 }
 
 // Check if a path exists in the repository
