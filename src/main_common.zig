@@ -1123,7 +1123,9 @@ fn getIndexedFileContent(entry: index_mod.IndexEntry, allocator: std.mem.Allocat
     
     // Find the git directory
     const platform_impl = platform_mod.getCurrentPlatform();
-    const git_dir = findGitDirectory(allocator, &platform_impl) catch {
+    const git_dir = findGitDirectory(allocator, &platform_impl) catch |err| {
+        // Return empty string for graceful degradation in diff/status
+        std.log.debug("Could not find git directory: {}", .{err});
         return try allocator.dupe(u8, "");
     };
     defer allocator.free(git_dir);
@@ -1131,15 +1133,23 @@ fn getIndexedFileContent(entry: index_mod.IndexEntry, allocator: std.mem.Allocat
     // Convert hash bytes to hex string
     const hash_str = try allocator.alloc(u8, 40);
     defer allocator.free(hash_str);
-    _ = std.fmt.bufPrint(hash_str, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch {
+    _ = std.fmt.bufPrint(hash_str, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch |err| {
+        std.log.debug("Could not format hash: {}", .{err});
         return try allocator.dupe(u8, "");
     };
     
     // Load the blob object from the git object store
-    const git_object = objects.GitObject.load(hash_str, git_dir, &platform_impl, allocator) catch {
+    const git_object = objects.GitObject.load(hash_str, git_dir, &platform_impl, allocator) catch |err| {
+        std.log.debug("Could not load blob object {s}: {}", .{ hash_str, err });
         return try allocator.dupe(u8, "");
     };
     defer git_object.deinit(allocator);
+    
+    // Verify this is actually a blob object
+    if (git_object.type != .blob) {
+        std.log.warn("Expected blob but got {} for hash {s}", .{ git_object.type, hash_str });
+        return try allocator.dupe(u8, "");
+    }
     
     // Return a copy of the blob data
     return try allocator.dupe(u8, git_object.data);
