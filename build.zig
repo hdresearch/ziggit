@@ -733,6 +733,17 @@ pub fn build(b: *std.Build) void {
     e2e_step.dependOn(&b.addRunArtifact(ziggit_writes_test).step);
     e2e_step.dependOn(&b.addRunArtifact(git_writes_test).step);
 
+    // Strict pack delta tests (format correctness, git compat, clone flow)
+    const pack_delta_strict_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_delta_strict_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_delta_strict_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(pack_delta_strict_tests).step);
+
     // E2E tests also available via main test step (may be slow)
     test_step.dependOn(&b.addRunArtifact(ziggit_writes_test).step);
     test_step.dependOn(&b.addRunArtifact(git_writes_test).step);
