@@ -545,7 +545,7 @@ fn findObjectInPackByHash(hash_str: []const u8, pack_path: []const u8, platform_
     defer allocator.free(idx_filename);
     
     // Try to find the object in this specific pack
-    return findObjectInPack(pack_dir_path, idx_filename, hash_str, platform_impl, allocator) catch |_| return error.ObjectNotFound;
+    return findObjectInPack(pack_dir_path, idx_filename, hash_str, platform_impl, allocator) catch return error.ObjectNotFound;
 }
 
 /// Apply delta to base data to reconstruct object
