@@ -1652,6 +1652,15 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(smart_http_tests).step);
 
+    // HTTPS integration tests (require network access — run with `zig build https-test`)
+    const https_integration_tests = b.addTest(.{
+        .root_source_file = b.path("test/https_integration_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const https_test_step = b.step("https-test", "Run HTTPS integration tests (requires network)");
+    https_test_step.dependOn(&b.addRunArtifact(https_integration_tests).step);
+
     // ========== BENCHMARKS ==========
     
     // CLI benchmark (ziggit vs git performance)
