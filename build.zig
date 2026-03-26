@@ -173,6 +173,19 @@ pub fn build(b: *std.Build) void {
     const optimization_bench_step = b.step("bench-opt", "Run hot path optimization benchmarks (PHASE 2)");
     optimization_bench_step.dependOn(&run_optimization_bench.step);
 
+    // Debug vs Release comparison (PHASE 3)
+    const debug_release_comparison = b.addExecutable(.{
+        .name = "debug_release_comparison",
+        .root_source_file = b.path("benchmarks/debug_release_comparison.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    debug_release_comparison.root_module.addImport("ziggit", ziggit_module);
+    const run_debug_release_comparison = b.addRunArtifact(debug_release_comparison);
+
+    const debug_release_step = b.step("bench-release", "Run debug vs release performance comparison (PHASE 3)");
+    debug_release_step.dependOn(&run_debug_release_comparison.step);
+
     // ========== WASM TARGET ==========
     const wasm_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
