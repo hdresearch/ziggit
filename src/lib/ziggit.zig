@@ -1020,15 +1020,53 @@ fn getStatusPorcelainReal(repo: *Repository, buffer: []u8) !void {
         };
         defer git_index.deinit();
         
+        // Load HEAD tree entries for staged file comparison
+        var head_buf: [41]u8 = undefined;
+        try getHeadCommitHashReal(repo, &head_buf);
+        const head_hash = std.mem.trim(u8, &head_buf, "\x00");
+        
+        var head_tree_entries = getHeadTreeEntries(git_dir, head_hash) catch blk: {
+            // If we can't get HEAD tree, treat all index entries as staged additions
+            break :blk std.ArrayList(TreeFileEntry).init(global_allocator);
+        };
+        defer head_tree_entries.deinit();
+        defer for (head_tree_entries.items) |entry| {
+            global_allocator.free(entry.path);
+        };
+        
+        // Create hash map of HEAD tree entries for quick lookup
+        var head_files = std.HashMap([]const u8, []const u8, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(global_allocator);
+        defer head_files.deinit();
+        for (head_tree_entries.items) |entry| {
+            try head_files.put(entry.path, entry.hash);
+        }
+        
         // Track which files we've seen in index to identify untracked files later
         var tracked_files = std.HashMap([]const u8, void, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(global_allocator);
         defer tracked_files.deinit();
         
-        // Check each index entry for modifications
+        // Check each index entry for modifications and staging
         for (git_index.entries.items) |entry| {
             try tracked_files.put(entry.path, {});
             
-            // Check if file is modified against index
+            // Check if file is staged (index differs from HEAD tree)
+            var staged_status: ?u8 = null;
+            if (head_files.get(entry.path)) |head_file_hash| {
+                // File exists in HEAD, check if it's different
+                var index_hash_str: [40]u8 = undefined;
+                for (entry.sha1, 0..) |byte, i| {
+                    _ = std.fmt.bufPrint(index_hash_str[i*2..i*2+2], "{x:0>2}", .{byte}) catch break;
+                }
+                
+                if (!std.mem.eql(u8, &index_hash_str, head_file_hash)) {
+                    staged_status = 'M'; // Modified in index
+                }
+            } else {
+                // File doesn't exist in HEAD tree, it's a staged addition
+                staged_status = 'A';
+            }
+            
+            // Check if file is modified in working tree against index
             const index_info = IndexFileInfo{
                 .hash = entry.sha1,
                 .size = entry.size,
@@ -1040,8 +1078,8 @@ fn getStatusPorcelainReal(repo: *Repository, buffer: []u8) !void {
                     // File was deleted from working tree
                     const status_line = std.fmt.bufPrint(
                         buffer[output_pos..],
-                        " D {s}\n",
-                        .{entry.path}
+                        "{}D {s}\n",
+                        .{if (staged_status) |s| s else ' ', entry.path}
                     ) catch break;
                     output_pos += status_line.len;
                     if (output_pos >= buffer.len - 1) break;
@@ -1050,12 +1088,37 @@ fn getStatusPorcelainReal(repo: *Repository, buffer: []u8) !void {
                 else => return err,
             };
             
-            if (is_modified) {
-                // File was modified in working tree
+            // Output status based on staged and working tree state
+            if (staged_status != null or is_modified) {
                 const status_line = std.fmt.bufPrint(
                     buffer[output_pos..],
-                    " M {s}\n",
-                    .{entry.path}
+                    "{c}{c} {s}\n",
+                    .{
+                        if (staged_status) |s| s else ' ',
+                        if (is_modified) @as(u8, 'M') else ' ',
+                        entry.path
+                    }
+                ) catch break;
+                output_pos += status_line.len;
+                if (output_pos >= buffer.len - 1) break;
+            }
+        }
+        
+        // Check for deleted files (in HEAD tree but not in index)
+        for (head_tree_entries.items) |head_entry| {
+            var found_in_index = false;
+            for (git_index.entries.items) |index_entry| {
+                if (std.mem.eql(u8, head_entry.path, index_entry.path)) {
+                    found_in_index = true;
+                    break;
+                }
+            }
+            if (!found_in_index) {
+                // File deleted from index (staged deletion)
+                const status_line = std.fmt.bufPrint(
+                    buffer[output_pos..],
+                    "D  {s}\n",
+                    .{head_entry.path}
                 ) catch break;
                 output_pos += status_line.len;
                 if (output_pos >= buffer.len - 1) break;
