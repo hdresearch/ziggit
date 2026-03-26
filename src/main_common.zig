@@ -18,6 +18,24 @@ const GitError = error{
     InvalidPath,
 };
 
+
+
+const NATIVE_COMMANDS = [_][]const u8{ 
+    "init", "status", "add", "commit", "log", "diff", "branch", 
+    "checkout", "merge", "fetch", "pull", "push", "clone", "config", 
+    "rev-parse", "describe", "tag", "--version", "-v", "--version-info", 
+    "--help", "-h", "help" 
+};
+
+fn isNativeCommand(command: []const u8) bool {
+    for (NATIVE_COMMANDS) |native_cmd| {
+        if (std.mem.eql(u8, command, native_cmd)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     const platform_impl = platform_mod.getCurrentPlatform();
     
@@ -27,21 +45,77 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     // Skip program name
     _ = args.skip();
 
-    // Check for global flags first
-    var first_arg = args.next() orelse {
+    // Store all arguments for potential git fallback
+    var all_original_args = std.ArrayList([]const u8).init(allocator);
+    defer all_original_args.deinit();
+    
+    // Collect all arguments first
+    while (args.next()) |arg| {
+        try all_original_args.append(arg);
+    }
+    
+    if (all_original_args.items.len == 0) {
         try showUsage(&platform_impl);
         return;
-    };
+    }
+    
+    // Find the command by skipping global flags
+    var command_index: usize = 0;
+    while (command_index < all_original_args.items.len) {
+        const arg = all_original_args.items[command_index];
+        
+        if (std.mem.eql(u8, arg, "-C") or std.mem.eql(u8, arg, "-c") or 
+           std.mem.eql(u8, arg, "--git-dir") or std.mem.eql(u8, arg, "--work-tree")) {
+            // Skip the flag and its value
+            command_index += 2;
+            if (command_index > all_original_args.items.len) {
+                try platform_impl.writeStderr("error: invalid global flag usage\n");
+                std.process.exit(128);
+            }
+        } else {
+            // This must be the command
+            break;
+        }
+    }
+    
+    if (command_index >= all_original_args.items.len) {
+        try showUsage(&platform_impl);
+        return;
+    }
+    
+    const command = all_original_args.items[command_index];
+    
+    // Check if this is a native command
+    if (!isNativeCommand(command)) {
+        // Not a native command, forward to git with all arguments
+        if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
+            try forwardToGit(allocator, all_original_args.items, &platform_impl);
+            return;
+        } else {
+            const error_msg = std.fmt.allocPrint(allocator, "ziggit: '{s}' is not a ziggit command. See 'ziggit --help'.\n", .{command}) catch "ziggit: invalid command. See 'ziggit --help'.\n";
+            defer if (error_msg.ptr != "ziggit: invalid command. See 'ziggit --help'.\n".ptr) allocator.free(error_msg);
+            try platform_impl.writeStderr(error_msg);
+            std.process.exit(1);
+        }
+    }
+    
+    // Native command - process global flags and execute
+    var arg_index: usize = 0;
     
     // Handle global flags in a loop
-    while (true) {
-        if (std.mem.eql(u8, first_arg, "-C")) {
-            const dir_path = args.next() orelse {
+    while (arg_index < all_original_args.items.len) {
+        const arg = all_original_args.items[arg_index];
+        
+        if (std.mem.eql(u8, arg, "-C")) {
+            if (arg_index + 1 >= all_original_args.items.len) {
                 try platform_impl.writeStderr("error: option '-C' requires a directory path\n");
                 std.process.exit(128);
-            };
+            }
             
-            // Change to the specified directory
+            arg_index += 1;
+            const dir_path = all_original_args.items[arg_index];
+            
+            // Change directory for native ziggit command
             std.process.changeCurDir(dir_path) catch |err| switch (err) {
                 error.AccessDenied => {
                     const msg = try std.fmt.allocPrint(allocator, "fatal: cannot change to '{s}': Permission denied\n", .{dir_path});
@@ -64,65 +138,94 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 else => return err,
             };
             
-            // Get the next argument
-            first_arg = args.next() orelse {
-                try showUsage(&platform_impl);
-                return;
-            };
-        } else if (std.mem.eql(u8, first_arg, "-c")) {
-            // Skip the config setting (bun passes -c core.longpaths=true which we ignore)
-            _ = args.next() orelse {
+            arg_index += 1;
+        } else if (std.mem.eql(u8, arg, "-c")) {
+            if (arg_index + 1 >= all_original_args.items.len) {
                 try platform_impl.writeStderr("error: option '-c' requires a config setting\n");
                 std.process.exit(128);
-            };
+            }
             
-            // Get the next argument
-            first_arg = args.next() orelse {
-                try showUsage(&platform_impl);
-                return;
-            };
+            arg_index += 1;
+            // Skip the config setting (bun passes -c core.longpaths=true which we ignore)
+            arg_index += 1;
+        } else if (std.mem.eql(u8, arg, "--git-dir")) {
+            if (arg_index + 1 >= all_original_args.items.len) {
+                try platform_impl.writeStderr("error: option '--git-dir' requires a path\n");
+                std.process.exit(128);
+            }
+            
+            arg_index += 1;
+            // Skip the path for now (not implemented)
+            arg_index += 1;
+        } else if (std.mem.eql(u8, arg, "--work-tree")) {
+            if (arg_index + 1 >= all_original_args.items.len) {
+                try platform_impl.writeStderr("error: option '--work-tree' requires a path\n");
+                std.process.exit(128);
+            }
+            
+            arg_index += 1;
+            // Skip the path for now (not implemented)
+            arg_index += 1;
         } else {
-            // Not a global flag, this must be the command
+            // Not a global flag, this must be the command - break
             break;
         }
     }
     
-    const command = first_arg;
+    // Create args iterator for the remaining arguments (after the command)
+    var remaining_args = std.ArrayList([]const u8).init(allocator);
+    defer remaining_args.deinit();
+    
+    var remaining_arg_index = command_index + 1;
+    while (remaining_arg_index < all_original_args.items.len) {
+        try remaining_args.append(all_original_args.items[remaining_arg_index]);
+        remaining_arg_index += 1;
+    }
+    
+    // Create a simple iterator for remaining args
+    const remaining_args_copy = try allocator.dupe([]const u8, remaining_args.items);
+    defer allocator.free(remaining_args_copy);
+    
+    var args_iter = platform_mod.ArgIterator{ 
+        .args = remaining_args_copy, 
+        .index = 0,
+        .allocator = allocator,
+    };
 
     if (std.mem.eql(u8, command, "init")) {
-        try cmdInit(allocator, &args, &platform_impl);
+        try cmdInit(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "status")) {
-        try cmdStatus(allocator, &args, &platform_impl);
+        try cmdStatus(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "add")) {
-        try cmdAdd(allocator, &args, &platform_impl);
+        try cmdAdd(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "commit")) {
-        try cmdCommit(allocator, &args, &platform_impl);
+        try cmdCommit(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "log")) {
-        try cmdLog(allocator, &args, &platform_impl);
+        try cmdLog(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "diff")) {
-        try cmdDiff(allocator, &args, &platform_impl);
+        try cmdDiff(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "branch")) {
-        try cmdBranch(allocator, &args, &platform_impl);
+        try cmdBranch(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "checkout")) {
-        try cmdCheckout(allocator, &args, &platform_impl);
+        try cmdCheckout(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "merge")) {
-        try cmdMerge(allocator, &args, &platform_impl);
+        try cmdMerge(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "fetch")) {
-        try cmdFetch(allocator, &args, &platform_impl);
+        try cmdFetch(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "pull")) {
-        try cmdPull(allocator, &args, &platform_impl);
+        try cmdPull(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "push")) {
-        try cmdPush(allocator, &args, &platform_impl);
+        try cmdPush(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "clone")) {
-        try cmdClone(allocator, &args, &platform_impl);
+        try cmdClone(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "config")) {
-        try cmdConfig(allocator, &args, &platform_impl);
+        try cmdConfig(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "rev-parse")) {
-        try cmdRevParse(allocator, &args, &platform_impl);
+        try cmdRevParse(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "describe")) {
-        try cmdDescribe(allocator, &args, &platform_impl);
+        try cmdDescribe(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "tag")) {
-        try cmdTag(allocator, &args, &platform_impl);
+        try cmdTag(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
         if (version_mod.getVersionString(allocator)) |version_msg| {
             defer allocator.free(version_msg);
@@ -141,39 +244,18 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         }
     } else if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "help")) {
         try showUsage(&platform_impl);
-    } else {
-        // Check if git fallback is enabled
-        if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
-            // Collect global flags that were already processed
-            var global_flags = std.ArrayList([]const u8).init(allocator);
-            defer global_flags.deinit();
-            
-            // Get all original arguments to reconstruct them for git
-            var all_args = try platform_impl.getArgs(allocator);
-            defer all_args.deinit();
-            
-            // Skip program name
-            _ = all_args.skip();
-            
-            try forwardToGit(allocator, &all_args, &platform_impl);
-        } else {
-            const error_msg = std.fmt.allocPrint(allocator, "ziggit: '{s}' is not a ziggit command. See 'ziggit --help'.\n", .{command}) catch "ziggit: invalid command. See 'ziggit --help'.\n";
-            defer if (error_msg.ptr != "ziggit: invalid command. See 'ziggit --help'.\n".ptr) allocator.free(error_msg);
-            try platform_impl.writeStderr(error_msg);
-            std.process.exit(1);
-        }
     }
 }
 
-fn forwardToGit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+fn forwardToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_impl: *const platform_mod.Platform) !void {
     // Build argv array with git as argv[0] and all original args after that
     var argv = std.ArrayList([]const u8).init(allocator);
     defer argv.deinit();
     
     try argv.append("git");
     
-    // Add all remaining arguments to git
-    while (args.next()) |arg| {
+    // Add all arguments to git (including global flags)
+    for (all_args) |arg| {
         try argv.append(arg);
     }
     
