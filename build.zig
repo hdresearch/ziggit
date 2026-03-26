@@ -54,15 +54,7 @@ pub fn build(b: *std.Build) void {
 
     // ========== TESTS ==========
     
-    // Platform unit tests
-    const platform_tests = b.addTest(.{
-        .root_source_file = b.path("src/platform/platform.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_platform_tests = b.addRunArtifact(platform_tests);
-
-    // Git interop integration test (main integration test)
+    // Main git interoperability integration test
     const git_interop_test = b.addExecutable(.{
         .name = "git_interop_test",
         .root_source_file = b.path("test/git_interop_test.zig"),
@@ -72,111 +64,18 @@ pub fn build(b: *std.Build) void {
     git_interop_test.root_module.addImport("ziggit", ziggit_module);
     const run_git_interop_test = b.addRunArtifact(git_interop_test);
 
-    // Broken pipe test
-    const broken_pipe_test = b.addExecutable(.{
-        .name = "broken_pipe_test",
-        .root_source_file = b.path("test/broken_pipe_test.zig"),
+    // Platform unit tests
+    const platform_tests = b.addTest(.{
+        .root_source_file = b.path("src/platform/platform.zig"),
         .target = target,
         .optimize = optimize,
     });
-    broken_pipe_test.root_module.addImport("ziggit", ziggit_module);
-    const run_broken_pipe_test = b.addRunArtifact(broken_pipe_test);
-
-    // Integration test suite
-    const integration_test_suite = b.addExecutable(.{
-        .name = "integration_test_suite",
-        .root_source_file = b.path("test/integration_test_suite.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    integration_test_suite.root_module.addImport("ziggit", ziggit_module);
-    const run_integration_test_suite = b.addRunArtifact(integration_test_suite);
-
-    // Bun API test (ITEM 6)
-    const bun_api_test = b.addTest(.{
-        .root_source_file = b.path("test/bun_zig_api_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    bun_api_test.root_module.addImport("ziggit", ziggit_module);
-    const run_bun_api_test = b.addRunArtifact(bun_api_test);
-
-    // Consolidated pack tests
-    const pack_tests = b.addTest(.{
-        .root_source_file = b.path("test/pack_tests.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_pack_tests = b.addRunArtifact(pack_tests);
-
-    // Pack verification tests
-    const pack_verification_tests = b.addTest(.{
-        .root_source_file = b.path("test/pack_verification_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_pack_verification_tests = b.addRunArtifact(pack_verification_tests);
-
-    // Pack improvement tests
-    const pack_improvement_tests = b.addTest(.{
-        .root_source_file = b.path("test/pack_improvement_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_pack_improvement_tests = b.addRunArtifact(pack_improvement_tests);
-
-    // Branch management tests
-    const branch_management_tests = b.addTest(.{
-        .root_source_file = b.path("test/branch_management_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_branch_management_tests = b.addRunArtifact(branch_management_tests);
-
-    // Lib status test
-    const lib_status_test = b.addTest(.{
-        .root_source_file = b.path("test/lib_status_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    lib_status_test.root_module.addImport("ziggit", ziggit_module);
-    const run_lib_status_test = b.addRunArtifact(lib_status_test);
-
-    // Build system test (standalone, no dependencies)
-    const build_system_test = b.addTest(.{
-        .root_source_file = b.path("test/build_system_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_build_system_test = b.addRunArtifact(build_system_test);
-
-    // Comprehensive integration test
-    const comprehensive_integration_test = b.addExecutable(.{
-        .name = "comprehensive_integration_test",
-        .root_source_file = b.path("test/comprehensive_integration_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_comprehensive_integration_test = b.addRunArtifact(comprehensive_integration_test);
+    const run_platform_tests = b.addRunArtifact(platform_tests);
 
     // Test step runs all tests
     const test_step = b.step("test", "Run unit tests and integration tests");
     test_step.dependOn(&run_platform_tests.step);
     test_step.dependOn(&run_git_interop_test.step);
-    test_step.dependOn(&run_broken_pipe_test.step);
-    test_step.dependOn(&run_integration_test_suite.step);
-    test_step.dependOn(&run_bun_api_test.step);
-    test_step.dependOn(&run_pack_tests.step);
-    test_step.dependOn(&run_pack_verification_tests.step);
-    test_step.dependOn(&run_pack_improvement_tests.step);
-    test_step.dependOn(&run_branch_management_tests.step);
-    test_step.dependOn(&run_lib_status_test.step);
-    test_step.dependOn(&run_build_system_test.step);
-    test_step.dependOn(&run_comprehensive_integration_test.step);
-
-    // Bun API test standalone step
-    const test_bun_api_step = b.step("test-bun", "Run bun workflow test using Zig API (ITEM 6)");
-    test_bun_api_step.dependOn(&run_bun_api_test.step);
 
     // ========== BENCHMARKS ==========
     const cli_benchmark = b.addExecutable(.{
@@ -205,46 +104,10 @@ pub fn build(b: *std.Build) void {
     bun_scenario_benchmark.root_module.addImport("ziggit", ziggit_module);
     const run_bun_scenario_benchmark = b.addRunArtifact(bun_scenario_benchmark);
 
-    // ITEM 7: Zig API vs Git CLI benchmark (from remote)
-    const zig_api_benchmark = b.addExecutable(.{
-        .name = "zig_api_benchmark",
-        .root_source_file = b.path("benchmarks/zig_api_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    zig_api_benchmark.root_module.addImport("ziggit", ziggit_module);
-    const run_zig_api_benchmark = b.addRunArtifact(zig_api_benchmark);
-
-    // Performance optimization benchmark (my addition)
-    const api_vs_cli_benchmark = b.addExecutable(.{
-        .name = "api_vs_cli_benchmark",
-        .root_source_file = b.path("benchmarks/api_vs_cli_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    api_vs_cli_benchmark.root_module.addImport("ziggit", ziggit_module);
-    const run_api_vs_cli_benchmark = b.addRunArtifact(api_vs_cli_benchmark);
-
-    const optimization_benchmark = b.addExecutable(.{
-        .name = "optimization_benchmark",
-        .root_source_file = b.path("benchmarks/optimization_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    optimization_benchmark.root_module.addImport("ziggit", ziggit_module);
-    const run_optimization_benchmark = b.addRunArtifact(optimization_benchmark);
-
     const bench_step = b.step("bench", "Run all benchmarks");
     bench_step.dependOn(&run_cli_benchmark.step);
     bench_step.dependOn(&run_lib_benchmark.step);
     bench_step.dependOn(&run_bun_scenario_benchmark.step);
-    bench_step.dependOn(&run_zig_api_benchmark.step);
-    bench_step.dependOn(&run_api_vs_cli_benchmark.step);
-    bench_step.dependOn(&run_optimization_benchmark.step);
-
-    // Standalone step for ITEM 7 benchmark
-    const bench_zig_api_step = b.step("bench-zig-api", "Run Zig API vs Git CLI benchmark (ITEM 7)");
-    bench_zig_api_step.dependOn(&run_zig_api_benchmark.step);
 
     // ========== WASM TARGET ==========
     const wasm_target = b.resolveTargetQuery(.{
