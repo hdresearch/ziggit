@@ -776,3 +776,73 @@ test "boolean value parsing" {
     try std.testing.expectEqual(@as(?bool, null), parseBooleanValue("maybe"));
     try std.testing.expectEqual(@as(?bool, null), parseBooleanValue(""));
 }
+
+/// Enhanced config backup and restoration utilities
+pub const ConfigManager = struct {
+    allocator: std.mem.Allocator,
+    git_dir: []const u8,
+    
+    pub fn init(allocator: std.mem.Allocator, git_dir: []const u8) ConfigManager {
+        return ConfigManager{
+            .allocator = allocator,
+            .git_dir = git_dir,
+        };
+    }
+    
+    /// Create a backup of the current config
+    pub fn createBackup(self: ConfigManager, backup_suffix: []const u8) !void {
+        const config_path = try std.fmt.allocPrint(self.allocator, "{s}/config", .{self.git_dir});
+        defer self.allocator.free(config_path);
+        
+        const backup_path = try std.fmt.allocPrint(self.allocator, "{s}/config.{s}", .{ self.git_dir, backup_suffix });
+        defer self.allocator.free(backup_path);
+        
+        const config_content = std.fs.cwd().readFileAlloc(self.allocator, config_path, 1024 * 1024) catch return;
+        defer self.allocator.free(config_content);
+        
+        try std.fs.cwd().writeFile(backup_path, config_content);
+    }
+    
+    /// Restore config from a backup
+    pub fn restoreFromBackup(self: ConfigManager, backup_suffix: []const u8) !void {
+        const config_path = try std.fmt.allocPrint(self.allocator, "{s}/config", .{self.git_dir});
+        defer self.allocator.free(config_path);
+        
+        const backup_path = try std.fmt.allocPrint(self.allocator, "{s}/config.{s}", .{ self.git_dir, backup_suffix });
+        defer self.allocator.free(backup_path);
+        
+        const backup_content = try std.fs.cwd().readFileAlloc(self.allocator, backup_path, 1024 * 1024);
+        defer self.allocator.free(backup_content);
+        
+        try std.fs.cwd().writeFile(config_path, backup_content);
+    }
+    
+    /// Merge configuration from another repository
+    pub fn mergeFromRepository(self: ConfigManager, other_git_dir: []const u8, sections_to_merge: []const []const u8) !void {
+        const other_config = try loadGitConfig(other_git_dir, self.allocator);
+        defer other_config.deinit();
+        
+        var local_config = try loadGitConfig(self.git_dir, self.allocator);
+        defer local_config.deinit();
+        
+        for (other_config.entries.items) |entry| {
+            // Check if this section should be merged
+            var should_merge = false;
+            for (sections_to_merge) |section| {
+                if (std.mem.eql(u8, entry.section, section)) {
+                    should_merge = true;
+                    break;
+                }
+            }
+            
+            if (should_merge) {
+                try local_config.setValue(entry.section, entry.subsection, entry.name, entry.value);
+            }
+        }
+        
+        // Write merged config back
+        const config_path = try std.fmt.allocPrint(self.allocator, "{s}/config", .{self.git_dir});
+        defer self.allocator.free(config_path);
+        try local_config.writeToFile(config_path);
+    }
+};

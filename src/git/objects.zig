@@ -1868,3 +1868,80 @@ pub fn readObject(allocator: std.mem.Allocator, objects_dir: []const u8, hash_by
     
     return try allocator.dupe(u8, decompressed.items);
 }
+
+/// Get a quick summary of object types in a pack file without full parsing
+pub fn getPackObjectTypeSummary(pack_path: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !PackObjectSummary {
+    const pack_data = platform_impl.fs.readFile(allocator, pack_path) catch return error.PackFileNotFound;
+    defer allocator.free(pack_data);
+    
+    if (pack_data.len < 12) return error.PackFileTooSmall;
+    
+    var summary = PackObjectSummary{
+        .total_objects = std.mem.readInt(u32, @ptrCast(pack_data[8..12]), .big),
+        .commits = 0,
+        .trees = 0,
+        .blobs = 0,
+        .tags = 0,
+        .deltas = 0,
+        .estimated_uncompressed_size = 0,
+    };
+    
+    var pos: usize = 12; // Start after header
+    var objects_processed: u32 = 0;
+    
+    while (objects_processed < summary.total_objects and pos + 4 < pack_data.len - 20) {
+        if (readPackedObjectHeader(pack_data, pos)) |header_info| {
+            switch (header_info.object_type) {
+                .commit => summary.commits += 1,
+                .tree => summary.trees += 1,
+                .blob => summary.blobs += 1,
+                .tag => summary.tags += 1,
+                .ofs_delta, .ref_delta => summary.deltas += 1,
+            }
+            
+            summary.estimated_uncompressed_size += header_info.size;
+            pos = header_info.next_pos;
+            
+            // Skip compressed data (rough estimation)
+            const estimated_compressed_size = header_info.size / 3; // Rough compression ratio
+            pos += @min(estimated_compressed_size, pack_data.len - pos - 20);
+            
+        } else |_| {
+            pos += 1; // Try to continue parsing
+        }
+        
+        objects_processed += 1;
+        
+        // Safety limit to prevent excessive processing
+        if (objects_processed > 1000) break;
+    }
+    
+    return summary;
+}
+
+/// Summary of object types in a pack file
+pub const PackObjectSummary = struct {
+    total_objects: u32,
+    commits: u32,
+    trees: u32,
+    blobs: u32,
+    tags: u32,
+    deltas: u32,
+    estimated_uncompressed_size: u64,
+    
+    pub fn print(self: PackObjectSummary) void {
+        std.debug.print("Pack Object Summary:\n");
+        std.debug.print("  Total objects: {}\n", .{self.total_objects});
+        std.debug.print("  - Commits: {}\n", .{self.commits});
+        std.debug.print("  - Trees: {}\n", .{self.trees});
+        std.debug.print("  - Blobs: {}\n", .{self.blobs});
+        std.debug.print("  - Tags: {}\n", .{self.tags});
+        std.debug.print("  - Deltas: {}\n", .{self.deltas});
+        std.debug.print("  Est. uncompressed size: {} KB\n", .{self.estimated_uncompressed_size / 1024});
+        
+        const delta_ratio = if (self.total_objects > 0) 
+            (@as(f32, @floatFromInt(self.deltas)) / @as(f32, @floatFromInt(self.total_objects))) * 100 
+        else 0;
+        std.debug.print("  Delta ratio: {d:.1}%\n", .{delta_ratio});
+    }
+};
