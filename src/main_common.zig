@@ -1413,27 +1413,44 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             }
         }
 
-        // For now, shell out to real git for checkout with refs (as per requirements)
-        var git_cmd = std.ArrayList(u8).init(allocator);
-        defer git_cmd.deinit();
+        // Shell out to real git for checkout with refs (as per requirements)
+        var git_args = std.ArrayList([]const u8).init(allocator);
+        defer git_args.deinit();
         
-        try git_cmd.appendSlice("git checkout");
+        try git_args.append("git");
+        try git_args.append("checkout");
         
         if (quiet) {
-            try git_cmd.appendSlice(" --quiet");
+            try git_args.append("--quiet");
         }
         
-        try git_cmd.appendSlice(" ");
-        try git_cmd.appendSlice(target);
+        try git_args.append(target);
 
-        // Just print a message for now since process spawning has complexity
-        const msg = try std.fmt.allocPrint(allocator, 
-            "ziggit: For checkout operations, use git directly:\n" ++
-            "  {s}\n" ++
-            "\nziggit supports most git commands. Use git for complex checkout operations\n" ++
-            "involving tags, branches, or specific refs.\n", .{git_cmd.items});
-        defer allocator.free(msg);
-        try platform_impl.writeStdout(msg);
+        // Spawn git process
+        var child = std.process.Child.init(git_args.items, allocator);
+        const result = child.spawnAndWait() catch |err| {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: failed to execute git: {}\n", .{err});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        };
+        
+        switch (result) {
+            .Exited => |code| {
+                if (code != 0) {
+                    std.process.exit(@intCast(code));
+                }
+            },
+            .Signal => |_| {
+                std.process.exit(128);
+            },
+            .Stopped => |_| {
+                std.process.exit(128);
+            },
+            .Unknown => |_| {
+                std.process.exit(128);
+            },
+        }
     }
 }
 
