@@ -114,6 +114,20 @@ pub fn build(b: *std.Build) void {
     lib_status_test.root_module.addImport("ziggit", ziggit_mod);
     const run_lib_status_test = b.addRunArtifact(lib_status_test);
 
+    // Comprehensive library status test
+    const lib_comprehensive_status_test = b.addTest(.{
+        .root_source_file = b.path("test/lib_comprehensive_status_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    lib_comprehensive_status_test.root_module.addImport("ziggit", ziggit_mod);
+
+    const run_lib_comprehensive_status_test = b.addRunArtifact(lib_comprehensive_status_test);
+    
+    const lib_comprehensive_status_test_step = b.step("lib-comprehensive-status-test", "Run comprehensive library status test");
+    lib_comprehensive_status_test_step.dependOn(&run_lib_comprehensive_status_test.step);
+
     // Test step runs all tests
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_platform_tests.step);
