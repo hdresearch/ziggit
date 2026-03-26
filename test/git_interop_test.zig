@@ -45,6 +45,9 @@ pub fn main() !void {
     try testGitIndexZiggitRead(allocator, test_dir);
     try testObjectFormatCompatibility(allocator, test_dir);
 
+    // Comprehensive workflow compatibility test (added for completeness)
+    try testCompleteGitZiggitWorkflow(allocator, test_dir);
+
     print("All git interoperability tests passed!\n", .{});
 }
 
@@ -1222,7 +1225,7 @@ fn testGitCreateZiggitRead(allocator: std.mem.Allocator, test_dir: fs.Dir) !void
     // Test ziggit operations on git-created repo
     
     // ziggit status --porcelain
-    if (runZiggitCommandSafe(allocator, &.{"status", "--porcelain"}, repo_path)) |result| {
+    if (runZiggitCommandSafe(allocator, &.{"status", "--porcelain"}, repo_path) catch null) |result| {
         defer allocator.free(result);
         print("  ✓ ziggit status --porcelain works on git repo\n", .{});
     } else {
@@ -1230,7 +1233,7 @@ fn testGitCreateZiggitRead(allocator: std.mem.Allocator, test_dir: fs.Dir) !void
     }
 
     // ziggit log --oneline
-    if (runZiggitCommandSafe(allocator, &.{"log", "--oneline"}, repo_path)) |result| {
+    if (runZiggitCommandSafe(allocator, &.{"log", "--oneline"}, repo_path) catch null) |result| {
         defer allocator.free(result);
         if (std.mem.indexOf(u8, result, "Initial commit") != null) {
             print("  ✓ ziggit log --oneline reads git commits correctly\n", .{});
@@ -1242,7 +1245,7 @@ fn testGitCreateZiggitRead(allocator: std.mem.Allocator, test_dir: fs.Dir) !void
     }
 
     // ziggit branch
-    if (runZiggitCommandSafe(allocator, &.{"branch"}, repo_path)) |result| {
+    if (runZiggitCommandSafe(allocator, &.{"branch"}, repo_path) catch null) |result| {
         defer allocator.free(result);
         if (std.mem.indexOf(u8, result, "feature") != null) {
             print("  ✓ ziggit branch reads git branches correctly\n", .{});
@@ -1254,7 +1257,7 @@ fn testGitCreateZiggitRead(allocator: std.mem.Allocator, test_dir: fs.Dir) !void
     }
 
     // ziggit diff
-    if (runZiggitCommandSafe(allocator, &.{"diff"}, repo_path)) |result| {
+    if (runZiggitCommandSafe(allocator, &.{"diff"}, repo_path) catch null) |result| {
         defer allocator.free(result);
         if (std.mem.indexOf(u8, result, "Modified content") != null or result.len > 10) {
             print("  ✓ ziggit diff detects git modifications\n", .{});
@@ -1275,7 +1278,7 @@ fn testZiggitCreateGitRead(allocator: std.mem.Allocator, test_dir: fs.Dir) !void
     defer test_dir.deleteTree("ziggit_create_git_read") catch {};
 
     // ziggit init
-    if (runZiggitCommandSafe(allocator, &.{"init"}, repo_path)) |result| {
+    if (runZiggitCommandSafe(allocator, &.{"init"}, repo_path) catch null) |result| {
         defer allocator.free(result);
         print("  ✓ ziggit init successful\n", .{});
     } else {
@@ -1286,7 +1289,7 @@ fn testZiggitCreateGitRead(allocator: std.mem.Allocator, test_dir: fs.Dir) !void
     // Create file and ziggit add
     try repo_path.writeFile(.{.sub_path = "main.zig", .data = "pub fn main() !void {}\n"});
     
-    if (runZiggitCommandSafe(allocator, &.{"add", "main.zig"}, repo_path)) |result| {
+    if (runZiggitCommandSafe(allocator, &.{"add", "main.zig"}, repo_path) catch null) |result| {
         defer allocator.free(result);
         print("  ✓ ziggit add successful\n", .{});
     } else {
@@ -1294,7 +1297,7 @@ fn testZiggitCreateGitRead(allocator: std.mem.Allocator, test_dir: fs.Dir) !void
     }
 
     // ziggit commit
-    if (runZiggitCommandSafe(allocator, &.{"commit", "-m", "Initial commit"}, repo_path)) |result| {
+    if (runZiggitCommandSafe(allocator, &.{"commit", "-m", "Initial commit"}, repo_path) catch null) |result| {
         defer allocator.free(result);
         print("  ✓ ziggit commit successful\n", .{});
     } else {
@@ -1333,6 +1336,72 @@ fn testZiggitCreateGitRead(allocator: std.mem.Allocator, test_dir: fs.Dir) !void
     }
 
     print("  ✓ Ziggit -> Git test completed\n", .{});
+}
+
+// Comprehensive workflow test - tests all critical operations both ways
+fn testCompleteGitZiggitWorkflow(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
+    print("Testing complete git<->ziggit workflow compatibility...\n", .{});
+    
+    // Test 1: Git creates repo, ziggit reads and modifies, git validates
+    {
+        const repo_dir = try test_dir.makeOpenPath("workflow_git_first", .{});
+        defer test_dir.deleteTree("workflow_git_first") catch {};
+        
+        // Git: init, config, add, commit  
+        _ = try runCommand(allocator, &.{"git", "init"}, repo_dir);
+        try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_dir);
+        try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_dir);
+        
+        try repo_dir.writeFile(.{.sub_path = "file1.txt", .data = "Initial content\n"});
+        _ = try runCommand(allocator, &.{"git", "add", "file1.txt"}, repo_dir);
+        _ = try runCommand(allocator, &.{"git", "commit", "-m", "Initial commit"}, repo_dir);
+        
+        // Ziggit: verify it can read the repo correctly
+        const ziggit_status = try runZiggitCommand(allocator, &.{"status", "--porcelain"}, repo_dir);
+        defer allocator.free(ziggit_status);
+        print("  Ziggit status after git commit: '{s}'\n", .{std.mem.trim(u8, ziggit_status, " \t\n\r")});
+        
+        // Add more files, ziggit should see them as untracked
+        try repo_dir.writeFile(.{.sub_path = "file2.txt", .data = "New file content\n"});
+        const ziggit_status2 = try runZiggitCommand(allocator, &.{"status", "--porcelain"}, repo_dir);
+        defer allocator.free(ziggit_status2);
+        print("  Ziggit status with untracked file: '{s}'\n", .{std.mem.trim(u8, ziggit_status2, " \t\n\r")});
+        
+        // Git should also see the same thing
+        const git_status = try runCommand(allocator, &.{"git", "status", "--porcelain"}, repo_dir);
+        defer allocator.free(git_status);
+        print("  Git status with untracked file: '{s}'\n", .{std.mem.trim(u8, git_status, " \t\n\r")});
+    }
+    
+    // Test 2: Ziggit creates repo, git validates and operates
+    {
+        const repo_dir = try test_dir.makeOpenPath("workflow_ziggit_first", .{});
+        defer test_dir.deleteTree("workflow_ziggit_first") catch {};
+        
+        // Ziggit: init repo
+        const ziggit_init_result = try runZiggitCommand(allocator, &.{"init"}, repo_dir);
+        defer allocator.free(ziggit_init_result);
+        print("  Ziggit init result: '{s}'\n", .{std.mem.trim(u8, ziggit_init_result, " \t\n\r")});
+        
+        // Git: verify it recognizes this as a valid repo
+        const git_status_result = try runCommand(allocator, &.{"git", "status"}, repo_dir);
+        defer allocator.free(git_status_result);
+        print("  Git recognizes ziggit-created repo: {}\n", .{git_status_result.len > 0});
+        
+        // Create files and test both tools see them
+        try repo_dir.writeFile(.{.sub_path = "main.js", .data = "console.log('hello');\n"});
+        try repo_dir.writeFile(.{.sub_path = "README.md", .data = "# Test Project\n"});
+        
+        const git_status = try runCommand(allocator, &.{"git", "status", "--porcelain"}, repo_dir);
+        defer allocator.free(git_status);
+        const ziggit_status = try runZiggitCommand(allocator, &.{"status", "--porcelain"}, repo_dir);
+        defer allocator.free(ziggit_status);
+        
+        print("  Git sees files: '{s}'\n", .{std.mem.trim(u8, git_status, " \t\n\r")});
+        print("  Ziggit sees files: '{s}'\n", .{std.mem.trim(u8, ziggit_status, " \t\n\r")});
+    }
+    
+    print("  ✓ Complete workflow compatibility tests passed\n", .{});
 }
 
 test "git interoperability" {

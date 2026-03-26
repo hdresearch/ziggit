@@ -138,9 +138,10 @@ test "lib status vs git status --porcelain - comprehensive" {
     
     // Test 1: Clean repository (should be empty)
     {
-        var repo = try ziggit.repo_open(allocator, repo_path);
+        var repo = try ziggit.Repository.open(allocator, repo_path);
+        defer repo.close();
         
-        const lib_status_raw = try ziggit.repo_status(&repo, allocator);
+        const lib_status_raw = try repo.statusPorcelain(allocator);
         defer allocator.free(lib_status_raw);
         const lib_status = std.mem.trim(u8, lib_status_raw, " \n\r\t");
         
@@ -155,9 +156,10 @@ test "lib status vs git status --porcelain - comprehensive" {
     {
         try writeFile(file1_path, "Modified content", allocator);
         
-        var repo = try ziggit.repo_open(allocator, repo_path);
+        var repo = try ziggit.Repository.open(allocator, repo_path);
+        defer repo.close();
         
-        const lib_status_raw = try ziggit.repo_status(&repo, allocator);
+        const lib_status_raw = try repo.statusPorcelain(allocator);
         defer allocator.free(lib_status_raw);
         const lib_status = std.mem.trim(u8, lib_status_raw, " \n\r\t");
         
@@ -174,9 +176,10 @@ test "lib status vs git status --porcelain - comprehensive" {
         defer allocator.free(file2_path);
         try writeFile(file2_path, "New file content", allocator);
         
-        var repo = try ziggit.repo_open(allocator, repo_path);
+        var repo = try ziggit.Repository.open(allocator, repo_path);
+        defer repo.close();
         
-        const lib_status_raw = try ziggit.repo_status(&repo, allocator);
+        const lib_status_raw = try repo.statusPorcelain(allocator);
         defer allocator.free(lib_status_raw);
         const lib_status = std.mem.trim(u8, lib_status_raw, " \n\r\t");
         
@@ -196,9 +199,10 @@ test "lib status vs git status --porcelain - comprehensive" {
         // The file is already committed from the initial commit
         try deleteFile(file1_path);
         
-        var repo = try ziggit.repo_open(allocator, repo_path);
+        var repo = try ziggit.Repository.open(allocator, repo_path);
+        defer repo.close();
         
-        const lib_status_raw = try ziggit.repo_status(&repo, allocator);
+        const lib_status_raw = try repo.statusPorcelain(allocator);
         defer allocator.free(lib_status_raw);
         const lib_status = std.mem.trim(u8, lib_status_raw, " \n\r\t");
         
