@@ -64,6 +64,15 @@ pub fn build(b: *std.Build) void {
     git_interop_test.root_module.addImport("ziggit", ziggit_module);
     const run_git_interop_test = b.addRunArtifact(git_interop_test);
 
+    // Workflow integration test
+    const workflow_test = b.addExecutable(.{
+        .name = "workflow_integration_test",
+        .root_source_file = b.path("test/workflow_integration_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_workflow_test = b.addRunArtifact(workflow_test);
+
     // Broken pipe handling test
     const broken_pipe_test = b.addExecutable(.{
         .name = "broken_pipe_test",
@@ -85,6 +94,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests and integration tests");
     test_step.dependOn(&run_platform_tests.step);
     test_step.dependOn(&run_git_interop_test.step);
+    test_step.dependOn(&run_workflow_test.step);
     test_step.dependOn(&run_broken_pipe_test.step);
 
     // ========== BENCHMARKS ==========
