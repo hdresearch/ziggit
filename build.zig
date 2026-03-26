@@ -184,6 +184,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Repository API comprehensive tests
+    const repo_api_tests = b.addTest(.{
+        .root_source_file = b.path("test/repository_api_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    repo_api_tests.root_module.addImport("ziggit", ziggit_module);
+
     // Test step - runs all unit tests and integration tests
     const test_step = b.step("test", "Run all unit tests and integration tests");
     test_step.dependOn(&b.addRunArtifact(platform_unit_tests).step);
@@ -207,6 +215,7 @@ pub fn build(b: *std.Build) void {
     _ = pack_integration_tests;
     _ = refs_enhanced_tests;
     _ = validation_comprehensive_tests;
+    test_step.dependOn(&b.addRunArtifact(repo_api_tests).step);
 
     // E2E validation: ziggit writes, git reads
     const ziggit_writes_test = b.addTest(.{
