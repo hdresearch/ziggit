@@ -4,23 +4,30 @@
 - Date: 2026-03-26
 - Machine: Linux (root@ziggit)
 - Git version: `git version 2.39.5`
-- Ziggit: built from `master` branch (commit `eeba670` — single-pass idx_writer rewrite)
+- Ziggit: built from `master` branch (commit `6f37261` — single-pass with eager LRU caching via DeltaCache)
 
 ## Bare Clone Benchmarks
 
 ### sindresorhus/is (small repo, ~900 objects, warm cache)
 
-**After single-pass idx_writer rewrite (`eeba670`):**
+**After eager LRU caching refactor (`6f37261`):**
+
+| Tool    | Run 1  | Run 2  | Run 3  | Run 4  | Run 5  | Median |
+|---------|--------|--------|--------|--------|--------|--------|
+| ziggit  | 0.221s | 0.199s | 0.188s | 0.193s | 0.174s | ~0.193s |
+| git CLI | 0.193s | 0.215s | 0.199s | 0.188s | 0.197s | ~0.197s |
+
+**Ratio: ~0.98x — ziggit slightly faster than git CLI** ✅
+
+> Run 1 includes cold-start overhead (DNS, TLS). Median excludes Run 1.
+> Both tools are network-dominated at ~200ms on this small repo.
+
+**Previous (commit `eeba670`, single-pass idx_writer):**
 
 | Tool    | Run 1  | Run 2  | Run 3  | Run 4  | Run 5  | Median |
 |---------|--------|--------|--------|--------|--------|--------|
 | ziggit  | 0.304s | 0.191s | 0.194s | 0.209s | 0.199s | ~0.197s |
 | git CLI | 0.180s | 0.202s | 0.239s | 0.174s | 0.202s | ~0.202s |
-
-**Ratio: ~1.0x — parity with git CLI** ✅
-
-> Run 1 includes cold-start overhead (DNS, TLS). Median excludes Run 1.
-> Both tools are network-dominated at ~200ms on this small repo.
 
 **Previous (commit `9b3fe78`, warm cache):**
 
@@ -46,11 +53,12 @@
 - **Previous** (commit `3c01d7f`): ~2.0x slower (cold cache, first-run variance)
 - **Current** (commit `9b3fe78`, warm cache): **~1.0x — parity with git CLI** ✅
 - **Current** (commit `eeba670`, single-pass idx_writer): **~1.0x — parity maintained** ✅
+- **Current** (commit `6f37261`, eager LRU DeltaCache): **~0.98x — slightly faster than git CLI** ✅
 
 ## Bun Fork Integration Status
 - Branch: `hdresearch/bun:ziggit-integration`
 - Commit: `ad8f206` — polish: use logZiggitError consistently for fetch/open errors
-- Dependency: ziggit at `eeba670` (single-pass idx_writer rewrite) via `.path = "../ziggit"`
+- Dependency: ziggit at `6f37261` (single-pass with eager LRU DeltaCache) via `.path = "../ziggit"`
 - `repository.zig`: ziggit used for clone, fetch, findCommit, checkout
 - Fallback: automatic to git CLI on any ziggit failure
 - Debug logging: `BUN_DEBUG_GitRepository=1` to see ziggit vs CLI decisions
