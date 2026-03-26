@@ -3889,10 +3889,9 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             const ref_file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{git_path, ref_path});
             defer allocator.free(ref_file_path);
             
-            const ref_content = platform_impl.fs.readFile(allocator, ref_file_path) catch |err| {
-                const msg = try std.fmt.allocPrint(allocator, "fatal: unable to read ref '{s}': {}\n", .{ref_path, err});
-                defer allocator.free(msg);
-                try platform_impl.writeStderr(msg);
+            const ref_content = platform_impl.fs.readFile(allocator, ref_file_path) catch {
+                // Ref file doesn't exist — matches git behavior for empty repos
+                try platform_impl.writeStderr("fatal: ambiguous argument 'HEAD': unknown revision or path not in the working tree.\n");
                 std.process.exit(128);
             };
             defer allocator.free(ref_content);

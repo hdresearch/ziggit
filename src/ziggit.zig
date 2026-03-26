@@ -1990,6 +1990,8 @@ pub const Repository = struct {
 
     /// Read a single object from a pack file at the given offset.
     /// Returns the full decompressed content with git header ("type size\0content").
+    /// This loads the entire pack into memory once; for delta resolution, use
+    /// readPackObjectFromData to avoid re-reading the pack file.
     fn readPackObjectAtOffset(self: *Repository, pack_path: []const u8, offset: u64) ObjectReadError![]u8 {
         const pack_file = try std.fs.openFileAbsolute(pack_path, .{});
         defer pack_file.close();
@@ -1997,6 +1999,12 @@ pub const Repository = struct {
         const pack_data = try pack_file.readToEndAlloc(self.allocator, 1024 * 1024 * 1024); // 1GB max
         defer self.allocator.free(pack_data);
 
+        return self.readPackObjectFromData(pack_data, offset);
+    }
+
+    /// Read a single object from already-loaded pack data at the given offset.
+    /// This avoids re-reading the pack file for delta chain resolution.
+    fn readPackObjectFromData(self: *Repository, pack_data: []const u8, offset: u64) ObjectReadError![]u8 {
         if (offset >= pack_data.len) return error.InvalidPackOffset;
 
         var pos = @as(usize, offset);
@@ -2019,8 +2027,8 @@ pub const Repository = struct {
             2 => "tree",
             3 => "blob",
             4 => "tag",
-            6 => return self.readOfsDeltaObject(pack_data, pack_path, pos, obj_size, offset),
-            7 => return self.readRefDeltaObject(pack_data, pack_path, pos, obj_size),
+            6 => return self.readOfsDeltaObject(pack_data, pos, obj_size, offset),
+            7 => return self.readRefDeltaObject(pack_data, pos, obj_size),
             else => return error.InvalidPackObject,
         };
 
@@ -2043,8 +2051,8 @@ pub const Repository = struct {
         return result;
     }
 
-    /// Handle OFS_DELTA pack objects
-    fn readOfsDeltaObject(self: *Repository, pack_data: []const u8, pack_path: []const u8, start_pos: usize, _: u64, current_offset: u64) ObjectReadError![]u8 {
+    /// Handle OFS_DELTA pack objects — reuses already-loaded pack_data
+    fn readOfsDeltaObject(self: *Repository, pack_data: []const u8, start_pos: usize, _: u64, current_offset: u64) ObjectReadError![]u8 {
         var pos = start_pos;
         // Read negative offset (variable-length encoding)
         var byte = pack_data[pos];
@@ -2059,8 +2067,8 @@ pub const Repository = struct {
 
         const base_offset = current_offset - neg_offset;
 
-        // Read base object recursively
-        const base_obj = try self.readPackObjectAtOffset(pack_path, base_offset);
+        // Read base object from the SAME pack data (no re-read from disk!)
+        const base_obj = try self.readPackObjectFromData(pack_data, base_offset);
         defer self.allocator.free(base_obj);
 
         // Decompress delta data
@@ -2073,14 +2081,14 @@ pub const Repository = struct {
         return self.applyDelta(base_obj, delta_data.items);
     }
 
-    /// Handle REF_DELTA pack objects
-    fn readRefDeltaObject(self: *Repository, pack_data: []const u8, _: []const u8, start_pos: usize, _: u64) ObjectReadError![]u8 {
+    /// Handle REF_DELTA pack objects — reuses already-loaded pack_data
+    fn readRefDeltaObject(self: *Repository, pack_data: []const u8, start_pos: usize, _: u64) ObjectReadError![]u8 {
         var pos = start_pos;
         if (pos + 20 > pack_data.len) return error.InvalidPackObject;
         const base_hash_bytes = pack_data[pos..pos + 20];
         pos += 20;
 
-        // Look up base object by hash
+        // Look up base object by hash (may be in a different pack or loose)
         var base_hash_hex: [40]u8 = undefined;
         _ = std.fmt.bufPrint(&base_hash_hex, "{}", .{std.fmt.fmtSliceHexLower(base_hash_bytes)}) catch return error.InvalidPackObject;
 
