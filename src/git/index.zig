@@ -285,7 +285,6 @@ pub const Index = struct {
 
     /// Read and skip index extensions with enhanced error handling and logging
     fn readExtensions(self: *Index, reader: anytype, data: []const u8) !void {
-        _ = self; // Not used currently
         
         var extensions_found: u32 = 0;
         const max_extensions = 100; // Increased limit for repositories with many extensions
