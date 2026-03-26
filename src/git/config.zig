@@ -57,15 +57,32 @@ pub const GitConfig = struct {
         self.entries.deinit();
     }
 
-    /// Parse a git config file from string
+    /// Parse a git config file from string with enhanced validation
     pub fn parseFromString(self: *GitConfig, content: []const u8) !void {
+        // Validate input size
+        if (content.len > 10 * 1024 * 1024) { // 10MB max config file
+            return error.ConfigFileTooLarge;
+        }
+        
         var lines = std.mem.split(u8, content, "\n");
         var current_section: ?[]const u8 = null;
         var current_subsection: ?[]const u8 = null;
         var line_number: u32 = 0;
+        const max_lines = 100_000; // Prevent DoS via extremely long config files
         
         while (lines.next()) |line| {
             line_number += 1;
+            
+            // Prevent infinite loop attacks
+            if (line_number > max_lines) {
+                return error.TooManyConfigLines;
+            }
+            
+            // Prevent individual lines from being too long
+            if (line.len > 8192) { // 8KB max per line
+                continue; // Skip extremely long lines instead of failing
+            }
+            
             const trimmed = std.mem.trim(u8, line, " \t\r");
             
             // Skip empty lines and comments
