@@ -411,8 +411,13 @@ fn forwardConfigToGit(allocator: std.mem.Allocator, all_args: [][]const u8, comm
                 // git config set [--flags] <key> <value>
                 // → git config [--flags] <key> <value>
                 // Just skip "set" and pass through rest
+                // Translate --append to --add for git 2.43 compat
                 for (all_args[rest_start..]) |arg| {
-                    try new_args.append(arg);
+                    if (std.mem.eql(u8, arg, "--append")) {
+                        try new_args.append("--add");
+                    } else {
+                        try new_args.append(arg);
+                    }
                 }
             } else if (std.mem.eql(u8, subcmd, "get")) {
                 // git config get [--flags] <key>
