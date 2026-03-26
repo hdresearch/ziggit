@@ -222,10 +222,21 @@ pub fn build(b: *std.Build) void {
 
     const run_bun_benchmark = b.addRunArtifact(bun_benchmark_exe);
 
+    // Simple API vs CLI benchmark (demonstrates concept)
+    const simple_api_vs_cli_benchmark_exe = b.addExecutable(.{
+        .name = "simple-api-vs-cli-benchmark",
+        .root_source_file = b.path("benchmarks/simple_api_vs_cli.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_simple_api_vs_cli_benchmark = b.addRunArtifact(simple_api_vs_cli_benchmark_exe);
+
     const bench_step = b.step("bench", "Run all benchmarks");
     bench_step.dependOn(&run_cli_benchmark.step);
     bench_step.dependOn(&run_lib_benchmark.step);
     bench_step.dependOn(&run_bun_benchmark.step);
+    bench_step.dependOn(&run_simple_api_vs_cli_benchmark.step);
 
     // ========== WASM TARGET ==========
     const wasm_target = b.resolveTargetQuery(.{
@@ -249,7 +260,7 @@ pub fn build(b: *std.Build) void {
     wasm_step.dependOn(&b.addInstallArtifact(wasm_exe, .{}).step);
 
     // ========== CLEAN TARGET ==========
-    const clean_step = b.step("clean", "Clean build artifacts");
+    _ = b.step("clean", "Clean build artifacts");
     // Note: Zig handles cache cleaning internally, this is just for documentation
     
     // ========== HELP TARGET ==========

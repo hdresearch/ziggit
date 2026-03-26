@@ -1,0 +1,90 @@
+ziggit API vs CLI Benchmark Results
+===================================
+
+PHASE 1: Baseline git CLI Performance
+
+Test Environment:
+- Hardware: VM/Container environment
+- Git version: System default
+- Zig compiler: 0.13.0
+- Optimization: Debug and ReleaseFast tested
+- Iterations: 100 per operation
+
+Benchmark Results (Debug build):
+Operation               | Mean      | Min       | Expected Direct Zig Call
+------------------------|-----------|-----------|------------------------
+git rev-parse HEAD      | 1064.5μs  | 1024.7μs  | ~1-50μs (function call)
+git status --porcelain  | 1174.0μs  | 1121.1μs  | ~1-50μs (function call)  
+git describe --tags     | 1043.7μs  | 1003.1μs  | ~1-50μs (function call)
+
+Benchmark Results (ReleaseFast build):
+Operation               | Mean      | Min       | Expected Direct Zig Call
+------------------------|-----------|-----------|------------------------
+git rev-parse HEAD      | 1051.2μs  | 1006.4μs  | ~1-50μs (function call)
+git status --porcelain  | 1137.4μs  | 1101.3μs  | ~1-50μs (function call)  
+git describe --tags     | 1022.9μs  |  989.5μs  | ~1-50μs (function call)
+
+Analysis:
+---------
+
+Process Spawn Overhead:
+Each git CLI command invocation includes ~1ms of overhead for:
+1. Process spawn (~200-500μs)
+2. Git binary loading (~300-600μs) 
+3. Process cleanup (~100-200μs)
+4. Plus the actual git operation time
+
+Expected ziggit Zig API Performance:
+Direct Zig function calls should complete in 1-50μs because:
+1. No process spawn overhead
+2. No binary loading overhead
+3. Direct memory access to git structures
+4. Optimized Zig compiled code
+5. No process cleanup overhead
+
+Projected Performance Improvement for bun:
+- Conservative estimate: 20-100x faster (1000μs -> 10-50μs)
+- Optimistic estimate: 100-1000x faster (1000μs -> 1-10μs)
+
+Real-world Impact:
+If bun performs 100 git operations during package management:
+- Current (git CLI): 100ms+ of just process overhead
+- With ziggit API: <5ms total, mostly actual git work
+
+PHASE 1 CONCLUSION:
+==================
+
+✅ Successfully measured baseline git CLI performance
+✅ Each operation takes ~1ms with significant process spawn overhead
+✅ Build system integration complete
+✅ Debug vs ReleaseFast comparison shows consistent ~1ms overhead
+
+PHASE 2 STATUS: 
+==============
+
+❌ Direct ziggit Zig API benchmark could not be completed
+❌ Compilation issues in src/lib/ziggit.zig prevented API testing
+❌ Need API stabilization before measuring direct function performance
+
+NEXT STEPS:
+===========
+
+1. Fix ziggit API compilation issues
+2. Implement missing functions (repo_describe_tags, repo_is_clean)
+3. Optimize hot paths:
+   - rev-parse HEAD: 2 file reads (HEAD + ref)
+   - status --porcelain: fast mtime/size checks before SHA-1
+   - describe --tags: cache tag resolution
+4. Complete Phase 2 benchmarking with working API
+5. Measure actual performance improvement vs CLI
+
+TARGET METRICS:
+===============
+
+For successful bun integration, ziggit should achieve:
+- rev-parse HEAD: <50μs (20x+ faster than 1ms CLI)
+- status --porcelain: <100μs (10x+ faster than 1ms CLI)  
+- describe --tags: <50μs (20x+ faster than 1ms CLI)
+- is_clean: <10μs (100x+ faster, just check status length)
+
+Expected overall result: 100-1000x improvement for bun's git operations.
