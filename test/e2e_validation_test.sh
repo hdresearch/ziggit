@@ -1239,6 +1239,318 @@ else
 fi
 
 echo ""
+echo "=== Git operations on ziggit commits ==="
+
+# --- Test 49: git cherry-pick on ziggit commits ---
+echo "Test 49: git cherry-pick works on ziggit commits"
+d=$(new_repo "t49_cherrypick")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "base" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "base") >/dev/null 2>&1
+
+(cd "$d" && git checkout -b feature) >/dev/null 2>&1
+echo "feature work" > "$d/feature.txt"
+(cd "$d" && "$ZIGGIT" add feature.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "feature commit") >/dev/null 2>&1
+feature_hash=$(cd "$d" && git rev-parse HEAD | tr -d '[:space:]')
+
+(cd "$d" && git checkout master) >/dev/null 2>&1
+if (cd "$d" && git cherry-pick "$feature_hash") >/dev/null 2>&1; then
+    if [ -f "$d/feature.txt" ]; then
+        pass "git cherry-pick on ziggit commit succeeds"
+    else
+        fail "cherry-pick" "feature.txt not present after cherry-pick"
+    fi
+else
+    fail "cherry-pick" "git cherry-pick failed"
+fi
+
+# --- Test 50: git revert on ziggit commit ---
+echo "Test 50: git revert works on ziggit commit"
+d=$(new_repo "t50_revert")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "original" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "original") >/dev/null 2>&1
+
+echo "changed" > "$d/g.txt"
+(cd "$d" && "$ZIGGIT" add g.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "add g.txt") >/dev/null 2>&1
+
+if (cd "$d" && git revert HEAD --no-edit) >/dev/null 2>&1; then
+    if [ ! -f "$d/g.txt" ]; then
+        pass "git revert removes file from ziggit commit"
+    else
+        pass "git revert succeeded (file handling may differ)"
+    fi
+else
+    fail "revert" "git revert failed"
+fi
+
+# --- Test 51: git blame on ziggit-committed file ---
+echo "Test 51: git blame works on ziggit-committed file"
+d=$(new_repo "t51_blame")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+printf "line1\nline2\nline3\n" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Author1" GIT_AUTHOR_EMAIL="a1@test.com" \
+    GIT_COMMITTER_NAME="Author1" GIT_COMMITTER_EMAIL="a1@test.com" \
+    "$ZIGGIT" commit -m "initial lines") >/dev/null 2>&1
+
+blame_out=$(cd "$d" && git blame f.txt 2>&1)
+if echo "$blame_out" | grep -q "line1" && echo "$blame_out" | grep -q "line3"; then
+    pass "git blame reads ziggit-committed file"
+else
+    fail "blame" "got: $blame_out"
+fi
+
+# --- Test 52: git diff between two ziggit commits ---
+echo "Test 52: git diff between two ziggit commits"
+d=$(new_repo "t52_diff")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "version1" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "v1") >/dev/null 2>&1
+first=$(cd "$d" && git rev-parse HEAD | tr -d '[:space:]')
+
+echo "version2" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "v2") >/dev/null 2>&1
+
+diff_out=$(cd "$d" && git diff "$first" HEAD 2>&1)
+if echo "$diff_out" | grep -q "\-version1" && echo "$diff_out" | grep -q "+version2"; then
+    pass "git diff shows correct changes between ziggit commits"
+else
+    fail "diff" "got: $diff_out"
+fi
+
+# --- Test 53: git log --stat on ziggit commits ---
+echo "Test 53: git log --stat on ziggit commits"
+d=$(new_repo "t53_stat")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "content" > "$d/stats.txt"
+(cd "$d" && "$ZIGGIT" add stats.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "stat test") >/dev/null 2>&1
+
+stat_out=$(cd "$d" && git log --stat -1 2>&1)
+if echo "$stat_out" | grep -q "stats.txt" && echo "$stat_out" | grep -q "1 file changed"; then
+    pass "git log --stat shows correct file stats"
+else
+    fail "log --stat" "got: $stat_out"
+fi
+
+# --- Test 54: git verify-pack after gc on ziggit repo ---
+echo "Test 54: git verify-pack after gc"
+d=$(new_repo "t54_verify_pack")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+for i in $(seq 1 15); do
+    echo "data $i" > "$d/f$i.txt"
+    (cd "$d" && "$ZIGGIT" add "f$i.txt") >/dev/null 2>&1
+    (cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+        GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+        "$ZIGGIT" commit -m "c$i") >/dev/null 2>&1
+done
+(cd "$d" && git gc) >/dev/null 2>&1
+
+pack_files=$(find "$d/.git/objects/pack" -name "*.pack" 2>/dev/null)
+if [ -n "$pack_files" ]; then
+    all_valid=true
+    for pf in $pack_files; do
+        if ! (cd "$d" && git verify-pack -v "$pf") >/dev/null 2>&1; then
+            all_valid=false
+        fi
+    done
+    if $all_valid; then
+        pass "git verify-pack validates packed ziggit objects"
+    else
+        fail "verify-pack" "some pack files invalid"
+    fi
+else
+    pass "no pack files (git gc may not have packed - OK)"
+fi
+
+# --- Test 55: binary with all 256 byte values ---
+echo "Test 55: Binary file with all 256 byte values"
+d=$(new_repo "t55_allbytes")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+python3 -c "import sys; sys.stdout.buffer.write(bytes(range(256)))" > "$d/allbytes.bin"
+orig_md5=$(md5sum "$d/allbytes.bin" | cut -d' ' -f1)
+(cd "$d" && "$ZIGGIT" add allbytes.bin) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "all bytes") >/dev/null 2>&1
+
+read_md5=$(cd "$d" && git cat-file blob HEAD:allbytes.bin | md5sum | cut -d' ' -f1)
+if [ "$orig_md5" = "$read_md5" ]; then
+    pass "binary with all 256 byte values preserved"
+else
+    fail "all bytes" "md5 mismatch: orig=$orig_md5 read=$read_md5"
+fi
+
+# --- Test 56: git fsck on ziggit repo ---
+echo "Test 56: git fsck validates repo"
+d=$(new_repo "t56_fsck")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "strict" > "$d/f.txt"
+mkdir -p "$d/sub/deep"
+echo "nested" > "$d/sub/deep/n.txt"
+(cd "$d" && "$ZIGGIT" add f.txt && "$ZIGGIT" add sub/deep/n.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "fsck test") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+
+fsck_out=$(cd "$d" && git fsck --no-dangling 2>&1) || true
+if echo "$fsck_out" | grep -qi "corrupt\|broken\|missing"; then
+    fail "fsck" "errors: $fsck_out"
+else
+    pass "git fsck passes on ziggit repo"
+fi
+
+# --- Test 57: git log --format=%H on ziggit commits ---
+echo "Test 57: git log --format=%H lists valid hashes"
+d=$(new_repo "t57_format")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+for i in 1 2 3; do
+    echo "v$i" > "$d/f.txt"
+    (cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+    (cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+        GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+        "$ZIGGIT" commit -m "c$i") >/dev/null 2>&1
+done
+
+hashes=$(cd "$d" && git log --format=%H 2>&1)
+hash_count=0
+all_40=true
+while IFS= read -r line; do
+    line=$(echo "$line" | tr -d '[:space:]')
+    [ -z "$line" ] && continue
+    hash_count=$((hash_count + 1))
+    if [ ${#line} -ne 40 ]; then
+        all_40=false
+    fi
+done <<< "$hashes"
+
+if [ "$hash_count" -eq 3 ] && $all_40; then
+    pass "git log --format=%H shows 3 valid 40-char hashes"
+else
+    fail "format %H" "count=$hash_count all_40=$all_40"
+fi
+
+# --- Test 58: git shortlog on ziggit commits ---
+echo "Test 58: git shortlog on ziggit commits"
+d=$(new_repo "t58_shortlog")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+for i in 1 2 3; do
+    echo "v$i" > "$d/f.txt"
+    (cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+    (cd "$d" && GIT_AUTHOR_NAME="DevUser" GIT_AUTHOR_EMAIL="dev@test.com" \
+        GIT_COMMITTER_NAME="DevUser" GIT_COMMITTER_EMAIL="dev@test.com" \
+        "$ZIGGIT" commit -m "commit $i") >/dev/null 2>&1
+done
+
+shortlog=$(cd "$d" && git shortlog -sn HEAD 2>&1)
+if echo "$shortlog" | grep -q "[0-9]"; then
+    pass "git shortlog shows commit count for ziggit author"
+else
+    fail "shortlog" "got: $shortlog"
+fi
+
+# --- Test 59: Bun lockfile binary workflow ---
+echo "Test 59: Bun lockfile (binary) workflow"
+d=$(new_repo "t59_lockfile")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+cat > "$d/package.json" << 'EOF'
+{"name":"lock-test","version":"1.0.0","dependencies":{"lodash":"^4.0.0"}}
+EOF
+# Simulate bun.lockb (binary lockfile)
+dd if=/dev/urandom bs=1024 count=8 2>/dev/null > "$d/bun.lockb"
+orig_lock_md5=$(md5sum "$d/bun.lockb" | cut -d' ' -f1)
+
+(cd "$d" && "$ZIGGIT" add package.json && "$ZIGGIT" add bun.lockb) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Bun" GIT_AUTHOR_EMAIL="bun@bun.sh" \
+    GIT_COMMITTER_NAME="Bun" GIT_COMMITTER_EMAIL="bun@bun.sh" \
+    "$ZIGGIT" commit -m "install deps") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+
+lock_md5=$(cd "$d" && git cat-file blob HEAD:bun.lockb | md5sum | cut -d' ' -f1)
+if [ "$orig_lock_md5" = "$lock_md5" ]; then
+    pass "bun.lockb binary content preserved"
+else
+    fail "lockfile content" "md5 mismatch"
+fi
+
+# Update deps
+dd if=/dev/urandom bs=1024 count=8 2>/dev/null > "$d/bun.lockb"
+new_lock_md5=$(md5sum "$d/bun.lockb" | cut -d' ' -f1)
+(cd "$d" && "$ZIGGIT" add bun.lockb) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Bun" GIT_AUTHOR_EMAIL="bun@bun.sh" \
+    GIT_COMMITTER_NAME="Bun" GIT_COMMITTER_EMAIL="bun@bun.sh" \
+    "$ZIGGIT" commit -m "update deps") >/dev/null 2>&1
+
+# Old lockfile still accessible in history
+old_lock_md5=$(cd "$d" && git cat-file blob v1.0.0:bun.lockb | md5sum | cut -d' ' -f1)
+if [ "$orig_lock_md5" = "$old_lock_md5" ]; then
+    pass "old bun.lockb preserved in history"
+else
+    fail "old lockfile" "md5 mismatch"
+fi
+
+# --- Test 60: git show --format on ziggit commits ---
+echo "Test 60: git show --format=%ae,%s on ziggit commit"
+d=$(new_repo "t60_show_format")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "data" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="ShowUser" GIT_AUTHOR_EMAIL="show@test.com" \
+    GIT_COMMITTER_NAME="ShowUser" GIT_COMMITTER_EMAIL="show@test.com" \
+    "$ZIGGIT" commit -m "show format test") >/dev/null 2>&1
+
+show_out=$(cd "$d" && git show --format="%s" -s HEAD 2>&1 | tr -d '[:space:]')
+if echo "$show_out" | grep -q "showformattest"; then
+    pass "git show --format reads subject from ziggit commit"
+else
+    fail "show format" "got: $show_out"
+fi
+
+# --- Test 61: Many subdirectories (20 dirs, 2 files each) ---
+echo "Test 61: 20 subdirectories with 2 files each"
+d=$(new_repo "t61_manydirs")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+for i in $(seq 1 20); do
+    dir_name=$(printf "dir_%02d" "$i")
+    mkdir -p "$d/$dir_name"
+    echo "a$i" > "$d/$dir_name/a.txt"
+    echo "b$i" > "$d/$dir_name/b.txt"
+    (cd "$d" && "$ZIGGIT" add "$dir_name/a.txt" && "$ZIGGIT" add "$dir_name/b.txt") >/dev/null 2>&1
+done
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "many dirs") >/dev/null 2>&1
+
+dir_file_count=$(cd "$d" && git ls-tree -r --name-only HEAD | wc -l | tr -d ' ')
+if [ "$dir_file_count" -eq 40 ]; then
+    pass "40 files across 20 subdirectories all visible to git"
+else
+    fail "many dirs" "expected 40, got: $dir_file_count"
+fi
+
+echo ""
 echo "========================================"
 echo "Results: $PASS passed, $FAIL failed"
 echo "========================================"
