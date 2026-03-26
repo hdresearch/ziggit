@@ -39,11 +39,13 @@
 
 ## Bun Fork Integration Status
 - Branch: `hdresearch/bun:ziggit-integration`
-- Commit: `f91422b` — defer repo.close() on all paths + expanded error categorization
+- Commit: `f87ea5c` — polish: expand error categorization, retry logging, checkout cleanup
 - `repository.zig`: ziggit used for clone, fetch, findCommit, checkout
 - Fallback: automatic to git CLI on any ziggit failure
 - Debug logging: `BUN_DEBUG_GitRepository=1` to see ziggit vs CLI decisions
-- Error categorization: SSH auth, network, protocol errors get distinct log messages
+- Error categorization: SSH auth, network (9 variants), protocol, data integrity errors get distinct log messages
+- Retry logging: attempt number logged on download retries
+- Checkout cleanup: partial directories cleaned on git CLI checkout failure
 - Partial clone cleanup: failed ziggit clones are cleaned up before git CLI fallback
 
 ## Pending
