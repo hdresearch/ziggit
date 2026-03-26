@@ -238,6 +238,18 @@ pub fn build(b: *std.Build) void {
     const debug_vs_release_step = b.step("bench-release", "Compare debug vs release performance");
     debug_vs_release_step.dependOn(&run_debug_vs_release_bench.step);
 
+    const status_micro_bench = b.addExecutable(.{
+        .name = "status_micro_bench",
+        .root_source_file = b.path("benchmarks/status_micro_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    status_micro_bench.root_module.addImport("ziggit", ziggit_module);
+    const run_status_micro_bench = b.addRunArtifact(status_micro_bench);
+
+    const micro_bench_step = b.step("bench-micro", "Run status micro-benchmark");
+    micro_bench_step.dependOn(&run_status_micro_bench.step);
+
     // ========== WASM TARGET ==========
     const wasm_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
