@@ -837,6 +837,13 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     }
     defer if (head_tree_hash) |h| allocator.free(h);
 
+    // For porcelain output, collect all lines then sort and output together
+    var porcelain_lines = std.ArrayList([]u8).init(allocator);
+    defer {
+        for (porcelain_lines.items) |line| allocator.free(line);
+        porcelain_lines.deinit();
+    }
+
     // Show staged files
     if (staged_files.items.len > 0) {
         if (porcelain) {
@@ -849,13 +856,9 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                     false;
                 
                 if (is_new) {
-                    const msg = try std.fmt.allocPrint(allocator, "A  {s}\n", .{entry.path});
-                    defer allocator.free(msg);
-                    try platform_impl.writeStdout(msg);
+                    try porcelain_lines.append(try std.fmt.allocPrint(allocator, "A  {s}", .{entry.path}));
                 } else {
-                    const msg = try std.fmt.allocPrint(allocator, "M  {s}\n", .{entry.path});
-                    defer allocator.free(msg);
-                    try platform_impl.writeStdout(msg);
+                    try porcelain_lines.append(try std.fmt.allocPrint(allocator, "M  {s}", .{entry.path}));
                 }
             }
         } else {
@@ -892,9 +895,7 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     if (modified_files.items.len > 0) {
         if (porcelain) {
             for (modified_files.items) |entry| {
-                const msg = try std.fmt.allocPrint(allocator, " M {s}\n", .{entry.path});
-                defer allocator.free(msg);
-                try platform_impl.writeStdout(msg);
+                try porcelain_lines.append(try std.fmt.allocPrint(allocator, " M {s}", .{entry.path}));
             }
         } else {
             try platform_impl.writeStdout("\nChanges not staged for commit:\n");
@@ -914,9 +915,7 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     if (deleted_files.items.len > 0) {
         if (porcelain) {
             for (deleted_files.items) |entry| {
-                const msg = try std.fmt.allocPrint(allocator, " D {s}\n", .{entry.path});
-                defer allocator.free(msg);
-                try platform_impl.writeStdout(msg);
+                try porcelain_lines.append(try std.fmt.allocPrint(allocator, " D {s}", .{entry.path}));
             }
         } else {
             if (modified_files.items.len == 0) {
@@ -946,9 +945,7 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     if (untracked_files.items.len > 0) {
         if (porcelain) {
             for (untracked_files.items) |file| {
-                const msg = try std.fmt.allocPrint(allocator, "?? {s}\n", .{file});
-                defer allocator.free(msg);
-                try platform_impl.writeStdout(msg);
+                try porcelain_lines.append(try std.fmt.allocPrint(allocator, "?? {s}", .{file}));
             }
         } else {
             try platform_impl.writeStdout("\nUntracked files:\n");
@@ -960,6 +957,26 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 try platform_impl.writeStdout(msg);
             }
             try platform_impl.writeStdout("\n");
+        }
+    }
+
+    // Output sorted porcelain lines
+    if (porcelain and porcelain_lines.items.len > 0) {
+        // Sort: tracked entries in path order first, then untracked in path order
+        std.mem.sort([]u8, porcelain_lines.items, {}, struct {
+            fn lessThan(_: void, a: []u8, b: []u8) bool {
+                const a_untracked = a.len >= 2 and a[0] == '?' and a[1] == '?';
+                const b_untracked = b.len >= 2 and b[0] == '?' and b[1] == '?';
+                if (a_untracked != b_untracked) return !a_untracked; // tracked before untracked
+                const a_path = if (a.len > 3) a[3..] else a;
+                const b_path = if (b.len > 3) b[3..] else b;
+                return std.mem.order(u8, a_path, b_path) == .lt;
+            }
+        }.lessThan);
+        for (porcelain_lines.items) |line| {
+            const msg = try std.fmt.allocPrint(allocator, "{s}\n", .{line});
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
         }
     }
 
