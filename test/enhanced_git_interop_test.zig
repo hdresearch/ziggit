@@ -61,14 +61,16 @@ fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8, cwd: ?fs.D
         .argv = argv,
         .cwd = cwd_path,
     }) catch |err| {
-        std.debug.print("Command failed: {any} (args: {s})\n", .{ err, argv });
+        std.debug.print("Command failed: {any} (args: {any})\n", .{ err, argv });
         return error.CommandFailed;
     };
     
     defer allocator.free(result.stderr);
     
     if (result.term != .Exited or result.term.Exited != 0) {
-        std.debug.print("Command failed with exit code {d}: {s}\n", .{ result.term.Exited, result.stderr });
+        if (result.stderr.len > 0) {
+            std.debug.print("Command failed with exit code {}: {s}\n", .{ result.term.Exited, result.stderr });
+        }
         allocator.free(result.stdout);
         return error.CommandFailed;
     }
@@ -80,7 +82,7 @@ fn runZiggitCommand(allocator: std.mem.Allocator, args: []const []const u8, cwd:
     var argv = std.ArrayList([]const u8).init(allocator);
     defer argv.deinit();
     
-    try argv.append("./zig-out/bin/ziggit");
+    try argv.append("/root/ziggit/zig-out/bin/ziggit");
     for (args) |arg| {
         try argv.append(arg);
     }
@@ -99,8 +101,12 @@ fn testGitCreateZiggitRead(allocator: std.mem.Allocator, test_dir: fs.Dir) !void
     defer allocator.free(init_result);
     
     // Configure git
-    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_dir);
-    _ = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_dir);
+    {
+        const result1 = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_dir);
+        defer allocator.free(result1);
+        const result2 = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_dir);
+        defer allocator.free(result2);
+    }
     
     // Test ziggit status on empty repo
     const status_empty = runZiggitCommand(allocator, &.{"status", "--porcelain"}, repo_dir) catch |err| blk: {
@@ -118,8 +124,12 @@ fn testGitCreateZiggitRead(allocator: std.mem.Allocator, test_dir: fs.Dir) !void
     try repo_dir.writeFile(.{ .sub_path = "file2.txt", .data = "Content 2" });
     
     // Git add and commit
-    _ = try runCommand(allocator, &.{"git", "add", "."}, repo_dir);
-    _ = try runCommand(allocator, &.{"git", "commit", "-m", "Initial commit"}, repo_dir);
+    {
+        const add_result = try runCommand(allocator, &.{"git", "add", "."}, repo_dir);
+        defer allocator.free(add_result);
+        const commit_result = try runCommand(allocator, &.{"git", "commit", "-m", "Initial commit"}, repo_dir);
+        defer allocator.free(commit_result);
+    }
     
     // Test ziggit log
     const log_result = runZiggitCommand(allocator, &.{"log", "--oneline"}, repo_dir) catch |err| blk: {
@@ -147,7 +157,10 @@ fn testGitCreateZiggitRead(allocator: std.mem.Allocator, test_dir: fs.Dir) !void
     
     // 3. Git branch operations -> ziggit reads
     std.debug.print("Test 1.3: git branch -> ziggit branch\n", .{});
-    _ = try runCommand(allocator, &.{"git", "checkout", "-b", "feature"}, repo_dir);
+    {
+        const checkout_result = try runCommand(allocator, &.{"git", "checkout", "-b", "feature"}, repo_dir);
+        defer allocator.free(checkout_result);
+    }
     
     const ziggit_branch = runZiggitCommand(allocator, &.{"branch"}, repo_dir) catch |err| blk: {
         std.debug.print("  ⚠ ziggit branch failed: {}\n", .{err});
@@ -201,8 +214,12 @@ fn testZiggitCreateGitRead(allocator: std.mem.Allocator, test_dir: fs.Dir) !void
     }
     
     // Configure git for this repo
-    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_dir);
-    _ = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_dir);
+    {
+        const config1 = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_dir);
+        defer allocator.free(config1);
+        const config2 = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_dir);
+        defer allocator.free(config2);
+    }
     
     // 2. Ziggit add/commit cycle -> git reads
     std.debug.print("Test 2.2: ziggit add/commit -> git log/status\n", .{});
@@ -284,14 +301,23 @@ fn testMixedOperations(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
     std.debug.print("Test 3.1: Mixed git/ziggit operations on same repo\n", .{});
     
     // 1. Start with git init
-    _ = try runCommand(allocator, &.{"git", "init"}, repo_dir);
-    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_dir);
-    _ = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_dir);
+    {
+        const init_result = try runCommand(allocator, &.{"git", "init"}, repo_dir);
+        defer allocator.free(init_result);
+        const config1 = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_dir);
+        defer allocator.free(config1);
+        const config2 = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_dir);
+        defer allocator.free(config2);
+    }
     
     // 2. Create files with ziggit/manual creation, add with git
     try repo_dir.writeFile(.{ .sub_path = "step1.txt", .data = "Step 1: Created by test" });
-    _ = try runCommand(allocator, &.{"git", "add", "step1.txt"}, repo_dir);
-    _ = try runCommand(allocator, &.{"git", "commit", "-m", "Step 1: Git commit"}, repo_dir);
+    {
+        const add_result = try runCommand(allocator, &.{"git", "add", "step1.txt"}, repo_dir);
+        defer allocator.free(add_result);
+        const commit_result = try runCommand(allocator, &.{"git", "commit", "-m", "Step 1: Git commit"}, repo_dir);
+        defer allocator.free(commit_result);
+    }
     
     // 3. Check status with both tools
     const git_status1 = try runCommand(allocator, &.{"git", "status", "--porcelain"}, repo_dir);
