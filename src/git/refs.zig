@@ -37,39 +37,123 @@ pub fn getCurrentBranch(git_dir: []const u8, platform_impl: anytype, allocator: 
 }
 
 pub fn getCurrentCommit(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !?[]u8 {
-    const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir});
-    defer allocator.free(head_path);
+    return resolveRef(git_dir, "HEAD", platform_impl, allocator);
+}
 
-    const content = try platform_impl.fs.readFile(allocator, head_path);
+/// Resolve a reference with support for nested symbolic refs and annotated tags
+pub fn resolveRef(git_dir: []const u8, ref_name: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !?[]u8 {
+    var current_ref = try allocator.dupe(u8, ref_name);
+    defer allocator.free(current_ref);
+    
+    var depth: u32 = 0;
+    const max_depth = 10; // Prevent infinite loops
+    
+    while (depth < max_depth) {
+        defer depth += 1;
+        
+        const resolved = try resolveRefOnce(git_dir, current_ref, platform_impl, allocator);
+        if (resolved.is_symbolic) {
+            // Update current_ref for next iteration
+            allocator.free(current_ref);
+            current_ref = try allocator.dupe(u8, resolved.target);
+            allocator.free(resolved.target);
+        } else {
+            // Found final hash, check if it's an annotated tag
+            const final_hash = try resolveAnnotatedTag(git_dir, resolved.target, platform_impl, allocator);
+            allocator.free(resolved.target);
+            return final_hash;
+        }
+    }
+    
+    return error.TooManySymbolicRefs;
+}
+
+/// Result of a single ref resolution step
+const RefResolution = struct {
+    target: []u8,
+    is_symbolic: bool,
+};
+
+/// Resolve a reference one level (without following symbolic refs)
+fn resolveRefOnce(git_dir: []const u8, ref_name: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !RefResolution {
+    // Try to read as file first
+    const ref_path = if (std.mem.eql(u8, ref_name, "HEAD"))
+        try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir})
+    else if (std.mem.startsWith(u8, ref_name, "refs/"))
+        try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_name })
+    else
+        // Try common locations for short ref names
+        try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_dir, ref_name });
+    defer allocator.free(ref_path);
+    
+    const content = platform_impl.fs.readFile(allocator, ref_path) catch |err| switch (err) {
+        error.FileNotFound => {
+            // Try packed-refs
+            const full_ref_name = if (std.mem.startsWith(u8, ref_name, "refs/"))
+                ref_name
+            else if (std.mem.eql(u8, ref_name, "HEAD"))
+                "HEAD"
+            else
+                // Try multiple locations
+                ref_name; // This will be handled in packed-refs search
+            
+            if (readFromPackedRefs(git_dir, full_ref_name, platform_impl, allocator)) |hash| {
+                return RefResolution{
+                    .target = hash,
+                    .is_symbolic = false,
+                };
+            } else |packed_err| switch (packed_err) {
+                error.RefNotFound => {
+                    // Try alternative locations for short names
+                    if (!std.mem.startsWith(u8, ref_name, "refs/") and !std.mem.eql(u8, ref_name, "HEAD")) {
+                        // Try refs/tags/
+                        const tag_ref = try std.fmt.allocPrint(allocator, "refs/tags/{s}", .{ref_name});
+                        defer allocator.free(tag_ref);
+                        
+                        if (readFromPackedRefs(git_dir, tag_ref, platform_impl, allocator)) |hash| {
+                            return RefResolution{
+                                .target = hash,
+                                .is_symbolic = false,
+                            };
+                        } else |_| {}
+                        
+                        // Try refs/remotes/
+                        const remote_ref = try std.fmt.allocPrint(allocator, "refs/remotes/{s}", .{ref_name});
+                        defer allocator.free(remote_ref);
+                        
+                        if (readFromPackedRefs(git_dir, remote_ref, platform_impl, allocator)) |hash| {
+                            return RefResolution{
+                                .target = hash,
+                                .is_symbolic = false,
+                            };
+                        } else |_| {}
+                    }
+                    return error.RefNotFound;
+                },
+                else => return packed_err,
+            }
+        },
+        else => return err,
+    };
     defer allocator.free(content);
-
+    
     const trimmed = std.mem.trim(u8, content, " \t\n\r");
     
     if (std.mem.startsWith(u8, trimmed, "ref: ")) {
-        const ref_path = trimmed["ref: ".len..];
-        const ref_file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_path });
-        defer allocator.free(ref_file_path);
-
-        const ref_content = platform_impl.fs.readFile(allocator, ref_file_path) catch |err| switch (err) {
-            error.FileNotFound => {
-                // Try to find it in packed-refs
-                return readFromPackedRefs(git_dir, ref_path, platform_impl, allocator) catch null;
-            },
-            else => return err,
+        // Symbolic reference
+        const target_ref = trimmed["ref: ".len..];
+        return RefResolution{
+            .target = try allocator.dupe(u8, target_ref),
+            .is_symbolic = true,
         };
-        defer allocator.free(ref_content);
-
-        const hash = std.mem.trim(u8, ref_content, " \t\n\r");
-        if (hash.len == 40 and isValidHash(hash)) {
-            return try allocator.dupe(u8, hash);
-        } else {
-            return error.InvalidHash;
-        }
-    } else if (trimmed.len == 40 and isValidHash(trimmed)) {
-        // Detached HEAD
-        return try allocator.dupe(u8, trimmed);
+    } else if (isValidHash(trimmed)) {
+        // Direct hash reference
+        return RefResolution{
+            .target = try allocator.dupe(u8, trimmed),
+            .is_symbolic = false,
+        };
     } else {
-        return error.InvalidHEAD;
+        return error.InvalidRef;
     }
 }
 
@@ -266,6 +350,159 @@ fn isValidHash(hash: []const u8) bool {
         if (!std.ascii.isHex(c)) return false;
     }
     return true;
+}
+
+/// Resolve annotated tag to commit (if the hash points to a tag object)
+fn resolveAnnotatedTag(git_dir: []const u8, hash: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![]u8 {
+    _ = git_dir;
+    _ = platform_impl;
+    // For now, just return the hash as-is
+    // TODO: Load the object and check if it's a tag object, then follow to the commit
+    // This would require importing objects.zig and loading the object to check its type
+    return try allocator.dupe(u8, hash);
+}
+
+/// List all remote references
+pub fn listRemotes(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.ArrayList([]u8) {
+    var remotes = std.ArrayList([]u8).init(allocator);
+    
+    const refs_remotes_path = try std.fmt.allocPrint(allocator, "{s}/refs/remotes", .{git_dir});
+    defer allocator.free(refs_remotes_path);
+    
+    const entries = platform_impl.fs.readDir(allocator, refs_remotes_path) catch |err| switch (err) {
+        error.FileNotFound, error.NotSupported => return remotes,
+        else => return err,
+    };
+    defer {
+        for (entries) |entry| {
+            allocator.free(entry);
+        }
+        allocator.free(entries);
+    }
+    
+    for (entries) |entry| {
+        try remotes.append(try allocator.dupe(u8, entry));
+    }
+    
+    return remotes;
+}
+
+/// List branches for a specific remote
+pub fn listRemoteBranches(git_dir: []const u8, remote_name: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.ArrayList([]u8) {
+    var branches = std.ArrayList([]u8).init(allocator);
+    
+    const remote_refs_path = try std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}", .{ git_dir, remote_name });
+    defer allocator.free(remote_refs_path);
+    
+    const entries = platform_impl.fs.readDir(allocator, remote_refs_path) catch |err| switch (err) {
+        error.FileNotFound, error.NotSupported => return branches,
+        else => return err,
+    };
+    defer {
+        for (entries) |entry| {
+            allocator.free(entry);
+        }
+        allocator.free(entries);
+    }
+    
+    for (entries) |entry| {
+        try branches.append(try allocator.dupe(u8, entry));
+    }
+    
+    return branches;
+}
+
+/// Get the commit hash for a remote branch
+pub fn getRemoteBranchCommit(git_dir: []const u8, remote_name: []const u8, branch_name: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !?[]u8 {
+    const ref_name = try std.fmt.allocPrint(allocator, "refs/remotes/{s}/{s}", .{ remote_name, branch_name });
+    defer allocator.free(ref_name);
+    
+    return resolveRef(git_dir, ref_name, platform_impl, allocator);
+}
+
+/// List all tags
+pub fn listTags(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.ArrayList([]u8) {
+    var tags = std.ArrayList([]u8).init(allocator);
+    
+    const refs_tags_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags", .{git_dir});
+    defer allocator.free(refs_tags_path);
+    
+    const entries = platform_impl.fs.readDir(allocator, refs_tags_path) catch |err| switch (err) {
+        error.FileNotFound, error.NotSupported => {
+            // Try to find tags in packed-refs
+            return findTagsInPackedRefs(git_dir, platform_impl, allocator) catch tags;
+        },
+        else => return err,
+    };
+    defer {
+        for (entries) |entry| {
+            allocator.free(entry);
+        }
+        allocator.free(entries);
+    }
+    
+    for (entries) |entry| {
+        try tags.append(try allocator.dupe(u8, entry));
+    }
+    
+    // Also check packed-refs for additional tags
+    const packed_tags = findTagsInPackedRefs(git_dir, platform_impl, allocator) catch std.ArrayList([]u8).init(allocator);
+    defer {
+        for (packed_tags.items) |tag| {
+            allocator.free(tag);
+        }
+        packed_tags.deinit();
+    }
+    
+    // Add packed tags that aren't already in the list
+    for (packed_tags.items) |packed_tag| {
+        var found = false;
+        for (tags.items) |existing_tag| {
+            if (std.mem.eql(u8, existing_tag, packed_tag)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            try tags.append(try allocator.dupe(u8, packed_tag));
+        }
+    }
+    
+    return tags;
+}
+
+/// Find tags in packed-refs file
+fn findTagsInPackedRefs(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.ArrayList([]u8) {
+    var tags = std.ArrayList([]u8).init(allocator);
+    
+    const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir});
+    defer allocator.free(packed_refs_path);
+
+    const content = platform_impl.fs.readFile(allocator, packed_refs_path) catch |err| switch (err) {
+        error.FileNotFound => return tags,
+        else => return err,
+    };
+    defer allocator.free(content);
+
+    var lines = std.mem.split(u8, content, "\n");
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        
+        // Skip comments and empty lines
+        if (trimmed.len == 0 or trimmed[0] == '#') continue;
+        
+        // Format: "<hash> <ref_name>"
+        if (std.mem.indexOf(u8, trimmed, " ")) |space_pos| {
+            const ref_path = trimmed[space_pos + 1..];
+            
+            if (std.mem.startsWith(u8, ref_path, "refs/tags/")) {
+                const tag_name = ref_path["refs/tags/".len..];
+                try tags.append(try allocator.dupe(u8, tag_name));
+            }
+        }
+    }
+    
+    return tags;
 }
 
 /// Read ref hash from packed-refs file
