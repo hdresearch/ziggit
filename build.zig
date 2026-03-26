@@ -530,6 +530,15 @@ pub fn build(b: *std.Build) void {
     });
     ziggit_writes_test.root_module.addImport("ziggit", ziggit_module);
 
+    // Status porcelain compatibility tests
+    const status_porcelain_compat_tests = b.addTest(.{
+        .root_source_file = b.path("test/status_porcelain_compat_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    status_porcelain_compat_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(status_porcelain_compat_tests).step);
+
     // Config parsing tests (internal git module)
     const config_parsing_tests = b.addTest(.{
         .root_source_file = b.path("test/config_parsing_test.zig"),
