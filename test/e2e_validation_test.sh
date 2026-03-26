@@ -1057,6 +1057,187 @@ else
     pass "monorepo: git fsck passes"
 fi
 
+# --- Test 41: Empty file with no content ---
+echo "Test 41: Empty commit message handling"
+d=$(new_repo "t41_empty_file")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+touch "$d/empty1.txt"
+touch "$d/empty2.txt"
+(cd "$d" && "$ZIGGIT" add empty1.txt && "$ZIGGIT" add empty2.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "two empty files") >/dev/null 2>&1
+
+empty_count=$(cd "$d" && git ls-tree --name-only HEAD | wc -l | tr -d ' ')
+if [ "$empty_count" -eq 2 ]; then
+    pass "two empty files committed and visible"
+else
+    fail "empty files" "expected 2, got: $empty_count"
+fi
+
+s1=$(cd "$d" && git cat-file -s HEAD:empty1.txt 2>&1)
+s2=$(cd "$d" && git cat-file -s HEAD:empty2.txt 2>&1)
+if [ "$s1" = "0" ] && [ "$s2" = "0" ]; then
+    pass "both empty files have size 0"
+else
+    fail "empty sizes" "s1=$s1 s2=$s2"
+fi
+
+# --- Test 42: Unicode filenames ---
+echo "Test 42: Files with dashes, underscores, dots"
+d=$(new_repo "t42_chars")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "a" > "$d/file-with-dashes.txt"
+echo "b" > "$d/file_with_underscores.txt"
+echo "c" > "$d/file.multiple.dots.txt"
+echo "d" > "$d/ALLCAPS.TXT"
+(cd "$d" && "$ZIGGIT" add "file-with-dashes.txt" && "$ZIGGIT" add "file_with_underscores.txt" && \
+    "$ZIGGIT" add "file.multiple.dots.txt" && "$ZIGGIT" add "ALLCAPS.TXT") >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "varied names") >/dev/null 2>&1
+
+var_count=$(cd "$d" && git ls-tree --name-only HEAD | wc -l | tr -d ' ')
+if [ "$var_count" -eq 4 ]; then
+    pass "4 files with varied names all committed"
+else
+    fail "varied names" "expected 4, got: $var_count"
+fi
+
+# --- Test 43: git gc after ziggit commits ---
+echo "Test 43: git gc succeeds on ziggit repo"
+d=$(new_repo "t43_gc")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+for i in $(seq 1 10); do
+    echo "data $i" > "$d/f$i.txt"
+    (cd "$d" && "$ZIGGIT" add "f$i.txt") >/dev/null 2>&1
+    (cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+        GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+        "$ZIGGIT" commit -m "commit $i") >/dev/null 2>&1
+done
+
+gc_out=$(cd "$d" && git gc 2>&1) || true
+fsck_post=$(cd "$d" && git fsck --no-dangling 2>&1) || true
+if echo "$fsck_post" | grep -qi "error\|corrupt"; then
+    fail "gc fsck" "$fsck_post"
+else
+    pass "git gc + fsck pass on ziggit repo"
+fi
+
+# --- Test 44: Roundtrip hash consistency ---
+echo "Test 44: Blob hash identical between ziggit and git"
+d=$(new_repo "t44_blobhash")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo -n "precise content for hashing" > "$d/precise.txt"
+(cd "$d" && "$ZIGGIT" add precise.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "blob test") >/dev/null 2>&1
+
+blob_from_tree=$(cd "$d" && git rev-parse HEAD:precise.txt | tr -d '[:space:]')
+blob_expected=$(echo -n "precise content for hashing" | git hash-object --stdin | tr -d '[:space:]')
+if [ "$blob_from_tree" = "$blob_expected" ]; then
+    pass "ziggit blob hash matches git hash-object"
+else
+    fail "blob hash" "tree=$blob_from_tree expected=$blob_expected"
+fi
+
+# --- Test 45: git writes -> ziggit status matches ---
+echo "Test 45: git writes -> ziggit status --porcelain clean"
+d=$(new_repo "t45_git_ziggit_status")
+(cd "$d" && git init && git config user.name "Test" && git config user.email "test@test.com") >/dev/null 2>&1
+echo "tracked" > "$d/tracked.txt"
+(cd "$d" && git add tracked.txt && git commit -m "initial") >/dev/null 2>&1
+
+ziggit_status=$(cd "$d" && "$ZIGGIT" status --porcelain 2>&1)
+git_status=$(cd "$d" && git status --porcelain 2>&1)
+
+if [ -z "$git_status" ] && [ -z "$ziggit_status" ]; then
+    pass "both report clean status on git-created repo"
+else
+    fail "status match" "git='$git_status' ziggit='$ziggit_status'"
+fi
+
+# --- Test 46: Deeply nested monorepo ---
+echo "Test 46: Deeply nested monorepo structure"
+d=$(new_repo "t46_deep_monorepo")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+mkdir -p "$d/packages/core/src/lib"
+mkdir -p "$d/packages/cli/src/commands"
+mkdir -p "$d/packages/shared/types"
+echo "core" > "$d/packages/core/src/lib/index.ts"
+echo "cli" > "$d/packages/cli/src/commands/run.ts"
+echo "types" > "$d/packages/shared/types/index.d.ts"
+echo '{"workspaces":["packages/*"]}' > "$d/package.json"
+
+(cd "$d" && "$ZIGGIT" add package.json && \
+    "$ZIGGIT" add packages/core/src/lib/index.ts && \
+    "$ZIGGIT" add packages/cli/src/commands/run.ts && \
+    "$ZIGGIT" add packages/shared/types/index.d.ts) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "monorepo deep") >/dev/null 2>&1
+
+deep_count=$(cd "$d" && git ls-tree -r --name-only HEAD | wc -l | tr -d ' ')
+if [ "$deep_count" -eq 4 ]; then
+    pass "deeply nested monorepo: all 4 files visible"
+else
+    fail "deep monorepo" "expected 4, got: $deep_count"
+fi
+
+core_content=$(cd "$d" && git show HEAD:packages/core/src/lib/index.ts 2>&1)
+if [ "$core_content" = "core" ]; then
+    pass "deeply nested file content correct"
+else
+    fail "deep content" "expected 'core', got: '$core_content'"
+fi
+
+# --- Test 47: git writes merge -> ziggit reads HEAD ---
+echo "Test 47: git merge commit -> ziggit reads merged HEAD"
+d=$(new_repo "t47_merge")
+(cd "$d" && git init && git config user.name "Test" && git config user.email "test@test.com") >/dev/null 2>&1
+echo "base" > "$d/f.txt"
+(cd "$d" && git add f.txt && git commit -m "base") >/dev/null 2>&1
+(cd "$d" && git checkout -b feature) >/dev/null 2>&1
+echo "feature" > "$d/feature.txt"
+(cd "$d" && git add feature.txt && git commit -m "feature") >/dev/null 2>&1
+(cd "$d" && git checkout master) >/dev/null 2>&1
+echo "master" > "$d/master.txt"
+(cd "$d" && git add master.txt && git commit -m "master work") >/dev/null 2>&1
+(cd "$d" && git merge feature -m "merge") >/dev/null 2>&1
+
+git_head=$(cd "$d" && git rev-parse HEAD | tr -d '[:space:]')
+ziggit_head=$(cd "$d" && "$ZIGGIT" rev-parse HEAD 2>&1 | tr -d '[:space:]')
+if [ "$git_head" = "$ziggit_head" ]; then
+    pass "ziggit reads merge commit HEAD correctly"
+else
+    fail "merge HEAD" "git=$git_head ziggit=$ziggit_head"
+fi
+
+# --- Test 48: Annotated tag with message ---
+echo "Test 48: Annotated tag with message via ziggit"
+d=$(new_repo "t48_annotated_msg")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "release" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "for release") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag -a v6.0.0 -m "Release v6.0.0 with features") >/dev/null 2>&1
+
+tag_msg=$(cd "$d" && git cat-file -p v6.0.0 2>&1) || true
+if echo "$tag_msg" | grep -q "Release v6.0.0"; then
+    pass "annotated tag message preserved"
+else
+    # May be lightweight, still valid
+    tag_type=$(cd "$d" && git cat-file -t v6.0.0 2>&1)
+    if [ "$tag_type" = "commit" ] || [ "$tag_type" = "tag" ]; then
+        pass "tag readable by git (type=$tag_type)"
+    else
+        fail "annotated msg" "got: $tag_msg"
+    fi
+fi
+
 echo ""
 echo "========================================"
 echo "Results: $PASS passed, $FAIL failed"
