@@ -69,6 +69,25 @@ test "isSshUrl - rejects non-SSH URLs" {
     try std.testing.expect(!ssh_transport.isSshUrl("relative/path"));
 }
 
+test "SCP-style URL with IP address" {
+    const result = try ssh_transport.parseSshUrl("git@192.168.1.100:repos/myproject.git");
+    try std.testing.expectEqualStrings("git", result.user);
+    try std.testing.expectEqualStrings("192.168.1.100", result.host);
+    try std.testing.expect(result.port == null);
+    try std.testing.expectEqualStrings("repos/myproject.git", result.path);
+    try std.testing.expect(!result.absolute_path);
+}
+
+test "ssh:// URL has absolute_path flag" {
+    const result = try ssh_transport.parseSshUrl("ssh://git@github.com/user/repo.git");
+    try std.testing.expect(result.absolute_path);
+}
+
+test "SCP-style URL has relative path flag" {
+    const result = try ssh_transport.parseSshUrl("git@github.com:user/repo.git");
+    try std.testing.expect(!result.absolute_path);
+}
+
 test "parseRefAdvertisement via parseSshUrl integration" {
     // This validates that the pkt-line parser works with SSH-style ref advertisement
     // (no HTTP service announcement prefix)

@@ -119,6 +119,15 @@ pub fn isSshUrl(url: []const u8) bool {
     return false;
 }
 
+/// Check if a ref name is relevant for cloning (HEAD, branches, tags).
+/// Skips pull request refs, GitHub internal refs, etc.
+fn isCloneRelevantRef(name: []const u8) bool {
+    if (std.mem.eql(u8, name, "HEAD")) return true;
+    if (std.mem.startsWith(u8, name, "refs/heads/")) return true;
+    if (std.mem.startsWith(u8, name, "refs/tags/")) return true;
+    return false;
+}
+
 /// Clone via SSH — returns pack data + refs just like smart_http.clonePack
 pub fn clonePack(allocator: std.mem.Allocator, url: []const u8) !CloneResult {
     const parsed = try parseSshUrl(url);
@@ -143,6 +152,7 @@ pub fn clonePack(allocator: std.mem.Allocator, url: []const u8) !CloneResult {
     defer wants.deinit();
 
     for (discovery.refs) |ref| {
+        if (!isCloneRelevantRef(ref.name)) continue;
         const hash_str = ref.hash;
         if (!want_set.contains(&hash_str)) {
             try want_set.put(try allocator.dupe(u8, &hash_str), {});
@@ -210,17 +220,31 @@ pub fn fetchNewPack(allocator: std.mem.Allocator, url: []const u8, local_refs: [
         have_set.deinit();
     }
 
+    var want_set = std.StringHashMap(void).init(allocator);
+    defer {
+        var wit = want_set.keyIterator();
+        while (wit.next()) |key| allocator.free(@constCast(key.*));
+        want_set.deinit();
+    }
+
     for (discovery.refs) |ref| {
+        if (!isCloneRelevantRef(ref.name)) continue;
         if (local_map.get(ref.name)) |local_hash| {
             if (!std.mem.eql(u8, &local_hash, &ref.hash)) {
-                try wants.append(ref.hash);
+                if (!want_set.contains(&ref.hash)) {
+                    try want_set.put(try allocator.dupe(u8, &ref.hash), {});
+                    try wants.append(ref.hash);
+                }
                 if (!have_set.contains(&local_hash)) {
                     try have_set.put(try allocator.dupe(u8, &local_hash), {});
                     try haves.append(local_hash);
                 }
             }
         } else {
-            try wants.append(ref.hash);
+            if (!want_set.contains(&ref.hash)) {
+                try want_set.put(try allocator.dupe(u8, &ref.hash), {});
+                try wants.append(ref.hash);
+            }
         }
     }
 
