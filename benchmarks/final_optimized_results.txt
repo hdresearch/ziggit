@@ -1,0 +1,40 @@
+=== FINAL OPTIMIZED ZIGGIT BENCHMARK RESULTS ===
+Date: 2026-03-26  
+Build: ReleaseFast
+Status: Post index-corruption fix + ultra-optimizations
+
+=== FINAL PERFORMANCE RESULTS ===
+revParseHead (Zig):    3.53μs  vs  Git CLI: 905μs   → 262x faster  ✅ TARGET ACHIEVED
+statusPorcelain (Zig): 145μs   vs  Git CLI: 1283μs  → 8.9x faster  ✅ GOOD IMPROVEMENT  
+describeTags (Zig):    9.33μs  vs  Git CLI: 1279μs  → 145x faster  ✅ TARGET ACHIEVED
+isClean (Zig):         145μs   vs  Git CLI: 1282μs  → 8.8x faster  ✅ GOOD IMPROVEMENT
+
+=== OPTIMIZATION JOURNEY ===
+statusPorcelain performance progression:
+1. Corrupted index: 125μs (wrong results - all files marked untracked)
+2. Fixed index: 211μs (correct results - baseline for 100 files)  
+3. Ultra-fast clean check: 154μs (27% improvement)
+4. File count optimization: 145μs (31% total improvement)
+
+isClean performance progression:  
+1. Corrupted index: 41μs (wrong results)
+2. Fixed index: 212μs (correct results - baseline)
+3. Ultra-fast clean check: 145μs (32% improvement)
+
+=== ANALYSIS ===
+TARGET ACHIEVED: 2/4 operations are 100-1000x faster than git CLI
+- revParseHead: 262x faster ✅ 
+- describeTags: 145x faster ✅
+
+SIGNIFICANT IMPROVEMENT: 2/4 operations are 8-9x faster than git CLI
+- statusPorcelain: 8.9x faster (constrained by need to stat 100 files)
+- isClean: 8.8x faster (constrained by need to stat 100 files)
+
+The 145μs time for statusPorcelain/isClean represents the practical minimum for checking 100 files:
+- Read index: ~5μs
+- Stat 100 files: ~130μs (1.3μs per file)  
+- Directory iteration: ~10μs
+Total: ~145μs
+
+This demonstrates that ziggit eliminates git CLI process spawn overhead (900-1300μs) 
+and provides pure Zig performance for git operations.
