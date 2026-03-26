@@ -23,14 +23,21 @@ pub fn main() !void {
     print("Running Git Interoperability Tests...\n", .{});
 
     // Set HOME environment for git (skip if not available)
-    _ = std.process.getEnvVarOwned(allocator, "HOME") catch {
+    if (std.process.getEnvVarOwned(allocator, "HOME")) |home_path| {
+        defer allocator.free(home_path);
+        // HOME is set, git should work fine
+    } else |_| {
         // HOME not set, but we can't easily set it in newer Zig versions  
         // Git commands should work with proper config
-    };
+    }
 
     // Set up global git config for tests (ignore failures)
-    _ = runCommandSafe(allocator, &.{"git", "config", "--global", "user.name", "Test User"}, fs.cwd());
-    _ = runCommandSafe(allocator, &.{"git", "config", "--global", "user.email", "test@example.com"}, fs.cwd());
+    if (runCommandSafe(allocator, &.{"git", "config", "--global", "user.name", "Test User"}, fs.cwd())) |result| {
+        defer allocator.free(result);
+    }
+    if (runCommandSafe(allocator, &.{"git", "config", "--global", "user.email", "test@example.com"}, fs.cwd())) |result| {
+        defer allocator.free(result);
+    }
 
     // Create temporary test directory
     const test_dir = try fs.cwd().makeOpenPath("test_tmp", .{});
@@ -304,13 +311,22 @@ fn runCommand(allocator: std.mem.Allocator, args: []const []const u8, cwd: fs.Di
     defer allocator.free(stderr);
     
     const term = try child.wait();
-    if (term != .Exited or term.Exited != 0) {
-        // For debugging, print stderr if command failed
-        if (stderr.len > 0) {
-            std.debug.print("Command failed with stderr: {s}\n", .{stderr});
-        }
-        allocator.free(stdout);
-        return error.CommandFailed;
+    switch (term) {
+        .Exited => |exit_code| if (exit_code != 0) {
+            // For debugging, print stderr if command failed
+            if (stderr.len > 0) {
+                std.debug.print("Command failed with stderr: {s}\n", .{stderr});
+            }
+            allocator.free(stdout);
+            return error.CommandFailed;
+        },
+        .Signal, .Stopped, .Unknown => {
+            if (stderr.len > 0) {
+                std.debug.print("Command failed with stderr: {s}\n", .{stderr});
+            }
+            allocator.free(stdout);
+            return error.CommandFailed;
+        },
     }
     
     return stdout;
