@@ -109,6 +109,14 @@ pub fn build(b: *std.Build) void {
     lib_status_test.root_module.addImport("ziggit", ziggit_module);
     const run_lib_status_test = b.addRunArtifact(lib_status_test);
 
+    // Build system test (standalone, no dependencies)
+    const build_system_test = b.addTest(.{
+        .root_source_file = b.path("test/build_system_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_build_system_test = b.addRunArtifact(build_system_test);
+
     // Test step runs all tests
     const test_step = b.step("test", "Run unit tests and integration tests");
     test_step.dependOn(&run_platform_tests.step);
@@ -117,6 +125,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_integration_test_suite.step);
     test_step.dependOn(&run_pack_tests.step);
     test_step.dependOn(&run_lib_status_test.step);
+    test_step.dependOn(&run_build_system_test.step);
 
     // ========== BENCHMARKS ==========
     const cli_benchmark = b.addExecutable(.{
