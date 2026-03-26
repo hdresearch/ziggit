@@ -47,7 +47,7 @@ System git: git version 2.43.0
   t2018-checkout-branch.sh: 25/25 passed ✓
   t2012-checkout-last.sh: 22/22 passed ✓
   t2010-checkout-ambiguous.sh: 10/10 passed ✓
-  t1700-split-index.sh: 11/29 passed (18 failed)
+  t1700-split-index.sh: 10/29 passed (19 failed)
   t1500-rev-parse.sh: 51/81 passed (30 failed)
   t1450-fsck.sh: 84/96 passed (12 failed)
   t1400-update-ref.sh: 178/313 passed (135 failed)
@@ -65,9 +65,9 @@ System git: git version 2.43.0
   t1000-read-tree-m-3way.sh: 83/83 passed ✓
   t0300-credentials.sh: 49/56 passed (7 failed)
   t0070-fundamental.sh: 3/11 passed (8 failed)
-  t0060-path-utils.sh: 55/219 passed (164 failed)
+  t0060-path-utils.sh: 146/219 passed (73 failed)
   t0050-filesystem.sh: 13/13 passed ✓
   t0001-init.sh: 60/102 passed (42 failed)
   t0000-basic.sh: 87/92 passed (5 failed)
 
-TOTAL: 6651/7840 passed (1189 failed)
+TOTAL: 6741/7840 passed (1099 failed)
