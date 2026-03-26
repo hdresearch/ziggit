@@ -748,6 +748,15 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(ziggit_writes_test).step);
     test_step.dependOn(&b.addRunArtifact(git_writes_test).step);
 
+    // Repository workflow tests
+    const repo_workflow_tests = b.addTest(.{
+        .root_source_file = b.path("test/repo_workflow_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    repo_workflow_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(repo_workflow_tests).step);
+
     // Clone and fetch tests
     const clone_and_fetch_tests = b.addTest(.{
         .root_source_file = b.path("test/clone_and_fetch_test.zig"),
