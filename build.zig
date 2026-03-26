@@ -1775,6 +1775,22 @@ pub fn build(b: *std.Build) void {
     const pack_idx_delta_step = b.step("pack-idx-delta-test", "Run pack idx delta tests");
     pack_idx_delta_step.dependOn(&b.addRunArtifact(pack_idx_delta_tests).step);
 
+    // Pack delta chain tests (REF_DELTA chains, mixed delta types, git-gc interop, cat-file round-trip)
+    const pack_delta_chain_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_delta_chain_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_delta_chain_tests.root_module.addAnonymousImport("idx_writer", .{
+        .root_source_file = b.path("src/git/idx_writer.zig"),
+    });
+    pack_delta_chain_tests.root_module.addAnonymousImport("pack_writer", .{
+        .root_source_file = b.path("src/git/pack_writer.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(pack_delta_chain_tests).step);
+    const pack_delta_chain_step = b.step("pack-delta-chain-test", "Run pack delta chain tests");
+    pack_delta_chain_step.dependOn(&b.addRunArtifact(pack_delta_chain_tests).step);
+
     // Pack storage comprehensive tests (REF_DELTA, delta chains, git interop, multi-pack)
     const pack_storage_comprehensive_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_storage_comprehensive_test.zig"),
