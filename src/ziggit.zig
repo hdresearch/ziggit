@@ -719,29 +719,50 @@ pub const Repository = struct {
         var tags_dir_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
         const tags_dir = std.fmt.bufPrint(&tags_dir_buf, "{s}/refs/tags", .{self.git_dir}) catch return error.PathTooLong;
 
-        // ULTRA-OPTIMIZATION: Pre-allocated buffer with reasonable size limit
-        var latest_tag_buf: [64]u8 = undefined; // Most tags are short
+        var latest_tag_buf: [64]u8 = undefined;
         var latest_tag_len: usize = 0;
         var has_tag = false;
 
-        // Single directory open - minimal syscalls
-        var dir = std.fs.openDirAbsolute(tags_dir, .{ .iterate = true }) catch {
-            return try allocator.dupe(u8, "");
-        };
-        defer dir.close();
+        // First: scan refs/tags/ directory (loose tag files)
+        if (std.fs.openDirAbsolute(tags_dir, .{ .iterate = true })) |mut_dir| {
+            var dir = mut_dir;
+            defer dir.close();
 
-        var iterator = dir.iterate();
-        while (try iterator.next()) |entry| {
-            // ULTRA-OPTIMIZATION: Skip non-files and oversized names in single check
-            if (entry.kind != .file or entry.name.len >= latest_tag_buf.len) continue;
-            
-            // HYPER-OPTIMIZATION: Use direct memory comparison with early bailout for performance
-            if (!has_tag or std.mem.order(u8, entry.name, latest_tag_buf[0..latest_tag_len]) == .gt) {
-                // Copy to stack buffer - zero allocations during comparison!
-                @memcpy(latest_tag_buf[0..entry.name.len], entry.name);
-                latest_tag_len = entry.name.len;
-                has_tag = true;
+            var iterator = dir.iterate();
+            while (try iterator.next()) |entry| {
+                if (entry.kind != .file or entry.name.len >= latest_tag_buf.len) continue;
+                if (!has_tag or std.mem.order(u8, entry.name, latest_tag_buf[0..latest_tag_len]) == .gt) {
+                    @memcpy(latest_tag_buf[0..entry.name.len], entry.name);
+                    latest_tag_len = entry.name.len;
+                    has_tag = true;
+                }
             }
+        } else |_| {}
+
+        // Second: scan packed-refs for refs/tags/ entries (tags stored after clone/fetch)
+        var packed_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const packed_path = std.fmt.bufPrint(&packed_path_buf, "{s}/packed-refs", .{self.git_dir}) catch "";
+        if (packed_path.len > 0) {
+            if (std.fs.cwd().readFileAlloc(allocator, packed_path, 4 * 1024 * 1024)) |packed_data| {
+                defer allocator.free(packed_data);
+                var lines = std.mem.splitScalar(u8, packed_data, '\n');
+                while (lines.next()) |line| {
+                    if (line.len == 0 or line[0] == '#' or line[0] == '^') continue;
+                    if (line.len > 41 and line[40] == ' ') {
+                        const ref_name = line[41..];
+                        if (std.mem.startsWith(u8, ref_name, "refs/tags/")) {
+                            const tag_name = ref_name["refs/tags/".len..];
+                            if (tag_name.len > 0 and tag_name.len < latest_tag_buf.len) {
+                                if (!has_tag or std.mem.order(u8, tag_name, latest_tag_buf[0..latest_tag_len]) == .gt) {
+                                    @memcpy(latest_tag_buf[0..tag_name.len], tag_name);
+                                    latest_tag_len = tag_name.len;
+                                    has_tag = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else |_| {}
         }
 
         return if (has_tag)
