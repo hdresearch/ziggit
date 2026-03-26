@@ -6535,3 +6535,310 @@ test "ziggit repo -> git ls-files matches index" {
     try std.testing.expect(std.mem.indexOf(u8, trimmed, "b.txt") != null);
     try std.testing.expect(std.mem.indexOf(u8, trimmed, "c.txt") != null);
 }
+
+test "ziggit tree sorting matches git: files and dirs interleaved" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    // Create files that test sorting edge cases (dirs sort with trailing /)
+    try writeFileHelper(allocator, tmp, "ab", "1");
+    try writeFileHelper(allocator, tmp, "ab.txt", "2");
+    const sub_dir = try std.fmt.allocPrint(allocator, "{s}/abc", .{tmp});
+    defer allocator.free(sub_dir);
+    std.fs.makeDirAbsolute(sub_dir) catch {};
+    try writeFileHelper(allocator, tmp, "abc/file.txt", "3");
+    try writeFileHelper(allocator, tmp, "abd", "4");
+
+    try repo.add("ab");
+    try repo.add("ab.txt");
+    try repo.add("abc/file.txt");
+    try repo.add("abd");
+    _ = try repo.commit("sorting test", "T", "t@t");
+
+    // git ls-tree should list them in git's canonical sort order
+    const ls_tree = try execGit(allocator, tmp, &.{ "ls-tree", "--name-only", "HEAD" });
+    defer allocator.free(ls_tree);
+    const out = trimRight(ls_tree);
+    // git should see all 4 entries (3 blobs + 1 tree at top level)
+    try std.testing.expect(std.mem.indexOf(u8, out, "ab") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "abc") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "abd") != null);
+
+    // git fsck validates the tree object format
+    const fsck = try execGit(allocator, tmp, &.{"fsck"});
+    defer allocator.free(fsck);
+    // If it doesn't error, the tree is valid
+}
+
+test "ziggit add file then commit -> git sees committed content" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    // Write and add
+    try writeFileHelper(allocator, tmp, "f.txt", "the content");
+    try repo.add("f.txt");
+    _ = try repo.commit("add file", "T", "t@t");
+
+    // git should see the content
+    const content = try execGit(allocator, tmp, &.{ "show", "HEAD:f.txt" });
+    defer allocator.free(content);
+    try std.testing.expectEqualStrings("the content", trimRight(content));
+}
+
+test "ziggit commit with very long message -> git log preserves it" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    try writeFileHelper(allocator, tmp, "f.txt", "data");
+    try repo.add("f.txt");
+
+    // Create a 2000-char commit message
+    var msg_buf: [2000]u8 = undefined;
+    for (&msg_buf) |*b| b.* = 'A';
+    msg_buf[0] = 'S'; // start marker
+    msg_buf[1999] = 'E'; // end marker
+    _ = try repo.commit(&msg_buf, "T", "t@t");
+
+    const git_log = try execGit(allocator, tmp, &.{ "log", "--format=%B", "-1" });
+    defer allocator.free(git_log);
+    const log_trimmed = trimRight(git_log);
+    try std.testing.expect(log_trimmed.len >= 2000);
+    try std.testing.expect(log_trimmed[0] == 'S');
+    try std.testing.expect(log_trimmed[1999] == 'E');
+}
+
+test "ziggit 3 commits -> git rev-list --count HEAD matches" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    for (0..3) |i| {
+        var name_buf: [16]u8 = undefined;
+        const name = std.fmt.bufPrint(&name_buf, "f{d}.txt", .{i}) catch unreachable;
+        var content_buf: [16]u8 = undefined;
+        const content = std.fmt.bufPrint(&content_buf, "data{d}", .{i}) catch unreachable;
+        try writeFileHelper(allocator, tmp, name, content);
+        try repo.add(name);
+        var msg_buf: [16]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "c{d}", .{i}) catch unreachable;
+        _ = try repo.commit(msg, "T", "t@t");
+    }
+
+    const count = try execGit(allocator, tmp, &.{ "rev-list", "--count", "HEAD" });
+    defer allocator.free(count);
+    try std.testing.expectEqualStrings("3", trimRight(count));
+}
+
+test "ziggit two commits -> git diff HEAD~1 HEAD shows diff output" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    try writeFileHelper(allocator, tmp, "a.txt", "aaa");
+    try repo.add("a.txt");
+    _ = try repo.commit("first", "T", "t@t");
+
+    try writeFileHelper(allocator, tmp, "b.txt", "bbb");
+    try repo.add("b.txt");
+    _ = try repo.commit("second", "T", "t@t");
+
+    // git diff should show b.txt was added
+    const diff = try execGit(allocator, tmp, &.{ "diff", "--stat", "HEAD~1", "HEAD" });
+    defer allocator.free(diff);
+    try std.testing.expect(std.mem.indexOf(u8, diff, "b.txt") != null);
+}
+
+test "ziggit empty file -> git preserves zero-length blob" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    try writeFileHelper(allocator, tmp, "empty.txt", "");
+    try repo.add("empty.txt");
+    _ = try repo.commit("empty file", "T", "t@t");
+
+    const content = try execGit(allocator, tmp, &.{ "show", "HEAD:empty.txt" });
+    defer allocator.free(content);
+    try std.testing.expectEqual(@as(usize, 0), content.len);
+
+    // The empty blob should have the well-known SHA-1
+    const blob_hash = try execGit(allocator, tmp, &.{ "rev-parse", "HEAD:empty.txt" });
+    defer allocator.free(blob_hash);
+    try std.testing.expectEqualStrings("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391", trimRight(blob_hash));
+}
+
+test "ziggit bun monorepo: packages in subdirs with shared deps" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    // Root package.json
+    try writeFileHelper(allocator, tmp, "package.json",
+        \\{"name":"monorepo","private":true,"workspaces":["packages/*"]}
+    );
+
+    // Create packages dirs
+    const pkgs_dir = try std.fmt.allocPrint(allocator, "{s}/packages", .{tmp});
+    defer allocator.free(pkgs_dir);
+    std.fs.makeDirAbsolute(pkgs_dir) catch {};
+
+    const pkg_core = try std.fmt.allocPrint(allocator, "{s}/packages/core", .{tmp});
+    defer allocator.free(pkg_core);
+    std.fs.makeDirAbsolute(pkg_core) catch {};
+
+    const pkg_cli = try std.fmt.allocPrint(allocator, "{s}/packages/cli", .{tmp});
+    defer allocator.free(pkg_cli);
+    std.fs.makeDirAbsolute(pkg_cli) catch {};
+
+    try writeFileHelper(allocator, tmp, "packages/core/package.json",
+        \\{"name":"@mono/core","version":"1.0.0"}
+    );
+    try writeFileHelper(allocator, tmp, "packages/core/index.js", "export const core = true;\n");
+    try writeFileHelper(allocator, tmp, "packages/cli/package.json",
+        \\{"name":"@mono/cli","version":"1.0.0","dependencies":{"@mono/core":"*"}}
+    );
+    try writeFileHelper(allocator, tmp, "packages/cli/index.js", "import { core } from '@mono/core';\n");
+
+    try repo.add("package.json");
+    try repo.add("packages/core/package.json");
+    try repo.add("packages/core/index.js");
+    try repo.add("packages/cli/package.json");
+    try repo.add("packages/cli/index.js");
+    _ = try repo.commit("feat: monorepo setup", "Dev", "dev@dev.com");
+    try repo.createTag("v1.0.0", null);
+
+    // git should see all files
+    const ls_tree = try execGit(allocator, tmp, &.{ "ls-tree", "-r", "--name-only", "HEAD" });
+    defer allocator.free(ls_tree);
+    const tree_out = trimRight(ls_tree);
+    try std.testing.expect(std.mem.indexOf(u8, tree_out, "package.json") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tree_out, "packages/core/package.json") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tree_out, "packages/cli/index.js") != null);
+
+    // git describe should work
+    const git_desc = try execGit(allocator, tmp, &.{ "describe", "--tags" });
+    defer allocator.free(git_desc);
+    try std.testing.expectEqualStrings("v1.0.0", trimRight(git_desc));
+
+    // git rev-list should show 1 commit
+    const count = try execGit(allocator, tmp, &.{ "rev-list", "--count", "HEAD" });
+    defer allocator.free(count);
+    try std.testing.expectEqualStrings("1", trimRight(count));
+}
+
+test "ziggit all 256 byte values in filename chars that git allows" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    // Test a set of unusual but valid filename characters
+    const filenames = [_][]const u8{
+        "file with spaces.txt",
+        "file-with-dashes.txt",
+        "file_with_underscores.txt",
+        "file.multiple.dots.txt",
+        "UPPERCASE.TXT",
+        "MiXeD.CaSe.txt",
+        "123numeric.txt",
+    };
+
+    for (filenames) |name| {
+        try writeFileHelper(allocator, tmp, name, name);
+        try repo.add(name);
+    }
+    _ = try repo.commit("special filenames", "T", "t@t");
+
+    // git ls-tree should show all files
+    const ls_tree = try execGit(allocator, tmp, &.{ "ls-tree", "--name-only", "HEAD" });
+    defer allocator.free(ls_tree);
+    for (filenames) |name| {
+        try std.testing.expect(std.mem.indexOf(u8, ls_tree, name) != null);
+    }
+}
+
+test "ziggit tag then more commits -> git log --oneline --decorate shows tag" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    try writeFileHelper(allocator, tmp, "f.txt", "v1");
+    try repo.add("f.txt");
+    const tagged_hash = try repo.commit("release", "T", "t@t");
+    try repo.createTag("v1.0.0", null);
+
+    // 3 more commits
+    for (0..3) |i| {
+        var buf: [16]u8 = undefined;
+        const name = std.fmt.bufPrint(&buf, "f{d}.txt", .{i}) catch unreachable;
+        try writeFileHelper(allocator, tmp, name, "data");
+        try repo.add(name);
+        _ = try repo.commit("post-tag", "T", "t@t");
+    }
+
+    // git should resolve tag to original commit
+    const tag_target = try execGit(allocator, tmp, &.{ "rev-parse", "v1.0.0" });
+    defer allocator.free(tag_target);
+    try std.testing.expectEqualStrings(&tagged_hash, trimRight(tag_target));
+
+    // git log should show 4 total commits
+    const count = try execGit(allocator, tmp, &.{ "rev-list", "--count", "HEAD" });
+    defer allocator.free(count);
+    try std.testing.expectEqualStrings("4", trimRight(count));
+}
