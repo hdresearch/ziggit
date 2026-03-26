@@ -5,7 +5,7 @@ const testing = std.testing;
 test "bun workflow - pure Zig, no git CLI" {
     const allocator = testing.allocator;
     
-    const test_dir = "/tmp/zig_api_test";
+    const test_dir = "/root/zig_api_test";
     std.fs.deleteDirAbsolute(test_dir) catch {};
     
     // 1. Initialize repository
@@ -81,7 +81,7 @@ test "bun workflow - pure Zig, no git CLI" {
 test "bun workflow - git CLI verification" {
     const allocator = testing.allocator;
     
-    const test_dir = "/tmp/zig_vs_git_test";
+    const test_dir = "/root/zig_vs_git_test";
     std.fs.deleteDirAbsolute(test_dir) catch {};
     
     var repo = ziggit.Repository.init(allocator, test_dir) catch |err| {

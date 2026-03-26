@@ -60,9 +60,9 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     
     std.debug.print("🔬 Zig API vs Git CLI Benchmark\n");
-    std.debug.print("Running {} iterations\n\n", .{NUM_ITERATIONS});
+    std.debug.print("Running {d} iterations\n\n", .{NUM_ITERATIONS});
     
-    const repo_path = "/tmp/zig_api_bench_repo";
+    const repo_path = "/root/zig_api_bench_repo";
     
     var repo = createTestRepo(allocator, repo_path) catch |err| {
         std.debug.print("Failed to create test repository: {}\n", .{err});
@@ -183,7 +183,7 @@ pub fn main() !void {
 test "benchmark operations work" {
     const allocator = std.testing.allocator;
     
-    const repo_path = "/tmp/bench_test";
+    const repo_path = "/root/bench_test";
     var repo = createTestRepo(allocator, repo_path) catch |err| {
         std.debug.print("Skipping benchmark test: {}\n", .{err});
         return;
