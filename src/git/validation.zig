@@ -54,7 +54,6 @@ pub fn normalizeSHA1Hash(hash: []const u8, allocator: std.mem.Allocator) ![]u8 {
 
 /// Validate git directory structure exists
 pub fn validateGitDirectory(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) GitValidationError!void {
-    _ = allocator; // May be used for future features
     
     // Check if HEAD exists
     const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir});
@@ -249,8 +248,7 @@ fn validateTagObject(data: []const u8) GitValidationError!void {
         return GitValidationError.MalformedGitObject;
     }
     
-    // tagger is optional for some tag objects
-    _ = found_tagger;
+    // tagger is optional for some tag objects - no validation needed
 }
 
 /// Security check for path traversal attacks in git operations

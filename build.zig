@@ -1081,6 +1081,17 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(tree_parse_create_tests).step);
 
+    // Validation module tests
+    const validation_module_tests = b.addTest(.{
+        .root_source_file = b.path("test/validation_module_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    validation_module_tests.root_module.addAnonymousImport("validation", .{
+        .root_source_file = b.path("src/git/validation.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(validation_module_tests).step);
+
     // ========== BENCHMARKS ==========
     
     // CLI benchmark (ziggit vs git performance)
