@@ -160,6 +160,19 @@ pub fn build(b: *std.Build) void {
     const api_cli_bench_step = b.step("bench-api", "Run API vs CLI performance comparison (PHASE 1)");
     api_cli_bench_step.dependOn(&run_api_vs_cli_bench.step);
 
+    // Optimization benchmark (PHASE 2)
+    const optimization_bench = b.addExecutable(.{
+        .name = "optimization_bench",
+        .root_source_file = b.path("benchmarks/optimization_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    optimization_bench.root_module.addImport("ziggit", ziggit_module);
+    const run_optimization_bench = b.addRunArtifact(optimization_bench);
+
+    const optimization_bench_step = b.step("bench-opt", "Run hot path optimization benchmarks (PHASE 2)");
+    optimization_bench_step.dependOn(&run_optimization_bench.step);
+
     // ========== WASM TARGET ==========
     const wasm_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
