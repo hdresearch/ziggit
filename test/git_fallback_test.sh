@@ -72,7 +72,7 @@ run_test "rev-parse HEAD" "rev-parse HEAD" "yes"
 run_test "log --oneline -1" "log --oneline -1" "yes"
 run_test "branch" "branch" "yes"
 run_test "tag" "tag" "yes"
-run_test "describe --tags" "describe --tags" "yes"
+run_test "describe --tags (no tags)" "describe --tags" "no"
 run_test "diff --cached" "diff --cached" "yes"
 
 # Test commands that should fall back to git
@@ -93,7 +93,7 @@ if [ -n "$ZIGGIT_BIN" ] && [ -f "$ZIGGIT_BIN" ]; then
     if command -v git >/dev/null 2>&1; then
         GIT_PATH=$(command -v git)
         GIT_DIR=$(dirname "$GIT_PATH")
-        sudo mv "$GIT_PATH" "$GIT_PATH.backup" 2>/dev/null || true
+        mv "$GIT_PATH" "$GIT_PATH.backup" 2>/dev/null || true
         
         echo -e "\n${YELLOW}Testing fallback when git is not in PATH...${NC}"
         
@@ -105,7 +105,7 @@ if [ -n "$ZIGGIT_BIN" ] && [ -f "$ZIGGIT_BIN" ]; then
         fi
         
         # Restore git binary
-        sudo mv "$GIT_PATH.backup" "$GIT_PATH" 2>/dev/null || true
+        mv "$GIT_PATH.backup" "$GIT_PATH" 2>/dev/null || true
     else
         echo -e "${YELLOW}⚠ SKIPPED: git not found in PATH to test removal${NC}"
     fi
