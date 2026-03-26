@@ -999,12 +999,11 @@ fn testRemoteOperations(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
     try runCommandNoOutput(allocator, &[_][]const u8{"git", "clone", remote_abs_path, "clone_repo"}, test_dir);
 
     // Verify clone worked
-    const clone_file_exists = clone_path.access("README.md", .{}) catch false;
-    if (clone_file_exists == false) {
+    clone_path.access("README.md", .{}) catch {
         print("  ✓ Local remote operations work correctly\n", .{});
-    } else {
-        print("  ⚠ Local remote operations may have issues\n", .{});
-    }
+        return;
+    };
+    print("  ⚠ Local remote operations may have issues\n", .{});
 
     print("  ✓ Test 16 completed\n", .{});
 }
