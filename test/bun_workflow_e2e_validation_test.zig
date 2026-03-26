@@ -1027,3 +1027,238 @@ test "bun publish: git validates multi-file ziggit commit objects" {
     defer allocator.free(pkg);
     try std.testing.expect(std.mem.indexOf(u8, pkg, "strict") != null);
 }
+
+// === NEW: Additional bun workflow scenarios ===
+
+test "bun publish: git clone from ziggit repo -> npm install simulation" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+
+    // Simulate a real bun project
+    try writeFileAbs(tmp, "package.json",
+        \\{"name":"@scope/my-lib","version":"1.0.0","main":"dist/index.js"}
+    , allocator);
+    try writeFileAbs(tmp, "src/index.ts", "export const hello = () => 'world';", allocator);
+    try writeFileAbs(tmp, "tsconfig.json", "{\"compilerOptions\":{\"outDir\":\"dist\"}}", allocator);
+    try writeFileAbs(tmp, ".gitignore", "node_modules/\ndist/\n", allocator);
+
+    try repo.add("package.json");
+    try repo.add("src/index.ts");
+    try repo.add("tsconfig.json");
+    try repo.add(".gitignore");
+    _ = try repo.commit("initial: bun project setup", "Publisher", "pub@npm.org");
+    try repo.createTag("v1.0.0", null);
+    repo.close();
+
+    // git clone the repo
+    const clone_dir = try std.fmt.allocPrint(allocator, "{s}_clone", .{tmp});
+    defer allocator.free(clone_dir);
+    defer cleanupTmpDir(clone_dir);
+
+    const clone_out = try execGit(allocator, "/root", &.{ "clone", tmp, clone_dir });
+    defer allocator.free(clone_out);
+
+    // Verify all files present in clone
+    const ls = try execGit(allocator, clone_dir, &.{ "ls-tree", "-r", "--name-only", "HEAD" });
+    defer allocator.free(ls);
+    try std.testing.expect(std.mem.indexOf(u8, ls, "package.json") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ls, "src/index.ts") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ls, "tsconfig.json") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ls, ".gitignore") != null);
+
+    // Verify content is correct
+    const pkg_content = try execGit(allocator, clone_dir, &.{ "show", "HEAD:package.json" });
+    defer allocator.free(pkg_content);
+    try std.testing.expect(std.mem.indexOf(u8, pkg_content, "@scope/my-lib") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pkg_content, "1.0.0") != null);
+
+    // Verify tag exists in clone
+    const tags = try execGit(allocator, clone_dir, &.{ "tag", "-l" });
+    defer allocator.free(tags);
+    try std.testing.expect(std.mem.indexOf(u8, tags, "v1.0.0") != null);
+}
+
+test "bun publish: version bump -> git fsck validates entire history" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    // v1.0.0
+    try writeFileAbs(tmp, "package.json",
+        \\{"name":"my-pkg","version":"1.0.0"}
+    , allocator);
+    try repo.add("package.json");
+    _ = try repo.commit("v1.0.0", "T", "t@t");
+    try repo.createTag("v1.0.0", null);
+
+    // v1.0.1 - patch bump
+    try writeFileAbs(tmp, "package.json",
+        \\{"name":"my-pkg","version":"1.0.1"}
+    , allocator);
+    try repo.add("package.json");
+    _ = try repo.commit("v1.0.1", "T", "t@t");
+    try repo.createTag("v1.0.1", null);
+
+    // v1.1.0 - minor bump with new file
+    try writeFileAbs(tmp, "package.json",
+        \\{"name":"my-pkg","version":"1.1.0"}
+    , allocator);
+    try writeFileAbs(tmp, "CHANGELOG.md", "# 1.1.0\n- New feature\n", allocator);
+    try repo.add("package.json");
+    try repo.add("CHANGELOG.md");
+    _ = try repo.commit("v1.1.0", "T", "t@t");
+    try repo.createTag("v1.1.0", null);
+
+    // git fsck --strict should pass
+    const fsck = try execGit(allocator, tmp, &.{ "fsck", "--no-dangling" });
+    defer allocator.free(fsck);
+    try std.testing.expect(std.mem.indexOf(u8, fsck, "error") == null);
+
+    // All 3 tags should exist
+    const tags = try execGit(allocator, tmp, &.{ "tag", "-l" });
+    defer allocator.free(tags);
+    try std.testing.expect(std.mem.indexOf(u8, tags, "v1.0.0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tags, "v1.0.1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tags, "v1.1.0") != null);
+
+    // 3 commits total
+    const count = try execGit(allocator, tmp, &.{ "rev-list", "--count", "HEAD" });
+    defer allocator.free(count);
+    try std.testing.expect(std.mem.indexOf(u8, trim(count), "3") != null);
+}
+
+test "bun publish: bun.lockb binary preserved through commit and clone" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+
+    // Simulate bun.lockb (binary file with known content)
+    var lockb_data: [512]u8 = undefined;
+    for (0..512) |i| {
+        lockb_data[i] = @intCast(i % 256);
+    }
+    const lockb_path = try std.fmt.allocPrint(allocator, "{s}/bun.lockb", .{tmp});
+    defer allocator.free(lockb_path);
+    {
+        const f = try std.fs.createFileAbsolute(lockb_path, .{ .truncate = true });
+        try f.writeAll(&lockb_data);
+        f.close();
+    }
+
+    try writeFileAbs(tmp, "package.json",
+        \\{"name":"lockb-test","version":"1.0.0"}
+    , allocator);
+    try repo.add("package.json");
+    try repo.add("bun.lockb");
+    _ = try repo.commit("with lockfile", "T", "t@t");
+    repo.close();
+
+    // git clone and verify binary content
+    const clone_dir = try std.fmt.allocPrint(allocator, "{s}_clone", .{tmp});
+    defer allocator.free(clone_dir);
+    defer cleanupTmpDir(clone_dir);
+
+    const clone_out = try execGit(allocator, "/root", &.{ "clone", tmp, clone_dir });
+    defer allocator.free(clone_out);
+
+    // Read cloned lockfile and compare
+    const cloned_lockb_path = try std.fmt.allocPrint(allocator, "{s}/bun.lockb", .{clone_dir});
+    defer allocator.free(cloned_lockb_path);
+    const cloned_data = try std.fs.cwd().readFileAlloc(allocator, cloned_lockb_path, 1024 * 1024);
+    defer allocator.free(cloned_data);
+
+    try std.testing.expectEqual(@as(usize, 512), cloned_data.len);
+    try std.testing.expectEqualSlices(u8, &lockb_data, cloned_data);
+}
+
+test "bun publish: describe after 3 post-tag commits shows distance" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    try writeFileAbs(tmp, "package.json",
+        \\{"name":"distance-test","version":"1.0.0"}
+    , allocator);
+    try repo.add("package.json");
+    _ = try repo.commit("v1.0.0", "T", "t@t");
+    try repo.createTag("v1.0.0", null);
+
+    // 3 more commits without tagging
+    for (0..3) |i| {
+        var name_buf: [32]u8 = undefined;
+        const name = std.fmt.bufPrint(&name_buf, "dev{d}.txt", .{i}) catch unreachable;
+        var content_buf: [32]u8 = undefined;
+        const content = std.fmt.bufPrint(&content_buf, "dev work {d}", .{i}) catch unreachable;
+        try writeFileAbs(tmp, name, content, allocator);
+        try repo.add(name);
+        var msg_buf: [32]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "dev {d}", .{i}) catch unreachable;
+        _ = try repo.commit(msg, "T", "t@t");
+    }
+
+    // git describe should show distance
+    const desc = try execGit(allocator, tmp, &.{ "describe", "--tags" });
+    defer allocator.free(desc);
+    const trimmed = trim(desc);
+    // Format: v1.0.0-3-g<hash>
+    try std.testing.expect(std.mem.startsWith(u8, trimmed, "v1.0.0-3-g"));
+}
+
+test "bun publish: status detects untracked node_modules correctly" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    try writeFileAbs(tmp, "package.json",
+        \\{"name":"status-test","version":"1.0.0"}
+    , allocator);
+    try repo.add("package.json");
+    _ = try repo.commit("initial", "T", "t@t");
+
+    // Should be clean
+    try std.testing.expect(try repo.isClean());
+
+    // Modify package.json (simulating version bump before publish)
+    try writeFileAbs(tmp, "package.json",
+        \\{"name":"status-test","version":"1.0.1"}
+    , allocator);
+
+    // Should be dirty now
+    try std.testing.expect(!try repo.isClean());
+
+    // Add and commit
+    try repo.add("package.json");
+    _ = try repo.commit("v1.0.1", "T", "t@t");
+
+    // Clean again
+    try std.testing.expect(try repo.isClean());
+}

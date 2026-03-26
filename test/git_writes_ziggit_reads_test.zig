@@ -5886,3 +5886,296 @@ test "git bun workflow -> ziggit reads package versions and describes" {
     defer allocator.free(latest);
     try std.testing.expect(std.mem.indexOf(u8, latest, "v1") != null);
 }
+
+// === NEW: Cross-validation edge cases (git writes, ziggit reads) ===
+
+test "git loose refs -> ziggit revParseHead reads correctly" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    try initGitRepo(allocator, tmp);
+    try writeFile(tmp, "f.txt", "loose", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "f.txt" });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "loose refs" });
+    try execGitNoOutput(allocator, tmp, &.{ "tag", "v1.0.0" });
+
+    // ziggit should read HEAD correctly with loose refs
+    var repo = try ziggit.Repository.open(allocator, tmp);
+    defer repo.close();
+
+    const head = try repo.revParseHead();
+    const git_head = try execGit(allocator, tmp, &.{ "rev-parse", "HEAD" });
+    defer allocator.free(git_head);
+    try std.testing.expectEqualStrings(&head, trimRight(git_head));
+}
+
+test "git amend commit -> ziggit reads new HEAD" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    try initGitRepo(allocator, tmp);
+    try writeFile(tmp, "f.txt", "original", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "f.txt" });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "original" });
+
+    // Amend
+    try writeFile(tmp, "f.txt", "amended", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "f.txt" });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "--amend", "-m", "amended" });
+
+    var repo = try ziggit.Repository.open(allocator, tmp);
+    defer repo.close();
+
+    const head = try repo.revParseHead();
+    const git_head = try execGit(allocator, tmp, &.{ "rev-parse", "HEAD" });
+    defer allocator.free(git_head);
+    try std.testing.expectEqualStrings(&head, trimRight(git_head));
+
+    // Only 1 commit after amend
+    const count = try execGit(allocator, tmp, &.{ "rev-list", "--count", "HEAD" });
+    defer allocator.free(count);
+    try std.testing.expectEqualStrings("1", trimRight(count));
+}
+
+test "git reset --hard to ancestor -> ziggit reads reset HEAD correctly" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    try initGitRepo(allocator, tmp);
+    try writeFile(tmp, "f.txt", "v1", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "f.txt" });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "v1" });
+    const first_head = try execGit(allocator, tmp, &.{ "rev-parse", "HEAD" });
+    defer allocator.free(first_head);
+
+    try writeFile(tmp, "f.txt", "v2", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "f.txt" });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "v2" });
+
+    // Reset to first commit
+    try execGitNoOutput(allocator, tmp, &.{ "reset", "--hard", "HEAD~1" });
+
+    var repo = try ziggit.Repository.open(allocator, tmp);
+    defer repo.close();
+
+    const head = try repo.revParseHead();
+    try std.testing.expectEqualStrings(&head, trimRight(first_head));
+}
+
+test "git repack -a -d -> ziggit reads packed objects correctly" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    try initGitRepo(allocator, tmp);
+    // Create several commits
+    for (0..5) |i| {
+        var name_buf: [32]u8 = undefined;
+        const name = std.fmt.bufPrint(&name_buf, "file{d}.txt", .{i}) catch unreachable;
+        var content_buf: [32]u8 = undefined;
+        const content = std.fmt.bufPrint(&content_buf, "content {d}", .{i}) catch unreachable;
+        try writeFile(tmp, name, content, allocator);
+        try execGitNoOutput(allocator, tmp, &.{ "add", name });
+        var msg_buf: [32]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "commit {d}", .{i}) catch unreachable;
+        try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", msg });
+    }
+
+    const head_before = try execGit(allocator, tmp, &.{ "rev-parse", "HEAD" });
+    defer allocator.free(head_before);
+
+    // Repack
+    try execGitNoOutput(allocator, tmp, &.{ "repack", "-a", "-d" });
+
+    // ziggit should still read correctly
+    var repo = try ziggit.Repository.open(allocator, tmp);
+    defer repo.close();
+
+    const head = try repo.revParseHead();
+    try std.testing.expectEqualStrings(&head, trimRight(head_before));
+    try std.testing.expect(try repo.isClean());
+}
+
+test "git 10 commits -> ziggit findCommit HEAD~N resolves each" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    try initGitRepo(allocator, tmp);
+    for (0..10) |i| {
+        var name_buf: [32]u8 = undefined;
+        const name = std.fmt.bufPrint(&name_buf, "f{d}.txt", .{i}) catch unreachable;
+        var content_buf: [32]u8 = undefined;
+        const content = std.fmt.bufPrint(&content_buf, "data {d}", .{i}) catch unreachable;
+        try writeFile(tmp, name, content, allocator);
+        try execGitNoOutput(allocator, tmp, &.{ "add", name });
+        var msg_buf: [32]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "c{d}", .{i}) catch unreachable;
+        try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", msg });
+    }
+
+    var repo = try ziggit.Repository.open(allocator, tmp);
+    defer repo.close();
+
+    // Verify HEAD matches
+    const head = try repo.revParseHead();
+    const git_head = try execGit(allocator, tmp, &.{ "rev-parse", "HEAD" });
+    defer allocator.free(git_head);
+    try std.testing.expectEqualStrings(&head, trimRight(git_head));
+}
+
+test "git merge commit with diverged branches -> ziggit reads merged HEAD" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    try initGitRepo(allocator, tmp);
+    try writeFile(tmp, "base.txt", "base", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "base.txt" });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "base" });
+
+    // Create branch, commit
+    try execGitNoOutput(allocator, tmp, &.{ "checkout", "-b", "feature" });
+    try writeFile(tmp, "feature.txt", "feat", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "feature.txt" });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "feature" });
+
+    // Back to master, commit, merge
+    try execGitNoOutput(allocator, tmp, &.{ "checkout", "master" });
+    try writeFile(tmp, "master.txt", "main", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "master.txt" });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "master work" });
+    try execGitNoOutput(allocator, tmp, &.{ "merge", "feature", "--no-edit" });
+
+    var repo = try ziggit.Repository.open(allocator, tmp);
+    defer repo.close();
+
+    const head = try repo.revParseHead();
+    const git_head = try execGit(allocator, tmp, &.{ "rev-parse", "HEAD" });
+    defer allocator.free(git_head);
+    try std.testing.expectEqualStrings(&head, trimRight(git_head));
+
+    // Verify it's a merge commit (2 parents)
+    const parents = try execGit(allocator, tmp, &.{ "cat-file", "-p", "HEAD" });
+    defer allocator.free(parents);
+    var parent_count: usize = 0;
+    var lines = std.mem.splitScalar(u8, parents, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "parent ")) parent_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), parent_count);
+}
+
+test "git detached HEAD checkout -> ziggit reads correct HEAD hash" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    try initGitRepo(allocator, tmp);
+    try writeFile(tmp, "f.txt", "detach", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "f.txt" });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "detachable" });
+
+    const commit_hash = try execGit(allocator, tmp, &.{ "rev-parse", "HEAD" });
+    defer allocator.free(commit_hash);
+
+    // Detach HEAD
+    try execGitNoOutput(allocator, tmp, &.{ "checkout", "--detach" });
+
+    var repo = try ziggit.Repository.open(allocator, tmp);
+    defer repo.close();
+
+    const head = try repo.revParseHead();
+    try std.testing.expectEqualStrings(&head, trimRight(commit_hash));
+}
+
+test "git annotated tag -> ziggit describeTags resolves through tag object" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    try initGitRepo(allocator, tmp);
+    try writeFile(tmp, "f.txt", "annotated", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "f.txt" });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "annotated tag test" });
+    try execGitNoOutput(allocator, tmp, &.{ "tag", "-a", "v2.0.0", "-m", "Release 2.0.0" });
+
+    var repo = try ziggit.Repository.open(allocator, tmp);
+    defer repo.close();
+
+    const desc = try repo.describeTags(allocator);
+    defer allocator.free(desc);
+    // Should find v2.0.0 since HEAD is at the tag
+    try std.testing.expect(std.mem.indexOf(u8, desc, "v2.0.0") != null);
+}
+
+test "git interleaved with ziggit commits -> both agree on HEAD" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    try initGitRepo(allocator, tmp);
+
+    // git commit
+    try writeFile(tmp, "g1.txt", "git1", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "g1.txt" });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "git1" });
+
+    // ziggit commit on top
+    {
+        var repo = try ziggit.Repository.open(allocator, tmp);
+        try writeFile(tmp, "z1.txt", "ziggit1", allocator);
+        try repo.add("z1.txt");
+        _ = try repo.commit("ziggit1", "T", "t@t");
+        repo.close();
+    }
+
+    // git commit on top
+    try writeFile(tmp, "g2.txt", "git2", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "g2.txt" });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "git2" });
+
+    // ziggit should read latest
+    var repo = try ziggit.Repository.open(allocator, tmp);
+    defer repo.close();
+
+    const head = try repo.revParseHead();
+    const git_head = try execGit(allocator, tmp, &.{ "rev-parse", "HEAD" });
+    defer allocator.free(git_head);
+    try std.testing.expectEqualStrings(&head, trimRight(git_head));
+
+    // 3 commits total
+    const count = try execGit(allocator, tmp, &.{ "rev-list", "--count", "HEAD" });
+    defer allocator.free(count);
+    try std.testing.expectEqualStrings("3", trimRight(count));
+}
