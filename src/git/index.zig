@@ -136,7 +136,7 @@ pub const Index = struct {
     }
 
     pub fn deinit(self: *Index) void {
-        for (self.entries.items) |entry| {
+        for (self.entries.items) |*entry| {
             entry.deinit(self.allocator);
         }
         self.entries.deinit();
@@ -195,10 +195,13 @@ pub const Index = struct {
             return error.TooManyIndexEntries;
         }
 
-        // Read entries
+        // Read entries with bounds checking
         var i: u32 = 0;
         while (i < entry_count) : (i += 1) {
-            const entry = try self.readIndexEntry(reader, version);
+            const entry = self.readIndexEntry(reader, version) catch |err| switch (err) {
+                error.EndOfStream => break, // We've hit the extensions/checksum area
+                else => return err,
+            };
             try self.entries.append(entry);
         }
 
@@ -211,6 +214,15 @@ pub const Index = struct {
 
     /// Read a single index entry with version-specific handling
     fn readIndexEntry(self: *Index, reader: anytype, version: u32) !IndexEntry {
+        // Check if we have enough bytes left for a complete entry
+        const min_entry_size = 62; // Minimum size without path and padding
+        const current_pos = try reader.context.getPos();
+        const remaining_bytes = reader.context.buffer.len - current_pos;
+        
+        if (remaining_bytes < min_entry_size + 20) { // +20 for checksum at end
+            return error.EndOfStream;
+        }
+        
         const ctime_sec = try reader.readInt(u32, .big);
         const ctime_nsec = try reader.readInt(u32, .big);
         const mtime_sec = try reader.readInt(u32, .big);
@@ -253,16 +265,31 @@ pub const Index = struct {
             }
         }
         
+        // Check if we have enough bytes for the path
+        const current_pos2 = try reader.context.getPos();
+        const remaining_bytes2 = reader.context.buffer.len - current_pos2;
+        
+        if (actual_path_len > remaining_bytes2 - 20) { // -20 for checksum
+            return error.EndOfStream;
+        }
+        
         const path_bytes = try self.allocator.alloc(u8, actual_path_len);
+        errdefer self.allocator.free(path_bytes);
+        
         _ = try reader.readAll(path_bytes);
         
         // Calculate and skip padding
         const entry_size = 62 + (if (version >= 3 and (flags & 0x4000) != 0) @as(usize, 2) else @as(usize, 0)) + actual_path_len;
         const pad_len = (8 - (entry_size % 8)) % 8;
         if (pad_len > 0) {
-            reader.skipBytes(pad_len, .{}) catch {
-                // Sometimes the last entry doesn't have full padding, that's OK
-            };
+            const current_pos3 = try reader.context.getPos();
+            const remaining_bytes3 = reader.context.buffer.len - current_pos3;
+            
+            if (pad_len <= remaining_bytes3 - 20) { // Check if padding fits before checksum
+                reader.skipBytes(pad_len, .{}) catch {
+                    // Sometimes the last entry doesn't have full padding, that's OK
+                };
+            }
         }
 
         return IndexEntry{
@@ -299,6 +326,9 @@ pub const Index = struct {
             // Check if we have enough bytes left for checksum (20 bytes) plus extension header (8 bytes)
             const current_pos = try reader.context.getPos();
             if (current_pos + 28 >= data.len) break;
+            
+            // More conservative check - make sure we're not too close to the end
+            if (data.len - current_pos <= 24) break; // Leave room for 20-byte checksum + some margin
             
             // Try to read extension signature
             var sig: [4]u8 = undefined;
