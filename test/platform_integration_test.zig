@@ -69,6 +69,7 @@ fn testBasicFileOperations(allocator: std.mem.Allocator, test_dir: fs.Dir) !void
     // Test file stats
     const file_stat = p.fs.stat(test_file) catch |err| {
         print("  ⚠ File stat failed: {}, continuing\n", .{err});
+        return;
     };
     _ = file_stat; // Just ensure it doesn't crash
     print("  ✓ File stat\n", .{});
@@ -103,7 +104,7 @@ fn testDirectoryOperations(allocator: std.mem.Allocator, test_dir: fs.Dir) !void
     // Test reading empty directory
     const empty_entries = p.fs.readDir(allocator, test_dir_name) catch |err| {
         print("  ⚠ readDir on empty directory failed: {}\n", .{err});
-        &[_][]u8{}; // Empty slice as fallback
+        return; // Skip the rest of the test if this fails
     };
     defer {
         for (empty_entries) |entry| allocator.free(entry);
@@ -116,10 +117,10 @@ fn testDirectoryOperations(allocator: std.mem.Allocator, test_dir: fs.Dir) !void
     defer allocator.free(original_cwd);
     
     // Create files in directory and test readDir
-    const subdir = try fs.cwd().openDir(test_dir_name, .{});
+    var subdir = try fs.cwd().openDir(test_dir_name, .{});
+    defer subdir.close();
     try subdir.writeFile(.{.sub_path = "file1.txt", .data = "content1"});
     try subdir.writeFile(.{.sub_path = "file2.txt", .data = "content2"});
-    subdir.close();
     
     const entries = try p.fs.readDir(allocator, test_dir_name);
     defer {
