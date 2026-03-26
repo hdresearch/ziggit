@@ -713,6 +713,69 @@ test "generateIdxFromData handles empty pack (0 objects)" {
     try std.testing.expectEqual(@as(u32, 0), fanout_last);
 }
 
+test "updateRefsAfterClone uses HEAD hash to detect default branch" {
+    const allocator = std.testing.allocator;
+    const tmp_dir = try setupTmpDir();
+    defer cleanupTmpDir(tmp_dir);
+
+    const git_dir = try std.fmt.allocPrint(allocator, "{s}/.git", .{tmp_dir});
+    defer allocator.free(git_dir);
+    try std.fs.cwd().makePath(git_dir);
+    {
+        const d = try std.fmt.allocPrint(allocator, "{s}/refs/heads", .{git_dir});
+        defer allocator.free(d);
+        try std.fs.cwd().makePath(d);
+    }
+
+    // Remote has HEAD pointing to "develop" branch (non-standard default)
+    const refs = [_]pack_writer.RefUpdate{
+        .{ .name = "HEAD", .hash = "3333333333333333333333333333333333333333" },
+        .{ .name = "refs/heads/main", .hash = "1111111111111111111111111111111111111111" },
+        .{ .name = "refs/heads/develop", .hash = "3333333333333333333333333333333333333333" },
+        .{ .name = "refs/heads/feature", .hash = "2222222222222222222222222222222222222222" },
+    };
+    try pack_writer.updateRefsAfterClone(allocator, git_dir, &refs, true);
+
+    const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir});
+    defer allocator.free(head_path);
+    const content = try std.fs.cwd().readFileAlloc(allocator, head_path, 256);
+    defer allocator.free(content);
+    const trimmed = std.mem.trimRight(u8, content, "\n");
+    // Should pick "develop" because HEAD hash matches it
+    try std.testing.expectEqualStrings("ref: refs/heads/develop", trimmed);
+}
+
+test "updateRefsAfterClone falls back to main when HEAD hash matches nothing" {
+    const allocator = std.testing.allocator;
+    const tmp_dir = try setupTmpDir();
+    defer cleanupTmpDir(tmp_dir);
+
+    const git_dir = try std.fmt.allocPrint(allocator, "{s}/.git", .{tmp_dir});
+    defer allocator.free(git_dir);
+    try std.fs.cwd().makePath(git_dir);
+    {
+        const d = try std.fmt.allocPrint(allocator, "{s}/refs/heads", .{git_dir});
+        defer allocator.free(d);
+        try std.fs.cwd().makePath(d);
+    }
+
+    // HEAD hash doesn't match any branch - should fall back to first branch
+    const refs = [_]pack_writer.RefUpdate{
+        .{ .name = "HEAD", .hash = "9999999999999999999999999999999999999999" },
+        .{ .name = "refs/heads/feature", .hash = "1111111111111111111111111111111111111111" },
+        .{ .name = "refs/heads/develop", .hash = "2222222222222222222222222222222222222222" },
+    };
+    try pack_writer.updateRefsAfterClone(allocator, git_dir, &refs, true);
+
+    const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir});
+    defer allocator.free(head_path);
+    const content = try std.fs.cwd().readFileAlloc(allocator, head_path, 256);
+    defer allocator.free(content);
+    const trimmed = std.mem.trimRight(u8, content, "\n");
+    // Should use first branch since no match
+    try std.testing.expectEqualStrings("ref: refs/heads/feature", trimmed);
+}
+
 test "packPath and idxPath produce consistent names" {
     const allocator = std.testing.allocator;
     const hex = "0123456789abcdef0123456789abcdef01234567";
