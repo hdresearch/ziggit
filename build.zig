@@ -48,14 +48,31 @@ pub fn build(b: *std.Build) void {
     lib_step.dependOn(&install_header.step);
 
     // ========== ZIG MODULE ==========
-    // Add ziggit module so external projects (like bun) can import it
     const ziggit_module = b.addModule("ziggit", .{
         .root_source_file = b.path("src/ziggit.zig"),
     });
-    // Expose it for the library as well
-    lib_static.root_module.addImport("ziggit", ziggit_module);
 
     // ========== TESTS ==========
+    // Comprehensive integration test suite
+    const integration_test = b.addExecutable(.{
+        .name = "integration_test_suite",
+        .root_source_file = b.path("test/integration_test_suite.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    const run_integration_test = b.addRunArtifact(integration_test);
+    
+    // Legacy git interop test (still available)
+    const git_interop_test = b.addExecutable(.{
+        .name = "git_interop_test",
+        .root_source_file = b.path("test/git_interop_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    const run_git_interop_test = b.addRunArtifact(git_interop_test);
+
     // Platform unit tests
     const platform_tests = b.addTest(.{
         .root_source_file = b.path("src/platform/platform.zig"),
@@ -64,135 +81,11 @@ pub fn build(b: *std.Build) void {
     });
     const run_platform_tests = b.addRunArtifact(platform_tests);
 
-    // Git interoperability test (integration test)
-    const git_interop_test = b.addExecutable(.{
-        .name = "git_interop_test",
-        .root_source_file = b.path("test/git_interop_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_git_interop_test = b.addRunArtifact(git_interop_test);
-
-    // Enhanced git interoperability test
-    const enhanced_git_interop_test = b.addExecutable(.{
-        .name = "enhanced_git_interop_test",
-        .root_source_file = b.path("test/enhanced_git_interop_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_enhanced_git_interop_test = b.addRunArtifact(enhanced_git_interop_test);
-
-    // Comprehensive git interoperability test
-    const comprehensive_git_interop_test = b.addExecutable(.{
-        .name = "comprehensive_git_interop_test",
-        .root_source_file = b.path("test/comprehensive_git_interop_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_comprehensive_git_interop_test = b.addRunArtifact(comprehensive_git_interop_test);
-
-    // Tool compatibility test (critical for bun/npm workflows)
-    const tool_compat_test = b.addExecutable(.{
-        .name = "tool_compatibility_test", 
-        .root_source_file = b.path("test/tool_compatibility_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_tool_compat_test = b.addRunArtifact(tool_compat_test);
-
-    // Other integration tests
-    const index_format_test = b.addExecutable(.{
-        .name = "index_format_test",
-        .root_source_file = b.path("test/index_format_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_index_format_test = b.addRunArtifact(index_format_test);
-
-    const object_format_test = b.addExecutable(.{
-        .name = "object_format_test",
-        .root_source_file = b.path("test/object_format_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_object_format_test = b.addRunArtifact(object_format_test);
-
-    const command_output_test = b.addExecutable(.{
-        .name = "command_output_test",
-        .root_source_file = b.path("test/command_output_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_command_output_test = b.addRunArtifact(command_output_test);
-
-    // BrokenPipe handling test
-    const broken_pipe_test = b.addExecutable(.{
-        .name = "broken_pipe_test",
-        .root_source_file = b.path("test/broken_pipe_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_broken_pipe_test = b.addRunArtifact(broken_pipe_test);
-
-    // Basic interoperability test (CLI-only, no library dependencies)
-    const basic_interop_test = b.addExecutable(.{
-        .name = "basic_interop_test",
-        .root_source_file = b.path("test/basic_interop_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_basic_interop_test = b.addRunArtifact(basic_interop_test);
-
-    // Library status test (requires ziggit module)
-    const lib_status_test = b.addTest(.{
-        .root_source_file = b.path("test/lib_status_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    
-    const ziggit_mod = b.addModule("ziggit", .{
-        .root_source_file = b.path("src/lib/ziggit.zig"),
-    });
-    lib_status_test.root_module.addImport("ziggit", ziggit_mod);
-    const run_lib_status_test = b.addRunArtifact(lib_status_test);
-
-    // Comprehensive library status test
-    const lib_comprehensive_status_test = b.addTest(.{
-        .root_source_file = b.path("test/lib_comprehensive_status_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    
-    lib_comprehensive_status_test.root_module.addImport("ziggit", ziggit_mod);
-    const run_lib_comprehensive_status_test = b.addRunArtifact(lib_comprehensive_status_test);
-
-    // Bun Zig API test (uses our pure Zig API)
-    const bun_zig_api_test = b.addTest(.{
-        .root_source_file = b.path("test/bun_zig_api_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    bun_zig_api_test.root_module.addImport("ziggit", ziggit_module);
-    const run_bun_zig_api_test = b.addRunArtifact(bun_zig_api_test);
-
     // Test step runs all tests
-    const test_step = b.step("test", "Run unit tests");
+    const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_platform_tests.step);
+    test_step.dependOn(&run_integration_test.step);
     test_step.dependOn(&run_git_interop_test.step);
-    test_step.dependOn(&run_enhanced_git_interop_test.step);
-    test_step.dependOn(&run_comprehensive_git_interop_test.step);
-    test_step.dependOn(&run_tool_compat_test.step);
-    test_step.dependOn(&run_index_format_test.step);
-    test_step.dependOn(&run_object_format_test.step);
-    test_step.dependOn(&run_command_output_test.step);
-    test_step.dependOn(&run_broken_pipe_test.step);
-    test_step.dependOn(&run_lib_status_test.step);
-    test_step.dependOn(&run_lib_comprehensive_status_test.step);
-    test_step.dependOn(&run_bun_zig_api_test.step);
-
-    // Basic interop test (can run independently)
-    const basic_interop_step = b.step("basic-interop", "Run basic git/ziggit interoperability test");
-    basic_interop_step.dependOn(&run_basic_interop_test.step);
 
     // ========== BENCHMARKS ==========
     const cli_benchmark = b.addExecutable(.{
@@ -221,7 +114,7 @@ pub fn build(b: *std.Build) void {
     bun_scenario_benchmark.root_module.addImport("ziggit", ziggit_module);
     const run_bun_scenario_benchmark = b.addRunArtifact(bun_scenario_benchmark);
 
-    const bench_step = b.step("bench", "Run benchmarks");
+    const bench_step = b.step("bench", "Run all benchmarks");
     bench_step.dependOn(&run_cli_benchmark.step);
     bench_step.dependOn(&run_lib_benchmark.step);
     bench_step.dependOn(&run_bun_scenario_benchmark.step);
