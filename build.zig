@@ -214,6 +214,19 @@ pub fn build(b: *std.Build) void {
     const api_vs_cli_step = b.step("api-vs-cli", "Run API vs CLI benchmark");
     api_vs_cli_step.dependOn(&run_api_vs_cli_bench.step);
 
+    // Minimal test for debugging
+    const minimal_test = b.addExecutable(.{
+        .name = "minimal-test",
+        .root_source_file = b.path("benchmarks/minimal_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    minimal_test.root_module.addImport("ziggit", ziggit_module);
+    const run_minimal_test = b.addRunArtifact(minimal_test);
+    
+    const minimal_step = b.step("minimal", "Run minimal test");
+    minimal_step.dependOn(&run_minimal_test.step);
+
     // Optimized status benchmark
     const optimized_status_bench = b.addExecutable(.{
         .name = "optimized-status-bench",
