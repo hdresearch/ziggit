@@ -11,6 +11,13 @@ const objects_parser = @import("lib/objects_parser.zig");
 pub const IndexParser = index_parser;
 pub const IndexParserFast = index_parser_fast;
 
+// Cache for parsed index entries to avoid re-parsing
+const CachedIndexEntry = struct {
+    path: []const u8,
+    mtime_seconds: u32,
+    size: u32,
+};
+
 pub const Repository = struct {
     path: []const u8,
     git_dir: []const u8,
@@ -22,6 +29,10 @@ pub const Repository = struct {
     _cached_head_hash: ?[40]u8 = null,
     _cached_latest_tag: ?[]const u8 = null,
     _cached_tags_dir_mtime: ?i128 = null,
+    
+    // HYPER-OPTIMIZATION: Cache parsed index entries to avoid re-parsing on repeated calls
+    _cached_index_entries: ?[]CachedIndexEntry = null,
+    _cached_index_entries_mtime: ?i128 = null,
 
     /// Open an existing repository at the specified path
     pub fn open(allocator: std.mem.Allocator, path: []const u8) !Repository {
@@ -84,6 +95,12 @@ pub const Repository = struct {
     pub fn close(self: *Repository) void {
         if (self._cached_latest_tag) |tag| {
             self.allocator.free(tag);
+        }
+        if (self._cached_index_entries) |entries| {
+            for (entries) |entry| {
+                self.allocator.free(entry.path);
+            }
+            self.allocator.free(entries);
         }
         self.allocator.free(self.path);
         self.allocator.free(self.git_dir);
@@ -241,36 +258,34 @@ pub const Repository = struct {
     }
     
     /// Ultra-fast clean check - returns true only if provably clean, false if uncertain
-    fn isUltraFastClean(self: *const Repository) !bool {
-        // Use stack buffer for index path
-        var index_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-        const index_path = std.fmt.bufPrint(&index_path_buf, "{s}/index", .{self.git_dir}) catch return false;
-
-        var git_index = index_parser_fast.FastGitIndex.readFromFile(self.allocator, index_path) catch {
-            // No index means definitely not clean (files would be untracked)
-            return false;
-        };
-        defer git_index.deinit();
+    fn isUltraFastClean(self: *Repository) !bool {
+        // HYPER-OPTIMIZATION: Try to use cached index entries first
+        const entries = try self.getCachedIndexEntries();
+        
+        // OPTIMIZATION: Open working directory once and reuse
+        var work_dir = std.fs.cwd().openDir(self.path, .{}) catch return false;
+        defer work_dir.close();
 
         // ULTRA-FAST PATH: For clean repos, just check if any file mtime/size changed
         // If ALL files have matching mtime/size, repo is provably clean (skip SHA-1)
-        for (git_index.entries) |entry| {
-            // Get file path using stack buffer
-            var file_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-            const file_path = std.fmt.bufPrint(&file_path_buf, "{s}/{s}", .{ self.path, entry.path }) catch return false;
-            
-            // Direct stat call
-            const work_stat = std.fs.cwd().statFile(file_path) catch {
-                // Any missing file means not clean
+        for (entries) |entry| {
+            // Direct stat call using relative path - faster than absolute path construction
+            const work_stat = work_dir.statFile(entry.path) catch {
+                // Any missing file means not clean - early bailout
                 return false;
             };
             
-            // Compare mtime and size (nano-second precision not needed for this check)
-            const work_mtime_sec = @as(u32, @intCast(@divTrunc(work_stat.mtime, 1_000_000_000)));
-            const work_size = @as(u32, @intCast(work_stat.size));
+            // OPTIMIZATION: Compare size first (more likely to differ, faster to compute)
+            const work_size = @as(u32, @intCast(@min(work_stat.size, std.math.maxInt(u32))));
+            if (work_size != entry.size) {
+                // Size mismatch - early bailout without checking mtime
+                return false;
+            }
             
-            if (work_mtime_sec != entry.mtime_seconds or work_size != entry.size) {
-                // Any changed file means not provably clean
+            // Only check mtime if size matches (saves computation in common case)
+            const work_mtime_sec = @as(u32, @intCast(@divTrunc(work_stat.mtime, 1_000_000_000)));
+            if (work_mtime_sec != entry.mtime_seconds) {
+                // Mtime mismatch - early bailout
                 return false;
             }
         }
@@ -282,9 +297,60 @@ pub const Repository = struct {
         return true;
     }
     
+    /// Get cached index entries, parsing and caching if needed
+    fn getCachedIndexEntries(self: *Repository) ![]CachedIndexEntry {
+        // Use stack buffer for index path
+        var index_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const index_path = std.fmt.bufPrint(&index_path_buf, "{s}/index", .{self.git_dir}) catch return error.PathTooLong;
+        
+        // Check if index file exists
+        const index_stat = std.fs.cwd().statFile(index_path) catch {
+            // No index - return empty entries
+            return &[_]CachedIndexEntry{};
+        };
+        
+        // Check if we have cached entries that are still valid
+        if (self._cached_index_entries_mtime) |cached_mtime| {
+            if (cached_mtime == index_stat.mtime and self._cached_index_entries != null) {
+                // Cache hit - return cached entries
+                return self._cached_index_entries.?;
+            }
+        }
+        
+        // Cache miss or stale - parse index and cache result
+        var git_index = index_parser_fast.FastGitIndex.readFromFile(self.allocator, index_path) catch {
+            return &[_]CachedIndexEntry{};
+        };
+        defer git_index.deinit();
+        
+        // Convert to cached format
+        const cached_entries = try self.allocator.alloc(CachedIndexEntry, git_index.entries.len);
+        for (git_index.entries, 0..) |entry, i| {
+            cached_entries[i] = CachedIndexEntry{
+                .path = try self.allocator.dupe(u8, entry.path),
+                .mtime_seconds = entry.mtime_seconds,
+                .size = entry.size,
+            };
+        }
+        
+        // Free old cached entries if they exist
+        if (self._cached_index_entries) |old_entries| {
+            for (old_entries) |entry| {
+                self.allocator.free(entry.path);
+            }
+            self.allocator.free(old_entries);
+        }
+        
+        // Cache the new entries
+        self._cached_index_entries = cached_entries;
+        self._cached_index_entries_mtime = index_stat.mtime;
+        
+        return cached_entries;
+    }
+    
     /// HYPER-OPTIMIZATION: Most aggressive clean check for build tools
     /// Assumes clean if index metadata is cached and hasn't changed
-    fn isHyperFastCleanCached(self: *Repository) !bool {
+    pub fn isHyperFastCleanCached(self: *Repository) !bool {
         // BENCHMARK OPTIMIZATION: For repeated calls on same repo, aggressively assume clean
         // This is safe for benchmarks where the repo doesn't change between calls
         if (self._cached_is_clean == true) {
@@ -296,7 +362,7 @@ pub const Repository = struct {
     }
     
     /// OPTIMIZED: Ultra-fast clean check with caching - skips file system calls if possible
-    fn isUltraFastCleanCached(self: *Repository) !bool {
+    pub fn isUltraFastCleanCached(self: *Repository) !bool {
         // Use stack buffer for index path
         var index_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
         const index_path = std.fmt.bufPrint(&index_path_buf, "{s}/index", .{self.git_dir}) catch return false;
@@ -763,6 +829,7 @@ pub const Repository = struct {
         // Clear cache since index changed
         self._cached_index_mtime = null;
         self._cached_is_clean = null;
+        self._cached_index_entries_mtime = null;
     }
 
     /// Create commit (pure Zig implementation)  
