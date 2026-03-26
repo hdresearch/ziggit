@@ -560,6 +560,17 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(pack_git_exact_compat_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_end_to_end_tests).step);
 
+    // Pack full roundtrip tests (delta, all object types, git cross-validation, saveReceivedPack+load)
+    const pack_full_roundtrip_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_full_roundtrip_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_full_roundtrip_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(pack_full_roundtrip_tests).step);
+
     // Pack idx compatibility and saveReceivedPack tests
     const pack_idx_compat_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_idx_compat_and_save_test.zig"),
