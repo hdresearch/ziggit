@@ -42,16 +42,21 @@ fn testGitInitZiggitReads(allocator: std.mem.Allocator, test_dir: fs.Dir) !void 
     defer test_dir.deleteTree("git_init_test") catch {};
 
     // git init
-    try runCommand(allocator, &.{"git", "init"});
+    const git_init_result = try runCommand(allocator, &.{"git", "init"});
+    defer allocator.free(git_init_result);
     
     // Configure git for the repo
-    try runCommand(allocator, &.{"git", "config", "user.name", "Test User"});  
-    try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"});
+    const name_result = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"});
+    defer allocator.free(name_result);
+    const email_result = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"});
+    defer allocator.free(email_result);
     
     // Create and commit a file with git
     try repo_path.writeFile(.{.sub_path = "test.txt", .data = "Hello from git!\n"});
-    try runCommand(allocator, &.{"git", "add", "test.txt"});
-    try runCommand(allocator, &.{"git", "commit", "-m", "Initial commit"});
+    const add_result = try runCommand(allocator, &.{"git", "add", "test.txt"});
+    defer allocator.free(add_result);
+    const commit_result = try runCommand(allocator, &.{"git", "commit", "-m", "Initial commit"});
+    defer allocator.free(commit_result);
     
     // Test ziggit can read git-created repo
     const ziggit_result = runZiggitCommand(allocator, &.{"status"}) catch |err| {
@@ -66,7 +71,7 @@ fn testGitInitZiggitReads(allocator: std.mem.Allocator, test_dir: fs.Dir) !void 
 fn testZiggitInitGitReads(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
     print("Test 2: ziggit init -> git reads repository\n", .{});
     
-    const repo_path = try test_dir.makeOpenPath("ziggit_init_test", .{});
+    _ = try test_dir.makeOpenPath("ziggit_init_test", .{});
     defer test_dir.deleteTree("ziggit_init_test") catch {};
 
     // ziggit init
@@ -99,17 +104,22 @@ fn testStatusCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) !void
     defer test_dir.deleteTree("status_test") catch {};
 
     // Create repo with git
-    try runCommand(allocator, &.{"git", "init"});
-    try runCommand(allocator, &.{"git", "config", "user.name", "Test User"});
-    try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"});
+    const init_result = try runCommand(allocator, &.{"git", "init"});
+    defer allocator.free(init_result);
+    const name_config = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"});
+    defer allocator.free(name_config);
+    const email_config = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"});
+    defer allocator.free(email_config);
     
     // Create files in different states
     try repo_path.writeFile(.{.sub_path = "staged.txt", .data = "staged content\n"});
     try repo_path.writeFile(.{.sub_path = "modified.txt", .data = "original content\n"});
     try repo_path.writeFile(.{.sub_path = "untracked.txt", .data = "untracked content\n"});
     
-    try runCommand(allocator, &.{"git", "add", "staged.txt", "modified.txt"});
-    try runCommand(allocator, &.{"git", "commit", "-m", "Initial commit"});
+    const add_result = try runCommand(allocator, &.{"git", "add", "staged.txt", "modified.txt"});
+    defer allocator.free(add_result);
+    const commit_result_2 = try runCommand(allocator, &.{"git", "commit", "-m", "Initial commit"});
+    defer allocator.free(commit_result_2);
     
     // Modify the file
     try repo_path.writeFile(.{.sub_path = "modified.txt", .data = "modified content\n"});

@@ -16,7 +16,6 @@ test "comprehensive pack file handling after git gc" {
     defer std.fs.cwd().deleteTree(temp_dir_path) catch {};
 
     // Change to the temp directory for git operations
-    const original_cwd = std.fs.cwd();
     const temp_dir = try std.fs.openDirAbsolute(temp_dir_path, .{});
     
     // Initialize git repository
