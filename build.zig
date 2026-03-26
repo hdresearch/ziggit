@@ -38,13 +38,21 @@ pub fn build(b: *std.Build) void {
     lib_step.dependOn(&install_header.step);
 
     // ========== TESTS ==========
+    // Unit tests for main module
     const unit_tests = b.addTest(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-
     const run_unit_tests = b.addRunArtifact(unit_tests);
+
+    // Platform-specific unit tests  
+    const platform_tests = b.addTest(.{
+        .root_source_file = b.path("src/platform/platform.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_platform_tests = b.addRunArtifact(platform_tests);
 
     // Git interoperability test
     const git_interop_test = b.addExecutable(.{
@@ -145,6 +153,7 @@ pub fn build(b: *std.Build) void {
     // Main test step runs core tests
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&run_platform_tests.step);
     test_step.dependOn(&run_git_interop_test.step);
     test_step.dependOn(&run_index_format_test.step);
     test_step.dependOn(&run_object_format_test.step);
@@ -154,6 +163,18 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_pack_implementation_test.step);
     test_step.dependOn(&run_comprehensive_pack_test.step);
     test_step.dependOn(&run_comprehensive_refs_test.step);
+
+    // Quick test step (just unit tests)
+    const quick_test_step = b.step("test-quick", "Run unit tests only");
+    quick_test_step.dependOn(&run_unit_tests.step);
+    quick_test_step.dependOn(&run_platform_tests.step);
+
+    // Integration test step 
+    const integration_test_step = b.step("test-integration", "Run integration tests only");
+    integration_test_step.dependOn(&run_git_interop_test.step);
+    integration_test_step.dependOn(&run_index_format_test.step);
+    integration_test_step.dependOn(&run_object_format_test.step);
+    integration_test_step.dependOn(&run_command_output_test.step);
 
     // ========== BENCHMARKS ==========
     // CLI benchmark (ziggit CLI vs git CLI)
@@ -211,4 +232,26 @@ pub fn build(b: *std.Build) void {
 
     const wasm_step = b.step("wasm", "Build for WebAssembly");
     wasm_step.dependOn(&b.addInstallArtifact(wasm_exe, .{}).step);
+
+    // ========== CLEAN TARGET ==========
+    const clean_step = b.step("clean", "Clean build artifacts");
+    // Note: Zig handles cache cleaning internally, this is just for documentation
+    
+    // ========== HELP TARGET ==========
+    const help_step = b.step("help", "Show available build targets");
+    const help_cmd = b.addSystemCommand(&.{
+        "/bin/sh", "-c",
+        \\echo "Available build targets:"
+        \\echo "  zig build          - Build ziggit CLI (default)"
+        \\echo "  zig build lib      - Build libziggit.a + ziggit.h"
+        \\echo "  zig build test     - Run all tests"
+        \\echo "  zig build test-quick - Run unit tests only"
+        \\echo "  zig build test-integration - Run integration tests only"
+        \\echo "  zig build bench    - Run all benchmarks"
+        \\echo "  zig build wasm     - Build for WebAssembly"
+        \\echo "  zig build run      - Build and run ziggit"
+        \\echo "  zig build clean    - Clean build artifacts"
+        \\echo "  zig build help     - Show this help"
+    });
+    help_step.dependOn(&help_cmd.step);
 }
