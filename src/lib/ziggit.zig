@@ -1006,29 +1006,120 @@ fn getStatusPorcelainReal(repo: *Repository, buffer: []u8) !void {
     };
     
     if (head_commit_exists and index_exists) {
-        // Repository likely has committed files and is clean
-        // For now, return empty status (clean repository)
-        // TODO: Implement proper file comparison
+        // Load the git index and check file status
+        var git_index = index_parser.GitIndex.readFromFile(global_allocator, index_path) catch |err| switch (err) {
+            error.FileNotFound => {
+                // Index file disappeared, treat as no index
+                try scanForUntrackedFilesSimple(repo.path, buffer, &output_pos);
+                if (output_pos < buffer.len) {
+                    buffer[output_pos] = 0;
+                }
+                return;
+            },
+            else => return err,
+        };
+        defer git_index.deinit();
+        
+        // Track which files we've seen in index to identify untracked files later
+        var tracked_files = std.HashMap([]const u8, void, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(global_allocator);
+        defer tracked_files.deinit();
+        
+        // Check each index entry for modifications
+        for (git_index.entries.items) |entry| {
+            try tracked_files.put(entry.path, {});
+            
+            // Check if file is modified against index
+            const index_info = IndexFileInfo{
+                .hash = entry.sha1,
+                .size = entry.size,
+                .mtime_sec = entry.mtime_seconds,
+            };
+            
+            const is_modified = isFileModifiedAgainstIndex(repo.path, entry.path, index_info) catch |err| switch (err) {
+                error.FileNotFound => {
+                    // File was deleted from working tree
+                    const status_line = std.fmt.bufPrint(
+                        buffer[output_pos..],
+                        " D {s}\n",
+                        .{entry.path}
+                    ) catch break;
+                    output_pos += status_line.len;
+                    if (output_pos >= buffer.len - 1) break;
+                    continue;
+                },
+                else => return err,
+            };
+            
+            if (is_modified) {
+                // File was modified in working tree
+                const status_line = std.fmt.bufPrint(
+                    buffer[output_pos..],
+                    " M {s}\n",
+                    .{entry.path}
+                ) catch break;
+                output_pos += status_line.len;
+                if (output_pos >= buffer.len - 1) break;
+            }
+        }
+        
+        // Check for untracked files (not in index)
+        try scanForUntrackedFilesInIndex(repo.path, &tracked_files, buffer, &output_pos);
+        
     } else if (index_exists) {
-        // Has index but no HEAD commit - might have staged files
-        // TODO: List staged files
+        // Has index but no HEAD commit - all indexed files are staged for initial commit
+        var git_index = index_parser.GitIndex.readFromFile(global_allocator, index_path) catch {
+            // If we can't read index, fall back to simple untracked scan
+            try scanForUntrackedFilesSimple(repo.path, buffer, &output_pos);
+            if (output_pos < buffer.len) {
+                buffer[output_pos] = 0;
+            }
+            return;
+        };
+        defer git_index.deinit();
+        
+        // All files in index are staged additions
+        for (git_index.entries.items) |entry| {
+            const status_line = std.fmt.bufPrint(
+                buffer[output_pos..],
+                "A  {s}\n",
+                .{entry.path}
+            ) catch break;
+            output_pos += status_line.len;
+            if (output_pos >= buffer.len - 1) break;
+        }
     } else {
         // No index - check for untracked files in working directory
         try scanForUntrackedFilesSimple(repo.path, buffer, &output_pos);
-    }
-    }
-    
-    // Check for deleted files (in index but not in working tree)
-    // Temporarily disabled to avoid path issues
-    // TODO: Fix absolute path handling for deleted file detection
-    for (git_index.entries.items) |entry| {
-        _ = entry; // Temporarily do nothing
-        // Real implementation would check if files exist
     }
     
     // Null terminate
     if (output_pos < buffer.len) {
         buffer[output_pos] = 0;
+    }
+}
+
+// Scan for untracked files, excluding those tracked in index
+fn scanForUntrackedFilesInIndex(repo_root: []const u8, tracked_files: *std.HashMap([]const u8, void, std.hash_map.StringContext, std.hash_map.default_max_load_percentage), buffer: []u8, output_pos: *usize) !void {
+    var dir = std.fs.cwd().openDir(repo_root, .{ .iterate = true }) catch return;
+    defer dir.close();
+    
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (std.mem.startsWith(u8, entry.name, ".git")) continue;
+        
+        // Check if file is tracked in index
+        if (!tracked_files.contains(entry.name)) {
+            // File is untracked
+            const status_line = std.fmt.bufPrint(
+                buffer[output_pos.*..],
+                "?? {s}\n",
+                .{entry.name}
+            ) catch break;
+            
+            output_pos.* += status_line.len;
+            if (output_pos.* >= buffer.len - 1) break;
+        }
     }
 }
 
@@ -1053,68 +1144,6 @@ fn scanForUntrackedFilesSimple(repo_root: []const u8, buffer: []u8, output_pos: 
         output_pos.* += status_line.len;
         if (output_pos.* >= buffer.len - 1) break;
     }
-    
-    const index_file = std.fs.openFileAbsolute(index_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return error.IndexNotFound,
-        else => return err,
-    };
-    defer index_file.close();
-    
-    var entries = std.ArrayList(IndexEntry).init(global_allocator);
-    
-    // Read index header
-    var header_buf: [12]u8 = undefined;
-    _ = try index_file.readAll(&header_buf);
-    
-    // Check signature "DIRC"
-    if (!std.mem.eql(u8, header_buf[0..4], "DIRC")) return error.InvalidIndex;
-    
-    // Get version (should be 2)
-    const version = std.mem.readInt(u32, header_buf[4..8], .big);
-    if (version != 2) return error.UnsupportedIndexVersion;
-    
-    // Get number of entries
-    const num_entries = std.mem.readInt(u32, header_buf[8..12], .big);
-    
-    // Read entries
-    var i: u32 = 0;
-    while (i < num_entries) : (i += 1) {
-        var entry_header: [62]u8 = undefined;
-        _ = try index_file.readAll(&entry_header);
-        
-        const mtime_sec = std.mem.readInt(u32, entry_header[8..12], .big);
-        const mtime_nsec = std.mem.readInt(u32, entry_header[12..16], .big);
-        const size = std.mem.readInt(u32, entry_header[36..40], .big);
-        var hash: [20]u8 = undefined;
-        @memcpy(&hash, entry_header[40..60]);
-        const flags = std.mem.readInt(u16, entry_header[60..62], .big);
-        const path_len = flags & 0xFFF;
-        
-        if (path_len > 4096) return error.InvalidIndex; // Sanity check
-        
-        // Read path
-        var path_buffer: [4096]u8 = undefined;
-        _ = try index_file.readAll(path_buffer[0..path_len]);
-        const path = try global_allocator.dupe(u8, path_buffer[0..path_len]);
-        
-        try entries.append(IndexEntry{
-            .path = path,
-            .hash = hash,
-            .size = size,
-            .mtime_sec = mtime_sec,
-            .mtime_nsec = mtime_nsec,
-            .mode = std.mem.readInt(u32, entry_header[24..28], .big),
-        });
-        
-        // Skip padding to 8-byte boundary
-        const total_len = 62 + path_len;
-        const padding = (8 - (total_len % 8)) % 8;
-        if (padding > 0) {
-            try index_file.seekBy(@intCast(padding));
-        }
-    }
-    
-    return entries;
 }
 
 // Get tree entries from HEAD commit
@@ -1292,15 +1321,13 @@ fn getUntrackedFilesStatusReal(repo: *Repository, buffer: []u8, output_pos: *usi
     var tracked_files = std.HashMap([]const u8, void, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(global_allocator);
     defer tracked_files.deinit();
     
-    if (loadGitIndex(git_dir)) |git_index| {
-        defer {
-            for (git_index.items) |entry| {
-                global_allocator.free(entry.path);
-            }
-            git_index.deinit();
-        }
+    const index_path = try std.fmt.allocPrint(global_allocator, "{s}/index", .{git_dir});
+    defer global_allocator.free(index_path);
+    
+    if (index_parser.GitIndex.readFromFile(global_allocator, index_path)) |git_index| {
+        defer git_index.deinit();
         
-        for (git_index.items) |entry| {
+        for (git_index.entries.items) |entry| {
             try tracked_files.put(entry.path, {});
         }
     } else |_| {
@@ -2162,28 +2189,6 @@ fn checkoutCommit(repo: *Repository, committish: []const u8) !void {
 }
 
 // Simple scan for untracked files (without full index parsing)
-fn scanForUntrackedFilesSimple(repo_root: []const u8, buffer: []u8, output_pos: *usize) !void {
-    var dir = std.fs.cwd().openDir(repo_root, .{ .iterate = true }) catch return;
-    defer dir.close();
-    
-    var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
-        if (entry.kind != .file) continue;
-        if (std.mem.startsWith(u8, entry.name, ".git")) continue;
-        if (std.mem.eql(u8, entry.name, ".gitignore")) continue;
-        
-        // Mark as untracked
-        const status_line = std.fmt.bufPrint(
-            buffer[output_pos.*..],
-            "?? {s}\n",
-            .{entry.name}
-        ) catch break;
-        
-        output_pos.* += status_line.len;
-        if (output_pos.* >= buffer.len - 1) break;
-    }
-}
-
 // Clone without checkout implementation
 fn cloneNoCheckout(source: []const u8, target: []const u8) !void {
     // First create the repository structure
