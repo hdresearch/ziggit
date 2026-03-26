@@ -1,0 +1,8 @@
+Ziggit vs Git Benchmark Results
+Generated: Thu Mar 26 00:56:17 UTC 2026
+Iterations: 1000 per command
+
+status --porcelain: git=1.576ms, ziggit=139.157ms, speedup=0.01x
+rev-parse HEAD: git=0.997ms, ziggit=0.680ms, speedup=1.47x
+describe --tags --abbrev=0: git=1.258ms, ziggit=2.639ms, speedup=0.48x
+log --format=%H -1: git=1.123ms, ziggit=1.395ms, speedup=0.80x
