@@ -118,9 +118,10 @@ test "repo with HEAD+index shows correct status" {
     {
         std.debug.print("\n--- Test 1: Clean repository ---\n", .{});
         
-        var repo = try ziggit.repo_open(allocator, repo_path);
+        var repo = try ziggit.Repository.open(allocator, repo_path);
+        defer repo.close();
         
-        const lib_status_raw = try ziggit.repo_status(&repo, allocator);
+        const lib_status_raw = try repo.statusPorcelain(allocator);
         defer allocator.free(lib_status_raw);
         const lib_status = std.mem.trim(u8, lib_status_raw, " \n\r\t");
         
@@ -141,9 +142,10 @@ test "repo with HEAD+index shows correct status" {
         
         try writeFile(file1_path, "Modified content 1", allocator);
         
-        var repo = try ziggit.repo_open(allocator, repo_path);
+        var repo = try ziggit.Repository.open(allocator, repo_path);
+        defer repo.close();
         
-        const lib_status_raw = try ziggit.repo_status(&repo, allocator);
+        const lib_status_raw = try repo.statusPorcelain(allocator);
         defer allocator.free(lib_status_raw);
         const lib_status = std.mem.trim(u8, lib_status_raw, " \n\r\t");
         
@@ -166,9 +168,10 @@ test "repo with HEAD+index shows correct status" {
         defer allocator.free(file3_path);
         try writeFile(file3_path, "New untracked content", allocator);
         
-        var repo = try ziggit.repo_open(allocator, repo_path);
+        var repo = try ziggit.Repository.open(allocator, repo_path);
+        defer repo.close();
         
-        const lib_status_raw = try ziggit.repo_status(&repo, allocator);
+        const lib_status_raw = try repo.statusPorcelain(allocator);
         defer allocator.free(lib_status_raw);
         const lib_status = std.mem.trim(u8, lib_status_raw, " \n\r\t");
         
@@ -193,9 +196,10 @@ test "repo with HEAD+index shows correct status" {
         // Now delete file2 (which was committed)
         try deleteFile(file2_path);
         
-        var repo = try ziggit.repo_open(allocator, repo_path);
+        var repo = try ziggit.Repository.open(allocator, repo_path);
+        defer repo.close();
         
-        const lib_status_raw = try ziggit.repo_status(&repo, allocator);
+        const lib_status_raw = try repo.statusPorcelain(allocator);
         defer allocator.free(lib_status_raw);
         const lib_status = std.mem.trim(u8, lib_status_raw, " \n\r\t");
         
@@ -224,9 +228,10 @@ test "repo with HEAD+index shows correct status" {
         
         try git_ops.add_file("file4.txt");
         
-        var repo = try ziggit.repo_open(allocator, repo_path);
+        var repo = try ziggit.Repository.open(allocator, repo_path);
+        defer repo.close();
         
-        const lib_status_raw = try ziggit.repo_status(&repo, allocator);
+        const lib_status_raw = try repo.statusPorcelain(allocator);
         defer allocator.free(lib_status_raw);
         const lib_status = std.mem.trim(u8, lib_status_raw, " \n\r\t");
         
