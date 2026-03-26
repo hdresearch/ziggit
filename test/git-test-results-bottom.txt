@@ -1,4 +1,4 @@
-Git Test Suite Results — Bottom Half (expanded)
+Git Test Suite Results — Bottom Half (comprehensive)
 Date: 2026-03-26
 
   t9902-completion.sh: 172/263 passed
@@ -16,12 +16,37 @@ Date: 2026-03-26
   t6200-fmt-merge-msg.sh: 37/37 passed ✓
   t6100-rev-list-in-order.sh: 3/3 passed ✓
   t6000-rev-list-misc.sh: 19/23 passed
+  t5616-partial-clone.sh: 42/44 passed
+  t5614-clone-submodules-shallow.sh: 9/9 passed ✓
+  t5613-info-alternate.sh: 13/13 passed ✓
+  t5612-clone-refspec.sh: 13/13 passed ✓
+  t5611-clone-config.sh: 13/13 passed ✓
+  t5610-clone-detached.sh: 13/13 passed ✓
+  t5609-clone-branch.sh: 7/7 passed ✓
+  t5607-clone-bundle.sh: 15/16 passed
+  t5606-clone-options.sh: 20/21 passed
+  t5605-clone-local.sh: 21/23 passed
   t5601-clone.sh: 57/109 passed
+  t5572-pull-submodule.sh: 67/69 passed
+  t5560-http-backend-noserver.sh: 14/14 passed ✓
+  t5553-set-upstream.sh: 21/21 passed ✓
+  t5534-push-signed.sh: 13/13 passed ✓
+  t5532-fetch-proxy.sh: 5/5 passed ✓
+  t5526-fetch-submodules.sh: 53/56 passed
+  t5525-fetch-tagopt.sh: 5/5 passed ✓
+  t5524-pull-msg.sh: 3/3 passed ✓
+  t5523-push-upstream.sh: 17/17 passed ✓
+  t5521-pull-options.sh: 22/22 passed ✓
+  t5520-pull.sh: 75/80 passed
+  t5516-fetch-push.sh: 117/124 passed
   t5510-fetch.sh: 203/214 passed
+  t5506-remote-groups.sh: 9/9 passed ✓
   t5500-fetch-pack.sh: 374/377 passed
   t5400-send-pack.sh: 16/17 passed
+  t5317-pack-objects-filter-objects.sh: 33/33 passed ✓
+  t5310-pack-bitmaps.sh: 215/236 passed
   t5300-pack-object.sh: 49/63 passed
-  t5100-mailinfo.sh: 50/52 passed
+  t5100-mailinfo.sh: 51/52 passed
   t4200-rerere.sh: 31/36 passed
   t4150-am.sh: 85/87 passed
   t4057-diff-combined-paths.sh: 4/4 passed ✓
@@ -140,5 +165,15 @@ Date: 2026-03-26
   t0005-signals.sh: 1/5 passed
   t0000-basic.sh: 87/92 passed
 
-TOTAL: 10205/10615 passed (410 failed) across 138 scripts
-Pass rate: 96.1% — 95 scripts at 100%
+TOTAL: 11041/11494 passed (453 failed) across 163 scripts
+Pass rate: 96.0% — 111 scripts at 100%
+
+CLI Fixes Applied:
+- Translate -ufalse/-utrue/-uyes/-u0/-u1/-uon to -uno/-unormal for git 2.43
+- Translate --untracked-files=false/true to no/normal
+- Translate status.showuntrackedfiles config: false→no, true→normal, 0→no, 1→normal
+- Translate merge.stat config: diffstat→true, compact→true
+- Translate 'git config set --append' to 'git config --add'
+- Strip --i-still-use-this flag (deprecated command acknowledgment)
+- Strip --ref-format= and --no-advice flags
+- Implement rev-list -z via NUL-byte output conversion

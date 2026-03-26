@@ -1,7 +1,7 @@
 #!/bin/bash
 cd /tmp/git-tests/t
 RESULTS="/root/ziggit/test/git-test-results-bottom.txt"
-echo "Git Test Suite Results — Bottom Half (expanded)" > "$RESULTS"
+echo "Git Test Suite Results — Bottom Half (comprehensive)" > "$RESULTS"
 echo "Date: $(date -u +%Y-%m-%d)" >> "$RESULTS"
 echo "" >> "$RESULTS"
 
@@ -23,10 +23,35 @@ for test_script in \
     t6200-fmt-merge-msg.sh \
     t6100-rev-list-in-order.sh \
     t6000-rev-list-misc.sh \
+    t5616-partial-clone.sh \
+    t5614-clone-submodules-shallow.sh \
+    t5613-info-alternate.sh \
+    t5612-clone-refspec.sh \
+    t5611-clone-config.sh \
+    t5610-clone-detached.sh \
+    t5609-clone-branch.sh \
+    t5607-clone-bundle.sh \
+    t5606-clone-options.sh \
+    t5605-clone-local.sh \
     t5601-clone.sh \
+    t5572-pull-submodule.sh \
+    t5560-http-backend-noserver.sh \
+    t5553-set-upstream.sh \
+    t5534-push-signed.sh \
+    t5532-fetch-proxy.sh \
+    t5526-fetch-submodules.sh \
+    t5525-fetch-tagopt.sh \
+    t5524-pull-msg.sh \
+    t5523-push-upstream.sh \
+    t5521-pull-options.sh \
+    t5520-pull.sh \
+    t5516-fetch-push.sh \
     t5510-fetch.sh \
+    t5506-remote-groups.sh \
     t5500-fetch-pack.sh \
     t5400-send-pack.sh \
+    t5317-pack-objects-filter-objects.sh \
+    t5310-pack-bitmaps.sh \
     t5300-pack-object.sh \
     t5100-mailinfo.sh \
     t4200-rerere.sh \
