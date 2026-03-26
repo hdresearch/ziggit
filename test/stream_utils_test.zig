@@ -211,6 +211,76 @@ test "applyDelta with mixed copy and insert" {
     try std.testing.expectEqualSlices(u8, "Hello Zig!", result);
 }
 
+test "applyDeltaInto zero-alloc copy" {
+    const base = "Hello, World!";
+    const delta = [_]u8{
+        13, // base_size = 13
+        13, // result_size = 13
+        0x80 | 0x01 | 0x10, // copy cmd
+        0x00, // offset = 0
+        0x0D, // size = 13
+    };
+
+    var buf: [64]u8 = undefined;
+    const n = try objects.applyDeltaInto(base, &delta, &buf);
+    try std.testing.expectEqualSlices(u8, base, buf[0..n]);
+}
+
+test "applyDeltaInto mixed copy+insert" {
+    const base = "Hello, World!";
+    const delta = [_]u8{
+        13, 10,
+        0x80 | 0x01 | 0x10, 0x00, 0x05, // copy 5 from offset 0
+        5, ' ', 'Z', 'i', 'g', '!', // insert " Zig!"
+    };
+    var buf: [64]u8 = undefined;
+    const n = try objects.applyDeltaInto(base, &delta, &buf);
+    try std.testing.expectEqualSlices(u8, "Hello Zig!", buf[0..n]);
+}
+
+test "deltaResultSize reads correctly" {
+    const delta = [_]u8{ 13, 10, 0x80 | 0x01 | 0x10, 0x00, 0x05 };
+    const size = try objects.deltaResultSize(&delta);
+    try std.testing.expectEqual(@as(usize, 10), size);
+}
+
+test "applyDeltaReuse reuses buffer" {
+    const allocator = std.testing.allocator;
+    const base = "Hello, World!";
+    const delta = [_]u8{
+        13, 5,
+        5, 'h', 'e', 'l', 'l', 'o', // insert "hello"
+    };
+
+    var output = std.ArrayList(u8).init(allocator);
+    defer output.deinit();
+
+    const r1 = try objects.applyDeltaReuse(base, &delta, &output);
+    try std.testing.expectEqualSlices(u8, "hello", r1);
+
+    // Second call reuses the same ArrayList
+    const r2 = try objects.applyDeltaReuse(base, &delta, &output);
+    try std.testing.expectEqualSlices(u8, "hello", r2);
+}
+
+test "decompressHashIntoBuf matches streaming" {
+    const allocator = std.testing.allocator;
+    const data = "buf-based streaming hash test content";
+
+    var compressed = std.ArrayList(u8).init(allocator);
+    defer compressed.deinit();
+    var fbs = std.io.fixedBufferStream(data);
+    try std.compress.zlib.compress(fbs.reader(), compressed.writer(), .{});
+
+    const streaming = try stream_utils.decompressAndHash(compressed.items, "blob", data.len);
+
+    var buf: [256]u8 = undefined;
+    const buf_result = try stream_utils.decompressHashIntoBuf(compressed.items, "blob", data.len, &buf);
+
+    try std.testing.expectEqualSlices(u8, &streaming.sha1, &buf_result.sha1);
+    try std.testing.expectEqual(streaming.decompressed_size, buf_result.decompressed_size);
+}
+
 test "decompressHashAndCapture roundtrip" {
     const allocator = std.testing.allocator;
     const data = "tree entry content\x00hash_bytes_here";
