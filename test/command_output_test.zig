@@ -172,9 +172,7 @@ fn testDiffOutput(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
     
     const ziggit_diff = runCommand(allocator, &.{getZiggitPath(), "diff", "diff_test.txt"}, repo_path) catch |err| switch (err) {
         error.CommandFailed => try allocator.dupe(u8, "ziggit diff output"),
-        } else {
-            return err;
-        }
+        else => return err,
     };
     defer allocator.free(ziggit_diff);
     
@@ -189,20 +187,15 @@ fn testErrorHandling(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
     defer test_dir.deleteTree("not_a_repo") catch {};
     
     // Test commands in non-git directory
-    const git_status_err = runCommand(allocator, &.{"git", "status"}, non_repo_path) catch |err| {
-        if (err == error.CommandFailed) {
-            std.debug.print("    Note: git status unexpectedly succeeded in non-repo (some git versions may handle this)\n", .{});
-            return allocator.dupe(u8, "");
-        }
-        return err;
+    const git_status_err = runCommand(allocator, &.{"git", "status"}, non_repo_path) catch |err| switch (err) {
+        error.CommandFailed => try allocator.dupe(u8, "Command failed as expected"),
+        else => return err,
     };
     defer allocator.free(git_status_err);
     
-    const ziggit_status_err = runCommand(allocator, &.{getZiggitPath(), "status"}, non_repo_path) catch |err| {
-        if (err == error.CommandFailed) {
-            return allocator.dupe(u8, "");
-        }
-        return err;
+    const ziggit_status_err = runCommand(allocator, &.{getZiggitPath(), "status"}, non_repo_path) catch |err| switch (err) {
+        error.CommandFailed => try allocator.dupe(u8, "Command failed as expected"),
+        else => return err,
     };
     defer allocator.free(ziggit_status_err);
     
@@ -210,19 +203,15 @@ fn testErrorHandling(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
     std.debug.print("    Both tools correctly fail in non-git directory\n", .{});
     
     // Test invalid commands
-    const git_invalid = runCommand(allocator, &.{"git", "nonexistent-command"}, test_dir) catch |err| {
-        if (err == error.CommandFailed) {
-            return allocator.dupe(u8, "");
-        }
-        return err;
+    const git_invalid = runCommand(allocator, &.{"git", "nonexistent-command"}, test_dir) catch |err| switch (err) {
+        error.CommandFailed => try allocator.dupe(u8, "Command failed as expected"),
+        else => return err,
     };
     defer allocator.free(git_invalid);
     
-    const ziggit_invalid = runCommand(allocator, &.{getZiggitPath(), "nonexistent-command"}, test_dir) catch |err| {
-        if (err == error.CommandFailed) {
-            return allocator.dupe(u8, "");
-        }
-        return err;
+    const ziggit_invalid = runCommand(allocator, &.{getZiggitPath(), "nonexistent-command"}, test_dir) catch |err| switch (err) {
+        error.CommandFailed => try allocator.dupe(u8, "Command failed as expected"),
+        else => return err,
     };
     defer allocator.free(ziggit_invalid);
     
@@ -346,13 +335,12 @@ fn testLogFormats(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
     // Test log with limit
     const git_log_3 = try runCommand(allocator, &.{"git", "log", "--oneline", "-3"}, repo_path);
     defer allocator.free(git_log_3);
-    const ziggit_log_3 = runCommand(allocator, &.{getZiggitPath(), "log", "--oneline", "-3"}, repo_path) catch |err| {
-        // ziggit might not support -3 flag yet
-        std.debug.print("    Note: ziggit may not support log limits yet\n", .{});
-        if (err == error.CommandFailed) {
-            return allocator.dupe(u8, "");
-        }
-        return err;
+    const ziggit_log_3 = runCommand(allocator, &.{getZiggitPath(), "log", "--oneline", "-3"}, repo_path) catch |err| switch (err) {
+        error.CommandFailed => blk: {
+            std.debug.print("    Note: ziggit may not support log limits yet\n", .{});
+            break :blk try allocator.dupe(u8, "Command failed as expected");
+        },
+        else => return err,
     };
     defer allocator.free(ziggit_log_3);
     
