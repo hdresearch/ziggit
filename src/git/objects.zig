@@ -595,7 +595,7 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     
     // Check for 64-bit offset (MSB set)
     if (object_offset & 0x80000000 != 0) {
-        const large_offset_index = object_offset & 0x7FFFFFFF;
+        const large_offset_index: usize = @intCast(object_offset & 0x7FFFFFFF);
         const large_offset_table_start = offset_table_start + @as(usize, total_objects) * 4;
         const large_offset_table_offset = large_offset_table_start + large_offset_index * 8;
         if (idx_data.len < large_offset_table_offset + 8) return error.ObjectNotFound;
@@ -736,14 +736,16 @@ fn readPackedObject(pack_data: []const u8, offset: usize, pack_path: []const u8,
     
     // Read variable-length size
     var size: usize = @intCast(first_byte & 15);
-    var shift: u6 = 4;
+    const ShiftType = std.math.Log2Int(usize);
+    const max_shift = @bitSizeOf(usize) - 4; // 60 on 64-bit, 28 on 32-bit
+    var shift: ShiftType = 4;
     var current_byte = first_byte;
     
     while (current_byte & 0x80 != 0 and pos < pack_data.len) {
         current_byte = pack_data[pos];
         pos += 1;
         size |= @as(usize, @intCast(current_byte & 0x7F)) << shift;
-        if (shift < 60) shift += 7 else break;
+        if (shift < max_shift) shift += 7 else break;
     }
     
     switch (pack_type) {
@@ -897,9 +899,9 @@ fn findOffsetInIdx(idx_data: []const u8, target_hash: [20]u8) ?usize {
                     
                     // Handle 64-bit offsets
                     if (offset_val & 0x80000000 != 0) {
-                        const large_offset_index = offset_val & 0x7FFFFFFF;
+                        const large_offset_index: usize = @intCast(offset_val & 0x7FFFFFFF);
                         const large_offset_table_start = offset_table_start + @as(usize, total_objects) * 4;
-                        const large_offset_table_offset = large_offset_table_start + @as(usize, large_offset_index) * 8;
+                        const large_offset_table_offset = large_offset_table_start + large_offset_index * 8;
                         if (large_offset_table_offset + 8 > idx_data.len) return null;
                         
                         offset_val = std.mem.readInt(u64, @ptrCast(idx_data[large_offset_table_offset .. large_offset_table_offset + 8]), .big);
@@ -987,7 +989,7 @@ fn applyDeltaWithFallback(base_data: []const u8, delta_data: []const u8, allocat
     
     // Read base size (variable length)
     var base_size: usize = 0;
-    var shift: u6 = 0;
+    const ShiftT = std.math.Log2Int(usize); var shift: ShiftT = 0;
     while (pos < delta_data.len and shift < 64) {
         const b = delta_data[pos];
         pos += 1;
@@ -1144,7 +1146,7 @@ fn applyDeltaPermissive(base_data: []const u8, delta_data: []const u8, allocator
     
     // Read base size (variable length) with more permissive bounds
     var base_size: usize = 0;
-    var shift: u6 = 0;
+    const ShiftT = std.math.Log2Int(usize); var shift: ShiftT = 0;
     while (pos < delta_data.len and shift < 64) {
         const b = delta_data[pos];
         pos += 1;
@@ -1276,7 +1278,7 @@ fn applyDeltaLastResort(base_data: []const u8, delta_data: []const u8, allocator
     var result_size: usize = base_data.len; // Default to base size
     
     // Try to read base size
-    var shift: u6 = 0;
+    const ShiftT = std.math.Log2Int(usize); var shift: ShiftT = 0;
     while (pos < delta_data.len and shift < 32) { 
         const b = delta_data[pos];
         pos += 1;
@@ -1825,7 +1827,7 @@ fn readPackedObjectHeader(pack_data: []const u8, offset: usize) !ObjectHeaderInf
     
     // Read variable-length size
     var size: usize = @intCast(first_byte & 15);
-    var shift: u6 = 4;
+    const ShiftT = std.math.Log2Int(usize); var shift: ShiftT = 4;
     var current_byte = first_byte;
     
     while (current_byte & 0x80 != 0 and pos < pack_data.len) {
@@ -2285,7 +2287,7 @@ pub fn validatePackFile(pack_path: []const u8, platform_impl: anytype, allocator
         
         // Read variable-length size
         var size: usize = @intCast(first_byte & 15);
-        var shift: u6 = 4;
+        const ShiftT = std.math.Log2Int(usize); var shift: ShiftT = 4;
         var current_byte = first_byte;
         
         while (current_byte & 0x80 != 0 and pos < content_end) {
@@ -2650,7 +2652,7 @@ fn readPackedObjectFromData(pack_data: []const u8, offset: usize, allocator: std
     const pack_type = std.meta.intToEnum(PackObjectType, pack_type_num) catch return error.ObjectNotFound;
     
     var size: usize = @intCast(first_byte & 15);
-    var shift: u6 = 4;
+    const ShiftT = std.math.Log2Int(usize); var shift: ShiftT = 4;
     var current_byte = first_byte;
     while (current_byte & 0x80 != 0 and pos < pack_data.len) {
         current_byte = pack_data[pos];
@@ -2729,7 +2731,7 @@ pub fn generatePackIndex(pack_data: []const u8, allocator: std.mem.Allocator) ![
         pos += 1;
         const pack_type_num: u3 = @intCast((first_byte >> 4) & 7);
         var size: usize = @intCast(first_byte & 0x0F);
-        var shift: u6 = 4;
+        const ShiftT = std.math.Log2Int(usize); var shift: ShiftT = 4;
         var current_byte = first_byte;
         
         while (current_byte & 0x80 != 0 and pos < content_end) {
