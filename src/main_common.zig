@@ -824,11 +824,28 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     }
 
     var oneline = false;
+    var format_string: ?[]const u8 = null;
+    var max_count: ?u32 = null;
+    var committish: ?[]const u8 = null;
     
     // Parse arguments
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--oneline")) {
             oneline = true;
+        } else if (std.mem.startsWith(u8, arg, "--format=")) {
+            format_string = arg[9..]; // Skip "--format="
+        } else if (std.mem.startsWith(u8, arg, "-") and arg.len > 1 and std.ascii.isDigit(arg[1])) {
+            // Parse -n format like -1, -5, etc.
+            const count_str = arg[1..];
+            max_count = std.fmt.parseInt(u32, count_str, 10) catch null;
+        } else if (std.mem.eql(u8, arg, "-n")) {
+            // Parse -n followed by number
+            if (args.next()) |count_str| {
+                max_count = std.fmt.parseInt(u32, count_str, 10) catch null;
+            }
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            // This is likely a committish (commit hash, branch name, etc.)
+            committish = arg;
         }
     }
 
@@ -839,16 +856,29 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     };
     defer allocator.free(git_path);
 
-    // Get current commit
-    const current_commit = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
-    if (current_commit == null) {
-        try platform_impl.writeStderr("fatal: your current branch does not have any commits yet\n");
-        std.process.exit(128);
+    // Resolve starting commit
+    var start_commit: []u8 = undefined;
+    if (committish) |commit_ref| {
+        // Try to resolve committish (branch, tag, or commit hash)
+        start_commit = resolveCommittish(git_path, commit_ref, platform_impl, allocator) catch {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\n", .{commit_ref});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        };
+    } else {
+        // Get current HEAD commit
+        const current_commit = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
+        if (current_commit == null) {
+            try platform_impl.writeStderr("fatal: your current branch does not have any commits yet\n");
+            std.process.exit(128);
+        }
+        start_commit = current_commit.?;
     }
-    defer if (current_commit) |hash| allocator.free(hash);
+    defer allocator.free(start_commit);
 
     // Walk the commit history
-    var commit_hash = try allocator.dupe(u8, current_commit.?);
+    var commit_hash = try allocator.dupe(u8, start_commit);
     defer allocator.free(commit_hash);
 
     var visited = std.StringHashMap(void).init(allocator);
@@ -860,7 +890,8 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         visited.deinit();
     }
 
-    while (true) {
+    var count: u32 = 0;
+    while (max_count == null or count < max_count.?) {
         // Avoid infinite loops
         if (visited.contains(commit_hash)) break;
         try visited.put(try allocator.dupe(u8, commit_hash), {});
@@ -908,8 +939,10 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             }
         }
 
-        // Display commit
-        if (oneline) {
+        // Display commit based on format
+        if (format_string) |fmt| {
+            try outputFormattedCommit(fmt, commit_hash, allocator, platform_impl);
+        } else if (oneline) {
             const short_hash = commit_hash[0..7];
             const first_line = blk: {
                 var msg_lines = std.mem.split(u8, std.mem.trimRight(u8, message.items, "\n"), "\n");
@@ -939,6 +972,8 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             try platform_impl.writeStdout(msg_output);
         }
 
+        count += 1;
+
         // Move to parent commit
         if (parent_hash) |parent| {
             allocator.free(commit_hash);
@@ -947,6 +982,99 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             break; // No parent, we've reached the initial commit
         }
     }
+}
+
+fn resolveCommittish(git_path: []const u8, committish: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
+    // First try as a direct hash
+    if (committish.len >= 4 and isValidHashPrefix(committish)) {
+        if (resolveCommitHash(git_path, committish, platform_impl, allocator)) |resolved_hash| {
+            return resolved_hash;
+        } else |_| {
+            // Fall through to try other methods
+        }
+    }
+    
+    // Try as branch reference
+    const branch_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{git_path, committish});
+    defer allocator.free(branch_path);
+    
+    if (platform_impl.fs.readFile(allocator, branch_path)) |branch_content| {
+        defer allocator.free(branch_content);
+        const hash = std.mem.trim(u8, branch_content, " \t\n\r");
+        if (hash.len == 40) {
+            return try allocator.dupe(u8, hash);
+        }
+    } else |_| {}
+    
+    // Try as tag reference
+    const tag_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags/{s}", .{git_path, committish});
+    defer allocator.free(tag_path);
+    
+    if (platform_impl.fs.readFile(allocator, tag_path)) |tag_content| {
+        defer allocator.free(tag_content);
+        const hash = std.mem.trim(u8, tag_content, " \t\n\r");
+        if (hash.len == 40) {
+            // This might be an annotated tag, resolve it
+            const tag_obj = objects.GitObject.load(hash, git_path, platform_impl, allocator) catch {
+                return try allocator.dupe(u8, hash);
+            };
+            defer tag_obj.deinit(allocator);
+            
+            if (tag_obj.type == .tag) {
+                return parseTagObject(tag_obj.data, allocator) catch try allocator.dupe(u8, hash);
+            } else {
+                return try allocator.dupe(u8, hash);
+            }
+        }
+    } else |_| {}
+    
+    // Try HEAD if committish is "HEAD"
+    if (std.mem.eql(u8, committish, "HEAD")) {
+        const head_commit = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
+        if (head_commit) |commit| {
+            return commit;
+        }
+    }
+    
+    return error.UnknownRevision;
+}
+
+fn outputFormattedCommit(format: []const u8, commit_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    var output = std.ArrayList(u8).init(allocator);
+    defer output.deinit();
+    
+    var i: usize = 0;
+    while (i < format.len) {
+        if (format[i] == '%' and i + 1 < format.len) {
+            switch (format[i + 1]) {
+                'H' => {
+                    // Full commit hash
+                    try output.appendSlice(commit_hash);
+                },
+                'h' => {
+                    // Short commit hash
+                    const short_hash = if (commit_hash.len >= 7) commit_hash[0..7] else commit_hash;
+                    try output.appendSlice(short_hash);
+                },
+                '%' => {
+                    // Literal %
+                    try output.append('%');
+                },
+                else => {
+                    // Unknown format specifier, output as-is
+                    try output.append(format[i]);
+                    try output.append(format[i + 1]);
+                },
+            }
+            i += 2;
+        } else {
+            try output.append(format[i]);
+            i += 1;
+        }
+    }
+    
+    try output.append('\n');
+    try platform_impl.writeStdout(output.items);
 }
 
 fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
