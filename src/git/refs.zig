@@ -621,6 +621,14 @@ fn findTagsInPackedRefs(git_dir: []const u8, platform_impl: anytype, allocator: 
     return tags;
 }
 
+/// Cache for packed-refs to avoid re-reading the file multiple times
+var packed_refs_cache: ?struct {
+    git_dir: []const u8,
+    content: []const u8,
+    last_modified: i64,
+} = null;
+var cache_allocator: ?std.mem.Allocator = null;
+
 /// Read ref hash from packed-refs file with enhanced performance and validation
 fn readFromPackedRefs(git_dir: []const u8, ref_name: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![]u8 {
     // Input validation
@@ -630,12 +638,53 @@ fn readFromPackedRefs(git_dir: []const u8, ref_name: []const u8, platform_impl: 
     const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir});
     defer allocator.free(packed_refs_path);
 
-    const content = platform_impl.fs.readFile(allocator, packed_refs_path) catch |err| switch (err) {
-        error.FileNotFound => return error.RefNotFound,
-        error.AccessDenied => return error.PackedRefsAccessDenied,
-        else => return err,
-    };
-    defer allocator.free(content);
+    // Try to use cached content if available and fresh
+    var content: []const u8 = undefined;
+    var should_free_content = true;
+    
+    if (packed_refs_cache) |cache| {
+        if (std.mem.eql(u8, cache.git_dir, git_dir)) {
+            // Check if file has been modified since cache
+            const file_stat = std.fs.cwd().statFile(packed_refs_path) catch {
+                // If we can't stat the file but have cache, use cache
+                content = cache.content;
+                should_free_content = false;
+            };
+            
+            if (should_free_content) {
+                const file_mtime = @divTrunc(file_stat.mtime, std.time.ns_per_s);
+                if (file_mtime <= cache.last_modified) {
+                    content = cache.content;
+                    should_free_content = false;
+                }
+            }
+        }
+    }
+    
+    if (should_free_content) {
+        content = platform_impl.fs.readFile(allocator, packed_refs_path) catch |err| switch (err) {
+            error.FileNotFound => return error.RefNotFound,
+            error.AccessDenied => return error.PackedRefsAccessDenied,
+            else => return err,
+        };
+        
+        // Update cache
+        if (packed_refs_cache) |old_cache| {
+            if (cache_allocator) |ca| {
+                ca.free(old_cache.git_dir);
+                ca.free(old_cache.content);
+            }
+        }
+        
+        packed_refs_cache = .{
+            .git_dir = try allocator.dupe(u8, git_dir),
+            .content = try allocator.dupe(u8, content),
+            .last_modified = std.time.timestamp(),
+        };
+        cache_allocator = allocator;
+    }
+    
+    defer if (should_free_content) allocator.free(content);
 
     // Validate packed-refs file size (reasonable limit: 10MB)
     if (content.len > 10 * 1024 * 1024) {
@@ -706,4 +755,49 @@ fn readFromPackedRefs(git_dir: []const u8, ref_name: []const u8, platform_impl: 
     }
     
     return error.RefNotFound;
+}
+
+/// Clear the packed-refs cache (useful for testing or after repo changes)
+pub fn clearPackedRefsCache() void {
+    if (packed_refs_cache) |cache| {
+        if (cache_allocator) |allocator| {
+            allocator.free(cache.git_dir);
+            allocator.free(cache.content);
+        }
+        packed_refs_cache = null;
+        cache_allocator = null;
+    }
+}
+
+/// Enhanced ref validation function
+pub fn validateRefName(ref_name: []const u8) !void {
+    if (ref_name.len == 0) return error.EmptyRefName;
+    if (ref_name.len > 1024) return error.RefNameTooLong;
+    
+    // Check for invalid characters
+    for (ref_name) |c| {
+        switch (c) {
+            ' ', '\t', '\n', '\r', '\\', '^', '~', ':', '?', '*', '[' => return error.InvalidRefName,
+            0...31, 127 => return error.InvalidRefName, // Control characters
+            else => {},
+        }
+    }
+    
+    // Check for invalid patterns
+    if (std.mem.indexOf(u8, ref_name, "..")) |_| return error.InvalidRefName;
+    if (std.mem.indexOf(u8, ref_name, "/.")) |_| return error.InvalidRefName;
+    if (std.mem.indexOf(u8, ref_name, "@{")) |_| return error.InvalidRefName;
+    if (std.mem.startsWith(u8, ref_name, ".") or std.mem.endsWith(u8, ref_name, ".")) return error.InvalidRefName;
+    if (std.mem.startsWith(u8, ref_name, "/") or std.mem.endsWith(u8, ref_name, "/")) return error.InvalidRefName;
+}
+
+/// Batch resolve multiple refs efficiently
+pub fn resolveRefs(git_dir: []const u8, ref_names: []const []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![]?[]u8 {
+    var results = try allocator.alloc(?[]u8, ref_names.len);
+    
+    for (ref_names, 0..) |ref_name, i| {
+        results[i] = resolveRef(git_dir, ref_name, platform_impl, allocator) catch null;
+    }
+    
+    return results;
 }
