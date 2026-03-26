@@ -1,5 +1,6 @@
 const std = @import("std");
 const objects = @import("objects.zig");
+const builtin = @import("builtin");
 
 pub const IndexEntry = struct {
     ctime_sec: u32,
@@ -23,11 +24,11 @@ pub const IndexEntry = struct {
             .ctime_nsec = @intCast(@mod(stat.ctime, std.time.ns_per_s)),
             .mtime_sec = @intCast(@divTrunc(stat.mtime, std.time.ns_per_s)),
             .mtime_nsec = @intCast(@mod(stat.mtime, std.time.ns_per_s)),
-            .dev = 0, // TODO: get actual device ID
+            .dev = getDeviceId(stat),
             .ino = @intCast(stat.inode),
             .mode = @intCast(stat.mode),
-            .uid = 0, // TODO: get actual UID
-            .gid = 0, // TODO: get actual GID
+            .uid = getUserId(),
+            .gid = getGroupId(),
             .size = @intCast(stat.size),
             .sha1 = sha1,
             .flags = @intCast(path.len),
@@ -469,3 +470,49 @@ pub const Index = struct {
         try self.parseIndexData(data);
     }
 };
+
+/// Get device ID from file stat (platform-specific)
+fn getDeviceId(stat: std.fs.File.Stat) u32 {
+    return switch (builtin.os.tag) {
+        .linux, .macos, .freebsd, .openbsd, .netbsd => @intCast(stat.dev),
+        .windows => 0, // Windows doesn't have device IDs like Unix
+        .wasi => 0, // WASI doesn't support device IDs
+        else => 0, // Default to 0 for unknown platforms
+    };
+}
+
+/// Get current user ID (platform-specific)
+fn getUserId() u32 {
+    return switch (builtin.os.tag) {
+        .linux, .macos, .freebsd, .openbsd, .netbsd => blk: {
+            if (@hasDecl(std.os, "getuid")) {
+                break :blk @intCast(std.os.getuid());
+            } else if (@hasDecl(std.posix, "getuid")) {
+                break :blk @intCast(std.posix.getuid());
+            } else {
+                break :blk 0;
+            }
+        },
+        .windows => 0, // Windows doesn't use Unix-style UIDs
+        .wasi => 0, // WASI doesn't support UIDs
+        else => 0, // Default to 0 for unknown platforms
+    };
+}
+
+/// Get current group ID (platform-specific)
+fn getGroupId() u32 {
+    return switch (builtin.os.tag) {
+        .linux, .macos, .freebsd, .openbsd, .netbsd => blk: {
+            if (@hasDecl(std.os, "getgid")) {
+                break :blk @intCast(std.os.getgid());
+            } else if (@hasDecl(std.posix, "getgid")) {
+                break :blk @intCast(std.posix.getgid());
+            } else {
+                break :blk 0;
+            }
+        },
+        .windows => 0, // Windows doesn't use Unix-style GIDs
+        .wasi => 0, // WASI doesn't support GIDs
+        else => 0, // Default to 0 for unknown platforms
+    };
+}
