@@ -60,7 +60,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     
     if (all_original_args.items.len == 0) {
         try showUsage(&platform_impl);
-        return;
+        std.process.exit(1);
     }
     
     // Strip global flags that newer git versions support but older ones don't
@@ -264,6 +264,22 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         .index = 0,
         .allocator = allocator,
     };
+
+    // If -h or --help-all is in the args for any command, forward to real git
+    // so that help output goes to stdout with exit 129 (git 2.47 behavior).
+    // This catches commands with native implementations (clone, etc.) that don't handle -h.
+    if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
+        var cmd_has_help = false;
+        for (remaining_args_copy) |arg| {
+            if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help-all")) {
+                cmd_has_help = true;
+                break;
+            }
+        }
+        if (cmd_has_help) {
+            try forwardCmdToGit(allocator, all_original_args.items, &platform_impl);
+        }
+    }
 
     // Commands with native ziggit implementations
     if (std.mem.eql(u8, command, "init")) {
@@ -737,6 +753,142 @@ fn forwardVersionToGit(allocator: std.mem.Allocator, all_args: [][]const u8, pla
 }
 
 fn forwardToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_impl: *const platform_mod.Platform) !void {
+    // Check if -h or --help-all is in the args (after global flags and command name).
+    // In git 2.47+, -h outputs to stdout and --help-all works outside a repo.
+    // In git 2.43, -h goes to stderr and --help-all fails outside a repo.
+    // We fix this by capturing output and ensuring correct behavior.
+    var has_help_flag = false;
+    var has_help_all = false;
+    var past_command = false;
+    for (all_args) |arg| {
+        if (!past_command) {
+            // Skip global flags like -C, -c, --git-dir etc
+            if (!std.mem.startsWith(u8, arg, "-")) {
+                past_command = true;
+                continue;
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "-h")) {
+            has_help_flag = true;
+            break;
+        }
+        if (std.mem.eql(u8, arg, "--help-all")) {
+            has_help_all = true;
+            break;
+        }
+    }
+
+    if (has_help_flag or has_help_all) {
+        // For -h: git 2.43 sends output to stderr; we redirect to stdout for 2.47 compat
+        // For --help-all: git 2.43 fails outside a repo; we fall back to -h
+        var argv = std.ArrayList([]const u8).init(allocator);
+        defer argv.deinit();
+        
+        try argv.append(findRealGit());
+        for (all_args) |arg| {
+            if (has_help_all and std.mem.eql(u8, arg, "--help-all")) {
+                // Try --help-all first, fall back to -h if it fails
+                try argv.append("--help-all");
+            } else {
+                try argv.append(arg);
+            }
+        }
+        
+        var child = std.process.Child.init(argv.items, allocator);
+        child.stdin_behavior = .Ignore;
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
+        
+        _ = child.spawn() catch |err| switch (err) {
+            error.FileNotFound => {
+                try platform_impl.writeStderr("ziggit: git is not installed.\n");
+                std.process.exit(1);
+            },
+            else => {
+                const msg = try std.fmt.allocPrint(allocator, "ziggit: failed to execute git: {}\n", .{err});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(1);
+            },
+        };
+        const stdout_data = child.stdout.?.reader().readAllAlloc(allocator, 4 * 1024 * 1024) catch "";
+        defer allocator.free(stdout_data);
+        const stderr_data = child.stderr.?.reader().readAllAlloc(allocator, 4 * 1024 * 1024) catch "";
+        defer allocator.free(stderr_data);
+        const term = try child.wait();
+        
+        var exit_code: u8 = switch (term) {
+            .Exited => |code| @intCast(code),
+            .Signal => 128,
+            .Stopped => 128,
+            .Unknown => 1,
+        };
+        
+        // Check if --help-all failed (exit 128 = not in repo). Fall back to -h.
+        if (has_help_all and exit_code == 128) {
+            var argv2 = std.ArrayList([]const u8).init(allocator);
+            defer argv2.deinit();
+            try argv2.append(findRealGit());
+            for (all_args) |arg| {
+                if (std.mem.eql(u8, arg, "--help-all")) {
+                    try argv2.append("-h");
+                } else {
+                    try argv2.append(arg);
+                }
+            }
+            var child2 = std.process.Child.init(argv2.items, allocator);
+            child2.stdin_behavior = .Ignore;
+            child2.stdout_behavior = .Pipe;
+            child2.stderr_behavior = .Pipe;
+            _ = child2.spawn() catch {
+                std.process.exit(1);
+            };
+            const stdout2 = child2.stdout.?.reader().readAllAlloc(allocator, 4 * 1024 * 1024) catch "";
+            defer allocator.free(stdout2);
+            const stderr2 = child2.stderr.?.reader().readAllAlloc(allocator, 4 * 1024 * 1024) catch "";
+            defer allocator.free(stderr2);
+            const term2 = try child2.wait();
+            
+            // Output everything to stdout (git 2.47 sends -h output to stdout)
+            if (stdout2.len > 0) try platform_impl.writeStdout(stdout2);
+            if (stderr2.len > 0) try platform_impl.writeStdout(stderr2);
+            
+            exit_code = switch (term2) {
+                .Exited => |code| @intCast(code),
+                .Signal => 128,
+                .Stopped => 128,
+                .Unknown => 1,
+            };
+            // Ensure exit 129 for help output
+            if (exit_code == 0 or exit_code == 129) {
+                std.process.exit(129);
+            }
+            std.process.exit(exit_code);
+        }
+        
+        // Output stdout first, then stderr content to stdout (for -h and --help-all compat)
+        // In git 2.47+, both -h and --help-all output to stdout. In git 2.43, they go to stderr.
+        if (stdout_data.len > 0) try platform_impl.writeStdout(stdout_data);
+        if (stderr_data.len > 0) {
+            // For -h and --help-all: stderr contains usage info in git 2.43, redirect to stdout
+            if (has_help_flag or has_help_all) {
+                try platform_impl.writeStdout(stderr_data);
+            } else {
+                try platform_impl.writeStderr(stderr_data);
+            }
+        }
+        
+        // Ensure exit 129 for help output
+        if (has_help_flag and (exit_code == 0 or exit_code == 129)) {
+            std.process.exit(129);
+        }
+        if (has_help_all and (exit_code == 0 or exit_code == 129)) {
+            std.process.exit(129);
+        }
+        std.process.exit(exit_code);
+    }
+
     // Build argv array with git as argv[0] and all original args after that
     var argv = std.array_list.Managed([]const u8).init(allocator);
     defer argv.deinit();
