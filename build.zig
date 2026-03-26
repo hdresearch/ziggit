@@ -82,7 +82,17 @@ pub fn build(b: *std.Build) void {
     });
     const run_enhanced_git_interop_test = b.addRunArtifact(enhanced_git_interop_test);
 
-    // Note: comprehensive_git_interop_test exists but excluded for now due to execution issues
+    // Comprehensive git interoperability test
+    const comprehensive_git_interop_test = b.addExecutable(.{
+        .name = "comprehensive_git_interop_test",
+        .root_source_file = b.path("test/comprehensive_git_interop_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_comprehensive_git_interop_test = b.addRunArtifact(comprehensive_git_interop_test);
+    
+    const comprehensive_interop_step = b.step("comprehensive-interop", "Run comprehensive git interoperability test");
+    comprehensive_interop_step.dependOn(&run_comprehensive_git_interop_test.step);
 
     // Tool compatibility test (critical for bun/npm workflows)
     const tool_compat_test = b.addExecutable(.{
@@ -164,6 +174,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_platform_tests.step);
     test_step.dependOn(&run_git_interop_test.step);
     test_step.dependOn(&run_enhanced_git_interop_test.step);
+    test_step.dependOn(&run_comprehensive_git_interop_test.step);
     test_step.dependOn(&run_tool_compat_test.step);
     test_step.dependOn(&run_index_format_test.step);
     test_step.dependOn(&run_object_format_test.step);
