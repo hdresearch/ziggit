@@ -659,4 +659,67 @@ pub fn build(b: *std.Build) void {
     // Install the final benchmark executable
     const install_final_benchmark = b.addInstallArtifact(final_benchmark_exe, .{});
     bench_final_step.dependOn(&install_final_benchmark.step);
+
+    // Bun-focused benchmark (ziggit library vs git CLI for bun's critical operations)
+    const bun_focused_bench_exe = b.addExecutable(.{
+        .name = "bun-focused-bench",
+        .root_source_file = b.path("benchmarks/bun_focused_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    // Link the static library for C integration testing
+    bun_focused_bench_exe.linkLibrary(lib_static);
+    bun_focused_bench_exe.linkLibC();
+    bun_focused_bench_exe.addIncludePath(b.path("src/lib"));
+
+    const run_bun_focused_bench = b.addRunArtifact(bun_focused_bench_exe);
+
+    const bench_step = b.step("bench-bun-focused", "Run focused benchmark for bun integration (ziggit library vs git CLI)");
+    bench_step.dependOn(&run_bun_focused_bench.step);
+
+    // Install the bun-focused benchmark executable
+    const install_bun_focused_bench = b.addInstallArtifact(bun_focused_bench_exe, .{});
+    bench_step.dependOn(&install_bun_focused_bench.step);
+
+    // Pure ziggit benchmark (pure Zig API, no C library)
+    const pure_ziggit_bench_exe = b.addExecutable(.{
+        .name = "pure-ziggit-bench",
+        .root_source_file = b.path("benchmarks/pure_ziggit_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    pure_ziggit_bench_exe.root_module.addImport("ziggit", ziggit_module);
+
+    const run_pure_ziggit_bench = b.addRunArtifact(pure_ziggit_bench_exe);
+
+    const bench_pure_ziggit_step = b.step("bench-pure-ziggit", "Run pure Zig API benchmark (ziggit vs git CLI)");
+    bench_pure_ziggit_step.dependOn(&run_pure_ziggit_bench.step);
+
+    // Install the pure ziggit benchmark executable
+    const install_pure_ziggit_bench = b.addInstallArtifact(pure_ziggit_bench_exe, .{});
+    bench_pure_ziggit_step.dependOn(&install_pure_ziggit_bench.step);
+
+    // Final working benchmark (comprehensive ziggit vs git CLI)
+    const final_working_bench_exe = b.addExecutable(.{
+        .name = "final-working-bench",
+        .root_source_file = b.path("benchmarks/final_working_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    // Link the static library for C integration testing
+    final_working_bench_exe.linkLibrary(lib_static);
+    final_working_bench_exe.linkLibC();
+    final_working_bench_exe.addIncludePath(b.path("src/lib"));
+
+    const run_final_working_bench = b.addRunArtifact(final_working_bench_exe);
+
+    const final_bench_step = b.step("bench-final-working", "Run comprehensive benchmark (ziggit library vs git CLI)");
+    final_bench_step.dependOn(&run_final_working_bench.step);
+
+    // Install the final working benchmark executable
+    const install_final_working_bench = b.addInstallArtifact(final_working_bench_exe, .{});
+    final_bench_step.dependOn(&install_final_working_bench.step);
 }
