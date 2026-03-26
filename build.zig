@@ -216,6 +216,22 @@ pub fn build(b: *std.Build) void {
     });
     edge_cases_tests.root_module.addImport("ziggit", ziggit_module);
 
+    // Index parser unit tests
+    const index_parser_unit_tests = b.addTest(.{
+        .root_source_file = b.path("test/index_parser_unit_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    index_parser_unit_tests.root_module.addImport("ziggit", ziggit_module);
+
+    // Status detection tests
+    const status_detection_tests = b.addTest(.{
+        .root_source_file = b.path("test/status_detection_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    status_detection_tests.root_module.addImport("ziggit", ziggit_module);
+
     // Test step - runs all unit tests and integration tests
     const test_step = b.step("test", "Run all unit tests and integration tests");
     test_step.dependOn(&b.addRunArtifact(platform_unit_tests).step);
@@ -243,6 +259,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(object_integrity_tests).step);
     test_step.dependOn(&b.addRunArtifact(index_roundtrip_tests).step);
     test_step.dependOn(&b.addRunArtifact(edge_cases_tests).step);
+    test_step.dependOn(&b.addRunArtifact(index_parser_unit_tests).step);
+    test_step.dependOn(&b.addRunArtifact(status_detection_tests).step);
 
     // E2E validation: ziggit writes, git reads
     const ziggit_writes_test = b.addTest(.{
