@@ -21,9 +21,9 @@ const GitError = error{
 
 
 const NATIVE_COMMANDS = [_][]const u8{ 
-    "init", "status", "add", "commit", "log", "diff", "branch", 
+    "init", "add", "commit", "log", "branch", 
     "checkout", "merge", "fetch", "pull", "push", "clone", "config", 
-    "rev-parse", "describe", "tag", "show", "cat-file", "rev-list", "remote", "reset", "rm", "ls-files", "--version", "-v", "--version-info", 
+    "rev-parse", "tag", "--version", "-v", "--version-info", 
     "--help", "-h", "help" 
 };
 
