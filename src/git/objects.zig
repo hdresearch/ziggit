@@ -243,7 +243,7 @@ fn loadFromPackFiles(hash_str: []const u8, git_dir: []const u8, platform_impl: a
     
     // Performance optimization: Use hash prefix for quick filtering
     const hash_prefix = hash_str[0..2];
-    const hash_prefix_int = std.fmt.parseInt(u8, hash_prefix, 16) catch 0;
+    _ = std.fmt.parseInt(u8, hash_prefix, 16) catch 0;
     
     const pack_dir_path = try std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir});
     defer allocator.free(pack_dir_path);
