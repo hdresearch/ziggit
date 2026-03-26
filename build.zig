@@ -614,6 +614,17 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(pack_internals_groundtruth_tests).step);
 
+    // Pack clone pipeline tests (end-to-end clone/fetch simulation)
+    const pack_clone_pipeline_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_clone_pipeline_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_clone_pipeline_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(pack_clone_pipeline_tests).step);
+
     // Pack full roundtrip tests (delta, all object types, git cross-validation, saveReceivedPack+load)
     const pack_full_roundtrip_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_full_roundtrip_test.zig"),
