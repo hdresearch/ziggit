@@ -315,6 +315,9 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
             try forwardCmdToGit(allocator, all_original_args.items, &platform_impl);
         }
     // Commands that forward to real git for full compatibility
+    } else if (std.mem.eql(u8, command, "clone")) {
+        // Use our native clone implementation (supports --depth for shallow clones)
+        try cmdClone(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "commit") or
         std.mem.eql(u8, command, "log") or
         std.mem.eql(u8, command, "diff") or
@@ -324,7 +327,6 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         std.mem.eql(u8, command, "fetch") or
         std.mem.eql(u8, command, "pull") or
         std.mem.eql(u8, command, "push") or
-        std.mem.eql(u8, command, "clone") or
         std.mem.eql(u8, command, "rev-parse") or
         std.mem.eql(u8, command, "describe") or
         std.mem.eql(u8, command, "tag") or
@@ -3516,22 +3518,47 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     // Check flags
     var is_bare = false;
     var is_no_checkout = false;
-    for (all_args.items) |arg| {
-        if (std.mem.eql(u8, arg, "--bare")) is_bare = true;
-        if (std.mem.eql(u8, arg, "--no-checkout")) is_no_checkout = true;
+    var clone_depth: u32 = 0;
+    {
+        var i: usize = 0;
+        while (i < all_args.items.len) : (i += 1) {
+            const arg = all_args.items[i];
+            if (std.mem.eql(u8, arg, "--bare")) is_bare = true;
+            if (std.mem.eql(u8, arg, "--no-checkout")) is_no_checkout = true;
+            if (std.mem.eql(u8, arg, "--depth")) {
+                if (i + 1 < all_args.items.len) {
+                    clone_depth = std.fmt.parseInt(u32, all_args.items[i + 1], 10) catch 0;
+                    i += 1; // skip the value
+                }
+            } else if (std.mem.startsWith(u8, arg, "--depth=")) {
+                clone_depth = std.fmt.parseInt(u32, arg["--depth=".len..], 10) catch 0;
+            }
+        }
     }
 
     // For --bare with HTTPS URLs, use our native smart HTTP clone
     if (is_bare) {
-        // Find the URL in args
+        // Find the URL in args (skip flags and their values)
         var clone_url: ?[]const u8 = null;
         var clone_target: ?[]const u8 = null;
-        for (all_args.items) |arg| {
-            if (std.mem.startsWith(u8, arg, "-")) continue;
-            if (clone_url == null) {
-                clone_url = arg;
-            } else if (clone_target == null) {
-                clone_target = arg;
+        {
+            var i: usize = 0;
+            while (i < all_args.items.len) : (i += 1) {
+                const arg = all_args.items[i];
+                if (std.mem.eql(u8, arg, "--depth") or std.mem.eql(u8, arg, "-b") or
+                    std.mem.eql(u8, arg, "--branch") or std.mem.eql(u8, arg, "--origin") or
+                    std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--reference") or
+                    std.mem.eql(u8, arg, "--separate-git-dir"))
+                {
+                    i += 1; // skip the next arg (value)
+                    continue;
+                }
+                if (std.mem.startsWith(u8, arg, "-")) continue;
+                if (clone_url == null) {
+                    clone_url = arg;
+                } else if (clone_target == null) {
+                    clone_target = arg;
+                }
             }
         }
 
@@ -3555,12 +3582,20 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
                 try platform_impl.writeStderr(clone_msg);
 
                 const ziggit = @import("ziggit.zig");
-                var repo = ziggit.Repository.cloneBare(allocator, url_val, final_target) catch |err| {
-                    const emsg = try std.fmt.allocPrint(allocator, "fatal: {}\n", .{err});
-                    defer allocator.free(emsg);
-                    try platform_impl.writeStderr(emsg);
-                    std.process.exit(128);
-                };
+                var repo = if (clone_depth > 0)
+                    ziggit.Repository.cloneBareShallow(allocator, url_val, final_target, clone_depth) catch |err| {
+                        const emsg = try std.fmt.allocPrint(allocator, "fatal: {}\n", .{err});
+                        defer allocator.free(emsg);
+                        try platform_impl.writeStderr(emsg);
+                        std.process.exit(128);
+                    }
+                else
+                    ziggit.Repository.cloneBare(allocator, url_val, final_target) catch |err| {
+                        const emsg = try std.fmt.allocPrint(allocator, "fatal: {}\n", .{err});
+                        defer allocator.free(emsg);
+                        try platform_impl.writeStderr(emsg);
+                        std.process.exit(128);
+                    };
                 repo.close();
                 return;
             }
@@ -3714,8 +3749,21 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     var url: ?[]const u8 = null;
     var target_dir: ?[]const u8 = null;
 
-    for (all_args.items) |arg| {
-        if (!std.mem.startsWith(u8, arg, "-")) {
+    {
+        var i: usize = 0;
+        while (i < all_args.items.len) : (i += 1) {
+            const arg = all_args.items[i];
+            // Skip flags that take a value argument
+            if (std.mem.eql(u8, arg, "--depth") or std.mem.eql(u8, arg, "-b") or
+                std.mem.eql(u8, arg, "--branch") or std.mem.eql(u8, arg, "--origin") or
+                std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--reference") or
+                std.mem.eql(u8, arg, "--separate-git-dir") or std.mem.eql(u8, arg, "-j") or
+                std.mem.eql(u8, arg, "--jobs") or std.mem.eql(u8, arg, "--filter"))
+            {
+                i += 1; // skip value
+                continue;
+            }
+            if (std.mem.startsWith(u8, arg, "-")) continue;
             if (url == null) {
                 url = arg;
             } else if (target_dir == null) {
@@ -3772,14 +3820,23 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             else => return err,
         };
 
-        // Clone bare into .git subdirectory
-        var repo = ziggit.Repository.cloneBare(allocator, url.?, bare_target) catch |err| {
-            std.fs.cwd().deleteTree(final_target_dir) catch {};
-            const emsg = try std.fmt.allocPrint(allocator, "fatal: {}\n", .{err});
-            defer allocator.free(emsg);
-            try platform_impl.writeStderr(emsg);
-            std.process.exit(128);
-        };
+        // Clone bare into .git subdirectory (with optional shallow depth)
+        var repo = if (clone_depth > 0)
+            ziggit.Repository.cloneBareShallow(allocator, url.?, bare_target, clone_depth) catch |err| {
+                std.fs.cwd().deleteTree(final_target_dir) catch {};
+                const emsg = try std.fmt.allocPrint(allocator, "fatal: {}\n", .{err});
+                defer allocator.free(emsg);
+                try platform_impl.writeStderr(emsg);
+                std.process.exit(128);
+            }
+        else
+            ziggit.Repository.cloneBare(allocator, url.?, bare_target) catch |err| {
+                std.fs.cwd().deleteTree(final_target_dir) catch {};
+                const emsg = try std.fmt.allocPrint(allocator, "fatal: {}\n", .{err});
+                defer allocator.free(emsg);
+                try platform_impl.writeStderr(emsg);
+                std.process.exit(128);
+            };
         repo.close();
 
         // Convert bare repo to non-bare: update config to set bare = false

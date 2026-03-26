@@ -29,6 +29,7 @@ pub const CloneResult = struct {
     refs: []Ref,
     capabilities: []const u8,
     pack_data: []u8,
+    shallow_commits: []Oid,
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *CloneResult) void {
@@ -38,6 +39,7 @@ pub const CloneResult = struct {
         self.allocator.free(self.refs);
         self.allocator.free(self.capabilities);
         self.allocator.free(self.pack_data);
+        self.allocator.free(self.shallow_commits);
     }
 };
 
@@ -155,11 +157,20 @@ pub fn writeFlushPkt() []const u8 {
 }
 
 /// Build the request body for git-upload-pack.
+/// If depth > 0, sends "deepen N" for shallow clone support.
 pub fn buildUploadPackRequest(allocator: std.mem.Allocator, wants: []const Oid, haves: []const Oid) ![]u8 {
+    return buildUploadPackRequestWithDepth(allocator, wants, haves, 0);
+}
+
+pub fn buildUploadPackRequestWithDepth(allocator: std.mem.Allocator, wants: []const Oid, haves: []const Oid, depth: u32) ![]u8 {
     var body = std.ArrayList(u8).init(allocator);
     errdefer body.deinit();
 
-    const capabilities = "multi_ack_detailed thin-pack side-band-64k ofs-delta";
+    // Include "shallow" and "deepen-since" in capabilities when doing shallow clone
+    const capabilities = if (depth > 0)
+        "multi_ack_detailed thin-pack side-band-64k ofs-delta shallow deepen-since deepen-not"
+    else
+        "multi_ack_detailed thin-pack side-band-64k ofs-delta";
 
     for (wants, 0..) |want, i| {
         var line_buf: [256]u8 = undefined;
@@ -175,7 +186,18 @@ pub fn buildUploadPackRequest(allocator: std.mem.Allocator, wants: []const Oid, 
         try body.appendSlice(line);
     }
 
-    // Flush after wants
+    // Send deepen command before flush if depth is specified
+    if (depth > 0) {
+        var deepen_buf: [64]u8 = undefined;
+        const deepen_line = std.fmt.bufPrint(&deepen_buf, "deepen {d}\n", .{depth}) catch unreachable;
+        const deepen_pkt_len = deepen_line.len + 4;
+        var deepen_hdr: [4]u8 = undefined;
+        _ = std.fmt.bufPrint(&deepen_hdr, "{x:0>4}", .{deepen_pkt_len}) catch unreachable;
+        try body.appendSlice(&deepen_hdr);
+        try body.appendSlice(deepen_line);
+    }
+
+    // Flush after wants (and deepen)
     try body.appendSlice("0000");
 
     // Haves
@@ -448,6 +470,40 @@ fn fetchPackWithClient(allocator: std.mem.Allocator, client: ?*std.http.Client, 
     return parseFetchPackResponse(allocator, response);
 }
 
+/// Result of a shallow fetch containing pack data and shallow boundary commits
+pub const ShallowFetchResult = struct {
+    pack_data: []u8,
+    shallow_commits: []Oid,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *ShallowFetchResult) void {
+        self.allocator.free(self.pack_data);
+        self.allocator.free(self.shallow_commits);
+    }
+};
+
+pub fn fetchPackShallow(allocator: std.mem.Allocator, url: []const u8, wants: []const Oid, haves: []const Oid, depth: u32) !ShallowFetchResult {
+    return fetchPackShallowWithClient(allocator, null, url, wants, haves, depth);
+}
+
+fn fetchPackShallowWithClient(allocator: std.mem.Allocator, client: ?*std.http.Client, url: []const u8, wants: []const Oid, haves: []const Oid, depth: u32) !ShallowFetchResult {
+    var base = url;
+    while (base.len > 0 and base[base.len - 1] == '/') {
+        base = base[0 .. base.len - 1];
+    }
+
+    const post_url = try std.fmt.allocPrint(allocator, "{s}/git-upload-pack", .{base});
+    defer allocator.free(post_url);
+
+    const request_body = try buildUploadPackRequestWithDepth(allocator, wants, haves, depth);
+    defer allocator.free(request_body);
+
+    const response = try httpPostWithClient(allocator, client, post_url, request_body, "application/x-git-upload-pack-request");
+    defer allocator.free(response);
+
+    return parseShallowFetchPackResponse(allocator, response);
+}
+
 /// Parse the response from POST /git-upload-pack.
 /// Handles side-band-64k demuxing.
 pub fn parseFetchPackResponse(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
@@ -517,6 +573,93 @@ pub fn parseFetchPackResponse(allocator: std.mem.Allocator, data: []const u8) ![
     return result;
 }
 
+/// Parse fetch response that may contain shallow lines.
+/// Returns pack data and any shallow boundary commit OIDs.
+pub fn parseShallowFetchPackResponse(allocator: std.mem.Allocator, data: []const u8) !ShallowFetchResult {
+    var pack_data = std.ArrayList(u8).init(allocator);
+    errdefer pack_data.deinit();
+    var shallow_commits = std.ArrayList(Oid).init(allocator);
+    errdefer shallow_commits.deinit();
+
+    var offset: usize = 0;
+    var using_sideband = false;
+
+    while (offset < data.len) {
+        const result = parsePktLine(data[offset..]) catch break;
+        offset += result.consumed;
+
+        if (result.pkt.line_type == .flush) continue;
+        if (result.pkt.line_type == .delim) continue;
+
+        const payload = result.pkt.data;
+        if (payload.len == 0) continue;
+
+        // Check for NAK/ACK lines
+        if (std.mem.startsWith(u8, payload, "NAK")) continue;
+        if (std.mem.startsWith(u8, payload, "ACK")) continue;
+
+        // Parse "shallow <hash>\n" lines from the server response
+        if (std.mem.startsWith(u8, payload, "shallow ")) {
+            const rest = payload["shallow ".len..];
+            // Strip trailing newline
+            const hash_str = if (rest.len > 0 and rest[rest.len - 1] == '\n')
+                rest[0 .. rest.len - 1]
+            else
+                rest;
+            if (hash_str.len >= 40) {
+                try shallow_commits.append(hash_str[0..40].*);
+            }
+            continue;
+        }
+
+        // Skip "unshallow" lines (used when deepening)
+        if (std.mem.startsWith(u8, payload, "unshallow ")) continue;
+
+        // Side-band demuxing: first byte is channel
+        const channel = payload[0];
+        if (channel == 1) {
+            using_sideband = true;
+            try pack_data.appendSlice(payload[1..]);
+        } else if (channel == 2) {
+            using_sideband = true;
+            continue;
+        } else if (channel == 3) {
+            return error.SideBandError;
+        } else if (!using_sideband) {
+            try pack_data.appendSlice(payload);
+        } else {
+            try pack_data.appendSlice(payload);
+        }
+    }
+
+    if (!using_sideband and offset < data.len) {
+        try pack_data.appendSlice(data[offset..]);
+    }
+
+    const pack_result = try pack_data.toOwnedSlice();
+    if (pack_result.len == 0) {
+        allocator.free(pack_result);
+        return error.NoPackData;
+    }
+
+    // Verify PACK magic, trim prefix junk if needed
+    var final_pack = pack_result;
+    if (pack_result.len < 4 or !std.mem.eql(u8, pack_result[0..4], "PACK")) {
+        if (std.mem.indexOf(u8, pack_result, "PACK")) |pack_start| {
+            if (pack_start > 0) {
+                final_pack = try allocator.dupe(u8, pack_result[pack_start..]);
+                allocator.free(pack_result);
+            }
+        }
+    }
+
+    return .{
+        .pack_data = final_pack,
+        .shallow_commits = try shallow_commits.toOwnedSlice(),
+        .allocator = allocator,
+    };
+}
+
 // ============================================================================
 // clonePack
 // ============================================================================
@@ -565,8 +708,75 @@ pub fn clonePack(allocator: std.mem.Allocator, url: []const u8) !CloneResult {
         .refs = discovery.refs,
         .capabilities = discovery.capabilities,
         .pack_data = pack_data,
+        .shallow_commits = try allocator.alloc(Oid, 0),
         .allocator = allocator,
     };
+}
+
+/// Check if a ref is relevant for shallow clone (HEAD + branches only, no tags).
+/// Tags often point to historical commits which defeats the purpose of shallow clone.
+fn isShallowCloneRelevantRef(name: []const u8) bool {
+    if (std.mem.eql(u8, name, "HEAD")) return true;
+    if (std.mem.startsWith(u8, name, "refs/heads/")) return true;
+    return false;
+}
+
+/// Clone a repository with shallow depth support.
+/// When depth > 0, sends "deepen N" to the server for a shallow clone.
+pub fn clonePackShallow(allocator: std.mem.Allocator, url: []const u8, depth: u32) !CloneResult {
+    var client = std.http.Client{ .allocator = allocator };
+    defer client.deinit();
+
+    const discovery = try discoverRefsWithClient(allocator, &client, url);
+
+    // Collect unique want hashes
+    // For shallow clones, only want HEAD + branches (skip tags to reduce transfer size)
+    var want_set = std.StringHashMap(void).init(allocator);
+    defer want_set.deinit();
+
+    var wants = std.ArrayList(Oid).init(allocator);
+    defer wants.deinit();
+
+    for (discovery.refs) |ref| {
+        const relevant = if (depth > 0)
+            isShallowCloneRelevantRef(ref.name)
+        else
+            isCloneRelevantRef(ref.name);
+        if (!relevant) continue;
+        const hash_str = ref.hash;
+        if (!want_set.contains(&hash_str)) {
+            try want_set.put(try allocator.dupe(u8, &hash_str), {});
+            try wants.append(hash_str);
+        }
+    }
+    defer {
+        var it = want_set.keyIterator();
+        while (it.next()) |key| allocator.free(@constCast(key.*));
+    }
+
+    if (depth > 0) {
+        // Use shallow fetch
+        const shallow_result = try fetchPackShallowWithClient(allocator, &client, url, wants.items, &.{}, depth);
+        // Transfer ownership - don't deinit shallow_result
+
+        return .{
+            .refs = discovery.refs,
+            .capabilities = discovery.capabilities,
+            .pack_data = shallow_result.pack_data,
+            .shallow_commits = shallow_result.shallow_commits,
+            .allocator = allocator,
+        };
+    } else {
+        const pack_data = try fetchPackWithClient(allocator, &client, url, wants.items, &.{});
+
+        return .{
+            .refs = discovery.refs,
+            .capabilities = discovery.capabilities,
+            .pack_data = pack_data,
+            .shallow_commits = try allocator.alloc(Oid, 0),
+            .allocator = allocator,
+        };
+    }
 }
 
 // ============================================================================
