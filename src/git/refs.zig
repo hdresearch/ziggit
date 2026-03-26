@@ -459,6 +459,8 @@ fn isValidHash(hash: []const u8) bool {
     return true;
 }
 
+
+
 /// Resolve annotated tag to commit (if the hash points to a tag object)
 fn resolveAnnotatedTag(git_dir: []const u8, hash: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![]u8 {
     const objects = @import("objects.zig");
