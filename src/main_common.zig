@@ -2769,29 +2769,72 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         try all_args.append(arg);
     }
 
-    // Check if we need to shell out (--bare or --no-checkout present)
-    var should_shell_out = false;
+    // Check flags
+    var is_bare = false;
+    var is_no_checkout = false;
     for (all_args.items) |arg| {
-        if (std.mem.eql(u8, arg, "--bare") or std.mem.eql(u8, arg, "--no-checkout")) {
-            should_shell_out = true;
-            break;
+        if (std.mem.eql(u8, arg, "--bare")) is_bare = true;
+        if (std.mem.eql(u8, arg, "--no-checkout")) is_no_checkout = true;
+    }
+
+    // For --bare with HTTPS URLs, use our native smart HTTP clone
+    if (is_bare) {
+        // Find the URL in args
+        var clone_url: ?[]const u8 = null;
+        var clone_target: ?[]const u8 = null;
+        for (all_args.items) |arg| {
+            if (std.mem.startsWith(u8, arg, "-")) continue;
+            if (clone_url == null) {
+                clone_url = arg;
+            } else if (clone_target == null) {
+                clone_target = arg;
+            }
+        }
+
+        if (clone_url) |url_val| {
+            if (std.mem.startsWith(u8, url_val, "https://") or std.mem.startsWith(u8, url_val, "http://")) {
+                const final_target = clone_target orelse blk: {
+                    if (std.mem.lastIndexOfScalar(u8, url_val, '/')) |last_slash| {
+                        const repo_name = url_val[last_slash + 1..];
+                        if (std.mem.endsWith(u8, repo_name, ".git")) {
+                            break :blk repo_name[0..repo_name.len - 4];
+                        } else {
+                            break :blk repo_name;
+                        }
+                    } else {
+                        break :blk "repository";
+                    }
+                };
+
+                const clone_msg = try std.fmt.allocPrint(allocator, "Cloning into bare repository '{s}'...\n", .{final_target});
+                defer allocator.free(clone_msg);
+                try platform_impl.writeStderr(clone_msg);
+
+                const ziggit = @import("ziggit.zig");
+                var repo = ziggit.Repository.cloneBare(allocator, url_val, final_target) catch |err| {
+                    const emsg = try std.fmt.allocPrint(allocator, "fatal: {}\n", .{err});
+                    defer allocator.free(emsg);
+                    try platform_impl.writeStderr(emsg);
+                    std.process.exit(128);
+                };
+                repo.close();
+                return;
+            }
         }
     }
 
-    if (should_shell_out) {
-        // Shell out to real git with all arguments
+    // Shell out to real git for non-HTTPS --bare/--no-checkout
+    if (is_bare or is_no_checkout) {
         var git_args = std.ArrayList([]const u8).init(allocator);
         defer git_args.deinit();
-        
+
         try git_args.append("git");
         try git_args.append("clone");
-        
-        // Add all the original arguments
+
         for (all_args.items) |arg| {
             try git_args.append(arg);
         }
 
-        // Spawn git process
         var child = std.process.Child.init(git_args.items, allocator);
         const result = child.spawnAndWait() catch |err| {
             const msg = try std.fmt.allocPrint(allocator, "fatal: failed to execute git: {}\n", .{err});
@@ -2799,7 +2842,7 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             try platform_impl.writeStderr(msg);
             std.process.exit(128);
         };
-        
+
         switch (result) {
             .Exited => |code| {
                 if (code != 0) {
