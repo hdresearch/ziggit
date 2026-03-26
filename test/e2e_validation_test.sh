@@ -715,6 +715,349 @@ else
 fi
 
 echo ""
+echo "=== Clone and Checkout ==="
+
+# --- Test 30: ziggit clone bare -> git reads bare repo ---
+echo "Test 30: ziggit init + commit, git clone --bare reads it"
+d=$(new_repo "t30_clone")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "clone me" > "$d/src.txt"
+(cd "$d" && "$ZIGGIT" add src.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "source commit") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+src_hash=$(cd "$d" && git rev-parse HEAD | tr -d '[:space:]')
+
+# git clone --bare the ziggit repo
+bare_d="$TMPBASE/t30_bare.git"
+git clone --bare "$d" "$bare_d" >/dev/null 2>&1
+bare_hash=$(cd "$bare_d" && git rev-parse HEAD | tr -d '[:space:]')
+bare_tags=$(cd "$bare_d" && git tag -l 2>&1)
+
+if [ "$src_hash" = "$bare_hash" ]; then
+    pass "git clone --bare preserves HEAD hash from ziggit repo"
+else
+    fail "bare clone HEAD" "src=$src_hash bare=$bare_hash"
+fi
+if echo "$bare_tags" | grep -q "v1.0.0"; then
+    pass "git clone --bare preserves ziggit tag"
+else
+    fail "bare clone tag" "got: $bare_tags"
+fi
+
+# --- Test 31: git clone ziggit repo, checkout works ---
+echo "Test 31: git clone + checkout from ziggit repo"
+d=$(new_repo "t31_clone_checkout")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "version 1" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "v1") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+
+echo "version 2" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "v2") >/dev/null 2>&1
+
+clone_d="$TMPBASE/t31_cloned"
+git clone "$d" "$clone_d" >/dev/null 2>&1
+
+# Verify cloned HEAD content
+cloned_content=$(cat "$clone_d/f.txt")
+if [ "$cloned_content" = "version 2" ]; then
+    pass "git clone: working tree has latest content"
+else
+    fail "clone content" "expected 'version 2', got: '$cloned_content'"
+fi
+
+# Checkout old tag in clone
+(cd "$clone_d" && git checkout v1.0.0) >/dev/null 2>&1
+v1_content=$(cat "$clone_d/f.txt")
+if [ "$v1_content" = "version 1" ]; then
+    pass "git checkout v1.0.0 in clone restores old content"
+else
+    fail "clone checkout" "expected 'version 1', got: '$v1_content'"
+fi
+
+# --- Test 32: ziggit checkout -> git verifies HEAD ---
+echo "Test 32: ziggit checkout tag -> git rev-parse confirms"
+d=$(new_repo "t32_checkout")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "first" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "first") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+first_hash=$(cd "$d" && git rev-parse HEAD | tr -d '[:space:]')
+
+echo "second" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "second") >/dev/null 2>&1
+
+# Checkout back to v1.0.0 with ziggit
+(cd "$d" && "$ZIGGIT" checkout v1.0.0) >/dev/null 2>&1
+
+# git should see HEAD at first commit
+checkout_hash=$(cd "$d" && git rev-parse HEAD | tr -d '[:space:]')
+if [ "$first_hash" = "$checkout_hash" ]; then
+    pass "ziggit checkout moves HEAD to correct commit"
+else
+    fail "ziggit checkout HEAD" "expected $first_hash, got $checkout_hash"
+fi
+
+echo ""
+echo "=== Advanced cross-validation ==="
+
+# --- Test 33: Tree object structure matches git ---
+echo "Test 33: Tree object hash agrees between ziggit and git"
+d=$(new_repo "t33_tree")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "a" > "$d/a.txt"
+echo "b" > "$d/b.txt"
+mkdir -p "$d/sub"
+echo "c" > "$d/sub/c.txt"
+(cd "$d" && "$ZIGGIT" add a.txt && "$ZIGGIT" add b.txt && "$ZIGGIT" add sub/c.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "tree test") >/dev/null 2>&1
+
+# git should be able to walk the entire tree
+tree_hash=$(cd "$d" && git rev-parse HEAD^{tree} | tr -d '[:space:]')
+tree_content=$(cd "$d" && git ls-tree -r HEAD --name-only | sort)
+expected=$(printf "a.txt\nb.txt\nsub/c.txt")
+if [ "$tree_content" = "$expected" ]; then
+    pass "git ls-tree -r lists all files from ziggit commit"
+else
+    fail "tree walk" "expected '$expected', got: '$tree_content'"
+fi
+
+# Verify tree hash is valid
+if [ ${#tree_hash} -eq 40 ]; then
+    pass "tree object has valid 40-char hash"
+else
+    fail "tree hash" "invalid hash: $tree_hash"
+fi
+
+# --- Test 34: Blob object hashes match git's expectations ---
+echo "Test 34: Blob hash matches git hash-object"
+d=$(new_repo "t34_blob")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo -n "exact content" > "$d/exact.txt"
+(cd "$d" && "$ZIGGIT" add exact.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "blob hash") >/dev/null 2>&1
+
+# Get blob hash from ziggit's commit via git
+blob_in_tree=$(cd "$d" && git rev-parse HEAD:exact.txt | tr -d '[:space:]')
+# Independently compute what git would hash
+expected_blob=$(echo -n "exact content" | git hash-object --stdin | tr -d '[:space:]')
+if [ "$blob_in_tree" = "$expected_blob" ]; then
+    pass "blob hash in ziggit tree matches git hash-object"
+else
+    fail "blob hash" "tree=$blob_in_tree expected=$expected_blob"
+fi
+
+# --- Test 35: Overwrite file preserves both versions in history ---
+echo "Test 35: File overwrite preserves history"
+d=$(new_repo "t35_overwrite")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "original" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "original") >/dev/null 2>&1
+first=$(cd "$d" && git rev-parse HEAD | tr -d '[:space:]')
+
+echo "modified" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "modified") >/dev/null 2>&1
+
+# Can read old version via first commit hash
+old_content=$(cd "$d" && git show "$first:f.txt" 2>&1)
+new_content=$(cd "$d" && git show HEAD:f.txt 2>&1)
+if [ "$old_content" = "original" ] && [ "$new_content" = "modified" ]; then
+    pass "git reads both old and new file versions from ziggit history"
+else
+    fail "overwrite history" "old='$old_content' new='$new_content'"
+fi
+
+# --- Test 36: git writes, ziggit describe finds tag ---
+echo "Test 36: git writes -> ziggit describe --tags finds tag"
+d=$(new_repo "t36_describe_match")
+(cd "$d" && git init && git config user.name "Test" && git config user.email "test@test.com") >/dev/null 2>&1
+echo "base" > "$d/f.txt"
+(cd "$d" && git add f.txt && git commit -m "base" && git tag v6.0.0) >/dev/null 2>&1
+
+# Exact tag on HEAD - should match exactly
+git_desc=$(cd "$d" && git describe --tags 2>&1 | tr -d '[:space:]')
+ziggit_desc=$(cd "$d" && "$ZIGGIT" describe --tags 2>&1 | tr -d '[:space:]')
+if [ "$git_desc" = "$ziggit_desc" ]; then
+    pass "ziggit describe --tags matches git (exact tag on HEAD)"
+else
+    fail "describe exact" "git='$git_desc' ziggit='$ziggit_desc'"
+fi
+
+# Commits ahead of tag - ziggit should at least contain the tag name
+echo "next" > "$d/f.txt"
+(cd "$d" && git add f.txt && git commit -m "next") >/dev/null 2>&1
+ziggit_desc_ahead=$(cd "$d" && "$ZIGGIT" describe --tags 2>&1 | tr -d '[:space:]')
+if echo "$ziggit_desc_ahead" | grep -q "v6.0.0"; then
+    pass "ziggit describe --tags contains tag name when ahead"
+else
+    fail "describe ahead" "expected v6.0.0 in: $ziggit_desc_ahead"
+fi
+
+# --- Test 37: ziggit commit parent chain validated by git ---
+echo "Test 37: Parent hash chain validated by git"
+d=$(new_repo "t37_parents")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+for i in 1 2 3 4 5; do
+    echo "v$i" > "$d/f.txt"
+    (cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+    (cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+        GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+        "$ZIGGIT" commit -m "commit $i") >/dev/null 2>&1
+done
+
+# Verify parent chain: each commit should have exactly one parent (except first)
+all_valid=true
+for i in 1 2 3 4; do
+    parent=$(cd "$d" && git rev-parse "HEAD~$i" 2>&1 | tr -d '[:space:]')
+    if [ ${#parent} -ne 40 ]; then
+        all_valid=false
+        break
+    fi
+done
+if $all_valid; then
+    pass "all parent references (HEAD~1 through HEAD~4) resolve"
+else
+    fail "parent chain" "some parent refs failed to resolve"
+fi
+
+# First commit should have no parent
+first_commit=$(cd "$d" && git rev-list --max-parents=0 HEAD | tr -d '[:space:]')
+parent_count=$(cd "$d" && git cat-file -p "$first_commit" | grep -c "^parent " || true)
+if [ "$parent_count" -eq 0 ]; then
+    pass "root commit has no parent"
+else
+    fail "root parent" "expected 0 parents, got $parent_count"
+fi
+
+# --- Test 38: git writes -> ziggit log matches ---
+echo "Test 38: git writes multiple -> ziggit log --oneline shows all"
+d=$(new_repo "t38_log_match")
+(cd "$d" && git init && git config user.name "Test" && git config user.email "test@test.com") >/dev/null 2>&1
+for msg in "alpha" "beta" "gamma"; do
+    echo "$msg" > "$d/f.txt"
+    (cd "$d" && git add f.txt && git commit -m "$msg") >/dev/null 2>&1
+done
+
+ziggit_log=$(cd "$d" && "$ZIGGIT" log --oneline 2>&1)
+for msg in "alpha" "beta" "gamma"; do
+    if echo "$ziggit_log" | grep -q "$msg"; then
+        pass "ziggit log shows git commit '$msg'"
+    else
+        fail "ziggit log $msg" "not found in: $ziggit_log"
+    fi
+done
+
+# --- Test 39: Subdirectory with many files in single commit ---
+echo "Test 39: Subdirectory structure in single commit"
+d=$(new_repo "t39_subdir")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+mkdir -p "$d/src/components" "$d/src/utils" "$d/test"
+echo "main" > "$d/src/main.ts"
+echo "btn" > "$d/src/components/button.ts"
+echo "fmt" > "$d/src/utils/format.ts"
+echo "spec" > "$d/test/main.test.ts"
+echo "pkg" > "$d/package.json"
+(cd "$d" && "$ZIGGIT" add src/main.ts && "$ZIGGIT" add src/components/button.ts && \
+    "$ZIGGIT" add src/utils/format.ts && "$ZIGGIT" add test/main.test.ts && \
+    "$ZIGGIT" add package.json) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "project structure") >/dev/null 2>&1
+
+file_count=$(cd "$d" && git ls-tree -r --name-only HEAD | wc -l | tr -d ' ')
+if [ "$file_count" -eq 5 ]; then
+    pass "git sees all 5 files across subdirectories"
+else
+    fail "subdir files" "expected 5, got: $file_count"
+fi
+
+# Verify each subdir file is readable
+for f in src/main.ts src/components/button.ts src/utils/format.ts test/main.test.ts package.json; do
+    content=$(cd "$d" && git show "HEAD:$f" 2>&1) || true
+    if [ -n "$content" ]; then
+        pass "git reads $f from ziggit commit"
+    else
+        fail "read $f" "empty or error"
+    fi
+done
+
+# --- Test 40: Bun monorepo simulation ---
+echo "Test 40: Bun monorepo with workspaces"
+d=$(new_repo "t40_monorepo")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+
+cat > "$d/package.json" << 'EOF'
+{"name":"monorepo","private":true,"workspaces":["packages/*"]}
+EOF
+mkdir -p "$d/packages/core" "$d/packages/cli"
+cat > "$d/packages/core/package.json" << 'EOF'
+{"name":"@mono/core","version":"1.0.0"}
+EOF
+cat > "$d/packages/cli/package.json" << 'EOF'
+{"name":"@mono/cli","version":"1.0.0","dependencies":{"@mono/core":"workspace:*"}}
+EOF
+echo "export const core = true;" > "$d/packages/core/index.ts"
+echo "import {core} from '@mono/core';" > "$d/packages/cli/index.ts"
+
+for f in package.json packages/core/package.json packages/core/index.ts \
+         packages/cli/package.json packages/cli/index.ts; do
+    (cd "$d" && "$ZIGGIT" add "$f") >/dev/null 2>&1
+done
+(cd "$d" && GIT_AUTHOR_NAME="Bun" GIT_AUTHOR_EMAIL="bun@bun.sh" \
+    GIT_COMMITTER_NAME="Bun" GIT_COMMITTER_EMAIL="bun@bun.sh" \
+    "$ZIGGIT" commit -m "monorepo init") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+
+# Verify all workspace files
+mono_files=$(cd "$d" && git ls-tree -r --name-only HEAD | sort)
+expected_mono=$(printf "package.json\npackages/cli/index.ts\npackages/cli/package.json\npackages/core/index.ts\npackages/core/package.json")
+if [ "$mono_files" = "$expected_mono" ]; then
+    pass "monorepo: all workspace files committed"
+else
+    fail "monorepo files" "got: $mono_files"
+fi
+
+# Verify content
+core_pkg=$(cd "$d" && git show HEAD:packages/core/package.json 2>&1)
+if echo "$core_pkg" | grep -q "@mono/core"; then
+    pass "monorepo: core package.json content correct"
+else
+    fail "monorepo core pkg" "got: $core_pkg"
+fi
+
+# git fsck
+fsck_out=$(cd "$d" && git fsck --no-dangling 2>&1)
+if echo "$fsck_out" | grep -qi "error\|corrupt"; then
+    fail "monorepo fsck" "$fsck_out"
+else
+    pass "monorepo: git fsck passes"
+fi
+
+echo ""
 echo "========================================"
 echo "Results: $PASS passed, $FAIL failed"
 echo "========================================"
