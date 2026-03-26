@@ -459,7 +459,7 @@ fn isValidHash(hash: []const u8) bool {
     return true;
 }
 
-fn isValidRefName(ref_name: []const u8) bool {
+fn isValidRefNameStrict(ref_name: []const u8) bool {
     if (ref_name.len == 0) return false;
     if (ref_name.len > 1024) return false; // Reasonable limit
     
@@ -1589,7 +1589,7 @@ pub const BranchManager = struct {
     /// Create a new branch
     pub fn createBranch(self: BranchManager, branch_name: []const u8, start_point: ?[]const u8, platform_impl: anytype) !void {
         // Validate branch name
-        if (!isValidRefName(branch_name)) {
+        if (!isValidRefNameStrict(branch_name)) {
             return error.InvalidBranchName;
         }
         
