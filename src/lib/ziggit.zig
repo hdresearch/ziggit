@@ -1792,32 +1792,57 @@ fn fileExistsInHead(repo_path: []const u8, file_path: []const u8, head_hash_str:
     var tree_hash_hex: [40]u8 = undefined;
     objects_parser.shaToHex(@as([]const u8, &commit_info.tree_sha), &tree_hash_hex);
     
-    // Read tree object
-    var tree_object = objects_parser.readObject(global_allocator, objects_dir, &tree_hash_hex) catch {
-        return false; // Can't read tree
-    };
-    defer tree_object.deinit();
-    
-    if (tree_object.type != .tree) {
-        return false; // Not a tree
-    }
-    
-    // Parse tree to find file
-    var tree_entries = std.ArrayList(objects_parser.TreeEntry).init(global_allocator);
-    defer tree_entries.deinit();
-    
-    objects_parser.parseTree(tree_object.content, &tree_entries) catch {
-        return false; // Can't parse tree
-    };
-    
-    // Check if file exists in tree
-    for (tree_entries.items) |entry| {
-        if (std.mem.eql(u8, entry.name, file_path)) {
-            return true;
+    // Helper function to check if a file exists in a specific tree
+    const checkFileInTree = struct {
+        fn check(objects_dir_: []const u8, tree_hash: []const u8, path_remaining: []const u8) bool {
+            // Read tree object
+            var tree_object = objects_parser.readObject(global_allocator, objects_dir_, tree_hash) catch {
+                return false; // Can't read tree
+            };
+            defer tree_object.deinit();
+            
+            if (tree_object.type != .tree) {
+                return false; // Not a tree
+            }
+            
+            // Parse tree entries
+            var tree_entries = std.ArrayList(objects_parser.TreeEntry).init(global_allocator);
+            defer tree_entries.deinit();
+            
+            objects_parser.parseTree(tree_object.content, &tree_entries) catch {
+                return false; // Can't parse tree
+            };
+            
+            // Split path on first '/' to handle subdirectories
+            const first_slash = std.mem.indexOf(u8, path_remaining, "/");
+            if (first_slash) |slash_pos| {
+                // Path has subdirectories (e.g., "subdir/file.txt")
+                const dir_name = path_remaining[0..slash_pos];
+                const remaining_path = path_remaining[slash_pos + 1..];
+                
+                // Look for the directory in current tree
+                for (tree_entries.items) |entry| {
+                    if (std.mem.eql(u8, entry.name, dir_name)) {
+                        // Found directory, convert SHA to hex and recurse
+                        var subtree_hash_hex: [40]u8 = undefined;
+                        objects_parser.shaToHex(@as([]const u8, &entry.sha1), &subtree_hash_hex);
+                        return check(objects_dir_, &subtree_hash_hex, remaining_path);
+                    }
+                }
+                return false; // Directory not found
+            } else {
+                // No more subdirectories, look for file in current tree
+                for (tree_entries.items) |entry| {
+                    if (std.mem.eql(u8, entry.name, path_remaining)) {
+                        return true; // Found file
+                    }
+                }
+                return false; // File not found
+            }
         }
-    }
+    }.check;
     
-    return false; // File not found in HEAD tree
+    return checkFileInTree(objects_dir, &tree_hash_hex, file_path);
 }
 
 // Check if a path exists in the repository
