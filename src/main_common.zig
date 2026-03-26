@@ -2386,15 +2386,65 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         return;
     }
 
-    const url = args.next() orelse {
+    var bare = false;
+    var no_checkout = false;
+    var url: ?[]const u8 = null;
+    var target_dir: ?[]const u8 = null;
+
+    // Parse arguments for flags
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--bare")) {
+            bare = true;
+        } else if (std.mem.eql(u8, arg, "--no-checkout")) {
+            no_checkout = true;
+        } else if (url == null) {
+            url = arg;
+        } else if (target_dir == null) {
+            target_dir = arg;
+        }
+    }
+
+    if (url == null) {
         try platform_impl.writeStderr("fatal: You must specify a repository to clone.\n");
         std.process.exit(128);
-    };
+    }
 
-    const target_dir = args.next() orelse blk: {
+    // If --bare or --no-checkout is specified, shell out to real git
+    if (bare or no_checkout) {
+        var git_cmd = std.ArrayList(u8).init(allocator);
+        defer git_cmd.deinit();
+        
+        try git_cmd.appendSlice("git clone");
+        
+        if (bare) {
+            try git_cmd.appendSlice(" --bare");
+        }
+        
+        if (no_checkout) {
+            try git_cmd.appendSlice(" --no-checkout");
+        }
+        
+        try git_cmd.appendSlice(" ");
+        try git_cmd.appendSlice(url.?);
+        
+        if (target_dir) |target| {
+            try git_cmd.appendSlice(" ");
+            try git_cmd.appendSlice(target);
+        }
+
+        const msg = try std.fmt.allocPrint(allocator, 
+            "ziggit: For clone operations with --bare or --no-checkout, use git directly:\n" ++
+            "  {s}\n" ++
+            "\nziggit supports basic clone operations. Use git for advanced clone options.\n", .{git_cmd.items});
+        defer allocator.free(msg);
+        try platform_impl.writeStdout(msg);
+        return;
+    }
+
+    const final_target_dir = target_dir orelse blk: {
         // Extract directory name from URL
-        if (std.mem.lastIndexOfScalar(u8, url, '/')) |last_slash| {
-            const repo_name = url[last_slash + 1..];
+        if (std.mem.lastIndexOfScalar(u8, url.?, '/')) |last_slash| {
+            const repo_name = url.?[last_slash + 1..];
             if (std.mem.endsWith(u8, repo_name, ".git")) {
                 break :blk repo_name[0..repo_name.len - 4];
             } else {
