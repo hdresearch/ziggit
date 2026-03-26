@@ -60,6 +60,10 @@ fn testCompleteWorkflowCompatibility(allocator: std.mem.Allocator, test_dir: fs.
     // Step 1: git creates repository with multiple commits
     _ = try runGit(allocator, &.{"init"}, repo_path);
     
+    // Configure git user for this repo
+    _ = try runGit(allocator, &.{"config", "user.name", "Test User"}, repo_path);
+    _ = try runGit(allocator, &.{"config", "user.email", "test@example.com"}, repo_path);
+    
     // Create initial file and commit
     try repo_path.writeFile(.{.sub_path = "README.md", .data = "# Test Project\n\nInitial content.\n"});
     _ = try runGit(allocator, &.{"add", "README.md"}, repo_path);
@@ -142,6 +146,10 @@ fn testStatusOutputExactMatch(allocator: std.mem.Allocator, test_dir: fs.Dir) !v
     // Create repository with various file states
     _ = try runGit(allocator, &.{"init"}, repo_path);
     
+    // Configure git user for this repo
+    _ = try runGit(allocator, &.{"config", "user.name", "Test User"}, repo_path);
+    _ = try runGit(allocator, &.{"config", "user.email", "test@example.com"}, repo_path);
+    
     // Committed file
     try repo_path.writeFile(.{.sub_path = "committed.txt", .data = "committed\n"});
     _ = try runGit(allocator, &.{"add", "committed.txt"}, repo_path);
@@ -190,6 +198,10 @@ fn testLogOutputExactMatch(allocator: std.mem.Allocator, test_dir: fs.Dir) !void
 
     // Create repository with multiple commits
     _ = try runGit(allocator, &.{"init"}, repo_path);
+    
+    // Configure git user for this repo
+    _ = try runGit(allocator, &.{"config", "user.name", "Test User"}, repo_path);
+    _ = try runGit(allocator, &.{"config", "user.email", "test@example.com"}, repo_path);
     
     const commits = [_][]const u8{ "First", "Second", "Third" };
     for (commits, 0..) |msg, i| {
@@ -244,6 +256,10 @@ fn testBinaryRepositoryCompatibility(allocator: std.mem.Allocator, test_dir: fs.
     // Create repository with binary files
     _ = try runGit(allocator, &.{"init"}, repo_path);
     
+    // Configure git user for this repo
+    _ = try runGit(allocator, &.{"config", "user.name", "Test User"}, repo_path);
+    _ = try runGit(allocator, &.{"config", "user.email", "test@example.com"}, repo_path);
+    
     // Add binary data
     const binary_data = [_]u8{0x00, 0x01, 0x02, 0x03, 0xFF, 0xFE, 0xFD, 0xFC, 0x89, 0x50, 0x4E, 0x47}; // PNG header-like
     try repo_path.writeFile(.{.sub_path = "binary.dat", .data = &binary_data});
@@ -282,6 +298,10 @@ fn testPerformanceRobustness(allocator: std.mem.Allocator, test_dir: fs.Dir) !vo
 
     // Create repository with moderate number of files/commits 
     _ = try runGit(allocator, &.{"init"}, repo_path);
+    
+    // Configure git user for this repo
+    _ = try runGit(allocator, &.{"config", "user.name", "Test User"}, repo_path);
+    _ = try runGit(allocator, &.{"config", "user.email", "test@example.com"}, repo_path);
     
     // Create 20 files across multiple commits
     var commit_count: u32 = 0;

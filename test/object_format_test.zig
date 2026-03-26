@@ -53,6 +53,10 @@ fn testReadGitBlobs(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
 
     // Initialize repository
     _ = try runCommand(allocator, &.{"git", "init"}, repo_path);
+    
+    // Configure git user for this repo
+    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    _ = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
 
     // Create test files with different content types
     try repo_path.writeFile(.{.sub_path = "simple.txt", .data = "Hello, World!\n"});
@@ -84,6 +88,10 @@ fn testReadGitCommits(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
 
     // Initialize repository and create multiple commits
     _ = try runCommand(allocator, &.{"git", "init"}, repo_path);
+    
+    // Configure git user for this repo
+    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    _ = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
 
     // Create multiple commits to test commit object reading
     const commits = [_]struct { file: []const u8, msg: []const u8 }{
@@ -122,6 +130,10 @@ fn testBinaryObjects(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
 
     // Initialize repository
     _ = try runCommand(allocator, &.{"git", "init"}, repo_path);
+    
+    // Configure git user for this repo
+    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    _ = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
 
     // Create binary file
     const binary_data = [_]u8{0x00, 0x01, 0x02, 0x03, 0xff, 0xfe, 0xfd, 0xfc};
@@ -148,6 +160,10 @@ fn testPackedObjects(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
 
     // Initialize repository and create many objects
     _ = try runCommand(allocator, &.{"git", "init"}, repo_path);
+    
+    // Configure git user for this repo
+    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    _ = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
 
     // Create first file and commit (needed for git gc to work)
     try repo_path.writeFile(.{.sub_path = "initial.txt", .data = "Initial content\n"});
