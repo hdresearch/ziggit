@@ -71,8 +71,9 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         while (read_idx < all_original_args.items.len) {
             const arg = all_original_args.items[read_idx];
             if (std.mem.startsWith(u8, arg, "--ref-format=") or
-                std.mem.eql(u8, arg, "--no-advice")) {
-                // Strip this flag
+                std.mem.eql(u8, arg, "--no-advice") or
+                std.mem.eql(u8, arg, "--i-still-use-this")) {
+                // Strip these flags (git 2.46+ features not in git 2.43)
                 read_idx += 1;
                 continue;
             }
