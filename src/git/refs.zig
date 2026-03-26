@@ -789,13 +789,219 @@ pub fn validateRefName(ref_name: []const u8) !void {
     if (std.mem.startsWith(u8, ref_name, "/") or std.mem.endsWith(u8, ref_name, "/")) return error.InvalidRefName;
 }
 
-/// Batch resolve multiple refs efficiently
+/// Batch resolve multiple refs efficiently with caching
 pub fn resolveRefs(git_dir: []const u8, ref_names: []const []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![]?[]u8 {
     var results = try allocator.alloc(?[]u8, ref_names.len);
     
+    // Pre-load packed-refs once for all lookups
+    const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir});
+    defer allocator.free(packed_refs_path);
+    
+    const packed_content = platform_impl.fs.readFile(allocator, packed_refs_path) catch null;
+    defer if (packed_content) |content| allocator.free(content);
+    
+    // Create a temporary ref cache for this batch operation
+    var ref_cache = std.HashMap([]const u8, []const u8, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator);
+    defer {
+        var cache_iter = ref_cache.iterator();
+        while (cache_iter.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.*);
+        }
+        ref_cache.deinit();
+    }
+    
+    // Parse packed-refs into cache if available
+    if (packed_content) |content| {
+        var lines = std.mem.split(u8, content, "\n");
+        var prev_ref: ?[]const u8 = null;
+        
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (trimmed.len == 0 or trimmed[0] == '#') continue;
+            
+            if (trimmed[0] == '^') {
+                // Peeled ref - update previous entry if it matches
+                if (prev_ref != null and trimmed.len >= 41) {
+                    const peeled_hash = trimmed[1..41];
+                    if (isValidHash(peeled_hash)) {
+                        // Replace previous entry with peeled version
+                        if (ref_cache.get(prev_ref.?)) |_| {
+                            try ref_cache.put(try allocator.dupe(u8, prev_ref.?), try allocator.dupe(u8, peeled_hash));
+                        }
+                    }
+                }
+                continue;
+            }
+            
+            if (std.mem.indexOf(u8, trimmed, " ")) |space_pos| {
+                const hash = trimmed[0..space_pos];
+                const ref_path = trimmed[space_pos + 1..];
+                prev_ref = ref_path;
+                
+                if (isValidHash(hash)) {
+                    try ref_cache.put(try allocator.dupe(u8, ref_path), try allocator.dupe(u8, hash));
+                }
+            }
+        }
+    }
+    
+    // Now resolve each ref, using cache when possible
     for (ref_names, 0..) |ref_name, i| {
-        results[i] = resolveRef(git_dir, ref_name, platform_impl, allocator) catch null;
+        // First try exact cache lookup
+        if (ref_cache.get(ref_name)) |cached_hash| {
+            results[i] = try allocator.dupe(u8, cached_hash);
+            continue;
+        }
+        
+        // Try with refs/ prefixes
+        const prefixes = [_][]const u8{ "refs/heads/", "refs/tags/", "refs/remotes/" };
+        var found = false;
+        
+        for (prefixes) |prefix| {
+            const full_ref = try std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, ref_name });
+            defer allocator.free(full_ref);
+            
+            if (ref_cache.get(full_ref)) |cached_hash| {
+                results[i] = try allocator.dupe(u8, cached_hash);
+                found = true;
+                break;
+            }
+        }
+        
+        if (!found) {
+            // Fall back to standard resolution
+            results[i] = resolveRef(git_dir, ref_name, platform_impl, allocator) catch null;
+        }
     }
     
     return results;
+}
+
+/// Enhanced ref name completion - suggests similar ref names when resolution fails
+pub fn suggestSimilarRefs(git_dir: []const u8, partial_name: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![][]u8 {
+    var suggestions = std.ArrayList([]u8).init(allocator);
+    
+    // Get all available refs
+    const all_refs = try listAllRefs(git_dir, platform_impl, allocator);
+    defer {
+        for (all_refs) |ref| {
+            allocator.free(ref);
+        }
+        allocator.free(all_refs);
+    }
+    
+    // Find refs that contain the partial name
+    for (all_refs) |ref| {
+        if (std.ascii.indexOfIgnoreCase(ref, partial_name) != null) {
+            try suggestions.append(try allocator.dupe(u8, ref));
+        }
+    }
+    
+    // Sort suggestions by similarity (shorter refs first)
+    std.sort.block([]u8, suggestions.items, {}, struct {
+        fn lessThan(context: void, lhs: []u8, rhs: []u8) bool {
+            _ = context;
+            return lhs.len < rhs.len;
+        }
+    }.lessThan);
+    
+    return suggestions.toOwnedSlice();
+}
+
+/// List all available refs in the repository
+fn listAllRefs(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![][]u8 {
+    var all_refs = std.ArrayList([]u8).init(allocator);
+    
+    // Add HEAD if it exists
+    const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir});
+    defer allocator.free(head_path);
+    
+    if (platform_impl.fs.exists(head_path) catch false) {
+        try all_refs.append(try allocator.dupe(u8, "HEAD"));
+    }
+    
+    // Recursively scan refs directory
+    const refs_dir = try std.fmt.allocPrint(allocator, "{s}/refs", .{git_dir});
+    defer allocator.free(refs_dir);
+    
+    try scanRefsDirectory(refs_dir, "refs", platform_impl, allocator, &all_refs);
+    
+    // Add refs from packed-refs
+    const packed_refs = findAllRefsInPackedRefs(git_dir, platform_impl, allocator) catch std.ArrayList([]u8).init(allocator);
+    defer {
+        for (packed_refs.items) |ref| {
+            allocator.free(ref);
+        }
+        packed_refs.deinit();
+    }
+    
+    // Merge packed refs that aren't already in the list
+    for (packed_refs.items) |packed_ref| {
+        var found = false;
+        for (all_refs.items) |existing_ref| {
+            if (std.mem.eql(u8, existing_ref, packed_ref)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            try all_refs.append(try allocator.dupe(u8, packed_ref));
+        }
+    }
+    
+    return all_refs.toOwnedSlice();
+}
+
+/// Recursively scan refs directory for all refs
+fn scanRefsDirectory(dir_path: []const u8, ref_prefix: []const u8, platform_impl: anytype, allocator: std.mem.Allocator, refs_list: *std.ArrayList([]u8)) !void {
+    const entries = platform_impl.fs.readDir(allocator, dir_path) catch return;
+    defer {
+        for (entries) |entry| {
+            allocator.free(entry);
+        }
+        allocator.free(entries);
+    }
+    
+    for (entries) |entry| {
+        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry });
+        defer allocator.free(full_path);
+        
+        const full_ref = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ ref_prefix, entry });
+        
+        // Check if it's a directory
+        const stat = std.fs.cwd().statFile(full_path) catch continue;
+        if (stat.kind == .directory) {
+            defer allocator.free(full_ref);
+            try scanRefsDirectory(full_path, full_ref, platform_impl, allocator, refs_list);
+        } else {
+            try refs_list.append(full_ref);
+        }
+    }
+}
+
+/// Find all refs in packed-refs file
+fn findAllRefsInPackedRefs(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.ArrayList([]u8) {
+    var refs = std.ArrayList([]u8).init(allocator);
+    
+    const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir});
+    defer allocator.free(packed_refs_path);
+
+    const content = platform_impl.fs.readFile(allocator, packed_refs_path) catch return refs;
+    defer allocator.free(content);
+
+    var lines = std.mem.split(u8, content, "\n");
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        
+        // Skip comments, empty lines, and peeled refs
+        if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == '^') continue;
+        
+        if (std.mem.indexOf(u8, trimmed, " ")) |space_pos| {
+            const ref_path = trimmed[space_pos + 1..];
+            try refs.append(try allocator.dupe(u8, ref_path));
+        }
+    }
+    
+    return refs;
 }
