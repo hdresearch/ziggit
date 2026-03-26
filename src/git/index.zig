@@ -170,7 +170,16 @@ pub const Index = struct {
         if (!std.mem.eql(u8, &signature, "DIRC")) return error.InvalidIndex;
 
         const version = try reader.readInt(u32, .big);
-        if (version < 2 or version > 4) return error.UnsupportedIndexVersion;
+        if (version < 2 or version > 4) {
+            // Be more specific about unsupported versions
+            if (version == 1) {
+                return error.IndexVersionTooOld;
+            } else if (version > 4) {
+                return error.IndexVersionTooNew;
+            } else {
+                return error.UnsupportedIndexVersion;
+            }
+        }
 
         const entry_count = try reader.readInt(u32, .big);
 
@@ -245,14 +254,17 @@ pub const Index = struct {
         };
     }
 
-    /// Read and skip index extensions
+    /// Read and skip index extensions with better error handling
     fn readExtensions(self: *Index, reader: anytype, data: []const u8) !void {
         _ = self; // Not used currently
         
-        while (true) {
-            // Check if we have enough bytes left for checksum (20 bytes)
+        var extensions_found: u32 = 0;
+        const max_extensions = 20; // Reasonable limit to prevent infinite loops
+        
+        while (extensions_found < max_extensions) {
+            // Check if we have enough bytes left for checksum (20 bytes) plus extension header (8 bytes)
             const current_pos = try reader.context.getPos();
-            if (current_pos + 20 >= data.len) break;
+            if (current_pos + 28 >= data.len) break;
             
             // Try to read extension signature
             var sig: [4]u8 = undefined;
@@ -260,7 +272,11 @@ pub const Index = struct {
             
             // Check if this is actually the start of the SHA-1 checksum
             // Extensions have printable ASCII signatures, checksum starts with hash bytes
-            if (sig[0] < 32 or sig[0] > 126) {
+            const is_printable = for (sig) |c| {
+                if (c < 32 or c > 126) break false;
+            } else true;
+            
+            if (!is_printable) {
                 // Likely the start of checksum, rewind
                 try reader.context.seekTo(current_pos);
                 break;
@@ -273,12 +289,25 @@ pub const Index = struct {
                 break;
             };
             
+            // Sanity check extension size
+            if (ext_size > data.len or current_pos + 8 + ext_size > data.len) {
+                // Extension size is invalid, probably hit the checksum
+                try reader.context.seekTo(current_pos);
+                break;
+            }
+            
+            // Log known extensions for debugging
+            const ext_name = std.fmt.bytesToHex(&sig, .lower);
+            std.debug.print("Skipping index extension: {s} (size: {} bytes)\n", .{ &ext_name, ext_size });
+            
             // Skip extension data
             reader.skipBytes(ext_size, .{}) catch {
                 // If we can't skip the extension, we're probably at the checksum
                 try reader.context.seekTo(current_pos);
                 break;
             };
+            
+            extensions_found += 1;
         }
     }
 
