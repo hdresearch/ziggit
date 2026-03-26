@@ -545,6 +545,7 @@ fn fetchPackShallowWithClient(allocator: std.mem.Allocator, client: ?*std.http.C
 /// Handles side-band-64k demuxing.
 pub fn parseFetchPackResponse(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     var pack_data = std.array_list.Managed(u8).init(allocator);
+    try pack_data.ensureTotalCapacity(data.len * 9 / 10);
     errdefer pack_data.deinit();
 
     var offset: usize = 0;
@@ -614,6 +615,8 @@ pub fn parseFetchPackResponse(allocator: std.mem.Allocator, data: []const u8) ![
 /// Returns pack data and any shallow boundary commit OIDs.
 pub fn parseShallowFetchPackResponse(allocator: std.mem.Allocator, data: []const u8) !ShallowFetchResult {
     var pack_data = std.array_list.Managed(u8).init(allocator);
+    // Pre-allocate: pack data is ~90% of total response after sideband overhead
+    try pack_data.ensureTotalCapacity(data.len * 9 / 10);
     errdefer pack_data.deinit();
     var shallow_commits = std.array_list.Managed(Oid).init(allocator);
     errdefer shallow_commits.deinit();
@@ -955,6 +958,8 @@ fn buildV2FetchRequest(allocator: std.mem.Allocator, wants: []const Oid, haves: 
 /// delimiters (0001) and contains: shallow-info, packfile-uris, then packfile section.
 fn parseV2FetchResponse(allocator: std.mem.Allocator, data: []const u8) !ShallowFetchResult {
     var pack_data = std.array_list.Managed(u8).init(allocator);
+    // Pre-allocate: pack data is ~90% of total response after sideband/pkt-line overhead
+    try pack_data.ensureTotalCapacity(data.len * 9 / 10);
     errdefer pack_data.deinit();
     var shallow_commits = std.array_list.Managed(Oid).init(allocator);
     errdefer shallow_commits.deinit();
