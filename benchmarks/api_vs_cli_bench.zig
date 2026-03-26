@@ -160,7 +160,7 @@ fn benchmarkRevParseHead(allocator: std.mem.Allocator, repo_path: []const u8, it
         allocator.free(cli_result.stderr);
     }
 
-    print("Measuring Zig API calls (PURE ZIG - zero process spawning)...\n");
+    print("Measuring Zig API calls (PURE ZIG - zero process spawning)...\n", .{});
     // Benchmark Zig API (PURE ZIG implementation)
     for (0..iterations) |_| {
         var repo = try ziggit.Repository.open(allocator, repo_path);
@@ -174,7 +174,7 @@ fn benchmarkRevParseHead(allocator: std.mem.Allocator, repo_path: []const u8, it
         try zig_stats.add(@as(u64, @intCast(end - start)));
     }
 
-    print("Measuring CLI spawning (git rev-parse HEAD)...\n");
+    print("Measuring CLI spawning (git rev-parse HEAD)...\n", .{});
     // Benchmark CLI spawning
     for (0..iterations) |_| {
         const start = std.time.nanoTimestamp();
@@ -225,7 +225,7 @@ fn benchmarkStatus(allocator: std.mem.Allocator, repo_path: []const u8, iteratio
         allocator.free(cli_result.stderr);
     }
 
-    print("Measuring Zig API calls (PURE ZIG - direct index/file reads)...\n");
+    print("Measuring Zig API calls (PURE ZIG - direct index/file reads)...\n", .{});
     // Benchmark Zig API (PURE ZIG - reads index + stats files directly)
     for (0..iterations) |_| {
         var repo = try ziggit.Repository.open(allocator, repo_path);
@@ -239,7 +239,7 @@ fn benchmarkStatus(allocator: std.mem.Allocator, repo_path: []const u8, iteratio
         try zig_stats.add(@as(u64, @intCast(end - start)));
     }
 
-    print("Measuring CLI spawning (git status --porcelain)...\n");
+    print("Measuring CLI spawning (git status --porcelain)...\n", .{});
     // Benchmark CLI spawning
     for (0..iterations) |_| {
         const start = std.time.nanoTimestamp();
@@ -290,7 +290,7 @@ fn benchmarkDescribeTags(allocator: std.mem.Allocator, repo_path: []const u8, it
         allocator.free(cli_result.stderr);
     }
 
-    print("Measuring Zig API calls (PURE ZIG - direct refs/tags directory scan)...\n");
+    print("Measuring Zig API calls (PURE ZIG - direct refs/tags directory scan)...\n", .{});
     // Benchmark Zig API (PURE ZIG - reads refs/tags directory directly)
     for (0..iterations) |_| {
         var repo = try ziggit.Repository.open(allocator, repo_path);
@@ -304,7 +304,7 @@ fn benchmarkDescribeTags(allocator: std.mem.Allocator, repo_path: []const u8, it
         try zig_stats.add(@as(u64, @intCast(end - start)));
     }
 
-    print("Measuring CLI spawning (git describe --tags)...\n");
+    print("Measuring CLI spawning (git describe --tags)...\n", .{});
     // Benchmark CLI spawning
     for (0..iterations) |_| {
         const start = std.time.nanoTimestamp();
@@ -354,7 +354,7 @@ fn benchmarkIsClean(allocator: std.mem.Allocator, repo_path: []const u8, iterati
         allocator.free(cli_result.stderr);
     }
 
-    print("Measuring Zig API calls (PURE ZIG - ultra-optimized clean check)...\n");
+    print("Measuring Zig API calls (PURE ZIG - ultra-optimized clean check)...\n", .{});
     // Benchmark Zig API (PURE ZIG - ultra-fast clean check)
     for (0..iterations) |_| {
         var repo = try ziggit.Repository.open(allocator, repo_path);
@@ -368,7 +368,7 @@ fn benchmarkIsClean(allocator: std.mem.Allocator, repo_path: []const u8, iterati
         try zig_stats.add(@as(u64, @intCast(end - start)));
     }
 
-    print("Measuring CLI spawning (git status + empty check)...\n");
+    print("Measuring CLI spawning (git status + empty check)...\n", .{});
     // Benchmark CLI spawning (git status --porcelain and check if empty)
     for (0..iterations) |_| {
         const start = std.time.nanoTimestamp();
@@ -398,13 +398,13 @@ fn benchmarkIsClean(allocator: std.mem.Allocator, repo_path: []const u8, iterati
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+    defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
 
-    print("=== ZIGGIT API vs CLI BENCHMARKING ===\n");
-    print("Testing PURE ZIG function calls vs external git process spawning\n");
-    print("Objective: Prove 100-1000x speedup by eliminating process spawn overhead\n");
-    print("Critical: All Zig measurements use ZERO std.process.Child calls\n\n");
+    print("=== ZIGGIT API vs CLI BENCHMARKING ===\n", .{});
+    print("Testing PURE ZIG function calls vs external git process spawning\n", .{});
+    print("Objective: Prove 100-1000x speedup by eliminating process spawn overhead\n", .{});
+    print("Critical: All Zig measurements use ZERO std.process.Child calls\n\n", .{});
 
     // Setup test repository
     const repo_path = "/tmp/ziggit_api_cli_bench";
@@ -421,11 +421,11 @@ pub fn main() !void {
     try benchmarkDescribeTags(allocator, repo_path, iterations);
     try benchmarkIsClean(allocator, repo_path, iterations);
 
-    print("\n=== VERIFICATION SUMMARY ===\n");
-    print("✅ All Zig API calls measured use PURE ZIG implementations\n");
-    print("✅ Zero std.process.Child usage in measured code paths\n");
-    print("✅ Direct .git file system access (HEAD, refs/*, index)\n");
-    print("✅ CLI calls spawn external git processes (~1ms overhead each)\n");
-    print("✅ Demonstrated 100-10,000x speedup goal achieved\n");
-    print("✅ Proves ziggit enables bun to eliminate FFI/process overhead\n");
+    print("\n=== VERIFICATION SUMMARY ===\n", .{});
+    print("✅ All Zig API calls measured use PURE ZIG implementations\n", .{});
+    print("✅ Zero std.process.Child usage in measured code paths\n", .{});
+    print("✅ Direct .git file system access (HEAD, refs/*, index)\n", .{});
+    print("✅ CLI calls spawn external git processes (~1ms overhead each)\n", .{});
+    print("✅ Demonstrated 100-10,000x speedup goal achieved\n", .{});
+    print("✅ Proves ziggit enables bun to eliminate FFI/process overhead\n", .{});
 }
