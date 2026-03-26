@@ -929,6 +929,17 @@ pub fn build(b: *std.Build) void {
     git_interop_comprehensive_tests.root_module.addImport("ziggit", ziggit_module);
     test_step.dependOn(&b.addRunArtifact(git_interop_comprehensive_tests).step);
 
+    // Pack fetch pipeline tests (HTTPS clone/fetch infrastructure)
+    const pack_fetch_pipeline_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_fetch_pipeline_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_fetch_pipeline_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(pack_fetch_pipeline_tests).step);
+
     // Objects store and hash tests (internal git module)
     const objects_store_hash_tests = b.addTest(.{
         .root_source_file = b.path("test/objects_store_and_hash_test.zig"),
