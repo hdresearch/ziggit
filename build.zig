@@ -53,42 +53,7 @@ pub fn build(b: *std.Build) void {
     });
 
     // ========== TESTS ==========
-    // Core git-ziggit interoperability test
-    const core_test = b.addExecutable(.{
-        .name = "git_ziggit_core_test",
-        .root_source_file = b.path("test/git_ziggit_core_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_core_test = b.addRunArtifact(core_test);
     
-    // Comprehensive integration test suite
-    const integration_test = b.addExecutable(.{
-        .name = "integration_test_suite",
-        .root_source_file = b.path("test/integration_test_suite.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_integration_test = b.addRunArtifact(integration_test);
-    
-    // Existing git interop test
-    const git_interop_test = b.addExecutable(.{
-        .name = "git_interop_test",
-        .root_source_file = b.path("test/git_interop_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_git_interop_test = b.addRunArtifact(git_interop_test);
-
-    // Improved git interop test
-    const improved_git_interop_test = b.addExecutable(.{
-        .name = "improved_git_interop_test", 
-        .root_source_file = b.path("test/improved_git_interop_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_improved_git_interop_test = b.addRunArtifact(improved_git_interop_test);
-
     // Platform unit tests
     const platform_tests = b.addTest(.{
         .root_source_file = b.path("src/platform/platform.zig"),
@@ -97,91 +62,19 @@ pub fn build(b: *std.Build) void {
     });
     const run_platform_tests = b.addRunArtifact(platform_tests);
 
-    // BrokenPipe test
-    const broken_pipe_test = b.addExecutable(.{
-        .name = "broken_pipe_test",
-        .root_source_file = b.path("test/broken_pipe_test.zig"),
+    // Git interop integration test (main integration test)
+    const git_interop_test = b.addExecutable(.{
+        .name = "git_interop_test",
+        .root_source_file = b.path("test/git_interop_test.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const run_broken_pipe_test = b.addRunArtifact(broken_pipe_test);
-
-    // Core git-ziggit interop test
-    const core_interop_test = b.addExecutable(.{
-        .name = "core_git_ziggit_interop",
-        .root_source_file = b.path("test/core_git_ziggit_interop.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_core_interop_test = b.addRunArtifact(core_interop_test);
-
-    // Pack file comprehensive test - temporarily disabled due to module import issues
-    // const pack_comprehensive_test = b.addTest(.{
-    //     .root_source_file = b.path("test/pack_file_comprehensive_test.zig"),
-    //     .target = target,
-    //     .optimize = optimize,
-    // });
-    // const run_pack_comprehensive_test = b.addRunArtifact(pack_comprehensive_test);
-
-    // Comprehensive pack file delta tests
-    const pack_delta_test = b.addTest(.{
-        .root_source_file = b.path("test/pack_delta_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_pack_delta_test = b.addRunArtifact(pack_delta_test);
-
-    // Git config comprehensive tests
-    const config_test = b.addTest(.{
-        .root_source_file = b.path("test/config_comprehensive_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_config_test = b.addRunArtifact(config_test);
-
-    // Index extensions and versions tests
-    const index_test = b.addTest(.{
-        .root_source_file = b.path("test/index_extensions_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_index_test = b.addRunArtifact(index_test);
-
-    // Symbolic refs and resolution tests
-    const refs_test = b.addTest(.{
-        .root_source_file = b.path("test/refs_symbolic_resolution_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_refs_test = b.addRunArtifact(refs_test);
-
-    // Individual test steps
-    const test_pack_step = b.step("test-pack", "Run pack file tests");
-    test_pack_step.dependOn(&run_pack_delta_test.step);
-
-    const test_config_step = b.step("test-config", "Run config parsing tests");
-    test_config_step.dependOn(&run_config_test.step);
-
-    const test_index_step = b.step("test-index", "Run index tests");
-    test_index_step.dependOn(&run_index_test.step);
-
-    const test_refs_step = b.step("test-refs", "Run refs resolution tests");
-    test_refs_step.dependOn(&run_refs_test.step);
+    const run_git_interop_test = b.addRunArtifact(git_interop_test);
 
     // Test step runs all tests
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_platform_tests.step);
-    test_step.dependOn(&run_core_test.step);
-    test_step.dependOn(&run_integration_test.step);
     test_step.dependOn(&run_git_interop_test.step);
-    test_step.dependOn(&run_improved_git_interop_test.step);
-    test_step.dependOn(&run_broken_pipe_test.step);
-    test_step.dependOn(&run_core_interop_test.step);
-    // test_step.dependOn(&run_pack_comprehensive_test.step); // temporarily disabled
-    test_step.dependOn(&run_pack_delta_test.step);
-    test_step.dependOn(&run_config_test.step);
-    test_step.dependOn(&run_index_test.step);
-    test_step.dependOn(&run_refs_test.step);
 
     // ========== BENCHMARKS ==========
     const cli_benchmark = b.addExecutable(.{
@@ -215,40 +108,6 @@ pub fn build(b: *std.Build) void {
     bench_step.dependOn(&run_lib_benchmark.step);
     bench_step.dependOn(&run_bun_scenario_benchmark.step);
 
-    const optimize_status_bench = b.addExecutable(.{
-        .name = "optimize_status_bench",
-        .root_source_file = b.path("optimize_status_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    optimize_status_bench.root_module.addImport("ziggit", ziggit_module);
-    const run_optimize_status_bench = b.addRunArtifact(optimize_status_bench);
-
-    const optimize_bench_step = b.step("bench-optimize", "Run optimization benchmark");
-    optimize_bench_step.dependOn(&run_optimize_status_bench.step);
-
-    const debug_vs_release_bench = b.addExecutable(.{
-        .name = "debug_vs_release_bench",
-        .root_source_file = b.path("debug_vs_release_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_debug_vs_release_bench = b.addRunArtifact(debug_vs_release_bench);
-
-    const debug_vs_release_step = b.step("bench-release", "Compare debug vs release performance");
-    debug_vs_release_step.dependOn(&run_debug_vs_release_bench.step);
-
-    const status_micro_bench = b.addExecutable(.{
-        .name = "status_micro_bench",
-        .root_source_file = b.path("benchmarks/status_micro_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    status_micro_bench.root_module.addImport("ziggit", ziggit_module);
-    const run_status_micro_bench = b.addRunArtifact(status_micro_bench);
-
-    const micro_bench_step = b.step("bench-micro", "Run status micro-benchmark");
-    micro_bench_step.dependOn(&run_status_micro_bench.step);
 
     // ========== WASM TARGET ==========
     const wasm_target = b.resolveTargetQuery(.{
