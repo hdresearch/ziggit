@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ziggit — Git in the Browser</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; background: #0d1117; color: #c9d1d9; padding: 20px; line-height: 1.6; }
+    h1 { color: #58a6ff; margin-bottom: 4px; font-size: 1.4em; }
+    .subtitle { color: #8b949e; margin-bottom: 20px; font-size: 0.85em; }
+    .row { display: flex; gap: 10px; margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
+    input[type="text"] { background: #161b22; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 12px; border-radius: 6px; font-family: inherit; font-size: 0.9em; }
+    #url { width: 460px; }
+    #corsProxy { width: 300px; }
+    button { background: #238636; color: #fff; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-family: inherit; font-size: 0.9em; }
+    button:hover { background: #2ea043; }
+    button:disabled { background: #30363d; cursor: not-allowed; }
+    .btn-secondary { background: #30363d; }
+    .btn-secondary:hover { background: #484f58; }
+    #status { color: #f0883e; font-size: 0.85em; min-height: 1.4em; }
+    .panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; margin-bottom: 12px; overflow: auto; }
+    .panel h2 { color: #58a6ff; font-size: 1em; margin-bottom: 8px; border-bottom: 1px solid #21262d; padding-bottom: 4px; }
+    #log-panel, #tree-panel, #file-panel { max-height: 400px; overflow-y: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+    th { text-align: left; color: #8b949e; padding: 4px 8px; border-bottom: 1px solid #21262d; }
+    td { padding: 4px 8px; border-bottom: 1px solid #21262d; }
+    tr:hover { background: #1c2128; }
+    .hash { color: #f0883e; cursor: pointer; }
+    .hash:hover { text-decoration: underline; }
+    .tree-link { color: #58a6ff; cursor: pointer; }
+    .tree-link:hover { text-decoration: underline; }
+    .blob-link { color: #7ee787; cursor: pointer; }
+    .blob-link:hover { text-decoration: underline; }
+    pre.file-content { white-space: pre-wrap; word-break: break-all; color: #c9d1d9; font-size: 0.85em; max-height: 500px; overflow: auto; }
+    .info { color: #8b949e; font-size: 0.85em; }
+    .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 900px) { .panels { grid-template-columns: 1fr; } #url { width: 100%; } }
+    .breadcrumb { color: #8b949e; font-size: 0.85em; margin-bottom: 8px; }
+    .breadcrumb a { color: #58a6ff; cursor: pointer; text-decoration: none; }
+    .breadcrumb a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1>⚡ ziggit</h1>
+  <p class="subtitle">A pure Zig git implementation running in WebAssembly — no server needed</p>
+
+  <div class="row">
+    <input type="text" id="corsProxy" placeholder="CORS proxy URL (optional)" value="">
+    <span class="info">e.g. https://corsproxy.io/?</span>
+  </div>
+  <div class="row">
+    <input type="text" id="url" value="https://github.com/nicholasgasior/gzig.git" placeholder="Repository URL">
+    <button id="cloneBtn" onclick="doClone()">Clone</button>
+    <span id="status"></span>
+  </div>
+
+  <div id="repo-info" class="panel" style="display:none">
+    <h2>Repository</h2>
+    <div id="repo-details"></div>
+  </div>
+
+  <div class="panels">
+    <div id="log-panel" class="panel" style="display:none">
+      <h2>Commit Log</h2>
+      <table id="log-table"><thead><tr><th>Hash</th><th>Author</th><th>Message</th></tr></thead><tbody></tbody></table>
+    </div>
+
+    <div id="tree-panel" class="panel" style="display:none">
+      <h2>Files</h2>
+      <div id="tree-breadcrumb" class="breadcrumb"></div>
+      <table id="tree-table"><thead><tr><th>Mode</th><th>Type</th><th>Name</th><th>Hash</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+
+  <div id="file-panel" class="panel" style="display:none">
+    <h2>File: <span id="file-name"></span></h2>
+    <pre class="file-content" id="file-content"></pre>
+  </div>
+
+  <script src="ziggit.js"></script>
+  <script>
+    let ziggit = null;
+    let repoPath = '/repo';
+    let currentCommit = null;
+
+    function status(msg, isError) {
+      const el = document.getElementById('status');
+      el.textContent = msg;
+      el.style.color = isError ? '#f85149' : '#f0883e';
+    }
+
+    async function doClone() {
+      const url = document.getElementById('url').value.trim();
+      const proxy = document.getElementById('corsProxy').value.trim();
+      if (!url) return status('Enter a URL', true);
+
+      const btn = document.getElementById('cloneBtn');
+      btn.disabled = true;
+      status('Loading WASM...');
+
+      try {
+        ziggit = new ZiggitBrowser(proxy);
+        await ziggit.load('ziggit-browser.wasm');
+        status('WASM loaded (' + ziggit.version() + '). Cloning...');
+
+        const rc = ziggit.cloneBare(url, repoPath);
+        if (rc !== 0) { status('Clone failed (error ' + rc + ')', true); btn.disabled = false; return; }
+        status('Clone OK. Indexing pack...');
+
+        const irc = ziggit.indexPack(repoPath);
+        if (irc !== 0) { status('Index failed (error ' + irc + ')', true); btn.disabled = false; return; }
+
+        // Show repo info
+        const head = ziggit.getHead(repoPath);
+        const branch = ziggit.getBranch(repoPath);
+        currentCommit = head;
+
+        const info = document.getElementById('repo-info');
+        info.style.display = 'block';
+        document.getElementById('repo-details').innerHTML =
+          `<strong>Branch:</strong> ${branch || 'detached'} &nbsp; <strong>HEAD:</strong> <span class="hash">${head}</span>` +
+          ` &nbsp; <strong>Pack:</strong> ${(ziggit.fs.get(repoPath + '/.git/objects/pack/pack-clone.pack') || []).length} bytes` +
+          ` &nbsp; <strong>In-memory files:</strong> ${ziggit.fs.size}`;
+
+        // Show log
+        showLog();
+
+        // Show tree at HEAD
+        if (head) {
+          const treeHash = ziggit.commitTree(head);
+          if (treeHash) showTree(treeHash, '/');
+        }
+
+        status('Ready! Click hashes to explore.');
+      } catch (e) {
+        status('Error: ' + e.message, true);
+        console.error(e);
+      }
+      btn.disabled = false;
+    }
+
+    function showLog() {
+      const log = ziggit.getLog(repoPath, 25);
+      const panel = document.getElementById('log-panel');
+      panel.style.display = 'block';
+      const tbody = document.querySelector('#log-table tbody');
+      tbody.innerHTML = '';
+      log.forEach(c => {
+        const tr = document.createElement('tr');
+        tr.innerHTML =
+          `<td><span class="hash" onclick="inspectCommit('${c.hash}')">${c.hash.slice(0, 8)}</span></td>` +
+          `<td>${escHtml(c.author)}</td>` +
+          `<td>${escHtml(c.message)}</td>`;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function showTree(treeHash, path) {
+      const entries = ziggit.lsTree(treeHash);
+      const panel = document.getElementById('tree-panel');
+      panel.style.display = 'block';
+
+      // Breadcrumb
+      const bc = document.getElementById('tree-breadcrumb');
+      const parts = path.split('/').filter(Boolean);
+      let bcHtml = `<a onclick="showTreeFromCommit()">root</a>`;
+      // Simple breadcrumb — just show current path
+      if (parts.length > 0) bcHtml += ' / ' + parts.join(' / ');
+      bc.innerHTML = bcHtml;
+
+      const tbody = document.querySelector('#tree-table tbody');
+      tbody.innerHTML = '';
+
+      // Sort: trees first, then blobs
+      entries.sort((a, b) => {
+        if (a.type === 'tree' && b.type !== 'tree') return -1;
+        if (a.type !== 'tree' && b.type === 'tree') return 1;
+        return a.name.localeCompare(b.name);
+      });
+
+      entries.forEach(e => {
+        const tr = document.createElement('tr');
+        const nameClass = e.type === 'tree' ? 'tree-link' : 'blob-link';
+        const onclick = e.type === 'tree'
+          ? `showTree('${e.hash}', '${path}${e.name}/')`
+          : `showFile('${e.hash}', '${e.name}')`;
+        tr.innerHTML =
+          `<td class="info">${e.mode}</td>` +
+          `<td class="info">${e.type}</td>` +
+          `<td><span class="${nameClass}" onclick="${onclick}">${escHtml(e.name)}</span></td>` +
+          `<td><span class="hash" title="${e.hash}">${e.hash.slice(0, 8)}</span></td>`;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function showTreeFromCommit() {
+      if (!currentCommit) return;
+      const treeHash = ziggit.commitTree(currentCommit);
+      if (treeHash) showTree(treeHash, '/');
+    }
+
+    function showFile(blobHash, name) {
+      const obj = ziggit.readObject(blobHash);
+      if (!obj) { status('Failed to read blob ' + blobHash, true); return; }
+      document.getElementById('file-panel').style.display = 'block';
+      document.getElementById('file-name').textContent = name;
+      // Show as text (may be binary, but best effort)
+      const content = obj.text;
+      document.getElementById('file-content').textContent =
+        content.length > 100000 ? content.slice(0, 100000) + '\n... (truncated)' : content;
+    }
+
+    function inspectCommit(hash) {
+      currentCommit = hash;
+      const obj = ziggit.readObject(hash);
+      if (!obj) { status('Failed to read commit', true); return; }
+      // Show tree for this commit
+      const treeHash = ziggit.commitTree(hash);
+      if (treeHash) showTree(treeHash, '/');
+      status('Viewing commit ' + hash.slice(0, 8));
+    }
+
+    function escHtml(s) {
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+  </script>
+</body>
+</html>

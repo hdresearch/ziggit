@@ -857,7 +857,7 @@ fn readPackedObject(pack_data: []const u8, offset: usize, pack_path: []const u8,
 }
 
 /// Look up an object's offset in a pack index by its SHA-1 hash (non-generic, breaks recursive cycle)
-fn findOffsetInIdx(idx_data: []const u8, target_hash: [20]u8) ?usize {
+pub fn findOffsetInIdx(idx_data: []const u8, target_hash: [20]u8) ?usize {
     if (idx_data.len < 8) return null;
     
     // Check for v2 magic

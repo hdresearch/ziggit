@@ -481,3 +481,836 @@ export fn ziggit_version(out_ptr: [*]u8, out_cap: u32) u32 {
     @memcpy(out_ptr[0..copy_len], version[0..copy_len]);
     return @intCast(copy_len);
 }
+
+// ========== In-memory pack store ==========
+// After clone_bare downloads a pack, these globals hold the pack + idx in WASM memory
+// for efficient object lookups without re-reading from the host filesystem.
+
+var global_pack_data: ?[]u8 = null;
+var global_idx_data: ?[]u8 = null;
+
+/// After clone_bare downloads a pack, call this to index it for object lookups.
+/// path_ptr/path_len: repo path (e.g. "/repo")
+/// Reads pack from host FS, generates idx, stores both as globals.
+/// Returns 0 on success, negative on error.
+export fn ziggit_index_pack(path_ptr: [*]const u8, path_len: u32) i32 {
+    const allocator = getAllocator();
+    const path = path_ptr[0..path_len];
+
+    // Free previous data if any
+    if (global_pack_data) |d| allocator.free(d);
+    if (global_idx_data) |d| allocator.free(d);
+    global_pack_data = null;
+    global_idx_data = null;
+
+    // Read pack file from host filesystem
+    const pack_data = readHostFile(allocator, path, ".git/objects/pack/pack-clone.pack") catch return -1;
+
+    // Generate idx from pack data
+    const idx_data = generateIdxFromPackData(allocator, pack_data) catch {
+        allocator.free(pack_data);
+        return -2;
+    };
+
+    global_pack_data = pack_data;
+    global_idx_data = idx_data;
+    return 0;
+}
+
+/// Read a git object by its hex SHA-1 hash from the in-memory pack.
+/// hash_ptr: pointer to 40 hex chars
+/// out_ptr: buffer to write object data
+/// out_cap: capacity of out buffer
+/// type_out: pointer to write object type (1=commit, 2=tree, 3=blob, 4=tag)
+/// Returns data length on success, negative on error.
+export fn ziggit_read_object(hash_ptr: [*]const u8, hash_len: u32, out_ptr: [*]u8, out_cap: u32, type_out: *u32) i32 {
+    if (hash_len < 40) return -1;
+    const allocator = getAllocator();
+    const pack_data = global_pack_data orelse return -2;
+    const idx_data = global_idx_data orelse return -3;
+
+    // Parse hex hash to binary
+    var target_hash: [20]u8 = undefined;
+    for (0..20) |i| {
+        target_hash[i] = std.fmt.parseInt(u8, hash_ptr[i * 2 .. i * 2 + 2], 16) catch return -4;
+    }
+
+    // Find offset in idx
+    const offset = findOffsetInIdx(idx_data, target_hash) orelse return -5;
+
+    // Read object from pack
+    const obj = readPackedObjectFromData(pack_data, offset, allocator) catch return -6;
+    defer obj.deinit(allocator);
+
+    if (obj.data.len > out_cap) return -7;
+
+    @memcpy(out_ptr[0..obj.data.len], obj.data);
+    type_out.* = switch (obj.obj_type) {
+        .commit => 1,
+        .tree => 2,
+        .blob => 3,
+        .tag => 4,
+    };
+    return @intCast(obj.data.len);
+}
+
+/// Get commit log as JSON. Walks parent chain from HEAD.
+/// path_ptr/path_len: repo path
+/// max_count: max commits to return
+/// out_ptr/out_cap: output buffer for JSON
+/// Returns bytes written, or negative on error.
+/// Format: [{"hash":"abc...","message":"...","author":"...","parent":"def..."},...]
+export fn ziggit_log(path_ptr: [*]const u8, path_len: u32, max_count: u32, out_ptr: [*]u8, out_cap: u32) i32 {
+    const allocator = getAllocator();
+    const pack_data = global_pack_data orelse return -1;
+    const idx_data = global_idx_data orelse return -2;
+
+    // Get HEAD hash
+    var head_buf: [40]u8 = undefined;
+    const head_rc = ziggit_rev_parse_head(path_ptr, path_len, &head_buf);
+    if (head_rc != 0) return -3;
+
+    var json = std.ArrayList(u8).init(allocator);
+    defer json.deinit();
+    json.appendSlice("[") catch return -4;
+
+    var current_hash: [40]u8 = head_buf;
+    var count: u32 = 0;
+
+    while (count < max_count) : (count += 1) {
+        // Parse hex hash
+        var hash_bytes: [20]u8 = undefined;
+        for (0..20) |i| {
+            hash_bytes[i] = std.fmt.parseInt(u8, current_hash[i * 2 .. i * 2 + 2], 16) catch break;
+        }
+
+        const offset = findOffsetInIdx(idx_data, hash_bytes) orelse break;
+        const obj = readPackedObjectFromData(pack_data, offset, allocator) catch break;
+        defer obj.deinit(allocator);
+
+        if (obj.obj_type != .commit) break;
+
+        // Parse commit object
+        const commit_data = obj.data;
+        var parent_hash: ?[]const u8 = null;
+        var author: []const u8 = "";
+        var message: []const u8 = "";
+
+        var line_iter = std.mem.splitScalar(u8, commit_data, '\n');
+        var in_headers = true;
+        var msg_start: usize = 0;
+        var pos: usize = 0;
+
+        // Find headers and message
+        var lines_buf = std.ArrayList(u8).init(allocator);
+        defer lines_buf.deinit();
+
+        while (line_iter.next()) |line| {
+            pos += line.len + 1;
+            if (in_headers) {
+                if (line.len == 0) {
+                    in_headers = false;
+                    msg_start = pos;
+                    continue;
+                }
+                if (std.mem.startsWith(u8, line, "parent ") and line.len >= 47) {
+                    parent_hash = line[7..47];
+                } else if (std.mem.startsWith(u8, line, "author ")) {
+                    // Extract author name (before email)
+                    const rest = line[7..];
+                    if (std.mem.indexOf(u8, rest, " <")) |email_start| {
+                        author = rest[0..email_start];
+                    } else {
+                        author = rest;
+                    }
+                }
+            }
+        }
+
+        // Message is everything after blank line
+        if (msg_start < commit_data.len) {
+            message = std.mem.trimRight(u8, commit_data[msg_start..], "\n\r ");
+            // Take only first line of message
+            if (std.mem.indexOfScalar(u8, message, '\n')) |nl| {
+                message = message[0..nl];
+            }
+        }
+
+        if (count > 0) json.appendSlice(",") catch return -4;
+        json.appendSlice("{\"hash\":\"") catch return -4;
+        json.appendSlice(&current_hash) catch return -4;
+        json.appendSlice("\",\"message\":\"") catch return -4;
+        appendJsonEscaped(&json, message) catch return -4;
+        json.appendSlice("\",\"author\":\"") catch return -4;
+        appendJsonEscaped(&json, author) catch return -4;
+        json.appendSlice("\",\"parent\":\"") catch return -4;
+        if (parent_hash) |ph| {
+            json.appendSlice(ph) catch return -4;
+        }
+        json.appendSlice("\"}") catch return -4;
+
+        // Follow parent
+        if (parent_hash) |ph| {
+            @memcpy(&current_hash, ph[0..40]);
+        } else {
+            count += 1;
+            break;
+        }
+    }
+
+    json.appendSlice("]") catch return -4;
+
+    if (json.items.len > out_cap) return -5;
+    @memcpy(out_ptr[0..json.items.len], json.items);
+    return @intCast(json.items.len);
+}
+
+/// List files in a tree object. Writes JSON to out_ptr.
+/// Format: [{"mode":"100644","name":"file.txt","hash":"abc...","type":"blob"},...]
+/// tree_hash_ptr: 40 hex chars of tree hash
+/// Returns bytes written, or negative on error.
+export fn ziggit_ls_tree(tree_hash_ptr: [*]const u8, tree_hash_len: u32, out_ptr: [*]u8, out_cap: u32) i32 {
+    if (tree_hash_len < 40) return -1;
+    const allocator = getAllocator();
+    const pack_data = global_pack_data orelse return -2;
+    const idx_data = global_idx_data orelse return -3;
+
+    // Read tree object
+    var hash_bytes: [20]u8 = undefined;
+    for (0..20) |i| {
+        hash_bytes[i] = std.fmt.parseInt(u8, tree_hash_ptr[i * 2 .. i * 2 + 2], 16) catch return -4;
+    }
+
+    const offset = findOffsetInIdx(idx_data, hash_bytes) orelse return -5;
+    const obj = readPackedObjectFromData(pack_data, offset, allocator) catch return -6;
+    defer obj.deinit(allocator);
+
+    if (obj.obj_type != .tree) return -7;
+
+    // Parse tree entries: each entry is "<mode> <name>\0<20-byte-hash>"
+    var json = std.ArrayList(u8).init(allocator);
+    defer json.deinit();
+    json.appendSlice("[") catch return -8;
+
+    var pos: usize = 0;
+    var first = true;
+    const data = obj.data;
+
+    while (pos < data.len) {
+        // Find space (separates mode from name)
+        const space = std.mem.indexOfScalarPos(u8, data, pos, ' ') orelse break;
+        const mode = data[pos..space];
+
+        // Find null (separates name from hash)
+        const null_pos = std.mem.indexOfScalarPos(u8, data, space + 1, 0) orelse break;
+        const name = data[space + 1 .. null_pos];
+
+        if (null_pos + 21 > data.len) break;
+        const entry_hash = data[null_pos + 1 .. null_pos + 21];
+
+        // Determine type from mode
+        const entry_type: []const u8 = if (std.mem.eql(u8, mode, "40000") or std.mem.eql(u8, mode, "040000"))
+            "tree"
+        else if (std.mem.eql(u8, mode, "160000"))
+            "commit"
+        else
+            "blob";
+
+        if (!first) json.appendSlice(",") catch return -8;
+        first = false;
+
+        json.appendSlice("{\"mode\":\"") catch return -8;
+        json.appendSlice(mode) catch return -8;
+        json.appendSlice("\",\"name\":\"") catch return -8;
+        appendJsonEscaped(&json, name) catch return -8;
+        json.appendSlice("\",\"hash\":\"") catch return -8;
+        const hex = std.fmt.bytesToHex(entry_hash[0..20].*, .lower);
+        json.appendSlice(&hex) catch return -8;
+        json.appendSlice("\",\"type\":\"") catch return -8;
+        json.appendSlice(entry_type) catch return -8;
+        json.appendSlice("\"}") catch return -8;
+
+        pos = null_pos + 21;
+    }
+
+    json.appendSlice("]") catch return -8;
+    if (json.items.len > out_cap) return -9;
+    @memcpy(out_ptr[0..json.items.len], json.items);
+    return @intCast(json.items.len);
+}
+
+/// Read a file from the repo at a given commit.
+/// Resolves: commit → tree → walk path → blob → data
+/// Returns bytes written, or negative on error.
+export fn ziggit_read_file(commit_hash_ptr: [*]const u8, commit_hash_len: u32, file_path_ptr: [*]const u8, file_path_len: u32, out_ptr: [*]u8, out_cap: u32) i32 {
+    if (commit_hash_len < 40) return -1;
+    const allocator = getAllocator();
+    const pack_data = global_pack_data orelse return -2;
+    const idx_data = global_idx_data orelse return -3;
+
+    // Read commit to get tree hash
+    var commit_hash_bytes: [20]u8 = undefined;
+    for (0..20) |i| {
+        commit_hash_bytes[i] = std.fmt.parseInt(u8, commit_hash_ptr[i * 2 .. i * 2 + 2], 16) catch return -4;
+    }
+
+    const commit_offset = findOffsetInIdx(idx_data, commit_hash_bytes) orelse return -5;
+    const commit_obj = readPackedObjectFromData(pack_data, commit_offset, allocator) catch return -6;
+    defer commit_obj.deinit(allocator);
+
+    if (commit_obj.obj_type != .commit) return -7;
+
+    // Extract tree hash from commit (first line: "tree <40hex>")
+    const commit_data = commit_obj.data;
+    if (!std.mem.startsWith(u8, commit_data, "tree ") or commit_data.len < 45) return -8;
+    const tree_hash_hex = commit_data[5..45];
+
+    // Walk path segments through trees
+    const file_path = file_path_ptr[0..file_path_len];
+    var current_tree_hex: [40]u8 = undefined;
+    @memcpy(&current_tree_hex, tree_hash_hex);
+
+    var path_iter = std.mem.splitScalar(u8, file_path, '/');
+    while (path_iter.next()) |segment| {
+        if (segment.len == 0) continue;
+
+        // Read current tree
+        var tree_hash_bytes: [20]u8 = undefined;
+        for (0..20) |i| {
+            tree_hash_bytes[i] = std.fmt.parseInt(u8, current_tree_hex[i * 2 .. i * 2 + 2], 16) catch return -9;
+        }
+
+        const tree_offset = findOffsetInIdx(idx_data, tree_hash_bytes) orelse return -10;
+        const tree_obj = readPackedObjectFromData(pack_data, tree_offset, allocator) catch return -11;
+        defer tree_obj.deinit(allocator);
+
+        if (tree_obj.obj_type != .tree) return -12;
+
+        // Search for entry matching segment
+        var found = false;
+        var pos: usize = 0;
+        const tdata = tree_obj.data;
+        while (pos < tdata.len) {
+            const space = std.mem.indexOfScalarPos(u8, tdata, pos, ' ') orelse break;
+            const null_pos = std.mem.indexOfScalarPos(u8, tdata, space + 1, 0) orelse break;
+            const name = tdata[space + 1 .. null_pos];
+            if (null_pos + 21 > tdata.len) break;
+            const entry_hash = tdata[null_pos + 1 .. null_pos + 21];
+
+            if (std.mem.eql(u8, name, segment)) {
+                const hex = std.fmt.bytesToHex(entry_hash[0..20].*, .lower);
+                @memcpy(&current_tree_hex, &hex);
+                found = true;
+                break;
+            }
+            pos = null_pos + 21;
+        }
+        if (!found) return -13; // path not found
+    }
+
+    // current_tree_hex now points to the blob (or subtree)
+    var blob_hash_bytes: [20]u8 = undefined;
+    for (0..20) |i| {
+        blob_hash_bytes[i] = std.fmt.parseInt(u8, current_tree_hex[i * 2 .. i * 2 + 2], 16) catch return -14;
+    }
+
+    const blob_offset = findOffsetInIdx(idx_data, blob_hash_bytes) orelse return -15;
+    const blob_obj = readPackedObjectFromData(pack_data, blob_offset, allocator) catch return -16;
+    defer blob_obj.deinit(allocator);
+
+    if (blob_obj.obj_type != .blob) return -17;
+    if (blob_obj.data.len > out_cap) return -18;
+
+    @memcpy(out_ptr[0..blob_obj.data.len], blob_obj.data);
+    return @intCast(blob_obj.data.len);
+}
+
+/// Get tree hash from a commit. Writes 40 hex chars to out_ptr.
+/// Returns 0 on success, negative on error.
+export fn ziggit_commit_tree(commit_hash_ptr: [*]const u8, commit_hash_len: u32, out_ptr: [*]u8) i32 {
+    if (commit_hash_len < 40) return -1;
+    const allocator = getAllocator();
+    const pack_data = global_pack_data orelse return -2;
+    const idx_data = global_idx_data orelse return -3;
+
+    var hash_bytes: [20]u8 = undefined;
+    for (0..20) |i| {
+        hash_bytes[i] = std.fmt.parseInt(u8, commit_hash_ptr[i * 2 .. i * 2 + 2], 16) catch return -4;
+    }
+
+    const offset = findOffsetInIdx(idx_data, hash_bytes) orelse return -5;
+    const obj = readPackedObjectFromData(pack_data, offset, allocator) catch return -6;
+    defer obj.deinit(allocator);
+
+    if (obj.obj_type != .commit) return -7;
+    if (!std.mem.startsWith(u8, obj.data, "tree ") or obj.data.len < 45) return -8;
+    @memcpy(out_ptr[0..40], obj.data[5..45]);
+    return 0;
+}
+
+// ========== Pure in-memory pack/idx implementations ==========
+// These are self-contained — no filesystem, no platform_impl needed.
+
+const PackObjType = enum(u3) {
+    commit = 1,
+    tree = 2,
+    blob = 3,
+    tag = 4,
+    ofs_delta = 6,
+    ref_delta = 7,
+};
+
+const InMemoryObjType = enum { commit, tree, blob, tag };
+
+const InMemoryGitObject = struct {
+    obj_type: InMemoryObjType,
+    data: []const u8,
+
+    fn deinit(self: InMemoryGitObject, allocator: std.mem.Allocator) void {
+        allocator.free(self.data);
+    }
+};
+
+/// Read a packed object from raw pack data at the given offset.
+/// Handles commit/tree/blob/tag and OFS_DELTA. REF_DELTA requires idx lookup
+/// which is done via the global idx_data.
+fn readPackedObjectFromData(pack_data: []const u8, offset: usize, allocator: std.mem.Allocator) !InMemoryGitObject {
+    if (offset >= pack_data.len) return error.ObjectNotFound;
+
+    var pos = offset;
+    const first_byte = pack_data[pos];
+    pos += 1;
+
+    const pack_type_num: u3 = @intCast((first_byte >> 4) & 7);
+    const pack_type = std.meta.intToEnum(PackObjType, pack_type_num) catch return error.ObjectNotFound;
+
+    // Read variable-length size
+    var size: usize = @intCast(first_byte & 15);
+    const ShiftT = std.math.Log2Int(usize);
+    var shift: ShiftT = 4;
+    var current_byte = first_byte;
+    while (current_byte & 0x80 != 0 and pos < pack_data.len) {
+        current_byte = pack_data[pos];
+        pos += 1;
+        size |= @as(usize, @intCast(current_byte & 0x7F)) << shift;
+        if (shift < 60) shift += 7 else break;
+    }
+
+    switch (pack_type) {
+        .commit, .tree, .blob, .tag => {
+            if (pos >= pack_data.len) return error.ObjectNotFound;
+            var decompressed = std.ArrayList(u8).init(allocator);
+            defer decompressed.deinit();
+            var stream = std.io.fixedBufferStream(pack_data[pos..]);
+            std.compress.zlib.decompress(stream.reader(), decompressed.writer()) catch return error.ObjectNotFound;
+            const obj_type: InMemoryObjType = switch (pack_type) {
+                .commit => .commit,
+                .tree => .tree,
+                .blob => .blob,
+                .tag => .tag,
+                else => unreachable,
+            };
+            return InMemoryGitObject{ .obj_type = obj_type, .data = try allocator.dupe(u8, decompressed.items) };
+        },
+        .ofs_delta => {
+            if (pos >= pack_data.len) return error.ObjectNotFound;
+            var base_offset_delta: usize = 0;
+            var first_offset_byte = true;
+            while (pos < pack_data.len) {
+                const offset_byte = pack_data[pos];
+                pos += 1;
+                if (first_offset_byte) {
+                    base_offset_delta = @intCast(offset_byte & 0x7F);
+                    first_offset_byte = false;
+                } else {
+                    base_offset_delta = (base_offset_delta + 1) << 7;
+                    base_offset_delta += @intCast(offset_byte & 0x7F);
+                }
+                if (offset_byte & 0x80 == 0) break;
+            }
+            if (base_offset_delta >= offset) return error.ObjectNotFound;
+            const base_offset = offset - base_offset_delta;
+            const base_object = try readPackedObjectFromData(pack_data, base_offset, allocator);
+            defer base_object.deinit(allocator);
+            var delta_data = std.ArrayList(u8).init(allocator);
+            defer delta_data.deinit();
+            var stream = std.io.fixedBufferStream(pack_data[pos..]);
+            std.compress.zlib.decompress(stream.reader(), delta_data.writer()) catch return error.ObjectNotFound;
+            const result_data = try applyDelta(base_object.data, delta_data.items, allocator);
+            return InMemoryGitObject{ .obj_type = base_object.obj_type, .data = result_data };
+        },
+        .ref_delta => {
+            // REF_DELTA: look up base object by SHA-1 in idx
+            if (pos + 20 > pack_data.len) return error.ObjectNotFound;
+            const base_sha1 = pack_data[pos .. pos + 20];
+            pos += 20;
+            const idx_data = global_idx_data orelse return error.ObjectNotFound;
+            const base_offset = findOffsetInIdx(idx_data, base_sha1[0..20].*) orelse return error.ObjectNotFound;
+            const base_object = try readPackedObjectFromData(pack_data, base_offset, allocator);
+            defer base_object.deinit(allocator);
+            var delta_data = std.ArrayList(u8).init(allocator);
+            defer delta_data.deinit();
+            var stream = std.io.fixedBufferStream(pack_data[pos..]);
+            std.compress.zlib.decompress(stream.reader(), delta_data.writer()) catch return error.ObjectNotFound;
+            const result_data = try applyDelta(base_object.data, delta_data.items, allocator);
+            return InMemoryGitObject{ .obj_type = base_object.obj_type, .data = result_data };
+        },
+    }
+}
+
+/// Apply a git delta to a base object, producing the result.
+fn applyDelta(base_data: []const u8, delta: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    var pos: usize = 0;
+
+    // Read base size (variable-length int) — skip it, we trust base_data.len
+    {
+        const ShiftType = std.math.Log2Int(usize);
+        var shift_s: ShiftType = 0;
+        _ = &shift_s;
+        while (pos < delta.len) {
+            const b = delta[pos];
+            pos += 1;
+            if (b & 0x80 == 0) break;
+        }
+    }
+
+    // Read result size
+    var result_size: usize = 0;
+    const ShiftType2 = std.math.Log2Int(usize);
+    var shift: ShiftType2 = 0;
+    while (pos < delta.len) {
+        const b = delta[pos];
+        pos += 1;
+        result_size |= @as(usize, b & 0x7F) << shift;
+        if (b & 0x80 == 0) break;
+        shift += 7;
+    }
+
+    var result = try std.ArrayList(u8).initCapacity(allocator, result_size);
+    errdefer result.deinit();
+
+    while (pos < delta.len) {
+        const cmd = delta[pos];
+        pos += 1;
+
+        if (cmd & 0x80 != 0) {
+            // Copy from base
+            var copy_offset: usize = 0;
+            var copy_size: usize = 0;
+
+            if (cmd & 0x01 != 0) { copy_offset = delta[pos]; pos += 1; }
+            if (cmd & 0x02 != 0) { copy_offset |= @as(usize, delta[pos]) << 8; pos += 1; }
+            if (cmd & 0x04 != 0) { copy_offset |= @as(usize, delta[pos]) << 16; pos += 1; }
+            if (cmd & 0x08 != 0) { copy_offset |= @as(usize, delta[pos]) << 24; pos += 1; }
+
+            if (cmd & 0x10 != 0) { copy_size = delta[pos]; pos += 1; }
+            if (cmd & 0x20 != 0) { copy_size |= @as(usize, delta[pos]) << 8; pos += 1; }
+            if (cmd & 0x40 != 0) { copy_size |= @as(usize, delta[pos]) << 16; pos += 1; }
+
+            if (copy_size == 0) copy_size = 0x10000;
+
+            if (copy_offset + copy_size > base_data.len) return error.DeltaCopyOutOfBounds;
+            try result.appendSlice(base_data[copy_offset .. copy_offset + copy_size]);
+        } else if (cmd > 0) {
+            // Insert from delta
+            const insert_size: usize = cmd;
+            if (pos + insert_size > delta.len) return error.DeltaInsertOutOfBounds;
+            try result.appendSlice(delta[pos .. pos + insert_size]);
+            pos += insert_size;
+        } else {
+            // cmd == 0 is reserved
+            return error.DeltaReservedCommand;
+        }
+    }
+
+    return try result.toOwnedSlice();
+}
+
+/// Binary search for object offset in a v2 pack index.
+fn findOffsetInIdx(idx_data: []const u8, target_hash: [20]u8) ?usize {
+    if (idx_data.len < 8) return null;
+
+    const magic = std.mem.readInt(u32, idx_data[0..4], .big);
+    if (magic != 0xff744f63) return null; // Only v2 supported
+
+    const fanout_start: usize = 8;
+    const first_byte = target_hash[0];
+
+    if (idx_data.len < fanout_start + 256 * 4) return null;
+
+    const start_index: u32 = if (first_byte == 0) 0 else std.mem.readInt(u32, idx_data[fanout_start + (@as(usize, first_byte) - 1) * 4 ..][0..4], .big);
+    const end_index = std.mem.readInt(u32, idx_data[fanout_start + @as(usize, first_byte) * 4 ..][0..4], .big);
+
+    if (start_index >= end_index) return null;
+
+    const total_objects = std.mem.readInt(u32, idx_data[fanout_start + 255 * 4 ..][0..4], .big);
+    const sha1_table_start = fanout_start + 256 * 4;
+    const crc_table_start = sha1_table_start + @as(usize, total_objects) * 20;
+    const offset_table_start = crc_table_start + @as(usize, total_objects) * 4;
+
+    var low = start_index;
+    var high = end_index;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        const sha_offset = sha1_table_start + @as(usize, mid) * 20;
+        if (sha_offset + 20 > idx_data.len) return null;
+
+        const obj_hash = idx_data[sha_offset .. sha_offset + 20];
+        const cmp = std.mem.order(u8, obj_hash, &target_hash);
+
+        switch (cmp) {
+            .eq => {
+                const off_offset = offset_table_start + @as(usize, mid) * 4;
+                if (off_offset + 4 > idx_data.len) return null;
+                var offset_val: u64 = std.mem.readInt(u32, idx_data[off_offset..][0..4], .big);
+
+                if (offset_val & 0x80000000 != 0) {
+                    const large_idx: usize = @intCast(offset_val & 0x7FFFFFFF);
+                    const large_table_start = offset_table_start + @as(usize, total_objects) * 4;
+                    const large_off = large_table_start + large_idx * 8;
+                    if (large_off + 8 > idx_data.len) return null;
+                    offset_val = std.mem.readInt(u64, idx_data[large_off..][0..8], .big);
+                }
+                return @intCast(offset_val);
+            },
+            .lt => low = mid + 1,
+            .gt => high = mid,
+        }
+    }
+    return null;
+}
+
+/// Generate a v2 pack index from raw pack data (pure in-memory).
+fn generateIdxFromPackData(allocator: std.mem.Allocator, pack_data: []const u8) ![]u8 {
+    if (pack_data.len < 32) return error.PackFileTooSmall;
+    if (!std.mem.eql(u8, pack_data[0..4], "PACK")) return error.InvalidPackSignature;
+
+    const object_count = std.mem.readInt(u32, pack_data[8..12], .big);
+    const content_end = pack_data.len - 20;
+    const pack_checksum = pack_data[content_end..][0..20];
+
+    const IdxEntry = struct {
+        sha1: [20]u8,
+        offset: u32,
+        crc: u32,
+    };
+
+    var entries = std.ArrayList(IdxEntry).init(allocator);
+    defer entries.deinit();
+    try entries.ensureTotalCapacity(object_count);
+
+    // Cache for delta resolution: offset -> (type_str, data)
+    const CachedObj = struct { type_str: []const u8, data: []const u8 };
+    var cache = std.AutoHashMap(usize, CachedObj).init(allocator);
+    defer {
+        var it = cache.valueIterator();
+        while (it.next()) |v| allocator.free(v.data);
+        cache.deinit();
+    }
+
+    var decompressed = std.ArrayList(u8).init(allocator);
+    defer decompressed.deinit();
+
+    var pos: usize = 12;
+    var obj_idx: u32 = 0;
+
+    while (obj_idx < object_count and pos < content_end) {
+        const obj_start = pos;
+        const first_byte = pack_data[pos];
+        pos += 1;
+        const pack_type_num: u3 = @intCast((first_byte >> 4) & 7);
+        var size: usize = @intCast(first_byte & 0x0F);
+        var shift_val: std.math.Log2Int(usize) = 4;
+        var cur_byte = first_byte;
+        while (cur_byte & 0x80 != 0 and pos < content_end) {
+            cur_byte = pack_data[pos];
+            pos += 1;
+            size |= @as(usize, @intCast(cur_byte & 0x7F)) << shift_val;
+            if (shift_val < 60) shift_val += 7 else break;
+        }
+
+        var base_offset: ?usize = null;
+        var base_sha1: ?[20]u8 = null;
+
+        if (pack_type_num == 6) {
+            var delta_off: usize = 0;
+            var first_delta_byte = true;
+            while (pos < content_end) {
+                const b = pack_data[pos];
+                pos += 1;
+                if (first_delta_byte) {
+                    delta_off = @intCast(b & 0x7F);
+                    first_delta_byte = false;
+                } else {
+                    delta_off = (delta_off + 1) << 7;
+                    delta_off += @intCast(b & 0x7F);
+                }
+                if (b & 0x80 == 0) break;
+            }
+            if (delta_off <= obj_start) base_offset = obj_start - delta_off;
+        } else if (pack_type_num == 7) {
+            if (pos + 20 <= content_end) {
+                var sha1: [20]u8 = undefined;
+                @memcpy(&sha1, pack_data[pos .. pos + 20]);
+                base_sha1 = sha1;
+                pos += 20;
+            }
+        }
+
+        // Decompress
+        decompressed.clearRetainingCapacity();
+        const compressed_start = pos;
+        var fbs = std.io.fixedBufferStream(pack_data[pos..content_end]);
+        std.compress.zlib.decompress(fbs.reader(), decompressed.writer()) catch {
+            obj_idx += 1;
+            continue;
+        };
+        pos = compressed_start + @as(usize, @intCast(fbs.pos));
+
+        const crc = std.hash.crc.Crc32IsoHdlc.hash(pack_data[obj_start..pos]);
+
+        var obj_sha1: [20]u8 = undefined;
+
+        if (pack_type_num >= 1 and pack_type_num <= 4) {
+            const type_str: []const u8 = switch (pack_type_num) {
+                1 => "commit",
+                2 => "tree",
+                3 => "blob",
+                4 => "tag",
+                else => unreachable,
+            };
+            var hdr_buf: [64]u8 = undefined;
+            const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ type_str, decompressed.items.len }) catch unreachable;
+            var sha_hasher = std.crypto.hash.Sha1.init(.{});
+            sha_hasher.update(header);
+            sha_hasher.update(decompressed.items);
+            sha_hasher.final(&obj_sha1);
+            try cache.put(obj_start, .{ .type_str = type_str, .data = try allocator.dupe(u8, decompressed.items) });
+        } else if (pack_type_num == 6) {
+            if (base_offset) |bo| {
+                const base = cache.get(bo) orelse { obj_idx += 1; continue; };
+                const result_data = applyDelta(base.data, decompressed.items, allocator) catch { obj_idx += 1; continue; };
+                defer allocator.free(result_data);
+                var hdr_buf: [64]u8 = undefined;
+                const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ base.type_str, result_data.len }) catch unreachable;
+                var sha_hasher = std.crypto.hash.Sha1.init(.{});
+                sha_hasher.update(header);
+                sha_hasher.update(result_data);
+                sha_hasher.final(&obj_sha1);
+                try cache.put(obj_start, .{ .type_str = base.type_str, .data = try allocator.dupe(u8, result_data) });
+            } else { obj_idx += 1; continue; }
+        } else if (pack_type_num == 7) {
+            if (base_sha1) |target_sha| {
+                var found_base: ?CachedObj = null;
+                for (entries.items) |entry| {
+                    if (std.mem.eql(u8, &entry.sha1, &target_sha)) {
+                        found_base = cache.get(entry.offset);
+                        break;
+                    }
+                }
+                if (found_base) |base| {
+                    const result_data = applyDelta(base.data, decompressed.items, allocator) catch { obj_idx += 1; continue; };
+                    defer allocator.free(result_data);
+                    var hdr_buf: [64]u8 = undefined;
+                    const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ base.type_str, result_data.len }) catch unreachable;
+                    var sha_hasher = std.crypto.hash.Sha1.init(.{});
+                    sha_hasher.update(header);
+                    sha_hasher.update(result_data);
+                    sha_hasher.final(&obj_sha1);
+                    try cache.put(obj_start, .{ .type_str = base.type_str, .data = try allocator.dupe(u8, result_data) });
+                } else { obj_idx += 1; continue; }
+            } else { obj_idx += 1; continue; }
+        } else { obj_idx += 1; continue; }
+
+        try entries.append(.{ .sha1 = obj_sha1, .offset = @intCast(obj_start), .crc = crc });
+        obj_idx += 1;
+    }
+
+    // Sort entries by SHA-1
+    std.mem.sort(IdxEntry, entries.items, {}, struct {
+        fn lessThan(_: void, a: IdxEntry, b: IdxEntry) bool {
+            return std.mem.order(u8, &a.sha1, &b.sha1) == .lt;
+        }
+    }.lessThan);
+
+    // Build v2 idx
+    const total: u32 = @intCast(entries.items.len);
+    // Header(8) + fanout(1024) + sha1_table(total*20) + crc_table(total*4) + offset_table(total*4) + pack_checksum(20) + idx_checksum(20)
+    const idx_size = 8 + 1024 + @as(usize, total) * 20 + @as(usize, total) * 4 + @as(usize, total) * 4 + 20 + 20;
+    var idx = try allocator.alloc(u8, idx_size);
+    errdefer allocator.free(idx);
+
+    var wp: usize = 0;
+
+    // Magic + version
+    std.mem.writeInt(u32, idx[wp..][0..4], 0xff744f63, .big);
+    wp += 4;
+    std.mem.writeInt(u32, idx[wp..][0..4], 2, .big);
+    wp += 4;
+
+    // Fanout table
+    var fanout: [256]u32 = undefined;
+    @memset(&fanout, 0);
+    for (entries.items) |entry| {
+        const bucket = entry.sha1[0];
+        var i: usize = bucket;
+        while (i < 256) : (i += 1) {
+            fanout[i] += 1;
+        }
+    }
+    for (fanout) |f| {
+        std.mem.writeInt(u32, idx[wp..][0..4], f, .big);
+        wp += 4;
+    }
+
+    // SHA-1 table
+    for (entries.items) |entry| {
+        @memcpy(idx[wp .. wp + 20], &entry.sha1);
+        wp += 20;
+    }
+
+    // CRC table
+    for (entries.items) |entry| {
+        std.mem.writeInt(u32, idx[wp..][0..4], entry.crc, .big);
+        wp += 4;
+    }
+
+    // Offset table
+    for (entries.items) |entry| {
+        std.mem.writeInt(u32, idx[wp..][0..4], entry.offset, .big);
+        wp += 4;
+    }
+
+    // Pack checksum
+    @memcpy(idx[wp .. wp + 20], pack_checksum);
+    wp += 20;
+
+    // Idx checksum
+    var idx_hasher = std.crypto.hash.Sha1.init(.{});
+    idx_hasher.update(idx[0..wp]);
+    var idx_checksum: [20]u8 = undefined;
+    idx_hasher.final(&idx_checksum);
+    @memcpy(idx[wp .. wp + 20], &idx_checksum);
+
+    return idx;
+}
+
+/// Escape a string for JSON output.
+fn appendJsonEscaped(list: *std.ArrayList(u8), s: []const u8) !void {
+    for (s) |c| {
+        switch (c) {
+            '"' => try list.appendSlice("\\\""),
+            '\\' => try list.appendSlice("\\\\"),
+            '\n' => try list.appendSlice("\\n"),
+            '\r' => try list.appendSlice("\\r"),
+            '\t' => try list.appendSlice("\\t"),
+            else => {
+                if (c < 0x20) {
+                    try list.writer().print("\\u{x:0>4}", .{c});
+                } else {
+                    try list.append(c);
+                }
+            },
+        }
+    }
+}
