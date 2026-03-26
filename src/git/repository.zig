@@ -75,7 +75,7 @@ pub const StatusEntry = struct {
 
 /// Repository status information
 pub const RepositoryStatus = struct {
-    entries: std.ArrayList(StatusEntry),
+    entries: std.array_list.Managed(StatusEntry),
     branch: ?[]const u8,
     upstream_branch: ?[]const u8,
     ahead: u32,
@@ -83,7 +83,7 @@ pub const RepositoryStatus = struct {
     
     pub fn init(allocator: std.mem.Allocator) RepositoryStatus {
         return RepositoryStatus{
-            .entries = std.ArrayList(StatusEntry).init(allocator),
+            .entries = std.array_list.Managed(StatusEntry).init(allocator),
             .branch = null,
             .upstream_branch = null,
             .ahead = 0,
@@ -109,8 +109,8 @@ pub const RepositoryStatus = struct {
         try self.entries.append(entry);
     }
     
-    pub fn getStagedFiles(self: RepositoryStatus) std.ArrayList(StatusEntry) {
-        var staged = std.ArrayList(StatusEntry).init(self.entries.allocator);
+    pub fn getStagedFiles(self: RepositoryStatus) std.array_list.Managed(StatusEntry) {
+        var staged = std.array_list.Managed(StatusEntry).init(self.entries.allocator);
         for (self.entries.items) |entry| {
             if (entry.isStaged()) {
                 staged.append(entry) catch {};
@@ -119,8 +119,8 @@ pub const RepositoryStatus = struct {
         return staged;
     }
     
-    pub fn getUnstagedFiles(self: RepositoryStatus) std.ArrayList(StatusEntry) {
-        var unstaged = std.ArrayList(StatusEntry).init(self.entries.allocator);
+    pub fn getUnstagedFiles(self: RepositoryStatus) std.array_list.Managed(StatusEntry) {
+        var unstaged = std.array_list.Managed(StatusEntry).init(self.entries.allocator);
         for (self.entries.items) |entry| {
             if (entry.isUnstaged()) {
                 unstaged.append(entry) catch {};
@@ -129,8 +129,8 @@ pub const RepositoryStatus = struct {
         return unstaged;
     }
     
-    pub fn getUntrackedFiles(self: RepositoryStatus) std.ArrayList(StatusEntry) {
-        var untracked = std.ArrayList(StatusEntry).init(self.entries.allocator);
+    pub fn getUntrackedFiles(self: RepositoryStatus) std.array_list.Managed(StatusEntry) {
+        var untracked = std.array_list.Managed(StatusEntry).init(self.entries.allocator);
         for (self.entries.items) |entry| {
             if (entry.isUntracked()) {
                 untracked.append(entry) catch {};
@@ -197,10 +197,10 @@ pub const Repository = struct {
         defer self.allocator.free(config_file);
         const config_content = 
             \\[core]
-            \\	repositoryformatversion = 0
-            \\	filemode = true
-            \\	bare = false
-            \\	logallrefupdates = true
+            \\    repositoryformatversion = 0
+            \\    filemode = true
+            \\    bare = false
+            \\    logallrefupdates = true
             \\
         ;
         try self.plat.fs.writeFile(config_file, config_content);

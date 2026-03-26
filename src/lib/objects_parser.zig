@@ -1,5 +1,6 @@
+const zlib_compat = @import("../git/zlib_compat.zig");
 const std = @import("std");
-const zlib = std.compress.zlib;
+const zlib = zlib_compat;
 
 pub const GitObjectType = enum {
     commit,
@@ -113,16 +114,16 @@ pub fn readObject(allocator: std.mem.Allocator, objects_dir: []const u8, sha_hex
 
 pub fn parseCommit(allocator: std.mem.Allocator, commit_content: []const u8) !CommitInfo {
     var tree_sha: [20]u8 = undefined;
-    var parents = std.ArrayList([20]u8).init(allocator);
+    var parents = std.array_list.Managed([20]u8).init(allocator);
     errdefer parents.deinit();
     
     var author: []const u8 = "";
     var committer: []const u8 = "";
     _ = "";
     
-    var lines = std.mem.split(u8, commit_content, "\n");
+    var lines = std.mem.splitSequence(u8, commit_content, "\n");
     var message_started = false;
-    var message_lines = std.ArrayList([]const u8).init(allocator);
+    var message_lines = std.array_list.Managed([]const u8).init(allocator);
     defer message_lines.deinit();
     
     while (lines.next()) |line| {
@@ -166,7 +167,7 @@ pub fn parseCommit(allocator: std.mem.Allocator, commit_content: []const u8) !Co
     };
 }
 
-pub fn parseTree(tree_content: []const u8, entries: *std.ArrayList(TreeEntry)) !void {
+pub fn parseTree(tree_content: []const u8, entries: *std.array_list.Managed(TreeEntry)) !void {
     var pos: usize = 0;
     
     while (pos < tree_content.len) {

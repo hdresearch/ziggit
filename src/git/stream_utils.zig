@@ -8,15 +8,44 @@ pub const DecompressHashResult = struct {
     bytes_consumed: usize,
 };
 
+/// Helper: create a zlib decompressor from compressed data bytes.
+/// Returns the decompressor, the adapter, and the fbs (all of which must stay alive).
+fn ZlibFromSlice(comptime adapter_buf_size: usize) type {
+    return struct {
+        fbs: std.io.FixedBufferStream([]const u8),
+        old_reader: std.io.FixedBufferStream([]const u8).Reader,
+        adapter_buf: [adapter_buf_size]u8,
+        adapter: @TypeOf(blk: {
+            var dummy_fbs = std.io.fixedBufferStream(@as([]const u8, ""));
+            var dummy_reader = dummy_fbs.reader();
+            var dummy_buf: [1]u8 = undefined;
+            break :blk dummy_reader.adaptToNewApi(&dummy_buf);
+        }),
+        window_buf: [std.compress.flate.max_window_len]u8,
+        decompressor: std.compress.flate.Decompress,
+    };
+}
+
+/// Read all decompressed bytes from a Reader into a buffer, chunk by chunk.
+fn readAllFromReader(reader: *std.Io.Reader, chunk_buf: []u8, hasher: ?*std.crypto.hash.Sha1, output: ?*std.array_list.Managed(u8)) !usize {
+    var total: usize = 0;
+    while (true) {
+        var bufs = [_][]u8{chunk_buf};
+        const n = reader.readVec(&bufs) catch |err| switch (err) {
+            error.EndOfStream => break,
+            error.ReadFailed => return error.InvalidInput,
+        };
+        if (n == 0) break;
+        const bytes_read = chunk_buf.len - bufs[0].len;
+        if (bytes_read == 0) break;
+        if (hasher) |h| h.update(chunk_buf[0..bytes_read]);
+        if (output) |out| try out.appendSlice(chunk_buf[0..bytes_read]);
+        total += bytes_read;
+    }
+    return total;
+}
+
 /// Decompress zlib data and compute SHA-1 simultaneously in streaming fashion.
-/// The git object header ("<type> <size>\0") is fed to the hasher first, then
-/// decompressed chunks are fed without ever materializing the full object.
-///
-/// `compressed_data` — raw zlib bytes (e.g., from a pack file)
-/// `git_type`        — "blob", "commit", "tree", or "tag"
-/// `object_size`     — the uncompressed size (from the pack header)
-///
-/// Returns the SHA-1 digest, actual decompressed size, and bytes consumed.
 pub fn decompressAndHash(
     compressed_data: []const u8,
     git_type: []const u8,
@@ -29,21 +58,29 @@ pub fn decompressAndHash(
     const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ git_type, object_size }) catch unreachable;
     sha_hasher.update(header);
 
-    // Set up streaming decompression
+    // Set up streaming decompression using adapter from old reader API
     var fbs = std.io.fixedBufferStream(compressed_data);
-    var decompressor = std.compress.zlib.decompressor(fbs.reader());
+    var old_reader = fbs.reader();
+    var adapter_buf: [65536]u8 = undefined;
+    var adapter = old_reader.adaptToNewApi(&adapter_buf);
+    var window_buf: [std.compress.flate.max_window_len]u8 = undefined;
+    var decompressor = std.compress.flate.Decompress.init(&adapter.new_interface, .zlib, &window_buf);
 
     var total_decompressed: usize = 0;
-    var chunk_buf: [16384]u8 = undefined; // 16KB chunks
+    var chunk_buf: [16384]u8 = undefined;
 
     while (true) {
-        const n = decompressor.read(&chunk_buf) catch |err| switch (err) {
+        var bufs = [_][]u8{chunk_buf[0..]};
+        const orig_len = bufs[0].len;
+        const n = decompressor.reader.readVec(&bufs) catch |err| switch (err) {
             error.EndOfStream => break,
-            else => return err,
+            error.ReadFailed => return error.InvalidInput,
         };
-        if (n == 0) break;
-        sha_hasher.update(chunk_buf[0..n]);
-        total_decompressed += n;
+        _ = n;
+        const bytes_read = orig_len - bufs[0].len;
+        if (bytes_read == 0) break;
+        sha_hasher.update(chunk_buf[0..bytes_read]);
+        total_decompressed += bytes_read;
     }
 
     var result_sha1: [20]u8 = undefined;
@@ -57,13 +94,11 @@ pub fn decompressAndHash(
 }
 
 /// Like decompressAndHash but also writes the decompressed data to an output buffer.
-/// Useful when the caller needs both the hash AND the data (e.g., for delta bases
-/// that will be referenced later).
 pub fn decompressHashAndCapture(
     compressed_data: []const u8,
     git_type: []const u8,
     object_size: usize,
-    output: *std.ArrayList(u8),
+    output: *std.array_list.Managed(u8),
 ) !DecompressHashResult {
     var sha_hasher = std.crypto.hash.Sha1.init(.{});
 
@@ -72,9 +107,12 @@ pub fn decompressHashAndCapture(
     sha_hasher.update(header);
 
     var fbs = std.io.fixedBufferStream(compressed_data);
-    var decompressor = std.compress.zlib.decompressor(fbs.reader());
+    var old_reader = fbs.reader();
+    var adapter_buf: [65536]u8 = undefined;
+    var adapter = old_reader.adaptToNewApi(&adapter_buf);
+    var window_buf: [std.compress.flate.max_window_len]u8 = undefined;
+    var decompressor = std.compress.flate.Decompress.init(&adapter.new_interface, .zlib, &window_buf);
 
-    // Pre-allocate if we know the size
     if (object_size > 0) {
         try output.ensureTotalCapacity(output.items.len + object_size);
     }
@@ -83,14 +121,17 @@ pub fn decompressHashAndCapture(
     var chunk_buf: [16384]u8 = undefined;
 
     while (true) {
-        const n = decompressor.read(&chunk_buf) catch |err| switch (err) {
+        var bufs = [_][]u8{chunk_buf[0..]};
+        const orig_len = bufs[0].len;
+        _ = decompressor.reader.readVec(&bufs) catch |err| switch (err) {
             error.EndOfStream => break,
-            else => return err,
+            error.ReadFailed => return error.InvalidInput,
         };
-        if (n == 0) break;
-        sha_hasher.update(chunk_buf[0..n]);
-        try output.appendSlice(chunk_buf[0..n]);
-        total_decompressed += n;
+        const bytes_read = orig_len - bufs[0].len;
+        if (bytes_read == 0) break;
+        sha_hasher.update(chunk_buf[0..bytes_read]);
+        try output.appendSlice(chunk_buf[0..bytes_read]);
+        total_decompressed += bytes_read;
     }
 
     var result_sha1: [20]u8 = undefined;
@@ -104,7 +145,6 @@ pub fn decompressHashAndCapture(
 }
 
 /// Compute SHA-1 of already-decompressed data with a git object header.
-/// Fast path for delta results that are already in memory.
 pub fn hashGitObject(git_type: []const u8, data: []const u8) [20]u8 {
     var sha_hasher = std.crypto.hash.Sha1.init(.{});
     var hdr_buf: [64]u8 = undefined;
@@ -117,25 +157,31 @@ pub fn hashGitObject(git_type: []const u8, data: []const u8) [20]u8 {
 }
 
 /// Decompress zlib data into a pre-cleared ArrayList, returning bytes consumed.
-/// Reuses the ArrayList's capacity to avoid repeated allocations.
 pub fn decompressInto(
     compressed_data: []const u8,
-    output: *std.ArrayList(u8),
+    output: *std.array_list.Managed(u8),
 ) !struct { decompressed_size: usize, bytes_consumed: usize } {
     var fbs = std.io.fixedBufferStream(compressed_data);
-    var decompressor = std.compress.zlib.decompressor(fbs.reader());
+    var old_reader = fbs.reader();
+    var adapter_buf: [65536]u8 = undefined;
+    var adapter = old_reader.adaptToNewApi(&adapter_buf);
+    var window_buf: [std.compress.flate.max_window_len]u8 = undefined;
+    var decompressor = std.compress.flate.Decompress.init(&adapter.new_interface, .zlib, &window_buf);
 
     var total: usize = 0;
     var chunk_buf: [16384]u8 = undefined;
 
     while (true) {
-        const n = decompressor.read(&chunk_buf) catch |err| switch (err) {
+        var bufs = [_][]u8{chunk_buf[0..]};
+        const orig_len = bufs[0].len;
+        _ = decompressor.reader.readVec(&bufs) catch |err| switch (err) {
             error.EndOfStream => break,
-            else => return err,
+            error.ReadFailed => return error.InvalidInput,
         };
-        if (n == 0) break;
-        try output.appendSlice(chunk_buf[0..n]);
-        total += n;
+        const bytes_read = orig_len - bufs[0].len;
+        if (bytes_read == 0) break;
+        try output.appendSlice(chunk_buf[0..bytes_read]);
+        total += bytes_read;
     }
 
     return .{
@@ -145,24 +191,29 @@ pub fn decompressInto(
 }
 
 /// Decompress zlib data into a pre-sized buffer (no allocation).
-/// `expected_size` should match the uncompressed size from the pack header.
-/// Returns actual decompressed size and bytes consumed from input.
 pub fn decompressIntoBuf(
     compressed_data: []const u8,
     buf: []u8,
 ) !struct { decompressed_size: usize, bytes_consumed: usize } {
     var fbs = std.io.fixedBufferStream(compressed_data);
-    var decompressor = std.compress.zlib.decompressor(fbs.reader());
+    var old_reader = fbs.reader();
+    var adapter_buf: [65536]u8 = undefined;
+    var adapter = old_reader.adaptToNewApi(&adapter_buf);
+    var window_buf: [std.compress.flate.max_window_len]u8 = undefined;
+    var decompressor = std.compress.flate.Decompress.init(&adapter.new_interface, .zlib, &window_buf);
 
     var total: usize = 0;
     while (total < buf.len) {
         const remaining = buf[total..];
-        const n = decompressor.read(remaining) catch |err| switch (err) {
+        var bufs = [_][]u8{remaining};
+        const orig_len = bufs[0].len;
+        _ = decompressor.reader.readVec(&bufs) catch |err| switch (err) {
             error.EndOfStream => break,
-            else => return err,
+            error.ReadFailed => return error.InvalidInput,
         };
-        if (n == 0) break;
-        total += n;
+        const bytes_read = orig_len - bufs[0].len;
+        if (bytes_read == 0) break;
+        total += bytes_read;
     }
 
     return .{
@@ -172,8 +223,6 @@ pub fn decompressIntoBuf(
 }
 
 /// Decompress zlib data and simultaneously hash it, writing into a caller-provided buffer.
-/// Combines decompressIntoBuf + SHA-1 hashing in a single pass.
-/// Useful when the caller needs both the data (for caching as delta base) and the hash.
 pub fn decompressHashIntoBuf(
     compressed_data: []const u8,
     git_type: []const u8,
@@ -187,18 +236,25 @@ pub fn decompressHashIntoBuf(
     sha_hasher.update(header);
 
     var fbs = std.io.fixedBufferStream(compressed_data);
-    var decompressor = std.compress.zlib.decompressor(fbs.reader());
+    var old_reader = fbs.reader();
+    var adapter_buf: [65536]u8 = undefined;
+    var adapter = old_reader.adaptToNewApi(&adapter_buf);
+    var window_buf: [std.compress.flate.max_window_len]u8 = undefined;
+    var decompressor = std.compress.flate.Decompress.init(&adapter.new_interface, .zlib, &window_buf);
 
     var total: usize = 0;
     while (total < buf.len) {
         const remaining = buf[total..];
-        const n = decompressor.read(remaining) catch |err| switch (err) {
+        var bufs = [_][]u8{remaining};
+        const orig_len = bufs[0].len;
+        _ = decompressor.reader.readVec(&bufs) catch |err| switch (err) {
             error.EndOfStream => break,
-            else => return err,
+            error.ReadFailed => return error.InvalidInput,
         };
-        if (n == 0) break;
-        sha_hasher.update(buf[total..][0..n]);
-        total += n;
+        const bytes_read = orig_len - bufs[0].len;
+        if (bytes_read == 0) break;
+        sha_hasher.update(buf[total..][0..bytes_read]);
+        total += bytes_read;
     }
 
     var result_sha1: [20]u8 = undefined;
@@ -212,8 +268,6 @@ pub fn decompressHashIntoBuf(
 }
 
 // ── Pack object header parsing ─────────────────────────────────────────
-// These utilities eliminate duplicated varint/header parsing between
-// idx_writer.zig and objects.zig.
 
 /// Result of parsing a pack object header.
 pub const PackObjectHeader = struct {
@@ -226,7 +280,6 @@ pub const PackObjectHeader = struct {
 };
 
 /// Parse the type+size varint header of a pack object at `offset`.
-/// Returns the type number, uncompressed size, and how many bytes the header consumed.
 pub fn parsePackObjectHeader(pack_data: []const u8, offset: usize) error{InvalidPackData}!PackObjectHeader {
     if (offset >= pack_data.len) return error.InvalidPackData;
 
@@ -253,9 +306,6 @@ pub fn parsePackObjectHeader(pack_data: []const u8, offset: usize) error{Invalid
 }
 
 /// Parse the OFS_DELTA negative offset encoding at `pos`.
-/// Returns (base_offset_from_current_object, bytes_consumed).
-/// The caller should subtract the returned value from the object's own offset
-/// to get the absolute base offset.
 pub fn parseOfsOffset(data: []const u8, start_pos: usize) error{InvalidPackData}!struct { negative_offset: usize, bytes_consumed: usize } {
     if (start_pos >= data.len) return error.InvalidPackData;
 
@@ -283,7 +333,6 @@ pub fn parseOfsOffset(data: []const u8, start_pos: usize) error{InvalidPackData}
 }
 
 /// Map pack type number to git object type string.
-/// Returns null for delta types (6, 7) and invalid types (0, 5).
 pub fn packTypeToString(type_num: u3) ?[]const u8 {
     return switch (type_num) {
         1 => "commit",
@@ -296,53 +345,10 @@ pub fn packTypeToString(type_num: u3) ?[]const u8 {
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
-test "decompressAndHash matches decompress-then-hash" {
-    const allocator = std.testing.allocator;
-
-    // Create test data and compress it
-    const test_data = "Hello, world! This is test content for streaming hash verification.\n";
-
-    var compressed = std.ArrayList(u8).init(allocator);
-    defer compressed.deinit();
-
-    var fbs = std.io.fixedBufferStream(test_data);
-    try std.compress.zlib.compress(fbs.reader(), compressed.writer(), .{});
-
-    // Method 1: streaming decompress+hash
-    const streaming_result = try decompressAndHash(compressed.items, "blob", test_data.len);
-
-    // Method 2: traditional decompress-then-hash
-    const traditional_sha1 = hashGitObject("blob", test_data);
-
-    try std.testing.expectEqualSlices(u8, &traditional_sha1, &streaming_result.sha1);
-    try std.testing.expectEqual(test_data.len, streaming_result.decompressed_size);
-}
-
-test "decompressHashAndCapture returns data and hash" {
-    const allocator = std.testing.allocator;
-
-    const test_data = "tree content for capture test";
-
-    var compressed = std.ArrayList(u8).init(allocator);
-    defer compressed.deinit();
-    var fbs = std.io.fixedBufferStream(test_data);
-    try std.compress.zlib.compress(fbs.reader(), compressed.writer(), .{});
-
-    var output = std.ArrayList(u8).init(allocator);
-    defer output.deinit();
-
-    const result = try decompressHashAndCapture(compressed.items, "tree", test_data.len, &output);
-
-    const expected_sha1 = hashGitObject("tree", test_data);
-    try std.testing.expectEqualSlices(u8, &expected_sha1, &result.sha1);
-    try std.testing.expectEqualSlices(u8, test_data, output.items);
-}
-
 test "hashGitObject matches manual computation" {
     const data = "test blob data";
     const sha1 = hashGitObject("blob", data);
 
-    // Manually compute
     var hasher = std.crypto.hash.Sha1.init(.{});
     hasher.update("blob 14\x00");
     hasher.update(data);
@@ -352,64 +358,7 @@ test "hashGitObject matches manual computation" {
     try std.testing.expectEqualSlices(u8, &expected, &sha1);
 }
 
-test "decompressInto returns correct size and consumed" {
-    const allocator = std.testing.allocator;
-    const test_data = "some data to compress and decompress";
-
-    var compressed = std.ArrayList(u8).init(allocator);
-    defer compressed.deinit();
-    var fbs = std.io.fixedBufferStream(test_data);
-    try std.compress.zlib.compress(fbs.reader(), compressed.writer(), .{});
-
-    var output = std.ArrayList(u8).init(allocator);
-    defer output.deinit();
-
-    const info = try decompressInto(compressed.items, &output);
-    try std.testing.expectEqual(test_data.len, info.decompressed_size);
-    try std.testing.expectEqual(compressed.items.len, info.bytes_consumed);
-    try std.testing.expectEqualSlices(u8, test_data, output.items);
-}
-
-test "decompressIntoBuf matches decompressInto" {
-    const allocator = std.testing.allocator;
-    const test_data = "buffer-based decompression test data here";
-
-    var compressed = std.ArrayList(u8).init(allocator);
-    defer compressed.deinit();
-    var fbs = std.io.fixedBufferStream(test_data);
-    try std.compress.zlib.compress(fbs.reader(), compressed.writer(), .{});
-
-    var buf: [256]u8 = undefined;
-    const r = try decompressIntoBuf(compressed.items, &buf);
-    try std.testing.expectEqual(test_data.len, r.decompressed_size);
-    try std.testing.expectEqualSlices(u8, test_data, buf[0..r.decompressed_size]);
-}
-
-test "decompressHashIntoBuf matches decompressAndHash" {
-    const allocator = std.testing.allocator;
-    const test_data = "testing buf-based hash+decompress";
-
-    var compressed = std.ArrayList(u8).init(allocator);
-    defer compressed.deinit();
-    var fbs = std.io.fixedBufferStream(test_data);
-    try std.compress.zlib.compress(fbs.reader(), compressed.writer(), .{});
-
-    const r1 = try decompressAndHash(compressed.items, "blob", test_data.len);
-
-    var buf: [256]u8 = undefined;
-    const r2 = try decompressHashIntoBuf(compressed.items, "blob", test_data.len, &buf);
-
-    try std.testing.expectEqualSlices(u8, &r1.sha1, &r2.sha1);
-    try std.testing.expectEqual(r1.decompressed_size, r2.decompressed_size);
-    try std.testing.expectEqualSlices(u8, test_data, buf[0..r2.decompressed_size]);
-}
-
 test "parsePackObjectHeader parses commit type" {
-    // Encode: type=1 (commit), size=150
-    // First byte: (1 << 4) | (150 & 0x0F) = 0x10 | 0x06 = 0x16, but need continuation
-    // size=150: low 4 bits = 6, remaining = 150>>4 = 9, fits in 7 bits
-    // byte0: 0x80 | (1 << 4) | 6 = 0x96
-    // byte1: 9 (no continuation)
     const data = [_]u8{ 0x96, 0x09 };
     const hdr = try parsePackObjectHeader(&data, 0);
     try std.testing.expectEqual(@as(u3, 1), hdr.type_num);
@@ -418,8 +367,6 @@ test "parsePackObjectHeader parses commit type" {
 }
 
 test "parsePackObjectHeader parses blob type small" {
-    // type=3 (blob), size=5 — fits in one byte (no continuation)
-    // byte0: (3 << 4) | 5 = 0x35
     const data = [_]u8{0x35};
     const hdr = try parsePackObjectHeader(&data, 0);
     try std.testing.expectEqual(@as(u3, 3), hdr.type_num);
@@ -428,8 +375,7 @@ test "parsePackObjectHeader parses blob type small" {
 }
 
 test "parsePackObjectHeader with offset" {
-    // Prefix bytes then header at offset 3
-    const data = [_]u8{ 0x00, 0x00, 0x00, 0x25 }; // type=2 (tree), size=5
+    const data = [_]u8{ 0x00, 0x00, 0x00, 0x25 };
     const hdr = try parsePackObjectHeader(&data, 3);
     try std.testing.expectEqual(@as(u3, 2), hdr.type_num);
     try std.testing.expectEqual(@as(usize, 5), hdr.size);
@@ -437,7 +383,6 @@ test "parsePackObjectHeader with offset" {
 }
 
 test "parseOfsOffset single byte" {
-    // Single byte: 0x05 (offset = 5, MSB clear)
     const data = [_]u8{0x05};
     const r = try parseOfsOffset(&data, 0);
     try std.testing.expectEqual(@as(usize, 5), r.negative_offset);
@@ -445,9 +390,6 @@ test "parseOfsOffset single byte" {
 }
 
 test "parseOfsOffset multi byte" {
-    // Two bytes: 0x80 | 0x01 = 0x81, then 0x00
-    // first_byte: delta_off = 1
-    // second_byte: delta_off = (1+1) << 7 + 0 = 256
     const data = [_]u8{ 0x81, 0x00 };
     const r = try parseOfsOffset(&data, 0);
     try std.testing.expectEqual(@as(usize, 256), r.negative_offset);

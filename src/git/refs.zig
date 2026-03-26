@@ -81,7 +81,7 @@ pub fn resolveRef(git_dir: []const u8, ref_name: []const u8, platform_impl: anyt
     
     var depth: u32 = 0;
     const max_depth = 20; // Increased from 10 to handle complex setups
-    var seen_refs = std.ArrayList([]const u8).init(allocator);
+    var seen_refs = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (seen_refs.items) |seen_ref| {
             allocator.free(seen_ref);
@@ -318,8 +318,8 @@ pub fn updateHEAD(git_dir: []const u8, branch_or_hash: []const u8, platform_impl
     try platform_impl.fs.writeFile(head_path, content);
 }
 
-pub fn listBranches(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.ArrayList([]u8) {
-    var branches = std.ArrayList([]u8).init(allocator);
+pub fn listBranches(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.array_list.Managed([]u8) {
+    var branches = std.array_list.Managed([]u8).init(allocator);
     
     const refs_heads_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads", .{git_dir});
     defer allocator.free(refs_heads_path);
@@ -526,7 +526,7 @@ fn parseTagObject(tag_content: []const u8) ?[]const u8 {
     // <blank_line>
     // <tag_message>
     
-    var lines = std.mem.split(u8, tag_content, "\n");
+    var lines = std.mem.splitSequence(u8, tag_content, "\n");
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "object ")) {
             const target_hash = line["object ".len..];
@@ -540,8 +540,8 @@ fn parseTagObject(tag_content: []const u8) ?[]const u8 {
 }
 
 /// List all remote references
-pub fn listRemotes(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.ArrayList([]u8) {
-    var remotes = std.ArrayList([]u8).init(allocator);
+pub fn listRemotes(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.array_list.Managed([]u8) {
+    var remotes = std.array_list.Managed([]u8).init(allocator);
     
     const refs_remotes_path = try std.fmt.allocPrint(allocator, "{s}/refs/remotes", .{git_dir});
     defer allocator.free(refs_remotes_path);
@@ -565,8 +565,8 @@ pub fn listRemotes(git_dir: []const u8, platform_impl: anytype, allocator: std.m
 }
 
 /// List branches for a specific remote
-pub fn listRemoteBranches(git_dir: []const u8, remote_name: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.ArrayList([]u8) {
-    var branches = std.ArrayList([]u8).init(allocator);
+pub fn listRemoteBranches(git_dir: []const u8, remote_name: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.array_list.Managed([]u8) {
+    var branches = std.array_list.Managed([]u8).init(allocator);
     
     const remote_refs_path = try std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}", .{ git_dir, remote_name });
     defer allocator.free(remote_refs_path);
@@ -598,8 +598,8 @@ pub fn getRemoteBranchCommit(git_dir: []const u8, remote_name: []const u8, branc
 }
 
 /// List all tags
-pub fn listTags(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.ArrayList([]u8) {
-    var tags = std.ArrayList([]u8).init(allocator);
+pub fn listTags(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.array_list.Managed([]u8) {
+    var tags = std.array_list.Managed([]u8).init(allocator);
     
     const refs_tags_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags", .{git_dir});
     defer allocator.free(refs_tags_path);
@@ -623,7 +623,7 @@ pub fn listTags(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.
     }
     
     // Also check packed-refs for additional tags
-    const packed_tags = findTagsInPackedRefs(git_dir, platform_impl, allocator) catch std.ArrayList([]u8).init(allocator);
+    const packed_tags = findTagsInPackedRefs(git_dir, platform_impl, allocator) catch std.array_list.Managed([]u8).init(allocator);
     defer {
         for (packed_tags.items) |tag| {
             allocator.free(tag);
@@ -649,8 +649,8 @@ pub fn listTags(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.
 }
 
 /// Find tags in packed-refs file
-fn findTagsInPackedRefs(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.ArrayList([]u8) {
-    var tags = std.ArrayList([]u8).init(allocator);
+fn findTagsInPackedRefs(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.array_list.Managed([]u8) {
+    var tags = std.array_list.Managed([]u8).init(allocator);
     
     const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir});
     defer allocator.free(packed_refs_path);
@@ -661,7 +661,7 @@ fn findTagsInPackedRefs(git_dir: []const u8, platform_impl: anytype, allocator: 
     };
     defer allocator.free(content);
 
-    var lines = std.mem.split(u8, content, "\n");
+    var lines = std.mem.splitSequence(u8, content, "\n");
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
         
@@ -752,7 +752,7 @@ fn readFromPackedRefs(git_dir: []const u8, ref_name: []const u8, platform_impl: 
 
     // Check if the file is sorted (git pack-refs --all usually sorts)
     var is_sorted = false;
-    var lines_iter = std.mem.split(u8, content, "\n");
+    var lines_iter = std.mem.splitSequence(u8, content, "\n");
     
     // Parse the header to check for capabilities
     while (lines_iter.next()) |line| {
@@ -772,7 +772,7 @@ fn readFromPackedRefs(git_dir: []const u8, ref_name: []const u8, platform_impl: 
     }
     
     // Reset iterator for full search
-    lines_iter = std.mem.split(u8, content, "\n");
+    lines_iter = std.mem.splitSequence(u8, content, "\n");
     
     // Parse packed-refs file
     var prev_ref: ?[]const u8 = null;
@@ -930,7 +930,7 @@ pub const RefResolver = struct {
         const content = platform_impl.fs.readFile(self.allocator, packed_refs_path) catch return;
         defer self.allocator.free(content);
         
-        var lines = std.mem.split(u8, content, "\n");
+        var lines = std.mem.splitSequence(u8, content, "\n");
         while (lines.next()) |line| {
             const trimmed = std.mem.trim(u8, line, " \t\r");
             
@@ -1134,7 +1134,7 @@ pub fn resolveRefs(git_dir: []const u8, ref_names: []const []const u8, platform_
     
     // Parse packed-refs into cache if available
     if (packed_content) |content| {
-        var lines = std.mem.split(u8, content, "\n");
+        var lines = std.mem.splitSequence(u8, content, "\n");
         var prev_ref: ?[]const u8 = null;
         
         while (lines.next()) |line| {
@@ -1201,7 +1201,7 @@ pub fn resolveRefs(git_dir: []const u8, ref_names: []const []const u8, platform_
 
 /// Enhanced ref name completion - suggests similar ref names when resolution fails
 pub fn suggestSimilarRefs(git_dir: []const u8, partial_name: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![][]u8 {
-    var suggestions = std.ArrayList([]u8).init(allocator);
+    var suggestions = std.array_list.Managed([]u8).init(allocator);
     
     // Get all available refs
     const all_refs = try listAllRefs(git_dir, platform_impl, allocator);
@@ -1426,7 +1426,7 @@ pub const RefManager = struct {
     
     /// List all refs with their information
     pub fn getAllRefsInfo(self: RefManager, platform_impl: anytype) ![]RefInfo {
-        var refs_info = std.ArrayList(RefInfo).init(self.allocator);
+        var refs_info = std.array_list.Managed(RefInfo).init(self.allocator);
         
         const all_refs = listAllRefs(self.git_dir, platform_impl, self.allocator) catch return refs_info.toOwnedSlice();
         defer {
@@ -1497,7 +1497,7 @@ fn fuzzyMatch(ref: []const u8, pattern: []const u8) bool {
 
 /// List all refs in the repository
 fn listAllRefs(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![][]u8 {
-    var all_refs = std.ArrayList([]u8).init(allocator);
+    var all_refs = std.array_list.Managed([]u8).init(allocator);
     
     // Add HEAD
     const head_exists = refExists(git_dir, "HEAD", platform_impl, allocator) catch false;
@@ -1518,7 +1518,7 @@ fn listAllRefs(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.A
 }
 
 /// Recursively list refs in a directory
-fn listRefsInDir(dir_path: []const u8, prefix: []const u8, platform_impl: anytype, allocator: std.mem.Allocator, refs_list: *std.ArrayList([]u8)) !void {
+fn listRefsInDir(dir_path: []const u8, prefix: []const u8, platform_impl: anytype, allocator: std.mem.Allocator, refs_list: *std.array_list.Managed([]u8)) !void {
     
     var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
     defer dir.close();
@@ -1540,14 +1540,14 @@ fn listRefsInDir(dir_path: []const u8, prefix: []const u8, platform_impl: anytyp
 }
 
 /// List refs from packed-refs file
-fn listRefsFromPackedRefs(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator, refs_list: *std.ArrayList([]u8)) !void {
+fn listRefsFromPackedRefs(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator, refs_list: *std.array_list.Managed([]u8)) !void {
     const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir});
     defer allocator.free(packed_refs_path);
     
     const content = platform_impl.fs.readFile(allocator, packed_refs_path) catch return;
     defer allocator.free(content);
     
-    var lines = std.mem.split(u8, content, "\n");
+    var lines = std.mem.splitSequence(u8, content, "\n");
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\n\r");
         
@@ -1709,8 +1709,8 @@ pub const PackedRef = struct {
 };
 
 /// Parse packed-refs file
-pub fn parsePackedRefs(content: []const u8, allocator: std.mem.Allocator) !std.ArrayList(PackedRef) {
-    var refs = std.ArrayList(PackedRef).init(allocator);
+pub fn parsePackedRefs(content: []const u8, allocator: std.mem.Allocator) !std.array_list.Managed(PackedRef) {
+    var refs = std.array_list.Managed(PackedRef).init(allocator);
     errdefer {
         for (refs.items) |ref| {
             ref.deinit(allocator);
@@ -1718,7 +1718,7 @@ pub fn parsePackedRefs(content: []const u8, allocator: std.mem.Allocator) !std.A
         refs.deinit();
     }
     
-    var lines = std.mem.split(u8, content, "\n");
+    var lines = std.mem.splitSequence(u8, content, "\n");
     var current_ref: ?*PackedRef = null;
     
     while (lines.next()) |line| {

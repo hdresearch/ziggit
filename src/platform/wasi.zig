@@ -1,29 +1,14 @@
 const std = @import("std");
 const interface = @import("interface.zig");
 
-var stdout_writer: ?std.fs.File.Writer = null;
-var stderr_writer: ?std.fs.File.Writer = null;
 
-fn getStdoutWriter() std.fs.File.Writer {
-    if (stdout_writer == null) {
-        stdout_writer = std.io.getStdOut().writer();
-    }
-    return stdout_writer.?;
-}
-
-fn getStderrWriter() std.fs.File.Writer {
-    if (stderr_writer == null) {
-        stderr_writer = std.io.getStdErr().writer();
-    }
-    return stderr_writer.?;
-}
 
 fn getArgsImpl(allocator: std.mem.Allocator) !interface.ArgIterator {
     // In WASI, we need to use initWithAllocator for args
     var args = try std.process.ArgIterator.initWithAllocator(allocator);
     defer args.deinit();
     
-    var arg_list = std.ArrayList([]u8).init(allocator);
+    var arg_list = std.array_list.Managed([]u8).init(allocator);
     defer arg_list.deinit();
     
     while (args.next()) |arg| {
@@ -38,15 +23,15 @@ fn getArgsImpl(allocator: std.mem.Allocator) !interface.ArgIterator {
 }
 
 fn writeStdoutImpl(data: []const u8) !void {
-    getStdoutWriter().writeAll(data) catch |err| switch (err) {
-        error.BrokenPipe => return, // Ignore broken pipe (e.g., piped to head/less)
+    std.fs.File.stdout().writeAll(data) catch |err| switch (err) {
+        error.BrokenPipe => return,
         else => return err,
     };
 }
 
 fn writeStderrImpl(data: []const u8) !void {
-    getStderrWriter().writeAll(data) catch |err| switch (err) {
-        error.BrokenPipe => return, // Ignore broken pipe (e.g., piped to head/less)
+    std.fs.File.stderr().writeAll(data) catch |err| switch (err) {
+        error.BrokenPipe => return,
         else => return err,
     };
 }
@@ -100,7 +85,7 @@ fn readDirImpl(allocator: std.mem.Allocator, path: []const u8) ![][]u8 {
     };
     defer dir.close();
     
-    var entries = std.ArrayList([]u8).init(allocator);
+    var entries = std.array_list.Managed([]u8).init(allocator);
     defer entries.deinit();
     
     var iterator = dir.iterate();

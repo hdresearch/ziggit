@@ -75,7 +75,7 @@ pub const GitignoreEntry = struct {
             }
             
             // Try matching against each path component
-            var parts = std.mem.split(u8, path, "/");
+            var parts = std.mem.splitSequence(u8, path, "/");
             while (parts.next()) |part| {
                 if (self.matchesPattern(part)) {
                     return true;

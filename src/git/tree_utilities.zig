@@ -73,7 +73,7 @@ pub const TreeEntry = struct {
 
 /// Parse a git tree object into structured entries
 pub fn parseTreeObject(tree_data: []const u8, allocator: std.mem.Allocator) ![]TreeEntry {
-    var entries = std.ArrayList(TreeEntry).init(allocator);
+    var entries = std.array_list.Managed(TreeEntry).init(allocator);
     defer entries.deinit();
     
     var pos: usize = 0;
@@ -109,7 +109,7 @@ pub fn parseTreeObject(tree_data: []const u8, allocator: std.mem.Allocator) ![]T
         const hash_bytes = tree_data[pos..pos + 20];
         const hash = try allocator.alloc(u8, 40);
         errdefer allocator.free(hash);
-        _ = try std.fmt.bufPrint(hash, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
+        _ = try std.fmt.bufPrint(hash, "{x}", .{hash_bytes});
         
         pos += 20;
         
@@ -200,7 +200,7 @@ pub fn TreeWalker(comptime PlatformImpl: type) type {
         
         /// Find a specific file in a tree by path
         pub fn findFile(self: *Self, tree_hash: []const u8, target_path: []const u8) !?TreeEntry {
-            var path_parts = std.mem.split(u8, target_path, "/");
+            var path_parts = std.mem.splitSequence(u8, target_path, "/");
             var current_tree = try self.allocator.dupe(u8, tree_hash);
             defer self.allocator.free(current_tree);
             
@@ -252,12 +252,12 @@ pub fn TreeWalker(comptime PlatformImpl: type) type {
 
 /// Simple visitor that collects all file paths
 pub const FileCollector = struct {
-    files: std.ArrayList([]const u8),
+    files: std.array_list.Managed([]const u8),
     allocator: std.mem.Allocator,
     
     pub fn init(allocator: std.mem.Allocator) FileCollector {
         return FileCollector{
-            .files = std.ArrayList([]const u8).init(allocator),
+            .files = std.array_list.Managed([]const u8).init(allocator),
             .allocator = allocator,
         };
     }
@@ -294,7 +294,7 @@ pub fn createTreeObject(entries: []const TreeEntry, allocator: std.mem.Allocator
         }
     }.lessThan);
     
-    var content = std.ArrayList(u8).init(allocator);
+    var content = std.array_list.Managed(u8).init(allocator);
     defer content.deinit();
     
     for (sorted_entries) |entry| {
