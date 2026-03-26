@@ -279,6 +279,21 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         } else {
             try cmdStatus(allocator, &args_iter, &platform_impl, all_original_args.items);
         }
+    } else if (std.mem.eql(u8, command, "rev-list")) {
+        // Check if -z flag is present (git 2.46+ feature, not in 2.43)
+        var has_z = false;
+        for (all_original_args.items) |arg| {
+            if (std.mem.eql(u8, arg, "-z")) {
+                has_z = true;
+                break;
+            }
+        }
+        if (has_z and build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
+            // Strip -z, run real git, convert \n to \0 in output
+            try forwardRevListWithZ(allocator, all_original_args.items, &platform_impl);
+        } else {
+            try forwardCmdToGit(allocator, all_original_args.items, &platform_impl);
+        }
     } else if (std.mem.eql(u8, command, "add")) {
         try forwardCmdToGit(allocator, all_original_args.items, &platform_impl);
     } else if (std.mem.eql(u8, command, "ls-files")) {
@@ -314,7 +329,6 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         std.mem.eql(u8, command, "tag") or
         std.mem.eql(u8, command, "show") or
         std.mem.eql(u8, command, "cat-file") or
-        std.mem.eql(u8, command, "rev-list") or
         std.mem.eql(u8, command, "remote") or
         std.mem.eql(u8, command, "reset") or
         std.mem.eql(u8, command, "rm") or
@@ -620,6 +634,60 @@ fn forwardToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_i
     };
     
     // Propagate git's exit code
+    switch (term) {
+        .Exited => |code| std.process.exit(@intCast(code)),
+        .Signal => |_| std.process.exit(128),
+        .Stopped => |_| std.process.exit(128),
+        .Unknown => |_| std.process.exit(1),
+    }
+}
+
+fn forwardRevListWithZ(allocator: std.mem.Allocator, all_args: [][]const u8, platform_impl: *const platform_mod.Platform) !void {
+    // Run real git rev-list without -z, then convert \n to \0 in output
+    var argv = std.ArrayList([]const u8).init(allocator);
+    defer argv.deinit();
+    
+    try argv.append(findRealGit());
+    for (all_args) |arg| {
+        if (!std.mem.eql(u8, arg, "-z")) {
+            try argv.append(arg);
+        }
+    }
+    
+    var child = std.process.Child.init(argv.items, allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Inherit;
+    
+    _ = child.spawn() catch |err| {
+        const msg = try std.fmt.allocPrint(allocator, "ziggit: failed to execute git: {}\n", .{err});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        std.process.exit(1);
+    };
+    
+    // Read stdout and convert \n to \0
+    const stdout = child.stdout.?.reader().readAllAlloc(allocator, 10 * 1024 * 1024) catch "";
+    defer allocator.free(stdout);
+    
+    const term = child.wait() catch {
+        std.process.exit(128);
+    };
+    
+    // Convert \n to \0 in output
+    const output = try allocator.alloc(u8, stdout.len);
+    defer allocator.free(output);
+    @memcpy(output, stdout);
+    for (output) |*c| {
+        if (c.* == '\n') c.* = 0;
+    }
+    
+    // Write converted output
+    if (output.len > 0) {
+        try platform_impl.writeStdout(output);
+    }
+    
+    // Propagate exit code
     switch (term) {
         .Exited => |code| std.process.exit(@intCast(code)),
         .Signal => |_| std.process.exit(128),

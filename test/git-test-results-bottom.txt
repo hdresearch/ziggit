@@ -1,12 +1,12 @@
 Git Test Suite Results — Bottom Half
 Date: 2026-03-26
 
-  t9902-completion.sh: 173/263 passed
+  t9902-completion.sh: 172/263 passed
   t7900-maintenance.sh: 33/72 passed
   t7810-grep.sh: 256/263 passed
   t7700-repack.sh: 31/47 passed
-  t7600-merge.sh: 76/83 passed
-  t7508-status.sh: 119/126 passed
+  t7600-merge.sh: 77/83 passed
+  t7508-status.sh: 125/126 passed
   t7501-commit.sh: SKIP (not found)
   t7400-submodule-basic.sh: 120/124 passed
   t7201-co.sh: 43/46 passed
@@ -18,7 +18,7 @@ Date: 2026-03-26
   t6100-rev-list-in-order.sh: 3/3 passed
   t6000-rev-list-misc.sh: 18/23 passed
   t5601-clone.sh: 57/109 passed
-  t5510-fetch.sh: 199/214 passed
+  t5510-fetch.sh: 203/214 passed
   t5500-fetch-pack.sh: 374/377 passed
   t5400-send-pack.sh: 16/17 passed
   t5300-pack-object.sh: 49/63 passed
@@ -28,4 +28,4 @@ Date: 2026-03-26
   t4000-diff-format.sh: 41/41 passed
   t3900-i18n-commit.sh: 38/38 passed
 
-TOTAL: 2558/2852 passed (294 failed)
+TOTAL: 2568/2852 passed (284 failed)
