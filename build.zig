@@ -1775,6 +1775,22 @@ pub fn build(b: *std.Build) void {
     const pack_idx_delta_step = b.step("pack-idx-delta-test", "Run pack idx delta tests");
     pack_idx_delta_step.dependOn(&b.addRunArtifact(pack_idx_delta_tests).step);
 
+    // Pack storage comprehensive tests (REF_DELTA, delta chains, git interop, multi-pack)
+    const pack_storage_comprehensive_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_storage_comprehensive_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_storage_comprehensive_tests.root_module.addAnonymousImport("pack_writer", .{
+        .root_source_file = b.path("src/git/pack_writer.zig"),
+    });
+    pack_storage_comprehensive_tests.root_module.addAnonymousImport("idx_writer", .{
+        .root_source_file = b.path("src/git/idx_writer.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(pack_storage_comprehensive_tests).step);
+    const pack_storage_step = b.step("pack-storage-test", "Run pack storage comprehensive tests");
+    pack_storage_step.dependOn(&b.addRunArtifact(pack_storage_comprehensive_tests).step);
+
     // HTTPS end-to-end tests (require network access — run with `zig build https-e2e-test`)
     const https_e2e_tests = b.addTest(.{
         .root_source_file = b.path("test/https_e2e_test.zig"),
