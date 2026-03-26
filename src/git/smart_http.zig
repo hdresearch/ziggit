@@ -240,11 +240,16 @@ fn extractAuth(allocator: std.mem.Allocator, url: []const u8) !AuthInfo {
 }
 
 fn httpGet(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
+    return httpGetWithClient(allocator, null, url);
+}
+
+fn httpGetWithClient(allocator: std.mem.Allocator, existing_client: ?*std.http.Client, url: []const u8) ![]u8 {
     const auth = try extractAuth(allocator, url);
     defer if (auth.needs_free) allocator.free(@constCast(auth.clean_url));
 
-    var client = std.http.Client{ .allocator = allocator };
-    defer client.deinit();
+    var owned_client: ?std.http.Client = if (existing_client == null) std.http.Client{ .allocator = allocator } else null;
+    defer if (owned_client) |*c| c.deinit();
+    const client = if (existing_client) |c| c else &(owned_client.?);
 
     var server_header_buffer: [16384]u8 = undefined;
     const uri = std.Uri.parse(auth.clean_url) catch return error.InvalidUrl;
@@ -276,11 +281,16 @@ fn httpGet(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
 }
 
 fn httpPost(allocator: std.mem.Allocator, url: []const u8, body: []const u8, content_type: []const u8) ![]u8 {
+    return httpPostWithClient(allocator, null, url, body, content_type);
+}
+
+fn httpPostWithClient(allocator: std.mem.Allocator, existing_client: ?*std.http.Client, url: []const u8, body: []const u8, content_type: []const u8) ![]u8 {
     const auth = try extractAuth(allocator, url);
     defer if (auth.needs_free) allocator.free(@constCast(auth.clean_url));
 
-    var client = std.http.Client{ .allocator = allocator };
-    defer client.deinit();
+    var owned_client: ?std.http.Client = if (existing_client == null) std.http.Client{ .allocator = allocator } else null;
+    defer if (owned_client) |*c| c.deinit();
+    const client = if (existing_client) |c| c else &(owned_client.?);
 
     var server_header_buffer: [16384]u8 = undefined;
     const uri = std.Uri.parse(auth.clean_url) catch return error.InvalidUrl;
@@ -331,6 +341,10 @@ fn httpPost(allocator: std.mem.Allocator, url: []const u8, body: []const u8, con
 // ============================================================================
 
 pub fn discoverRefs(allocator: std.mem.Allocator, url: []const u8) !RefDiscovery {
+    return discoverRefsWithClient(allocator, null, url);
+}
+
+fn discoverRefsWithClient(allocator: std.mem.Allocator, client: ?*std.http.Client, url: []const u8) !RefDiscovery {
     // Normalize URL: strip trailing /
     var base = url;
     while (base.len > 0 and base[base.len - 1] == '/') {
@@ -340,7 +354,7 @@ pub fn discoverRefs(allocator: std.mem.Allocator, url: []const u8) !RefDiscovery
     const ref_url = try std.fmt.allocPrint(allocator, "{s}/info/refs?service=git-upload-pack", .{base});
     defer allocator.free(ref_url);
 
-    const body = try httpGet(allocator, ref_url);
+    const body = try httpGetWithClient(allocator, client, ref_url);
     defer allocator.free(body);
 
     return parseRefDiscoveryResponse(allocator, body);
@@ -413,6 +427,10 @@ pub fn parseRefDiscoveryResponse(allocator: std.mem.Allocator, data: []const u8)
 // ============================================================================
 
 pub fn fetchPack(allocator: std.mem.Allocator, url: []const u8, wants: []const Oid, haves: []const Oid) ![]u8 {
+    return fetchPackWithClient(allocator, null, url, wants, haves);
+}
+
+fn fetchPackWithClient(allocator: std.mem.Allocator, client: ?*std.http.Client, url: []const u8, wants: []const Oid, haves: []const Oid) ![]u8 {
     var base = url;
     while (base.len > 0 and base[base.len - 1] == '/') {
         base = base[0 .. base.len - 1];
@@ -424,7 +442,7 @@ pub fn fetchPack(allocator: std.mem.Allocator, url: []const u8, wants: []const O
     const request_body = try buildUploadPackRequest(allocator, wants, haves);
     defer allocator.free(request_body);
 
-    const response = try httpPost(allocator, post_url, request_body, "application/x-git-upload-pack-request");
+    const response = try httpPostWithClient(allocator, client, post_url, request_body, "application/x-git-upload-pack-request");
     defer allocator.free(response);
 
     return parseFetchPackResponse(allocator, response);
@@ -504,7 +522,11 @@ pub fn parseFetchPackResponse(allocator: std.mem.Allocator, data: []const u8) ![
 // ============================================================================
 
 pub fn clonePack(allocator: std.mem.Allocator, url: []const u8) !CloneResult {
-    const discovery = try discoverRefs(allocator, url);
+    // Use a single HTTP client for both requests (TLS connection reuse)
+    var client = std.http.Client{ .allocator = allocator };
+    defer client.deinit();
+
+    const discovery = try discoverRefsWithClient(allocator, &client, url);
 
     // Collect unique want hashes
     var want_set = std.StringHashMap(void).init(allocator);
@@ -526,7 +548,7 @@ pub fn clonePack(allocator: std.mem.Allocator, url: []const u8) !CloneResult {
         while (it.next()) |key| allocator.free(@constCast(key.*));
     }
 
-    const pack_data = try fetchPack(allocator, url, wants.items, &.{});
+    const pack_data = try fetchPackWithClient(allocator, &client, url, wants.items, &.{});
 
     return .{
         .refs = discovery.refs,
@@ -561,7 +583,15 @@ pub fn fetchNewPack(allocator: std.mem.Allocator, url: []const u8, local_refs: [
     var haves = std.ArrayList(Oid).init(allocator);
     defer haves.deinit();
 
-    // Collect unique have hashes
+
+
+    // Collect unique want and have hashes
+    var want_set = std.StringHashMap(void).init(allocator);
+    defer {
+        var it = want_set.keyIterator();
+        while (it.next()) |key| allocator.free(@constCast(key.*));
+        want_set.deinit();
+    }
     var have_set = std.StringHashMap(void).init(allocator);
     defer {
         var it = have_set.keyIterator();
@@ -573,7 +603,10 @@ pub fn fetchNewPack(allocator: std.mem.Allocator, url: []const u8, local_refs: [
         if (local_map.get(ref.name)) |local_hash| {
             if (!std.mem.eql(u8, &local_hash, &ref.hash)) {
                 // Updated ref - want new, have old
-                try wants.append(ref.hash);
+                if (!want_set.contains(&ref.hash)) {
+                    try want_set.put(try allocator.dupe(u8, &ref.hash), {});
+                    try wants.append(ref.hash);
+                }
                 if (!have_set.contains(&local_hash)) {
                     try have_set.put(try allocator.dupe(u8, &local_hash), {});
                     try haves.append(local_hash);
@@ -581,8 +614,11 @@ pub fn fetchNewPack(allocator: std.mem.Allocator, url: []const u8, local_refs: [
             }
             // If equal, already up to date for this ref
         } else {
-            // New ref
-            try wants.append(ref.hash);
+            // New ref - deduplicate wants
+            if (!want_set.contains(&ref.hash)) {
+                try want_set.put(try allocator.dupe(u8, &ref.hash), {});
+                try wants.append(ref.hash);
+            }
         }
     }
 

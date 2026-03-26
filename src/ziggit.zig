@@ -1238,9 +1238,16 @@ pub const Repository = struct {
             const checksum_hex = try pack_writer.savePack(allocator, git_dir, clone_result.pack_data);
             defer allocator.free(checksum_hex);
 
-            const pp = try pack_writer.packPath(allocator, git_dir, checksum_hex);
-            defer allocator.free(pp);
-            try idx_writer.generateIdx(allocator, pp);
+            // Generate idx from in-memory pack data (avoid re-reading from disk)
+            const idx_data = try idx_writer.generateIdxFromData(allocator, clone_result.pack_data);
+            defer allocator.free(idx_data);
+
+            // Write idx file
+            const ip = try pack_writer.idxPath(allocator, git_dir, checksum_hex);
+            defer allocator.free(ip);
+            const idx_file = try std.fs.cwd().createFile(ip, .{});
+            defer idx_file.close();
+            try idx_file.writeAll(idx_data);
         }
 
         // Write refs

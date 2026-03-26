@@ -50,6 +50,19 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
 
     var entries = std.ArrayList(IndexEntry).init(allocator);
     defer entries.deinit();
+    try entries.ensureTotalCapacity(object_count);
+
+    // Cache: offset -> resolved object (avoids re-decompressing delta bases)
+    var resolve_cache = std.AutoHashMap(usize, CachedObject).init(allocator);
+    defer {
+        var it = resolve_cache.valueIterator();
+        while (it.next()) |v| allocator.free(v.data);
+        resolve_cache.deinit();
+    }
+
+    // Reusable decompression buffer (avoids per-object allocation)
+    var decompressed = std.ArrayList(u8).init(allocator);
+    defer decompressed.deinit();
 
     var pos: usize = 12; // After 12-byte header
     var obj_idx: u32 = 0;
@@ -105,17 +118,16 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
             }
         }
 
-        // Decompress zlib data
+        // Decompress zlib data (reuse buffer)
         const compressed_start = pos;
-        var decompressed = std.ArrayList(u8).init(allocator);
-        defer decompressed.deinit();
+        decompressed.clearRetainingCapacity();
 
-        var stream = std.io.fixedBufferStream(pack_data[pos..content_end]);
-        std.compress.zlib.decompress(stream.reader(), decompressed.writer()) catch {
+        var fbs = std.io.fixedBufferStream(pack_data[pos..content_end]);
+        std.compress.zlib.decompress(fbs.reader(), decompressed.writer()) catch {
             obj_idx += 1;
             continue;
         };
-        pos = compressed_start + @as(usize, @intCast(stream.pos));
+        pos = compressed_start + @as(usize, @intCast(fbs.pos));
 
         // CRC32 of raw pack bytes for this object (header + compressed data)
         const crc = std.hash.crc.Crc32IsoHdlc.hash(pack_data[obj_start..pos]);
@@ -132,21 +144,26 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
                 4 => "tag",
                 else => unreachable,
             };
-            const header = try std.fmt.allocPrint(allocator, "{s} {}\x00", .{ type_str, decompressed.items.len });
-            defer allocator.free(header);
+            var hdr_buf: [64]u8 = undefined;
+            const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ type_str, decompressed.items.len }) catch unreachable;
 
             var sha_hasher = std.crypto.hash.Sha1.init(.{});
             sha_hasher.update(header);
             sha_hasher.update(decompressed.items);
             sha_hasher.final(&obj_sha1);
+
+            // Cache for future delta resolution
+            try resolve_cache.put(obj_start, .{
+                .type_str = type_str,
+                .data = try allocator.dupe(u8, decompressed.items),
+            });
         } else if (pack_type_num == 6) {
             // OFS_DELTA
             if (base_offset) |bo| {
-                const resolved = resolveObject(allocator, pack_data, bo, content_end) catch {
+                const resolved = resolveCached(allocator, pack_data, bo, content_end, &resolve_cache) catch {
                     obj_idx += 1;
                     continue;
                 };
-                defer allocator.free(resolved.data);
 
                 const result_data = applyDelta(allocator, resolved.data, decompressed.items) catch {
                     obj_idx += 1;
@@ -154,12 +171,18 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
                 };
                 defer allocator.free(result_data);
 
-                const header = try std.fmt.allocPrint(allocator, "{s} {}\x00", .{ resolved.type_str, result_data.len });
-                defer allocator.free(header);
+                var hdr_buf_d: [64]u8 = undefined;
+                const header = std.fmt.bufPrint(&hdr_buf_d, "{s} {}\x00", .{ resolved.type_str, result_data.len }) catch unreachable;
                 var sha_hasher = std.crypto.hash.Sha1.init(.{});
                 sha_hasher.update(header);
                 sha_hasher.update(result_data);
                 sha_hasher.final(&obj_sha1);
+
+                // Cache resolved result
+                try resolve_cache.put(obj_start, .{
+                    .type_str = resolved.type_str,
+                    .data = try allocator.dupe(u8, result_data),
+                });
             } else {
                 obj_idx += 1;
                 continue;
@@ -176,11 +199,10 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
                     }
                 }
                 if (found_offset) |bo| {
-                    const resolved = resolveObject(allocator, pack_data, bo, content_end) catch {
+                    const resolved = resolveCached(allocator, pack_data, bo, content_end, &resolve_cache) catch {
                         obj_idx += 1;
                         continue;
                     };
-                    defer allocator.free(resolved.data);
 
                     const result_data = applyDelta(allocator, resolved.data, decompressed.items) catch {
                         obj_idx += 1;
@@ -188,12 +210,18 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
                     };
                     defer allocator.free(result_data);
 
-                    const header = try std.fmt.allocPrint(allocator, "{s} {}\x00", .{ resolved.type_str, result_data.len });
-                    defer allocator.free(header);
+                    var hdr_buf_d2: [64]u8 = undefined;
+                    const header = std.fmt.bufPrint(&hdr_buf_d2, "{s} {}\x00", .{ resolved.type_str, result_data.len }) catch unreachable;
                     var sha_hasher = std.crypto.hash.Sha1.init(.{});
                     sha_hasher.update(header);
                     sha_hasher.update(result_data);
                     sha_hasher.final(&obj_sha1);
+
+                    // Cache resolved result
+                    try resolve_cache.put(obj_start, .{
+                        .type_str = resolved.type_str,
+                        .data = try allocator.dupe(u8, result_data),
+                    });
                 } else {
                     obj_idx += 1;
                     continue;
@@ -231,13 +259,16 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
     try idx.writer().writeInt(u32, 0xff744f63, .big);
     try idx.writer().writeInt(u32, 2, .big);
 
-    // Fanout table (256 entries)
+    // Fanout table (256 entries) - O(N) using bucket counts
+    var fanout: [256]u32 = [_]u32{0} ** 256;
+    for (entries.items) |entry| {
+        fanout[entry.sha1[0]] += 1;
+    }
+    // Convert counts to cumulative
+    var cumulative: u32 = 0;
     for (0..256) |i| {
-        var count: u32 = 0;
-        for (entries.items) |entry| {
-            if (entry.sha1[0] <= @as(u8, @intCast(i))) count += 1;
-        }
-        try idx.writer().writeInt(u32, count, .big);
+        cumulative += fanout[i];
+        try idx.writer().writeInt(u32, cumulative, .big);
     }
 
     // SHA-1 table
@@ -279,6 +310,29 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
     try idx.appendSlice(&idx_checksum);
 
     return try idx.toOwnedSlice();
+}
+
+/// Cached resolved object (data is owned by cache, do NOT free from caller)
+const CachedObject = struct {
+    type_str: []const u8, // static string
+    data: []u8, // owned by cache
+};
+
+/// Resolve with cache lookup first. Returns borrowed reference (do not free .data).
+fn resolveCached(
+    allocator: std.mem.Allocator,
+    pack_data: []const u8,
+    offset: usize,
+    content_end: usize,
+    cache: *std.AutoHashMap(usize, CachedObject),
+) !CachedObject {
+    if (cache.get(offset)) |cached| return cached;
+
+    // Not cached, resolve and cache
+    const resolved = try resolveObject(allocator, pack_data, offset, content_end);
+    // resolved.data is owned; put it in cache (cache takes ownership)
+    try cache.put(offset, .{ .type_str = resolved.type_str, .data = resolved.data });
+    return .{ .type_str = resolved.type_str, .data = resolved.data };
 }
 
 /// Resolved object: type string + decompressed data
