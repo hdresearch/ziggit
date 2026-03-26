@@ -1075,7 +1075,6 @@ pub const Repository = struct {
                 const trimmed = std.mem.trim(u8, content, " \t\n\r");
                 if (trimmed.len == 40) {
                     const ref_name = try std.fmt.allocPrint(self.allocator, "refs/heads/{s}", .{entry.name});
-                    defer self.allocator.free(ref_name);
                     try local_refs_list.append(.{
                         .hash = trimmed[0..40].*,
                         .name = ref_name,
@@ -1102,7 +1101,6 @@ pub const Repository = struct {
                     const trimmed = std.mem.trim(u8, content, " \t\n\r");
                     if (trimmed.len == 40) {
                         const ref_name = try std.fmt.allocPrint(self.allocator, "refs/heads/{s}", .{entry.name});
-                        defer self.allocator.free(ref_name);
                         try local_refs_list.append(.{
                             .hash = trimmed[0..40].*,
                             .name = ref_name,
@@ -1111,6 +1109,11 @@ pub const Repository = struct {
                 }
             } else |_| {}
         }
+
+        // Free local ref names when done (ownership was kept for fetchNewPack)
+        defer for (local_refs_list.items) |lr| {
+            self.allocator.free(lr.name);
+        };
 
         var result = smart_http.fetchNewPack(self.allocator, url, local_refs_list.items) catch {
             return error.HttpFetchFailed;
