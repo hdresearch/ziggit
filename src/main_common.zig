@@ -3876,6 +3876,38 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         }
     };
     
+    // For non-HTTP URLs (local paths, ssh://, git://), forward to real git early
+    if (!(std.mem.startsWith(u8, url.?, "https://") or std.mem.startsWith(u8, url.?, "http://"))) {
+        if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
+            var git_args = std.ArrayList([]const u8).init(allocator);
+            defer git_args.deinit();
+            try git_args.append(findRealGit());
+            try git_args.append("clone");
+            for (all_args.items) |arg| {
+                try git_args.append(arg);
+            }
+            var child = std.process.Child.init(git_args.items, allocator);
+            child.stdin_behavior = .Inherit;
+            child.stdout_behavior = .Inherit;
+            child.stderr_behavior = .Inherit;
+            const result = child.spawnAndWait() catch |err| {
+                const fmsg = try std.fmt.allocPrint(allocator, "fatal: failed to execute git: {}\n", .{err});
+                defer allocator.free(fmsg);
+                try platform_impl.writeStderr(fmsg);
+                std.process.exit(128);
+            };
+            switch (result) {
+                .Exited => |code| {
+                    if (code != 0) std.process.exit(@intCast(code));
+                },
+                .Signal => |_| std.process.exit(128),
+                .Stopped => |_| std.process.exit(128),
+                .Unknown => |_| std.process.exit(1),
+            }
+            return;
+        }
+    }
+
     // Check if target directory already exists
     if (platform_impl.fs.exists(final_target_dir) catch false) {
         const msg = try std.fmt.allocPrint(allocator, "fatal: destination path '{s}' already exists and is not an empty directory.\n", .{final_target_dir});
@@ -3976,6 +4008,36 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             };
         }
 
+        return;
+    }
+
+    // For non-HTTP URLs (local paths, ssh://, git://), forward to real git
+    if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
+        var git_args = std.ArrayList([]const u8).init(allocator);
+        defer git_args.deinit();
+        try git_args.append(findRealGit());
+        try git_args.append("clone");
+        for (all_args.items) |arg| {
+            try git_args.append(arg);
+        }
+        var child = std.process.Child.init(git_args.items, allocator);
+        child.stdin_behavior = .Inherit;
+        child.stdout_behavior = .Inherit;
+        child.stderr_behavior = .Inherit;
+        const result = child.spawnAndWait() catch |err| {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: failed to execute git: {}\n", .{err});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        };
+        switch (result) {
+            .Exited => |code| {
+                if (code != 0) std.process.exit(@intCast(code));
+            },
+            .Signal => |_| std.process.exit(128),
+            .Stopped => |_| std.process.exit(128),
+            .Unknown => |_| std.process.exit(1),
+        }
         return;
     }
 
