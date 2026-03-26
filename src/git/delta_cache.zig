@@ -1,8 +1,8 @@
 const std = @import("std");
 
 /// Bounded LRU cache for decompressed delta base objects.
-/// Tracks total memory usage and evicts least-recently-used entries
-/// when the budget is exceeded.
+/// Uses a doubly-linked list for O(1) LRU operations and a hash map for O(1) lookups.
+/// Tracks total memory usage and evicts least-recently-used entries when the budget is exceeded.
 pub const DeltaCache = struct {
     const Self = @This();
 
@@ -12,10 +12,18 @@ pub const DeltaCache = struct {
         data: []u8, // owned by the cache
     };
 
+    const Node = struct {
+        offset: usize,
+        entry: Entry,
+        prev: ?*Node,
+        next: ?*Node,
+    };
+
     allocator: std.mem.Allocator,
-    entries: std.AutoHashMap(usize, Entry),
-    /// Tracks access order (front = oldest, back = newest).
-    order: std.ArrayList(usize),
+    map: std.AutoHashMap(usize, *Node),
+    /// Head = least recently used, tail = most recently used
+    head: ?*Node,
+    tail: ?*Node,
     total_bytes: usize,
     max_bytes: usize,
     hits: u64,
@@ -24,8 +32,9 @@ pub const DeltaCache = struct {
     pub fn init(allocator: std.mem.Allocator, max_bytes: usize) Self {
         return .{
             .allocator = allocator,
-            .entries = std.AutoHashMap(usize, Entry).init(allocator),
-            .order = std.ArrayList(usize).init(allocator),
+            .map = std.AutoHashMap(usize, *Node).init(allocator),
+            .head = null,
+            .tail = null,
             .total_bytes = 0,
             .max_bytes = max_bytes,
             .hits = 0,
@@ -34,21 +43,22 @@ pub const DeltaCache = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        var it = self.entries.valueIterator();
-        while (it.next()) |v| {
-            self.allocator.free(v.data);
+        var node = self.head;
+        while (node) |n| {
+            const next = n.next;
+            self.allocator.free(n.entry.data);
+            self.allocator.destroy(n);
+            node = next;
         }
-        self.entries.deinit();
-        self.order.deinit();
+        self.map.deinit();
     }
 
     /// Look up an entry by pack offset. Returns borrowed reference (do NOT free).
     pub fn get(self: *Self, offset: usize) ?Entry {
-        if (self.entries.get(offset)) |entry| {
+        if (self.map.get(offset)) |node| {
             self.hits += 1;
-            // Move to back of LRU order (mark as recently used)
-            self.touchOrder(offset);
-            return entry;
+            self.moveToTail(node);
+            return node.entry;
         }
         self.misses += 1;
         return null;
@@ -58,18 +68,29 @@ pub const DeltaCache = struct {
     /// Evicts oldest entries if over memory budget.
     pub fn put(self: *Self, offset: usize, type_str: []const u8, data: []u8) !void {
         // If already present, replace
-        if (self.entries.fetchRemove(offset)) |old| {
-            self.total_bytes -= old.value.data.len;
-            self.allocator.free(old.value.data);
+        if (self.map.get(offset)) |existing| {
+            self.total_bytes -= existing.entry.data.len;
+            self.allocator.free(existing.entry.data);
+            existing.entry = .{ .type_str = type_str, .data = data };
+            self.total_bytes += data.len;
+            self.moveToTail(existing);
+            return;
         }
 
         // Evict until we have room
-        while (self.total_bytes + data.len > self.max_bytes and self.order.items.len > 0) {
-            self.evictOldest();
+        while (self.total_bytes + data.len > self.max_bytes and self.head != null) {
+            self.evictHead();
         }
 
-        try self.entries.put(offset, .{ .type_str = type_str, .data = data });
-        try self.order.append(offset);
+        const node = try self.allocator.create(Node);
+        node.* = .{
+            .offset = offset,
+            .entry = .{ .type_str = type_str, .data = data },
+            .prev = null,
+            .next = null,
+        };
+        try self.map.put(offset, node);
+        self.appendToTail(node);
         self.total_bytes += data.len;
     }
 
@@ -82,29 +103,38 @@ pub const DeltaCache = struct {
         };
     }
 
-    fn evictOldest(self: *Self) void {
-        if (self.order.items.len == 0) return;
-        const oldest_offset = self.order.orderedRemove(0);
-        if (self.entries.fetchRemove(oldest_offset)) |removed| {
-            self.total_bytes -= removed.value.data.len;
-            self.allocator.free(removed.value.data);
-        }
+    fn evictHead(self: *Self) void {
+        const node = self.head orelse return;
+        self.removeNode(node);
+        _ = self.map.remove(node.offset);
+        self.total_bytes -= node.entry.data.len;
+        self.allocator.free(node.entry.data);
+        self.allocator.destroy(node);
     }
 
-    fn touchOrder(self: *Self, offset: usize) void {
-        // Remove from current position and push to back
-        for (self.order.items, 0..) |item, i| {
-            if (item == offset) {
-                _ = self.order.orderedRemove(i);
-                self.order.append(offset) catch {};
-                return;
-            }
-        }
+    fn removeNode(self: *Self, node: *Node) void {
+        if (node.prev) |p| p.next = node.next else self.head = node.next;
+        if (node.next) |n| n.prev = node.prev else self.tail = node.prev;
+        node.prev = null;
+        node.next = null;
+    }
+
+    fn appendToTail(self: *Self, node: *Node) void {
+        node.prev = self.tail;
+        node.next = null;
+        if (self.tail) |t| t.next = node else self.head = node;
+        self.tail = node;
+    }
+
+    fn moveToTail(self: *Self, node: *Node) void {
+        if (self.tail == node) return; // already at tail
+        self.removeNode(node);
+        self.appendToTail(node);
     }
 
     /// Number of cached entries.
     pub fn count(self: Self) usize {
-        return self.entries.count();
+        return self.map.count();
     }
 
     /// Current memory usage in bytes.
@@ -141,7 +171,6 @@ test "DeltaCache evicts when over budget" {
     var cache = DeltaCache.init(allocator, 20);
     defer cache.deinit();
 
-    // Insert 3 entries of ~10 bytes each; budget is 20, so oldest should be evicted
     const d1 = try allocator.dupe(u8, "aaaaaaaaaa"); // 10 bytes
     try cache.put(1, "blob", d1);
     try std.testing.expectEqual(@as(usize, 10), cache.memoryUsage());

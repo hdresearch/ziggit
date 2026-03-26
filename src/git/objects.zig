@@ -955,24 +955,20 @@ fn findOffsetInIdx(idx_data: []const u8, target_hash: [20]u8) ?usize {
 
 /// Apply delta to base data to reconstruct object with enhanced error handling and validation
 pub fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    // Fast path: optimized delta application (no fallback overhead)
-    return applyDeltaFast(base_data, delta_data, allocator) catch |err| {
+    return applyDeltaCore(base_data, delta_data, allocator) catch |err| {
         // Only fall back for data-level errors, not OOM
         switch (err) {
             error.OutOfMemory => return err,
             else => {},
         }
-        // Fallback: try permissive then last-resort
-        return applyDeltaPermissive(base_data, delta_data, allocator) catch {
-            return applyDeltaLastResort(base_data, delta_data, allocator) catch err;
-        };
+        // Single permissive fallback — handles thin pack mismatches
+        return applyDeltaPermissive(base_data, delta_data, allocator) catch err;
     };
 }
 
-/// Optimized primary delta application path.
-/// Reads varint headers, pre-allocates result, applies copy/insert commands
-/// with minimal bounds checking on the hot path.
-fn applyDeltaFast(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
+/// Primary delta application path. Handles both exact and minor base size mismatches.
+/// Pre-allocates result buffer and applies copy/insert commands with @memcpy.
+fn applyDeltaCore(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
     if (delta_data.len < 2) return error.InvalidDelta;
 
     var pos: usize = 0;
@@ -984,9 +980,8 @@ fn applyDeltaFast(base_data: []const u8, delta_data: []const u8, allocator: std.
     // Read result size varint
     const result_size = readVarint(delta_data, &pos);
 
-    // Validate base size (allow minor mismatch for thin packs)
-    if (base_size != base_data.len) {
-        // Strict check — if sizes don't match, fall through to permissive
+    // Allow minor base size mismatch for thin packs (up to 1KB tolerance)
+    if (base_size > base_data.len + 1024 or (base_size > 0 and base_data.len > base_size + 1024)) {
         return error.InvalidDelta;
     }
 
@@ -994,7 +989,7 @@ fn applyDeltaFast(base_data: []const u8, delta_data: []const u8, allocator: std.
     if (result_size > 1024 * 1024 * 1024) return error.InvalidDelta;
 
     // Pre-allocate exact result size
-    var result = try allocator.alloc(u8, result_size);
+    const result = try allocator.alloc(u8, result_size);
     errdefer allocator.free(result);
     var result_pos: usize = 0;
 
@@ -1016,6 +1011,7 @@ fn applyDeltaFast(base_data: []const u8, delta_data: []const u8, allocator: std.
             if (cmd & 0x40 != 0) { copy_size |= @as(usize, delta_data[pos]) << 16; pos += 1; }
             if (copy_size == 0) copy_size = 0x10000;
 
+            // Bounds check against actual base data (handles thin pack mismatch)
             if (copy_offset + copy_size > base_data.len) return error.InvalidDelta;
             if (result_pos + copy_size > result_size) return error.InvalidDelta;
 
@@ -1038,8 +1034,6 @@ fn applyDeltaFast(base_data: []const u8, delta_data: []const u8, allocator: std.
     if (result_pos != result_size) return error.InvalidDelta;
     return result;
 }
-
-/// Read a variable-length size from delta data (7 bits per byte, MSB = continuation).
 fn readVarint(data: []const u8, pos: *usize) usize {
     var value: usize = 0;
     var shift: u6 = 0;
@@ -1055,291 +1049,64 @@ fn readVarint(data: []const u8, pos: *usize) usize {
 }
 
 
-/// More permissive delta application for recovery from corrupted deltas
+/// Permissive delta application for edge cases (thin packs, minor corruption).
+/// Uses ArrayList for dynamic result sizing.
 fn applyDeltaPermissive(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
     if (delta_data.len < 2) return error.DeltaMissingHeaders;
     if (base_data.len == 0) return error.EmptyBaseData;
-    
+
     var pos: usize = 0;
-    
-    // Read base size (variable length) with more permissive bounds
-    var base_size: usize = 0;
-    const ShiftT = std.math.Log2Int(usize); var shift: ShiftT = 0;
-    while (pos < delta_data.len and shift < 64) {
-        const b = delta_data[pos];
-        pos += 1;
-        base_size |= @as(usize, @intCast(b & 0x7F)) << shift;
-        if (b & 0x80 == 0) break;
-        shift += 7;
-        
-        if (shift > 40) break; // More permissive limit
-    }
-    
+
+    // Read base size varint (permissive — skip if corrupted)
+    _ = readVarint(delta_data, &pos);
     if (pos >= delta_data.len) return error.DeltaTruncated;
-    
-    // Read result size (variable length) with more permissive bounds
-    var result_size: usize = 0;
-    shift = 0;
-    while (pos < delta_data.len and shift < 64) {
-        const b = delta_data[pos];
-        pos += 1;
-        result_size |= @as(usize, @intCast(b & 0x7F)) << shift;
-        if (b & 0x80 == 0) break;
-        shift += 7;
-        
-        if (shift > 40) break; // More permissive limit
-    }
-    
-    // More permissive size validation - allow some mismatch
-    if (base_size > base_data.len + 1024) { // Allow 1KB tolerance
-        return error.BaseSizeMismatch;
-    }
-    
-    // Use actual base size if encoded size is larger
-    const actual_base_size = @min(base_size, base_data.len);
-    
-    // Apply delta commands with error recovery
+
+    // Read result size varint
+    const result_size = readVarint(delta_data, &pos);
+
     var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
-    try result.ensureTotalCapacity(@max(result_size, base_data.len));
-    
+    if (result_size > 0 and result_size < 1024 * 1024 * 1024) {
+        try result.ensureTotalCapacity(result_size);
+    }
+
     while (pos < delta_data.len) {
-        if (pos >= delta_data.len) break;
-        
         const cmd = delta_data[pos];
         pos += 1;
-        
+
         if (cmd & 0x80 != 0) {
-            // Copy command with bounds checking
             var copy_offset: usize = 0;
             var copy_size: usize = 0;
-            
-            // Read offset (up to 4 bytes, little-endian)
-            if (cmd & 0x01 != 0 and pos < delta_data.len) { 
-                copy_offset |= @as(usize, delta_data[pos]); 
-                pos += 1; 
-            }
-            if (cmd & 0x02 != 0 and pos < delta_data.len) { 
-                copy_offset |= @as(usize, delta_data[pos]) << 8; 
-                pos += 1; 
-            }
-            if (cmd & 0x04 != 0 and pos < delta_data.len) { 
-                copy_offset |= @as(usize, delta_data[pos]) << 16; 
-                pos += 1; 
-            }
-            if (cmd & 0x08 != 0 and pos < delta_data.len) { 
-                copy_offset |= @as(usize, delta_data[pos]) << 24; 
-                pos += 1; 
-            }
-            
-            // Read size (up to 3 bytes, little-endian)
-            if (cmd & 0x10 != 0 and pos < delta_data.len) { 
-                copy_size |= @as(usize, delta_data[pos]); 
-                pos += 1; 
-            }
-            if (cmd & 0x20 != 0 and pos < delta_data.len) { 
-                copy_size |= @as(usize, delta_data[pos]) << 8; 
-                pos += 1; 
-            }
-            if (cmd & 0x40 != 0 and pos < delta_data.len) { 
-                copy_size |= @as(usize, delta_data[pos]) << 16; 
-                pos += 1; 
-            }
-            
-            // Size 0 means 0x10000
-            if (copy_size == 0) copy_size = 0x10000;
-            
-            // More permissive bounds checking
-            if (copy_offset >= actual_base_size) continue; // Skip invalid copy
-            
-            copy_size = @min(copy_size, actual_base_size - copy_offset);
-            if (copy_size == 0) continue;
-            
-            // Copy data from base with bounds checking
-            const end_offset = @min(copy_offset + copy_size, base_data.len);
-            if (end_offset > copy_offset) {
-                try result.appendSlice(base_data[copy_offset..end_offset]);
-            }
-        } else if (cmd > 0) {
-            // Insert command with bounds checking
-            const insert_size = @as(usize, cmd);
-            const available_data = @min(insert_size, delta_data.len - pos);
-            
-            if (available_data > 0) {
-                try result.appendSlice(delta_data[pos..pos + available_data]);
-                pos += insert_size; // Skip the full size even if we didn't read it all
-            }
-        } else {
-            // cmd == 0 is reserved - skip in permissive mode
-            continue;
-        }
-        
-        // Prevent excessive growth
-        if (result.items.len > result_size * 2) break;
-    }
-    
-    return try allocator.dupe(u8, result.items);
-}
 
-/// Last resort delta application - tries to salvage partial data from corrupted deltas
-fn applyDeltaLastResort(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    if (delta_data.len < 2) return error.DeltaMissingHeaders;
-    if (base_data.len == 0) {
-        // If base is empty, try to extract just the insert commands from delta
-        return extractInsertsFromDelta(delta_data, allocator);
-    }
-    
-    var pos: usize = 0;
-    
-    // Try to read sizes even if corrupted
-    var base_size: usize = 0;
-    var result_size: usize = base_data.len; // Default to base size
-    
-    // Try to read base size
-    const ShiftT = std.math.Log2Int(usize); var shift: ShiftT = 0;
-    while (pos < delta_data.len and shift < 32) { 
-        const b = delta_data[pos];
-        pos += 1;
-        base_size |= @as(usize, @intCast(b & 0x7F)) << shift;
-        if (b & 0x80 == 0) break;
-        shift += 7;
-    }
-    
-    // Try to read result size
-    shift = 0;
-    while (pos < delta_data.len and shift < 32) {
-        const b = delta_data[pos];
-        pos += 1;
-        result_size |= @as(usize, @intCast(b & 0x7F)) << shift;
-        if (b & 0x80 == 0) break;
-        shift += 7;
-    }
-    
-    // If sizes seem unreasonable, fall back to base data
-    if (result_size > base_data.len * 100 or result_size > 1024 * 1024 * 1024) {
-        result_size = base_data.len;
-    }
-    
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
-    
-    // Start with base data as fallback
-    try result.appendSlice(base_data);
-    
-    // Try to apply what commands we can
-    while (pos < delta_data.len and result.items.len < result_size * 2) {
-        if (pos >= delta_data.len) break;
-        
-        const cmd = delta_data[pos];
-        pos += 1;
-        
-        if (cmd & 0x80 != 0) {
-            // Copy command - be very defensive
-            var copy_offset: usize = 0;
-            var copy_size: usize = 0;
-            
-            // Read offset carefully
-            for (0..4) |i| {
-                if (cmd & (@as(u8, 1) << @intCast(i)) != 0 and pos < delta_data.len) {
-                    copy_offset |= @as(usize, delta_data[pos]) << @intCast(i * 8);
-                    pos += 1;
-                }
-            }
-            
-            // Read size carefully  
-            for (0..3) |i| {
-                if (cmd & (@as(u8, 0x10) << @intCast(i)) != 0 and pos < delta_data.len) {
-                    copy_size |= @as(usize, delta_data[pos]) << @intCast(i * 8);
-                    pos += 1;
-                }
-            }
-            
+            if (cmd & 0x01 != 0 and pos < delta_data.len) { copy_offset |= @as(usize, delta_data[pos]); pos += 1; }
+            if (cmd & 0x02 != 0 and pos < delta_data.len) { copy_offset |= @as(usize, delta_data[pos]) << 8; pos += 1; }
+            if (cmd & 0x04 != 0 and pos < delta_data.len) { copy_offset |= @as(usize, delta_data[pos]) << 16; pos += 1; }
+            if (cmd & 0x08 != 0 and pos < delta_data.len) { copy_offset |= @as(usize, delta_data[pos]) << 24; pos += 1; }
+            if (cmd & 0x10 != 0 and pos < delta_data.len) { copy_size |= @as(usize, delta_data[pos]); pos += 1; }
+            if (cmd & 0x20 != 0 and pos < delta_data.len) { copy_size |= @as(usize, delta_data[pos]) << 8; pos += 1; }
+            if (cmd & 0x40 != 0 and pos < delta_data.len) { copy_size |= @as(usize, delta_data[pos]) << 16; pos += 1; }
             if (copy_size == 0) copy_size = 0x10000;
-            
-            // Very conservative bounds checking
-            if (copy_offset < base_data.len and copy_size > 0) {
-                const safe_size = @min(copy_size, base_data.len - copy_offset);
-                const safe_size_clamped = @min(safe_size, 1024 * 1024); // Max 1MB copy
-                
-                if (safe_size_clamped > 0 and result.items.len + safe_size_clamped <= result_size + base_data.len) {
-                    result.appendSlice(base_data[copy_offset..copy_offset + safe_size_clamped]) catch break;
-                }
-            }
-        } else if (cmd > 0) {
-            // Insert command - be defensive about size
-            const insert_size = @min(@as(usize, cmd), delta_data.len - pos);
-            const safe_insert_size = @min(insert_size, 1024 * 1024); // Max 1MB insert
-            
-            if (safe_insert_size > 0 and result.items.len + safe_insert_size <= result_size + base_data.len) {
-                result.appendSlice(delta_data[pos..pos + safe_insert_size]) catch break;
-            }
-            pos += insert_size; // Skip all the data even if we didn't use it
-        }
-        // cmd == 0 is ignored
-    }
-    
-    // If result is empty or suspiciously small, return base data
-    if (result.items.len == 0 or result.items.len < base_data.len / 10) {
-        result.clearRetainingCapacity();
-        try result.appendSlice(base_data);
-    }
-    
-    return try allocator.dupe(u8, result.items);
-}
 
-/// Extract just the insert commands from a delta (for when base data is unavailable/corrupted)
-fn extractInsertsFromDelta(delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    if (delta_data.len < 2) return error.DeltaMissingHeaders;
-    
-    var pos: usize = 0;
-    
-    // Skip base size
-    while (pos < delta_data.len) {
-        const b = delta_data[pos];
-        pos += 1;
-        if (b & 0x80 == 0) break;
-    }
-    
-    // Skip result size
-    while (pos < delta_data.len) {
-        const b = delta_data[pos];
-        pos += 1;
-        if (b & 0x80 == 0) break;
-    }
-    
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
-    
-    // Extract only insert commands
-    while (pos < delta_data.len) {
-        if (pos >= delta_data.len) break;
-        
-        const cmd = delta_data[pos];
-        pos += 1;
-        
-        if (cmd & 0x80 != 0) {
-            // Copy command - skip it and its parameters
-            for (0..7) |i| {
-                if (cmd & (@as(u8, 1) << @intCast(i)) != 0 and pos < delta_data.len) {
-                    pos += 1;
-                }
+            // Clamp to available base data
+            if (copy_offset >= base_data.len) continue;
+            copy_size = @min(copy_size, base_data.len - copy_offset);
+            if (copy_size > 0) {
+                try result.appendSlice(base_data[copy_offset..copy_offset + copy_size]);
             }
         } else if (cmd > 0) {
-            // Insert command - extract the data
-            const insert_size = @as(usize, cmd);
-            const available = @min(insert_size, delta_data.len - pos);
-            
+            const n: usize = @intCast(cmd);
+            const available = @min(n, delta_data.len - pos);
             if (available > 0) {
-                result.appendSlice(delta_data[pos..pos + available]) catch break;
-                pos += insert_size;
+                try result.appendSlice(delta_data[pos..pos + available]);
             }
+            pos += n;
         }
+        // cmd == 0: skip silently in permissive mode
     }
-    
+
     return try allocator.dupe(u8, result.items);
 }
 
-/// Check if a pack file might be a "thin pack" (missing some base objects)
 fn isPackFileThin(pack_data: []const u8) bool {
     if (pack_data.len < 12) return false;
     
