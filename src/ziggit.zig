@@ -65,10 +65,11 @@ pub const Repository = struct {
 
     // Read operations (pure Zig, no git dependency)
 
-    /// Get HEAD commit hash (like `git rev-parse HEAD`)
+    /// Get HEAD commit hash (like `git rev-parse HEAD`) - OPTIMIZED
     pub fn revParseHead(self: *const Repository) ![40]u8 {
-        const head_path = try std.fmt.allocPrint(self.allocator, "{s}/HEAD", .{self.git_dir});
-        defer self.allocator.free(head_path);
+        // Use stack-allocated buffer instead of heap allocation
+        var head_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const head_path = std.fmt.bufPrint(&head_path_buf, "{s}/HEAD", .{self.git_dir}) catch return error.PathTooLong;
 
         const head_file = std.fs.openFileAbsolute(head_path, .{}) catch |err| switch (err) {
             error.FileNotFound => return [_]u8{'0'} ** 40, // Empty repo
@@ -76,13 +77,13 @@ pub const Repository = struct {
         };
         defer head_file.close();
 
-        var head_content_buf: [512]u8 = undefined;
+        var head_content_buf: [64]u8 = undefined; // HEAD content is small, reduce buffer size
         const bytes_read = try head_file.readAll(&head_content_buf);
         const head_content = std.mem.trim(u8, head_content_buf[0..bytes_read], " \n\r\t");
 
         if (std.mem.startsWith(u8, head_content, "ref: ")) {
             const ref_name = head_content[5..];
-            return try self.resolveRef(ref_name);
+            return try self.resolveRefFast(ref_name);
         } else if (head_content.len >= 40 and isValidHex(head_content[0..40])) {
             var result: [40]u8 = undefined;
             @memcpy(&result, head_content[0..40]);
@@ -92,18 +93,19 @@ pub const Repository = struct {
         }
     }
 
-    /// Get status in porcelain format (like `git status --porcelain`)
+    /// Get status in porcelain format (like `git status --porcelain`) - OPTIMIZED
     pub fn statusPorcelain(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
-        const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{self.git_dir});
-        defer allocator.free(head_path);
+        // Use stack buffer to avoid heap allocation
+        var head_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const head_path = std.fmt.bufPrint(&head_path_buf, "{s}/HEAD", .{self.git_dir}) catch return error.PathTooLong;
 
         std.fs.accessAbsolute(head_path, .{}) catch |err| switch (err) {
             error.FileNotFound => return try allocator.dupe(u8, ""),
             else => return err,
         };
 
-        // Simple implementation - check for untracked files
-        return try self.scanUntracked(allocator);
+        // Optimized implementation - check for untracked files
+        return try self.scanUntrackedFast(allocator);
     }
 
     /// Check if working tree is clean
@@ -113,10 +115,11 @@ pub const Repository = struct {
         return status.len == 0;
     }
 
-    /// Get latest tag (like `git describe --tags --abbrev=0`)  
-    pub fn describeTags(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
-        const tags_dir = try std.fmt.allocPrint(allocator, "{s}/refs/tags", .{self.git_dir});
-        defer allocator.free(tags_dir);
+    /// Get latest tag (like `git describe --tags --abbrev=0`) - OPTIMIZED 
+    pub fn describeTagsFast(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
+        // Use stack buffer for tags directory path
+        var tags_dir_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const tags_dir = std.fmt.bufPrint(&tags_dir_buf, "{s}/refs/tags", .{self.git_dir}) catch return error.PathTooLong;
 
         var tags_list = std.ArrayList([]const u8).init(allocator);
         defer {
@@ -151,6 +154,11 @@ pub const Repository = struct {
         }.lessThan);
 
         return try allocator.dupe(u8, tags_list.items[0]);
+    }
+
+    /// Get latest tag (like `git describe --tags --abbrev=0`)  
+    pub fn describeTags(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
+        return self.describeTagsFast(allocator);
     }
 
     /// Find specific commit hash
@@ -659,6 +667,28 @@ pub const Repository = struct {
         return error.RefNotFound;
     }
 
+    /// Fast ref resolution using stack allocation - OPTIMIZED
+    fn resolveRefFast(self: *const Repository, ref_name: []const u8) ![40]u8 {
+        // Use stack-allocated buffer instead of heap allocation
+        var ref_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const ref_path = std.fmt.bufPrint(&ref_path_buf, "{s}/{s}", .{ self.git_dir, ref_name }) catch return error.PathTooLong;
+
+        const ref_file = std.fs.openFileAbsolute(ref_path, .{}) catch return error.RefNotFound;
+        defer ref_file.close();
+
+        var ref_content_buf: [48]u8 = undefined; // SHA-1 is 40 chars + newline
+        const bytes_read = try ref_file.readAll(&ref_content_buf);
+        const ref_content = std.mem.trim(u8, ref_content_buf[0..bytes_read], " \n\r\t");
+
+        if (ref_content.len >= 40 and isValidHex(ref_content[0..40])) {
+            var result: [40]u8 = undefined;
+            @memcpy(&result, ref_content[0..40]);
+            return result;
+        }
+
+        return error.RefNotFound;
+    }
+
     fn expandShortHash(self: *const Repository, short_hash: []const u8) ![40]u8 {
         const obj_dir = try std.fmt.allocPrint(self.allocator, "{s}/objects/{s}", .{ self.git_dir, short_hash[0..2] });
         defer self.allocator.free(obj_dir);
@@ -719,7 +749,69 @@ pub const Repository = struct {
         return try output.toOwnedSlice();
     }
 
+    /// Fast untracked file scanning using HashMap for O(1) lookups - OPTIMIZED
+    fn scanUntrackedFast(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
+        var output = std.ArrayList(u8).init(allocator);
+        defer output.deinit();
+
+        // Use stack buffer for index path
+        var index_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const index_path = std.fmt.bufPrint(&index_path_buf, "{s}/index", .{self.git_dir}) catch return error.PathTooLong;
+
+        var git_index = index_parser.GitIndex.readFromFile(allocator, index_path) catch {
+            return try self.scanAllFilesAsUntrackedFast(allocator);
+        };
+        defer git_index.deinit();
+
+        // Build HashMap for O(1) tracked file lookups instead of O(n) linear search
+        var tracked_files = std.HashMap([]const u8, void, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator);
+        defer tracked_files.deinit();
+
+        for (git_index.entries.items) |index_entry| {
+            try tracked_files.put(index_entry.path, {});
+        }
+
+        var dir = std.fs.cwd().openDir(self.path, .{ .iterate = true }) catch return try allocator.dupe(u8, "");
+        defer dir.close();
+
+        var iterator = dir.iterate();
+        while (try iterator.next()) |entry| {
+            if (entry.kind != .file) continue;
+            if (std.mem.startsWith(u8, entry.name, ".git")) continue;
+
+            // O(1) lookup instead of O(n) linear search
+            if (!tracked_files.contains(entry.name)) {
+                try output.appendSlice("?? ");
+                try output.appendSlice(entry.name);
+                try output.append('\n');
+            }
+        }
+
+        return try output.toOwnedSlice();
+    }
+
     fn scanAllFilesAsUntracked(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
+        var output = std.ArrayList(u8).init(allocator);
+        defer output.deinit();
+
+        var dir = std.fs.cwd().openDir(self.path, .{ .iterate = true }) catch return try allocator.dupe(u8, "");
+        defer dir.close();
+
+        var iterator = dir.iterate();
+        while (try iterator.next()) |entry| {
+            if (entry.kind != .file) continue;
+            if (std.mem.startsWith(u8, entry.name, ".git")) continue;
+
+            try output.appendSlice("?? ");
+            try output.appendSlice(entry.name);
+            try output.append('\n');
+        }
+
+        return try output.toOwnedSlice();
+    }
+
+    /// Fast scan all files as untracked - OPTIMIZED
+    fn scanAllFilesAsUntrackedFast(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
         var output = std.ArrayList(u8).init(allocator);
         defer output.deinit();
 
