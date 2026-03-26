@@ -185,6 +185,7 @@ pub const Repository = struct {
         var index_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
         const index_path = std.fmt.bufPrint(&index_path_buf, "{s}/index", .{self.git_dir}) catch return error.PathTooLong;
 
+        // Use regular GitIndex for detailed status (needs SHA-1 hashes)
         var git_index = index_parser.GitIndex.readFromFile(allocator, index_path) catch {
             // No index means all files are untracked
             return try self.scanAllFilesAsUntrackedFast(allocator);
@@ -293,8 +294,13 @@ pub const Repository = struct {
 
     /// Check if working tree is clean - ultra-optimized
     pub fn isClean(self: *const Repository) !bool {
-        // For now, use a simple status-based check
-        // TODO: Re-enable ultra-fast path after fixing timing issues
+        // OPTIMIZATION: Try ultra-fast clean check first
+        if (try self.isUltraFastClean()) {
+            return true;
+        }
+        
+        // If ultra-fast check is uncertain, fall back to status-based check
+        // This is still faster than a full status because it short-circuits
         const status = try self.statusPorcelain(self.allocator);
         defer self.allocator.free(status);
         return status.len == 0;
@@ -306,7 +312,8 @@ pub const Repository = struct {
         var index_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
         const index_path = std.fmt.bufPrint(&index_path_buf, "{s}/index", .{self.git_dir}) catch return error.PathTooLong;
 
-        var git_index = index_parser.GitIndex.readFromFile(self.allocator, index_path) catch {
+        // OPTIMIZATION: Use FastGitIndex for faster parsing
+        var git_index = index_parser_fast.FastGitIndex.readFromFile(self.allocator, index_path) catch {
             // No index means check if any files exist (all would be untracked)
             return try self.hasNoUntrackedFiles();
         };
@@ -317,7 +324,7 @@ pub const Repository = struct {
         defer tracked_files.deinit();
 
         // Check each indexed file for modifications - SHORT CIRCUIT on first change
-        for (git_index.entries.items) |entry| {
+        for (git_index.entries) |entry| {
             try tracked_files.put(entry.path, {});
             
             // Get file path in working directory using stack buffer
@@ -333,50 +340,16 @@ pub const Repository = struct {
                 else => continue,
             };
             
-            // Fast path: compare mtime and size
+            // Fast path: compare mtime and size only (no SHA-1 computation)
             const work_mtime_sec = @as(u32, @intCast(@divTrunc(work_stat.mtime, 1_000_000_000)));
             const work_size = @as(u32, @intCast(work_stat.size));
             
             if (work_mtime_sec == entry.mtime_seconds and work_size == entry.size) {
-                // File appears unchanged - continue checking other files
+                // File appears unchanged (mtime/size match) - assume clean for ultra-fast path
                 continue;
-            }
-            
-            // Slow path: need to check content, but optimize for clean case
-            const work_file = std.fs.cwd().openFile(file_path, .{}) catch continue;
-            defer work_file.close();
-            
-            const work_content = work_file.readToEndAlloc(self.allocator, 100 * 1024 * 1024) catch continue;
-            defer self.allocator.free(work_content);
-            
-            // Optimized blob header creation
-            var blob_header_buf: [32]u8 = undefined;
-            const blob_header = std.fmt.bufPrint(&blob_header_buf, "blob {}\x00", .{work_content.len}) catch {
-                // Fallback for very large files
-                const header = try std.fmt.allocPrint(self.allocator, "blob {}\x00", .{work_content.len});
-                defer self.allocator.free(header);
-                
-                var hasher = std.crypto.hash.Sha1.init(.{});
-                hasher.update(header);
-                hasher.update(work_content);
-                var work_hash: [20]u8 = undefined;
-                hasher.final(&work_hash);
-                
-                if (!std.mem.eql(u8, &work_hash, &entry.sha1)) {
-                    return false; // SHORT CIRCUIT - file changed
-                }
-                continue;
-            };
-            
-            // Streaming SHA-1 computation
-            var hasher = std.crypto.hash.Sha1.init(.{});
-            hasher.update(blob_header);
-            hasher.update(work_content);
-            var work_hash: [20]u8 = undefined;
-            hasher.final(&work_hash);
-            
-            if (!std.mem.eql(u8, &work_hash, &entry.sha1)) {
-                return false; // SHORT CIRCUIT - file changed
+            } else {
+                // Any mtime/size difference means potentially not clean - be conservative
+                return false; // SHORT CIRCUIT - assume not clean when mtime/size differs
             }
         }
 
