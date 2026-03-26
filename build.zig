@@ -831,6 +831,15 @@ pub fn build(b: *std.Build) void {
     e2e_step.dependOn(&b.addRunArtifact(ziggit_writes_test).step);
     e2e_step.dependOn(&b.addRunArtifact(git_writes_test).step);
 
+    // API git cross-check tests
+    const api_git_crosscheck_tests = b.addTest(.{
+        .root_source_file = b.path("test/api_git_crosscheck_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    api_git_crosscheck_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(api_git_crosscheck_tests).step);
+
     // Strict pack delta tests (format correctness, git compat, clone flow)
     const pack_delta_strict_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_delta_strict_test.zig"),
