@@ -456,6 +456,144 @@ test "git creates npm project -> ziggit reads all state" {
     try std.testing.expect(found_master);
 }
 
+test "bun .gitignore: node_modules excluded, src tracked" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    // Create src dir first
+    const src_dir = try std.fmt.allocPrint(allocator, "{s}/src", .{tmp});
+    defer allocator.free(src_dir);
+    std.fs.makeDirAbsolute(src_dir) catch {};
+
+    try writeFile(tmp, ".gitignore", "node_modules/\n*.log\nbun.lockb\n", allocator);
+    try writeFile(tmp, "package.json", "{\"name\":\"ignore-test\",\"version\":\"1.0.0\"}", allocator);
+    try writeFile(tmp, "src/index.ts", "export const main = () => {};\n", allocator);
+
+    try repo.add(".gitignore");
+    try repo.add("package.json");
+    try repo.add("src/index.ts");
+    _ = try repo.commit("initial with gitignore", "Dev", "dev@dev.com");
+
+    // Verify git sees only tracked files
+    const ls_tree = try execGit(allocator, tmp, &.{ "ls-tree", "-r", "--name-only", "HEAD" });
+    defer allocator.free(ls_tree);
+    try std.testing.expect(std.mem.indexOf(u8, ls_tree, ".gitignore") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ls_tree, "package.json") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ls_tree, "src/index.ts") != null);
+    // node_modules should NOT appear
+    try std.testing.expect(std.mem.indexOf(u8, ls_tree, "node_modules") == null);
+}
+
+test "bun lockfile update cycle: multiple files across commits" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    // Initial setup
+    try writeFile(tmp, "package.json", "{\"name\":\"lock-test\",\"version\":\"1.0.0\"}", allocator);
+    try writeFile(tmp, "bun.lock", "lockfile-v1-content\n", allocator);
+    try repo.add("package.json");
+    try repo.add("bun.lock");
+    const h1 = try repo.commit("initial", "Dev", "dev@dev.com");
+    try repo.createTag("v1.0.0", null);
+
+    // Second commit adds a new file
+    try writeFile(tmp, "CHANGELOG.md", "# 1.1.0\n- Added lodash dep\n", allocator);
+    try repo.add("CHANGELOG.md");
+    const h2 = try repo.commit("chore: add changelog", "Dev", "dev@dev.com");
+
+    // Commits should be different
+    try std.testing.expect(!std.mem.eql(u8, &h1, &h2));
+
+    // git should show 2 commits
+    const count = try execGit(allocator, tmp, &.{ "rev-list", "--count", "HEAD" });
+    defer allocator.free(count);
+    try std.testing.expectEqualStrings("2", trim(count));
+
+    // Verify all files present
+    const ls_tree = try execGit(allocator, tmp, &.{ "ls-tree", "-r", "--name-only", "HEAD" });
+    defer allocator.free(ls_tree);
+    try std.testing.expect(std.mem.indexOf(u8, ls_tree, "package.json") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ls_tree, "bun.lock") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ls_tree, "CHANGELOG.md") != null);
+}
+
+test "bun workspace: multiple packages committed together" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    // Create monorepo structure
+    const dirs = [_][]const u8{ "packages", "packages/alpha", "packages/beta" };
+    for (dirs) |d| {
+        const full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ tmp, d });
+        defer allocator.free(full);
+        std.fs.makeDirAbsolute(full) catch {};
+    }
+
+    try writeFile(tmp, "package.json",
+        \\{"private":true,"workspaces":["packages/*"]}
+    , allocator);
+    try writeFile(tmp, "packages/alpha/package.json",
+        \\{"name":"@ws/alpha","version":"1.0.0"}
+    , allocator);
+    try writeFile(tmp, "packages/beta/package.json",
+        \\{"name":"@ws/beta","version":"2.0.0","dependencies":{"@ws/alpha":"*"}}
+    , allocator);
+
+    try repo.add("package.json");
+    try repo.add("packages/alpha/package.json");
+    try repo.add("packages/beta/package.json");
+    _ = try repo.commit("workspace setup", "Dev", "dev@dev.com");
+    try repo.createTag("v1.0.0", null);
+
+    // Second commit adds new files (not re-adding existing ones)
+    try writeFile(tmp, "packages/alpha/index.js", "export const alpha = true;\n", allocator);
+    try writeFile(tmp, "packages/beta/index.js", "export const beta = true;\n", allocator);
+    try repo.add("packages/alpha/index.js");
+    try repo.add("packages/beta/index.js");
+    _ = try repo.commit("feat: add entry points", "Dev", "dev@dev.com");
+    try repo.createTag("v2.0.0", null);
+
+    // git should see both tags
+    const tags = try execGit(allocator, tmp, &.{ "tag", "-l" });
+    defer allocator.free(tags);
+    try std.testing.expect(std.mem.indexOf(u8, tags, "v1.0.0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tags, "v2.0.0") != null);
+
+    // All files should be in the tree
+    const ls_tree = try execGit(allocator, tmp, &.{ "ls-tree", "-r", "--name-only", "HEAD" });
+    defer allocator.free(ls_tree);
+    try std.testing.expect(std.mem.indexOf(u8, ls_tree, "packages/alpha/package.json") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ls_tree, "packages/alpha/index.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ls_tree, "packages/beta/package.json") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ls_tree, "packages/beta/index.js") != null);
+
+    // 2 commits
+    const count = try execGit(allocator, tmp, &.{ "rev-list", "--count", "HEAD" });
+    defer allocator.free(count);
+    try std.testing.expectEqualStrings("2", trim(count));
+}
+
 test "bun rapid development: 10 commits -> git log validates chain" {
     const allocator = std.testing.allocator;
     const tmp = try makeTmpDir(allocator);
