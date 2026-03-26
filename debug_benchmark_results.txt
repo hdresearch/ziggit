@@ -1,0 +1,261 @@
+=== Ziggit API vs CLI Benchmark ===
+Comparing pure Zig function calls vs git CLI spawning
+Goal: Prove 100-1000x speedup by eliminating process spawn overhead
+
+Setting up test repository (100 files, 10 commits, 3 tags)...
+Test repository setup complete.
+
+Running 1000 iterations per operation:
+
+           Operation |    Zig Med |   Zig Mean |    Zig P95 |    Zig P99 ||    CLI Med |   CLI Mean |    CLI P95 |    CLI P99 ||  Speedup
+==================================================================================================================================
+      rev-parse HEAD | 48.8μs | 49.8μs | 54.7μs | 86.5μs || 1.01ms | 1.03ms | 1.11ms | 1.14ms || 20.8x
+  status --porcelain | 1.00ms | 1.02ms | 1.07ms | 1.10ms || 1.37ms | 1.38ms | 1.48ms | 1.54ms || 1.4x
+     describe --tags | 119.7μs | 122.8μs | 138.3μs | 154.8μs || 1.17ms | 1.27ms | 1.32ms | 3.56ms || 9.7x
+            is_clean | 1.00ms | 1.02ms | 1.08ms | 1.11ms || 1.35ms | 1.38ms | 1.46ms | 1.50ms || 1.4x
+
+NOTE: Zig implementations are pure Zig code paths with no process spawning.
+CLI implementations spawn 'git' as a child process (typical 2-5ms overhead).
+Target speedup: 100-1000x faster for Zig vs CLI due to eliminating spawn overhead.
+
+Benchmark completed!
+error(gpa): memory address 0x7f5cd2024000 leaked: 
+/usr/local/zig/lib/std/fifo.zig:128:54: 0x10a4e19 in ensureTotalCapacity (api-vs-cli-bench)
+                self.buf = try self.allocator.realloc(self.buf, new_size);
+                                                     ^
+/usr/local/zig/lib/std/fifo.zig:138:48: 0x1061a1c in ensureUnusedCapacity (api-vs-cli-bench)
+            return try self.ensureTotalCapacity(math.add(usize, self.count, size) catch return error.OutOfMemory);
+                                               ^
+/usr/local/zig/lib/std/fifo.zig:264:42: 0x10618a3 in writableWithSize (api-vs-cli-bench)
+            try self.ensureUnusedCapacity(size);
+                                         ^
+/usr/local/zig/lib/std/io.zig:636:55: 0x1062b10 in pollPosix (api-vs-cli-bench)
+                    const buf = try q.writableWithSize(bump_amt);
+                                                      ^
+/usr/local/zig/lib/std/io.zig:517:33: 0x106348a in poll (api-vs-cli-bench)
+                return pollPosix(self, null);
+                                ^
+/usr/local/zig/lib/std/process/Child.zig:353:27: 0x10636e2 in collectOutput (api-vs-cli-bench)
+    while (try poller.poll()) {
+                          ^
+
+error(gpa): memory address 0x7f5cd234f000 leaked: 
+/usr/local/zig/lib/std/fifo.zig:128:54: 0x10a4e19 in ensureTotalCapacity (api-vs-cli-bench)
+                self.buf = try self.allocator.realloc(self.buf, new_size);
+                                                     ^
+/usr/local/zig/lib/std/fifo.zig:138:48: 0x1061a1c in ensureUnusedCapacity (api-vs-cli-bench)
+            return try self.ensureTotalCapacity(math.add(usize, self.count, size) catch return error.OutOfMemory);
+                                               ^
+/usr/local/zig/lib/std/fifo.zig:264:42: 0x10618a3 in writableWithSize (api-vs-cli-bench)
+            try self.ensureUnusedCapacity(size);
+                                         ^
+/usr/local/zig/lib/std/io.zig:636:55: 0x1062b10 in pollPosix (api-vs-cli-bench)
+                    const buf = try q.writableWithSize(bump_amt);
+                                                      ^
+/usr/local/zig/lib/std/io.zig:517:33: 0x106348a in poll (api-vs-cli-bench)
+                return pollPosix(self, null);
+                                ^
+/usr/local/zig/lib/std/process/Child.zig:353:27: 0x10636e2 in collectOutput (api-vs-cli-bench)
+    while (try poller.poll()) {
+                          ^
+
+error(gpa): memory address 0x7f5cd234f600 leaked: 
+/usr/local/zig/lib/std/fifo.zig:128:54: 0x10a4e19 in ensureTotalCapacity (api-vs-cli-bench)
+                self.buf = try self.allocator.realloc(self.buf, new_size);
+                                                     ^
+/usr/local/zig/lib/std/fifo.zig:138:48: 0x1061a1c in ensureUnusedCapacity (api-vs-cli-bench)
+            return try self.ensureTotalCapacity(math.add(usize, self.count, size) catch return error.OutOfMemory);
+                                               ^
+/usr/local/zig/lib/std/fifo.zig:264:42: 0x10618a3 in writableWithSize (api-vs-cli-bench)
+            try self.ensureUnusedCapacity(size);
+                                         ^
+/usr/local/zig/lib/std/io.zig:636:55: 0x1062b10 in pollPosix (api-vs-cli-bench)
+                    const buf = try q.writableWithSize(bump_amt);
+                                                      ^
+/usr/local/zig/lib/std/io.zig:517:33: 0x106348a in poll (api-vs-cli-bench)
+                return pollPosix(self, null);
+                                ^
+/usr/local/zig/lib/std/process/Child.zig:353:27: 0x10636e2 in collectOutput (api-vs-cli-bench)
+    while (try poller.poll()) {
+                          ^
+
+error(gpa): memory address 0x7f5cd234fc00 leaked: 
+/usr/local/zig/lib/std/fifo.zig:128:54: 0x10a4e19 in ensureTotalCapacity (api-vs-cli-bench)
+                self.buf = try self.allocator.realloc(self.buf, new_size);
+                                                     ^
+/usr/local/zig/lib/std/fifo.zig:138:48: 0x1061a1c in ensureUnusedCapacity (api-vs-cli-bench)
+            return try self.ensureTotalCapacity(math.add(usize, self.count, size) catch return error.OutOfMemory);
+                                               ^
+/usr/local/zig/lib/std/fifo.zig:264:42: 0x10618a3 in writableWithSize (api-vs-cli-bench)
+            try self.ensureUnusedCapacity(size);
+                                         ^
+/usr/local/zig/lib/std/io.zig:636:55: 0x1062b10 in pollPosix (api-vs-cli-bench)
+                    const buf = try q.writableWithSize(bump_amt);
+                                                      ^
+/usr/local/zig/lib/std/io.zig:517:33: 0x106348a in poll (api-vs-cli-bench)
+                return pollPosix(self, null);
+                                ^
+/usr/local/zig/lib/std/process/Child.zig:353:27: 0x10636e2 in collectOutput (api-vs-cli-bench)
+    while (try poller.poll()) {
+                          ^
+
+error(gpa): memory address 0x7f5cd246a000 leaked: 
+/usr/local/zig/lib/std/fifo.zig:128:54: 0x10a4e19 in ensureTotalCapacity (api-vs-cli-bench)
+                self.buf = try self.allocator.realloc(self.buf, new_size);
+                                                     ^
+/usr/local/zig/lib/std/fifo.zig:138:48: 0x1061a1c in ensureUnusedCapacity (api-vs-cli-bench)
+            return try self.ensureTotalCapacity(math.add(usize, self.count, size) catch return error.OutOfMemory);
+                                               ^
+/usr/local/zig/lib/std/fifo.zig:264:42: 0x10618a3 in writableWithSize (api-vs-cli-bench)
+            try self.ensureUnusedCapacity(size);
+                                         ^
+/usr/local/zig/lib/std/io.zig:636:55: 0x1062b10 in pollPosix (api-vs-cli-bench)
+                    const buf = try q.writableWithSize(bump_amt);
+                                                      ^
+/usr/local/zig/lib/std/io.zig:517:33: 0x106348a in poll (api-vs-cli-bench)
+                return pollPosix(self, null);
+                                ^
+/usr/local/zig/lib/std/process/Child.zig:353:27: 0x10636e2 in collectOutput (api-vs-cli-bench)
+    while (try poller.poll()) {
+                          ^
+
+error(gpa): memory address 0x7f5cd246a600 leaked: 
+/usr/local/zig/lib/std/fifo.zig:128:54: 0x10a4e19 in ensureTotalCapacity (api-vs-cli-bench)
+                self.buf = try self.allocator.realloc(self.buf, new_size);
+                                                     ^
+/usr/local/zig/lib/std/fifo.zig:138:48: 0x1061a1c in ensureUnusedCapacity (api-vs-cli-bench)
+            return try self.ensureTotalCapacity(math.add(usize, self.count, size) catch return error.OutOfMemory);
+                                               ^
+/usr/local/zig/lib/std/fifo.zig:264:42: 0x10618a3 in writableWithSize (api-vs-cli-bench)
+            try self.ensureUnusedCapacity(size);
+                                         ^
+/usr/local/zig/lib/std/io.zig:636:55: 0x1062b10 in pollPosix (api-vs-cli-bench)
+                    const buf = try q.writableWithSize(bump_amt);
+                                                      ^
+/usr/local/zig/lib/std/io.zig:517:33: 0x106348a in poll (api-vs-cli-bench)
+                return pollPosix(self, null);
+                                ^
+/usr/local/zig/lib/std/process/Child.zig:353:27: 0x10636e2 in collectOutput (api-vs-cli-bench)
+    while (try poller.poll()) {
+                          ^
+
+error(gpa): memory address 0x7f5cd246ac00 leaked: 
+/usr/local/zig/lib/std/fifo.zig:128:54: 0x10a4e19 in ensureTotalCapacity (api-vs-cli-bench)
+                self.buf = try self.allocator.realloc(self.buf, new_size);
+                                                     ^
+/usr/local/zig/lib/std/fifo.zig:138:48: 0x1061a1c in ensureUnusedCapacity (api-vs-cli-bench)
+            return try self.ensureTotalCapacity(math.add(usize, self.count, size) catch return error.OutOfMemory);
+                                               ^
+/usr/local/zig/lib/std/fifo.zig:264:42: 0x10618a3 in writableWithSize (api-vs-cli-bench)
+            try self.ensureUnusedCapacity(size);
+                                         ^
+/usr/local/zig/lib/std/io.zig:636:55: 0x1062b10 in pollPosix (api-vs-cli-bench)
+                    const buf = try q.writableWithSize(bump_amt);
+                                                      ^
+/usr/local/zig/lib/std/io.zig:517:33: 0x106348a in poll (api-vs-cli-bench)
+                return pollPosix(self, null);
+                                ^
+/usr/local/zig/lib/std/process/Child.zig:353:27: 0x10636e2 in collectOutput (api-vs-cli-bench)
+    while (try poller.poll()) {
+                          ^
+
+error(gpa): memory address 0x7f5cd2585000 leaked: 
+/usr/local/zig/lib/std/fifo.zig:128:54: 0x10a4e19 in ensureTotalCapacity (api-vs-cli-bench)
+                self.buf = try self.allocator.realloc(self.buf, new_size);
+                                                     ^
+/usr/local/zig/lib/std/fifo.zig:138:48: 0x1061a1c in ensureUnusedCapacity (api-vs-cli-bench)
+            return try self.ensureTotalCapacity(math.add(usize, self.count, size) catch return error.OutOfMemory);
+                                               ^
+/usr/local/zig/lib/std/fifo.zig:264:42: 0x10618a3 in writableWithSize (api-vs-cli-bench)
+            try self.ensureUnusedCapacity(size);
+                                         ^
+/usr/local/zig/lib/std/io.zig:636:55: 0x1062b10 in pollPosix (api-vs-cli-bench)
+                    const buf = try q.writableWithSize(bump_amt);
+                                                      ^
+/usr/local/zig/lib/std/io.zig:517:33: 0x106348a in poll (api-vs-cli-bench)
+                return pollPosix(self, null);
+                                ^
+/usr/local/zig/lib/std/process/Child.zig:353:27: 0x10636e2 in collectOutput (api-vs-cli-bench)
+    while (try poller.poll()) {
+                          ^
+
+error(gpa): memory address 0x7f5cd2585600 leaked: 
+/usr/local/zig/lib/std/fifo.zig:128:54: 0x10a4e19 in ensureTotalCapacity (api-vs-cli-bench)
+                self.buf = try self.allocator.realloc(self.buf, new_size);
+                                                     ^
+/usr/local/zig/lib/std/fifo.zig:138:48: 0x1061a1c in ensureUnusedCapacity (api-vs-cli-bench)
+            return try self.ensureTotalCapacity(math.add(usize, self.count, size) catch return error.OutOfMemory);
+                                               ^
+/usr/local/zig/lib/std/fifo.zig:264:42: 0x10618a3 in writableWithSize (api-vs-cli-bench)
+            try self.ensureUnusedCapacity(size);
+                                         ^
+/usr/local/zig/lib/std/io.zig:636:55: 0x1062b10 in pollPosix (api-vs-cli-bench)
+                    const buf = try q.writableWithSize(bump_amt);
+                                                      ^
+/usr/local/zig/lib/std/io.zig:517:33: 0x106348a in poll (api-vs-cli-bench)
+                return pollPosix(self, null);
+                                ^
+/usr/local/zig/lib/std/process/Child.zig:353:27: 0x10636e2 in collectOutput (api-vs-cli-bench)
+    while (try poller.poll()) {
+                          ^
+
+error(gpa): memory address 0x7f5cd2585c00 leaked: 
+/usr/local/zig/lib/std/fifo.zig:128:54: 0x10a4e19 in ensureTotalCapacity (api-vs-cli-bench)
+                self.buf = try self.allocator.realloc(self.buf, new_size);
+                                                     ^
+/usr/local/zig/lib/std/fifo.zig:138:48: 0x1061a1c in ensureUnusedCapacity (api-vs-cli-bench)
+            return try self.ensureTotalCapacity(math.add(usize, self.count, size) catch return error.OutOfMemory);
+                                               ^
+/usr/local/zig/lib/std/fifo.zig:264:42: 0x10618a3 in writableWithSize (api-vs-cli-bench)
+            try self.ensureUnusedCapacity(size);
+                                         ^
+/usr/local/zig/lib/std/io.zig:636:55: 0x1062b10 in pollPosix (api-vs-cli-bench)
+                    const buf = try q.writableWithSize(bump_amt);
+                                                      ^
+/usr/local/zig/lib/std/io.zig:517:33: 0x106348a in poll (api-vs-cli-bench)
+                return pollPosix(self, null);
+                                ^
+/usr/local/zig/lib/std/process/Child.zig:353:27: 0x10636e2 in collectOutput (api-vs-cli-bench)
+    while (try poller.poll()) {
+                          ^
+
+error(gpa): memory address 0x7f5cd2022000 leaked: 
+/usr/local/zig/lib/std/fifo.zig:128:54: 0x10a4e19 in ensureTotalCapacity (api-vs-cli-bench)
+                self.buf = try self.allocator.realloc(self.buf, new_size);
+                                                     ^
+/usr/local/zig/lib/std/fifo.zig:138:48: 0x1061a1c in ensureUnusedCapacity (api-vs-cli-bench)
+            return try self.ensureTotalCapacity(math.add(usize, self.count, size) catch return error.OutOfMemory);
+                                               ^
+/usr/local/zig/lib/std/fifo.zig:264:42: 0x10618a3 in writableWithSize (api-vs-cli-bench)
+            try self.ensureUnusedCapacity(size);
+                                         ^
+/usr/local/zig/lib/std/io.zig:636:55: 0x1062cb0 in pollPosix (api-vs-cli-bench)
+                    const buf = try q.writableWithSize(bump_amt);
+                                                      ^
+/usr/local/zig/lib/std/io.zig:517:33: 0x106348a in poll (api-vs-cli-bench)
+                return pollPosix(self, null);
+                                ^
+/usr/local/zig/lib/std/process/Child.zig:353:27: 0x10636e2 in collectOutput (api-vs-cli-bench)
+    while (try poller.poll()) {
+                          ^
+
+error(gpa): memory address 0x7f5cd22f1000 leaked: 
+/usr/local/zig/lib/std/array_list.zig:114:33: 0x1053ed1 in toOwnedSlice (api-vs-cli-bench)
+            if (allocator.resize(old_memory, self.items.len)) {
+                                ^
+/usr/local/zig/lib/std/process/Child.zig:401:42: 0x10495af in run (api-vs-cli-bench)
+        .stdout = try stdout.toOwnedSlice(),
+                                         ^
+/root/ziggit/benchmarks/api_vs_cli_bench.zig:18:33: 0x10491f6 in runGitCommand (api-vs-cli-bench)
+    return std.process.Child.run(.{
+                                ^
+/root/ziggit/benchmarks/api_vs_cli_bench.zig:248:26: 0x1049df4 in setupTestRepo (api-vs-cli-bench)
+    _ = try runGitCommand(allocator, &.{"git", "commit", "-m", "Initial commit with 100 files"}, repo_path);
+                         ^
+/root/ziggit/benchmarks/api_vs_cli_bench.zig:288:22: 0x105841c in main (api-vs-cli-bench)
+    try setupTestRepo(allocator, test_dir);
+                     ^
+/usr/local/zig/lib/std/start.zig:524:37: 0x1047e35 in posixCallMainAndExit (api-vs-cli-bench)
+            const result = root.main() catch |err| {
+                                    ^
+
