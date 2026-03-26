@@ -279,7 +279,11 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     const version = std.mem.readInt(u32, @ptrCast(idx_data[4..8]), .big);
     
     if (magic != 0xff744f63) return error.ObjectNotFound; // '\377tOc'
-    if (version != 2) return error.ObjectNotFound;
+    if (version != 2) {
+        // Try to support version 1 format (no header, just fanout table)
+        if (idx_data.len < 256 * 4) return error.ObjectNotFound;
+        return findObjectInPackV1(idx_data, target_hash, pack_dir_path, idx_filename, platform_impl, allocator);
+    }
     
     // Use fanout table for efficient searching
     const fanout_start = 8;
@@ -346,6 +350,59 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     defer allocator.free(pack_path);
     
     return readObjectFromPack(pack_path, object_offset, platform_impl, allocator);
+}
+
+/// Find object in pack index v1 format (legacy support)
+fn findObjectInPackV1(idx_data: []const u8, target_hash: [20]u8, pack_dir_path: []const u8, idx_filename: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
+    // Pack index v1: fanout[256] + (sha1[20] + offset[4]) * N
+    if (idx_data.len < 256 * 4) return error.ObjectNotFound;
+    
+    const fanout_start = 0;
+    const first_byte = target_hash[0];
+    
+    // Get search range from fanout table
+    const start_index = if (first_byte == 0) 0 else std.mem.readInt(u32, @ptrCast(idx_data[fanout_start + (@as(usize, first_byte) - 1) * 4..fanout_start + (@as(usize, first_byte) - 1) * 4 + 4]), .big);
+    const end_index = std.mem.readInt(u32, @ptrCast(idx_data[fanout_start + @as(usize, first_byte) * 4..fanout_start + @as(usize, first_byte) * 4 + 4]), .big);
+    
+    if (start_index >= end_index) return error.ObjectNotFound;
+    
+    // Object entries start after fanout table
+    const entries_start = 256 * 4;
+    const entry_size = 24; // 20 bytes SHA-1 + 4 bytes offset
+    
+    // Binary search in the entries within the range
+    var low = start_index;
+    var high = end_index;
+    
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        const entry_offset = entries_start + mid * entry_size;
+        
+        if (entry_offset + 20 > idx_data.len) return error.ObjectNotFound;
+        const obj_hash = idx_data[entry_offset..entry_offset + 20];
+        
+        const cmp = std.mem.order(u8, obj_hash, &target_hash);
+        switch (cmp) {
+            .eq => {
+                // Found the object, get its offset
+                if (entry_offset + 24 > idx_data.len) return error.ObjectNotFound;
+                const object_offset: u64 = std.mem.readInt(u32, @ptrCast(idx_data[entry_offset + 20..entry_offset + 24]), .big);
+                
+                // Read from the corresponding .pack file
+                const pack_filename = try std.fmt.allocPrint(allocator, "{s}.pack", .{idx_filename[0..idx_filename.len-4]});
+                defer allocator.free(pack_filename);
+                
+                const pack_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{pack_dir_path, pack_filename});
+                defer allocator.free(pack_path);
+                
+                return readObjectFromPack(pack_path, object_offset, platform_impl, allocator);
+            },
+            .lt => low = mid + 1,
+            .gt => high = mid,
+        }
+    }
+    
+    return error.ObjectNotFound;
 }
 
 /// Read object from pack file at given offset
@@ -450,21 +507,57 @@ fn readPackedObject(pack_data: []const u8, offset: usize, pack_path: []const u8,
             // Reference delta - read 20-byte SHA-1 of base object
             if (pos + 20 > pack_data.len) return error.ObjectNotFound;
             
-            // For now, skip ref_delta objects as they require recursive resolution
-            // TODO: Implement proper ref_delta support
-            return error.ObjectNotFound;
+            const base_sha1 = pack_data[pos..pos + 20];
+            pos += 20;
+            
+            // Convert SHA-1 to hex string for recursive lookup
+            const base_hash_str = try allocator.alloc(u8, 40);
+            defer allocator.free(base_hash_str);
+            _ = try std.fmt.bufPrint(base_hash_str, "{}", .{std.fmt.fmtSliceHexLower(base_sha1)});
+            
+            // Recursively read base object from this same pack
+            const base_object = findObjectInPackByHash(base_hash_str, pack_path, platform_impl, allocator) catch return error.ObjectNotFound;
+            defer base_object.deinit(allocator);
+            
+            // Read and decompress delta data
+            var delta_data = std.ArrayList(u8).init(allocator);
+            defer delta_data.deinit();
+            
+            var stream = std.io.fixedBufferStream(pack_data[pos..]);
+            std.compress.zlib.decompress(stream.reader(), delta_data.writer()) catch return error.ObjectNotFound;
+            
+            // Apply delta to base object
+            const result_data = try applyDelta(base_object.data, delta_data.items, allocator);
+            return GitObject.init(base_object.type, result_data);
         },
     }
 }
 
+/// Find object in pack by hash (for REF_DELTA support)
+fn findObjectInPackByHash(hash_str: []const u8, pack_path: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
+    // Extract pack directory and index filename from pack path
+    const pack_dir_path = std.fs.path.dirname(pack_path) orelse return error.ObjectNotFound;
+    const pack_filename = std.fs.path.basename(pack_path);
+    
+    // Create index filename by changing .pack to .idx
+    if (!std.mem.endsWith(u8, pack_filename, ".pack")) return error.ObjectNotFound;
+    const idx_filename = try std.fmt.allocPrint(allocator, "{s}.idx", .{pack_filename[0..pack_filename.len-5]});
+    defer allocator.free(idx_filename);
+    
+    // Try to find the object in this specific pack
+    return findObjectInPack(pack_dir_path, idx_filename, hash_str, platform_impl, allocator) catch error.ObjectNotFound;
+}
+
 /// Apply delta to base data to reconstruct object
 fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    if (delta_data.len == 0) return error.InvalidDelta;
+    
     var pos: usize = 0;
     
     // Read base size (variable length)
     var base_size: usize = 0;
     var shift: u6 = 0;
-    while (pos < delta_data.len) {
+    while (pos < delta_data.len and shift < 64) {
         const b = delta_data[pos];
         pos += 1;
         base_size |= @as(usize, @intCast(b & 0x7F)) << shift;
@@ -472,10 +565,12 @@ fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.
         shift += 7;
     }
     
+    if (pos >= delta_data.len) return error.InvalidDelta;
+    
     // Read result size (variable length) 
     var result_size: usize = 0;
     shift = 0;
-    while (pos < delta_data.len) {
+    while (pos < delta_data.len and shift < 64) {
         const b = delta_data[pos];
         pos += 1;
         result_size |= @as(usize, @intCast(b & 0x7F)) << shift;
@@ -483,8 +578,9 @@ fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.
         shift += 7;
     }
     
-    // Verify base size
+    // Verify base size and reasonable result size
     if (base_size != base_data.len) return error.InvalidDelta;
+    if (result_size > 100 * 1024 * 1024) return error.InvalidDelta; // Sanity check for 100MB max
     
     // Apply delta commands
     var result = std.ArrayList(u8).init(allocator);
