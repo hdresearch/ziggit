@@ -10,14 +10,23 @@
 
 ### sindresorhus/is (small repo, ~900 objects, warm cache)
 
-**After eager LRU caching refactor (`6f37261`):**
+**Latest refresh (2026-03-26, commit `6f37261`):**
+
+| Tool    | Run 1  | Run 2  | Run 3  | Run 4  | Run 5  | Median |
+|---------|--------|--------|--------|--------|--------|--------|
+| ziggit  | 0.197s | 0.193s | 0.176s | 0.175s | 0.190s | ~0.190s |
+| git CLI | 0.185s | 0.185s | 0.180s | 0.192s | 0.181s | ~0.185s |
+
+**Ratio: ~1.03x — parity** ✅
+
+**Previous (same commit, earlier run):**
 
 | Tool    | Run 1  | Run 2  | Run 3  | Run 4  | Run 5  | Median |
 |---------|--------|--------|--------|--------|--------|--------|
 | ziggit  | 0.221s | 0.199s | 0.188s | 0.193s | 0.174s | ~0.193s |
 | git CLI | 0.193s | 0.215s | 0.199s | 0.188s | 0.197s | ~0.197s |
 
-**Ratio: ~0.98x — ziggit slightly faster than git CLI** ✅
+**Ratio: ~0.98x — slightly faster** ✅
 
 > Run 1 includes cold-start overhead (DNS, TLS). Median excludes Run 1.
 > Both tools are network-dominated at ~200ms on this small repo.
@@ -57,7 +66,7 @@
 
 ## Bun Fork Integration Status
 - Branch: `hdresearch/bun:ziggit-integration`
-- Commit: `ad8f206` — polish: use logZiggitError consistently for fetch/open errors
+- Commit: `2aeb30e` — bench: 5-run refresh with dead parity
 - Dependency: ziggit at `6f37261` (single-pass with eager LRU DeltaCache) via `.path = "../ziggit"`
 - `repository.zig`: ziggit used for clone, fetch, findCommit, checkout
 - Fallback: automatic to git CLI on any ziggit failure
@@ -72,14 +81,16 @@
 - Partial clone cleanup: failed ziggit clones are cleaned up before git CLI fallback
 - URL transform logging: shows original vs HTTPS-transformed URL
 
-### expressjs/express (medium repo)
+### expressjs/express (medium repo, 33,335 objects, ~10.6MB pack)
 
 | Tool    | Run 1  | Run 2  | Run 3  | Avg    |
 |---------|--------|--------|--------|--------|
-| ziggit  | 0.278s | 0.285s | 0.271s | 0.278s |
-| git CLI | 0.281s | 0.280s | 0.268s | 0.276s |
+| ziggit  | 0.971s | 0.937s | 0.936s | 0.948s |
+| git CLI | 0.944s | 0.949s | 0.930s | 0.941s |
 
 **Ratio: ~1.01x — parity** ✅
+- Correctness: `git count-objects -v` identical (33,335 objects, 10,651KB pack)
+- `git fsck --no-dangling` passes on ziggit-cloned repo ✅
 
 ### lodash/lodash (larger repo)
 
