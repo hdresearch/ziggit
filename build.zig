@@ -152,6 +152,31 @@ pub fn build(b: *std.Build) void {
     _ = core_git_format_tests;
     _ = pack_comprehensive_tests;
 
+    // E2E validation: ziggit writes, git reads
+    const ziggit_writes_test = b.addTest(.{
+        .root_source_file = b.path("test/ziggit_writes_git_reads_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ziggit_writes_test.root_module.addImport("ziggit", ziggit_module);
+
+    // E2E validation: git writes, ziggit reads
+    const git_writes_test = b.addTest(.{
+        .root_source_file = b.path("test/git_writes_ziggit_reads_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    git_writes_test.root_module.addImport("ziggit", ziggit_module);
+
+    // E2E validation step (separate from main test to allow independent running)
+    const e2e_step = b.step("e2e", "Run end-to-end validation tests");
+    e2e_step.dependOn(&b.addRunArtifact(ziggit_writes_test).step);
+    e2e_step.dependOn(&b.addRunArtifact(git_writes_test).step);
+
+    // Also add to main test step
+    test_step.dependOn(&b.addRunArtifact(ziggit_writes_test).step);
+    test_step.dependOn(&b.addRunArtifact(git_writes_test).step);
+
     // ========== BENCHMARKS ==========
     
     // CLI benchmark (ziggit vs git performance)
