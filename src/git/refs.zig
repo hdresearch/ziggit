@@ -46,6 +46,17 @@ pub fn resolveRef(git_dir: []const u8, ref_name: []const u8, platform_impl: anyt
     if (ref_name.len == 0) return error.EmptyRefName;
     if (ref_name.len > 1024) return error.RefNameTooLong; // Reasonable limit
     
+    // Check for invalid characters in ref name (git ref naming rules)
+    for (ref_name) |c| {
+        if (c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == 0x7F) {
+            return error.InvalidRefNameChar;
+        }
+        // Control characters and some special chars are not allowed
+        if (c < 0x20 or c == '~' or c == '^' or c == ':' or c == '?' or c == '*' or c == '[') {
+            return error.InvalidRefNameChar;
+        }
+    }
+    
     var current_ref = try allocator.dupe(u8, ref_name);
     defer allocator.free(current_ref);
     
