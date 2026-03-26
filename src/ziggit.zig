@@ -1112,11 +1112,8 @@ pub const Repository = struct {
             } else |_| {}
         }
 
-        var result = smart_http.fetchNewPack(self.allocator, url, local_refs_list.items) catch |err| {
-            return switch (err) {
-                error.HttpError => error.HttpFetchFailed,
-                else => error.HttpFetchFailed,
-            };
+        var result = smart_http.fetchNewPack(self.allocator, url, local_refs_list.items) catch {
+            return error.HttpFetchFailed;
         };
 
         if (result) |*fetch_result| {
@@ -1225,11 +1222,8 @@ pub const Repository = struct {
         }
 
         // Clone pack data via smart HTTP
-        var clone_result = smart_http.clonePack(allocator, url) catch |err| {
-            return switch (err) {
-                error.HttpError => error.RepositoryNotFound,
-                else => error.RepositoryNotFound,
-            };
+        var clone_result = smart_http.clonePack(allocator, url) catch {
+            return error.HttpCloneFailed;
         };
         defer clone_result.deinit();
 
