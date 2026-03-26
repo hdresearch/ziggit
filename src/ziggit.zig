@@ -1931,6 +1931,13 @@ pub const Repository = struct {
             { var buf_: [512]u8 = undefined; const msg_ = std.fmt.bufPrint(&buf_, "ref: {s}\n", .{head_target}) catch unreachable; try hf.writeAll(msg_); }
         }
 
+        if (trace_timing) {
+            if (timer) |*t| {
+                std.debug.print("[timing] write refs: {}ms\n", .{t.read() / std.time.ns_per_ms});
+                t.reset();
+            }
+        }
+
         const path = try allocator.dupe(u8, target);
 
         return Repository{

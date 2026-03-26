@@ -451,19 +451,27 @@ fn getBaseData(
 // ─── Utility functions ─────────────────────────────────────────────────
 
 /// Skip a zlib stream, returning the number of compressed bytes consumed.
-/// Uses only stack memory (16KB buffer). No heap allocation.
+/// Uses C zlib for fast decompression. No heap allocation.
 fn skipZlib(compressed: []const u8) !usize {
-    var fbs = std.io.fixedBufferStream(compressed);
-    var decompressor = zlib_compat.decompressor(fbs.reader());
+    const c = @cImport({
+        @cInclude("zlib.h");
+    });
+
+    var stream: c.z_stream = std.mem.zeroes(c.z_stream);
+    stream.next_in = @constCast(compressed.ptr);
+    stream.avail_in = @intCast(@min(compressed.len, std.math.maxInt(c_uint)));
+
+    if (c.inflateInit(&stream) != c.Z_OK) return error.ZlibInitFailed;
+    defer _ = c.inflateEnd(&stream);
     var buf: [16384]u8 = undefined;
     while (true) {
-        const n = decompressor.read(&buf) catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => return err,
-        };
-        if (n == 0) break;
+        stream.next_out = &buf;
+        stream.avail_out = buf.len;
+        const ret = c.inflate(&stream, c.Z_NO_FLUSH);
+        if (ret == c.Z_STREAM_END) break;
+        if (ret != c.Z_OK) return error.ZlibDecompressError;
     }
-    return @intCast(fbs.pos);
+    return @intCast(stream.total_in);
 }
 
 /// Count unresolved records.

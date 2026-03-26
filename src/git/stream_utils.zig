@@ -1,4 +1,7 @@
 const std = @import("std");
+const c = @cImport({
+    @cInclude("zlib.h");
+});
 
 /// Result of streaming decompress+hash operation.
 pub const DecompressHashResult = struct {
@@ -58,29 +61,30 @@ pub fn decompressAndHash(
     const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ git_type, object_size }) catch unreachable;
     sha_hasher.update(header);
 
-    // Set up streaming decompression using adapter from old reader API
-    var fbs = std.io.fixedBufferStream(compressed_data);
-    var old_reader = fbs.reader();
-    var adapter_buf: [65536]u8 = undefined;
-    var adapter = old_reader.adaptToNewApi(&adapter_buf);
-    var window_buf: [std.compress.flate.max_window_len]u8 = undefined;
-    var decompressor = std.compress.flate.Decompress.init(&adapter.new_interface, .zlib, &window_buf);
+    // Use C zlib for faster decompression
+    var stream: c.z_stream = std.mem.zeroes(c.z_stream);
+    stream.next_in = @constCast(compressed_data.ptr);
+    stream.avail_in = @intCast(@min(compressed_data.len, std.math.maxInt(c_uint)));
+
+    if (c.inflateInit(&stream) != c.Z_OK) return error.ZlibInitFailed;
+    defer _ = c.inflateEnd(&stream);
 
     var total_decompressed: usize = 0;
-    var chunk_buf: [32768]u8 = undefined; // 32KB chunks
+    var chunk_buf: [32768]u8 = undefined;
 
     while (true) {
-        var bufs = [_][]u8{chunk_buf[0..]};
-        const orig_len = bufs[0].len;
-        const n = decompressor.reader.readVec(&bufs) catch |err| switch (err) {
-            error.EndOfStream => break,
-            error.ReadFailed => return error.InvalidInput,
-        };
-        _ = n;
-        const bytes_read = orig_len - bufs[0].len;
-        if (bytes_read == 0) break;
-        sha_hasher.update(chunk_buf[0..bytes_read]);
-        total_decompressed += bytes_read;
+        stream.next_out = &chunk_buf;
+        stream.avail_out = chunk_buf.len;
+
+        const ret = c.inflate(&stream, c.Z_NO_FLUSH);
+        const produced = chunk_buf.len - stream.avail_out;
+        if (produced > 0) {
+            sha_hasher.update(chunk_buf[0..produced]);
+            total_decompressed += produced;
+        }
+
+        if (ret == c.Z_STREAM_END) break;
+        if (ret != c.Z_OK) return error.ZlibDecompressError;
     }
 
     var result_sha1: [20]u8 = undefined;
@@ -89,7 +93,7 @@ pub fn decompressAndHash(
     return .{
         .sha1 = result_sha1,
         .decompressed_size = total_decompressed,
-        .bytes_consumed = @intCast(fbs.pos),
+        .bytes_consumed = @intCast(stream.total_in),
     };
 }
 
@@ -106,32 +110,33 @@ pub fn decompressHashAndCapture(
     const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ git_type, object_size }) catch unreachable;
     sha_hasher.update(header);
 
-    var fbs = std.io.fixedBufferStream(compressed_data);
-    var old_reader = fbs.reader();
-    var adapter_buf: [65536]u8 = undefined;
-    var adapter = old_reader.adaptToNewApi(&adapter_buf);
-    var window_buf: [std.compress.flate.max_window_len]u8 = undefined;
-    var decompressor = std.compress.flate.Decompress.init(&adapter.new_interface, .zlib, &window_buf);
-
+    // Pre-allocate if we know the size
     if (object_size > 0) {
         try output.ensureTotalCapacity(output.items.len + object_size);
     }
+
+    var stream: c.z_stream = std.mem.zeroes(c.z_stream);
+    stream.next_in = @constCast(compressed_data.ptr);
+    stream.avail_in = @intCast(@min(compressed_data.len, std.math.maxInt(c_uint)));
+
+    if (c.inflateInit(&stream) != c.Z_OK) return error.ZlibInitFailed;
+    defer _ = c.inflateEnd(&stream);
 
     var total_decompressed: usize = 0;
     var chunk_buf: [16384]u8 = undefined;
 
     while (true) {
-        var bufs = [_][]u8{chunk_buf[0..]};
-        const orig_len = bufs[0].len;
-        _ = decompressor.reader.readVec(&bufs) catch |err| switch (err) {
-            error.EndOfStream => break,
-            error.ReadFailed => return error.InvalidInput,
-        };
-        const bytes_read = orig_len - bufs[0].len;
-        if (bytes_read == 0) break;
-        sha_hasher.update(chunk_buf[0..bytes_read]);
-        try output.appendSlice(chunk_buf[0..bytes_read]);
-        total_decompressed += bytes_read;
+        stream.next_out = &chunk_buf;
+        stream.avail_out = chunk_buf.len;
+        const ret = c.inflate(&stream, c.Z_NO_FLUSH);
+        const produced = chunk_buf.len - stream.avail_out;
+        if (produced > 0) {
+            sha_hasher.update(chunk_buf[0..produced]);
+            try output.appendSlice(chunk_buf[0..produced]);
+            total_decompressed += produced;
+        }
+        if (ret == c.Z_STREAM_END) break;
+        if (ret != c.Z_OK) return error.ZlibDecompressError;
     }
 
     var result_sha1: [20]u8 = undefined;
@@ -140,7 +145,7 @@ pub fn decompressHashAndCapture(
     return .{
         .sha1 = result_sha1,
         .decompressed_size = total_decompressed,
-        .bytes_consumed = @intCast(fbs.pos),
+        .bytes_consumed = @intCast(stream.total_in),
     };
 }
 
@@ -157,68 +162,66 @@ pub fn hashGitObject(git_type: []const u8, data: []const u8) [20]u8 {
 }
 
 /// Decompress zlib data into a pre-cleared ArrayList, returning bytes consumed.
+/// Uses C zlib for performance.
 pub fn decompressInto(
     compressed_data: []const u8,
     output: *std.array_list.Managed(u8),
 ) !struct { decompressed_size: usize, bytes_consumed: usize } {
-    var fbs = std.io.fixedBufferStream(compressed_data);
-    var old_reader = fbs.reader();
-    var adapter_buf: [65536]u8 = undefined;
-    var adapter = old_reader.adaptToNewApi(&adapter_buf);
-    var window_buf: [std.compress.flate.max_window_len]u8 = undefined;
-    var decompressor = std.compress.flate.Decompress.init(&adapter.new_interface, .zlib, &window_buf);
+    var stream: c.z_stream = std.mem.zeroes(c.z_stream);
+    stream.next_in = @constCast(compressed_data.ptr);
+    stream.avail_in = @intCast(@min(compressed_data.len, std.math.maxInt(c_uint)));
 
-    var total: usize = 0;
+    if (c.inflateInit(&stream) != c.Z_OK) return error.ZlibInitFailed;
+    defer _ = c.inflateEnd(&stream);
+
     var chunk_buf: [16384]u8 = undefined;
+    var total: usize = 0;
 
     while (true) {
-        var bufs = [_][]u8{chunk_buf[0..]};
-        const orig_len = bufs[0].len;
-        _ = decompressor.reader.readVec(&bufs) catch |err| switch (err) {
-            error.EndOfStream => break,
-            error.ReadFailed => return error.InvalidInput,
-        };
-        const bytes_read = orig_len - bufs[0].len;
-        if (bytes_read == 0) break;
-        try output.appendSlice(chunk_buf[0..bytes_read]);
-        total += bytes_read;
+        stream.next_out = &chunk_buf;
+        stream.avail_out = chunk_buf.len;
+        const ret = c.inflate(&stream, c.Z_NO_FLUSH);
+        const produced = chunk_buf.len - stream.avail_out;
+        if (produced > 0) {
+            try output.appendSlice(chunk_buf[0..produced]);
+            total += produced;
+        }
+        if (ret == c.Z_STREAM_END) break;
+        if (ret != c.Z_OK) return error.ZlibDecompressError;
     }
 
     return .{
         .decompressed_size = total,
-        .bytes_consumed = @intCast(fbs.pos),
+        .bytes_consumed = @intCast(stream.total_in),
     };
 }
 
 /// Decompress zlib data into a pre-sized buffer (no allocation).
+/// Returns actual decompressed size and bytes consumed from input.
 pub fn decompressIntoBuf(
     compressed_data: []const u8,
     buf: []u8,
 ) !struct { decompressed_size: usize, bytes_consumed: usize } {
-    var fbs = std.io.fixedBufferStream(compressed_data);
-    var old_reader = fbs.reader();
-    var adapter_buf: [65536]u8 = undefined;
-    var adapter = old_reader.adaptToNewApi(&adapter_buf);
-    var window_buf: [std.compress.flate.max_window_len]u8 = undefined;
-    var decompressor = std.compress.flate.Decompress.init(&adapter.new_interface, .zlib, &window_buf);
+    var stream: c.z_stream = std.mem.zeroes(c.z_stream);
+    stream.next_in = @constCast(compressed_data.ptr);
+    stream.avail_in = @intCast(@min(compressed_data.len, std.math.maxInt(c_uint)));
 
-    var total: usize = 0;
-    while (total < buf.len) {
-        const remaining = buf[total..];
-        var bufs = [_][]u8{remaining};
-        const orig_len = bufs[0].len;
-        _ = decompressor.reader.readVec(&bufs) catch |err| switch (err) {
-            error.EndOfStream => break,
-            error.ReadFailed => return error.InvalidInput,
-        };
-        const bytes_read = orig_len - bufs[0].len;
-        if (bytes_read == 0) break;
-        total += bytes_read;
+    if (c.inflateInit(&stream) != c.Z_OK) return error.ZlibInitFailed;
+    defer _ = c.inflateEnd(&stream);
+
+    stream.next_out = buf.ptr;
+    stream.avail_out = @intCast(@min(buf.len, std.math.maxInt(c_uint)));
+
+    while (true) {
+        const ret = c.inflate(&stream, c.Z_NO_FLUSH);
+        if (ret == c.Z_STREAM_END) break;
+        if (ret != c.Z_OK) return error.ZlibDecompressError;
+        if (stream.avail_out == 0) break;
     }
 
     return .{
-        .decompressed_size = total,
-        .bytes_consumed = @intCast(fbs.pos),
+        .decompressed_size = @intCast(stream.total_out),
+        .bytes_consumed = @intCast(stream.total_in),
     };
 }
 
@@ -235,26 +238,26 @@ pub fn decompressHashIntoBuf(
     const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ git_type, object_size }) catch unreachable;
     sha_hasher.update(header);
 
-    var fbs = std.io.fixedBufferStream(compressed_data);
-    var old_reader = fbs.reader();
-    var adapter_buf: [65536]u8 = undefined;
-    var adapter = old_reader.adaptToNewApi(&adapter_buf);
-    var window_buf: [std.compress.flate.max_window_len]u8 = undefined;
-    var decompressor = std.compress.flate.Decompress.init(&adapter.new_interface, .zlib, &window_buf);
+    var stream: c.z_stream = std.mem.zeroes(c.z_stream);
+    stream.next_in = @constCast(compressed_data.ptr);
+    stream.avail_in = @intCast(@min(compressed_data.len, std.math.maxInt(c_uint)));
 
-    var total: usize = 0;
-    while (total < buf.len) {
-        const remaining = buf[total..];
-        var bufs = [_][]u8{remaining};
-        const orig_len = bufs[0].len;
-        _ = decompressor.reader.readVec(&bufs) catch |err| switch (err) {
-            error.EndOfStream => break,
-            error.ReadFailed => return error.InvalidInput,
-        };
-        const bytes_read = orig_len - bufs[0].len;
-        if (bytes_read == 0) break;
-        sha_hasher.update(buf[total..][0..bytes_read]);
-        total += bytes_read;
+    if (c.inflateInit(&stream) != c.Z_OK) return error.ZlibInitFailed;
+    defer _ = c.inflateEnd(&stream);
+
+    stream.next_out = buf.ptr;
+    stream.avail_out = @intCast(@min(buf.len, std.math.maxInt(c_uint)));
+
+    while (true) {
+        const old_out = stream.total_out;
+        const ret = c.inflate(&stream, c.Z_NO_FLUSH);
+        const produced = stream.total_out - old_out;
+        if (produced > 0) {
+            sha_hasher.update(buf[@intCast(old_out)..@intCast(stream.total_out)]);
+        }
+        if (ret == c.Z_STREAM_END) break;
+        if (ret != c.Z_OK) return error.ZlibDecompressError;
+        if (stream.avail_out == 0) break;
     }
 
     var result_sha1: [20]u8 = undefined;
@@ -262,8 +265,8 @@ pub fn decompressHashIntoBuf(
 
     return .{
         .sha1 = result_sha1,
-        .decompressed_size = total,
-        .bytes_consumed = @intCast(fbs.pos),
+        .decompressed_size = @intCast(stream.total_out),
+        .bytes_consumed = @intCast(stream.total_in),
     };
 }
 
