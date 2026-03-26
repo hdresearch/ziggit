@@ -84,48 +84,45 @@ pub fn resolveRef(git_dir: []const u8, ref_name: []const u8, platform_impl: anyt
                 const head_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{current_ref});
                 defer allocator.free(head_ref);
                 if (resolveRefOnce(git_dir, head_ref, platform_impl, allocator)) |head_resolved| {
-                    const result = if (head_resolved.is_symbolic) {
+                    if (head_resolved.is_symbolic) {
                         allocator.free(current_ref);
                         current_ref = try allocator.dupe(u8, head_resolved.target);
                         allocator.free(head_resolved.target);
                         continue; // Continue the loop with the symbolic target
-                    } else blk: {
+                    } else {
                         defer allocator.free(head_resolved.target);
-                        break :blk try resolveAnnotatedTag(git_dir, head_resolved.target, platform_impl, allocator);
-                    };
-                    return result;
+                        return try resolveAnnotatedTag(git_dir, head_resolved.target, platform_impl, allocator);
+                    }
                 } else |_| {}
                 
                 // Try refs/tags/ 
                 const tag_ref = try std.fmt.allocPrint(allocator, "refs/tags/{s}", .{current_ref});
                 defer allocator.free(tag_ref);
                 if (resolveRefOnce(git_dir, tag_ref, platform_impl, allocator)) |tag_resolved| {
-                    const result = if (tag_resolved.is_symbolic) {
+                    if (tag_resolved.is_symbolic) {
                         allocator.free(current_ref);
                         current_ref = try allocator.dupe(u8, tag_resolved.target);
                         allocator.free(tag_resolved.target);
                         continue;
-                    } else blk: {
+                    } else {
                         defer allocator.free(tag_resolved.target);
-                        break :blk try resolveAnnotatedTag(git_dir, tag_resolved.target, platform_impl, allocator);
-                    };
-                    return result;
+                        return try resolveAnnotatedTag(git_dir, tag_resolved.target, platform_impl, allocator);
+                    }
                 } else |_| {}
                 
                 // Try refs/remotes/ (for remote tracking branches)
                 const remote_ref = try std.fmt.allocPrint(allocator, "refs/remotes/{s}", .{current_ref});
                 defer allocator.free(remote_ref);
                 if (resolveRefOnce(git_dir, remote_ref, platform_impl, allocator)) |remote_resolved| {
-                    const result = if (remote_resolved.is_symbolic) {
+                    if (remote_resolved.is_symbolic) {
                         allocator.free(current_ref);
                         current_ref = try allocator.dupe(u8, remote_resolved.target);
                         allocator.free(remote_resolved.target);
                         continue;
-                    } else blk: {
+                    } else {
                         defer allocator.free(remote_resolved.target);
-                        break :blk try resolveAnnotatedTag(git_dir, remote_resolved.target, platform_impl, allocator);
-                    };
-                    return result;
+                        return try resolveAnnotatedTag(git_dir, remote_resolved.target, platform_impl, allocator);
+                    }
                 } else |_| {}
             }
             
@@ -368,10 +365,10 @@ pub fn branchExists(git_dir: []const u8, branch_name: []const u8, platform_impl:
 }
 
 pub fn createBranch(git_dir: []const u8, branch_name: []const u8, start_point: ?[]const u8, platform_impl: anytype, allocator: std.mem.Allocator) !void {
-    const hash = if (start_point) |sp| blk: {
-        if (sp.len == 40 and isValidHash(sp)) {
-            break :blk try allocator.dupe(u8, sp);
-        } else {
+    const hash = if (start_point) |sp|
+        if (sp.len == 40 and isValidHash(sp))
+            try allocator.dupe(u8, sp)
+        else blk: {
             // Resolve branch name to hash
             const commit_hash = try getBranchCommit(git_dir, sp, platform_impl, allocator);
             if (commit_hash) |h| {
@@ -380,7 +377,7 @@ pub fn createBranch(git_dir: []const u8, branch_name: []const u8, start_point: ?
                 return error.InvalidStartPoint;
             }
         }
-    } else blk: {
+    else blk: {
         // Use current HEAD
         const current_commit = try getCurrentCommit(git_dir, platform_impl, allocator);
         if (current_commit) |h| {
@@ -624,16 +621,22 @@ fn findTagsInPackedRefs(git_dir: []const u8, platform_impl: anytype, allocator: 
     return tags;
 }
 
-/// Read ref hash from packed-refs file with improved performance
+/// Read ref hash from packed-refs file with enhanced performance and validation
 fn readFromPackedRefs(git_dir: []const u8, ref_name: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![]u8 {
     const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir});
     defer allocator.free(packed_refs_path);
 
     const content = platform_impl.fs.readFile(allocator, packed_refs_path) catch |err| switch (err) {
         error.FileNotFound => return error.RefNotFound,
+        error.AccessDenied => return error.PackedRefsAccessDenied,
         else => return err,
     };
     defer allocator.free(content);
+
+    // Validate packed-refs file size (reasonable limit: 10MB)
+    if (content.len > 10 * 1024 * 1024) {
+        std.debug.print("Warning: packed-refs file is very large ({} bytes)\n", .{content.len});
+    }
 
     // Check if the file is sorted (git pack-refs --all usually sorts)
     var is_sorted = false;
