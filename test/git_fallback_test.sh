@@ -5,7 +5,7 @@ set +e
 # Comprehensive test for git fallback functionality
 # This script tests that ziggit can be used as a drop-in replacement for git
 
-ZIGGIT_BINARY="../../zig-out/bin/ziggit"
+ZIGGIT_BINARY="/root/ziggit/zig-out/bin/ziggit"
 
 # Color codes for output
 RED='\033[0;31m'
@@ -125,7 +125,7 @@ mkdir subdir
 cd subdir
 
 # Use absolute path to ziggit binary since we're in a subdirectory
-ZIGGIT_ABS_PATH="$(cd .. && pwd)/$ZIGGIT_BINARY"
+ZIGGIT_ABS_PATH="$ZIGGIT_BINARY"
 run_test "-C global flag" 0 "$ZIGGIT_ABS_PATH" -C .. rev-parse HEAD
 run_test "-c global flag" 0 "$ZIGGIT_ABS_PATH" -C .. -c core.abbrev=7 rev-parse HEAD
 
