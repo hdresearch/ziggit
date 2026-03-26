@@ -1,85 +1,31 @@
-Git Test Suite Results — Bottom Half (t9xxx-t3xxx)
+Git Test Suite Results — Bottom Half
 Date: 2026-03-26
-Runner: ziggit via /tmp/ziggit-as-git/git
-System git: git version 2.43.0
 
-  t9902-completion.sh: 173/263 passed (90 failed)
-  t7900-maintenance.sh: 33/72 passed (39 failed)
-  t7810-grep.sh: 256/263 passed (7 failed)
-  t7700-repack.sh: 31/47 passed (16 failed)
-  t7600-merge.sh: 76/83 passed (7 failed)
-  t7508-status.sh: 119/126 passed (7 failed)
-  t7501-commit-basic-functionality.sh: 76/77 passed (1 failed)
-  t7400-submodule-basic.sh: 120/124 passed (4 failed)
-  t7201-co.sh: 43/46 passed (3 failed)
-  t7060-wtstatus.sh: 17/17 passed ✓
-  t7004-tag.sh: 220/231 passed (11 failed)
-  t7001-mv.sh: 52/54 passed (2 failed)
-  t6300-for-each-ref.sh: 420/429 passed (9 failed)
-  t6200-fmt-merge-msg.sh: 37/37 passed ✓
-  t6100-rev-list-in-order.sh: 3/3 passed ✓
-  t6000-rev-list-misc.sh: 18/23 passed (5 failed)
-  t5601-clone.sh: 57/109 passed (52 failed)
-  t5510-fetch.sh: 199/214 passed (15 failed)
-  t5500-fetch-pack.sh: 374/377 passed (3 failed)
-  t5400-send-pack.sh: 16/17 passed (1 failed)
-  t5300-pack-object.sh: 49/63 passed (14 failed)
-  t5100-mailinfo.sh: 50/52 passed (2 failed)
-  t4200-rerere.sh: 31/36 passed (5 failed)
-  t4150-am.sh: 85/87 passed (2 failed)
-  t4000-diff-format.sh: 41/41 passed ✓
-  t3900-i18n-commit.sh: 38/38 passed ✓
-  t3700-add.sh: 53/58 passed (5 failed)
-  t3600-rm.sh: 81/82 passed (1 failed)
-  t3507-cherry-pick-conflict.sh: 42/44 passed (2 failed)
-  t3501-revert-cherry-pick.sh: 17/21 passed (4 failed)
-  t3404-rebase-interactive.sh: 101/132 passed (31 failed)
-  t3903-stash.sh: 125/142 passed (17 failed)
-  t3400-rebase.sh: 35/39 passed (4 failed)
-  t3305-notes-fanout.sh: 7/7 passed ✓
-  t3301-notes.sh: 149/153 passed (4 failed)
-  t3200-branch.sh: 164/167 passed (3 failed)
-  t3100-ls-tree-restrict.sh: 14/14 passed ✓
-  t3070-wildmatch.sh: 1850/1901 passed (51 failed)
-  t3000-ls-files-others.sh: 15/15 passed ✓
-  t2400-worktree-add.sh: 203/232 passed (29 failed)
-  t2200-add-update.sh: 18/19 passed (1 failed)
-  t2106-update-index-assume-unchanged.sh: 2/2 passed ✓
-  t2025-checkout-no-overlay.sh: 6/6 passed ✓
-  t2020-checkout-detach.sh: 24/26 passed (2 failed)
-  t2018-checkout-branch.sh: 25/25 passed ✓
-  t2012-checkout-last.sh: 22/22 passed ✓
-  t2300-cd-to-toplevel.sh: 5/5 passed ✓
-  t2007-checkout-symlink.sh: 4/4 passed ✓
-  t2010-checkout-ambiguous.sh: 10/10 passed ✓
-  t1700-split-index.sh: 10/29 passed (19 failed)
-  t1500-rev-parse.sh: 79/81 passed (2 failed)
-  t1450-fsck.sh: 84/96 passed (12 failed)
-  t1400-update-ref.sh: 179/313 passed (134 failed)
-  t1300-config.sh: 389/497 passed (108 failed)
-  t1200-tutorial.sh: SKIPPED (not found)
-  t1100-commit-tree-options.sh: 5/5 passed ✓
-  t1020-subdirectory.sh: 15/15 passed ✓
-  t1010-mktree.sh: 8/8 passed ✓
-  t1006-cat-file.sh: 244/291 passed (47 failed)
-  t1005-read-tree-reset.sh: 7/7 passed ✓
-  t1004-read-tree-m-u-wf.sh: 17/17 passed ✓
-  t1003-read-tree-prefix.sh: 3/3 passed ✓
-  t1002-read-tree-m-u-2way.sh: 22/22 passed ✓
-  t1001-read-tree-m-2way.sh: 29/29 passed ✓
-  t1000-read-tree-m-3way.sh: 83/83 passed ✓
-  t0300-credentials.sh: 49/56 passed (7 failed)
-  t0070-fundamental.sh: 3/11 passed (8 failed)
-  t0060-path-utils.sh: 146/219 passed (73 failed)
-  t0050-filesystem.sh: 13/13 passed ✓
-  t0004-unwritable.sh: 9/9 passed ✓
-  t0008-ignores.sh: 397/398 passed (1 failed)
-  t0030-stripspace.sh: 28/30 passed (2 failed)
-  t0002-gitfile.sh: 14/14 passed ✓
-  t0003-attributes.sh: 45/55 passed (10 failed)
-  t0010-racy-git.sh: 10/10 passed ✓
-  t0020-crlf.sh: 36/36 passed ✓
-  t0001-init.sh: 70/102 passed (32 failed)
-  t0000-basic.sh: 87/92 passed (5 failed)
+  t9902-completion.sh: 173/263 passed
+  t7900-maintenance.sh: 33/72 passed
+  t7810-grep.sh: 256/263 passed
+  t7700-repack.sh: 31/47 passed
+  t7600-merge.sh: 76/83 passed
+  t7508-status.sh: 119/126 passed
+  t7501-commit.sh: SKIP (not found)
+  t7400-submodule-basic.sh: 120/124 passed
+  t7201-co.sh: 43/46 passed
+  t7060-wtstatus.sh: 17/17 passed
+  t7004-tag.sh: 220/231 passed
+  t7001-mv.sh: 52/54 passed
+  t6300-for-each-ref.sh: 420/429 passed
+  t6200-fmt-merge-msg.sh: 37/37 passed
+  t6100-rev-list-in-order.sh: 3/3 passed
+  t6000-rev-list-misc.sh: 18/23 passed
+  t5601-clone.sh: 57/109 passed
+  t5510-fetch.sh: 199/214 passed
+  t5500-fetch-pack.sh: 374/377 passed
+  t5400-send-pack.sh: 16/17 passed
+  t5300-pack-object.sh: 49/63 passed
+  t5100-mailinfo.sh: 50/52 passed
+  t4200-rerere.sh: 31/36 passed
+  t4150-am.sh: 85/87 passed
+  t4000-diff-format.sh: 41/41 passed
+  t3900-i18n-commit.sh: 38/38 passed
 
-TOTAL: 7687/8596 passed (909 failed)
+TOTAL: 2558/2852 passed (294 failed)

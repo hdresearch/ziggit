@@ -76,7 +76,18 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 read_idx += 1;
                 continue;
             }
-            all_original_args.items[write_idx] = arg;
+            // Translate newer git flags to older equivalents for git 2.43 compat
+            if (std.mem.eql(u8, arg, "-ufalse") or std.mem.eql(u8, arg, "--untracked-files=false") or
+                std.mem.eql(u8, arg, "-u0") or std.mem.eql(u8, arg, "--untracked-files=0")) {
+                all_original_args.items[write_idx] = "-uno";
+            } else if (std.mem.eql(u8, arg, "-utrue") or std.mem.eql(u8, arg, "--untracked-files=true") or
+                       std.mem.eql(u8, arg, "-uyes") or std.mem.eql(u8, arg, "--untracked-files=yes") or
+                       std.mem.eql(u8, arg, "-u1") or std.mem.eql(u8, arg, "--untracked-files=1") or
+                       std.mem.eql(u8, arg, "-uon") or std.mem.eql(u8, arg, "--untracked-files=on")) {
+                all_original_args.items[write_idx] = "-unormal";
+            } else {
+                all_original_args.items[write_idx] = arg;
+            }
             write_idx += 1;
             read_idx += 1;
         }
@@ -410,13 +421,65 @@ fn forwardConfigToGit(allocator: std.mem.Allocator, all_args: [][]const u8, comm
                 }
             }
             
-            try forwardToGit(allocator, new_args.items, platform_impl);
+            try forwardToGit(allocator, try translateConfigValues(allocator, new_args.items), platform_impl);
             return;
         }
     }
     
-    // Not a new-style subcommand, forward as-is
-    try forwardCmdToGit(allocator, all_args, platform_impl);
+    // Not a new-style subcommand, forward as-is (with value translation)
+    try forwardCmdToGit(allocator, try translateConfigValues(allocator, all_args), platform_impl);
+}
+
+fn translateConfigValues(allocator: std.mem.Allocator, all_args: [][]const u8) ![][]const u8 {
+    // Translate config values that newer git (2.46+) accepts but older git (2.43) doesn't.
+    // E.g., status.showuntrackedfiles: false→no, true→normal, 0→no, 1→normal
+    // Also: advice.statusHints: same treatment
+    var new_args = try allocator.alloc([]const u8, all_args.len);
+    @memcpy(new_args, all_args);
+    
+    // Find the config key and value positions
+    // Pattern: git [global-flags] config [flags] <key> <value>
+    var i: usize = 0;
+    var found_config = false;
+    var key_idx: ?usize = null;
+    var val_idx: ?usize = null;
+    while (i < all_args.len) : (i += 1) {
+        const arg = all_args[i];
+        if (!found_config) {
+            if (std.mem.eql(u8, arg, "config")) {
+                found_config = true;
+            }
+            continue;
+        }
+        // After "config", skip flags
+        if (std.mem.startsWith(u8, arg, "-")) continue;
+        if (key_idx == null) {
+            key_idx = i;
+        } else if (val_idx == null) {
+            val_idx = i;
+            break;
+        }
+    }
+    
+    if (key_idx != null and val_idx != null) {
+        const key = std.ascii.lowerString(
+            try allocator.alloc(u8, all_args[key_idx.?].len),
+            all_args[key_idx.?],
+        );
+        defer allocator.free(key);
+        const val = all_args[val_idx.?];
+        
+        // Translate boolean-style values for keys that expect no/normal/all
+        if (std.mem.eql(u8, key, "status.showuntrackedfiles")) {
+            if (std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "0")) {
+                new_args[val_idx.?] = "no";
+            } else if (std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "1")) {
+                new_args[val_idx.?] = "normal";
+            }
+        }
+    }
+    
+    return new_args;
 }
 
 fn forwardVersionToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_impl: *const platform_mod.Platform) !void {
@@ -835,9 +898,9 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             if (std.mem.eql(u8, arg, "-sb") or std.mem.eql(u8, arg, "-bs")) {
                 show_branch = true;
             }
-        } else if (std.mem.eql(u8, arg, "-uno") or std.mem.eql(u8, arg, "--untracked-files=no") or std.mem.eql(u8, arg, "-u") or std.mem.eql(u8, arg, "--no-untracked-files")) {
+        } else if (std.mem.eql(u8, arg, "-uno") or std.mem.eql(u8, arg, "-ufalse") or std.mem.eql(u8, arg, "--untracked-files=no") or std.mem.eql(u8, arg, "--untracked-files=false") or std.mem.eql(u8, arg, "-u") or std.mem.eql(u8, arg, "--no-untracked-files")) {
             show_untracked = false;
-        } else if (std.mem.eql(u8, arg, "-unormal") or std.mem.eql(u8, arg, "--untracked-files=normal") or std.mem.eql(u8, arg, "--untracked-files") or std.mem.eql(u8, arg, "-uall") or std.mem.eql(u8, arg, "--untracked-files=all")) {
+        } else if (std.mem.eql(u8, arg, "-unormal") or std.mem.eql(u8, arg, "-utrue") or std.mem.eql(u8, arg, "--untracked-files=normal") or std.mem.eql(u8, arg, "--untracked-files=true") or std.mem.eql(u8, arg, "--untracked-files") or std.mem.eql(u8, arg, "-uall") or std.mem.eql(u8, arg, "--untracked-files=all")) {
             show_untracked = true;
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try platform_impl.writeStdout("usage: git status [<options>] [--] [<pathspec>...]\n\n");
