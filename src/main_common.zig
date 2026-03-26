@@ -608,10 +608,20 @@ fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8, alloc
         platform_impl.fs.writeFile(exclude_path, "# git ls-files --others --exclude-from=.git/info/exclude\n# Lines that start with '#' are comments.\n") catch {};
     }
 
+    // Get absolute, normalized path for the success message (git always prints absolute paths)
+    const abs_path = std.fs.cwd().realpathAlloc(allocator, path) catch blk: {
+        if (std.fs.path.isAbsolute(path))
+            break :blk try allocator.dupe(u8, path);
+        const cwd = try platform_impl.fs.getCwd(allocator);
+        defer allocator.free(cwd);
+        break :blk try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd, path });
+    };
+    defer allocator.free(abs_path);
+
     const success_msg = if (bare)
-        try std.fmt.allocPrint(allocator, "Initialized empty Git repository in {s}/\n", .{git_dir})
+        try std.fmt.allocPrint(allocator, "Initialized empty Git repository in {s}/\n", .{abs_path})
     else
-        try std.fmt.allocPrint(allocator, "Initialized empty Git repository in {s}/.git/\n", .{path});
+        try std.fmt.allocPrint(allocator, "Initialized empty Git repository in {s}/.git/\n", .{abs_path});
     defer allocator.free(success_msg);
     try platform_impl.writeStdout(success_msg);
 }
