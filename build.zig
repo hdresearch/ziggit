@@ -200,6 +200,19 @@ pub fn build(b: *std.Build) void {
     bench_step.dependOn(&run_lib_benchmark.step);
     bench_step.dependOn(&run_bun_scenario_benchmark.step);
 
+    // ========== DEMO EXECUTABLE ==========
+    const demo_exe = b.addExecutable(.{
+        .name = "bun-integration-demo",
+        .root_source_file = b.path("example_bun_integration.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    demo_exe.root_module.addImport("ziggit", ziggit_module);
+    
+    const run_demo = b.addRunArtifact(demo_exe);
+    const demo_step = b.step("demo", "Run bun integration demonstration");
+    demo_step.dependOn(&run_demo.step);
+
     // ========== WASM TARGET ==========
     const wasm_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
