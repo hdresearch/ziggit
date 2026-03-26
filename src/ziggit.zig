@@ -40,7 +40,7 @@ pub const Repository = struct {
         const abs_path = if (std.fs.path.isAbsolute(path))
             try allocator.dupe(u8, path)
         else blk: {
-            var cwd_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
             const cwd = try std.process.getCwd(&cwd_buf);
             break :blk try std.fs.path.resolve(allocator, &[_][]const u8{ cwd, path });
         };
@@ -80,7 +80,7 @@ pub const Repository = struct {
         const abs_path = if (std.fs.path.isAbsolute(path))
             try allocator.dupe(u8, path)
         else blk: {
-            var cwd_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
             const cwd = try std.process.getCwd(&cwd_buf);
             break :blk try std.fs.path.resolve(allocator, &[_][]const u8{ cwd, path });
         };
@@ -131,7 +131,7 @@ pub const Repository = struct {
     /// Pre-warm index file metadata to speed up first status check
     fn warmupIndexMetadata(self: *Repository) !void {
         // Use stack buffer for index path
-        var index_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var index_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const index_path = std.fmt.bufPrint(&index_path_buf, "{s}/index", .{self.git_dir}) catch return;
 
         // Just get index file metadata to warm the cache
@@ -147,7 +147,7 @@ pub const Repository = struct {
 
     /// ULTRA-FAST: Check if index file has changed since last check (2-5x faster than parsing)
     fn isIndexUnchanged(self: *Repository) !bool {
-        var index_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var index_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const index_path = std.fmt.bufPrint(&index_path_buf, "{s}/index", .{self.git_dir}) catch return false;
 
         const index_stat = std.fs.cwd().statFile(index_path) catch return false;
@@ -185,7 +185,7 @@ pub const Repository = struct {
         // try a super-fast heuristic based on just file existence
         if (self._cached_index_mtime == null and self._cached_is_clean == null) {
             // This is likely a benchmark scenario - be aggressive
-            var index_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            var index_path_buf: [std.fs.max_path_bytes]u8 = undefined;
             const index_path = std.fmt.bufPrint(&index_path_buf, "{s}/index", .{self.git_dir}) catch return false;
             
             // If index exists and we're in a benchmark test repo, assume clean
@@ -220,7 +220,7 @@ pub const Repository = struct {
     /// Ultra-fast HEAD parsing with minimal allocations and syscalls
     fn revParseHeadUltraFast(self: *const Repository) ![40]u8 {
         // Use stack-allocated buffer to minimize heap usage
-        var head_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var head_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const head_path = std.fmt.bufPrint(&head_path_buf, "{s}/HEAD", .{self.git_dir}) catch return error.PathTooLong;
 
         // Single syscall to open and read HEAD file
@@ -250,7 +250,7 @@ pub const Repository = struct {
     /// Ultra-fast ref resolution with stack allocation
     fn resolveRefUltraFast(self: *const Repository, ref_name: []const u8) ![40]u8 {
         // Use stack-allocated buffer instead of heap allocation
-        var ref_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var ref_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const ref_path = std.fmt.bufPrint(&ref_path_buf, "{s}/{s}", .{ self.git_dir, ref_name }) catch return error.PathTooLong;
 
         const ref_file = std.fs.openFileAbsolute(ref_path, .{}) catch return error.RefNotFound;
@@ -272,7 +272,7 @@ pub const Repository = struct {
     /// Get HEAD commit hash without caching - internal implementation
     fn revParseHeadUncached(self: *const Repository) ![40]u8 {
         // Use stack-allocated buffer instead of heap allocation
-        var head_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var head_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const head_path = std.fmt.bufPrint(&head_path_buf, "{s}/HEAD", .{self.git_dir}) catch return error.PathTooLong;
 
         const head_file = std.fs.openFileAbsolute(head_path, .{}) catch |err| switch (err) {
@@ -386,7 +386,7 @@ pub const Repository = struct {
     /// Get cached index entries, parsing and caching if needed
     fn getCachedIndexEntries(self: *Repository) ![]CachedIndexEntry {
         // Use stack buffer for index path
-        var index_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var index_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const index_path = std.fmt.bufPrint(&index_path_buf, "{s}/index", .{self.git_dir}) catch return error.PathTooLong;
         
         // Check if index file exists
@@ -450,7 +450,7 @@ pub const Repository = struct {
     /// OPTIMIZED: Ultra-fast clean check with caching - skips file system calls if possible
     pub fn isUltraFastCleanCached(self: *Repository) !bool {
         // Use stack buffer for index path
-        var index_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var index_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const index_path = std.fmt.bufPrint(&index_path_buf, "{s}/index", .{self.git_dir}) catch return false;
 
         // Check if index file changed since last check
@@ -485,7 +485,7 @@ pub const Repository = struct {
         defer output.deinit();
 
         // Use stack buffer for index path
-        var index_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var index_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const index_path = std.fmt.bufPrint(&index_path_buf, "{s}/index", .{self.git_dir}) catch return error.PathTooLong;
 
         // Use regular GitIndex for detailed status (needs SHA-1 hashes)
@@ -504,7 +504,7 @@ pub const Repository = struct {
             try tracked_files.put(entry.path, {});
             
             // Get file path in working directory using stack buffer
-            var file_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            var file_path_buf: [std.fs.max_path_bytes]u8 = undefined;
             const file_path = std.fmt.bufPrint(&file_path_buf, "{s}/{s}", .{ self.path, entry.path }) catch continue;
             
             // Use direct stat instead of opening file first - much faster
@@ -622,7 +622,7 @@ pub const Repository = struct {
     /// Optimized clean check that short-circuits on first change - much faster than full status
     fn isCleanFast(self: *const Repository) !bool {
         // Use stack buffer for index path
-        var index_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var index_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const index_path = std.fmt.bufPrint(&index_path_buf, "{s}/index", .{self.git_dir}) catch return error.PathTooLong;
 
         // OPTIMIZATION: Use FastGitIndex for faster parsing
@@ -641,7 +641,7 @@ pub const Repository = struct {
             try tracked_files.put(entry.path, {});
             
             // Get file path in working directory using stack buffer
-            var file_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            var file_path_buf: [std.fs.max_path_bytes]u8 = undefined;
             const file_path = std.fmt.bufPrint(&file_path_buf, "{s}/{s}", .{ self.path, entry.path }) catch continue;
             
             // Use direct stat - much faster than opening file
@@ -717,7 +717,7 @@ pub const Repository = struct {
     }
     fn describeTagsUltraFast(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
         // Use stack buffer for tags directory path
-        var tags_dir_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var tags_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
         const tags_dir = std.fmt.bufPrint(&tags_dir_buf, "{s}/refs/tags", .{self.git_dir}) catch return error.PathTooLong;
 
         var latest_tag_buf: [64]u8 = undefined;
@@ -741,7 +741,7 @@ pub const Repository = struct {
         } else |_| {}
 
         // Second: scan packed-refs for refs/tags/ entries (tags stored after clone/fetch)
-        var packed_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var packed_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const packed_path = std.fmt.bufPrint(&packed_path_buf, "{s}/packed-refs", .{self.git_dir}) catch "";
         if (packed_path.len > 0) {
             if (std.fs.cwd().readFileAlloc(allocator, packed_path, 4 * 1024 * 1024)) |packed_data| {
@@ -780,7 +780,7 @@ pub const Repository = struct {
     /// Get latest tag without caching - internal implementation 
     fn describeTagsUncached(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
         // Use stack buffer for tags directory path
-        var tags_dir_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var tags_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
         const tags_dir = std.fmt.bufPrint(&tags_dir_buf, "{s}/refs/tags", .{self.git_dir}) catch return error.PathTooLong;
 
         // ULTRA-OPTIMIZED: Use stack buffer for latest tag to avoid heap allocations during comparison
@@ -1197,7 +1197,7 @@ pub const Repository = struct {
         defer self.allocator.free(head_path);
         
         // Check if ref is a branch name
-        var ref_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var ref_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const branch_ref = std.fmt.bufPrint(&ref_path_buf, "{s}/refs/heads/{s}", .{ self.git_dir, ref }) catch {
             // Fall back to detached HEAD
             const hf = try std.fs.createFileAbsolute(head_path, .{ .truncate = true });
@@ -1314,7 +1314,7 @@ pub const Repository = struct {
             } else |_| {}
 
             // Also scan packed-refs for refs stored there (e.g., after ziggit clone)
-            var packed_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            var packed_path_buf: [std.fs.max_path_bytes]u8 = undefined;
             const packed_path = std.fmt.bufPrint(&packed_path_buf, "{s}/packed-refs", .{self.git_dir}) catch "";
             if (packed_path.len > 0) {
                 if (std.fs.cwd().readFileAlloc(self.allocator, packed_path, 4 * 1024 * 1024)) |packed_data| {
@@ -2673,7 +2673,7 @@ pub const Repository = struct {
         // After populating from tree, stat actual files to get correct mtime/size
         // This ensures the index matches the working tree state
         for (git_index.entries.items) |*entry| {
-            var file_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            var file_path_buf: [std.fs.max_path_bytes]u8 = undefined;
             const file_path = std.fmt.bufPrint(&file_path_buf, "{s}/{s}", .{ self.path, entry.path }) catch continue;
             const stat = std.fs.cwd().statFile(file_path) catch continue;
             entry.size = @intCast(@min(stat.size, std.math.maxInt(u32)));
@@ -2775,7 +2775,7 @@ pub const Repository = struct {
     /// Fast ref resolution using stack allocation - OPTIMIZED
     fn resolveRefFast(self: *const Repository, ref_name: []const u8) ![40]u8 {
         // Use stack-allocated buffer instead of heap allocation
-        var ref_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var ref_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const ref_path = std.fmt.bufPrint(&ref_path_buf, "{s}/{s}", .{ self.git_dir, ref_name }) catch return error.PathTooLong;
 
         if (std.fs.openFileAbsolute(ref_path, .{})) |ref_file| {
@@ -2799,7 +2799,7 @@ pub const Repository = struct {
     /// Resolve a ref by scanning the packed-refs file.
     /// packed-refs format: "<hash> <refname>\n" per line, with comment lines starting with '#'.
     fn resolveRefFromPackedRefs(self: *const Repository, ref_name: []const u8) ![40]u8 {
-        var packed_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var packed_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const packed_path = std.fmt.bufPrint(&packed_path_buf, "{s}/packed-refs", .{self.git_dir}) catch return error.RefNotFound;
 
         const packed_file = std.fs.openFileAbsolute(packed_path, .{}) catch return error.RefNotFound;
@@ -2903,7 +2903,7 @@ pub const Repository = struct {
         defer output.deinit();
 
         // Use stack buffer for index path
-        var index_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var index_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const index_path = std.fmt.bufPrint(&index_path_buf, "{s}/index", .{self.git_dir}) catch return error.PathTooLong;
 
         var git_index = index_parser.GitIndex.readFromFile(allocator, index_path) catch {

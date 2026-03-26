@@ -20,7 +20,7 @@ const Repository = struct {
         const abs_path = if (std.fs.path.isAbsolute(self.path))
             try self.allocator.dupe(u8, self.path)
         else blk: {
-            var cwd_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
             const cwd = try std.process.getCwd(&cwd_buf);
             break :blk try std.fs.path.resolve(self.allocator, &[_][]const u8{ cwd, self.path });
         };
@@ -346,7 +346,7 @@ fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8) !void
     _ = template_dir; // TODO: implement template support
     
     // Convert to absolute path
-    var cwd_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd = try std.process.getCwd(&cwd_buf);
     
     const abs_path = if (std.fs.path.isAbsolute(path)) 
@@ -515,7 +515,7 @@ fn commitCreate(repo: *Repository, message: []const u8, author_name: []const u8,
     defer global_allocator.free(git_dir);
     
     // Set author information temporarily
-    var cwd_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    var cwd_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const old_cwd = std.process.getCwd(&cwd_buffer) catch return error.InvalidPath;
     
     std.process.changeCurDir(repo.path) catch return error.InvalidPath;
@@ -756,7 +756,7 @@ fn addToIndex(repo: *Repository, pathspec: []const u8) !void {
     };
     
     // Change to repository directory and run git add
-    var cwd_buffer2: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    var cwd_buffer2: [std.fs.max_path_bytes]u8 = undefined;
     const old_cwd = std.process.getCwd(&cwd_buffer2) catch return error.InvalidPath;
     
     std.process.changeCurDir(repo.path) catch return error.InvalidPath;
@@ -1134,7 +1134,7 @@ fn scanForUntrackedFilesInIndex(repo_root: []const u8, tracked_files: *std.HashM
     const abs_repo_root = if (std.fs.path.isAbsolute(repo_root))
         try global_allocator.dupe(u8, repo_root)
     else blk: {
-        var cwd_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd = try std.process.getCwd(&cwd_buf);
         break :blk try std.fs.path.resolve(global_allocator, &[_][]const u8{ cwd, repo_root });
     };
@@ -1378,7 +1378,7 @@ fn isFileModifiedAgainstIndex(work_tree: []const u8, file_path: []const u8, inde
     const abs_work_tree = if (std.fs.path.isAbsolute(work_tree))
         try global_allocator.dupe(u8, work_tree)
     else blk: {
-        var cwd_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd = try std.process.getCwd(&cwd_buf);
         break :blk try std.fs.path.resolve(global_allocator, &[_][]const u8{ cwd, work_tree });
     };
@@ -1844,7 +1844,7 @@ fn getFileAtRef(repo: *Repository, ref: []const u8, file_path: []const u8, buffe
     // For complex object operations, use git CLI for correctness
     // This ensures compatibility while keeping simple operations fast
     
-    var cwd_buffer3: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    var cwd_buffer3: [std.fs.max_path_bytes]u8 = undefined;
     const old_cwd = std.process.getCwd(&cwd_buffer3) catch return error.InvalidPath;
     
     std.process.changeCurDir(repo.path) catch return error.InvalidPath;
@@ -1953,7 +1953,7 @@ fn findGitDirForRepo(repo: *Repository) ![]const u8 {
     const abs_repo_path = if (std.fs.path.isAbsolute(repo.path))
         try global_allocator.dupe(u8, repo.path)
     else blk: {
-        var cwd_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd = try std.process.getCwd(&cwd_buf);
         break :blk try std.fs.path.resolve(global_allocator, &[_][]const u8{ cwd, repo.path });
     };

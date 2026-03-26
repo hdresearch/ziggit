@@ -2580,7 +2580,7 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         
         if (!quiet) {
             // Check if this was a branch or detached HEAD
-            var ref_check_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            var ref_check_buf: [std.fs.max_path_bytes]u8 = undefined;
             const branch_ref_path = std.fmt.bufPrint(&ref_check_buf, "{s}/refs/heads/{s}", .{ repo.git_dir, target }) catch {
                 return;
             };
