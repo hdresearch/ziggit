@@ -1,6 +1,7 @@
 const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 const version_mod = @import("version.zig");
+const build_options = @import("build_options");
 
 // Only import git modules on platforms that support them
 const Repository = if (@import("builtin").target.os.tag != .freestanding) @import("git/repository.zig").Repository else void;
@@ -141,10 +142,72 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "help")) {
         try showUsage(&platform_impl);
     } else {
-        const error_msg = std.fmt.allocPrint(allocator, "ziggit: '{s}' is not a ziggit command. See 'ziggit --help'.\n", .{command}) catch "ziggit: invalid command. See 'ziggit --help'.\n";
-        defer if (error_msg.ptr != "ziggit: invalid command. See 'ziggit --help'.\n".ptr) allocator.free(error_msg);
-        try platform_impl.writeStderr(error_msg);
-        std.process.exit(1);
+        // Check if git fallback is enabled
+        if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
+            // Collect global flags that were already processed
+            var global_flags = std.ArrayList([]const u8).init(allocator);
+            defer global_flags.deinit();
+            
+            // Get all original arguments to reconstruct them for git
+            var all_args = try platform_impl.getArgs(allocator);
+            defer all_args.deinit();
+            
+            // Skip program name
+            _ = all_args.skip();
+            
+            try forwardToGit(allocator, &all_args, &platform_impl);
+        } else {
+            const error_msg = std.fmt.allocPrint(allocator, "ziggit: '{s}' is not a ziggit command. See 'ziggit --help'.\n", .{command}) catch "ziggit: invalid command. See 'ziggit --help'.\n";
+            defer if (error_msg.ptr != "ziggit: invalid command. See 'ziggit --help'.\n".ptr) allocator.free(error_msg);
+            try platform_impl.writeStderr(error_msg);
+            std.process.exit(1);
+        }
+    }
+}
+
+fn forwardToGit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    // Build argv array with git as argv[0] and all original args after that
+    var argv = std.ArrayList([]const u8).init(allocator);
+    defer argv.deinit();
+    
+    try argv.append("git");
+    
+    // Add all remaining arguments to git
+    while (args.next()) |arg| {
+        try argv.append(arg);
+    }
+    
+    // Spawn git child process with inherited stdin/stdout/stderr
+    var child = std.process.Child.init(argv.items, allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+    
+    // Try to spawn the git process
+    const term = child.spawnAndWait() catch |err| switch (err) {
+        error.FileNotFound => {
+            // git binary not found
+            const msg = try std.fmt.allocPrint(allocator, "ziggit: '{s}' is not a ziggit command and git is not installed.\n", .{argv.items[1]});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            try platform_impl.writeStderr("Either install git for fallback functionality or use a natively supported ziggit command.\n");
+            try platform_impl.writeStderr("See 'ziggit --help' for supported commands.\n");
+            std.process.exit(1);
+        },
+        else => {
+            const msg = try std.fmt.allocPrint(allocator, "ziggit: failed to execute git: {}\n", .{err});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(1);
+        },
+    };
+    
+    // Propagate git's exit code
+    switch (term) {
+        .Exited => |code| std.process.exit(@intCast(code)),
+        .Signal => |_| std.process.exit(128),
+        .Stopped => |_| std.process.exit(128),
+        .Unknown => |_| std.process.exit(1),
     }
 }
 
@@ -257,7 +320,12 @@ fn showUsage(platform_impl: *const platform_mod.Platform) !void {
         try platform_impl.writeStdout("   push       Update remote refs along with associated objects\n");
     }
     
-    const suffix_msg = std.fmt.allocPrint(std.heap.page_allocator, "\nziggit{s} - A modern version control system written in Zig\n\nDrop-in replacement for git commands - use 'ziggit' instead of 'git'\nCompatible .git directory format, works with existing git repositories\n\nOptions:\n  --version, -v       Show version information\n  --version-info      Show detailed version and build information\n  --help, -h          Show this help message\n", .{target_info}) catch return;
+    const fallback_info = if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) 
+        "\nUnimplemented commands are transparently forwarded to git when available.\n"
+    else 
+        "";
+        
+    const suffix_msg = std.fmt.allocPrint(std.heap.page_allocator, "\nziggit{s} - A modern version control system written in Zig\n\nDrop-in replacement for git commands - use 'ziggit' instead of 'git'\nCompatible .git directory format, works with existing git repositories{s}\nOptions:\n  --version, -v       Show version information\n  --version-info      Show detailed version and build information\n  --help, -h          Show this help message\n", .{target_info, fallback_info}) catch return;
     defer std.heap.page_allocator.free(suffix_msg);
     try platform_impl.writeStdout(suffix_msg);
 }
