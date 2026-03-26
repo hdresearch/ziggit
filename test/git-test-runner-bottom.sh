@@ -10,11 +10,26 @@ echo "" >> "$RESULTS"
 
 TOTAL_PASS=0; TOTAL_FAIL=0; TOTAL_TESTS=0; PERFECT=0; SCRIPTS=0
 
-# All test scripts to run
 TEST_SCRIPTS=(
     # t9xxx
     t9902-completion.sh
-    # t7xxx  
+    # t8xxx — blame/annotate
+    t8015-blame-default-ignorerevs.sh
+    t8014-blame-ignore-fuzzy.sh
+    t8013-blame-ignore-revs.sh
+    t8012-blame-colors.sh
+    t8011-blame-split-file.sh
+    t8010-cat-file-filters.sh
+    t8009-blame-vs-topicbranches.sh
+    t8008-blame-formats.sh
+    t8007-cat-file-textconv.sh
+    t8006-blame-textconv.sh
+    t8005-blame-i18n.sh
+    t8004-blame-with-conflicts.sh
+    t8003-blame-corner-cases.sh
+    t8002-blame.sh
+    t8001-annotate.sh
+    # t7xxx — high-level commands
     t7900-maintenance.sh
     t7810-grep.sh
     t7700-repack.sh
@@ -33,6 +48,8 @@ TEST_SCRIPTS=(
     t7505-prepare-commit-msg-hook.sh
     t7504-commit-msg-hook.sh
     t7502-commit-porcelain.sh
+    t7501-commit-basic-functionality.sh
+    t7500-commit-template-squash-signoff.sh
     t7421-submodule-summary.sh
     t7420-submodule-set-url.sh
     t7419-submodule-set-branch.sh
@@ -64,10 +81,23 @@ TEST_SCRIPTS=(
     t7103-reset-bare.sh
     t7102-reset.sh
     t7101-reset-empty-subdirs.sh
+    t7100-revert.sh
+    t7064-wtstatus-pv2.sh
     t7060-wtstatus.sh
+    t7031-verify-tag-signed-ssh.sh
+    t7030-verify-tag.sh
+    t7012-skip-worktree-writing.sh
+    t7011-skip-worktree-reading.sh
+    t7010-setup.sh
+    t7008-filter-branch-null-sha1.sh
+    t7007-show.sh
+    t7006-pager.sh
+    t7005-editor.sh
     t7004-tag.sh
+    t7003-filter-branch.sh
+    t7002-mv-sparse-checkout.sh
     t7001-mv.sh
-    # t6xxx
+    # t6xxx — rev-list, merge, for-each-ref
     t6302-for-each-ref-filter.sh
     t6301-for-each-ref-errors.sh
     t6300-for-each-ref.sh
@@ -110,7 +140,7 @@ TEST_SCRIPTS=(
     t6002-rev-list-bisect.sh
     t6001-rev-list-graft.sh
     t6000-rev-list-misc.sh
-    # t5xxx
+    # t5xxx — fetch, push, clone, pack
     t5616-partial-clone.sh
     t5614-clone-submodules-shallow.sh
     t5613-info-alternate.sh
@@ -161,11 +191,12 @@ TEST_SCRIPTS=(
     t5504-fetch-receive-strict.sh
     t5503-tagfollow.sh
     t5502-quickfetch.sh
+    t5501-fetch-push-hook.sh
     t5500-fetch-pack.sh
     t5400-send-pack.sh
     t5300-pack-object.sh
     t5100-mailinfo.sh
-    # t4xxx
+    # t4xxx — diff, apply, am
     t4200-rerere.sh
     t4150-am.sh
     t4137-apply-submodule.sh
@@ -250,17 +281,64 @@ TEST_SCRIPTS=(
     t4003-diff-rename-1.sh
     t4002-diff-basic.sh
     t4000-diff-format.sh
-    # t3xxx
+    # t3xxx — rebase, cherry-pick, add, rm, branch, ls-files/tree
     t3900-i18n-commit.sh
     t3700-add.sh
     t3600-rm.sh
+    t3514-cherry-pick-revert-gpg.sh
+    t3512-cherry-pick-submodule.sh
+    t3513-revert-submodule.sh
+    t3511-cherry-pick-x.sh
+    t3510-cherry-pick-sequence.sh
+    t3509-cherry-pick-merge-df.sh
+    t3508-cherry-pick-many-commits.sh
+    t3507-cherry-pick-conflict.sh
+    t3506-cherry-pick-ff.sh
+    t3505-cherry-pick-empty.sh
+    t3504-cherry-pick-rerere.sh
+    t3503-cherry-pick-root.sh
+    t3502-cherry-pick-merge.sh
+    t3501-revert-cherry-pick.sh
     t3500-cherry.sh
+    t3438-rebase-broken-files.sh
+    t3437-rebase-fixup-options.sh
+    t3436-rebase-more-options.sh
+    t3435-rebase-gpg-sign.sh
+    t3434-rebase-i18n.sh
+    t3433-rebase-across-mode-change.sh
+    t3432-rebase-fast-forward.sh
+    t3431-rebase-fork-point.sh
     t3430-rebase-merges.sh
+    t3429-rebase-edit-todo.sh
+    t3428-rebase-signoff.sh
+    t3427-rebase-subtree.sh
+    t3426-rebase-submodule.sh
+    t3425-rebase-topology-merges.sh
+    t3424-rebase-empty.sh
+    t3423-rebase-reword.sh
+    t3422-rebase-incompatible-options.sh
+    t3421-rebase-topology-linear.sh
     t3420-rebase-autostash.sh
+    t3419-rebase-patch-id.sh
+    t3418-rebase-continue.sh
+    t3417-rebase-whitespace-fix.sh
+    t3416-rebase-onto-threedots.sh
     t3415-rebase-autosquash.sh
+    t3413-rebase-hook.sh
+    t3412-rebase-root.sh
+    t3409-rebase-environ.sh
+    t3408-rebase-multi-line.sh
+    t3407-rebase-abort.sh
+    t3406-rebase-message.sh
+    t3405-rebase-malformed.sh
     t3404-rebase-interactive.sh
     t3403-rebase-skip.sh
     t3400-rebase.sh
+    t3322-notes-commit-abort.sh
+    t3321-notes-stripspace.sh
+    t3320-notes-merge-worktrees.sh
+    t3311-notes-merge-fanout.sh
+    t3310-notes-merge-manual-resolve.sh
     t3301-notes.sh
     t3300-funny-names.sh
     t3200-branch.sh
@@ -273,7 +351,13 @@ TEST_SCRIPTS=(
     t3020-ls-files-error-unmatch.sh
     t3010-ls-files-killed-modified.sh
     t3000-ls-files-others.sh
-    # t2xxx
+    # t2xxx — checkout, switch, restore, worktree, add
+    t2406-worktree-repair.sh
+    t2404-worktree-config.sh
+    t2403-worktree-move.sh
+    t2402-worktree-list.sh
+    t2401-worktree-prune.sh
+    t2400-worktree-add.sh
     t2200-add-update.sh
     t2100-update-cache-badpath.sh
     t2072-restore-pathspec-file.sh
@@ -290,6 +374,7 @@ TEST_SCRIPTS=(
     t2019-checkout-ambiguous-ref.sh
     t2018-checkout-branch.sh
     t2017-checkout-orphan.sh
+    t2016-checkout-patch.sh
     t2015-checkout-unborn.sh
     t2014-checkout-switch.sh
     t2013-checkout-submodule.sh
@@ -303,7 +388,7 @@ TEST_SCRIPTS=(
     t2004-checkout-cache-temp.sh
     t2003-checkout-cache-mkdir.sh
     t2022-checkout-paths.sh
-    # t1xxx
+    # t1xxx — read-tree, rev-parse, config, fsck, refs, setup
     t1510-repo-setup.sh
     t1507-rev-parse-upstream.sh
     t1506-rev-parse-diagnosis.sh
@@ -314,25 +399,47 @@ TEST_SCRIPTS=(
     t1500-rev-parse.sh
     t1451-fsck-buffer.sh
     t1450-fsck.sh
+    t1420-lost-found.sh
     t1418-reflog-exists.sh
     t1417-reflog-updateref.sh
     t1414-reflog-walk.sh
+    t1412-reflog-loop.sh
+    t1411-reflog-show.sh
+    t1409-avoid-packing-refs.sh
+    t1408-packed-refs.sh
+    t1415-worktree-refs.sh
     t1404-update-ref-errors.sh
+    t1402-check-ref-format.sh
     t1401-symbolic-ref.sh
+    t1350-config-hooks-path.sh
     t1307-config-blob.sh
     t1306-xdg-files.sh
     t1305-config-include.sh
     t1303-wacky-config.sh
     t1302-repo-version.sh
     t1301-shared-repo.sh
+    t1200-tutorial.sh
     t1100-commit-tree-options.sh
+    t1091-sparse-checkout-builtin.sh
+    t1090-sparse-checkout-scope.sh
+    t1060-object-corruption.sh
     t1050-large.sh
+    t1020-subdirectory.sh
+    t1015-read-index-unmerged.sh
+    t1014-read-tree-confusing.sh
+    t1013-read-tree-submodule.sh
+    t1012-read-tree-df.sh
+    t1011-read-tree-sparse-checkout.sh
     t1010-mktree.sh
+    t1009-read-tree-new-index.sh
+    t1008-read-tree-overlay.sh
+    t1007-hash-object.sh
     t1005-read-tree-reset.sh
+    t1004-read-tree-m-u-wf.sh
     t1002-read-tree-m-u-2way.sh
     t1001-read-tree-m-2way.sh
     t1000-read-tree-m-3way.sh
-    # t0xxx
+    # t0xxx — basics, credentials, gettext
     t0410-partial-clone.sh
     t0302-credential-store.sh
     t0303-credential-external.sh
@@ -350,6 +457,7 @@ TEST_SCRIPTS=(
     t0027-auto-crlf.sh
     t0020-crlf.sh
     t0010-racy-git.sh
+    t0008-ignores.sh
     t0005-signals.sh
     t0002-gitfile.sh
     t0000-basic.sh
