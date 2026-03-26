@@ -571,7 +571,7 @@ test "workflow: fetch rejects network URL" {
     try repo.add("f.txt");
     _ = try repo.commit("init", "T", "t@t");
 
-    try testing.expectError(error.NetworkRemoteNotSupported, repo.fetch("https://github.com/example/repo"));
+    try testing.expectError(error.HttpFetchFailed, repo.fetch("https://github.com/example/repo"));
     try testing.expectError(error.NetworkRemoteNotSupported, repo.fetch("git://example.com/repo"));
     try testing.expectError(error.NetworkRemoteNotSupported, repo.fetch("ssh://example.com/repo"));
 }

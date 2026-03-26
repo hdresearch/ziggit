@@ -1724,6 +1724,15 @@ pub fn build(b: *std.Build) void {
     const https_test_step = b.step("https-test", "Run HTTPS integration tests (requires network)");
     https_test_step.dependOn(&b.addRunArtifact(https_integration_tests).step);
 
+    // Git object format cross-validation tests
+    const git_object_format_crossval_tests = b.addTest(.{
+        .root_source_file = b.path("test/git_object_format_crossval_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    git_object_format_crossval_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(git_object_format_crossval_tests).step);
+
     // ========== BENCHMARKS ==========
     
     // CLI benchmark (ziggit vs git performance)

@@ -543,5 +543,5 @@ test "fetch fails on network URL" {
     defer repo.close();
 
     const result = repo.fetch("https://github.com/test/repo.git");
-    try testing.expectError(error.NetworkRemoteNotSupported, result);
+    try testing.expectError(error.HttpFetchFailed, result);
 }

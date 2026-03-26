@@ -680,7 +680,7 @@ test "cloneBare copies HEAD and objects" {
 
 test "cloneBare rejects network URLs" {
     try testing.expectError(
-        error.NetworkRemoteNotSupported,
+        error.HttpCloneFailed,
         Repository.cloneBare(testing.allocator, "https://github.com/example/repo", "/tmp/x"),
     );
 }
@@ -738,7 +738,7 @@ test "fetch rejects network URLs" {
     defer repo.close();
 
     try testing.expectError(
-        error.NetworkRemoteNotSupported,
+        error.HttpFetchFailed,
         repo.fetch("https://github.com/example/repo"),
     );
 }

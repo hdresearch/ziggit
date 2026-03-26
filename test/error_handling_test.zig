@@ -123,7 +123,7 @@ test "error: fetch rejects https URL" {
     var repo = try Repository.init(testing.allocator, path);
     defer repo.close();
 
-    try testing.expectError(error.NetworkRemoteNotSupported, repo.fetch("https://github.com/x/y.git"));
+    try testing.expectError(error.HttpFetchFailed, repo.fetch("https://github.com/x/y.git"));
 }
 
 test "error: fetch rejects http URL" {
@@ -134,7 +134,7 @@ test "error: fetch rejects http URL" {
     var repo = try Repository.init(testing.allocator, path);
     defer repo.close();
 
-    try testing.expectError(error.NetworkRemoteNotSupported, repo.fetch("http://example.com/repo.git"));
+    try testing.expectError(error.HttpFetchFailed, repo.fetch("http://example.com/repo.git"));
 }
 
 test "error: fetch rejects git:// URL" {
@@ -160,8 +160,8 @@ test "error: fetch rejects ssh URL" {
 }
 
 test "error: cloneBare rejects network URLs" {
-    try testing.expectError(error.NetworkRemoteNotSupported, Repository.cloneBare(testing.allocator, "https://github.com/x/y.git", "/tmp/z"));
-    try testing.expectError(error.NetworkRemoteNotSupported, Repository.cloneBare(testing.allocator, "http://x.com/y.git", "/tmp/z"));
+    try testing.expectError(error.HttpCloneFailed, Repository.cloneBare(testing.allocator, "https://github.com/x/y.git", "/tmp/z"));
+    try testing.expectError(error.HttpCloneFailed, Repository.cloneBare(testing.allocator, "http://x.com/y.git", "/tmp/z"));
     try testing.expectError(error.NetworkRemoteNotSupported, Repository.cloneBare(testing.allocator, "git://x.com/y.git", "/tmp/z"));
     try testing.expectError(error.NetworkRemoteNotSupported, Repository.cloneBare(testing.allocator, "ssh://x.com/y.git", "/tmp/z"));
 }

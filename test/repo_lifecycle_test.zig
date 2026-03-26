@@ -831,7 +831,7 @@ test "fetch: rejects network URLs" {
     var repo = try Repository.init(testing.allocator, path);
     defer repo.close();
 
-    try testing.expectError(error.NetworkRemoteNotSupported, repo.fetch("https://github.com/example/repo.git"));
+    try testing.expectError(error.HttpFetchFailed, repo.fetch("https://github.com/example/repo.git"));
     try testing.expectError(error.NetworkRemoteNotSupported, repo.fetch("git://example.com/repo.git"));
     try testing.expectError(error.NetworkRemoteNotSupported, repo.fetch("ssh://example.com/repo.git"));
 }

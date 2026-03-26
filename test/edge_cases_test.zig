@@ -515,7 +515,7 @@ test "fetch rejects http URLs" {
     var repo = try Repository.init(testing.allocator, path);
     defer repo.close();
 
-    try testing.expectError(error.NetworkRemoteNotSupported, repo.fetch("http://example.com/repo.git"));
+    try testing.expectError(error.HttpFetchFailed, repo.fetch("http://example.com/repo.git"));
 }
 
 test "fetch rejects https URLs" {
@@ -526,7 +526,7 @@ test "fetch rejects https URLs" {
     var repo = try Repository.init(testing.allocator, path);
     defer repo.close();
 
-    try testing.expectError(error.NetworkRemoteNotSupported, repo.fetch("https://github.com/user/repo"));
+    try testing.expectError(error.HttpFetchFailed, repo.fetch("https://github.com/user/repo"));
 }
 
 test "fetch rejects ssh URLs" {
