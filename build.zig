@@ -1791,6 +1791,22 @@ pub fn build(b: *std.Build) void {
     const pack_idx_advanced_step = b.step("pack-idx-advanced-test", "Run pack idx advanced tests");
     pack_idx_advanced_step.dependOn(&b.addRunArtifact(pack_idx_advanced_tests).step);
 
+    // Pack clone interop tests (git pack-objects -> our idx -> git reads back, incremental fetch, tags)
+    const pack_clone_interop_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_clone_interop_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_clone_interop_tests.root_module.addAnonymousImport("pack_writer", .{
+        .root_source_file = b.path("src/git/pack_writer.zig"),
+    });
+    pack_clone_interop_tests.root_module.addAnonymousImport("idx_writer", .{
+        .root_source_file = b.path("src/git/idx_writer.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(pack_clone_interop_tests).step);
+    const pack_clone_interop_step = b.step("pack-clone-interop-test", "Run pack clone interop tests");
+    pack_clone_interop_step.dependOn(&b.addRunArtifact(pack_clone_interop_tests).step);
+
     // Pack delta chain tests (REF_DELTA chains, mixed delta types, git-gc interop, cat-file round-trip)
     const pack_delta_chain_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_delta_chain_test.zig"),
