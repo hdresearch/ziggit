@@ -1721,6 +1721,60 @@ pub fn build(b: *std.Build) void {
     const pack_format_step = b.step("pack-format-test", "Run pack format verification tests");
     pack_format_step.dependOn(&b.addRunArtifact(pack_format_tests).step);
 
+    // Pack writer tests (savePack, generateIdx, updateRefs, full pipeline)
+    const pack_writer_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_writer_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_writer_tests.root_module.addAnonymousImport("pack_writer", .{
+        .root_source_file = b.path("src/git/pack_writer.zig"),
+    });
+    pack_writer_tests.root_module.addAnonymousImport("idx_writer", .{
+        .root_source_file = b.path("src/git/idx_writer.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(pack_writer_tests).step);
+    const pack_writer_step = b.step("pack-writer-test", "Run pack writer tests");
+    pack_writer_step.dependOn(&b.addRunArtifact(pack_writer_tests).step);
+
+    // Clone workflow tests (bare structure, refs, simulated clone/fetch pipelines)
+    const clone_workflow_tests = b.addTest(.{
+        .root_source_file = b.path("test/clone_workflow_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    clone_workflow_tests.root_module.addAnonymousImport("pack_writer", .{
+        .root_source_file = b.path("src/git/pack_writer.zig"),
+    });
+    clone_workflow_tests.root_module.addAnonymousImport("idx_writer", .{
+        .root_source_file = b.path("src/git/idx_writer.zig"),
+    });
+    const clone_module = b.addModule("clone_mod", .{
+        .root_source_file = b.path("src/git/clone.zig"),
+    });
+    clone_module.addImport("pack_writer", clone_workflow_tests.root_module.import_table.get("pack_writer").?);
+    clone_module.addImport("idx_writer", clone_workflow_tests.root_module.import_table.get("idx_writer").?);
+    clone_module.addAnonymousImport("smart_http", .{
+        .root_source_file = b.path("src/git/smart_http.zig"),
+    });
+    clone_workflow_tests.root_module.addImport("clone", clone_module);
+    test_step.dependOn(&b.addRunArtifact(clone_workflow_tests).step);
+    const clone_workflow_step = b.step("clone-workflow-test", "Run clone workflow tests");
+    clone_workflow_step.dependOn(&b.addRunArtifact(clone_workflow_tests).step);
+
+    // Pack idx delta tests (OFS_DELTA, SHA-1 correctness, git verify-pack)
+    const pack_idx_delta_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_idx_delta_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_idx_delta_tests.root_module.addAnonymousImport("idx_writer", .{
+        .root_source_file = b.path("src/git/idx_writer.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(pack_idx_delta_tests).step);
+    const pack_idx_delta_step = b.step("pack-idx-delta-test", "Run pack idx delta tests");
+    pack_idx_delta_step.dependOn(&b.addRunArtifact(pack_idx_delta_tests).step);
+
     // HTTPS end-to-end tests (require network access — run with `zig build https-e2e-test`)
     const https_e2e_tests = b.addTest(.{
         .root_source_file = b.path("test/https_e2e_test.zig"),
