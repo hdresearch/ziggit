@@ -231,20 +231,33 @@ pub const Index = struct {
         const extended_flags = if (version >= 3 and (flags & 0x4000) != 0) try reader.readInt(u16, .big) else null;
         
         // Extract path length
-        const path_len = flags & 0xFFF;
+        var actual_path_len = flags & 0xFFF;
         if (version >= 4) {
-            // In v4, if path length is 0xFFF, path length is stored separately
-            if (path_len == 0xFFF) {
-                // For now, treat this as an error since we don't fully support v4 variable-length paths
-                return error.UnsupportedIndexVersion;
+            // In v4, if path length is 0xFFF, path length is stored separately as varint
+            if (actual_path_len == 0xFFF) {
+                // Read variable-length path length (simplified varint decode)
+                var varint_len: u16 = 0;
+                var shift: u4 = 0;
+                while (shift < 14) { // Max 2 bytes for path length
+                    const byte = reader.readByte() catch return error.UnsupportedIndexVersion;
+                    varint_len |= @as(u16, @intCast(byte & 0x7F)) << shift;
+                    if (byte & 0x80 == 0) break;
+                    shift += 7;
+                }
+                actual_path_len = varint_len;
+                
+                // Sanity check the path length
+                if (actual_path_len > 4096) { // 4KB max path length
+                    return error.PathTooLong;
+                }
             }
         }
         
-        const path_bytes = try self.allocator.alloc(u8, path_len);
+        const path_bytes = try self.allocator.alloc(u8, actual_path_len);
         _ = try reader.readAll(path_bytes);
         
         // Calculate and skip padding
-        const entry_size = 62 + (if (version >= 3 and (flags & 0x4000) != 0) @as(usize, 2) else @as(usize, 0)) + path_len;
+        const entry_size = 62 + (if (version >= 3 and (flags & 0x4000) != 0) @as(usize, 2) else @as(usize, 0)) + actual_path_len;
         const pad_len = (8 - (entry_size % 8)) % 8;
         if (pad_len > 0) {
             reader.skipBytes(pad_len, .{}) catch {
@@ -277,7 +290,7 @@ pub const Index = struct {
         var extensions_found: u32 = 0;
         const max_extensions = 100; // Increased limit for repositories with many extensions
         var total_extension_size: u64 = 0;
-        const max_total_extension_size = 50 * 1024 * 1024; // 50MB max for all extensions combined
+        const max_total_extension_size = 100 * 1024 * 1024; // Increased to 100MB max for very large repos
         
         while (extensions_found < max_extensions) {
             // Check if we have enough bytes left for checksum (20 bytes) plus extension header (8 bytes)

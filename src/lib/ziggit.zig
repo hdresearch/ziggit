@@ -769,61 +769,23 @@ fn getRemoteUrl(repo: *Repository, remote_name: []const u8, buffer: []u8) !void 
     const git_dir = try findGitDirForRepo(repo);
     defer global_allocator.free(git_dir);
     
-    const config_path = try std.fmt.allocPrint(global_allocator, "{s}/config", .{git_dir});
-    defer global_allocator.free(config_path);
-    
-    const config_file = std.fs.openFileAbsolute(config_path, .{}) catch |err| switch (err) {
+    // Use the comprehensive config parser from src/git/config.zig
+    const config = @import("../git/config.zig");
+    var git_config = config.loadGitConfig(git_dir, global_allocator) catch |err| switch (err) {
         error.FileNotFound => return error.NotFound,
         else => return err,
     };
-    defer config_file.close();
+    defer git_config.deinit();
     
-    const config_content = try config_file.readToEndAlloc(global_allocator, 8192);
-    defer global_allocator.free(config_content);
-    
-    // Simple INI parser for git config
-    var lines = std.mem.split(u8, config_content, "\n");
-    var in_remote_section = false;
-    var current_remote_name: ?[]const u8 = null;
-    
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r\n");
-        if (trimmed.len == 0 or trimmed[0] == '#') continue;
-        
-        // Check for section header [remote "name"]
-        if (std.mem.startsWith(u8, trimmed, "[remote ")) {
-            in_remote_section = true;
-            
-            // Extract remote name from [remote "name"]
-            const quote_start = std.mem.indexOf(u8, trimmed, "\"") orelse continue;
-            const quote_end = std.mem.lastIndexOf(u8, trimmed, "\"") orelse continue;
-            if (quote_end <= quote_start) continue;
-            
-            current_remote_name = trimmed[quote_start + 1 .. quote_end];
-            continue;
+    // Use the comprehensive config parser to get the remote URL
+    if (git_config.getRemoteUrl(remote_name)) |url| {
+        // Copy URL to buffer
+        if (url.len >= buffer.len) {
+            return error.InvalidPath; // Buffer too small
         }
-        
-        // Check for other sections
-        if (std.mem.startsWith(u8, trimmed, "[")) {
-            in_remote_section = false;
-            current_remote_name = null;
-            continue;
-        }
-        
-        // If we're in the right remote section, look for url
-        if (in_remote_section and current_remote_name != null) {
-            if (std.mem.eql(u8, current_remote_name.?, remote_name)) {
-                if (std.mem.startsWith(u8, trimmed, "url = ")) {
-                    const url = trimmed[6..]; // Skip "url = "
-                    if (url.len >= buffer.len) {
-                        return error.InvalidPath; // Buffer too small
-                    }
-                    @memcpy(buffer[0..url.len], url);
-                    buffer[url.len] = 0;
-                    return;
-                }
-            }
-        }
+        @memcpy(buffer[0..url.len], url);
+        buffer[url.len] = 0; // Null terminate
+        return;
     }
     
     return error.NotFound;

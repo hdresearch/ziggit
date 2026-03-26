@@ -233,36 +233,51 @@ fn loadFromPackFiles(hash_str: []const u8, git_dir: []const u8, platform_impl: a
     defer allocator.free(pack_dir_path);
     
     // Open pack directory
-    var pack_dir = std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true }) catch {
-        return error.ObjectNotFound;
+    var pack_dir = std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return error.ObjectNotFound,
+        error.AccessDenied => return error.PackDirectoryAccessDenied,
+        else => return error.PackDirectoryError,
     };
     defer pack_dir.close();
     
-            // debug print removed
+    // Look for .idx files (pack index files) - optimize by collecting all first
+    var pack_files = std.ArrayList([]u8).init(allocator);
+    defer {
+        for (pack_files.items) |pack_file| {
+            allocator.free(pack_file);
+        }
+        pack_files.deinit();
+    }
     
-    // Look for .idx files (pack index files)
     var iterator = pack_dir.iterate();
-    var pack_files_found: u32 = 0;
     while (try iterator.next()) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
         
-        pack_files_found += 1;
-            // debug print removed
-        
-        // Try to find object in this pack
-        const obj = findObjectInPack(pack_dir_path, entry.name, hash_str, platform_impl, allocator) catch {
-            // debug print removed
-            continue;
-        };
-            // debug print removed
-        return obj;
+        try pack_files.append(try allocator.dupe(u8, entry.name));
     }
     
-    if (pack_files_found == 0) {
-            // debug print removed
-    } else {
-            // debug print removed
+    if (pack_files.items.len == 0) {
+        return error.ObjectNotFound;
+    }
+    
+    // Try each pack file - prioritize newer pack files first (reverse order)
+    var i = pack_files.items.len;
+    while (i > 0) {
+        i -= 1;
+        const pack_file = pack_files.items[i];
+        
+        // Try to find object in this pack
+        if (findObjectInPack(pack_dir_path, pack_file, hash_str, platform_impl, allocator)) |obj| {
+            return obj;
+        } else |err| {
+            // Log specific errors for debugging but continue to next pack
+            switch (err) {
+                error.ObjectNotFound => continue,
+                error.CorruptedPackIndex, error.PackIndexReadError => continue,
+                else => return err, // Serious error, don't continue
+            }
+        }
     }
     
     return error.ObjectNotFound;
@@ -284,25 +299,27 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     if (hash_str.len != 40) {
         return error.InvalidHashLength;
     }
-    if (!std.ascii.isLower(hash_str[0])) {
+    
+    // Optimize: Check if hash is already lowercase before normalizing
+    var needs_normalization = false;
+    for (hash_str) |c| {
+        if (!std.ascii.isHex(c)) {
+            return error.InvalidHashCharacter;
+        }
+        if (c >= 'A' and c <= 'F') {
+            needs_normalization = true;
+        }
+    }
+    
+    if (needs_normalization) {
         // Git hashes are lowercase by convention - convert if needed
         var normalized_hash = try allocator.alloc(u8, 40);
         defer allocator.free(normalized_hash);
         for (hash_str, 0..) |c, i| {
             normalized_hash[i] = std.ascii.toLower(c);
         }
-        for (normalized_hash) |c| {
-            if (!std.ascii.isHex(c)) {
-                return error.InvalidHashCharacter;
-            }
-        }
         // Recursively call with normalized hash
         return findObjectInPack(pack_dir_path, idx_filename, normalized_hash, platform_impl, allocator);
-    }
-    for (hash_str) |c| {
-        if (!std.ascii.isHex(c)) {
-            return error.InvalidHashCharacter;
-        }
     }
     
     // Convert hash string to bytes for searching
@@ -811,8 +828,8 @@ fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.
     // Enhanced validation with specific error messages
     if (delta_data.len < 2) return error.DeltaMissingHeaders;
     if (base_data.len == 0) return error.EmptyBaseData;
-    if (base_data.len > 512 * 1024 * 1024) return error.BaseDataTooLarge; // 512MB limit for safety
-    if (delta_data.len > 50 * 1024 * 1024) return error.DeltaDataTooLarge; // 50MB delta limit
+    if (base_data.len > 1024 * 1024 * 1024) return error.BaseDataTooLarge; // Increased to 1GB for large repos
+    if (delta_data.len > 100 * 1024 * 1024) return error.DeltaDataTooLarge; // Increased to 100MB delta limit
     
     var pos: usize = 0;
     
@@ -1012,6 +1029,28 @@ pub const PackFileStats = struct {
     delta_count: u32,
     file_size: u64,
     is_thin: bool,
+    version: u32,
+    checksum_valid: bool,
+};
+
+/// Pack index cache entry to avoid re-reading index files
+const PackIndexCache = struct {
+    path: []const u8,
+    data: []const u8,
+    last_modified: i64,
+    
+    pub fn init(allocator: std.mem.Allocator, path: []const u8, data: []const u8) !PackIndexCache {
+        return PackIndexCache{
+            .path = try allocator.dupe(u8, path),
+            .data = try allocator.dupe(u8, data),
+            .last_modified = std.time.timestamp(),
+        };
+    }
+    
+    pub fn deinit(self: PackIndexCache, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        allocator.free(self.data);
+    }
 };
 
 /// Analyze pack file structure and return statistics
@@ -1030,16 +1069,71 @@ pub fn analyzePackFile(pack_path: []const u8, platform_impl: anytype, allocator:
         .delta_count = 0,
         .file_size = pack_data.len,
         .is_thin = isPackFileThin(pack_data),
+        .version = 0,
+        .checksum_valid = false,
     };
     
     if (pack_data.len >= 12) {
         stats.total_objects = std.mem.readInt(u32, @ptrCast(pack_data[8..12]), .big);
+        stats.version = std.mem.readInt(u32, @ptrCast(pack_data[4..8]), .big);
+    }
+    
+    // Verify pack file checksum
+    if (pack_data.len >= 20) {
+        const content_end = pack_data.len - 20;
+        const stored_checksum = pack_data[content_end..];
+        
+        var hasher = std.crypto.hash.Sha1.init(.{});
+        hasher.update(pack_data[0..content_end]);
+        var computed_checksum: [20]u8 = undefined;
+        hasher.final(&computed_checksum);
+        
+        stats.checksum_valid = std.mem.eql(u8, &computed_checksum, stored_checksum);
     }
     
     // Note: Full object type analysis would require parsing all objects,
     // which is expensive. This is a basic implementation.
     
     return stats;
+}
+
+/// Get pack file info without loading the entire file (for performance)
+pub fn getPackFileInfo(pack_path: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !PackFileStats {
+    // Read just the header (first 32 bytes) for basic info
+    const header_data = blk: {
+        const full_data = platform_impl.fs.readFile(allocator, pack_path) catch return error.PackFileNotFound;
+        defer allocator.free(full_data);
+        
+        if (full_data.len < 32) return error.PackFileTooSmall;
+        
+        var header = try allocator.alloc(u8, 32);
+        @memcpy(header, full_data[0..32]);
+        break :blk header;
+    };
+    defer allocator.free(header_data);
+    
+    if (!std.mem.eql(u8, header_data[0..4], "PACK")) {
+        return error.InvalidPackSignature;
+    }
+    
+    const version = std.mem.readInt(u32, @ptrCast(header_data[4..8]), .big);
+    const object_count = std.mem.readInt(u32, @ptrCast(header_data[8..12]), .big);
+    
+    // Get file size
+    const file_stat = std.fs.cwd().statFile(pack_path) catch return error.PackFileNotFound;
+    
+    return PackFileStats{
+        .total_objects = object_count,
+        .blob_count = 0, // Unknown without full scan
+        .tree_count = 0,
+        .commit_count = 0,
+        .tag_count = 0,
+        .delta_count = 0,
+        .file_size = file_stat.size,
+        .is_thin = false, // Unknown without full scan
+        .version = version,
+        .checksum_valid = false, // Unknown without full scan
+    };
 }
 
 /// Legacy function for compatibility with tests - reads and decompresses git object
