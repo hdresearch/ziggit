@@ -661,7 +661,7 @@ pub fn analyzeIndex(git_dir: []const u8, platform_impl: anytype, allocator: std.
         const extended_flags_size = if (stats.version >= 3 and (flags & 0x4000) != 0) @as(usize, 2) else @as(usize, 0);
         const actual_path_len = if (stats.version >= 4 and path_len == 0xFFF) {
             // For v4, we'd need to read the varint path length, but for analysis we'll approximate
-            100 // Rough estimate
+            100; // Rough estimate
         } else path_len;
         
         const total_entry_size = base_entry_size + extended_flags_size + actual_path_len;
