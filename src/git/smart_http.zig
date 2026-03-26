@@ -372,10 +372,9 @@ fn httpPostWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.h
 
     if (response.head.status != .ok) return error.HttpError;
 
-    // Read response - use readAllAlloc for efficiency (handles chunked transfer internally)
+    // Read response body (use allocRemaining which handles chunked transfer correctly)
     var transfer_buf3: [65536]u8 = undefined;
-    const body_rdr = response.reader(&transfer_buf3);
-    return body_rdr.readAlloc(allocator, max_response_size) catch return error.HttpError;
+    return response.reader(&transfer_buf3).allocRemaining(allocator, .limited(max_response_size)) catch return error.HttpError;
 }
 
 // ============================================================================
@@ -1161,9 +1160,18 @@ pub fn clonePackShallow(allocator: std.mem.Allocator, url: []const u8, depth: u3
     var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
 
-    // Try protocol v2 directly (skip probe - most servers support v2).
-    // Fall back to v1 on any v2 error.
-    return clonePackShallowV2(allocator, &client, url, depth) catch {
+    // For shallow clones, use optimized v1 path:
+    // GET /info/refs (establishes TLS + gets all refs) → POST /git-upload-pack (fetch pack)
+    // This is faster than v2's 2-POST approach because the GET establishes TLS and the POST reuses it.
+    // V2 ls-refs filtering doesn't help since we filter client-side anyway for shallow clones.
+    if (depth > 0) {
+        return clonePackShallowV1(allocator, &client, url, depth);
+    }
+
+    // For full clones, try v2 (fewer refs transferred) with v1 fallback
+    return clonePackShallowV2(allocator, &client, url, depth) catch |e| {
+        if (std.posix.getenv("ZIGGIT_TRACE_TIMING") != null)
+            std.debug.print("[debug] v2 failed: {}, falling back to v1\n", .{e});
         return clonePackShallowV1(allocator, &client, url, depth);
     };
 }
