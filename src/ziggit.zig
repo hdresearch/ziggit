@@ -44,7 +44,10 @@ pub const Repository = struct {
             break :blk try std.fs.path.resolve(allocator, &[_][]const u8{ cwd, path });
         };
 
-        const git_dir = try findGitDir(allocator, abs_path);
+        const git_dir = findGitDir(allocator, abs_path) catch {
+            allocator.free(abs_path);
+            return error.NotAGitRepository;
+        };
         const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir});
         defer allocator.free(head_path);
         std.fs.accessAbsolute(head_path, .{}) catch {
@@ -223,8 +226,8 @@ pub const Repository = struct {
         };
         defer head_file.close();
 
-        // Minimal buffer size - HEAD content is always small
-        var head_content_buf: [48]u8 = undefined; // Just enough for ref + newline
+        // Buffer must fit "ref: refs/heads/<long-branch-name>\n" — 256 is safe
+        var head_content_buf: [256]u8 = undefined;
         const bytes_read = try head_file.readAll(&head_content_buf);
         const head_content = std.mem.trim(u8, head_content_buf[0..bytes_read], " \n\r\t");
 
@@ -1292,11 +1295,114 @@ pub const Repository = struct {
         };
     }
 
-    /// Clone local repository (no checkout)
+    /// Clone from HTTPS URL into a non-bare repository without checking out files
+    fn cloneNoCheckoutHttps(allocator: std.mem.Allocator, url: []const u8, target: []const u8) !Repository {
+        const smart_http = @import("git/smart_http.zig");
+        const pack_writer = @import("git/pack_writer.zig");
+        const idx_writer = @import("git/idx_writer.zig");
+
+        // Create non-bare repo structure
+        std.fs.cwd().makePath(target) catch |err| switch (err) {
+            error.PathAlreadyExists => return error.AlreadyExists,
+            else => return err,
+        };
+        errdefer std.fs.cwd().deleteTree(target) catch {};
+
+        const git_dir = try std.fmt.allocPrint(allocator, "{s}/.git", .{target});
+        errdefer allocator.free(git_dir);
+
+        // Create .git and required subdirectories
+        const dirs = [_][]const u8{ ".git", ".git/objects", ".git/objects/pack", ".git/refs", ".git/refs/heads", ".git/refs/tags", ".git/refs/remotes", ".git/refs/remotes/origin" };
+        for (dirs) |d| {
+            const dir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ target, d });
+            defer allocator.free(dir_path);
+            std.fs.cwd().makePath(dir_path) catch {};
+        }
+
+        // Write HEAD
+        const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir});
+        defer allocator.free(head_path);
+        {
+            const f = try std.fs.cwd().createFile(head_path, .{});
+            defer f.close();
+            try f.writeAll("ref: refs/heads/master\n");
+        }
+
+        // Write config
+        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_dir});
+        defer allocator.free(config_path);
+        {
+            const f = try std.fs.cwd().createFile(config_path, .{});
+            defer f.close();
+            try f.writeAll("[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n[remote \"origin\"]\n\turl = ");
+            try f.writeAll(url);
+            try f.writeAll("\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n");
+        }
+
+        // Clone pack data via smart HTTP
+        var clone_result = smart_http.clonePack(allocator, url) catch {
+            return error.HttpCloneFailed;
+        };
+        defer clone_result.deinit();
+
+        // Save pack + generate idx
+        if (clone_result.pack_data.len >= 32) {
+            const checksum_hex = try pack_writer.savePack(allocator, git_dir, clone_result.pack_data);
+            defer allocator.free(checksum_hex);
+
+            const pp = try pack_writer.packPath(allocator, git_dir, checksum_hex);
+            defer allocator.free(pp);
+            try idx_writer.generateIdx(allocator, pp);
+        }
+
+        // Write refs (branches + tags) and update HEAD
+        var head_ref: ?[]const u8 = null;
+        for (clone_result.refs) |ref| {
+            if (std.mem.eql(u8, ref.name, "HEAD")) {
+                head_ref = &ref.hash;
+                continue;
+            }
+            if (std.mem.startsWith(u8, ref.name, "refs/heads/")) {
+                try writeRefDirect(allocator, git_dir, ref.name, &ref.hash);
+                try writeRemoteRef(allocator, git_dir, "origin", ref.name, &ref.hash);
+            } else if (std.mem.startsWith(u8, ref.name, "refs/tags/")) {
+                try writeRefDirect(allocator, git_dir, ref.name, &ref.hash);
+            }
+        }
+
+        // Update HEAD to point to the correct branch
+        if (head_ref) |head_hash| {
+            var head_target: []const u8 = "refs/heads/master";
+            for (clone_result.refs) |ref| {
+                if (std.mem.startsWith(u8, ref.name, "refs/heads/") and
+                    std.mem.eql(u8, &ref.hash, head_hash))
+                {
+                    head_target = ref.name;
+                    break;
+                }
+            }
+            const hf = try std.fs.cwd().createFile(head_path, .{});
+            defer hf.close();
+            try hf.writer().print("ref: {s}\n", .{head_target});
+        }
+
+        const path = try allocator.dupe(u8, target);
+
+        return Repository{
+            .path = path,
+            .git_dir = git_dir,
+            .allocator = allocator,
+        };
+    }
+
+    /// Clone repository (no checkout) — supports local paths and HTTPS URLs
     pub fn cloneNoCheckout(allocator: std.mem.Allocator, source: []const u8, target: []const u8) !Repository {
-        if (std.mem.startsWith(u8, source, "http://") or
-            std.mem.startsWith(u8, source, "https://") or
-            std.mem.startsWith(u8, source, "git://") or
+        if (std.mem.startsWith(u8, source, "https://") or
+            std.mem.startsWith(u8, source, "http://")) {
+            return cloneNoCheckoutHttps(allocator, source, target);
+        }
+
+        if (std.mem.startsWith(u8, source, "git://") or
             std.mem.startsWith(u8, source, "ssh://")) {
             return error.NetworkRemoteNotSupported;
         }
@@ -1321,32 +1427,396 @@ pub const Repository = struct {
 
     // Private helper methods
 
-    fn getCommitTree(self: *Repository, commit_hash: *const [40]u8) ![40]u8 {
-        // Read commit object and extract tree hash
-        const obj_path = try std.fmt.allocPrint(self.allocator, "{s}/objects/{s}/{s}", .{ self.git_dir, commit_hash[0..2], commit_hash[2..] });
+    const ObjectReadError = error{
+        ObjectNotFound,
+        CorruptObject,
+        InvalidIdx,
+        InvalidPackOffset,
+        InvalidPackObject,
+        OutOfMemory,
+        PathTooLong,
+        // File system errors
+        AccessDenied,
+        BadPathName,
+        InvalidUtf8,
+        InvalidWtf8,
+        IsDir,
+        NameTooLong,
+        NoDevice,
+        NoSpaceLeft,
+        NotDir,
+        NotOpenForReading,
+        FileNotFound,
+        SystemResources,
+        Unexpected,
+        FileTooBig,
+        ConnectionResetByPeer,
+        ConnectionTimedOut,
+        InputOutput,
+        BrokenPipe,
+        NetworkError,
+        OperationAborted,
+        Overflow,
+        SocketNotConnected,
+        DeviceBusy,
+        SymLinkLoop,
+        ProcessFdQuotaExceeded,
+        SystemFdQuotaExceeded,
+        Locked,
+        FileBusy,
+        WouldBlock,
+        InvalidArgument,
+        EndOfStream,
+        StreamTooLong,
+        NotOpenForWriting,
+        DiskQuota,
+        // Additional platform-specific errors
+        PathAlreadyExists,
+        NetworkNotFound,
+        SharingViolation,
+        PipeBusy,
+        AntivirusInterference,
+        FileLocksNotSupported,
+    };
+
+    /// Read and decompress a git object (loose or packed).
+    /// Returns the raw decompressed content INCLUDING the header ("type size\0...").
+    /// Caller owns the returned slice and must free it with self.allocator.
+    fn readRawObject(self: *Repository, hash_hex: *const [40]u8) ObjectReadError![]u8 {
+        // Try loose object first
+        const obj_path = try std.fmt.allocPrint(self.allocator, "{s}/objects/{s}/{s}", .{ self.git_dir, hash_hex[0..2], hash_hex[2..] });
         defer self.allocator.free(obj_path);
 
-        const obj_file = try std.fs.openFileAbsolute(obj_path, .{});
-        defer obj_file.close();
+        if (std.fs.openFileAbsolute(obj_path, .{})) |obj_file| {
+            defer obj_file.close();
+            const compressed = try obj_file.readToEndAlloc(self.allocator, 100 * 1024 * 1024);
+            defer self.allocator.free(compressed);
 
-        // Read and decompress
-        const compressed = try obj_file.readToEndAlloc(self.allocator, 100 * 1024 * 1024);
-        defer self.allocator.free(compressed);
+            var decompressed = std.ArrayList(u8).init(self.allocator);
+            errdefer decompressed.deinit();
 
+            var stream = std.io.fixedBufferStream(compressed);
+            std.compress.zlib.decompress(stream.reader(), decompressed.writer()) catch {
+                decompressed.deinit();
+                return error.CorruptObject;
+            };
+            return decompressed.toOwnedSlice();
+        } else |_| {}
+
+        // Fall back to pack files
+        return self.readObjectFromPacks(hash_hex);
+    }
+
+    /// Read an object from pack files. Returns raw content with header.
+    fn readObjectFromPacks(self: *Repository, hash_hex: *const [40]u8) ObjectReadError![]u8 {
+        const pack_dir_path = try std.fmt.allocPrint(self.allocator, "{s}/objects/pack", .{self.git_dir});
+        defer self.allocator.free(pack_dir_path);
+
+        var pack_dir = std.fs.openDirAbsolute(pack_dir_path, .{ .iterate = true }) catch return error.ObjectNotFound;
+        defer pack_dir.close();
+
+        // Convert hex to bytes for idx lookup
+        var target_hash: [20]u8 = undefined;
+        _ = std.fmt.hexToBytes(&target_hash, hash_hex) catch return error.ObjectNotFound;
+
+        var iter = pack_dir.iterate();
+        while (try iter.next()) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
+
+            const idx_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ pack_dir_path, entry.name });
+            defer self.allocator.free(idx_path);
+
+            // Derive .pack path from .idx path
+            const pack_name = try std.fmt.allocPrint(self.allocator, "{s}.pack", .{entry.name[0 .. entry.name.len - 4]});
+            defer self.allocator.free(pack_name);
+            const pack_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ pack_dir_path, pack_name });
+            defer self.allocator.free(pack_path);
+
+            // Look up offset in idx
+            const offset = self.lookupIdxForOffset(idx_path, &target_hash) catch continue;
+
+            // Read object from pack at that offset
+            return self.readPackObjectAtOffset(pack_path, offset) catch continue;
+        }
+
+        return error.ObjectNotFound;
+    }
+
+    /// Look up a SHA-1 hash in an .idx file and return the pack offset.
+    fn lookupIdxForOffset(self: *Repository, idx_path: []const u8, target_hash: *const [20]u8) ObjectReadError!u64 {
+        const idx_file = try std.fs.openFileAbsolute(idx_path, .{});
+        defer idx_file.close();
+
+        const idx_data = try idx_file.readToEndAlloc(self.allocator, 100 * 1024 * 1024);
+        defer self.allocator.free(idx_data);
+
+        // Validate v2 idx header
+        if (idx_data.len < 1028) return error.InvalidIdx;
+        if (!std.mem.eql(u8, idx_data[0..4], "\xfftOc")) return error.InvalidIdx;
+        const version = std.mem.readInt(u32, idx_data[4..8], .big);
+        if (version != 2) return error.InvalidIdx;
+
+        // Fanout table at offset 8, 256 entries of 4 bytes each
+        const fanout_offset: usize = 8;
+        const first_byte = target_hash[0];
+        const total_objects = std.mem.readInt(u32, idx_data[fanout_offset + 255 * 4 ..][0..4], .big);
+
+        const lo: u32 = if (first_byte == 0) 0 else std.mem.readInt(u32, idx_data[fanout_offset + (@as(usize, first_byte) - 1) * 4 ..][0..4], .big);
+        const hi: u32 = std.mem.readInt(u32, idx_data[fanout_offset + @as(usize, first_byte) * 4 ..][0..4], .big);
+
+        // SHA table starts at offset 1032
+        const sha_table_offset: usize = 1032;
+
+        // Binary search in the SHA-1 table
+        var low = lo;
+        var high = hi;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            const entry_offset = sha_table_offset + @as(usize, mid) * 20;
+            if (entry_offset + 20 > idx_data.len) return error.InvalidIdx;
+            const entry_sha = idx_data[entry_offset..][0..20];
+
+            const order = std.mem.order(u8, entry_sha, target_hash);
+            if (order == .lt) {
+                low = mid + 1;
+            } else if (order == .gt) {
+                high = mid;
+            } else {
+                // Found! Now read offset from offset table
+                // CRC table: sha_table_offset + total_objects * 20
+                // Offset table: sha_table_offset + total_objects * 20 + total_objects * 4
+                const offset_table_start = sha_table_offset + @as(usize, total_objects) * 20 + @as(usize, total_objects) * 4;
+                const off_entry = offset_table_start + @as(usize, mid) * 4;
+                if (off_entry + 4 > idx_data.len) return error.InvalidIdx;
+                const raw_offset = std.mem.readInt(u32, idx_data[off_entry..][0..4], .big);
+
+                // Check MSB for large offset (>= 2GB)
+                if (raw_offset & 0x80000000 != 0) {
+                    // Large offset table
+                    const large_offset_table_start = offset_table_start + @as(usize, total_objects) * 4;
+                    const large_idx = raw_offset & 0x7fffffff;
+                    const large_off_entry = large_offset_table_start + @as(usize, large_idx) * 8;
+                    if (large_off_entry + 8 > idx_data.len) return error.InvalidIdx;
+                    return std.mem.readInt(u64, idx_data[large_off_entry..][0..8], .big);
+                }
+
+                return @as(u64, raw_offset);
+            }
+        }
+
+        return error.ObjectNotFound;
+    }
+
+    /// Read a single object from a pack file at the given offset.
+    /// Returns the full decompressed content with git header ("type size\0content").
+    fn readPackObjectAtOffset(self: *Repository, pack_path: []const u8, offset: u64) ObjectReadError![]u8 {
+        const pack_file = try std.fs.openFileAbsolute(pack_path, .{});
+        defer pack_file.close();
+
+        const pack_data = try pack_file.readToEndAlloc(self.allocator, 1024 * 1024 * 1024); // 1GB max
+        defer self.allocator.free(pack_data);
+
+        if (offset >= pack_data.len) return error.InvalidPackOffset;
+
+        var pos = @as(usize, offset);
+        // Parse pack object header (variable-length encoding)
+        const first_byte = pack_data[pos];
+        const obj_type_raw = (first_byte >> 4) & 0x07;
+        var obj_size: u64 = first_byte & 0x0f;
+        var shift: u6 = 4;
+        pos += 1;
+
+        while (pack_data[pos - 1] & 0x80 != 0) {
+            if (pos >= pack_data.len) return error.InvalidPackObject;
+            obj_size |= @as(u64, @as(u64, pack_data[pos] & 0x7f)) << shift;
+            shift += 7;
+            pos += 1;
+        }
+
+        const type_name: []const u8 = switch (obj_type_raw) {
+            1 => "commit",
+            2 => "tree",
+            3 => "blob",
+            4 => "tag",
+            6 => return self.readOfsDeltaObject(pack_data, pack_path, pos, obj_size, offset),
+            7 => return self.readRefDeltaObject(pack_data, pack_path, pos, obj_size),
+            else => return error.InvalidPackObject,
+        };
+
+        // Decompress the object data
         var decompressed = std.ArrayList(u8).init(self.allocator);
-        defer decompressed.deinit();
+        errdefer decompressed.deinit();
 
-        var stream = std.io.fixedBufferStream(compressed);
-        try std.compress.zlib.decompress(stream.reader(), decompressed.writer());
+        var stream = std.io.fixedBufferStream(pack_data[pos..]);
+        std.compress.zlib.decompress(stream.reader(), decompressed.writer()) catch return error.CorruptObject;
 
-        // Parse commit object - look for "tree <hash>" line
-        const commit_content = decompressed.items;
+        // Build "type size\0content" format
+        const header = try std.fmt.allocPrint(self.allocator, "{s} {}\x00", .{ type_name, decompressed.items.len });
+        defer self.allocator.free(header);
+
+        var result = try self.allocator.alloc(u8, header.len + decompressed.items.len);
+        @memcpy(result[0..header.len], header);
+        @memcpy(result[header.len..], decompressed.items);
+        decompressed.deinit();
+
+        return result;
+    }
+
+    /// Handle OFS_DELTA pack objects
+    fn readOfsDeltaObject(self: *Repository, pack_data: []const u8, pack_path: []const u8, start_pos: usize, _: u64, current_offset: u64) ObjectReadError![]u8 {
+        var pos = start_pos;
+        // Read negative offset (variable-length encoding)
+        var byte = pack_data[pos];
+        var neg_offset: u64 = byte & 0x7f;
+        pos += 1;
+        while (byte & 0x80 != 0) {
+            if (pos >= pack_data.len) return error.InvalidPackObject;
+            byte = pack_data[pos];
+            neg_offset = ((neg_offset + 1) << 7) | (byte & 0x7f);
+            pos += 1;
+        }
+
+        const base_offset = current_offset - neg_offset;
+
+        // Read base object recursively
+        const base_obj = try self.readPackObjectAtOffset(pack_path, base_offset);
+        defer self.allocator.free(base_obj);
+
+        // Decompress delta data
+        var delta_data = std.ArrayList(u8).init(self.allocator);
+        defer delta_data.deinit();
+        var stream = std.io.fixedBufferStream(pack_data[pos..]);
+        std.compress.zlib.decompress(stream.reader(), delta_data.writer()) catch return error.CorruptObject;
+
+        // Apply delta to base
+        return self.applyDelta(base_obj, delta_data.items);
+    }
+
+    /// Handle REF_DELTA pack objects
+    fn readRefDeltaObject(self: *Repository, pack_data: []const u8, _: []const u8, start_pos: usize, _: u64) ObjectReadError![]u8 {
+        var pos = start_pos;
+        if (pos + 20 > pack_data.len) return error.InvalidPackObject;
+        const base_hash_bytes = pack_data[pos..pos + 20];
+        pos += 20;
+
+        // Look up base object by hash
+        var base_hash_hex: [40]u8 = undefined;
+        _ = std.fmt.bufPrint(&base_hash_hex, "{}", .{std.fmt.fmtSliceHexLower(base_hash_bytes)}) catch return error.InvalidPackObject;
+
+        const base_obj = try self.readRawObject(&base_hash_hex);
+        defer self.allocator.free(base_obj);
+
+        // Decompress delta data
+        var delta_data = std.ArrayList(u8).init(self.allocator);
+        defer delta_data.deinit();
+        var stream = std.io.fixedBufferStream(pack_data[pos..]);
+        std.compress.zlib.decompress(stream.reader(), delta_data.writer()) catch return error.CorruptObject;
+
+        return self.applyDelta(base_obj, delta_data.items);
+    }
+
+    /// Apply a git delta to a base object. Returns new raw object with header.
+    fn applyDelta(self: *Repository, base_raw: []const u8, delta: []const u8) ObjectReadError![]u8 {
+        // Extract content from base (skip "type size\0" header)
+        const base_null = std.mem.indexOfScalar(u8, base_raw, 0) orelse return error.CorruptObject;
+        const base_header = base_raw[0..base_null];
+        const base_content = base_raw[base_null + 1 ..];
+
+        // Extract type name from base header
+        const space_pos = std.mem.indexOfScalar(u8, base_header, ' ') orelse return error.CorruptObject;
+        const type_name = base_header[0..space_pos];
+
+        // Parse delta header: base size, result size (variable-length integers)
+        var dpos: usize = 0;
+        // Skip base_size
+        var shift: u6 = 0;
+        while (dpos < delta.len and (dpos == 0 or delta[dpos - 1] & 0x80 != 0)) {
+            shift +%= 7;
+            dpos += 1;
+        }
+        // Read result_size
+        var result_size: u64 = 0;
+        shift = 0;
+        while (dpos < delta.len) {
+            result_size |= @as(u64, delta[dpos] & 0x7f) << shift;
+            shift +%= 7;
+            dpos += 1;
+            if (delta[dpos - 1] & 0x80 == 0) break;
+        }
+
+        // Apply delta instructions
+        var result_content = std.ArrayList(u8).init(self.allocator);
+        errdefer result_content.deinit();
+
+        while (dpos < delta.len) {
+            const cmd = delta[dpos];
+            dpos += 1;
+
+            if (cmd & 0x80 != 0) {
+                // Copy from base
+                var copy_offset: u64 = 0;
+                var copy_size: u64 = 0;
+
+                if (cmd & 0x01 != 0) { copy_offset |= @as(u64, delta[dpos]); dpos += 1; }
+                if (cmd & 0x02 != 0) { copy_offset |= @as(u64, delta[dpos]) << 8; dpos += 1; }
+                if (cmd & 0x04 != 0) { copy_offset |= @as(u64, delta[dpos]) << 16; dpos += 1; }
+                if (cmd & 0x08 != 0) { copy_offset |= @as(u64, delta[dpos]) << 24; dpos += 1; }
+
+                if (cmd & 0x10 != 0) { copy_size |= @as(u64, delta[dpos]); dpos += 1; }
+                if (cmd & 0x20 != 0) { copy_size |= @as(u64, delta[dpos]) << 8; dpos += 1; }
+                if (cmd & 0x40 != 0) { copy_size |= @as(u64, delta[dpos]) << 16; dpos += 1; }
+
+                if (copy_size == 0) copy_size = 0x10000;
+
+                const co = @as(usize, @intCast(copy_offset));
+                const cs = @as(usize, @intCast(copy_size));
+                if (co + cs > base_content.len) return error.CorruptObject;
+                try result_content.appendSlice(base_content[co .. co + cs]);
+            } else if (cmd != 0) {
+                // Insert from delta
+                const insert_size = @as(usize, cmd);
+                if (dpos + insert_size > delta.len) return error.CorruptObject;
+                try result_content.appendSlice(delta[dpos .. dpos + insert_size]);
+                dpos += insert_size;
+            } else {
+                return error.CorruptObject; // cmd == 0 is reserved
+            }
+        }
+
+        // Build result with header
+        const new_header = try std.fmt.allocPrint(self.allocator, "{s} {}\x00", .{ type_name, result_content.items.len });
+        defer self.allocator.free(new_header);
+
+        var full_result = try self.allocator.alloc(u8, new_header.len + result_content.items.len);
+        @memcpy(full_result[0..new_header.len], new_header);
+        @memcpy(full_result[new_header.len..], result_content.items);
+        result_content.deinit();
+
+        return full_result;
+    }
+
+    fn getCommitTree(self: *Repository, commit_hash: *const [40]u8) ![40]u8 {
+        const raw = try self.readRawObject(commit_hash);
+        defer self.allocator.free(raw);
+
+        // Parse commit object - look for "tree <hash>" line after null
+        const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse return error.InvalidCommitObject;
+        const commit_content = raw[null_pos + 1 ..];
         const tree_prefix = "tree ";
+        if (std.mem.startsWith(u8, commit_content, tree_prefix)) {
+            if (commit_content.len >= tree_prefix.len + 40) {
+                var result: [40]u8 = undefined;
+                @memcpy(&result, commit_content[tree_prefix.len .. tree_prefix.len + 40]);
+                return result;
+            }
+        }
+        // Also search anywhere in content for robustness
         if (std.mem.indexOf(u8, commit_content, tree_prefix)) |tree_start| {
             const tree_hash_start = tree_start + tree_prefix.len;
             if (tree_hash_start + 40 <= commit_content.len) {
                 var result: [40]u8 = undefined;
-                @memcpy(&result, commit_content[tree_hash_start..tree_hash_start + 40]);
+                @memcpy(&result, commit_content[tree_hash_start .. tree_hash_start + 40]);
                 return result;
             }
         }
@@ -1355,42 +1825,28 @@ pub const Repository = struct {
     }
 
     fn checkoutTree(self: *Repository, tree_hash: *const [40]u8, target_path: []const u8) !void {
-        // Read tree object
-        const obj_path = try std.fmt.allocPrint(self.allocator, "{s}/objects/{s}/{s}", .{ self.git_dir, tree_hash[0..2], tree_hash[2..] });
-        defer self.allocator.free(obj_path);
-
-        const obj_file = try std.fs.openFileAbsolute(obj_path, .{});
-        defer obj_file.close();
-
-        const compressed = try obj_file.readToEndAlloc(self.allocator, 100 * 1024 * 1024);
-        defer self.allocator.free(compressed);
-
-        var decompressed = std.ArrayList(u8).init(self.allocator);
-        defer decompressed.deinit();
-
-        var stream = std.io.fixedBufferStream(compressed);
-        try std.compress.zlib.decompress(stream.reader(), decompressed.writer());
+        const raw = try self.readRawObject(tree_hash);
+        defer self.allocator.free(raw);
 
         // Parse tree object - skip "tree <size>\0" header
-        const tree_content = decompressed.items;
-        const null_pos = std.mem.indexOfScalar(u8, tree_content, 0) orelse return error.InvalidTreeObject;
+        const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse return error.InvalidTreeObject;
         const entries_start = null_pos + 1;
 
         var pos = entries_start;
-        while (pos < tree_content.len) {
+        while (pos < raw.len) {
             // Parse mode
-            const space_pos = std.mem.indexOfScalarPos(u8, tree_content, pos, ' ') orelse break;
-            const mode = tree_content[pos..space_pos];
+            const space_pos = std.mem.indexOfScalarPos(u8, raw, pos, ' ') orelse break;
+            const mode = raw[pos..space_pos];
 
             // Parse name
             const name_start = space_pos + 1;
-            const null_pos_name = std.mem.indexOfScalarPos(u8, tree_content, name_start, 0) orelse break;
-            const name = tree_content[name_start..null_pos_name];
+            const null_pos_name = std.mem.indexOfScalarPos(u8, raw, name_start, 0) orelse break;
+            const name = raw[name_start..null_pos_name];
 
             // Parse 20-byte SHA-1
             const sha_start = null_pos_name + 1;
-            if (sha_start + 20 > tree_content.len) break;
-            const sha_bytes = tree_content[sha_start..sha_start + 20];
+            if (sha_start + 20 > raw.len) break;
+            const sha_bytes = raw[sha_start .. sha_start + 20];
 
             // Convert SHA to hex
             var sha_hex: [40]u8 = undefined;
@@ -1398,14 +1854,15 @@ pub const Repository = struct {
 
             // Check if it's a blob or tree
             if (std.mem.eql(u8, mode, "100644") or std.mem.eql(u8, mode, "100755")) {
-                // It's a file (blob) - write it
                 try self.checkoutBlob(&sha_hex, target_path, name);
             } else if (std.mem.eql(u8, mode, "40000")) {
-                // It's a subdirectory (tree) - recurse
                 const subdir_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ target_path, name });
                 defer self.allocator.free(subdir_path);
-                std.fs.makeDirAbsolute(subdir_path) catch {};
+                std.fs.cwd().makePath(subdir_path) catch {};
                 try self.checkoutTree(&sha_hex, subdir_path);
+            } else if (std.mem.eql(u8, mode, "160000")) {
+                // Submodule entry — skip gracefully (can't checkout submodules)
+                continue;
             }
 
             pos = sha_start + 20;
@@ -1413,30 +1870,21 @@ pub const Repository = struct {
     }
 
     fn checkoutBlob(self: *Repository, blob_hash: *const [40]u8, target_path: []const u8, filename: []const u8) !void {
-        // Read blob object
-        const obj_path = try std.fmt.allocPrint(self.allocator, "{s}/objects/{s}/{s}", .{ self.git_dir, blob_hash[0..2], blob_hash[2..] });
-        defer self.allocator.free(obj_path);
-
-        const obj_file = try std.fs.openFileAbsolute(obj_path, .{});
-        defer obj_file.close();
-
-        const compressed = try obj_file.readToEndAlloc(self.allocator, 100 * 1024 * 1024);
-        defer self.allocator.free(compressed);
-
-        var decompressed = std.ArrayList(u8).init(self.allocator);
-        defer decompressed.deinit();
-
-        var stream = std.io.fixedBufferStream(compressed);
-        try std.compress.zlib.decompress(stream.reader(), decompressed.writer());
+        const raw = try self.readRawObject(blob_hash);
+        defer self.allocator.free(raw);
 
         // Parse blob object - skip "blob <size>\0" header
-        const blob_content = decompressed.items;
-        const null_pos = std.mem.indexOfScalar(u8, blob_content, 0) orelse return error.InvalidBlobObject;
-        const file_content = blob_content[null_pos + 1..];
+        const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse return error.InvalidBlobObject;
+        const file_content = raw[null_pos + 1 ..];
 
         // Write file to working directory
         const file_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ target_path, filename });
         defer self.allocator.free(file_path);
+
+        // Ensure parent directory exists
+        if (std.mem.lastIndexOfScalar(u8, file_path, '/')) |last_slash| {
+            std.fs.cwd().makePath(file_path[0..last_slash]) catch {};
+        }
 
         const file = try std.fs.createFileAbsolute(file_path, .{ .truncate = true });
         defer file.close();
@@ -1458,38 +1906,24 @@ pub const Repository = struct {
     }
 
     fn addTreeToIndex(self: *Repository, git_index: *index_parser.GitIndex, tree_hash: *const [40]u8, prefix: []const u8) !void {
-        // Read tree object (similar to checkoutTree but adds entries to index instead of files)
-        const obj_path = try std.fmt.allocPrint(self.allocator, "{s}/objects/{s}/{s}", .{ self.git_dir, tree_hash[0..2], tree_hash[2..] });
-        defer self.allocator.free(obj_path);
+        const raw = try self.readRawObject(tree_hash);
+        defer self.allocator.free(raw);
 
-        const obj_file = try std.fs.openFileAbsolute(obj_path, .{});
-        defer obj_file.close();
-
-        const compressed = try obj_file.readToEndAlloc(self.allocator, 100 * 1024 * 1024);
-        defer self.allocator.free(compressed);
-
-        var decompressed = std.ArrayList(u8).init(self.allocator);
-        defer decompressed.deinit();
-
-        var stream = std.io.fixedBufferStream(compressed);
-        try std.compress.zlib.decompress(stream.reader(), decompressed.writer());
-
-        const tree_content = decompressed.items;
-        const null_pos = std.mem.indexOfScalar(u8, tree_content, 0) orelse return error.InvalidTreeObject;
+        const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse return error.InvalidTreeObject;
         const entries_start = null_pos + 1;
 
         var pos = entries_start;
-        while (pos < tree_content.len) {
-            const space_pos = std.mem.indexOfScalarPos(u8, tree_content, pos, ' ') orelse break;
-            const mode = tree_content[pos..space_pos];
+        while (pos < raw.len) {
+            const space_pos = std.mem.indexOfScalarPos(u8, raw, pos, ' ') orelse break;
+            const mode = raw[pos..space_pos];
 
             const name_start = space_pos + 1;
-            const null_pos_name = std.mem.indexOfScalarPos(u8, tree_content, name_start, 0) orelse break;
-            const name = tree_content[name_start..null_pos_name];
+            const null_pos_name = std.mem.indexOfScalarPos(u8, raw, name_start, 0) orelse break;
+            const name = raw[name_start..null_pos_name];
 
             const sha_start = null_pos_name + 1;
-            if (sha_start + 20 > tree_content.len) break;
-            const sha_bytes = tree_content[sha_start..sha_start + 20];
+            if (sha_start + 20 > raw.len) break;
+            const sha_bytes = raw[sha_start..sha_start + 20];
 
             if (std.mem.eql(u8, mode, "100644") or std.mem.eql(u8, mode, "100755")) {
                 // Add file to index

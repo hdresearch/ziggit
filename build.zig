@@ -1662,6 +1662,15 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(smart_http_tests).step);
 
+    // Risk hardening tests (memory leaks, edge cases, pack-based checkout)
+    const risk_hardening_tests = b.addTest(.{
+        .root_source_file = b.path("test/risk_hardening_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    risk_hardening_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(risk_hardening_tests).step);
+
     // HTTPS integration tests (require network access — run with `zig build https-test`)
     const https_integration_tests = b.addTest(.{
         .root_source_file = b.path("test/https_integration_test.zig"),

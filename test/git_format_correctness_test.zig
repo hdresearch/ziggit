@@ -719,8 +719,10 @@ test "fetch rejects HTTP URLs" {
     var repo = try Repository.init(testing.allocator, path);
     defer repo.close();
 
-    try testing.expectError(error.NetworkRemoteNotSupported, repo.fetch("https://github.com/example/repo"));
-    try testing.expectError(error.NetworkRemoteNotSupported, repo.fetch("http://github.com/example/repo"));
+    // HTTPS/HTTP fetch is supported now — it will fail with HttpFetchFailed on bad URLs
+    try testing.expectError(error.HttpFetchFailed, repo.fetch("https://github.com/example/repo"));
+    try testing.expectError(error.HttpFetchFailed, repo.fetch("http://github.com/example/repo"));
+    // git:// and ssh:// are still unsupported
     try testing.expectError(error.NetworkRemoteNotSupported, repo.fetch("git://github.com/example/repo"));
     try testing.expectError(error.NetworkRemoteNotSupported, repo.fetch("ssh://github.com/example/repo"));
 }
