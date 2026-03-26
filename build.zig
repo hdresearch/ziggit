@@ -126,10 +126,34 @@ pub fn build(b: *std.Build) void {
     bun_scenario_benchmark.root_module.addImport("ziggit", ziggit_module);
     const run_bun_scenario_benchmark = b.addRunArtifact(bun_scenario_benchmark);
 
+    const zig_api_benchmark = b.addExecutable(.{
+        .name = "zig_api_benchmark",
+        .root_source_file = b.path("benchmarks/zig_api_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    zig_api_benchmark.root_module.addImport("ziggit", ziggit_module);
+    const run_zig_api_benchmark = b.addRunArtifact(zig_api_benchmark);
+
     const bench_step = b.step("bench", "Run all benchmarks");
     bench_step.dependOn(&run_cli_benchmark.step);
     bench_step.dependOn(&run_lib_benchmark.step);
     bench_step.dependOn(&run_bun_scenario_benchmark.step);
+    
+    const bench_api_step = b.step("bench-api", "Run Zig API vs Git CLI benchmark (ITEM 7)");
+    bench_api_step.dependOn(&run_zig_api_benchmark.step);
+
+    // Bun API test (ITEM 6)
+    const bun_api_test = b.addTest(.{
+        .root_source_file = b.path("test/bun_zig_api_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bun_api_test.root_module.addImport("ziggit", ziggit_module);
+    const run_bun_api_test = b.addRunArtifact(bun_api_test);
+
+    const test_bun_api_step = b.step("test-bun", "Run bun workflow test using Zig API (ITEM 6)");
+    test_bun_api_step.dependOn(&run_bun_api_test.step);
 
 
 
