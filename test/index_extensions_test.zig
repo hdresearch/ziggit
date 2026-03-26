@@ -268,7 +268,7 @@ test "index checksum and corruption handling" {
         const truncated_index = original_index[0..original_index.len - 20];
         try std.fs.cwd().writeFile(.{ .sub_path = index_path, .data = truncated_index });
 
-        const truncated_stats = index.analyzeIndex(git_dir, TestPlatform, allocator) catch |_| {
+        const truncated_stats = index.analyzeIndex(git_dir, TestPlatform, allocator) catch {
             std.debug.print("✓ Correctly detected truncated index as invalid\n", .{});
             
             // Restore original
@@ -297,7 +297,7 @@ test "index checksum and corruption handling" {
 
         try std.fs.cwd().writeFile(.{ .sub_path = index_path, .data = corrupted_index });
 
-        const corrupted_stats = index.analyzeIndex(git_dir, TestPlatform, allocator) catch |_| {
+        const corrupted_stats = index.analyzeIndex(git_dir, TestPlatform, allocator) catch {
             std.debug.print("✓ Correctly detected corrupted index\n", .{});
             
             // Restore original

@@ -368,9 +368,15 @@ test "nested symbolic refs and circular reference detection" {
         
         const ref_content = try std.fmt.allocPrint(allocator, "ref: {s}", .{target});
         defer allocator.free(ref_content);
-        if (i != 24) defer allocator.free(target);
+        
+        // Handle target deallocation properly
+        const should_free_target = i != 24;
         
         try std.fs.cwd().writeFile(.{ .sub_path = ref_path, .data = ref_content });
+        
+        if (should_free_target) {
+            allocator.free(target);
+        }
     }
 
     // This should fail due to depth limit
