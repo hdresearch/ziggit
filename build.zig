@@ -796,6 +796,15 @@ pub fn build(b: *std.Build) void {
     objects_parser_comprehensive_tests.root_module.addImport("ziggit", ziggit_module);
     test_step.dependOn(&b.addRunArtifact(objects_parser_comprehensive_tests).step);
 
+    // Hash correctness tests (SHA-1, git interop, known values)
+    const hash_correctness_tests = b.addTest(.{
+        .root_source_file = b.path("test/hash_correctness_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    hash_correctness_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(hash_correctness_tests).step);
+
     // Fast index parser tests
     const fast_index_parser_tests = b.addTest(.{
         .root_source_file = b.path("test/fast_index_parser_test.zig"),
