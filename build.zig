@@ -1276,6 +1276,16 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(crossval_stress_tests).step);
     e2e_step.dependOn(&b.addRunArtifact(crossval_stress_tests).step);
 
+    // E2E edge cases validation tests (boundary files, close/reopen cycles, deterministic hashes, octopus merge)
+    const e2e_edge_cases_validation_tests = b.addTest(.{
+        .root_source_file = b.path("test/e2e_edge_cases_validation_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    e2e_edge_cases_validation_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(e2e_edge_cases_validation_tests).step);
+    e2e_step.dependOn(&b.addRunArtifact(e2e_edge_cases_validation_tests).step);
+
     // API coverage tests (comprehensive Repository API tests with git cross-validation)
     const api_coverage_tests = b.addTest(.{
         .root_source_file = b.path("test/api_coverage_test.zig"),
