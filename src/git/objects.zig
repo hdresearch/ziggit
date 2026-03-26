@@ -2061,9 +2061,7 @@ pub const RepositoryPackHealth = struct {
     issues: std.ArrayList([]const u8),
     
     pub fn deinit(self: RepositoryPackHealth) void {
-        for (self.issues.items) |issue| {
-            // Note: Issues are owned by the calling allocator
-        }
+        _ = self.issues.items;
         self.issues.deinit();
     }
     

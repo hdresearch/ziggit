@@ -417,7 +417,7 @@ pub const Index = struct {
                 // Tree cache extension - could be useful for performance
                 // Store the tree cache data for potential future use
                 if (ext_size > 0) {
-                    var tree_data = try self.allocator.alloc(u8, ext_size);
+                    const tree_data = try self.allocator.alloc(u8, ext_size);
                     _ = reader.readAll(tree_data) catch {
                         self.allocator.free(tree_data);
                         try reader.context.seekTo(current_pos);
