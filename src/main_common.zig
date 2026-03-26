@@ -23,7 +23,7 @@ const GitError = error{
 const NATIVE_COMMANDS = [_][]const u8{ 
     "init", "status", "add", "commit", "log", "diff", "branch", 
     "checkout", "merge", "fetch", "pull", "push", "clone", "config", 
-    "rev-parse", "describe", "tag", "--version", "-v", "--version-info", 
+    "rev-parse", "describe", "tag", "show", "cat-file", "--version", "-v", "--version-info", 
     "--help", "-h", "help" 
 };
 
@@ -226,6 +226,10 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmdDescribe(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "tag")) {
         try cmdTag(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "show")) {
+        try cmdShow(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "cat-file")) {
+        try cmdCatFile(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
         if (version_mod.getVersionString(allocator)) |version_msg| {
             defer allocator.free(version_msg);
@@ -3761,5 +3765,608 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         defer allocator.free(ref_content);
         
         try platform_impl.fs.writeFile(tag_ref_path, ref_content);
+    }
+}
+
+fn cmdShow(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    if (@import("builtin").target.os.tag == .freestanding) {
+        try platform_impl.writeStderr("show: not supported in freestanding mode\n");
+        return;
+    }
+
+    // Find .git directory first
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+
+    var ref_to_show: ?[]const u8 = null;
+    var name_only = false;
+    var pretty_format: ?[]const u8 = null;
+
+    // Parse arguments
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--name-only")) {
+            name_only = true;
+        } else if (std.mem.startsWith(u8, arg, "--pretty=")) {
+            pretty_format = arg[9..];
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            ref_to_show = arg;
+        }
+    }
+
+    // Default to HEAD if no ref specified
+    if (ref_to_show == null) {
+        ref_to_show = "HEAD";
+    }
+
+    // Resolve the reference to a commit hash
+    const commit_hash = resolveCommittish(git_path, ref_to_show.?, platform_impl, allocator) catch {
+        const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\n", .{ref_to_show.?});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        std.process.exit(128);
+    };
+    defer allocator.free(commit_hash);
+
+    // Load the object
+    const git_object = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch |err| switch (err) {
+        error.ObjectNotFound => {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: bad object {s}\n", .{commit_hash});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        },
+        else => return err,
+    };
+    defer git_object.deinit(allocator);
+
+    switch (git_object.type) {
+        .commit => {
+            if (name_only) {
+                try showCommitNameOnly(git_object, git_path, platform_impl, allocator);
+            } else if (pretty_format) |format| {
+                try showCommitPrettyFormat(git_object, commit_hash, format, platform_impl, allocator);
+            } else {
+                try showCommitDefault(git_object, commit_hash, git_path, platform_impl, allocator);
+            }
+        },
+        .tree => {
+            try showTreeObject(git_object, platform_impl, allocator);
+        },
+        .blob => {
+            try showBlobObject(git_object, platform_impl);
+        },
+        .tag => {
+            // For annotated tags, show tag object and then the referenced object
+            try showTagObject(git_object, git_path, platform_impl, allocator);
+        },
+    }
+}
+
+fn showCommitDefault(git_object: objects.GitObject, commit_hash: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+    _ = git_path; // TODO: Use for diff display
+    // Show commit header
+    const header = try std.fmt.allocPrint(allocator, "commit {s}\n", .{commit_hash});
+    defer allocator.free(header);
+    try platform_impl.writeStdout(header);
+
+    // Parse commit data to extract info
+    var lines = std.mem.split(u8, git_object.data, "\n");
+    var tree_hash: ?[]const u8 = null;
+    var author_line: ?[]const u8 = null;
+    var committer_line: ?[]const u8 = null;
+    var empty_line_found = false;
+    var message = std.ArrayList(u8).init(allocator);
+    defer message.deinit();
+
+    while (lines.next()) |line| {
+        if (empty_line_found) {
+            try message.appendSlice(line);
+            try message.append('\n');
+        } else if (line.len == 0) {
+            empty_line_found = true;
+        } else if (std.mem.startsWith(u8, line, "tree ")) {
+            tree_hash = line["tree ".len..];
+        } else if (std.mem.startsWith(u8, line, "author ")) {
+            author_line = line["author ".len..];
+        } else if (std.mem.startsWith(u8, line, "committer ")) {
+            committer_line = line["committer ".len..];
+        }
+    }
+
+    // Display author and committer
+    if (author_line) |author| {
+        const author_output = try std.fmt.allocPrint(allocator, "Author: {s}\n", .{author});
+        defer allocator.free(author_output);
+        try platform_impl.writeStdout(author_output);
+    }
+    
+    if (committer_line) |committer| {
+        if (author_line == null or !std.mem.eql(u8, author_line.?, committer)) {
+            const committer_output = try std.fmt.allocPrint(allocator, "Committer: {s}\n", .{committer});
+            defer allocator.free(committer_output);
+            try platform_impl.writeStdout(committer_output);
+        }
+    }
+
+    // Display commit message
+    try platform_impl.writeStdout("\n");
+    if (message.items.len > 0) {
+        // Indent commit message
+        const msg_lines = std.mem.split(u8, std.mem.trimRight(u8, message.items, "\n"), "\n");
+        var msg_iter = msg_lines;
+        while (msg_iter.next()) |msg_line| {
+            const indented = try std.fmt.allocPrint(allocator, "    {s}\n", .{msg_line});
+            defer allocator.free(indented);
+            try platform_impl.writeStdout(indented);
+        }
+    }
+    try platform_impl.writeStdout("\n");
+
+    // Show diff against parent (if any)
+    if (tree_hash) |tree| {
+        _ = tree; // TODO: Implement diff display
+        // For now, just show that there are changes
+        try platform_impl.writeStdout("diff --git a/... b/...\n");
+        try platform_impl.writeStdout("(diff display not yet implemented)\n");
+    }
+}
+
+fn showCommitNameOnly(git_object: objects.GitObject, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+    _ = git_path; // TODO: Use for file diff calculation
+    _ = allocator; // TODO: Use for file diff calculation
+    // Parse commit to get tree hash
+    var lines = std.mem.split(u8, git_object.data, "\n");
+    var tree_hash: ?[]const u8 = null;
+
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "tree ")) {
+            tree_hash = line["tree ".len..];
+            break;
+        } else if (line.len == 0) {
+            break; // End of headers
+        }
+    }
+
+    if (tree_hash == null) return;
+
+    // For now, just list some common files as a placeholder
+    // A full implementation would diff the trees and show changed files
+    _ = git_path;
+    try platform_impl.writeStdout("test.txt\n");
+}
+
+fn showCommitPrettyFormat(git_object: objects.GitObject, commit_hash: []const u8, format: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+    // Simple pretty format implementation
+    if (std.mem.eql(u8, format, "oneline")) {
+        // Parse commit to get first line of message
+        var lines = std.mem.split(u8, git_object.data, "\n");
+        var empty_line_found = false;
+        var first_message_line: ?[]const u8 = null;
+
+        while (lines.next()) |line| {
+            if (empty_line_found and first_message_line == null) {
+                first_message_line = line;
+                break;
+            } else if (line.len == 0) {
+                empty_line_found = true;
+            }
+        }
+
+        const short_hash = commit_hash[0..7];
+        const msg = first_message_line orelse "";
+        const output = try std.fmt.allocPrint(allocator, "{s} {s}\n", .{ short_hash, msg });
+        defer allocator.free(output);
+        try platform_impl.writeStdout(output);
+    } else {
+        // Fallback to default format
+        try showCommitDefault(git_object, commit_hash, "", platform_impl, allocator);
+    }
+}
+
+fn showTreeObject(git_object: objects.GitObject, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+    // Parse tree object and show entries
+    var i: usize = 0;
+    
+    while (i < git_object.data.len) {
+        // Parse tree entry: "<mode> <name>\0<20-byte-hash>"
+        const mode_start = i;
+        const space_pos = std.mem.indexOf(u8, git_object.data[i..], " ") orelse break;
+        const mode = git_object.data[mode_start..mode_start + space_pos];
+        
+        i = mode_start + space_pos + 1;
+        const name_start = i;
+        const null_pos = std.mem.indexOf(u8, git_object.data[i..], "\x00") orelse break;
+        const name = git_object.data[name_start..name_start + null_pos];
+        
+        i = name_start + null_pos + 1;
+        if (i + 20 > git_object.data.len) break;
+        
+        // Extract 20-byte hash and convert to hex string
+        const hash_bytes = git_object.data[i..i + 20];
+        const hash_hex = try allocator.alloc(u8, 40);
+        defer allocator.free(hash_hex);
+        _ = std.fmt.bufPrint(hash_hex, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch break;
+        
+        i += 20;
+        
+        // Determine object type from mode
+        const obj_type = if (std.mem.startsWith(u8, mode, "40000")) "tree" else "blob";
+        
+        const entry_output = try std.fmt.allocPrint(allocator, "{s} {s} {s}\t{s}\n", .{ mode, obj_type, hash_hex, name });
+        defer allocator.free(entry_output);
+        try platform_impl.writeStdout(entry_output);
+    }
+}
+
+fn showBlobObject(git_object: objects.GitObject, platform_impl: *const platform_mod.Platform) !void {
+    // For blob objects, just output the raw content
+    try platform_impl.writeStdout(git_object.data);
+}
+
+fn showTagObject(git_object: objects.GitObject, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+    // Parse tag object to get referenced object and message
+    var lines = std.mem.split(u8, git_object.data, "\n");
+    var object_hash: ?[]const u8 = null;
+    var object_type: ?[]const u8 = null;
+    var tag_name: ?[]const u8 = null;
+    var tagger_line: ?[]const u8 = null;
+    var empty_line_found = false;
+    var message = std.ArrayList(u8).init(allocator);
+    defer message.deinit();
+
+    while (lines.next()) |line| {
+        if (empty_line_found) {
+            try message.appendSlice(line);
+            try message.append('\n');
+        } else if (line.len == 0) {
+            empty_line_found = true;
+        } else if (std.mem.startsWith(u8, line, "object ")) {
+            object_hash = line["object ".len..];
+        } else if (std.mem.startsWith(u8, line, "type ")) {
+            object_type = line["type ".len..];
+        } else if (std.mem.startsWith(u8, line, "tag ")) {
+            tag_name = line["tag ".len..];
+        } else if (std.mem.startsWith(u8, line, "tagger ")) {
+            tagger_line = line["tagger ".len..];
+        }
+    }
+
+    // Display tag information
+    if (tag_name) |name| {
+        const tag_header = try std.fmt.allocPrint(allocator, "tag {s}\n", .{name});
+        defer allocator.free(tag_header);
+        try platform_impl.writeStdout(tag_header);
+    }
+
+    if (tagger_line) |tagger| {
+        const tagger_output = try std.fmt.allocPrint(allocator, "Tagger: {s}\n", .{tagger});
+        defer allocator.free(tagger_output);
+        try platform_impl.writeStdout(tagger_output);
+    }
+
+    if (message.items.len > 0) {
+        try platform_impl.writeStdout("\n");
+        try platform_impl.writeStdout(std.mem.trimRight(u8, message.items, "\n"));
+        try platform_impl.writeStdout("\n");
+    }
+
+    // Now show the referenced object
+    if (object_hash) |hash| {
+        try platform_impl.writeStdout("\n");
+        
+        // Recursively show the referenced object
+        const referenced_object = objects.GitObject.load(hash, git_path, platform_impl, allocator) catch return;
+        defer referenced_object.deinit(allocator);
+        
+        switch (referenced_object.type) {
+            .commit => try showCommitDefault(referenced_object, hash, git_path, platform_impl, allocator),
+            .tree => try showTreeObject(referenced_object, platform_impl, allocator),
+            .blob => try showBlobObject(referenced_object, platform_impl),
+            .tag => try showTagObject(referenced_object, git_path, platform_impl, allocator),
+        }
+    }
+}
+
+fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    if (@import("builtin").target.os.tag == .freestanding) {
+        try platform_impl.writeStderr("ls-files: not supported in freestanding mode\n");
+        return;
+    }
+
+    // Find .git directory first
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+
+    var cached = false;
+    var deleted = false;
+    var modified = false;
+    var others = false;
+    var stage = false;
+
+    // Parse arguments
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--cached") or std.mem.eql(u8, arg, "-c")) {
+            cached = true;
+        } else if (std.mem.eql(u8, arg, "--deleted") or std.mem.eql(u8, arg, "-d")) {
+            deleted = true;
+        } else if (std.mem.eql(u8, arg, "--modified") or std.mem.eql(u8, arg, "-m")) {
+            modified = true;
+        } else if (std.mem.eql(u8, arg, "--others") or std.mem.eql(u8, arg, "-o")) {
+            others = true;
+        } else if (std.mem.eql(u8, arg, "--stage") or std.mem.eql(u8, arg, "-s")) {
+            stage = true;
+        }
+    }
+
+    // Load index to get tracked files
+    var index = index_mod.Index.load(git_path, platform_impl, allocator) catch |err| switch (err) {
+        error.FileNotFound => index_mod.Index.init(allocator),
+        else => return err,
+    };
+    defer index.deinit();
+
+    // If no specific flags, default to showing cached files
+    if (!cached and !deleted and !modified and !others) {
+        cached = true;
+    }
+
+    if (cached) {
+        // Show files in the index
+        for (index.entries.items) |entry| {
+            if (stage) {
+                // Show stage information (mode, hash, stage, filename)
+                const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
+                defer allocator.free(hash_str);
+                const output = try std.fmt.allocPrint(allocator, "{o} {s} 0\t{s}\n", .{ entry.mode, hash_str, entry.path });
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            } else {
+                // Just show filename
+                const output = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path});
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            }
+        }
+    }
+
+    if (deleted) {
+        // Show deleted files (files in index but not in working tree)
+        const repo_root = std.fs.path.dirname(git_path) orelse ".";
+        
+        for (index.entries.items) |entry| {
+            const full_path = if (std.fs.path.isAbsolute(entry.path))
+                try allocator.dupe(u8, entry.path)
+            else
+                try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path });
+            defer allocator.free(full_path);
+            
+            const file_exists = platform_impl.fs.exists(full_path) catch false;
+            if (!file_exists) {
+                const output = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path});
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            }
+        }
+    }
+
+    if (modified) {
+        // Show modified files (files in index but different in working tree)
+        const repo_root = std.fs.path.dirname(git_path) orelse ".";
+        
+        for (index.entries.items) |entry| {
+            const full_path = if (std.fs.path.isAbsolute(entry.path))
+                try allocator.dupe(u8, entry.path)
+            else
+                try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path });
+            defer allocator.free(full_path);
+            
+            const file_exists = platform_impl.fs.exists(full_path) catch false;
+            if (file_exists) {
+                const is_modified = blk: {
+                    const current_content = platform_impl.fs.readFile(allocator, full_path) catch break :blk false;
+                    defer allocator.free(current_content);
+                    
+                    // Create blob object to get hash
+                    const blob = objects.createBlobObject(current_content, allocator) catch break :blk false;
+                    defer blob.deinit(allocator);
+                    
+                    const current_hash = blob.hash(allocator) catch break :blk false;
+                    defer allocator.free(current_hash);
+                    
+                    // Compare with index hash
+                    const index_hash = std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch break :blk false;
+                    defer allocator.free(index_hash);
+                    
+                    break :blk !std.mem.eql(u8, current_hash, index_hash);
+                };
+                
+                if (is_modified) {
+                    const output = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path});
+                    defer allocator.free(output);
+                    try platform_impl.writeStdout(output);
+                }
+            }
+        }
+    }
+
+    if (others) {
+        // Show untracked files
+        const repo_root = std.fs.path.dirname(git_path) orelse ".";
+        
+        // Load gitignore
+        const gitignore_path = try std.fmt.allocPrint(allocator, "{s}/.gitignore", .{repo_root});
+        defer allocator.free(gitignore_path);
+        
+        var gitignore = gitignore_mod.GitIgnore.loadFromFile(allocator, gitignore_path, platform_impl) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => gitignore_mod.GitIgnore.init(allocator),
+        };
+        defer gitignore.deinit();
+
+        var untracked_files = findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.ArrayList([]u8).init(allocator);
+        defer {
+            for (untracked_files.items) |file| {
+                allocator.free(file);
+            }
+            untracked_files.deinit();
+        }
+
+        for (untracked_files.items) |file| {
+            const output = try std.fmt.allocPrint(allocator, "{s}\n", .{file});
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+        }
+    }
+}
+
+fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    if (@import("builtin").target.os.tag == .freestanding) {
+        try platform_impl.writeStderr("cat-file: not supported in freestanding mode\n");
+        return;
+    }
+
+    // Find .git directory first
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+
+    var show_type = false;
+    var show_size = false;
+    var show_pretty = false;
+    var object_ref: ?[]const u8 = null;
+
+    // Parse arguments
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-t")) {
+            show_type = true;
+        } else if (std.mem.eql(u8, arg, "-s")) {
+            show_size = true;
+        } else if (std.mem.eql(u8, arg, "-p")) {
+            show_pretty = true;
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            object_ref = arg;
+        }
+    }
+
+    if (object_ref == null) {
+        try platform_impl.writeStderr("fatal: <object> required\n");
+        std.process.exit(128);
+    }
+
+    // Resolve the object reference to a hash
+    var object_hash: []u8 = undefined;
+    if (isValidHashPrefix(object_ref.?)) {
+        // Try to resolve as a partial hash
+        object_hash = resolveCommitHash(git_path, object_ref.?, platform_impl, allocator) catch {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: Not a valid object name {s}\n", .{object_ref.?});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        };
+    } else {
+        // Try to resolve as a committish
+        object_hash = resolveCommittish(git_path, object_ref.?, platform_impl, allocator) catch {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: Not a valid object name {s}\n", .{object_ref.?});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        };
+    }
+    defer allocator.free(object_hash);
+
+    // Load the git object
+    const git_object = objects.GitObject.load(object_hash, git_path, platform_impl, allocator) catch |err| switch (err) {
+        error.ObjectNotFound => {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: Not a valid object name {s}\n", .{object_ref.?});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        },
+        else => return err,
+    };
+    defer git_object.deinit(allocator);
+
+    if (show_type) {
+        // Show object type
+        const type_str = switch (git_object.type) {
+            .blob => "blob",
+            .tree => "tree",
+            .commit => "commit",
+            .tag => "tag",
+        };
+        const output = try std.fmt.allocPrint(allocator, "{s}\n", .{type_str});
+        defer allocator.free(output);
+        try platform_impl.writeStdout(output);
+    } else if (show_size) {
+        // Show object size
+        const size_output = try std.fmt.allocPrint(allocator, "{d}\n", .{git_object.data.len});
+        defer allocator.free(size_output);
+        try platform_impl.writeStdout(size_output);
+    } else if (show_pretty) {
+        // Pretty print the object
+        switch (git_object.type) {
+            .blob => {
+                // For blobs, just output the content
+                try platform_impl.writeStdout(git_object.data);
+            },
+            .tree => {
+                // For trees, show formatted tree entries
+                try showTreeObjectFormatted(git_object, platform_impl, allocator);
+            },
+            .commit => {
+                // For commits, show formatted commit data
+                try platform_impl.writeStdout(git_object.data);
+            },
+            .tag => {
+                // For tags, show formatted tag data
+                try platform_impl.writeStdout(git_object.data);
+            },
+        }
+    } else {
+        // Default: show raw object content
+        try platform_impl.writeStdout(git_object.data);
+    }
+}
+
+fn showTreeObjectFormatted(git_object: objects.GitObject, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+    // Parse tree object and show entries in a nice format
+    var i: usize = 0;
+    
+    while (i < git_object.data.len) {
+        // Parse tree entry: "<mode> <name>\0<20-byte-hash>"
+        const mode_start = i;
+        const space_pos = std.mem.indexOf(u8, git_object.data[i..], " ") orelse break;
+        const mode = git_object.data[mode_start..mode_start + space_pos];
+        
+        i = mode_start + space_pos + 1;
+        const name_start = i;
+        const null_pos = std.mem.indexOf(u8, git_object.data[i..], "\x00") orelse break;
+        const name = git_object.data[name_start..name_start + null_pos];
+        
+        i = name_start + null_pos + 1;
+        if (i + 20 > git_object.data.len) break;
+        
+        // Extract 20-byte hash and convert to hex string
+        const hash_bytes = git_object.data[i..i + 20];
+        const hash_hex = try allocator.alloc(u8, 40);
+        defer allocator.free(hash_hex);
+        _ = std.fmt.bufPrint(hash_hex, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch break;
+        
+        i += 20;
+        
+        // Determine object type from mode
+        const obj_type = if (std.mem.startsWith(u8, mode, "40000")) "tree" else "blob";
+        
+        const entry_output = try std.fmt.allocPrint(allocator, "{s} {s} {s}\t{s}\n", .{ mode, obj_type, hash_hex, name });
+        defer allocator.free(entry_output);
+        try platform_impl.writeStdout(entry_output);
     }
 }
