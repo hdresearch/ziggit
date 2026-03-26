@@ -250,18 +250,151 @@ fn loadFromPackFiles(hash_str: []const u8, git_dir: []const u8, platform_impl: a
 
 /// Find object in a specific pack file
 fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_str: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
-    // For a simplified implementation, we'll just return an error
-    // A full implementation would:
-    // 1. Parse the .idx file to find the object offset in the .pack file
-    // 2. Read the object data from the .pack file at that offset
-    // 3. Decompress and parse the object data
+    // Convert hash string to bytes for searching
+    var target_hash: [20]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&target_hash, hash_str);
     
-    // Pack file format is complex, so for now we'll return ObjectNotFound
-    _ = pack_dir_path;
-    _ = idx_filename;
-    _ = hash_str;
-    _ = platform_impl;
-    _ = allocator;
+    // Read the .idx file to find object offset
+    const idx_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{pack_dir_path, idx_filename});
+    defer allocator.free(idx_path);
     
-    return error.ObjectNotFound;
+    const idx_data = platform_impl.fs.readFile(allocator, idx_path) catch return error.ObjectNotFound;
+    defer allocator.free(idx_data);
+    
+    // Parse pack index v2 format (simplified)
+    if (idx_data.len < 8) return error.ObjectNotFound;
+    
+    // Check for pack index magic and version
+    const magic = std.mem.readIntBig(u32, idx_data[0..4]);
+    const version = std.mem.readIntBig(u32, idx_data[4..8]);
+    
+    if (magic != 0xff744f63) return error.ObjectNotFound; // '\377tOc'
+    if (version != 2) return error.ObjectNotFound;
+    
+    // Skip fanout table (256 * 4 bytes) 
+    const fanout_start = 8;
+    const fanout_end = fanout_start + 256 * 4;
+    if (idx_data.len < fanout_end) return error.ObjectNotFound;
+    
+    // Get number of objects from last fanout entry
+    const num_objects = std.mem.readIntBig(u32, idx_data[fanout_end - 4..fanout_end]);
+    if (num_objects == 0) return error.ObjectNotFound;
+    
+    // Find object in sorted SHA-1 table
+    const sha1_table_start = fanout_end;
+    const sha1_table_end = sha1_table_start + num_objects * 20;
+    if (idx_data.len < sha1_table_end) return error.ObjectNotFound;
+    
+    var object_index: ?u32 = null;
+    var i: u32 = 0;
+    while (i < num_objects) : (i += 1) {
+        const sha1_offset = sha1_table_start + i * 20;
+        const obj_hash = idx_data[sha1_offset..sha1_offset + 20];
+        
+        if (std.mem.eql(u8, obj_hash, &target_hash)) {
+            object_index = i;
+            break;
+        }
+    }
+    
+    if (object_index == null) return error.ObjectNotFound;
+    
+    // Get offset from offset table (simplified - assumes 32-bit offsets)
+    const offset_table_start = sha1_table_end + num_objects * 4; // Skip CRC table
+    const offset_table_offset = offset_table_start + object_index.? * 4;
+    if (idx_data.len < offset_table_offset + 4) return error.ObjectNotFound;
+    
+    const object_offset = std.mem.readIntBig(u32, idx_data[offset_table_offset..offset_table_offset + 4]);
+    
+    // Now read from the corresponding .pack file
+    const pack_filename = try std.fmt.allocPrint(allocator, "{s}.pack", .{idx_filename[0..idx_filename.len-4]});
+    defer allocator.free(pack_filename);
+    
+    const pack_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{pack_dir_path, pack_filename});
+    defer allocator.free(pack_path);
+    
+    return readObjectFromPack(pack_path, object_offset, platform_impl, allocator);
+}
+
+/// Read object from pack file at given offset (simplified implementation)
+fn readObjectFromPack(pack_path: []const u8, offset: u32, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
+    const pack_data = platform_impl.fs.readFile(allocator, pack_path) catch return error.ObjectNotFound;
+    defer allocator.free(pack_data);
+    
+    if (offset >= pack_data.len) return error.ObjectNotFound;
+    
+    // Parse pack object header (simplified)
+    var pos: usize = offset;
+    if (pos >= pack_data.len) return error.ObjectNotFound;
+    
+    const first_byte = pack_data[pos];
+    pos += 1;
+    
+    const obj_type_num = (first_byte >> 4) & 7;
+    const obj_type: ObjectType = switch (obj_type_num) {
+        1 => .commit,
+        2 => .tree, 
+        3 => .blob,
+        4 => .tag,
+        else => return error.ObjectNotFound,
+    };
+    
+    // Read variable-length size (simplified)
+    var size: usize = @intCast(first_byte & 15);
+    var shift: u3 = 4;
+    
+    while (first_byte & 0x80 != 0 and pos < pack_data.len) {
+        const next_byte = pack_data[pos];
+        pos += 1;
+        size |= @as(usize, @intCast(next_byte & 0x7F)) << shift;
+        shift += 7;
+        if (next_byte & 0x80 == 0) break;
+    }
+    
+    // Decompress object data using zlib
+    if (pos >= pack_data.len) return error.ObjectNotFound;
+    
+    var decompressed = std.ArrayList(u8).init(allocator);
+    defer decompressed.deinit();
+    
+    var stream = std.io.fixedBufferStream(pack_data[pos..]);
+    std.compress.zlib.decompress(stream.reader(), decompressed.writer()) catch return error.ObjectNotFound;
+    
+    if (decompressed.items.len != size) return error.ObjectNotFound;
+    
+    const data = try allocator.dupe(u8, decompressed.items);
+    return GitObject.init(obj_type, data);
+}
+
+/// Legacy function for compatibility with tests - reads and decompresses git object
+pub fn readObject(allocator: std.mem.Allocator, objects_dir: []const u8, hash_bytes: *const [20]u8) ![]u8 {
+    // Convert hash bytes to hex string
+    const hash_str = try allocator.alloc(u8, 40);
+    defer allocator.free(hash_str);
+    _ = try std.fmt.bufPrint(hash_str, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
+    
+    // Build object file path
+    const obj_dir = hash_str[0..2];
+    const obj_file = hash_str[2..];
+    const obj_path = try std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{objects_dir, obj_dir, obj_file});
+    defer allocator.free(obj_path);
+    
+    // Read compressed object file
+    const compressed_data = std.fs.cwd().readFileAlloc(allocator, obj_path, 1024 * 1024) catch return error.ObjectNotFound;
+    defer allocator.free(compressed_data);
+    
+    // Decompress using zlib
+    var decompressed = std.ArrayList(u8).init(allocator);
+    defer decompressed.deinit();
+    
+    var stream = std.io.fixedBufferStream(compressed_data);
+    std.compress.zlib.decompress(stream.reader(), decompressed.writer()) catch |err| {
+        // If decompression fails, maybe it's uncompressed
+        if (std.mem.indexOf(u8, compressed_data, "\x00") != null) {
+            return try allocator.dupe(u8, compressed_data);
+        }
+        return err;
+    };
+    
+    return try allocator.dupe(u8, decompressed.items);
 }

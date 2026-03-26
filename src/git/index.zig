@@ -12,11 +12,11 @@ pub const IndexEntry = struct {
     uid: u32,
     gid: u32,
     size: u32,
-    hash: [20]u8,
+    sha1: [20]u8, // SHA-1 hash of file contents
     flags: u16,
     path: []const u8,
 
-    pub fn init(path: []const u8, stat: std.fs.File.Stat, hash: [20]u8) IndexEntry {
+    pub fn init(path: []const u8, stat: std.fs.File.Stat, sha1: [20]u8) IndexEntry {
         return IndexEntry{
             .ctime_sec = @intCast(@divTrunc(stat.ctime, std.time.ns_per_s)),
             .ctime_nsec = @intCast(@mod(stat.ctime, std.time.ns_per_s)),
@@ -28,7 +28,7 @@ pub const IndexEntry = struct {
             .uid = 0, // TODO: get actual UID
             .gid = 0, // TODO: get actual GID
             .size = @intCast(stat.size),
-            .hash = hash,
+            .sha1 = sha1,
             .flags = @intCast(path.len),
             .path = path,
         };
@@ -45,7 +45,7 @@ pub const IndexEntry = struct {
         try writer.writeInt(u32, self.uid, .big);
         try writer.writeInt(u32, self.gid, .big);
         try writer.writeInt(u32, self.size, .big);
-        try writer.writeAll(&self.hash);
+        try writer.writeAll(&self.sha1);
         try writer.writeInt(u16, self.flags, .big);
         try writer.writeAll(self.path);
         
@@ -70,8 +70,8 @@ pub const IndexEntry = struct {
         const gid = try reader.readInt(u32, .big);
         const size = try reader.readInt(u32, .big);
         
-        var hash: [20]u8 = undefined;
-        _ = try reader.readAll(&hash);
+        var sha1: [20]u8 = undefined;
+        _ = try reader.readAll(&sha1);
         
         const flags = try reader.readInt(u16, .big);
         const path_len = flags & 0xFFF;
@@ -95,7 +95,7 @@ pub const IndexEntry = struct {
             .uid = uid,
             .gid = gid,
             .size = size,
-            .hash = hash,
+            .sha1 = sha1,
             .flags = flags,
             .path = path_bytes,
         };
@@ -252,5 +252,30 @@ pub const Index = struct {
             }
         }
         return null;
+    }
+    
+    /// Legacy function for compatibility with tests - reads index from a file path
+    pub fn read(self: *Index, index_path: []const u8) !void {
+        const data = std.fs.cwd().readFileAlloc(self.allocator, index_path, 1024 * 1024) catch return error.FileNotFound;
+        defer self.allocator.free(data);
+        
+        var stream = std.io.fixedBufferStream(data);
+        const reader = stream.reader();
+        
+        // Read header
+        var signature: [4]u8 = undefined;
+        _ = try reader.readAll(&signature);
+        if (!std.mem.eql(u8, &signature, "DIRC")) return error.InvalidIndex;
+        
+        const version = try reader.readInt(u32, .big);
+        if (version != 2) return error.UnsupportedIndexVersion;
+        
+        const entry_count = try reader.readInt(u32, .big);
+        
+        var i: u32 = 0;
+        while (i < entry_count) : (i += 1) {
+            const entry = try IndexEntry.readFromBuffer(reader, self.allocator);
+            try self.entries.append(entry);
+        }
     }
 };

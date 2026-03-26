@@ -392,7 +392,7 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             defer allocator.free(current_hash);
             
             // Compare with index hash
-            const index_hash = std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.hash)}) catch break :blk false;
+            const index_hash = std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch break :blk false;
             defer allocator.free(index_hash);
             
             break :blk !std.mem.eql(u8, current_hash, index_hash);
@@ -724,7 +724,7 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     }
 
     for (index.entries.items) |entry| {
-        const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.hash)});
+        const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
         defer allocator.free(hash_str);
         
         const mode_str = try std.fmt.allocPrint(allocator, "{o}", .{entry.mode});
@@ -1009,7 +1009,7 @@ fn showWorkingTreeDiff(index: *const index_mod.Index, cwd: []const u8, platform_
             defer allocator.free(current_hash);
             
             // Compare with index hash
-            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.hash)});
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
             defer allocator.free(index_hash);
             
             if (!std.mem.eql(u8, current_hash, index_hash)) {
@@ -1039,7 +1039,7 @@ fn showWorkingTreeDiff(index: *const index_mod.Index, cwd: []const u8, platform_
             defer allocator.free(empty_hash);
             
             // Get index hash
-            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.hash)});
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
             defer allocator.free(index_hash);
             
             const short_index_hash = index_hash[0..7];
@@ -1073,7 +1073,7 @@ fn showStagedDiff(index: *const index_mod.Index, git_path: []const u8, platform_
             defer allocator.free(empty_hash);
             
             // Get index hash
-            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.hash)});
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
             defer allocator.free(index_hash);
             
             const short_empty_hash = empty_hash[0..7];
@@ -1098,7 +1098,7 @@ fn showStagedDiff(index: *const index_mod.Index, git_path: []const u8, platform_
             defer allocator.free(empty_hash);
             
             // Get index hash
-            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.hash)});
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
             defer allocator.free(index_hash);
             
             // For now, just show all staged files as additions
@@ -1130,7 +1130,7 @@ fn getIndexedFileContent(entry: index_mod.IndexEntry, allocator: std.mem.Allocat
     // Convert hash bytes to hex string
     const hash_str = try allocator.alloc(u8, 40);
     defer allocator.free(hash_str);
-    _ = std.fmt.bufPrint(hash_str, "{}", .{std.fmt.fmtSliceHexLower(&entry.hash)}) catch {
+    _ = std.fmt.bufPrint(hash_str, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch {
         return try allocator.dupe(u8, "");
     };
     
@@ -1419,16 +1419,102 @@ fn checkoutTreeRecursive(git_path: []const u8, tree_data: []const u8, repo_root:
 
 /// Update index to match the checked out tree
 fn updateIndexFromTree(git_path: []const u8, tree_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
-    // For now, just load the current index and save it back
-    // A full implementation would populate the index with tree entries
-    var index = index_mod.Index.load(git_path, platform_impl, allocator) catch index_mod.Index.init(allocator);
+    // Create a new index based on the tree
+    var index = index_mod.Index.init(allocator);
     defer index.deinit();
     
-    try index.save(git_path, platform_impl);
+    // Load the tree object
+    const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch |err| {
+        std.debug.print("Warning: failed to load tree for index update: {}\n", .{err});
+        return;
+    };
+    defer tree_obj.deinit(allocator);
     
-    // TODO: Actually populate index with tree entries
-    // This requires walking the tree again and creating IndexEntry objects
-    _ = tree_hash; // Suppress unused variable warning for now
+    if (tree_obj.type != .tree) return;
+    
+    // Get repository root (parent of .git directory)  
+    const repo_root = std.fs.path.dirname(git_path) orelse ".";
+    
+    // Recursively populate index from tree
+    try populateIndexFromTree(git_path, tree_obj.data, repo_root, "", &index, allocator, platform_impl);
+    
+    // Save the updated index
+    try index.save(git_path, platform_impl);
+}
+
+/// Recursively populate index entries from tree data
+fn populateIndexFromTree(git_path: []const u8, tree_data: []const u8, repo_root: []const u8, current_path: []const u8, index: *index_mod.Index, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    var i: usize = 0;
+    
+    while (i < tree_data.len) {
+        // Parse tree entry: "<mode> <name>\0<20-byte-hash>"
+        const mode_start = i;
+        const space_pos = std.mem.indexOf(u8, tree_data[i..], " ") orelse break;
+        const mode_str = tree_data[mode_start..mode_start + space_pos];
+        
+        i = mode_start + space_pos + 1;
+        const name_start = i;
+        const null_pos = std.mem.indexOf(u8, tree_data[i..], "\x00") orelse break;
+        const name = tree_data[name_start..name_start + null_pos];
+        
+        i = name_start + null_pos + 1;
+        if (i + 20 > tree_data.len) break;
+        
+        // Extract 20-byte hash
+        const hash_bytes = tree_data[i..i + 20];
+        var sha1: [20]u8 = undefined;
+        @memcpy(&sha1, hash_bytes);
+        
+        i += 20;
+        
+        // Build full path
+        const full_path = if (current_path.len == 0) 
+            try allocator.dupe(u8, name)
+        else 
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{current_path, name});
+        defer allocator.free(full_path);
+        
+        // Parse mode
+        const mode = std.fmt.parseInt(u32, mode_str, 8) catch 0;
+        
+        // Check if this is a tree (directory) or blob (file)
+        if (std.mem.startsWith(u8, mode_str, "40000")) {
+            // This is a tree (subdirectory) - recurse into it
+            const subtree_obj = objects.GitObject.load(try allocator.alloc(u8, 40), git_path, platform_impl, allocator) catch continue;
+            defer allocator.free(subtree_obj.data);
+            
+            // Convert hash to hex for loading
+            const hash_hex = try allocator.alloc(u8, 40);
+            defer allocator.free(hash_hex);
+            _ = try std.fmt.bufPrint(hash_hex, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
+            
+            const subtree_loaded = objects.GitObject.load(hash_hex, git_path, platform_impl, allocator) catch continue;
+            defer subtree_loaded.deinit(allocator);
+            
+            if (subtree_loaded.type == .tree) {
+                try populateIndexFromTree(git_path, subtree_loaded.data, repo_root, full_path, index, allocator, platform_impl);
+            }
+        } else {
+            // This is a blob (file) - add to index
+            const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, full_path });
+            defer allocator.free(file_path);
+            
+            // Get file stats (or create fake ones)
+            const stat = std.fs.cwd().statFile(file_path) catch std.fs.File.Stat{
+                .inode = 0,
+                .size = 0,
+                .mode = mode,
+                .kind = .file,
+                .atime = 0,
+                .mtime = 0,
+                .ctime = 0,
+            };
+            
+            // Create index entry
+            const entry = index_mod.IndexEntry.init(try allocator.dupe(u8, full_path), stat, sha1);
+            try index.entries.append(entry);
+        }
+    }
 }
 
 fn cmdMerge(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
@@ -1515,26 +1601,126 @@ fn cmdMerge(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
 
 /// Check if a merge can be done as a fast-forward
 fn canFastForward(git_path: []const u8, current_hash: []const u8, target_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) bool {
-    // For now, simplified check: if current hash is an ancestor of target hash
-    // A full implementation would walk the commit history
-    _ = git_path;
-    _ = allocator;
-    _ = platform_impl;
-    
-    // Simple case: if hashes are the same, already up to date (can fast-forward)
+    // Simple case: if hashes are the same, already up to date
     if (std.mem.eql(u8, current_hash, target_hash)) {
         return true;
     }
     
-    // For this implementation, assume we can't fast-forward if hashes differ
-    // Real git would check if current is ancestor of target
+    // Check if current commit is an ancestor of target commit
+    return isAncestor(git_path, current_hash, target_hash, allocator, platform_impl) catch false;
+}
+
+/// Check if ancestor_hash is an ancestor of descendant_hash
+fn isAncestor(git_path: []const u8, ancestor_hash: []const u8, descendant_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !bool {
+    if (std.mem.eql(u8, ancestor_hash, descendant_hash)) return true;
+    
+    // Load the descendant commit
+    const descendant_commit = objects.GitObject.load(descendant_hash, git_path, platform_impl, allocator) catch return false;
+    defer descendant_commit.deinit(allocator);
+    
+    if (descendant_commit.type != .commit) return false;
+    
+    // Parse commit to find parents
+    var lines = std.mem.split(u8, descendant_commit.data, "\n");
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "parent ")) {
+            const parent_hash = line["parent ".len..];
+            if (std.mem.eql(u8, parent_hash, ancestor_hash)) {
+                return true; // Direct parent
+            }
+            // Recursively check if ancestor is ancestor of this parent
+            if (isAncestor(git_path, ancestor_hash, parent_hash, allocator, platform_impl) catch false) {
+                return true;
+            }
+        } else if (line.len == 0) {
+            break; // End of headers
+        }
+    }
+    
     return false;
+}
+
+/// Find the merge base (common ancestor) of two commits
+fn findMergeBase(git_path: []const u8, hash1: []const u8, hash2: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
+    // Simplified merge base algorithm - find first common ancestor
+    // A proper implementation would use more sophisticated algorithms
+    
+    // Collect all ancestors of hash1
+    var ancestors1 = std.StringHashMap(void).init(allocator);
+    defer {
+        var iterator = ancestors1.iterator();
+        while (iterator.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+        }
+        ancestors1.deinit();
+    }
+    
+    try collectAncestors(git_path, hash1, &ancestors1, allocator, platform_impl);
+    
+    // Walk ancestors of hash2 and find first match
+    return findFirstCommonAncestor(git_path, hash2, &ancestors1, allocator, platform_impl) catch try allocator.dupe(u8, hash1);
+}
+
+/// Recursively collect all ancestor commit hashes
+fn collectAncestors(git_path: []const u8, commit_hash: []const u8, ancestors: *std.StringHashMap(void), allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    // Avoid infinite loops
+    if (ancestors.contains(commit_hash)) return;
+    
+    try ancestors.put(try allocator.dupe(u8, commit_hash), {});
+    
+    // Load commit to find parents
+    const commit_obj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch return;
+    defer commit_obj.deinit(allocator);
+    
+    if (commit_obj.type != .commit) return;
+    
+    // Parse commit to find parents
+    var lines = std.mem.split(u8, commit_obj.data, "\n");
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "parent ")) {
+            const parent_hash = line["parent ".len..];
+            try collectAncestors(git_path, parent_hash, ancestors, allocator, platform_impl);
+        } else if (line.len == 0) {
+            break; // End of headers
+        }
+    }
+}
+
+/// Find first common ancestor by walking commit history
+fn findFirstCommonAncestor(git_path: []const u8, commit_hash: []const u8, ancestors: *const std.StringHashMap(void), allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
+    // Check if this commit is in ancestors
+    if (ancestors.contains(commit_hash)) {
+        return try allocator.dupe(u8, commit_hash);
+    }
+    
+    // Load commit to find parents
+    const commit_obj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch return error.NotFound;
+    defer commit_obj.deinit(allocator);
+    
+    if (commit_obj.type != .commit) return error.NotFound;
+    
+    // Check parents
+    var lines = std.mem.split(u8, commit_obj.data, "\n");
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "parent ")) {
+            const parent_hash = line["parent ".len..];
+            if (findFirstCommonAncestor(git_path, parent_hash, ancestors, allocator, platform_impl)) |common_ancestor| {
+                return common_ancestor;
+            } else |_| {
+                continue;
+            }
+        } else if (line.len == 0) {
+            break; // End of headers
+        }
+    }
+    
+    return error.NotFound;
 }
 
 /// Perform a 3-way merge between current branch and target branch
 fn performThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_hash: []const u8, current_branch: []const u8, target_branch: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
-    // Find common base (merge base) - simplified to use current commit as base for now
-    const merge_base = try allocator.dupe(u8, current_hash);
+    // Find common base (merge base) - simplified implementation
+    const merge_base = findMergeBase(git_path, current_hash, target_hash, allocator, platform_impl) catch try allocator.dupe(u8, current_hash);
     defer allocator.free(merge_base);
     
     // Get trees for the three commits
@@ -2195,7 +2381,7 @@ fn checkIfDifferentFromHEAD(entry: index_mod.IndexEntry, git_path: []const u8, p
     if (tree_obj.type != .tree) return false;
     
     // Parse tree entries to find our file
-    const entry_hash_str = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.hash)});
+    const entry_hash_str = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
     defer allocator.free(entry_hash_str);
     
     // Simple tree parsing - look for the file name and hash
