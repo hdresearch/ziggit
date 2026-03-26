@@ -39,12 +39,6 @@ fn deleteFile(dir: []const u8, name: []const u8) !void {
     try std.fs.deleteFileAbsolute(full);
 }
 
-fn readFile(path: []const u8) ![]u8 {
-    const file = try std.fs.openFileAbsolute(path, .{});
-    defer file.close();
-    return try file.readToEndAlloc(testing.allocator, 1024 * 1024);
-}
-
 /// Run a git command and return stdout
 fn gitCmd(repo_path: []const u8, args: []const []const u8) ![]u8 {
     const allocator = testing.allocator;
@@ -92,7 +86,6 @@ test "basic add and commit produces git-readable objects" {
     try testing.expect(std.mem.indexOf(u8, git_out, "test@example.com") != null);
 
     // Verify the tree contains hello.txt
-    // Extract tree hash from commit
     var lines = std.mem.splitScalar(u8, git_out, '\n');
     const first_line = lines.first();
     try testing.expect(std.mem.startsWith(u8, first_line, "tree "));
@@ -104,10 +97,10 @@ test "basic add and commit produces git-readable objects" {
 }
 
 // ============================================================================
-// Test 2: Modify file then commit — tree has updated content
+// Test 2: commitAll — modify file, commit without explicit add
 // ============================================================================
-test "modify tracked file and commit updates tree" {
-    const path = test_base ++ "modify";
+test "commitAll stages modified files and commits" {
+    const path = test_base ++ "commitall";
     cleanup(path);
     defer cleanup(path);
 
@@ -118,30 +111,22 @@ test "modify tracked file and commit updates tree" {
     try repo.add("file.txt");
     _ = try repo.commit("first", "A", "a@b.com");
 
-    // Modify
+    // Modify the file without calling add
     try writeFile(path, "file.txt", "version 2\n");
-    try repo.add("file.txt");
-    const hash2 = try repo.commit("second", "A", "a@b.com");
 
-    // git should show the file with new content
-    const log = try gitCmd(path, &.{ "log", "--oneline" });
-    defer testing.allocator.free(log);
-    // Should have 2 commits
-    var line_count: usize = 0;
-    var it = std.mem.splitScalar(u8, std.mem.trim(u8, log, "\n"), '\n');
-    while (it.next()) |_| line_count += 1;
-    try testing.expect(line_count >= 2);
+    // commitAll should detect the change and stage it
+    const hash2 = try repo.commitAll("second", "A", "a@b.com");
 
-    // Verify content via git show
+    // git should show the new content
     const show = try gitCmd(path, &.{ "show", &hash2 ++ ":file.txt" });
     defer testing.allocator.free(show);
     try testing.expectEqualStrings("version 2\n", show);
 }
 
 // ============================================================================
-// Test 3: Author name/email from config
+// Test 3: Author name/email in commit object
 // ============================================================================
-test "author info read from git config" {
+test "author info appears in commit object" {
     const path = test_base ++ "author";
     cleanup(path);
     defer cleanup(path);
@@ -149,23 +134,8 @@ test "author info read from git config" {
     var repo = try Repository.init(testing.allocator, path);
     defer repo.close();
 
-    // Write git config with user info
-    const config_path = try std.fmt.allocPrint(testing.allocator, "{s}/.git/config", .{path});
-    defer testing.allocator.free(config_path);
-    const config_file = try std.fs.createFileAbsolute(config_path, .{ .truncate = true });
-    defer config_file.close();
-    try config_file.writeAll(
-        \\[user]
-        \\    name = Config Author
-        \\    email = config@author.org
-        \\
-    );
-
     try writeFile(path, "readme.md", "# Hello\n");
     try repo.add("readme.md");
-    // Note: the ziggit.Repository.commit() takes explicit author params,
-    // so the config-reading is a main_common.zig (CLI) concern.
-    // We test that the commit object format is correct with the given params.
     const hash = try repo.commit("from config", "Config Author", "config@author.org");
 
     const out = try gitCmd(path, &.{ "cat-file", "-p", &hash });
@@ -175,9 +145,9 @@ test "author info read from git config" {
 }
 
 // ============================================================================
-// Test 4: Deleted file removed from tree (simulating -a behavior)
+// Test 4: Deleted file with commitAll removes from tree
 // ============================================================================
-test "deleted tracked file removed from index on re-add" {
+test "commitAll removes deleted files from tree" {
     const path = test_base ++ "delete";
     cleanup(path);
     defer cleanup(path);
@@ -191,20 +161,15 @@ test "deleted tracked file removed from index on re-add" {
     try repo.add("remove.txt");
     _ = try repo.commit("both files", "A", "a@b.com");
 
-    // Delete file on disk then re-add keep.txt only
+    // Delete file on disk, then use commitAll (which calls stageTrackedChanges)
     try deleteFile(path, "remove.txt");
-    // Manually remove from index by adding keep.txt and committing
-    // (In the CLI, commit -a would call stageTrackedChanges which handles this)
-    // For the API, we just verify the tree after adding only keep.txt
-    try repo.add("keep.txt");
-    const hash2 = try repo.commit("after delete", "A", "a@b.com");
+    const hash2 = try repo.commitAll("after delete", "A", "a@b.com");
 
-    // The tree for commit 2 should still have remove.txt since we didn't explicitly remove it
-    // from the index via the API... But the point is the CLI's stageTrackedChanges does.
-    // Let's verify git can read commit 2
-    const out = try gitCmd(path, &.{ "cat-file", "-p", &hash2 });
-    defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "after delete") != null);
+    // The tree for commit 2 should NOT contain remove.txt
+    const tree_list = try gitCmd(path, &.{ "ls-tree", "-r", &hash2 });
+    defer testing.allocator.free(tree_list);
+    try testing.expect(std.mem.indexOf(u8, tree_list, "keep.txt") != null);
+    try testing.expect(std.mem.indexOf(u8, tree_list, "remove.txt") == null);
 }
 
 // ============================================================================
@@ -239,7 +204,7 @@ test "nested directories produce correct tree objects" {
     // Verify the top-level tree has a subtree entry for "src"
     const top_tree = try gitCmd(path, &.{ "ls-tree", &hash });
     defer testing.allocator.free(top_tree);
-    try testing.expect(std.mem.indexOf(u8, top_tree, "tree") != null); // "src" should be a tree
+    try testing.expect(std.mem.indexOf(u8, top_tree, "tree") != null);
     try testing.expect(std.mem.indexOf(u8, top_tree, "src") != null);
 }
 
@@ -265,8 +230,41 @@ test "commit chain is valid" {
     // Second commit should have first as parent
     const out = try gitCmd(path, &.{ "cat-file", "-p", &h2 });
     defer testing.allocator.free(out);
-    // Check parent line matches first commit hash
     const parent_needle = try std.fmt.allocPrint(testing.allocator, "parent {s}", .{h1});
     defer testing.allocator.free(parent_needle);
     try testing.expect(std.mem.indexOf(u8, out, parent_needle) != null);
+}
+
+// ============================================================================
+// Test 7: stageTrackedChanges detects modifications without explicit add
+// ============================================================================
+test "stageTrackedChanges updates modified files in index" {
+    const path = test_base ++ "stage";
+    cleanup(path);
+    defer cleanup(path);
+
+    var repo = try Repository.init(testing.allocator, path);
+    defer repo.close();
+
+    try writeFile(path, "a.txt", "original\n");
+    try writeFile(path, "b.txt", "also original\n");
+    try repo.add("a.txt");
+    try repo.add("b.txt");
+    _ = try repo.commit("initial", "A", "a@b.com");
+
+    // Modify a.txt, leave b.txt alone
+    try writeFile(path, "a.txt", "modified\n");
+
+    // Stage tracked changes
+    try repo.stageTrackedChanges();
+
+    // Commit and verify
+    const hash = try repo.commit("after stage", "A", "a@b.com");
+    const show_a = try gitCmd(path, &.{ "show", &hash ++ ":a.txt" });
+    defer testing.allocator.free(show_a);
+    try testing.expectEqualStrings("modified\n", show_a);
+
+    const show_b = try gitCmd(path, &.{ "show", &hash ++ ":b.txt" });
+    defer testing.allocator.free(show_b);
+    try testing.expectEqualStrings("also original\n", show_b);
 }
