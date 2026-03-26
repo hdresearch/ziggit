@@ -57,6 +57,27 @@ const GitOps = struct {
         defer self.allocator.free(output);
     }
     
+    fn commit_if_changes(self: Self, message: []const u8) !void {
+        // Check if there are changes to commit first
+        const status = self.runGitCommand(&[_][]const u8{ "git", "status", "--porcelain" }) catch {
+            // If git status fails, skip commit
+            return;
+        };
+        defer self.allocator.free(status);
+        
+        const trimmed_status = std.mem.trim(u8, status, " \n\r\t");
+        std.log.info("Git status before commit: '{s}'", .{trimmed_status});
+        if (trimmed_status.len > 0) {
+            // There are changes, commit them
+            std.log.info("Attempting to commit changes...", .{});
+            const output = try self.runGitCommand(&[_][]const u8{ "git", "commit", "-m", message });
+            defer self.allocator.free(output);
+            std.log.info("Commit successful", .{});
+        } else {
+            std.log.info("No changes to commit, skipping", .{});
+        }
+    }
+    
     fn get_status_porcelain(self: Self) ![]u8 {
         return try self.runGitCommand(&[_][]const u8{ "git", "status", "--porcelain" });
     }
@@ -156,14 +177,13 @@ test "lib status vs git status --porcelain" {
         try testing.expectEqualStrings(git_status, lib_status);
     }
     
-    // Test 4: Deleted file
+    // Test 4: Deleted file  
     {
-        // First restore file1 to clean state
+        // Make sure we have a clean state first - remove any modifications
         try writeFile(file1_path, "Initial content", allocator);
-        try git_ops.add_file("file1.txt");
-        try git_ops.commit("Reset file1");
         
-        // Now delete the file
+        // Skip the problematic commit step and just delete the file directly
+        // The file is already committed from the initial commit
         try deleteFile(file1_path);
         
         var repo = try ziggit.repo_open(allocator, repo_path);
