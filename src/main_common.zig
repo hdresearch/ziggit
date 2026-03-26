@@ -63,6 +63,26 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         return;
     }
     
+    // Strip global flags that newer git versions support but older ones don't
+    // This allows tests written for git 2.46+ to work with git 2.43
+    {
+        var write_idx: usize = 0;
+        var read_idx: usize = 0;
+        while (read_idx < all_original_args.items.len) {
+            const arg = all_original_args.items[read_idx];
+            if (std.mem.startsWith(u8, arg, "--ref-format=") or
+                std.mem.eql(u8, arg, "--no-advice")) {
+                // Strip this flag
+                read_idx += 1;
+                continue;
+            }
+            all_original_args.items[write_idx] = arg;
+            write_idx += 1;
+            read_idx += 1;
+        }
+        all_original_args.shrinkRetainingCapacity(write_idx);
+    }
+    
     // Find the command by skipping global flags
     var command_index: usize = 0;
     while (command_index < all_original_args.items.len) {
@@ -76,6 +96,12 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 try platform_impl.writeStderr("error: invalid global flag usage\n");
                 std.process.exit(128);
             }
+        } else if (std.mem.startsWith(u8, arg, "--ref-format=") or 
+                   std.mem.startsWith(u8, arg, "--no-advice") or
+                   std.mem.startsWith(u8, arg, "--config-env=") or
+                   std.mem.startsWith(u8, arg, "--namespace=")) {
+            // New global flags (git 2.44+) - skip them (strip for older git compat)
+            command_index += 1;
         } else {
             // This must be the command
             break;
@@ -103,10 +129,9 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         }
     }
     
-    // Determine if this command is handled natively or forwarded to real git
-    const is_native_handler = std.mem.eql(u8, command, "init") or
-        std.mem.eql(u8, command, "status") or
-        std.mem.eql(u8, command, "config") or
+    // Determine if this command is handled natively (NOT forwarded to real git)
+    // Commands forwarded to git should NOT be here — git handles -C itself
+    const is_native_handler = 
         std.mem.eql(u8, command, "--exec-path") or
         std.mem.eql(u8, command, "--version") or
         std.mem.eql(u8, command, "-v") or
