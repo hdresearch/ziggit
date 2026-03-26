@@ -1,0 +1,26 @@
+=== ZIGGIT BASELINE PERFORMANCE RESULTS ===
+Date: 2026-03-26
+Build: Debug vs ReleaseFast comparison
+
+=== DEBUG BUILD RESULTS ===
+revParseHead (Zig):    6.25μs  vs  Git CLI: 1053μs  → 168x faster
+statusPorcelain (Zig): 293μs   vs  Git CLI: 1393μs  → 4.8x faster  
+describeTags (Zig):    39μs    vs  Git CLI: 1425μs  → 37x faster
+isClean (Zig):         81μs    vs  Git CLI: 1394μs  → 17x faster
+
+=== RELEASE BUILD RESULTS ===  
+revParseHead (Zig):    3.64μs  vs  Git CLI: 906μs   → 249x faster  ✅ TARGET ACHIEVED
+statusPorcelain (Zig): 125μs   vs  Git CLI: 1232μs  → 9.8x faster  ⚠️ NEEDS OPTIMIZATION
+describeTags (Zig):    9.95μs  vs  Git CLI: 1276μs  → 128x faster  ✅ TARGET ACHIEVED
+isClean (Zig):         40.94μs vs  Git CLI: 1230μs  → 30x faster   ⚠️ COULD BE BETTER
+
+OPTIMIZATION OPPORTUNITIES:
+1. statusPorcelain: 125μs is too slow - optimize file stat operations and SHA-1 computation
+2. isClean: 40μs could be faster with short-circuit optimization
+3. The optimizations are already implemented in the code, let me verify they're being used
+
+NOTES:
+- All measurements are median times from 1000 iterations
+- Process spawn overhead for git CLI is consistent at ~900-1400μs
+- ziggit functions eliminate this overhead completely
+- Target of 100-1000x faster is achieved for revParseHead and describeTags
