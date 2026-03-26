@@ -1264,6 +1264,59 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(tree_and_diff_internal_tests).step);
 
+    // Repository git cross-validation tests
+    const repo_git_crossval_tests = b.addTest(.{
+        .root_source_file = b.path("test/repo_git_crossval_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    repo_git_crossval_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(repo_git_crossval_tests).step);
+
+    // Gitignore behavior tests
+    const gitignore_behavior_tests = b.addTest(.{
+        .root_source_file = b.path("test/gitignore_behavior_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gitignore_behavior_tests.root_module.addAnonymousImport("gitignore", .{
+        .root_source_file = b.path("src/git/gitignore.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(gitignore_behavior_tests).step);
+
+    // Validation SHA1/refs tests
+    const validation_sha1_refs_tests = b.addTest(.{
+        .root_source_file = b.path("test/validation_sha1_refs_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    validation_sha1_refs_tests.root_module.addAnonymousImport("validation", .{
+        .root_source_file = b.path("src/git/validation.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(validation_sha1_refs_tests).step);
+
+    // Diff comprehensive tests
+    const diff_comprehensive_tests = b.addTest(.{
+        .root_source_file = b.path("test/diff_comprehensive_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    diff_comprehensive_tests.root_module.addAnonymousImport("diff", .{
+        .root_source_file = b.path("src/git/diff.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(diff_comprehensive_tests).step);
+
+    // Tree walker and parse tests
+    const tree_walker_parse_tests = b.addTest(.{
+        .root_source_file = b.path("test/tree_walker_and_parse_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    tree_walker_parse_tests.root_module.addAnonymousImport("tree", .{
+        .root_source_file = b.path("src/git/tree.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(tree_walker_parse_tests).step);
+
     // Diff internal tests
     const diff_internal_tests = b.addTest(.{
         .root_source_file = b.path("test/diff_internal_test.zig"),
