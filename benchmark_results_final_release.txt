@@ -1,0 +1,21 @@
+=== Ziggit API vs CLI Benchmark ===
+Comparing pure Zig function calls vs git CLI spawning
+Goal: Prove 100-1000x speedup by eliminating process spawn overhead
+
+Setting up test repository (100 files, 10 commits, 3 tags)...
+Test repository setup complete.
+
+Running 1000 iterations per operation:
+
+           Operation |    Zig Med |   Zig Mean |    Zig P95 |    Zig P99 ||    CLI Med |   CLI Mean |    CLI P95 |    CLI P99 ||  Speedup
+==================================================================================================================================
+      rev-parse HEAD | 28.1μs | 29.2μs | 32.6μs | 45.4μs || 890.0μs | 913.5μs | 986.1μs | 1.03ms || 31.7x
+  status --porcelain | 104.4μs | 107.5μs | 117.8μs | 171.7μs || 1.25ms | 1.27ms | 1.36ms | 1.40ms || 12.0x
+     describe --tags | 46.4μs | 48.1μs | 52.0μs | 117.8μs || 1.06ms | 1.08ms | 1.17ms | 1.20ms || 22.8x
+            is_clean | 104.6μs | 107.8μs | 122.2μs | 171.4μs || 1.24ms | 1.26ms | 1.35ms | 1.40ms || 11.8x
+
+NOTE: Zig implementations are pure Zig code paths with no process spawning.
+CLI implementations spawn 'git' as a child process (typical 2-5ms overhead).
+Target speedup: 100-1000x faster for Zig vs CLI due to eliminating spawn overhead.
+
+Benchmark completed!
