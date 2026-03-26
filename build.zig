@@ -571,6 +571,17 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(pack_git_exact_compat_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_end_to_end_tests).step);
 
+    // Pack git cross-validation tests (real git packs, all object types, idx generation, round-trip)
+    const pack_git_crossvalidation_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_git_crossvalidation_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_git_crossvalidation_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(pack_git_crossvalidation_tests).step);
+
     // Pack internals ground-truth tests (readPackObjectAtOffset, applyDelta, generatePackIndex, git cross-validation)
     const pack_internals_groundtruth_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_internals_groundtruth_test.zig"),
