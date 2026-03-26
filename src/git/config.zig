@@ -245,6 +245,56 @@ pub const GitConfig = struct {
     pub fn getValue(self: GitConfig, section: []const u8, name: []const u8) ?[]const u8 {
         return self.get(section, null, name);
     }
+
+    /// Set a config value
+    pub fn setValue(self: *GitConfig, section: []const u8, subsection: ?[]const u8, name: []const u8, value: []const u8) !void {
+        // Check if entry already exists and update it
+        for (self.entries.items) |*entry| {
+            if (entry.matches(section, subsection, name)) {
+                self.allocator.free(entry.value);
+                entry.value = try self.allocator.dupe(u8, value);
+                return;
+            }
+        }
+        
+        // Add new entry
+        const entry = ConfigEntry{
+            .section = try self.allocator.dupe(u8, section),
+            .subsection = if (subsection) |sub| try self.allocator.dupe(u8, sub) else null,
+            .name = try self.allocator.dupe(u8, name),
+            .value = try self.allocator.dupe(u8, value),
+        };
+        
+        try self.entries.append(entry);
+    }
+
+    /// Remove a config value
+    pub fn removeValue(self: *GitConfig, section: []const u8, subsection: ?[]const u8, name: []const u8) !bool {
+        for (self.entries.items, 0..) |entry, i| {
+            if (entry.matches(section, subsection, name)) {
+                entry.deinit(self.allocator);
+                _ = self.entries.swapRemove(i);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Get boolean config value with default
+    pub fn getBool(self: GitConfig, section: []const u8, subsection: ?[]const u8, name: []const u8, default: bool) bool {
+        if (self.get(section, subsection, name)) |value| {
+            return parseBooleanValue(value) orelse default;
+        }
+        return default;
+    }
+
+    /// Get integer config value with default
+    pub fn getInt(self: GitConfig, section: []const u8, subsection: ?[]const u8, name: []const u8, default: i64) i64 {
+        if (self.get(section, subsection, name)) |value| {
+            return std.fmt.parseInt(i64, std.mem.trim(u8, value, " \t"), 10) catch default;
+        }
+        return default;
+    }
 };
 
 /// Load git config from a git directory
@@ -365,57 +415,6 @@ test "case insensitive matching" {
     try testing.expectEqualStrings("test@example.com", config.get("user", null, "email").?);
     try testing.expectEqualStrings("https://example.com/repo.git", config.get("remote", "origin", "url").?);
     try testing.expectEqualStrings("https://example.com/repo.git", config.get("REMOTE", "ORIGIN", "URL").?);
-}
-
-/// Enhanced config features for better git compatibility
-/// Set a config value
-pub fn setValue(self: *GitConfig, section: []const u8, subsection: ?[]const u8, name: []const u8, value: []const u8) !void {
-    // Check if entry already exists and update it
-    for (self.entries.items) |*entry| {
-        if (entry.matches(section, subsection, name)) {
-            self.allocator.free(entry.value);
-            entry.value = try self.allocator.dupe(u8, value);
-            return;
-        }
-    }
-    
-    // Add new entry
-    const entry = ConfigEntry{
-        .section = try self.allocator.dupe(u8, section),
-        .subsection = if (subsection) |sub| try self.allocator.dupe(u8, sub) else null,
-        .name = try self.allocator.dupe(u8, name),
-        .value = try self.allocator.dupe(u8, value),
-    };
-    
-    try self.entries.append(entry);
-}
-
-/// Remove a config value
-pub fn removeValue(self: *GitConfig, section: []const u8, subsection: ?[]const u8, name: []const u8) !bool {
-    for (self.entries.items, 0..) |entry, i| {
-        if (entry.matches(section, subsection, name)) {
-            entry.deinit(self.allocator);
-            _ = self.entries.swapRemove(i);
-            return true;
-        }
-    }
-    return false;
-}
-
-/// Get boolean config value with default
-pub fn getBool(self: GitConfig, section: []const u8, subsection: ?[]const u8, name: []const u8, default: bool) bool {
-    if (self.get(section, subsection, name)) |value| {
-        return parseBooleanValue(value) orelse default;
-    }
-    return default;
-}
-
-/// Get integer config value with default
-pub fn getInt(self: GitConfig, section: []const u8, subsection: ?[]const u8, name: []const u8, default: i64) i64 {
-    if (self.get(section, subsection, name)) |value| {
-        return std.fmt.parseInt(i64, std.mem.trim(u8, value, " \t"), 10) catch default;
-    }
-    return default;
 }
 
 /// Parse boolean values according to git config rules
