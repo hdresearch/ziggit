@@ -102,10 +102,23 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         }
     }
     
-    // Native command - process global flags and execute
+    // Determine if this command is handled natively or forwarded to real git
+    const is_native_handler = std.mem.eql(u8, command, "init") or
+        std.mem.eql(u8, command, "status") or
+        std.mem.eql(u8, command, "config") or
+        std.mem.eql(u8, command, "--exec-path") or
+        std.mem.eql(u8, command, "--version") or
+        std.mem.eql(u8, command, "-v") or
+        std.mem.eql(u8, command, "--version-info") or
+        std.mem.eql(u8, command, "--help") or
+        std.mem.eql(u8, command, "-h") or
+        std.mem.eql(u8, command, "help");
+
+    // Process global flags and execute
     var arg_index: usize = 0;
     
-    // Handle global flags in a loop
+    // Handle global flags in a loop - only process -C for native commands
+    // (forwarded commands pass all args to real git which handles -C itself)
     while (arg_index < all_original_args.items.len) {
         const arg = all_original_args.items[arg_index];
         
@@ -118,28 +131,30 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
             arg_index += 1;
             const dir_path = all_original_args.items[arg_index];
             
-            // Change directory for native ziggit command
-            std.process.changeCurDir(dir_path) catch |err| switch (err) {
-                error.AccessDenied => {
-                    const msg = try std.fmt.allocPrint(allocator, "fatal: cannot change to '{s}': Permission denied\n", .{dir_path});
-                    defer allocator.free(msg);
-                    try platform_impl.writeStderr(msg);
-                    std.process.exit(128);
-                },
-                error.FileNotFound => {
-                    const msg = try std.fmt.allocPrint(allocator, "fatal: cannot change to '{s}': No such file or directory\n", .{dir_path});
-                    defer allocator.free(msg);
-                    try platform_impl.writeStderr(msg);
-                    std.process.exit(128);
-                },
-                error.NotDir => {
-                    const msg = try std.fmt.allocPrint(allocator, "fatal: cannot change to '{s}': Not a directory\n", .{dir_path});
-                    defer allocator.free(msg);
-                    try platform_impl.writeStderr(msg);
-                    std.process.exit(128);
-                },
-                else => return err,
-            };
+            // Only change directory for native commands
+            if (is_native_handler) {
+                std.process.changeCurDir(dir_path) catch |err| switch (err) {
+                    error.AccessDenied => {
+                        const msg = try std.fmt.allocPrint(allocator, "fatal: cannot change to '{s}': Permission denied\n", .{dir_path});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                        std.process.exit(128);
+                    },
+                    error.FileNotFound => {
+                        const msg = try std.fmt.allocPrint(allocator, "fatal: cannot change to '{s}': No such file or directory\n", .{dir_path});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                        std.process.exit(128);
+                    },
+                    error.NotDir => {
+                        const msg = try std.fmt.allocPrint(allocator, "fatal: cannot change to '{s}': Not a directory\n", .{dir_path});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                        std.process.exit(128);
+                    },
+                    else => return err,
+                };
+            }
             
             arg_index += 1;
         } else if (std.mem.eql(u8, arg, "-c")) {
