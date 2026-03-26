@@ -15,6 +15,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     
+    exe.linkLibC();
+    exe.linkSystemLibrary("z");
+
     const exe_options = b.addOptions();
     exe_options.addOption(bool, "enable_git_fallback", enable_git_fallback);
     exe.root_module.addOptions("build_options", exe_options);
