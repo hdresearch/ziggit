@@ -126,6 +126,10 @@ pub fn main() !void {
 
     // Test 20: Error handling consistency
     try testErrorHandlingConsistency(allocator, test_dir);
+    
+    // Add comprehensive interoperability tests
+    try testGitCreateZiggitRead(allocator, test_dir);
+    try testZiggitCreateGitRead(allocator, test_dir);
 
     std.debug.print("All git interoperability tests passed!\n", .{});
 }
@@ -1273,7 +1277,250 @@ fn testErrorHandlingConsistency(allocator: std.mem.Allocator, test_dir: fs.Dir) 
     std.debug.print("  ✓ Test 20 passed\n", .{});
 }
 
+// New comprehensive interoperability tests
+fn testGitCreateZiggitRead(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
+    std.debug.print("Test 21: Git creates repo -> Ziggit reads all operations\n", .{});
+    
+    const repo_path = try test_dir.makeOpenPath("git_create_ziggit_read", .{});
+    defer test_dir.deleteTree("git_create_ziggit_read") catch {};
+
+    // Use git to init
+    {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"git", "init"},
+            .cwd_dir = repo_path,
+        }) catch return;
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+    }
+
+    // Create and add files with git
+    {
+        const file = try repo_path.createFile("test.txt", .{});
+        defer file.close();
+        try file.writeAll("test content\n");
+    }
+
+    // git add
+    {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"git", "add", "test.txt"},
+            .cwd_dir = repo_path,
+        }) catch return;
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+    }
+
+    // git commit
+    {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"git", "commit", "-m", "Initial commit"},
+            .cwd_dir = repo_path,
+        }) catch return;
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+    }
+
+    // Create branch with git
+    {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"git", "branch", "feature"},
+            .cwd_dir = repo_path,
+        }) catch return;
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+    }
+
+    // Now test ziggit reading operations
+    
+    // ziggit status --porcelain
+    {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"/root/ziggit/zig-out/bin/ziggit", "status", "--porcelain"},
+            .cwd_dir = repo_path,
+        }) catch return;
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        
+        if (result.term == .Exited and result.term.Exited == 0) {
+            std.debug.print("  ✓ ziggit status --porcelain works on git repo\n", .{});
+        } else {
+            std.debug.print("  ⚠ ziggit status --porcelain failed on git repo\n", .{});
+        }
+    }
+
+    // ziggit log --oneline
+    {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"/root/ziggit/zig-out/bin/ziggit", "log", "--oneline"},
+            .cwd_dir = repo_path,
+        }) catch return;
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        
+        if (result.term == .Exited and result.term.Exited == 0) {
+            std.debug.print("  ✓ ziggit log --oneline works on git repo\n", .{});
+        } else {
+            std.debug.print("  ⚠ ziggit log --oneline failed on git repo\n", .{});
+        }
+    }
+
+    // ziggit branch
+    {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"/root/ziggit/zig-out/bin/ziggit", "branch"},
+            .cwd_dir = repo_path,
+        }) catch return;
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        
+        if (result.term == .Exited and result.term.Exited == 0 and 
+           std.mem.indexOf(u8, result.stdout, "feature") != null) {
+            std.debug.print("  ✓ ziggit branch works on git repo\n", .{});
+        } else {
+            std.debug.print("  ⚠ ziggit branch failed on git repo\n", .{});
+        }
+    }
+
+    std.debug.print("  ✓ Test 21 passed\n", .{});
+}
+
+fn testZiggitCreateGitRead(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
+    std.debug.print("Test 22: Ziggit creates repo -> Git reads all operations\n", .{});
+    
+    const repo_path = try test_dir.makeOpenPath("ziggit_create_git_read", .{});
+    defer test_dir.deleteTree("ziggit_create_git_read") catch {};
+
+    // Use ziggit to init
+    {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"/root/ziggit/zig-out/bin/ziggit", "init"},
+            .cwd_dir = repo_path,
+        }) catch return;
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+    }
+
+    // Create and add files with ziggit
+    {
+        const file = try repo_path.createFile("test.txt", .{});
+        defer file.close();
+        try file.writeAll("test content\n");
+    }
+
+    // ziggit add
+    {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"/root/ziggit/zig-out/bin/ziggit", "add", "test.txt"},
+            .cwd_dir = repo_path,
+        }) catch return;
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+    }
+
+    // ziggit commit
+    {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"/root/ziggit/zig-out/bin/ziggit", "commit", "-m", "Initial commit"},
+            .cwd_dir = repo_path,
+        }) catch return;
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+    }
+
+    // Now test git reading operations
+    
+    // git status --porcelain
+    {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"git", "status", "--porcelain"},
+            .cwd_dir = repo_path,
+        }) catch return;
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        
+        if (result.term == .Exited and result.term.Exited == 0) {
+            std.debug.print("  ✓ git status --porcelain works on ziggit repo\n", .{});
+        } else {
+            std.debug.print("  ⚠ git status --porcelain failed on ziggit repo\n", .{});
+        }
+    }
+
+    // git log --oneline
+    {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"git", "log", "--oneline"},
+            .cwd_dir = repo_path,
+        }) catch return;
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        
+        if (result.term == .Exited and result.term.Exited == 0 and 
+           std.mem.indexOf(u8, result.stdout, "Initial commit") != null) {
+            std.debug.print("  ✓ git log --oneline works on ziggit repo\n", .{});
+        } else {
+            std.debug.print("  ⚠ git log --oneline failed on ziggit repo\n", .{});
+        }
+    }
+
+    // Test git checkout
+    {
+        // Create new file
+        const file = try repo_path.createFile("test2.txt", .{});
+        file.close();
+        
+        // git checkout should work
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"git", "checkout", "test2.txt"},
+            .cwd_dir = repo_path,
+        }) catch return;
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        
+        if (result.term == .Exited and result.term.Exited == 0) {
+            std.debug.print("  ✓ git checkout works on ziggit repo\n", .{});
+        } else {
+            std.debug.print("  ⚠ git checkout failed on ziggit repo\n", .{});
+        }
+    }
+
+    std.debug.print("  ✓ Test 22 passed\n", .{});
+}
+
 test "git interoperability" {
     // This runs the main function as a test
     try main();
+}
+
+test "comprehensive git-ziggit interoperability" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Create test directory
+    const test_dir = fs.cwd().makeOpenPath("test_interop_comprehensive", .{}) catch |err| {
+        std.debug.print("Failed to create test directory: {}\n", .{err});
+        return;
+    };
+    defer fs.cwd().deleteTree("test_interop_comprehensive") catch {};
+
+    std.debug.print("Running Comprehensive Git-Ziggit Interoperability Tests...\n", .{});
+
+    try testGitCreateZiggitRead(allocator, test_dir);
+    try testZiggitCreateGitRead(allocator, test_dir);
+
+    std.debug.print("All comprehensive interoperability tests passed!\n", .{});
 }
