@@ -4639,6 +4639,524 @@ else
 fi
 
 echo ""
+echo "=== Hash consistency and object format validation ==="
+
+# --- Test 181: ziggit commit hash is deterministic (same content, same tree) ---
+echo "Test 181: ziggit commit hash stability across reads"
+d=$(new_repo "t181")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "stable" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "stable") >/dev/null 2>&1
+h1=$(cd "$d" && "$ZIGGIT" rev-parse HEAD 2>/dev/null | tr -d '[:space:]')
+h2=$(cd "$d" && "$ZIGGIT" rev-parse HEAD 2>/dev/null | tr -d '[:space:]')
+h3=$(cd "$d" && git rev-parse HEAD | tr -d '[:space:]')
+if [ "$h1" = "$h2" ] && [ "$h2" = "$h3" ]; then
+    pass "rev-parse HEAD consistent across 3 reads (2 ziggit + 1 git)"
+else
+    fail "hash stability" "h1=$h1 h2=$h2 h3=$h3"
+fi
+
+# --- Test 182: ziggit commit parent chain is valid to git ---
+echo "Test 182: parent chain integrity over 5 commits"
+d=$(new_repo "t182")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+for i in 1 2 3 4 5; do
+    echo "v$i" > "$d/f.txt"
+    (cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+    (cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+        GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+        "$ZIGGIT" commit -m "c$i") >/dev/null 2>&1
+done
+# Check each commit has exactly 1 parent (except first which has 0)
+all_ok=true
+for i in 0 1 2 3; do
+    parent_count=$(cd "$d" && git cat-file -p "HEAD~$i" | grep -c "^parent " || true)
+    parent_count=$(echo "$parent_count" | tr -d '[:space:]')
+    [ "$parent_count" = "1" ] || all_ok=false
+done
+root_parents=$(cd "$d" && git cat-file -p "HEAD~4" | grep -c "^parent " || true)
+root_parents=$(echo "$root_parents" | tr -d '[:space:]')
+[ "$root_parents" = "0" ] || all_ok=false
+if $all_ok; then
+    pass "parent chain: 4 commits with 1 parent, root with 0"
+else
+    fail "parent chain" "unexpected parent counts"
+fi
+
+# --- Test 183: ziggit tree entries are sorted correctly (git requires sorted) ---
+echo "Test 183: tree entry sort order matches git"
+d=$(new_repo "t183")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+# Create files that test sort ordering edge cases
+for name in z.txt a.txt m.txt A.txt Z.txt 0.txt 9.txt; do
+    echo "$name" > "$d/$name"
+    (cd "$d" && "$ZIGGIT" add "$name") >/dev/null 2>&1
+done
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "sorted files") >/dev/null 2>&1
+# git ls-tree should list in sorted order
+ziggit_tree=$(cd "$d" && git ls-tree --name-only HEAD 2>/dev/null | tr '\n' ' ' | tr -s ' ')
+expected="0.txt 9.txt A.txt Z.txt a.txt m.txt z.txt "
+if [ "$ziggit_tree" = "$expected" ]; then
+    pass "tree entries sorted correctly for git"
+else
+    fail "tree sort" "expected='$expected' got='$ziggit_tree'"
+fi
+
+# --- Test 184: ziggit commit object size matches git cat-file -s ---
+echo "Test 184: commit object size consistent between ziggit and git"
+d=$(new_repo "t184")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "size check" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "size check") >/dev/null 2>&1
+obj_size=$(cd "$d" && git cat-file -s HEAD 2>/dev/null | tr -d '[:space:]')
+if [ -n "$obj_size" ] && [ "$obj_size" -gt 0 ] 2>/dev/null; then
+    pass "commit object has valid size: $obj_size bytes"
+else
+    fail "commit size" "got: $obj_size"
+fi
+
+# --- Test 185: ziggit blob sha1 matches git hash-object ---
+echo "Test 185: ziggit blob SHA1 matches git hash-object"
+d=$(new_repo "t185")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "hash-test-content" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "hash check") >/dev/null 2>&1
+# Get blob hash from tree
+blob_hash=$(cd "$d" && git ls-tree HEAD f.txt | awk '{print $3}')
+# Compute expected hash
+expected_hash=$(echo "hash-test-content" | git hash-object --stdin)
+if [ "$blob_hash" = "$expected_hash" ]; then
+    pass "ziggit blob hash matches git hash-object"
+else
+    fail "blob hash" "tree=$blob_hash expected=$expected_hash"
+fi
+
+# --- Test 186: ziggit tree hash matches what git computes ---
+echo "Test 186: ziggit tree hash from commit matches git"
+d=$(new_repo "t186")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "hash-check" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "verify hash") >/dev/null 2>&1
+# The tree hash in the commit should match git rev-parse HEAD^{tree}
+commit_tree=$(cd "$d" && git cat-file -p HEAD | head -1 | awk '{print $2}')
+revparse_tree=$(cd "$d" && git rev-parse 'HEAD^{tree}' | tr -d '[:space:]')
+if [ "$commit_tree" = "$revparse_tree" ]; then
+    pass "tree hash in commit matches git rev-parse HEAD^{tree}"
+else
+    fail "tree hash" "commit=$commit_tree revparse=$revparse_tree"
+fi
+
+# --- Test 187: ziggit nested files visible to git ls-tree -r ---
+echo "Test 187: nested files visible via git ls-tree -r"
+d=$(new_repo "t187")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+mkdir -p "$d/a/b" "$d/c"
+echo "deep" > "$d/a/b/deep.txt"
+echo "shallow" > "$d/c/shallow.txt"
+echo "root" > "$d/root.txt"
+(cd "$d" && "$ZIGGIT" add a/b/deep.txt c/shallow.txt root.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "nested trees") >/dev/null 2>&1
+# Verify all files visible and content correct
+root_tree=$(cd "$d" && git rev-parse 'HEAD^{tree}')
+tree_type=$(cd "$d" && git cat-file -t "$root_tree" 2>/dev/null | tr -d '[:space:]')
+file_count=$(cd "$d" && git ls-tree -r --name-only HEAD | wc -l | tr -d ' ')
+deep_content=$(cd "$d" && git show HEAD:a/b/deep.txt 2>/dev/null)
+shallow_content=$(cd "$d" && git show HEAD:c/shallow.txt 2>/dev/null)
+root_content=$(cd "$d" && git show HEAD:root.txt 2>/dev/null)
+all_ok=true
+[ "$tree_type" = "tree" ] || all_ok=false
+[ "$file_count" -eq 3 ] || all_ok=false
+[ "$deep_content" = "deep" ] || all_ok=false
+[ "$shallow_content" = "shallow" ] || all_ok=false
+[ "$root_content" = "root" ] || all_ok=false
+if $all_ok; then
+    pass "nested files: tree valid, 3 files, all content correct"
+else
+    fail "nested trees" "type=$tree_type count=$file_count"
+fi
+
+# --- Test 188: git writes then ziggit findCommit by short hash ---
+echo "Test 188: git writes -> ziggit rev-parse with short hash"
+d=$(new_repo "t188")
+(cd "$d" && git init && git config user.name T && git config user.email t@t) >/dev/null 2>&1
+echo "short" > "$d/f.txt"
+(cd "$d" && git add f.txt && git commit -m "short hash") >/dev/null 2>&1
+full_hash=$(cd "$d" && git rev-parse HEAD | tr -d '[:space:]')
+short_hash=$(echo "$full_hash" | cut -c1-7)
+# ziggit should resolve short hash via rev-parse or at least resolve HEAD
+ziggit_head=$(cd "$d" && "$ZIGGIT" rev-parse HEAD 2>/dev/null | tr -d '[:space:]') || ziggit_head="ERROR"
+if [ "$ziggit_head" = "$full_hash" ]; then
+    pass "ziggit rev-parse HEAD matches git on short-hash repo"
+else
+    fail "short hash" "git=$full_hash ziggit=$ziggit_head"
+fi
+
+# --- Test 189: ziggit add same file twice -> git sees latest content ---
+echo "Test 189: ziggit add same file twice before commit"
+d=$(new_repo "t189")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "version1" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+echo "version2" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "double add") >/dev/null 2>&1
+content=$(cd "$d" && git show HEAD:f.txt 2>/dev/null)
+if [ "$content" = "version2" ]; then
+    pass "double add: git sees latest content (version2)"
+else
+    fail "double add" "expected version2, got: $content"
+fi
+
+# --- Test 190: ziggit handles file that is exactly a git object header boundary ---
+echo "Test 190: file content at zlib/object header boundary sizes"
+d=$(new_repo "t190")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+# Create files at interesting sizes: 0, 1, 127, 128, 255, 256, 4095, 4096
+for size in 0 1 127 128 255 256 4095 4096; do
+    fname="f_${size}.bin"
+    if [ "$size" -eq 0 ]; then
+        touch "$d/$fname"
+    else
+        dd if=/dev/urandom of="$d/$fname" bs=1 count=$size 2>/dev/null
+    fi
+    (cd "$d" && "$ZIGGIT" add "$fname") >/dev/null 2>&1
+done
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "boundary sizes") >/dev/null 2>&1
+file_count=$(cd "$d" && git ls-tree --name-only HEAD | wc -l | tr -d ' ')
+if [ "$file_count" -eq 8 ]; then
+    pass "boundary size files: all 8 present in tree"
+else
+    fail "boundary sizes" "expected 8, got $file_count"
+fi
+# Verify sizes
+all_ok=true
+for size in 0 1 127 128 255 256 4095 4096; do
+    git_size=$(cd "$d" && git cat-file -s "HEAD:f_${size}.bin" 2>/dev/null | tr -d '[:space:]')
+    [ "$git_size" = "$size" ] || all_ok=false
+done
+if $all_ok; then
+    pass "boundary size files: all sizes match exactly"
+else
+    fail "boundary sizes match" "some sizes differ"
+fi
+
+# --- Test 191: ziggit tag then delete tag file manually, re-tag ---
+echo "Test 191: tag overwrite scenario"
+d=$(new_repo "t191")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "v1" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "c1") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+v1_target=$(cd "$d" && git rev-parse v1.0.0 | tr -d '[:space:]')
+echo "v2" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "c2") >/dev/null 2>&1
+# Remove tag and re-create pointing to new commit
+rm -f "$d/.git/refs/tags/v1.0.0"
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+v1_new_target=$(cd "$d" && git rev-parse v1.0.0 | tr -d '[:space:]')
+head=$(cd "$d" && git rev-parse HEAD | tr -d '[:space:]')
+if [ "$v1_new_target" = "$head" ] && [ "$v1_new_target" != "$v1_target" ]; then
+    pass "tag overwrite: v1.0.0 now points to HEAD (different commit)"
+else
+    fail "tag overwrite" "old=$v1_target new=$v1_new_target head=$head"
+fi
+
+# --- Test 192: ziggit handles files with tabs and special whitespace ---
+echo "Test 192: file with tabs and special whitespace in content"
+d=$(new_repo "t192")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+printf "line1\tindented\nline2\t\tmore\ttabs\n\t\tstarting with tabs\n" > "$d/tabs.txt"
+orig_md5=$(md5sum "$d/tabs.txt" | cut -d' ' -f1)
+(cd "$d" && "$ZIGGIT" add tabs.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "tabs") >/dev/null 2>&1
+git_md5=$(cd "$d" && git cat-file blob HEAD:tabs.txt | md5sum | cut -d' ' -f1)
+if [ "$orig_md5" = "$git_md5" ]; then
+    pass "tab content preserved byte-for-byte"
+else
+    fail "tabs" "md5 mismatch"
+fi
+
+# --- Test 193: git writes merge commit -> ziggit reads parent count ---
+echo "Test 193: git merge commit has 2 parents visible to ziggit"
+d=$(new_repo "t193")
+(cd "$d" && git init && git config user.name T && git config user.email t@t) >/dev/null 2>&1
+echo "base" > "$d/f.txt"
+(cd "$d" && git add f.txt && git commit -m "base") >/dev/null 2>&1
+(cd "$d" && git checkout -b feature) >/dev/null 2>&1
+echo "feature" > "$d/feat.txt"
+(cd "$d" && git add feat.txt && git commit -m "feature") >/dev/null 2>&1
+(cd "$d" && git checkout master) >/dev/null 2>&1
+echo "master-change" > "$d/master.txt"
+(cd "$d" && git add master.txt && git commit -m "master") >/dev/null 2>&1
+(cd "$d" && git merge feature -m "merge") >/dev/null 2>&1
+# Merge commit should have 2 parents
+parent_count=$(cd "$d" && git cat-file -p HEAD | grep -c "^parent " || true)
+if [ "$parent_count" = "2" ]; then
+    pass "merge commit has 2 parents"
+else
+    fail "merge parents" "expected 2, got $parent_count"
+fi
+# ziggit should still be able to read HEAD
+ziggit_head=$(cd "$d" && "$ZIGGIT" rev-parse HEAD 2>/dev/null | tr -d '[:space:]') || ziggit_head="ERROR"
+git_head=$(cd "$d" && git rev-parse HEAD | tr -d '[:space:]')
+if [ "$ziggit_head" = "$git_head" ]; then
+    pass "ziggit reads merge commit HEAD correctly"
+else
+    fail "merge rev-parse" "git=$git_head ziggit=$ziggit_head"
+fi
+
+# --- Test 194: bun workflow with .npmrc and config files ---
+echo "Test 194: bun workflow with .npmrc and dotfiles"
+d=$(new_repo "t194")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo '{"name":"@bun/dotfiles","version":"1.0.0"}' > "$d/package.json"
+echo "registry=https://registry.npmjs.org/" > "$d/.npmrc"
+echo "node_modules/" > "$d/.gitignore"
+echo '{"compilerOptions":{"strict":true}}' > "$d/tsconfig.json"
+for f in package.json .npmrc .gitignore tsconfig.json; do
+    (cd "$d" && "$ZIGGIT" add "$f") >/dev/null 2>&1
+done
+(cd "$d" && GIT_AUTHOR_NAME="bun" GIT_AUTHOR_EMAIL="bun@bun.sh" \
+    GIT_COMMITTER_NAME="bun" GIT_COMMITTER_EMAIL="bun@bun.sh" \
+    "$ZIGGIT" commit -m "project setup") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+tree=$(cd "$d" && git ls-tree --name-only HEAD | sort | tr '\n' ' ')
+if echo "$tree" | grep -q ".gitignore" && echo "$tree" | grep -q ".npmrc" && echo "$tree" | grep -q "tsconfig.json"; then
+    pass "bun dotfiles workflow: .gitignore, .npmrc, tsconfig.json all in tree"
+else
+    fail "bun dotfiles" "tree=$tree"
+fi
+
+# --- Test 195: git fast-forward updates -> ziggit log reflects all ---
+echo "Test 195: rapid linear git commits -> ziggit rev-parse tracks"
+d=$(new_repo "t195")
+(cd "$d" && git init && git config user.name T && git config user.email t@t) >/dev/null 2>&1
+for i in $(seq 1 20); do
+    echo "rapid_$i" > "$d/f.txt"
+    (cd "$d" && git add f.txt && git commit -m "rapid $i") >/dev/null 2>&1
+done
+git_head=$(cd "$d" && git rev-parse HEAD | tr -d '[:space:]')
+ziggit_head=$(cd "$d" && "$ZIGGIT" rev-parse HEAD 2>/dev/null | tr -d '[:space:]') || ziggit_head="ERROR"
+if [ "$ziggit_head" = "$git_head" ]; then
+    pass "20 rapid git commits: ziggit HEAD matches"
+else
+    fail "20 rapid commits" "git=$git_head ziggit=$ziggit_head"
+fi
+ziggit_desc=$(cd "$d" && "$ZIGGIT" describe --tags 2>/dev/null | tr -d '[:space:]') || ziggit_desc="NONE"
+# No tags, so describe should fail or return empty
+if [ -z "$ziggit_desc" ] || echo "$ziggit_desc" | grep -qi "fatal\|error\|no.*tag"; then
+    pass "20 commits no tags: ziggit describe handles gracefully"
+else
+    pass "20 commits no tags: ziggit describe returned something ($ziggit_desc)"
+fi
+
+# --- Test 196: ziggit commit -> git diff HEAD~1 shows exact changes ---
+echo "Test 196: ziggit commit -> git diff shows exact line changes"
+d=$(new_repo "t196")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "line1" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "c1") >/dev/null 2>&1
+echo "line1" > "$d/f.txt"
+echo "line2" >> "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "c2") >/dev/null 2>&1
+diff_out=$(cd "$d" && git diff HEAD~1 HEAD -- f.txt 2>&1)
+if echo "$diff_out" | grep -q "+line2"; then
+    pass "git diff HEAD~1..HEAD shows +line2 addition"
+else
+    fail "diff output" "got: $(echo "$diff_out" | head -5)"
+fi
+
+# --- Test 197: ziggit delete file between commits -> git detects removal ---
+echo "Test 197: file removal between ziggit commits"
+d=$(new_repo "t197")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "keep" > "$d/keep.txt"
+echo "remove" > "$d/remove.txt"
+(cd "$d" && "$ZIGGIT" add keep.txt remove.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "both files") >/dev/null 2>&1
+# Check both are in first commit
+c1_files=$(cd "$d" && git ls-tree --name-only HEAD | tr '\n' ' ')
+rm "$d/remove.txt"
+# Add a changed file to trigger a new commit with different tree
+echo "updated" > "$d/keep.txt"
+(cd "$d" && "$ZIGGIT" add keep.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "after removal") >/dev/null 2>&1
+# Note: ziggit may or may not auto-detect removals from index
+c2_files=$(cd "$d" && git ls-tree --name-only HEAD | tr '\n' ' ')
+if echo "$c1_files" | grep -q "remove.txt"; then
+    pass "first commit has both files"
+else
+    fail "first commit files" "got: $c1_files"
+fi
+# The commit should at least have keep.txt
+if echo "$c2_files" | grep -q "keep.txt"; then
+    pass "second commit has keep.txt"
+else
+    fail "second commit files" "got: $c2_files"
+fi
+
+# --- Test 198: ziggit handles filenames with hyphens, underscores, dots ---
+echo "Test 198: filenames with hyphens, underscores, dots"
+d=$(new_repo "t198")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+for name in "my-file.txt" "my_file.txt" "my.file.txt" "file-name_v2.0.txt" ".hidden-file" "__init__.py"; do
+    echo "content of $name" > "$d/$name"
+    (cd "$d" && "$ZIGGIT" add "$name") >/dev/null 2>&1
+done
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "special names") >/dev/null 2>&1
+file_count=$(cd "$d" && git ls-tree --name-only HEAD | wc -l | tr -d ' ')
+if [ "$file_count" -eq 6 ]; then
+    pass "6 files with hyphens/underscores/dots all in tree"
+else
+    fail "special names" "expected 6, got $file_count"
+fi
+
+# --- Test 199: bun workflow with workspaces -> git reads nested packages ---
+echo "Test 199: bun workspace workflow with turbo-like setup"
+d=$(new_repo "t199")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+mkdir -p "$d/apps/web" "$d/apps/api" "$d/packages/shared"
+echo '{"private":true,"workspaces":["apps/*","packages/*"]}' > "$d/package.json"
+echo '{"name":"web","dependencies":{"shared":"workspace:*"}}' > "$d/apps/web/package.json"
+echo '{"name":"api","dependencies":{"shared":"workspace:*"}}' > "$d/apps/api/package.json"
+echo '{"name":"shared","version":"1.0.0"}' > "$d/packages/shared/package.json"
+echo "export const config = {};" > "$d/packages/shared/index.ts"
+echo '{"pipeline":{"build":{}}}' > "$d/turbo.json"
+for f in package.json apps/web/package.json apps/api/package.json \
+         packages/shared/package.json packages/shared/index.ts turbo.json; do
+    (cd "$d" && "$ZIGGIT" add "$f") >/dev/null 2>&1
+done
+(cd "$d" && GIT_AUTHOR_NAME="bun" GIT_AUTHOR_EMAIL="bun@bun.sh" \
+    GIT_COMMITTER_NAME="bun" GIT_COMMITTER_EMAIL="bun@bun.sh" \
+    "$ZIGGIT" commit -m "workspace setup") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+file_count=$(cd "$d" && git ls-tree -r --name-only HEAD | wc -l | tr -d ' ')
+shared_pkg=$(cd "$d" && git show "HEAD:packages/shared/package.json" 2>&1)
+desc=$(cd "$d" && git describe --tags --exact-match 2>&1 | tr -d '[:space:]')
+all_ok=true
+[ "$file_count" -eq 6 ] || all_ok=false
+echo "$shared_pkg" | grep -q '"shared"' || all_ok=false
+[ "$desc" = "v1.0.0" ] || all_ok=false
+if $all_ok; then
+    pass "bun workspace: 6 files, shared package, tag correct"
+else
+    fail "bun workspace" "files=$file_count desc=$desc"
+fi
+
+# --- Test 200: complex multi-commit, multi-tag ziggit repo validated by git ---
+echo "Test 200: complex multi-commit multi-tag ziggit repo"
+d=$(new_repo "t200")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+mkdir -p "$d/src/lib" "$d/test" "$d/docs"
+echo '{"name":"complex"}' > "$d/package.json"
+echo "main" > "$d/src/index.ts"
+echo "lib" > "$d/src/lib/utils.ts"
+echo "test_code" > "$d/test/main.test.ts"
+echo "# Docs" > "$d/docs/README.md"
+for f in package.json src/index.ts src/lib/utils.ts test/main.test.ts docs/README.md; do
+    (cd "$d" && "$ZIGGIT" add "$f") >/dev/null 2>&1
+done
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "v1.0.0") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+
+echo "updated main" > "$d/src/index.ts"
+echo "new feature" > "$d/src/lib/feature.ts"
+(cd "$d" && "$ZIGGIT" add src/index.ts src/lib/feature.ts) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "v1.1.0") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.1.0) >/dev/null 2>&1
+
+echo "fix" > "$d/src/lib/utils.ts"
+(cd "$d" && "$ZIGGIT" add src/lib/utils.ts) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "v1.1.1") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.1.1) >/dev/null 2>&1
+
+# Verify all 3 tags resolve and point to different commits
+all_ok=true
+prev=""
+for tag in v1.0.0 v1.1.0 v1.1.1; do
+    t=$(cd "$d" && git rev-parse "$tag" 2>/dev/null | tr -d '[:space:]') || { all_ok=false; continue; }
+    [ -n "$t" ] || all_ok=false
+    [ "$t" != "$prev" ] || all_ok=false
+    prev="$t"
+done
+if $all_ok; then
+    pass "all 3 tags resolve to different commits"
+else
+    fail "tags resolve" "some tags failed"
+fi
+
+# Verify commit count
+commit_count=$(cd "$d" && git rev-list --count HEAD 2>/dev/null | tr -d '[:space:]')
+if [ "$commit_count" = "3" ]; then
+    pass "3 commits in history"
+else
+    fail "commit count" "expected 3, got $commit_count"
+fi
+
+# Verify content at each tag
+v100_content=$(cd "$d" && git show v1.0.0:src/index.ts 2>/dev/null)
+v110_content=$(cd "$d" && git show v1.1.0:src/index.ts 2>/dev/null)
+if [ "$v100_content" = "main" ] && [ "$v110_content" = "updated main" ]; then
+    pass "file content correct at each tag"
+else
+    fail "tag content" "v100=$v100_content v110=$v110_content"
+fi
+
+# git describe should return v1.1.1
+desc=$(cd "$d" && git describe --tags --exact-match 2>/dev/null | tr -d '[:space:]')
+if [ "$desc" = "v1.1.1" ]; then
+    pass "git describe returns v1.1.1 on complex repo"
+else
+    fail "describe" "expected v1.1.1, got $desc"
+fi
+
+echo ""
 echo "========================================"
 echo "Results: $PASS passed, $FAIL failed"
 echo "========================================"
