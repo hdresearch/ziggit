@@ -29,14 +29,20 @@ pub fn cloneBareSmart(allocator: std.mem.Allocator, url: []const u8, target_dir:
     var clone_result = try smart_http.clonePack(allocator, url);
     defer clone_result.deinit();
 
-    // 3. Save pack to disk
-    const checksum = try pack_writer.savePackFast(allocator, git_dir, clone_result.pack_data);
-    errdefer allocator.free(checksum);
+    // 3. Save pack to disk (skip if empty/too small - e.g., empty repo)
+    var checksum: []u8 = undefined;
+    if (clone_result.pack_data.len >= 32) {
+        checksum = try pack_writer.savePackFast(allocator, git_dir, clone_result.pack_data);
+        errdefer allocator.free(checksum);
 
-    // 4. Generate idx
-    const pp = try pack_writer.packPath(allocator, git_dir, checksum);
-    defer allocator.free(pp);
-    try idx_writer.generateIdx(allocator, pp);
+        // 4. Generate idx
+        const pp = try pack_writer.packPath(allocator, git_dir, checksum);
+        defer allocator.free(pp);
+        try idx_writer.generateIdx(allocator, pp);
+    } else {
+        checksum = try allocator.dupe(u8, "0000000000000000000000000000000000000000");
+    }
+    errdefer allocator.free(checksum);
 
     // 5. Update refs (bare mode)
     var ref_updates = std.ArrayList(pack_writer.RefUpdate).init(allocator);
@@ -73,14 +79,20 @@ pub fn cloneSmart(allocator: std.mem.Allocator, url: []const u8, target_dir: []c
     var clone_result = try smart_http.clonePack(allocator, url);
     defer clone_result.deinit();
 
-    // 3. Save pack
-    const checksum = try pack_writer.savePackFast(allocator, git_dir, clone_result.pack_data);
-    errdefer allocator.free(checksum);
+    // 3. Save pack (skip if empty/too small - e.g., empty repo)
+    var checksum: []u8 = undefined;
+    if (clone_result.pack_data.len >= 32) {
+        checksum = try pack_writer.savePackFast(allocator, git_dir, clone_result.pack_data);
+        errdefer allocator.free(checksum);
 
-    // 4. Generate idx
-    const pp = try pack_writer.packPath(allocator, git_dir, checksum);
-    defer allocator.free(pp);
-    try idx_writer.generateIdx(allocator, pp);
+        // 4. Generate idx
+        const pp = try pack_writer.packPath(allocator, git_dir, checksum);
+        defer allocator.free(pp);
+        try idx_writer.generateIdx(allocator, pp);
+    } else {
+        checksum = try allocator.dupe(u8, "0000000000000000000000000000000000000000");
+    }
+    errdefer allocator.free(checksum);
 
     // 5. Update refs (non-bare: branches go to remotes/origin/)
     var ref_updates = std.ArrayList(pack_writer.RefUpdate).init(allocator);
@@ -141,7 +153,9 @@ pub fn fetchSmart(allocator: std.mem.Allocator, url: []const u8, git_dir: []cons
     var fetch_result = try smart_http.fetchNewPack(allocator, url, local_refs.items) orelse return null;
     defer fetch_result.deinit();
 
-    // 3. Save pack
+    // 3. Save pack (skip if too small)
+    if (fetch_result.pack_data.len < 32) return null;
+
     const checksum = try pack_writer.savePackFast(allocator, git_dir, fetch_result.pack_data);
     errdefer allocator.free(checksum);
 
