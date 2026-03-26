@@ -110,7 +110,26 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         }
         all_original_args.shrinkRetainingCapacity(write_idx);
     }
-    
+
+    // Post-process: command-specific flag translations for git 2.43 compat
+    // show-ref --branches → show-ref --heads (git 2.46+ alias)
+    // show-ref --exists → needs git 2.45+, handle specially
+    {
+        var found_show_ref = false;
+        var found_for_each_ref = false;
+        for (all_original_args.items) |arg| {
+            if (std.mem.eql(u8, arg, "show-ref")) { found_show_ref = true; break; }
+            if (std.mem.eql(u8, arg, "for-each-ref")) { found_for_each_ref = true; break; }
+        }
+        if (found_show_ref or found_for_each_ref) {
+            for (all_original_args.items, 0..) |arg, i| {
+                if (std.mem.eql(u8, arg, "--branches")) {
+                    all_original_args.items[i] = "--heads";
+                }
+            }
+        }
+    }
+
     // Find the command by skipping global flags
     var command_index: usize = 0;
     while (command_index < all_original_args.items.len) {
