@@ -118,8 +118,11 @@ pub const Repository = struct {
         // Pre-warm index metadata cache for status operations
         self.warmupIndexMetadata() catch {};
         
-        // Pre-warm tags directory cache
-        const tag_result = self.describeTags(self.allocator) catch return;
+        // Pre-warm tags directory cache (NoTagsFound is expected for repos without tags)
+        const tag_result = self.describeTags(self.allocator) catch |err| switch (err) {
+            error.NoTagsFound => return, // Normal — repo has no tags
+            else => return,
+        };
         // Free the result since we're just warming cache
         self.allocator.free(tag_result);
     }
@@ -707,17 +710,23 @@ pub const Repository = struct {
         var tags_dir_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
         const tags_dir = std.fmt.bufPrint(&tags_dir_buf, "{s}/refs/tags", .{self.git_dir}) catch return error.PathTooLong;
 
-        // OPTIMIZATION: Check if tags directory exists before iterating
-        if (std.fs.cwd().statFile(tags_dir)) |tags_stat| {
+        // Check if tags directory exists before iterating
+        if (std.fs.openDirAbsolute(tags_dir, .{})) |dir| {
+            var d = dir;
+            d.close();
+            
             // Cache miss - do the optimized scan and cache result permanently
             const result = try self.describeTagsUltraFast(allocator);
             
-            // Update cache aggressively
+            // Update cache
             if (self._cached_latest_tag) |old_tag| {
                 self.allocator.free(old_tag);
             }
-            self._cached_latest_tag = try self.allocator.dupe(u8, result);
-            self._cached_tags_dir_mtime = tags_stat.mtime;
+            if (result.len > 0) {
+                self._cached_latest_tag = try self.allocator.dupe(u8, result);
+            } else {
+                self._cached_latest_tag = null;
+            }
             
             return result;
         } else |_| {
@@ -807,9 +816,15 @@ pub const Repository = struct {
         }
     }
 
-    /// Get latest tag (like `git describe --tags --abbrev=0`)  
+    /// Get latest tag (like `git describe --tags --abbrev=0`)
+    /// Returns the tag name, or error.NoTagsFound if the repo has no tags.
     pub fn describeTags(self: *Repository, allocator: std.mem.Allocator) ![]const u8 {
-        return self.describeTagsFast(allocator);
+        const result = try self.describeTagsFast(allocator);
+        if (result.len == 0) {
+            allocator.free(result);
+            return error.NoTagsFound;
+        }
+        return result;
     }
 
     /// Find specific commit hash
@@ -1014,11 +1029,18 @@ pub const Repository = struct {
     }
 
     /// Checkout (pure Zig implementation - updates HEAD, working tree, and index)
+    /// Works on both bare repos (just updates HEAD) and non-bare repos (updates working tree + index).
     pub fn checkout(self: *Repository, ref: []const u8) !void {
         const commit_hash = try self.findCommit(ref);
         
         // 1. Read commit object to get tree hash
         const tree_hash = try self.getCommitTree(&commit_hash);
+        
+        // For bare repos, only update HEAD (no working tree)
+        if (self.isBareRepo()) {
+            try self.updateHead(&commit_hash);
+            return;
+        }
         
         // 2. Recursively checkout tree to working directory
         try self.checkoutTree(&tree_hash, self.path);
@@ -1026,8 +1048,44 @@ pub const Repository = struct {
         // 3. Update index to match the checked-out tree
         try self.updateIndexFromTree(&tree_hash);
         
-        // 4. Update HEAD (for detached HEAD) or the branch ref
-        try self.updateHead(&commit_hash);
+        // 4. Update HEAD — check if ref is a branch name and update symbolically
+        try self.updateHeadForCheckout(ref, &commit_hash);
+        
+        // 5. Invalidate caches
+        self._cached_head_hash = null;
+        self._cached_index_mtime = null;
+        self._cached_is_clean = null;
+        self._cached_index_entries_mtime = null;
+    }
+    
+    /// Update HEAD for a checkout — if ref is a branch, make HEAD a symbolic ref
+    fn updateHeadForCheckout(self: *Repository, ref: []const u8, commit_hash: *const [40]u8) !void {
+        const head_path = try std.fmt.allocPrint(self.allocator, "{s}/HEAD", .{self.git_dir});
+        defer self.allocator.free(head_path);
+        
+        // Check if ref is a branch name
+        var ref_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const branch_ref = std.fmt.bufPrint(&ref_path_buf, "{s}/refs/heads/{s}", .{ self.git_dir, ref }) catch {
+            // Fall back to detached HEAD
+            const hf = try std.fs.createFileAbsolute(head_path, .{ .truncate = true });
+            defer hf.close();
+            try hf.writeAll(commit_hash);
+            try hf.writeAll("\n");
+            return;
+        };
+        
+        if (std.fs.accessAbsolute(branch_ref, .{})) |_| {
+            // ref is a branch — set HEAD as symbolic ref
+            const hf = try std.fs.createFileAbsolute(head_path, .{ .truncate = true });
+            defer hf.close();
+            try hf.writer().print("ref: refs/heads/{s}\n", .{ref});
+        } else |_| {
+            // Not a branch — detached HEAD
+            const hf = try std.fs.createFileAbsolute(head_path, .{ .truncate = true });
+            defer hf.close();
+            try hf.writeAll(commit_hash);
+            try hf.writeAll("\n");
+        }
     }
 
     /// Fetch from remote repository (local or HTTPS)
@@ -1867,10 +1925,13 @@ pub const Repository = struct {
                 defer self.allocator.free(subdir_path);
                 std.fs.cwd().makePath(subdir_path) catch {};
                 try self.checkoutTree(&sha_hex, subdir_path);
+            } else if (std.mem.eql(u8, mode, "120000")) {
+                // Symlink entry — skip gracefully (symlinks not yet supported)
+                // TODO: create actual symlinks
             } else if (std.mem.eql(u8, mode, "160000")) {
                 // Submodule entry — skip gracefully (can't checkout submodules)
-                continue;
             }
+            // else: unknown mode — skip
 
             pos = sha_start + 20;
         }
@@ -1905,6 +1966,17 @@ pub const Repository = struct {
 
         // Populate index from tree
         try self.addTreeToIndex(&git_index, tree_hash, "");
+        
+        // After populating from tree, stat actual files to get correct mtime/size
+        // This ensures the index matches the working tree state
+        for (git_index.entries.items) |*entry| {
+            var file_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            const file_path = std.fmt.bufPrint(&file_path_buf, "{s}/{s}", .{ self.path, entry.path }) catch continue;
+            const stat = std.fs.cwd().statFile(file_path) catch continue;
+            entry.size = @intCast(@min(stat.size, std.math.maxInt(u32)));
+            entry.mtime_seconds = @intCast(@max(0, @divTrunc(stat.mtime, 1_000_000_000)));
+            entry.mtime_nanoseconds = @intCast(@max(0, @mod(stat.mtime, 1_000_000_000)));
+        }
 
         // Write index to disk
         const index_path = try std.fmt.allocPrint(self.allocator, "{s}/index", .{self.git_dir});

@@ -1753,43 +1753,72 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             }
         }
 
-        // Shell out to real git for checkout with refs (as per requirements)
-        var git_args = std.ArrayList([]const u8).init(allocator);
-        defer git_args.deinit();
+        // Use native ziggit checkout
+        const ziggit = @import("ziggit.zig");
         
-        try git_args.append("git");
-        try git_args.append("checkout");
+        // Determine repository root from git_path
+        const repo_root = if (std.mem.endsWith(u8, git_path, "/.git"))
+            git_path[0 .. git_path.len - 5]
+        else
+            git_path; // bare repo
         
-        if (quiet) {
-            try git_args.append("--quiet");
-        }
-        
-        try git_args.append(target);
-
-        // Spawn git process
-        var child = std.process.Child.init(git_args.items, allocator);
-        const result = child.spawnAndWait() catch |err| {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: failed to execute git: {}\n", .{err});
-            defer allocator.free(msg);
-            try platform_impl.writeStderr(msg);
+        var repo = ziggit.Repository.open(allocator, repo_root) catch {
+            try platform_impl.writeStderr("fatal: not a git repository\n");
             std.process.exit(128);
         };
+        defer repo.close();
         
-        switch (result) {
-            .Exited => |code| {
-                if (code != 0) {
-                    std.process.exit(@intCast(code));
-                }
-            },
-            .Signal => |_| {
-                std.process.exit(128);
-            },
-            .Stopped => |_| {
-                std.process.exit(128);
-            },
-            .Unknown => |_| {
-                std.process.exit(128);
-            },
+        repo.checkout(target) catch |err| {
+            switch (err) {
+                error.CommitNotFound => {
+                    const msg = try std.fmt.allocPrint(allocator, "error: pathspec '{s}' did not match any file(s) known to git\n", .{target});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(1);
+                },
+                error.RefNotFound => {
+                    const msg = try std.fmt.allocPrint(allocator, "error: pathspec '{s}' did not match any file(s) known to git\n", .{target});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(1);
+                },
+                error.ObjectNotFound => {
+                    const msg = try std.fmt.allocPrint(allocator, "fatal: reference is not a tree: {s}\n", .{target});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(128);
+                },
+                error.InvalidCommitObject, error.InvalidTreeObject => {
+                    const msg = try std.fmt.allocPrint(allocator, "fatal: corrupt object for '{s}'\n", .{target});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(128);
+                },
+                else => {
+                    const msg = try std.fmt.allocPrint(allocator, "fatal: checkout failed: {}\n", .{err});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(128);
+                },
+            }
+        };
+        
+        if (!quiet) {
+            // Check if this was a branch or detached HEAD
+            var ref_check_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            const branch_ref_path = std.fmt.bufPrint(&ref_check_buf, "{s}/refs/heads/{s}", .{ repo.git_dir, target }) catch {
+                return;
+            };
+            
+            if (std.fs.accessAbsolute(branch_ref_path, .{})) |_| {
+                const msg = try std.fmt.allocPrint(allocator, "Switched to branch '{s}'\n", .{target});
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+            } else |_| {
+                const msg = try std.fmt.allocPrint(allocator, "HEAD is now at {s}\n", .{target[0..@min(target.len, 7)]});
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+            }
         }
     }
 }
