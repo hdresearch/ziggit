@@ -2474,19 +2474,19 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     };
     
     // Check if target directory already exists
-    if (platform_impl.fs.exists(target_dir) catch false) {
-        const msg = try std.fmt.allocPrint(allocator, "fatal: destination path '{s}' already exists and is not an empty directory.\n", .{target_dir});
+    if (platform_impl.fs.exists(final_target_dir) catch false) {
+        const msg = try std.fmt.allocPrint(allocator, "fatal: destination path '{s}' already exists and is not an empty directory.\n", .{final_target_dir});
         defer allocator.free(msg);
         try platform_impl.writeStderr(msg);
         std.process.exit(128);
     }
     
-    const clone_msg = try std.fmt.allocPrint(allocator, "Cloning into '{s}'...\n", .{target_dir});
+    const clone_msg = try std.fmt.allocPrint(allocator, "Cloning into '{s}'...\n", .{final_target_dir});
     defer allocator.free(clone_msg);
     try platform_impl.writeStdout(clone_msg);
     
     // Perform clone using dumb HTTP protocol
-    network.cloneRepository(allocator, url, target_dir, platform_impl) catch |err| switch (err) {
+    network.cloneRepository(allocator, url.?, final_target_dir, platform_impl) catch |err| switch (err) {
         error.RepositoryNotFound => {
             try platform_impl.writeStderr("fatal: repository not found\n");
             std.process.exit(128);
