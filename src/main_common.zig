@@ -1582,7 +1582,7 @@ fn cmdMerge(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     // Check if this is a fast-forward merge
     if (canFastForward(git_path, current_hash, target_hash, allocator, platform_impl)) {
         // Fast-forward merge
-        try refs.updateRef(git_path, try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{current_branch}), target_hash, platform_impl, allocator);
+        try refs.updateRef(git_path, current_branch, target_hash, platform_impl, allocator);
         try checkoutCommitTree(git_path, target_hash, allocator, platform_impl);
 
         const msg = try std.fmt.allocPrint(allocator, "Fast-forward\n", .{});

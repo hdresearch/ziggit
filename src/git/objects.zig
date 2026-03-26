@@ -265,8 +265,8 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     if (idx_data.len < 8) return error.ObjectNotFound;
     
     // Check for pack index magic and version
-    const magic = std.mem.readInt(u32, idx_data[0..4][0..4], .big);
-    const version = std.mem.readInt(u32, idx_data[4..8][0..4], .big);
+    const magic = std.mem.readInt(u32, @ptrCast(idx_data[0..4]), .big);
+    const version = std.mem.readInt(u32, @ptrCast(idx_data[4..8]), .big);
     
     if (magic != 0xff744f63) return error.ObjectNotFound; // '\377tOc'
     if (version != 2) return error.ObjectNotFound;
@@ -277,7 +277,7 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     if (idx_data.len < fanout_end) return error.ObjectNotFound;
     
     // Get number of objects from last fanout entry
-    const num_objects = std.mem.readInt(u32, idx_data[fanout_end - 4..fanout_end][0..4], .big);
+    const num_objects = std.mem.readInt(u32, @ptrCast(idx_data[fanout_end - 4..fanout_end]), .big);
     if (num_objects == 0) return error.ObjectNotFound;
     
     // Find object in sorted SHA-1 table
@@ -304,7 +304,7 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     const offset_table_offset = offset_table_start + object_index.? * 4;
     if (idx_data.len < offset_table_offset + 4) return error.ObjectNotFound;
     
-    const object_offset = std.mem.readInt(u32, idx_data[offset_table_offset..offset_table_offset + 4][0..4], .big);
+    const object_offset = std.mem.readInt(u32, @ptrCast(idx_data[offset_table_offset..offset_table_offset + 4]), .big);
     
     // Now read from the corresponding .pack file
     const pack_filename = try std.fmt.allocPrint(allocator, "{s}.pack", .{idx_filename[0..idx_filename.len-4]});
@@ -341,7 +341,7 @@ fn readObjectFromPack(pack_path: []const u8, offset: u32, platform_impl: anytype
     
     // Read variable-length size (simplified)
     var size: usize = @intCast(first_byte & 15);
-    var shift: u3 = 4;
+    var shift: u6 = 4;
     
     while (first_byte & 0x80 != 0 and pos < pack_data.len) {
         const next_byte = pack_data[pos];
