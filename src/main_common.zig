@@ -1010,34 +1010,8 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         std.process.exit(1);
     }
 
-    // Create tree object from index entries
-    var tree_entries = std.ArrayList(objects.TreeEntry).init(allocator);
-    defer {
-        for (tree_entries.items) |entry| {
-            entry.deinit(allocator);
-        }
-        tree_entries.deinit();
-    }
-
-    for (index.entries.items) |entry| {
-        const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
-        defer allocator.free(hash_str);
-        
-        const mode_str = try std.fmt.allocPrint(allocator, "{o}", .{entry.mode});
-        defer allocator.free(mode_str);
-
-        const tree_entry = objects.TreeEntry.init(
-            try allocator.dupe(u8, mode_str),
-            try allocator.dupe(u8, entry.path),
-            try allocator.dupe(u8, hash_str),
-        );
-        try tree_entries.append(tree_entry);
-    }
-
-    const tree_object = try objects.createTreeObject(tree_entries.items, allocator);
-    defer tree_object.deinit(allocator);
-    
-    const tree_hash = try tree_object.store(git_path, platform_impl, allocator);
+    // Create recursive tree objects from index entries (handles nested directories)
+    const tree_hash = try buildRecursiveTree(allocator, index.entries.items, "", git_path, platform_impl);
     defer allocator.free(tree_hash);
 
     // Get parent commit (if any)
@@ -1086,14 +1060,16 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     const tz_minutes = (tz_abs % 3600) / 60;
 
     // Resolve author/committer identity
-    const author_name = resolveAuthorName(allocator, git_path) catch "ziggit";
-    defer if (!std.mem.eql(u8, author_name, "ziggit")) allocator.free(author_name);
-    const author_email = resolveAuthorEmail(allocator, git_path) catch "ziggit@example.com";
-    defer if (!std.mem.eql(u8, author_email, "ziggit@example.com")) allocator.free(author_email);
+    const author_name_fallback: []const u8 = "ziggit";
+    const author_name = resolveAuthorName(allocator, git_path) catch author_name_fallback;
+    defer if (author_name.ptr != author_name_fallback.ptr) allocator.free(author_name);
+    const author_email_fallback: []const u8 = "ziggit@example.com";
+    const author_email = resolveAuthorEmail(allocator, git_path) catch author_email_fallback;
+    defer if (author_email.ptr != author_email_fallback.ptr) allocator.free(author_email);
     const committer_name = resolveCommitterName(allocator, git_path, author_name) catch author_name;
-    defer if (!std.mem.eql(u8, committer_name, author_name) and !std.mem.eql(u8, committer_name, "ziggit")) allocator.free(committer_name);
+    defer if (committer_name.ptr != author_name.ptr) allocator.free(committer_name);
     const committer_email = resolveCommitterEmail(allocator, git_path, author_email) catch author_email;
-    defer if (!std.mem.eql(u8, committer_email, author_email) and !std.mem.eql(u8, committer_email, "ziggit@example.com")) allocator.free(committer_email);
+    defer if (committer_email.ptr != author_email.ptr) allocator.free(committer_email);
 
     const author_info = try std.fmt.allocPrint(allocator, "{s} <{s}> {d} {c}{d:0>2}{d:0>2}", .{ author_name, author_email, timestamp, tz_sign, tz_hours, tz_minutes });
     defer allocator.free(author_info);
@@ -3548,6 +3524,134 @@ fn addDirectoryRecursively(allocator: std.mem.Allocator, repo_root: []const u8, 
             else => continue, // Skip other types (symlinks, etc.)
         }
     }
+}
+
+/// Build recursive tree objects from a list of index entries.
+/// For entries with paths like "src/main.zig", creates subtree objects for each directory level,
+/// matching git's expected tree format.
+fn buildRecursiveTree(allocator: std.mem.Allocator, entries: []const index_mod.IndexEntry, prefix: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) ![]u8 {
+    const TreeItem = struct {
+        name: []const u8,
+        mode: []const u8,
+        hash_bytes: [20]u8,
+    };
+    var items = std.ArrayList(TreeItem).init(allocator);
+    defer {
+        for (items.items) |item| {
+            allocator.free(item.name);
+            allocator.free(item.mode);
+        }
+        items.deinit();
+    }
+
+    // Track subdirectories we've already processed
+    var seen_dirs = std.StringHashMap(void).init(allocator);
+    defer {
+        var kit = seen_dirs.keyIterator();
+        while (kit.next()) |key| allocator.free(key.*);
+        seen_dirs.deinit();
+    }
+
+    for (entries) |entry| {
+        // Only consider entries under our prefix
+        const rel_path = if (prefix.len == 0)
+            entry.path
+        else blk: {
+            if (std.mem.startsWith(u8, entry.path, prefix) and
+                entry.path.len > prefix.len and
+                entry.path[prefix.len] == '/')
+            {
+                break :blk entry.path[prefix.len + 1 ..];
+            } else continue;
+        };
+
+        // Check if this is a direct child or lives in a subdirectory
+        if (std.mem.indexOfScalar(u8, rel_path, '/')) |slash_pos| {
+            // It's inside a subdirectory — record the dir name
+            const dir_name = rel_path[0..slash_pos];
+            if (!seen_dirs.contains(dir_name)) {
+                const duped = try allocator.dupe(u8, dir_name);
+                try seen_dirs.put(duped, {});
+            }
+        } else {
+            // Direct child (blob)
+            const mode_str = try std.fmt.allocPrint(allocator, "{o}", .{entry.mode});
+            try items.append(.{
+                .name = try allocator.dupe(u8, rel_path),
+                .mode = mode_str,
+                .hash_bytes = entry.sha1,
+            });
+        }
+    }
+
+    // Recurse into each subdirectory
+    var dir_it = seen_dirs.keyIterator();
+    while (dir_it.next()) |dir_name_ptr| {
+        const dir_name = dir_name_ptr.*;
+        const sub_prefix = if (prefix.len == 0)
+            try allocator.dupe(u8, dir_name)
+        else
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, dir_name });
+        defer allocator.free(sub_prefix);
+
+        const sub_hash_hex = try buildRecursiveTree(allocator, entries, sub_prefix, git_path, platform_impl);
+        defer allocator.free(sub_hash_hex);
+
+        var sub_hash: [20]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&sub_hash, sub_hash_hex);
+
+        try items.append(.{
+            .name = try allocator.dupe(u8, dir_name),
+            .mode = try allocator.dupe(u8, "40000"),
+            .hash_bytes = sub_hash,
+        });
+    }
+
+    // Sort items by name (git requires sorted tree entries; dirs get trailing '/' for comparison)
+    std.sort.block(TreeItem, items.items, {}, struct {
+        fn lessThan(_: void, a: TreeItem, b: TreeItem) bool {
+            const a_is_dir = std.mem.eql(u8, a.mode, "40000");
+            const b_is_dir = std.mem.eql(u8, b.mode, "40000");
+            // Git tree sort: compare as if dirs have trailing '/'
+            if (a_is_dir and !b_is_dir) {
+                // Compare a.name + "/" vs b.name
+                const order = std.mem.order(u8, a.name, b.name[0..@min(a.name.len, b.name.len)]);
+                if (order != .eq) return order == .lt;
+                if (a.name.len < b.name.len) {
+                    return '/' < b.name[a.name.len];
+                }
+                return a.name.len < b.name.len;
+            } else if (!a_is_dir and b_is_dir) {
+                const order = std.mem.order(u8, a.name[0..@min(a.name.len, b.name.len)], b.name);
+                if (order != .eq) return order == .lt;
+                if (b.name.len < a.name.len) {
+                    return a.name[b.name.len] < '/';
+                }
+                return a.name.len < b.name.len;
+            } else {
+                return std.mem.lessThan(u8, a.name, b.name);
+            }
+        }
+    }.lessThan);
+
+    // Build tree content
+    var tree_content = std.ArrayList(u8).init(allocator);
+    defer tree_content.deinit();
+
+    for (items.items) |item| {
+        try tree_content.appendSlice(item.mode);
+        try tree_content.append(' ');
+        try tree_content.appendSlice(item.name);
+        try tree_content.append(0);
+        try tree_content.appendSlice(&item.hash_bytes);
+    }
+
+    // Create and store the tree object
+    const tree_data = try allocator.dupe(u8, tree_content.items);
+    var tree_object = objects.GitObject.init(.tree, tree_data);
+    defer tree_object.deinit(allocator);
+
+    return try tree_object.store(git_path, platform_impl, allocator);
 }
 
 /// Stage all tracked file changes into the index (pure Zig replacement for `git add -u`).
