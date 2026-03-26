@@ -2,15 +2,15 @@ Git Test Suite Results — Bottom Half (High Numbers)
 Date: 2026-03-26
 Runner: ziggit via /tmp/ziggit-as-git/git
 
-  t9902-completion.sh: 14/263 passed
-  t7900-maintenance.sh: 30/72 passed
+  t9902-completion.sh: 16/263 passed
+  t7900-maintenance.sh: 31/72 passed
   t7810-grep.sh: 260/263 passed
-  t7700-repack.sh: 28/47 passed
+  t7700-repack.sh: 30/47 passed
   t7600-merge.sh: 72/83 passed
   t7508-status.sh: 36/126 passed
-  t7501-commit-basic-functionality.sh: 75/77 passed
-  t7400-submodule-basic.sh: 21/124 passed
-  t7201-co.sh: 36/46 passed
+  t7501-commit-basic-functionality.sh: 76/77 passed
+  t7400-submodule-basic.sh: 23/124 passed
+  t7201-co.sh: 38/46 passed
   t7060-wtstatus.sh: 10/17 passed
   t7004-tag.sh: 220/231 passed
   t7001-mv.sh: 40/54 passed
@@ -21,12 +21,12 @@ Runner: ziggit via /tmp/ziggit-as-git/git
   t5601-clone.sh: 0/0 (no test plan / aborted)
   t5510-fetch.sh: 0/0 (no test plan / aborted)
   t5500-fetch-pack.sh: 0/0 (no test plan / aborted)
-  t5400-send-pack.sh: 15/17 passed
-  t5300-pack-object.sh: 28/63 passed
+  t5400-send-pack.sh: 16/17 passed
+  t5300-pack-object.sh: 43/63 passed
   t5100-mailinfo.sh: 50/52 passed
-  t4200-rerere.sh: 18/36 passed
-  t4150-am.sh: 77/87 passed
+  t4200-rerere.sh: 19/36 passed
+  t4150-am.sh: 85/87 passed
   t4000-diff-format.sh: 41/41 passed
   t3900-i18n-commit.sh: 38/38 passed
 
-TOTAL: 1587/2229 passed (642 failed)
+TOTAL: 1622/2229 passed (607 failed)
