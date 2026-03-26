@@ -148,8 +148,8 @@ fn resolveRefDirect(git_dir: []const u8, ref_name: []const u8, platform_impl: an
 }
 
 /// List all references in a repository with their information
-pub fn listAllRefs(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.ArrayList(RefInfo) {
-    var refs_list = std.ArrayList(RefInfo).init(allocator);
+pub fn listAllRefs(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.array_list.Managed(RefInfo) {
+    var refs_list = std.array_list.Managed(RefInfo).init(allocator);
     errdefer {
         for (refs_list.items) |ref_info| {
             ref_info.deinit(allocator);
@@ -174,7 +174,7 @@ pub fn listAllRefs(git_dir: []const u8, platform_impl: anytype, allocator: std.m
     return refs_list;
 }
 
-fn listRefsInDirectory(git_dir: []const u8, refs_subdir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator, refs_list: *std.ArrayList(RefInfo)) !void {
+fn listRefsInDirectory(git_dir: []const u8, refs_subdir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator, refs_list: *std.array_list.Managed(RefInfo)) !void {
     const refs_dir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, refs_subdir });
     defer allocator.free(refs_dir_path);
     
@@ -199,8 +199,8 @@ fn listRefsInDirectory(git_dir: []const u8, refs_subdir: []const u8, platform_im
 }
 
 /// Find refs that point to a specific commit
-pub fn findRefsPointingTo(git_dir: []const u8, target_hash: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.ArrayList(RefInfo) {
-    var matching_refs = std.ArrayList(RefInfo).init(allocator);
+pub fn findRefsPointingTo(git_dir: []const u8, target_hash: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.array_list.Managed(RefInfo) {
+    var matching_refs = std.array_list.Managed(RefInfo).init(allocator);
     errdefer {
         for (matching_refs.items) |ref_info| {
             ref_info.deinit(allocator);
@@ -316,8 +316,8 @@ pub fn isAncestor(git_dir: []const u8, ancestor_hash: []const u8, descendant_has
 }
 
 /// Parse commit object to extract parent hashes
-fn parseCommitParents(commit_data: []const u8, allocator: std.mem.Allocator) !std.ArrayList([]u8) {
-    var parents = std.ArrayList([]u8).init(allocator);
+fn parseCommitParents(commit_data: []const u8, allocator: std.mem.Allocator) !std.array_list.Managed([]u8) {
+    var parents = std.array_list.Managed([]u8).init(allocator);
     errdefer {
         for (parents.items) |parent| {
             allocator.free(parent);
@@ -325,7 +325,7 @@ fn parseCommitParents(commit_data: []const u8, allocator: std.mem.Allocator) !st
         parents.deinit();
     }
     
-    var lines = std.mem.split(u8, commit_data, "\n");
+    var lines = std.mem.splitSequence(u8, commit_data, "\n");
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "parent ")) {
             const parent_hash = std.mem.trim(u8, line[7..], " \t");

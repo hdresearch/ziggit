@@ -1,3 +1,4 @@
+const zlib_compat = @import("zlib_compat.zig");
 const std = @import("std");
 const objects = @import("objects.zig");
 
@@ -115,7 +116,7 @@ pub const PackFileStream = struct {
                 // Create a decompression stream
                 const compressed_data = self.pack_data[self.position..];
                 var stream = std.io.fixedBufferStream(compressed_data);
-                var decompressor = std.compress.zlib.decompressor(stream.reader());
+                var decompressor = zlib_compat.decompressor(stream.reader());
                 
                 const obj_type: objects.ObjectType = switch (pack_type) {
                     .commit => .commit,
@@ -212,7 +213,7 @@ pub const TreeWalker = struct {
             
             // Convert hash to hex string
             const hash_hex = try self.allocator.alloc(u8, 40);
-            _ = try std.fmt.bufPrint(hash_hex, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
+            _ = try std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes});
             
             // Determine object type from mode
             const obj_type: objects.ObjectType = if (std.mem.eql(u8, mode, "040000"))

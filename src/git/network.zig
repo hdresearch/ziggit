@@ -62,7 +62,7 @@ pub const DumbHttpProtocol = struct {
     }
     
     /// Get the list of references from info/refs
-    pub fn getRefs(self: DumbHttpProtocol) !std.ArrayList(RefInfo) {
+    pub fn getRefs(self: DumbHttpProtocol) !std.array_list.Managed(RefInfo) {
         const refs_url = try std.fmt.allocPrint(self.allocator, "{s}/info/refs", .{self.base_url});
         defer self.allocator.free(refs_url);
         
@@ -72,9 +72,9 @@ pub const DumbHttpProtocol = struct {
         };
         defer self.allocator.free(refs_content);
         
-        var ref_list = std.ArrayList(RefInfo).init(self.allocator);
+        var ref_list = std.array_list.Managed(RefInfo).init(self.allocator);
         
-        var lines = std.mem.split(u8, refs_content, "\n");
+        var lines = std.mem.splitSequence(u8, refs_content, "\n");
         while (lines.next()) |line| {
             const trimmed = std.mem.trim(u8, line, " \t\r\n");
             if (trimmed.len == 0) continue;
@@ -146,9 +146,9 @@ pub const DumbHttpProtocol = struct {
         };
         defer self.allocator.free(packs_content);
         
-        var pack_list = std.ArrayList([]const u8).init(self.allocator);
+        var pack_list = std.array_list.Managed([]const u8).init(self.allocator);
         
-        var lines = std.mem.split(u8, packs_content, "\n");
+        var lines = std.mem.splitSequence(u8, packs_content, "\n");
         while (lines.next()) |line| {
             const trimmed = std.mem.trim(u8, line, " \t\r\n");
             if (trimmed.len == 0) continue;
@@ -256,7 +256,7 @@ fn downloadObjects(protocol: DumbHttpProtocol, start_hash: []const u8, git_dir: 
         visited.deinit();
     }
     
-    var to_download = std.ArrayList([]const u8).init(allocator);
+    var to_download = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (to_download.items) |hash| {
             allocator.free(hash);
@@ -322,10 +322,10 @@ fn storeObject(git_dir: []const u8, hash: []const u8, obj_data: []const u8, plat
 }
 
 /// Add object dependencies to the download queue  
-fn addObjectDependencies(obj: objects.GitObject, to_download: *std.ArrayList([]const u8), allocator: std.mem.Allocator) !void {
+fn addObjectDependencies(obj: objects.GitObject, to_download: *std.array_list.Managed([]const u8), allocator: std.mem.Allocator) !void {
     switch (obj.type) {
         .commit => {
-            var lines = std.mem.split(u8, obj.data, "\n");
+            var lines = std.mem.splitSequence(u8, obj.data, "\n");
             while (lines.next()) |line| {
                 if (std.mem.startsWith(u8, line, "tree ")) {
                     const tree_hash = line[5..];
@@ -352,7 +352,7 @@ fn addObjectDependencies(obj: objects.GitObject, to_download: *std.ArrayList([]c
                 // Next 20 bytes are the hash
                 if (pos + 20 <= obj.data.len) {
                     const hash_bytes = obj.data[pos..pos + 20];
-                    const hash_str = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
+                    const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{hash_bytes});
                     try to_download.append(hash_str);
                     pos += 20;
                 } else {
@@ -389,10 +389,10 @@ fn createGitDirectory(git_dir: []const u8, platform_impl: anytype) !void {
     defer std.heap.page_allocator.free(config_path);
     try platform_impl.fs.writeFile(config_path, 
         \\[core]
-        \\	repositoryformatversion = 0
-        \\	filemode = true
-        \\	bare = false
-        \\	logallrefupdates = true
+        \\    repositoryformatversion = 0
+        \\    filemode = true
+        \\    bare = false
+        \\    logallrefupdates = true
         \\
     );
 }
@@ -407,7 +407,7 @@ fn checkoutWorkingTree(git_dir: []const u8, commit_hash: []const u8, target_dir:
     
     // Find tree hash in commit
     var tree_hash: ?[]const u8 = null;
-    var lines = std.mem.split(u8, commit_obj.data, "\n");
+    var lines = std.mem.splitSequence(u8, commit_obj.data, "\n");
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "tree ")) {
             tree_hash = line[5..];
@@ -443,7 +443,7 @@ fn checkoutTree(git_dir: []const u8, tree_hash: []const u8, base_dir: []const u8
         // Get hash (20 bytes)
         if (pos + 20 > tree_obj.data.len) break;
         const hash_bytes = tree_obj.data[pos..pos + 20];
-        const hash_str = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
+        const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{hash_bytes});
         defer allocator.free(hash_str);
         pos += 20;
         

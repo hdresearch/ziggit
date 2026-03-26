@@ -141,7 +141,7 @@ pub fn validateGitObject(obj_type: []const u8, data: []const u8) GitValidationEr
 
 /// Validate commit object structure
 fn validateCommitObject(data: []const u8) GitValidationError!void {
-    var lines = std.mem.split(u8, data, "\n");
+    var lines = std.mem.splitSequence(u8, data, "\n");
     var found_tree = false;
     var found_author = false;
     var found_committer = false;
@@ -220,7 +220,7 @@ fn validateTreeObject(data: []const u8) GitValidationError!void {
 
 /// Validate tag object structure
 fn validateTagObject(data: []const u8) GitValidationError!void {
-    var lines = std.mem.split(u8, data, "\n");
+    var lines = std.mem.splitSequence(u8, data, "\n");
     var found_object = false;
     var found_type = false;
     var found_tag = false;

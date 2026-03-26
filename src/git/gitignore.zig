@@ -36,12 +36,12 @@ pub const GitignoreEntry = struct {
 };
 
 pub const GitIgnore = struct {
-    entries: std.ArrayList(GitignoreEntry),
+    entries: std.array_list.Managed(GitignoreEntry),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) GitIgnore {
         return GitIgnore{
-            .entries = std.ArrayList(GitignoreEntry).init(allocator),
+            .entries = std.array_list.Managed(GitignoreEntry).init(allocator),
             .allocator = allocator,
         };
     }

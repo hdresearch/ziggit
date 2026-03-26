@@ -1,3 +1,4 @@
+const zlib_compat = @import("zlib_compat.zig");
 const std = @import("std");
 const stream_utils = @import("stream_utils.zig");
 const DeltaCache = @import("delta_cache.zig").DeltaCache;
@@ -218,7 +219,7 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
     defer cache.deinit();
 
     // Reusable buffer for delta instruction decompression.
-    var decomp_buf = std.ArrayList(u8).init(allocator);
+    var decomp_buf = std.array_list.Managed(u8).init(allocator);
     defer decomp_buf.deinit();
 
     // --- Resolve OFS_DELTAs in pack order ---
@@ -276,7 +277,7 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
     // ═══════════════════════════════════════════════════════════════════
     // Build sorted entries from resolved records
     // ═══════════════════════════════════════════════════════════════════
-    var entries = try std.ArrayList(IndexEntry).initCapacity(allocator, total_objects);
+    var entries = try std.array_list.Managed(IndexEntry).initCapacity(allocator, total_objects);
     defer entries.deinit();
 
     for (records[0..total_objects]) |rec| {
@@ -311,7 +312,7 @@ fn resolveOfsDelta(
     records: []ObjRecord,
     offset_to_idx: *std.AutoHashMap(usize, u32),
     cache: *DeltaCache,
-    decomp_buf: *std.ArrayList(u8),
+    decomp_buf: *std.array_list.Managed(u8),
     sha_to_offset: *std.AutoHashMap([20]u8, usize),
 ) !void {
     return resolveDelta(allocator, pack_data, content_end, rec, rec.base_offset, records, offset_to_idx, cache, decomp_buf, sha_to_offset);
@@ -327,7 +328,7 @@ fn resolveDelta(
     records: []ObjRecord,
     offset_to_idx: *std.AutoHashMap(usize, u32),
     cache: *DeltaCache,
-    decomp_buf: *std.ArrayList(u8),
+    decomp_buf: *std.array_list.Managed(u8),
     sha_to_offset: *std.AutoHashMap([20]u8, usize),
 ) !void {
     // Get base data (from cache or by decompressing/resolving).
@@ -366,7 +367,7 @@ fn getBaseData(
     records: []ObjRecord,
     offset_to_idx: *std.AutoHashMap(usize, u32),
     cache: *DeltaCache,
-    decomp_buf: *std.ArrayList(u8),
+    decomp_buf: *std.array_list.Managed(u8),
 ) !DeltaCache.Entry {
     // Fast path: already in cache.
     if (cache.get(offset)) |e| return e;
@@ -399,7 +400,7 @@ fn getBaseData(
 
         // Decompress delta instructions into a temporary buffer.
         // We can't use decomp_buf because the caller might be using it.
-        var tmp = try std.ArrayList(u8).initCapacity(allocator, if (rec.size > 0) rec.size else 256);
+        var tmp = try std.array_list.Managed(u8).initCapacity(allocator, if (rec.size > 0) rec.size else 256);
         defer tmp.deinit();
         _ = try stream_utils.decompressInto(
             pack_data[rec.comp_start .. rec.comp_start + rec.comp_len],
@@ -429,7 +430,7 @@ fn getBaseData(
 /// Uses only stack memory (16KB buffer). No heap allocation.
 fn skipZlib(compressed: []const u8) !usize {
     var fbs = std.io.fixedBufferStream(compressed);
-    var decompressor = std.compress.zlib.decompressor(fbs.reader());
+    var decompressor = zlib_compat.decompressor(fbs.reader());
     var buf: [16384]u8 = undefined;
     while (true) {
         const n = decompressor.read(&buf) catch |err| switch (err) {
@@ -544,7 +545,7 @@ fn readDeltaVarint(data: []const u8, pos_ptr: *usize) usize {
 
 /// Build a v2 .idx file from sorted entries.
 fn buildIdxFile(allocator: std.mem.Allocator, entries: []const IndexEntry, pack_checksum: *const [20]u8) ![]u8 {
-    var idx = std.ArrayList(u8).init(allocator);
+    var idx = std.array_list.Managed(u8).init(allocator);
     defer idx.deinit();
     try idx.ensureTotalCapacity(8 + 256 * 4 + entries.len * (20 + 4 + 4) + 40);
 
@@ -570,7 +571,7 @@ fn buildIdxFile(allocator: std.mem.Allocator, entries: []const IndexEntry, pack_
     for (entries) |entry| try writer.writeInt(u32, entry.crc32, .big);
 
     // Offset table (+ large offset overflow)
-    var large_offsets = std.ArrayList(u64).init(allocator);
+    var large_offsets = std.array_list.Managed(u64).init(allocator);
     defer large_offsets.deinit();
     for (entries) |entry| {
         if (entry.offset >= 0x80000000) {

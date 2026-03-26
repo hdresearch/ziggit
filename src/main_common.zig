@@ -50,7 +50,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     _ = args.skip();
 
     // Store all arguments for potential git fallback
-    var all_original_args = std.ArrayList([]const u8).init(allocator);
+    var all_original_args = std.array_list.Managed([]const u8).init(allocator);
     defer all_original_args.deinit();
     
     // Collect all arguments first
@@ -246,7 +246,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     }
     
     // Create args iterator for the remaining arguments (after the command)
-    var remaining_args = std.ArrayList([]const u8).init(allocator);
+    var remaining_args = std.array_list.Managed([]const u8).init(allocator);
     defer remaining_args.deinit();
     
     var remaining_arg_index = command_index + 1;
@@ -420,7 +420,7 @@ fn forwardConfigToGit(allocator: std.mem.Allocator, all_args: [][]const u8, comm
                              std.mem.eql(u8, subcmd, "remove-section");
         
         if (is_new_style) {
-            var new_args = std.ArrayList([]const u8).init(allocator);
+            var new_args = std.array_list.Managed([]const u8).init(allocator);
             defer new_args.deinit();
             
             // Copy args before config command (global flags)
@@ -671,7 +671,7 @@ fn forwardRevParseToGit(allocator: std.mem.Allocator, all_args: [][]const u8, co
             return;
         }
         // Build new args without --show-ref-format, output "files" then forward rest
-        var new_args = std.ArrayList([]const u8).init(allocator);
+        var new_args = std.array_list.Managed([]const u8).init(allocator);
         defer new_args.deinit();
         for (all_args) |arg| {
             if (std.mem.eql(u8, arg, "--show-ref-format")) continue;
@@ -703,7 +703,7 @@ fn forwardVersionToGit(allocator: std.mem.Allocator, all_args: [][]const u8, pla
     }
     
     // Capture output from real git using collectOutput
-    var argv = std.ArrayList([]const u8).init(allocator);
+    var argv = std.array_list.Managed([]const u8).init(allocator);
     defer argv.deinit();
     try argv.append(findRealGit());
     for (all_args) |arg| {
@@ -716,7 +716,7 @@ fn forwardVersionToGit(allocator: std.mem.Allocator, all_args: [][]const u8, pla
     child.stderr_behavior = .Inherit;
     
     _ = try child.spawn();
-    const stdout = child.stdout.?.reader().readAllAlloc(allocator, 1024 * 1024) catch "";
+    const stdout = child.stdout.?.readToEndAlloc(allocator, 1024 * 1024) catch "";
     defer allocator.free(stdout);
     const term = try child.wait();
     
@@ -738,7 +738,7 @@ fn forwardVersionToGit(allocator: std.mem.Allocator, all_args: [][]const u8, pla
 
 fn forwardToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_impl: *const platform_mod.Platform) !void {
     // Build argv array with git as argv[0] and all original args after that
-    var argv = std.ArrayList([]const u8).init(allocator);
+    var argv = std.array_list.Managed([]const u8).init(allocator);
     defer argv.deinit();
     
     try argv.append(findRealGit());
@@ -788,7 +788,7 @@ fn forwardRevListWithZ(allocator: std.mem.Allocator, all_args: [][]const u8, pla
     //   --objects: "hash path\n" → "hash\0path=path\0"
     //   --boundary: "-hash\n" → "hash\0boundary=yes\0"
     //   plain: "hash\n" → "hash\0"
-    var argv = std.ArrayList([]const u8).init(allocator);
+    var argv = std.array_list.Managed([]const u8).init(allocator);
     defer argv.deinit();
     
     var has_objects = false;
@@ -821,7 +821,7 @@ fn forwardRevListWithZ(allocator: std.mem.Allocator, all_args: [][]const u8, pla
         std.process.exit(1);
     };
     
-    const stdout = child.stdout.?.reader().readAllAlloc(allocator, 10 * 1024 * 1024) catch "";
+    const stdout = child.stdout.?.readToEndAlloc(allocator, 10 * 1024 * 1024) catch "";
     defer allocator.free(stdout);
     
     const term = child.wait() catch {
@@ -829,7 +829,7 @@ fn forwardRevListWithZ(allocator: std.mem.Allocator, all_args: [][]const u8, pla
     };
     
     // Transform output based on flags
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     defer result.deinit();
     
     var line_iter = std.mem.splitScalar(u8, stdout, '\n');
@@ -884,8 +884,8 @@ fn forwardRevListWithZ(allocator: std.mem.Allocator, all_args: [][]const u8, pla
     }
 }
 
-fn findUntrackedFiles(allocator: std.mem.Allocator, repo_root: []const u8, index: *const index_mod.Index, gitignore: *const gitignore_mod.GitIgnore, platform_impl: *const platform_mod.Platform) !std.ArrayList([]u8) {
-    var untracked_files = std.ArrayList([]u8).init(allocator);
+fn findUntrackedFiles(allocator: std.mem.Allocator, repo_root: []const u8, index: *const index_mod.Index, gitignore: *const gitignore_mod.GitIgnore, platform_impl: *const platform_mod.Platform) !std.array_list.Managed([]u8) {
+    var untracked_files = std.array_list.Managed([]u8).init(allocator);
     
     // Create a set of tracked file paths for fast lookup
     var tracked_files = std.StringHashMap(void).init(allocator);
@@ -911,7 +911,7 @@ fn scanDirectoryForUntrackedFiles(
     allocator: std.mem.Allocator,
     repo_root: []const u8,
     relative_path: []const u8,
-    untracked_files: *std.ArrayList([]u8),
+    untracked_files: *std.array_list.Managed([]u8),
     tracked_files: *const std.StringHashMap(void),
     gitignore: *const gitignore_mod.GitIgnore,
     platform_impl: *const platform_mod.Platform,
@@ -1115,17 +1115,17 @@ fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8, alloc
     defer allocator.free(config_path);
     const config_content = if (bare)
         \\[core]
-        \\	repositoryformatversion = 0
-        \\	filemode = true
-        \\	bare = true
-        \\	logallrefupdates = true
+        \\    repositoryformatversion = 0
+        \\    filemode = true
+        \\    bare = true
+        \\    logallrefupdates = true
         \\
     else
         \\[core]
-        \\	repositoryformatversion = 0
-        \\	filemode = true
-        \\	bare = false
-        \\	logallrefupdates = true
+        \\    repositoryformatversion = 0
+        \\    filemode = true
+        \\    bare = false
+        \\    logallrefupdates = true
         \\
     ;
     try platform_impl.fs.writeFile(config_path, config_content);
@@ -1179,7 +1179,7 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     var show_branch = false;
     var short_format = false;
     var show_untracked = true; // default: show untracked files
-    var status_args = std.ArrayList([]const u8).init(allocator);
+    var status_args = std.array_list.Managed([]const u8).init(allocator);
     defer status_args.deinit();
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--porcelain") or std.mem.eql(u8, arg, "--porcelain=v1")) {
@@ -1341,9 +1341,9 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     defer gitignore.deinit();
 
     // Detect staged files vs modified files vs deleted files vs clean files
-    var staged_files = std.ArrayList(index_mod.IndexEntry).init(allocator);
-    var modified_files = std.ArrayList(index_mod.IndexEntry).init(allocator);
-    var deleted_files = std.ArrayList(index_mod.IndexEntry).init(allocator);
+    var staged_files = std.array_list.Managed(index_mod.IndexEntry).init(allocator);
+    var modified_files = std.array_list.Managed(index_mod.IndexEntry).init(allocator);
+    var deleted_files = std.array_list.Managed(index_mod.IndexEntry).init(allocator);
     defer staged_files.deinit();
     defer modified_files.deinit();
     defer deleted_files.deinit();
@@ -1388,7 +1388,7 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 defer allocator.free(current_hash);
                 
                 // Compare with index hash
-                const index_hash = std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch break :blk false;
+                const index_hash = std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1}) catch break :blk false;
                 defer allocator.free(index_hash);
                 
                 break :blk !std.mem.eql(u8, current_hash, index_hash);
@@ -1419,7 +1419,7 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         if (cobj) |co| {
             defer co.deinit(allocator);
             if (co.type == .commit) {
-                var clines = std.mem.split(u8, co.data, "\n");
+                var clines = std.mem.splitSequence(u8, co.data, "\n");
                 if (clines.next()) |tl| {
                     if (std.mem.startsWith(u8, tl, "tree ")) {
                         head_tree_hash = allocator.dupe(u8, tl["tree ".len..]) catch null;
@@ -1431,7 +1431,7 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     defer if (head_tree_hash) |h| allocator.free(h);
 
     // For porcelain output, collect all lines then sort and output together
-    var porcelain_lines = std.ArrayList([]u8).init(allocator);
+    var porcelain_lines = std.array_list.Managed([]u8).init(allocator);
     defer {
         for (porcelain_lines.items) |line| allocator.free(line);
         porcelain_lines.deinit();
@@ -1528,9 +1528,9 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 
     // Find untracked files
     var untracked_files = if (show_untracked)
-        findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.ArrayList([]u8).init(allocator)
+        findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.array_list.Managed([]u8).init(allocator)
     else
-        std.ArrayList([]u8).init(allocator);
+        std.array_list.Managed([]u8).init(allocator);
     defer {
         for (untracked_files.items) |file| {
             allocator.free(file);
@@ -1824,7 +1824,7 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     defer allocator.free(tree_hash);
 
     // Get parent commit (if any)
-    var parent_hashes = std.ArrayList([]const u8).init(allocator);
+    var parent_hashes = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (parent_hashes.items) |hash| {
             allocator.free(hash);
@@ -1843,7 +1843,7 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 defer commit.deinit(allocator);
                 
                 // Parse commit data to find parent lines
-                var lines = std.mem.split(u8, commit.data, "\n");
+                var lines = std.mem.splitSequence(u8, commit.data, "\n");
                 while (lines.next()) |line| {
                     if (std.mem.startsWith(u8, line, "parent ")) {
                         const parent_hash = line["parent ".len..];
@@ -2026,11 +2026,11 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         const commit_data = commit_object.data;
         
         // Extract commit message and author
-        var lines = std.mem.split(u8, commit_data, "\n");
+        var lines = std.mem.splitSequence(u8, commit_data, "\n");
         var parent_hash: ?[]const u8 = null;
         var author_line: ?[]const u8 = null;
         var empty_line_found = false;
-        var message = std.ArrayList(u8).init(allocator);
+        var message = std.array_list.Managed(u8).init(allocator);
         defer message.deinit();
 
         while (lines.next()) |line| {
@@ -2054,7 +2054,7 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         } else if (oneline) {
             const short_hash = commit_hash[0..7];
             const first_line = blk: {
-                var msg_lines = std.mem.split(u8, std.mem.trimRight(u8, message.items, "\n"), "\n");
+                var msg_lines = std.mem.splitSequence(u8, std.mem.trimRight(u8, message.items, "\n"), "\n");
                 if (msg_lines.next()) |line| {
                     break :blk line;
                 } else {
@@ -2118,7 +2118,7 @@ fn resolveHeadRelative(git_path: []const u8, steps: u32, platform_impl: *const p
         }
         
         // Parse commit data to find the first parent
-        var lines = std.mem.split(u8, commit_obj.data, "\n");
+        var lines = std.mem.splitSequence(u8, commit_obj.data, "\n");
         var parent_hash: ?[]const u8 = null;
         
         while (lines.next()) |line| {
@@ -2218,7 +2218,7 @@ fn resolveCommittish(git_path: []const u8, committish: []const u8, platform_impl
 }
 
 fn outputFormattedCommit(format: []const u8, commit_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
-    var output = std.ArrayList(u8).init(allocator);
+    var output = std.array_list.Managed(u8).init(allocator);
     defer output.deinit();
     
     var i: usize = 0;
@@ -2316,7 +2316,7 @@ fn showWorkingTreeDiff(index: *const index_mod.Index, cwd: []const u8, platform_
             defer allocator.free(current_hash);
             
             // Compare with index hash
-            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
             defer allocator.free(index_hash);
             
             if (!std.mem.eql(u8, current_hash, index_hash)) {
@@ -2346,7 +2346,7 @@ fn showWorkingTreeDiff(index: *const index_mod.Index, cwd: []const u8, platform_
             defer allocator.free(empty_hash);
             
             // Get index hash
-            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
             defer allocator.free(index_hash);
             
             const short_index_hash = index_hash[0..7];
@@ -2380,7 +2380,7 @@ fn showStagedDiff(index: *const index_mod.Index, git_path: []const u8, platform_
             defer allocator.free(empty_hash);
             
             // Get index hash
-            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
             defer allocator.free(index_hash);
             
             const short_empty_hash = empty_hash[0..7];
@@ -2405,7 +2405,7 @@ fn showStagedDiff(index: *const index_mod.Index, git_path: []const u8, platform_
             defer allocator.free(empty_hash);
             
             // Get index hash
-            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
             defer allocator.free(index_hash);
             
             // For now, just show all staged files as additions
@@ -2439,7 +2439,7 @@ fn getIndexedFileContent(entry: index_mod.IndexEntry, allocator: std.mem.Allocat
     // Convert hash bytes to hex string
     const hash_str = try allocator.alloc(u8, 40);
     defer allocator.free(hash_str);
-    _ = std.fmt.bufPrint(hash_str, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch |err| {
+    _ = std.fmt.bufPrint(hash_str, "{x}", .{&entry.sha1}) catch |err| {
         std.log.debug("Could not format hash: {}", .{err});
         return try allocator.dupe(u8, "");
     };
@@ -2643,7 +2643,7 @@ fn checkoutCommitTree(git_path: []const u8, commit_hash: []const u8, allocator: 
 
 /// Parse commit object to extract tree hash
 fn parseCommitTreeHash(commit_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    var lines = std.mem.split(u8, commit_data, "\n");
+    var lines = std.mem.splitSequence(u8, commit_data, "\n");
     
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "tree ")) {
@@ -2703,7 +2703,7 @@ fn checkoutTreeRecursive(git_path: []const u8, tree_data: []const u8, repo_root:
         const hash_bytes = tree_data[i..i + 20];
         const hash_hex = try allocator.alloc(u8, 40);
         defer allocator.free(hash_hex);
-        _ = std.fmt.bufPrint(hash_hex, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch break;
+        _ = std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes}) catch break;
         
         i += 20;
         
@@ -2822,7 +2822,7 @@ fn populateIndexFromTree(git_path: []const u8, tree_data: []const u8, repo_root:
             // Convert hash to hex for loading
             const hash_hex = try allocator.alloc(u8, 40);
             defer allocator.free(hash_hex);
-            _ = try std.fmt.bufPrint(hash_hex, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
+            _ = try std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes});
             
             const subtree_loaded = objects.GitObject.load(hash_hex, git_path, platform_impl, allocator) catch continue;
             defer subtree_loaded.deinit(allocator);
@@ -2957,7 +2957,7 @@ fn isAncestor(git_path: []const u8, ancestor_hash: []const u8, descendant_hash: 
     if (descendant_commit.type != .commit) return false;
     
     // Parse commit to find parents
-    var lines = std.mem.split(u8, descendant_commit.data, "\n");
+    var lines = std.mem.splitSequence(u8, descendant_commit.data, "\n");
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "parent ")) {
             const parent_hash = line["parent ".len..];
@@ -3011,7 +3011,7 @@ fn collectAncestors(git_path: []const u8, commit_hash: []const u8, ancestors: *s
     if (commit_obj.type != .commit) return;
     
     // Parse commit to find parents
-    var lines = std.mem.split(u8, commit_obj.data, "\n");
+    var lines = std.mem.splitSequence(u8, commit_obj.data, "\n");
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "parent ")) {
             const parent_hash = line["parent ".len..];
@@ -3036,7 +3036,7 @@ fn findFirstCommonAncestor(git_path: []const u8, commit_hash: []const u8, ancest
     if (commit_obj.type != .commit) return error.NotFound;
     
     // Check parents
-    var lines = std.mem.split(u8, commit_obj.data, "\n");
+    var lines = std.mem.splitSequence(u8, commit_obj.data, "\n");
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "parent ")) {
             const parent_hash = line["parent ".len..];
@@ -3173,7 +3173,7 @@ fn parseTreeIntoMap(tree_data: []const u8, file_map: *std.StringHashMap([]const 
         // Extract 20-byte hash and convert to hex string
         const hash_bytes = tree_data[i..i + 20];
         const hash_hex = try allocator.alloc(u8, 40);
-        _ = std.fmt.bufPrint(hash_hex, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch {
+        _ = std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes}) catch {
             allocator.free(hash_hex);
             break;
         };
@@ -3312,7 +3312,7 @@ fn createConflictFile(git_path: []const u8, filename: []const u8, base_hash: ?[]
     defer if (target_content.len > 0) allocator.free(target_content);
     
     // Create conflict content with markers
-    var conflict_content = std.ArrayList(u8).init(allocator);
+    var conflict_content = std.array_list.Managed(u8).init(allocator);
     defer conflict_content.deinit();
     
     const writer = conflict_content.writer();
@@ -3471,7 +3471,7 @@ fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
 
     // For non-HTTPS URLs, shell out to git
     if (build_options.enable_git_fallback) {
-        var git_args = std.ArrayList([]const u8).init(allocator);
+        var git_args = std.array_list.Managed([]const u8).init(allocator);
         defer git_args.deinit();
 
         try git_args.append(findRealGit());
@@ -3617,7 +3617,7 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     }
 
     // Collect all arguments first
-    var all_args = std.ArrayList([]const u8).init(allocator);
+    var all_args = std.array_list.Managed([]const u8).init(allocator);
     defer all_args.deinit();
     
     while (args.next()) |arg| {
@@ -3782,7 +3782,7 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
                 defer allocator.free(config_content);
 
                 // Replace bare = true with bare = false
-                var new_config = std.ArrayList(u8).init(allocator);
+                var new_config = std.array_list.Managed(u8).init(allocator);
                 defer new_config.deinit();
                 var config_lines = std.mem.splitSequence(u8, config_content, "\n");
                 var first = true;
@@ -3818,7 +3818,7 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     if (is_bare) {
         // This shouldn't be reached for HTTPS (handled above), only non-HTTPS bare clones
         if (build_options.enable_git_fallback) {
-            var git_args = std.ArrayList([]const u8).init(allocator);
+            var git_args = std.array_list.Managed([]const u8).init(allocator);
             defer git_args.deinit();
 
             try git_args.append(findRealGit());
@@ -3903,7 +3903,7 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     // For non-HTTP URLs (local paths, ssh://, git://), forward to real git early
     if (!(std.mem.startsWith(u8, url.?, "https://") or std.mem.startsWith(u8, url.?, "http://"))) {
         if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
-            var git_args = std.ArrayList([]const u8).init(allocator);
+            var git_args = std.array_list.Managed([]const u8).init(allocator);
             defer git_args.deinit();
             try git_args.append(findRealGit());
             try git_args.append("clone");
@@ -3992,7 +3992,7 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         defer allocator.free(config_content);
 
         // Replace bare = true with bare = false
-        var new_config = std.ArrayList(u8).init(allocator);
+        var new_config = std.array_list.Managed(u8).init(allocator);
         defer new_config.deinit();
         var config_lines = std.mem.splitSequence(u8, config_content, "\n");
         var first = true;
@@ -4037,7 +4037,7 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
 
     // For non-HTTP URLs (local paths, ssh://, git://), forward to real git
     if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
-        var git_args = std.ArrayList([]const u8).init(allocator);
+        var git_args = std.array_list.Managed([]const u8).init(allocator);
         defer git_args.deinit();
         try git_args.append(findRealGit());
         try git_args.append("clone");
@@ -4098,7 +4098,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     }
 
     // Collect all remaining args for config
-    var config_args = std.ArrayList([]const u8).init(allocator);
+    var config_args = std.array_list.Managed([]const u8).init(allocator);
     defer config_args.deinit();
     while (args.next()) |arg| {
         try config_args.append(arg);
@@ -4127,7 +4127,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             // git config get <key> [--global etc.] -> git config [--global] <key>
             // git config unset <key> [--global etc.] -> git config --unset [--global] <key>
             // git config list [--global etc.] -> git config --list [--global]
-            var argv = std.ArrayList([]const u8).init(allocator);
+            var argv = std.array_list.Managed([]const u8).init(allocator);
             defer argv.deinit();
             try argv.append(findRealGit());
             try argv.append("config");
@@ -4137,9 +4137,9 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 if (std.mem.eql(u8, sub, "set") and config_args.items.len >= 3) {
                     // git config set [flags...] <key> <value>
                     // Flags come between 'set' and key. Extract flags, key, value
-                    var flags = std.ArrayList([]const u8).init(allocator);
+                    var flags = std.array_list.Managed([]const u8).init(allocator);
                     defer flags.deinit();
-                    var positional = std.ArrayList([]const u8).init(allocator);
+                    var positional = std.array_list.Managed([]const u8).init(allocator);
                     defer positional.deinit();
                     for (config_args.items[1..]) |a| {
                         if (a.len > 0 and a[0] == '-') {
@@ -4244,7 +4244,7 @@ fn getRemoteUrl(git_path: []const u8, remote_name: []const u8, platform_impl: *c
 }
 
 fn parseConfigValue(config_content: []const u8, key: []const u8, allocator: std.mem.Allocator) !?[]u8 {
-    var lines = std.mem.split(u8, config_content, "\n");
+    var lines = std.mem.splitSequence(u8, config_content, "\n");
     var current_section: ?[]const u8 = null;
     var current_section_owned: ?[]u8 = null;
     defer if (current_section_owned) |sec| allocator.free(sec);
@@ -4437,7 +4437,7 @@ fn lookupBlobInTree(tree_hash: []const u8, path: []const u8, git_path: []const u
         if (std.mem.eql(u8, name, name_to_find)) {
             if (remaining) |rest| {
                 // This is a directory - recurse
-                const sub_tree_hash = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
+                const sub_tree_hash = try std.fmt.allocPrint(allocator, "{x}", .{hash_bytes});
                 defer allocator.free(sub_tree_hash);
                 return try lookupBlobInTree(sub_tree_hash, rest, git_path, platform_impl, allocator);
             } else {
@@ -4467,7 +4467,7 @@ fn checkIfDifferentFromHEAD(entry: index_mod.IndexEntry, git_path: []const u8, p
     if (commit_obj.type != .commit) return false;
     
     // Parse commit to get tree hash
-    var lines = std.mem.split(u8, commit_obj.data, "\n");
+    var lines = std.mem.splitSequence(u8, commit_obj.data, "\n");
     const tree_line = lines.next() orelse return false;
     if (!std.mem.startsWith(u8, tree_line, "tree ")) return false;
     const tree_hash = tree_line["tree ".len..];
@@ -4562,7 +4562,7 @@ fn buildRecursiveTree(allocator: std.mem.Allocator, entries: []const index_mod.I
         mode: []const u8,
         hash_bytes: [20]u8,
     };
-    var items = std.ArrayList(TreeItem).init(allocator);
+    var items = std.array_list.Managed(TreeItem).init(allocator);
     defer {
         for (items.items) |item| {
             allocator.free(item.name);
@@ -4662,7 +4662,7 @@ fn buildRecursiveTree(allocator: std.mem.Allocator, entries: []const index_mod.I
     }.lessThan);
 
     // Build tree content
-    var tree_content = std.ArrayList(u8).init(allocator);
+    var tree_content = std.array_list.Managed(u8).init(allocator);
     defer tree_content.deinit();
 
     for (items.items) |item| {
@@ -4687,12 +4687,12 @@ fn buildRecursiveTree(allocator: std.mem.Allocator, entries: []const index_mod.I
 fn stageTrackedChanges(allocator: std.mem.Allocator, index: *index_mod.Index, git_path: []const u8, repo_root: []const u8, platform_impl: *const platform_mod.Platform) !void {
     // Collect paths to remove (deleted files) and paths to re-add (modified files).
     // We collect first to avoid mutating the list while iterating.
-    var to_remove = std.ArrayList([]const u8).init(allocator);
+    var to_remove = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (to_remove.items) |p| allocator.free(p);
         to_remove.deinit();
     }
-    var to_readd = std.ArrayList([]const u8).init(allocator);
+    var to_readd = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (to_readd.items) |p| allocator.free(p);
         to_readd.deinit();
@@ -5215,7 +5215,7 @@ fn cmdDescribe(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
 }
 
 fn parseTagObject(tag_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    var lines = std.mem.split(u8, tag_data, "\n");
+    var lines = std.mem.splitSequence(u8, tag_data, "\n");
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "object ")) {
             const object_hash = line["object ".len..];
@@ -5239,7 +5239,7 @@ fn findTagInHistory(git_path: []const u8, start_hash: []const u8, tag_map: *cons
         visited.deinit();
     }
     
-    var commit_stack = std.ArrayList([]u8).init(allocator);
+    var commit_stack = std.array_list.Managed([]u8).init(allocator);
     defer {
         for (commit_stack.items) |hash| {
             allocator.free(hash);
@@ -5275,7 +5275,7 @@ fn findTagInHistory(git_path: []const u8, start_hash: []const u8, tag_map: *cons
         if (commit_obj.type != .commit) continue;
         
         // Parse commit data to find parents
-        var lines = std.mem.split(u8, commit_obj.data, "\n");
+        var lines = std.mem.splitSequence(u8, commit_obj.data, "\n");
         while (lines.next()) |line| {
             if (std.mem.startsWith(u8, line, "parent ")) {
                 const parent_hash = line["parent ".len..];
@@ -5333,7 +5333,7 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         };
         defer tags_dir.close();
         
-        var tag_list = std.ArrayList([]u8).init(allocator);
+        var tag_list = std.array_list.Managed([]u8).init(allocator);
         defer {
             for (tag_list.items) |tag| {
                 allocator.free(tag);
@@ -5498,12 +5498,12 @@ fn showCommitDefault(git_object: objects.GitObject, commit_hash: []const u8, git
     try platform_impl.writeStdout(header);
 
     // Parse commit data to extract info
-    var lines = std.mem.split(u8, git_object.data, "\n");
+    var lines = std.mem.splitSequence(u8, git_object.data, "\n");
     var tree_hash: ?[]const u8 = null;
     var author_line: ?[]const u8 = null;
     var committer_line: ?[]const u8 = null;
     var empty_line_found = false;
-    var message = std.ArrayList(u8).init(allocator);
+    var message = std.array_list.Managed(u8).init(allocator);
     defer message.deinit();
 
     while (lines.next()) |line| {
@@ -5540,7 +5540,7 @@ fn showCommitDefault(git_object: objects.GitObject, commit_hash: []const u8, git
     try platform_impl.writeStdout("\n");
     if (message.items.len > 0) {
         // Indent commit message
-        const msg_lines = std.mem.split(u8, std.mem.trimRight(u8, message.items, "\n"), "\n");
+        const msg_lines = std.mem.splitSequence(u8, std.mem.trimRight(u8, message.items, "\n"), "\n");
         var msg_iter = msg_lines;
         while (msg_iter.next()) |msg_line| {
             const indented = try std.fmt.allocPrint(allocator, "    {s}\n", .{msg_line});
@@ -5563,7 +5563,7 @@ fn showCommitNameOnly(git_object: objects.GitObject, git_path: []const u8, platf
     _ = git_path; // TODO: Use for file diff calculation
     _ = allocator; // TODO: Use for file diff calculation
     // Parse commit to get tree hash
-    var lines = std.mem.split(u8, git_object.data, "\n");
+    var lines = std.mem.splitSequence(u8, git_object.data, "\n");
     var tree_hash: ?[]const u8 = null;
 
     while (lines.next()) |line| {
@@ -5587,7 +5587,7 @@ fn showCommitPrettyFormat(git_object: objects.GitObject, commit_hash: []const u8
     // Simple pretty format implementation
     if (std.mem.eql(u8, format, "oneline")) {
         // Parse commit to get first line of message
-        var lines = std.mem.split(u8, git_object.data, "\n");
+        var lines = std.mem.splitSequence(u8, git_object.data, "\n");
         var empty_line_found = false;
         var first_message_line: ?[]const u8 = null;
 
@@ -5633,7 +5633,7 @@ fn showTreeObject(git_object: objects.GitObject, platform_impl: *const platform_
         const hash_bytes = git_object.data[i..i + 20];
         const hash_hex = try allocator.alloc(u8, 40);
         defer allocator.free(hash_hex);
-        _ = std.fmt.bufPrint(hash_hex, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch break;
+        _ = std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes}) catch break;
         
         i += 20;
         
@@ -5653,13 +5653,13 @@ fn showBlobObject(git_object: objects.GitObject, platform_impl: *const platform_
 
 fn showTagObject(git_object: objects.GitObject, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
     // Parse tag object to get referenced object and message
-    var lines = std.mem.split(u8, git_object.data, "\n");
+    var lines = std.mem.splitSequence(u8, git_object.data, "\n");
     var object_hash: ?[]const u8 = null;
     var object_type: ?[]const u8 = null;
     var tag_name: ?[]const u8 = null;
     var tagger_line: ?[]const u8 = null;
     var empty_line_found = false;
-    var message = std.ArrayList(u8).init(allocator);
+    var message = std.array_list.Managed(u8).init(allocator);
     defer message.deinit();
 
     while (lines.next()) |line| {
@@ -5766,7 +5766,7 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         for (index.entries.items) |entry| {
             if (stage) {
                 // Show stage information (mode, hash, stage, filename)
-                const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
+                const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
                 defer allocator.free(hash_str);
                 const output = try std.fmt.allocPrint(allocator, "{o} {s} 0\t{s}\n", .{ entry.mode, hash_str, entry.path });
                 defer allocator.free(output);
@@ -5825,7 +5825,7 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                     defer allocator.free(current_hash);
                     
                     // Compare with index hash
-                    const index_hash = std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch break :blk false;
+                    const index_hash = std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1}) catch break :blk false;
                     defer allocator.free(index_hash);
                     
                     break :blk !std.mem.eql(u8, current_hash, index_hash);
@@ -5854,7 +5854,7 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         };
         defer gitignore.deinit();
 
-        var untracked_files = findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.ArrayList([]u8).init(allocator);
+        var untracked_files = findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.array_list.Managed([]u8).init(allocator);
         defer {
             for (untracked_files.items) |file| {
                 allocator.free(file);
@@ -6003,7 +6003,7 @@ fn showTreeObjectFormatted(git_object: objects.GitObject, platform_impl: *const 
         const hash_bytes = git_object.data[i..i + 20];
         const hash_hex = try allocator.alloc(u8, 40);
         defer allocator.free(hash_hex);
-        _ = std.fmt.bufPrint(hash_hex, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch break;
+        _ = std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes}) catch break;
         
         i += 20;
         
@@ -6106,7 +6106,7 @@ fn countCommits(git_path: []const u8, start_commit: []const u8, platform_impl: *
         if (commit_object.type != .commit) break;
 
         // Find first parent
-        var lines = std.mem.split(u8, commit_object.data, "\n");
+        var lines = std.mem.splitSequence(u8, commit_object.data, "\n");
         var parent_hash: ?[]const u8 = null;
 
         while (lines.next()) |line| {
@@ -6165,7 +6165,7 @@ fn listCommits(git_path: []const u8, start_commit: []const u8, max_count: ?u32, 
         if (commit_object.type != .commit) break;
 
         // Find first parent
-        var lines = std.mem.split(u8, commit_object.data, "\n");
+        var lines = std.mem.splitSequence(u8, commit_object.data, "\n");
         var parent_hash: ?[]const u8 = null;
 
         while (lines.next()) |line| {
@@ -6247,7 +6247,7 @@ fn listRemotes(git_path: []const u8, verbose: bool, platform_impl: *const platfo
     };
     defer allocator.free(config_content);
 
-    var lines = std.mem.split(u8, config_content, "\n");
+    var lines = std.mem.splitSequence(u8, config_content, "\n");
     var current_remote: ?[]u8 = null;
     defer if (current_remote) |r| allocator.free(r);
     
@@ -6372,7 +6372,7 @@ fn cmdRm(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform
     var force = false;
     var cached = false;
     var recursive = false;
-    var files = std.ArrayList([]const u8).init(allocator);
+    var files = std.array_list.Managed([]const u8).init(allocator);
     defer files.deinit();
 
     while (args.next()) |arg| {
@@ -6507,7 +6507,7 @@ fn forwardCmdToGit(allocator: std.mem.Allocator, all_original_args: [][]const u8
 // Forward a plumbing command to real git (used for plumbing stubs)
 fn forwardPlumbingToGit(allocator: std.mem.Allocator, cmd_name: []const u8, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
-        var argv = std.ArrayList([]const u8).init(allocator);
+        var argv = std.array_list.Managed([]const u8).init(allocator);
         defer argv.deinit();
         try argv.append(cmd_name);
         while (args.next()) |arg| {

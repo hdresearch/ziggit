@@ -1,5 +1,7 @@
 .{
-    .name = "ziggit",
+    .name = .ziggit,
     .version = "0.3.0",
+    .fingerprint = 0x8767edecb3e5bd75,
+    .minimum_zig_version = "0.15.2",
     .paths = .{ "src/", "build.zig", "build.zig.zon" },
 }

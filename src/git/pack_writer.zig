@@ -72,7 +72,7 @@ pub fn updateRefsAfterClone(allocator: std.mem.Allocator, git_dir: []const u8, r
 /// Update refs after a fetch operation.
 /// Writes refs/remotes/origin/* for branches, refs/tags/* for tags, and FETCH_HEAD.
 pub fn updateRefsAfterFetch(allocator: std.mem.Allocator, git_dir: []const u8, ref_updates: []const RefUpdate) !void {
-    var fetch_head = std.ArrayList(u8).init(allocator);
+    var fetch_head = std.array_list.Managed(u8).init(allocator);
     defer fetch_head.deinit();
 
     for (ref_updates) |ref| {
@@ -159,16 +159,17 @@ fn savePackInternal(allocator: std.mem.Allocator, git_dir: []const u8, pack_byte
     }
 
     // Build hex string from stored checksum (avoids recomputing when verify=false)
-    const checksum_hex = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(stored_checksum)});
+    const checksum_hex_arr = std.fmt.bytesToHex(stored_checksum.*, .lower);
+    const checksum_hex = try allocator.dupe(u8, &checksum_hex_arr);
     errdefer allocator.free(checksum_hex);
 
     // Use stack buffer for pack directory path
-    var pack_dir_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    var pack_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     const pack_dir = std.fmt.bufPrint(&pack_dir_buf, "{s}/objects/pack", .{git_dir}) catch return error.PathTooLong;
     std.fs.cwd().makePath(pack_dir) catch {};
 
     // Use stack buffer for pack file path
-    var pack_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    var pack_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const pack_path = std.fmt.bufPrint(&pack_path_buf, "{s}/pack-{s}.pack", .{ pack_dir, checksum_hex }) catch return error.PathTooLong;
 
     const file = try std.fs.cwd().createFile(pack_path, .{});
