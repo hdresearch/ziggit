@@ -672,15 +672,30 @@ fn forwardToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_i
 }
 
 fn forwardRevListWithZ(allocator: std.mem.Allocator, all_args: [][]const u8, platform_impl: *const platform_mod.Platform) !void {
-    // Run real git rev-list without -z, then convert \n to \0 in output
+    // Run real git rev-list without -z, then convert output to NUL-delimited format.
+    // In newer git (2.46+), -z changes the format:
+    //   --objects: "hash path\n" → "hash\0path=path\0"
+    //   --boundary: "-hash\n" → "hash\0boundary=yes\0"
+    //   plain: "hash\n" → "hash\0"
     var argv = std.ArrayList([]const u8).init(allocator);
     defer argv.deinit();
     
+    var has_objects = false;
+    var has_boundary = false;
+    
     try argv.append(findRealGit());
     for (all_args) |arg| {
-        if (!std.mem.eql(u8, arg, "-z")) {
-            try argv.append(arg);
+        if (std.mem.eql(u8, arg, "-z")) {
+            continue; // strip -z
         }
+        if (std.mem.eql(u8, arg, "--objects") or std.mem.eql(u8, arg, "--objects-edge") or
+            std.mem.eql(u8, arg, "--objects-edge-aggressive")) {
+            has_objects = true;
+        }
+        if (std.mem.eql(u8, arg, "--boundary")) {
+            has_boundary = true;
+        }
+        try argv.append(arg);
     }
     
     var child = std.process.Child.init(argv.items, allocator);
@@ -695,7 +710,6 @@ fn forwardRevListWithZ(allocator: std.mem.Allocator, all_args: [][]const u8, pla
         std.process.exit(1);
     };
     
-    // Read stdout and convert \n to \0
     const stdout = child.stdout.?.reader().readAllAlloc(allocator, 10 * 1024 * 1024) catch "";
     defer allocator.free(stdout);
     
@@ -703,17 +717,51 @@ fn forwardRevListWithZ(allocator: std.mem.Allocator, all_args: [][]const u8, pla
         std.process.exit(128);
     };
     
-    // Convert \n to \0 in output
-    const output = try allocator.alloc(u8, stdout.len);
-    defer allocator.free(output);
-    @memcpy(output, stdout);
-    for (output) |*c| {
-        if (c.* == '\n') c.* = 0;
+    // Transform output based on flags
+    var result = std.ArrayList(u8).init(allocator);
+    defer result.deinit();
+    
+    var line_iter = std.mem.splitScalar(u8, stdout, '\n');
+    while (line_iter.next()) |line| {
+        if (line.len == 0) continue;
+        
+        if (has_objects) {
+            // Format: "hash path" or "hash " (tree with empty name) or just "hash"
+            // With -z: "hash\0path=path\0" or just "hash\0"
+            if (std.mem.indexOfScalar(u8, line, ' ')) |space_idx| {
+                const hash = line[0..space_idx];
+                const path = line[space_idx + 1 ..];
+                try result.appendSlice(hash);
+                try result.append(0);
+                if (path.len > 0) {
+                    try result.appendSlice("path=");
+                    try result.appendSlice(path);
+                    try result.append(0);
+                }
+            } else {
+                try result.appendSlice(line);
+                try result.append(0);
+            }
+        } else if (has_boundary) {
+            // Boundary commits prefixed with '-': "-hash\n" → "hash\0boundary=yes\0"
+            if (line[0] == '-') {
+                try result.appendSlice(line[1..]);
+                try result.append(0);
+                try result.appendSlice("boundary=yes");
+                try result.append(0);
+            } else {
+                try result.appendSlice(line);
+                try result.append(0);
+            }
+        } else {
+            // Plain: just replace \n with \0
+            try result.appendSlice(line);
+            try result.append(0);
+        }
     }
     
-    // Write converted output
-    if (output.len > 0) {
-        try platform_impl.writeStdout(output);
+    if (result.items.len > 0) {
+        try platform_impl.writeStdout(result.items);
     }
     
     // Propagate exit code
