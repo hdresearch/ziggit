@@ -62,8 +62,10 @@ pub const GitConfig = struct {
         var lines = std.mem.split(u8, content, "\n");
         var current_section: ?[]const u8 = null;
         var current_subsection: ?[]const u8 = null;
+        var line_number: u32 = 0;
         
         while (lines.next()) |line| {
+            line_number += 1;
             const trimmed = std.mem.trim(u8, line, " \t\r");
             
             // Skip empty lines and comments
@@ -72,12 +74,20 @@ pub const GitConfig = struct {
             }
             
             // Section header: [section] or [section "subsection"]
-            if (trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']') {
+            if (trimmed[0] == '[') {
+                if (trimmed.len < 3 or trimmed[trimmed.len - 1] != ']') {
+                    // Malformed section header, skip it
+                    continue;
+                }
+                
                 const section_content = trimmed[1..trimmed.len - 1];
                 
                 // Check for subsection: section "subsection"
                 if (std.mem.indexOf(u8, section_content, "\"")) |quote_start| {
                     const section = std.mem.trim(u8, section_content[0..quote_start], " \t");
+                    
+                    // Validate section name is not empty
+                    if (section.len == 0) continue;
                     
                     // Find closing quote
                     if (std.mem.lastIndexOf(u8, section_content, "\"")) |quote_end| {
@@ -93,13 +103,17 @@ pub const GitConfig = struct {
                             continue;
                         }
                     }
+                    // Malformed quoted subsection, treat as simple section
                 }
                 
                 // Simple section without subsection
+                const section = std.mem.trim(u8, section_content, " \t");
+                if (section.len == 0) continue; // Skip empty section names
+                
                 if (current_section) |sec| self.allocator.free(sec);
                 if (current_subsection) |sub| self.allocator.free(sub);
                 
-                current_section = try self.allocator.dupe(u8, section_content);
+                current_section = try self.allocator.dupe(u8, section);
                 current_subsection = null;
                 continue;
             }

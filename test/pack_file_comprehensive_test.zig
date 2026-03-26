@@ -2,7 +2,6 @@ const std = @import("std");
 const testing = std.testing;
 const objects = @import("../src/git/objects.zig");
 
-/// Test pack file format parsing and object extraction
 test "pack file index v2 parsing" {
     const allocator = testing.allocator;
     
@@ -51,7 +50,6 @@ test "pack file index v2 parsing" {
     try testing.expectEqual(@as(u32, 2), version);
 }
 
-/// Test pack object type parsing
 test "pack object type parsing" {
     // Test pack object type values
     try testing.expectEqual(@as(u3, 1), @intFromEnum(objects.PackObjectType.commit));
@@ -62,7 +60,6 @@ test "pack object type parsing" {
     try testing.expectEqual(@as(u3, 7), @intFromEnum(objects.PackObjectType.ref_delta));
 }
 
-/// Test variable-length size encoding (used in pack files)
 test "pack variable length size encoding" {
     const allocator = testing.allocator;
     
@@ -106,7 +103,6 @@ test "pack variable length size encoding" {
     _ = allocator;
 }
 
-/// Test delta application (basic)
 test "delta application basics" {
     const allocator = testing.allocator;
     
@@ -154,7 +150,6 @@ test "delta application basics" {
     try testing.expectEqual(base_data.len, base_size);
 }
 
-/// Test pack file header parsing
 test "pack file header validation" {
     const allocator = testing.allocator;
     
@@ -185,7 +180,6 @@ test "pack file header validation" {
     try testing.expectEqual(@as(u32, 3), object_count);
 }
 
-/// Test hash validation functions  
 test "hash validation" {
     // Test the isValidHash function logic
     const valid_hashes = [_][]const u8{
@@ -228,7 +222,6 @@ test "hash validation" {
     }
 }
 
-/// Test fanout table search ranges
 test "fanout table search optimization" {
     const allocator = testing.allocator;
     
@@ -264,7 +257,6 @@ test "fanout table search optimization" {
     _ = allocator;
 }
 
-/// Test offset table lookups (32-bit vs 64-bit offsets)
 test "pack index offset table" {
     const allocator = testing.allocator;
     
