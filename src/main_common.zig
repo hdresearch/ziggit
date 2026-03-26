@@ -735,6 +735,23 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     defer if (current_commit) |hash| allocator.free(hash);
     
     if (!porcelain) {
+        // Check if branch has upstream tracking - if so, fall back to real git for complete output
+        if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
+            const config_path_track = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+            defer allocator.free(config_path_track);
+            if (platform_impl.fs.readFile(allocator, config_path_track)) |cfg| {
+                defer allocator.free(cfg);
+                const track_key = try std.fmt.allocPrint(allocator, "branch \"{s}\".remote", .{current_branch});
+                defer allocator.free(track_key);
+                if (parseConfigValue(cfg, track_key, allocator) catch null) |remote_val| {
+                    allocator.free(remote_val);
+                    // Branch has upstream tracking - fall back to real git for complete output
+                    try forwardToGit(allocator, original_args, platform_impl);
+                    return;
+                }
+            } else |_| {}
+        }
+        
         const branch_msg = try std.fmt.allocPrint(allocator, "On branch {s}\n", .{current_branch});
         defer allocator.free(branch_msg);
         try platform_impl.writeStdout(branch_msg);
