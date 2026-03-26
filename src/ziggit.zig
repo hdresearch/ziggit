@@ -337,17 +337,21 @@ pub const Repository = struct {
         }
     }
 
-    /// Checkout (simplified - just updates HEAD and working tree files)
+    /// Checkout (pure Zig implementation - updates HEAD, working tree, and index)
     pub fn checkout(self: *Repository, ref: []const u8) !void {
         const commit_hash = try self.findCommit(ref);
         
-        // Update HEAD
-        const head_path = try std.fmt.allocPrint(self.allocator, "{s}/HEAD", .{self.git_dir});
-        defer self.allocator.free(head_path);
-
-        const head_file = try std.fs.createFileAbsolute(head_path, .{ .truncate = true });
-        defer head_file.close();
-        try head_file.writeAll(&commit_hash);
+        // 1. Read commit object to get tree hash
+        const tree_hash = try self.getCommitTree(&commit_hash);
+        
+        // 2. Recursively checkout tree to working directory
+        try self.checkoutTree(&tree_hash, self.path);
+        
+        // 3. Update index to match the checked-out tree
+        try self.updateIndexFromTree(&tree_hash);
+        
+        // 4. Update HEAD (for detached HEAD) or the branch ref
+        try self.updateHead(&commit_hash);
     }
 
     /// Fetch from local repository
@@ -420,6 +424,219 @@ pub const Repository = struct {
     }
 
     // Private helper methods
+
+    fn getCommitTree(self: *Repository, commit_hash: *const [40]u8) ![40]u8 {
+        // Read commit object and extract tree hash
+        const obj_path = try std.fmt.allocPrint(self.allocator, "{s}/objects/{s}/{s}", .{ self.git_dir, commit_hash[0..2], commit_hash[2..] });
+        defer self.allocator.free(obj_path);
+
+        const obj_file = try std.fs.openFileAbsolute(obj_path, .{});
+        defer obj_file.close();
+
+        // Read and decompress
+        const compressed = try obj_file.readToEndAlloc(self.allocator, 100 * 1024 * 1024);
+        defer self.allocator.free(compressed);
+
+        var decompressed = std.ArrayList(u8).init(self.allocator);
+        defer decompressed.deinit();
+
+        var stream = std.io.fixedBufferStream(compressed);
+        try std.compress.zlib.decompress(stream.reader(), decompressed.writer());
+
+        // Parse commit object - look for "tree <hash>" line
+        const commit_content = decompressed.items;
+        const tree_prefix = "tree ";
+        if (std.mem.indexOf(u8, commit_content, tree_prefix)) |tree_start| {
+            const tree_hash_start = tree_start + tree_prefix.len;
+            if (tree_hash_start + 40 <= commit_content.len) {
+                var result: [40]u8 = undefined;
+                @memcpy(&result, commit_content[tree_hash_start..tree_hash_start + 40]);
+                return result;
+            }
+        }
+
+        return error.InvalidCommitObject;
+    }
+
+    fn checkoutTree(self: *Repository, tree_hash: *const [40]u8, target_path: []const u8) !void {
+        // Read tree object
+        const obj_path = try std.fmt.allocPrint(self.allocator, "{s}/objects/{s}/{s}", .{ self.git_dir, tree_hash[0..2], tree_hash[2..] });
+        defer self.allocator.free(obj_path);
+
+        const obj_file = try std.fs.openFileAbsolute(obj_path, .{});
+        defer obj_file.close();
+
+        const compressed = try obj_file.readToEndAlloc(self.allocator, 100 * 1024 * 1024);
+        defer self.allocator.free(compressed);
+
+        var decompressed = std.ArrayList(u8).init(self.allocator);
+        defer decompressed.deinit();
+
+        var stream = std.io.fixedBufferStream(compressed);
+        try std.compress.zlib.decompress(stream.reader(), decompressed.writer());
+
+        // Parse tree object - skip "tree <size>\0" header
+        const tree_content = decompressed.items;
+        const null_pos = std.mem.indexOfScalar(u8, tree_content, 0) orelse return error.InvalidTreeObject;
+        const entries_start = null_pos + 1;
+
+        var pos = entries_start;
+        while (pos < tree_content.len) {
+            // Parse mode
+            const space_pos = std.mem.indexOfScalarPos(u8, tree_content, pos, ' ') orelse break;
+            const mode = tree_content[pos..space_pos];
+
+            // Parse name
+            const name_start = space_pos + 1;
+            const null_pos_name = std.mem.indexOfScalarPos(u8, tree_content, name_start, 0) orelse break;
+            const name = tree_content[name_start..null_pos_name];
+
+            // Parse 20-byte SHA-1
+            const sha_start = null_pos_name + 1;
+            if (sha_start + 20 > tree_content.len) break;
+            const sha_bytes = tree_content[sha_start..sha_start + 20];
+
+            // Convert SHA to hex
+            var sha_hex: [40]u8 = undefined;
+            _ = std.fmt.bufPrint(&sha_hex, "{}", .{std.fmt.fmtSliceHexLower(sha_bytes)}) catch break;
+
+            // Check if it's a blob or tree
+            if (std.mem.eql(u8, mode, "100644") or std.mem.eql(u8, mode, "100755")) {
+                // It's a file (blob) - write it
+                try self.checkoutBlob(&sha_hex, target_path, name);
+            } else if (std.mem.eql(u8, mode, "40000")) {
+                // It's a subdirectory (tree) - recurse
+                const subdir_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ target_path, name });
+                defer self.allocator.free(subdir_path);
+                std.fs.makeDirAbsolute(subdir_path) catch {};
+                try self.checkoutTree(&sha_hex, subdir_path);
+            }
+
+            pos = sha_start + 20;
+        }
+    }
+
+    fn checkoutBlob(self: *Repository, blob_hash: *const [40]u8, target_path: []const u8, filename: []const u8) !void {
+        // Read blob object
+        const obj_path = try std.fmt.allocPrint(self.allocator, "{s}/objects/{s}/{s}", .{ self.git_dir, blob_hash[0..2], blob_hash[2..] });
+        defer self.allocator.free(obj_path);
+
+        const obj_file = try std.fs.openFileAbsolute(obj_path, .{});
+        defer obj_file.close();
+
+        const compressed = try obj_file.readToEndAlloc(self.allocator, 100 * 1024 * 1024);
+        defer self.allocator.free(compressed);
+
+        var decompressed = std.ArrayList(u8).init(self.allocator);
+        defer decompressed.deinit();
+
+        var stream = std.io.fixedBufferStream(compressed);
+        try std.compress.zlib.decompress(stream.reader(), decompressed.writer());
+
+        // Parse blob object - skip "blob <size>\0" header
+        const blob_content = decompressed.items;
+        const null_pos = std.mem.indexOfScalar(u8, blob_content, 0) orelse return error.InvalidBlobObject;
+        const file_content = blob_content[null_pos + 1..];
+
+        // Write file to working directory
+        const file_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ target_path, filename });
+        defer self.allocator.free(file_path);
+
+        const file = try std.fs.createFileAbsolute(file_path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll(file_content);
+    }
+
+    fn updateIndexFromTree(self: *Repository, tree_hash: *const [40]u8) !void {
+        // Create new empty index
+        var git_index = index_parser.GitIndex.init(self.allocator);
+        defer git_index.deinit();
+
+        // Populate index from tree
+        try self.addTreeToIndex(&git_index, tree_hash, "");
+
+        // Write index to disk
+        const index_path = try std.fmt.allocPrint(self.allocator, "{s}/index", .{self.git_dir});
+        defer self.allocator.free(index_path);
+        try git_index.writeToFile(index_path);
+    }
+
+    fn addTreeToIndex(self: *Repository, git_index: *index_parser.GitIndex, tree_hash: *const [40]u8, prefix: []const u8) !void {
+        // Read tree object (similar to checkoutTree but adds entries to index instead of files)
+        const obj_path = try std.fmt.allocPrint(self.allocator, "{s}/objects/{s}/{s}", .{ self.git_dir, tree_hash[0..2], tree_hash[2..] });
+        defer self.allocator.free(obj_path);
+
+        const obj_file = try std.fs.openFileAbsolute(obj_path, .{});
+        defer obj_file.close();
+
+        const compressed = try obj_file.readToEndAlloc(self.allocator, 100 * 1024 * 1024);
+        defer self.allocator.free(compressed);
+
+        var decompressed = std.ArrayList(u8).init(self.allocator);
+        defer decompressed.deinit();
+
+        var stream = std.io.fixedBufferStream(compressed);
+        try std.compress.zlib.decompress(stream.reader(), decompressed.writer());
+
+        const tree_content = decompressed.items;
+        const null_pos = std.mem.indexOfScalar(u8, tree_content, 0) orelse return error.InvalidTreeObject;
+        const entries_start = null_pos + 1;
+
+        var pos = entries_start;
+        while (pos < tree_content.len) {
+            const space_pos = std.mem.indexOfScalarPos(u8, tree_content, pos, ' ') orelse break;
+            const mode = tree_content[pos..space_pos];
+
+            const name_start = space_pos + 1;
+            const null_pos_name = std.mem.indexOfScalarPos(u8, tree_content, name_start, 0) orelse break;
+            const name = tree_content[name_start..null_pos_name];
+
+            const sha_start = null_pos_name + 1;
+            if (sha_start + 20 > tree_content.len) break;
+            const sha_bytes = tree_content[sha_start..sha_start + 20];
+
+            if (std.mem.eql(u8, mode, "100644") or std.mem.eql(u8, mode, "100755")) {
+                // Add file to index
+                const full_path = if (prefix.len == 0) 
+                    try self.allocator.dupe(u8, name)
+                else 
+                    try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, name });
+                
+                var sha_array: [20]u8 = undefined;
+                @memcpy(&sha_array, sha_bytes);
+
+                try git_index.entries.append(index_parser.IndexEntry{
+                    .ctime_seconds = 0,
+                    .ctime_nanoseconds = 0,
+                    .mtime_seconds = 0,
+                    .mtime_nanoseconds = 0,
+                    .dev = 0,
+                    .ino = 0,
+                    .mode = if (std.mem.eql(u8, mode, "100755")) 33261 else 33188,
+                    .uid = 0,
+                    .gid = 0,
+                    .size = 0, // We'd need to read the blob to get actual size
+                    .sha1 = sha_array,
+                    .flags = @intCast(@min(full_path.len, 0xfff)),
+                    .path = full_path,
+                });
+            } else if (std.mem.eql(u8, mode, "40000")) {
+                // Recursively add subtree
+                var sha_hex: [40]u8 = undefined;
+                _ = std.fmt.bufPrint(&sha_hex, "{}", .{std.fmt.fmtSliceHexLower(sha_bytes)}) catch break;
+
+                const subprefix = if (prefix.len == 0) 
+                    try self.allocator.dupe(u8, name)
+                else 
+                    try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, name });
+                defer self.allocator.free(subprefix);
+
+                try self.addTreeToIndex(git_index, &sha_hex, subprefix);
+            }
+
+            pos = sha_start + 20;
+        }
+    }
 
     fn resolveRef(self: *const Repository, ref_name: []const u8) ![40]u8 {
         const ref_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.git_dir, ref_name });
