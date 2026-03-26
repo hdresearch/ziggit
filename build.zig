@@ -114,10 +114,21 @@ pub fn build(b: *std.Build) void {
     bun_scenario_benchmark.root_module.addImport("ziggit", ziggit_module);
     const run_bun_scenario_benchmark = b.addRunArtifact(bun_scenario_benchmark);
 
+    // Zig API vs CLI benchmark (ITEM 7)
+    const zig_api_benchmark = b.addExecutable(.{
+        .name = "zig_api_benchmark",
+        .root_source_file = b.path("benchmarks/zig_api_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    zig_api_benchmark.root_module.addImport("ziggit", ziggit_module);
+    const run_zig_api_benchmark = b.addRunArtifact(zig_api_benchmark);
+
     const bench_step = b.step("bench", "Run all benchmarks");
     bench_step.dependOn(&run_cli_benchmark.step);
     bench_step.dependOn(&run_lib_benchmark.step);
     bench_step.dependOn(&run_bun_scenario_benchmark.step);
+    bench_step.dependOn(&run_zig_api_benchmark.step);
 
     // ========== WASM TARGET ==========
     const wasm_target = b.resolveTargetQuery(.{
