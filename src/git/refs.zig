@@ -459,6 +459,32 @@ fn isValidHash(hash: []const u8) bool {
     return true;
 }
 
+/// Validate git reference name according to git ref naming rules
+pub fn isValidRefName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    
+    // Check for forbidden characters
+    for (name) |c| {
+        switch (c) {
+            // ASCII control characters
+            0...31, 127 => return false,
+            // Forbidden characters in git ref names
+            ' ', '~', '^', ':', '?', '*', '[', '\\' => return false,
+            else => {},
+        }
+    }
+    
+    // Check for forbidden patterns
+    if (std.mem.indexOf(u8, name, "..") != null) return false; // No consecutive dots
+    if (std.mem.startsWith(u8, name, ".") or std.mem.endsWith(u8, name, ".")) return false; // No leading/trailing dots
+    if (std.mem.startsWith(u8, name, "/") or std.mem.endsWith(u8, name, "/")) return false; // No leading/trailing slashes
+    if (std.mem.indexOf(u8, name, "/.") != null) return false; // No component starting with dot
+    if (std.mem.indexOf(u8, name, "//") != null) return false; // No consecutive slashes
+    if (std.mem.endsWith(u8, name, ".lock")) return false; // No .lock suffix
+    
+    return true;
+}
+
 /// Resolve annotated tag to commit (if the hash points to a tag object)
 fn resolveAnnotatedTag(git_dir: []const u8, hash: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![]u8 {
     const objects = @import("objects.zig");
