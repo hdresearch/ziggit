@@ -701,23 +701,46 @@ fn findOffsetInIdx(idx_data: []const u8, target_hash: [20]u8) ?usize {
         
         const total_objects = std.mem.readInt(u32, @ptrCast(idx_data[fanout_start + 255 * 4 .. fanout_start + 255 * 4 + 4]), .big);
         const sha1_table_start = fanout_start + 256 * 4;
-        const crc_table_start = sha1_table_start + @as(usize, total_objects) * 20; // SHA-1 table
-        const offset_table_start = crc_table_start + @as(usize, total_objects) * 4; // CRC table + offset table
+        const crc_table_start = sha1_table_start + @as(usize, total_objects) * 20;
+        const offset_table_start = crc_table_start + @as(usize, total_objects) * 4;
         
-        var i: u32 = start_index;
-        while (i < end_index) : (i += 1) {
-            const sha_offset = sha1_table_start + @as(usize, i) * 20;
+        // Binary search for efficiency
+        var low = start_index;
+        var high = end_index;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            const sha_offset = sha1_table_start + @as(usize, mid) * 20;
             if (sha_offset + 20 > idx_data.len) return null;
-            if (std.mem.eql(u8, idx_data[sha_offset .. sha_offset + 20], &target_hash)) {
-                const off_offset = offset_table_start + @as(usize, i) * 4;
-                if (off_offset + 4 > idx_data.len) return null;
-                const offset_val = std.mem.readInt(u32, @ptrCast(idx_data[off_offset .. off_offset + 4]), .big);
-                return @intCast(offset_val);
+            
+            const obj_hash = idx_data[sha_offset .. sha_offset + 20];
+            const cmp = std.mem.order(u8, obj_hash, &target_hash);
+            
+            switch (cmp) {
+                .eq => {
+                    // Found it, get offset
+                    const off_offset = offset_table_start + @as(usize, mid) * 4;
+                    if (off_offset + 4 > idx_data.len) return null;
+                    var offset_val: u64 = std.mem.readInt(u32, @ptrCast(idx_data[off_offset .. off_offset + 4]), .big);
+                    
+                    // Handle 64-bit offsets
+                    if (offset_val & 0x80000000 != 0) {
+                        const large_offset_index = offset_val & 0x7FFFFFFF;
+                        const large_offset_table_start = offset_table_start + @as(usize, total_objects) * 4;
+                        const large_offset_table_offset = large_offset_table_start + @as(usize, large_offset_index) * 8;
+                        if (large_offset_table_offset + 8 > idx_data.len) return null;
+                        
+                        offset_val = std.mem.readInt(u64, @ptrCast(idx_data[large_offset_table_offset .. large_offset_table_offset + 8]), .big);
+                    }
+                    
+                    return @intCast(offset_val);
+                },
+                .lt => low = mid + 1,
+                .gt => high = mid,
             }
         }
         return null;
     } else {
-        // V1 index - simpler format
+        // V1 index - fanout table followed by (offset, SHA-1) pairs
         const fanout_start: usize = 0;
         const first_byte = target_hash[0];
         
@@ -730,14 +753,25 @@ fn findOffsetInIdx(idx_data: []const u8, target_hash: [20]u8) ?usize {
         
         const entries_start: usize = 256 * 4;
         
-        var i: u32 = start_index;
-        while (i < end_index) : (i += 1) {
-            const entry_offset = entries_start + @as(usize, i) * 24;
+        // Binary search for efficiency
+        var low = start_index;
+        var high = end_index;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            const entry_offset = entries_start + @as(usize, mid) * 24;
             if (entry_offset + 24 > idx_data.len) return null;
+            
             // V1 format: 4 bytes offset + 20 bytes SHA-1
-            if (std.mem.eql(u8, idx_data[entry_offset + 4 .. entry_offset + 24], &target_hash)) {
-                const offset_val = std.mem.readInt(u32, @ptrCast(idx_data[entry_offset .. entry_offset + 4]), .big);
-                return @intCast(offset_val);
+            const obj_hash = idx_data[entry_offset + 4 .. entry_offset + 24];
+            const cmp = std.mem.order(u8, obj_hash, &target_hash);
+            
+            switch (cmp) {
+                .eq => {
+                    const offset_val = std.mem.readInt(u32, @ptrCast(idx_data[entry_offset .. entry_offset + 4]), .big);
+                    return @intCast(offset_val);
+                },
+                .lt => low = mid + 1,
+                .gt => high = mid,
             }
         }
         return null;
@@ -789,19 +823,19 @@ fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.
     
     // Verify base size matches actual base data
     if (base_size != base_data.len) {
-            // debug print removed
+        // debug print removed
         return error.BaseSizeMismatch;
     }
     
     // Sanity check result size (100MB max for regular use)
     if (result_size > 100 * 1024 * 1024) {
-            // debug print removed
+        // debug print removed
         return error.ResultTooLarge;
     }
     
     // Basic sanity check: result size shouldn't be dramatically different from base
-    if (result_size > base_size * 10) {
-            // debug print removed
+    if (result_size > base_size * 10 and result_size > 1024 * 1024) { // Allow small files to grow significantly
+        // debug print removed
         return error.SuspiciousDelta;
     }
     
@@ -811,6 +845,8 @@ fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.
     try result.ensureTotalCapacity(result_size);
     
     while (pos < delta_data.len) {
+        if (pos >= delta_data.len) break; // Safety check
+        
         const cmd = delta_data[pos];
         pos += 1;
         
@@ -819,36 +855,84 @@ fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.
             var copy_offset: usize = 0;
             var copy_size: usize = 0;
             
-            // Read offset
-            if (cmd & 0x01 != 0) { copy_offset |= @as(usize, delta_data[pos]); pos += 1; }
-            if (cmd & 0x02 != 0) { copy_offset |= @as(usize, delta_data[pos]) << 8; pos += 1; }
-            if (cmd & 0x04 != 0) { copy_offset |= @as(usize, delta_data[pos]) << 16; pos += 1; }
-            if (cmd & 0x08 != 0) { copy_offset |= @as(usize, delta_data[pos]) << 24; pos += 1; }
+            // Read offset (up to 4 bytes, little-endian)
+            if (cmd & 0x01 != 0) { 
+                if (pos >= delta_data.len) return error.DeltaTruncated;
+                copy_offset |= @as(usize, delta_data[pos]); 
+                pos += 1; 
+            }
+            if (cmd & 0x02 != 0) { 
+                if (pos >= delta_data.len) return error.DeltaTruncated;
+                copy_offset |= @as(usize, delta_data[pos]) << 8; 
+                pos += 1; 
+            }
+            if (cmd & 0x04 != 0) { 
+                if (pos >= delta_data.len) return error.DeltaTruncated;
+                copy_offset |= @as(usize, delta_data[pos]) << 16; 
+                pos += 1; 
+            }
+            if (cmd & 0x08 != 0) { 
+                if (pos >= delta_data.len) return error.DeltaTruncated;
+                copy_offset |= @as(usize, delta_data[pos]) << 24; 
+                pos += 1; 
+            }
             
-            // Read size
-            if (cmd & 0x10 != 0) { copy_size |= @as(usize, delta_data[pos]); pos += 1; }
-            if (cmd & 0x20 != 0) { copy_size |= @as(usize, delta_data[pos]) << 8; pos += 1; }
-            if (cmd & 0x40 != 0) { copy_size |= @as(usize, delta_data[pos]) << 16; pos += 1; }
+            // Read size (up to 3 bytes, little-endian)
+            if (cmd & 0x10 != 0) { 
+                if (pos >= delta_data.len) return error.DeltaTruncated;
+                copy_size |= @as(usize, delta_data[pos]); 
+                pos += 1; 
+            }
+            if (cmd & 0x20 != 0) { 
+                if (pos >= delta_data.len) return error.DeltaTruncated;
+                copy_size |= @as(usize, delta_data[pos]) << 8; 
+                pos += 1; 
+            }
+            if (cmd & 0x40 != 0) { 
+                if (pos >= delta_data.len) return error.DeltaTruncated;
+                copy_size |= @as(usize, delta_data[pos]) << 16; 
+                pos += 1; 
+            }
             
             // Size 0 means 0x10000
             if (copy_size == 0) copy_size = 0x10000;
             
+            // Validate copy parameters
+            if (copy_offset >= base_data.len) return error.InvalidDelta;
+            if (copy_offset + copy_size > base_data.len) {
+                // Clamp to available data rather than failing completely
+                copy_size = base_data.len - copy_offset;
+            }
+            if (copy_size == 0) return error.InvalidDelta;
+            
+            // Prevent result from growing too large
+            if (result.items.len + copy_size > result_size) return error.InvalidDelta;
+            
             // Copy data from base
-            if (copy_offset + copy_size > base_data.len) return error.InvalidDelta;
             try result.appendSlice(base_data[copy_offset..copy_offset + copy_size]);
-        } else {
+        } else if (cmd > 0) {
             // Insert command - copy data from delta
             const insert_size = @as(usize, cmd);
-            if (insert_size == 0) return error.InvalidDelta;
-            if (pos + insert_size > delta_data.len) return error.InvalidDelta;
+            if (pos + insert_size > delta_data.len) return error.DeltaTruncated;
+            
+            // Prevent result from growing too large
+            if (result.items.len + insert_size > result_size) return error.InvalidDelta;
             
             try result.appendSlice(delta_data[pos..pos + insert_size]);
             pos += insert_size;
+        } else {
+            // cmd == 0 is reserved and invalid
+            return error.InvalidDelta;
         }
+        
+        // Safety check: don't let result grow beyond expected size
+        if (result.items.len > result_size) return error.InvalidDelta;
     }
     
-    // Verify result size
-    if (result.items.len != result_size) return error.InvalidDelta;
+    // Verify result size matches expected
+    if (result.items.len != result_size) {
+        return error.ResultSizeMismatch;
+    }
     
     return try allocator.dupe(u8, result.items);
 }
