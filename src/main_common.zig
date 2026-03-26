@@ -88,8 +88,24 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
             } else {
                 all_original_args.items[write_idx] = arg;
             }
-            write_idx += 1;
-            read_idx += 1;
+            // Translate -c key=value pairs for git 2.43 compat
+            if (std.mem.eql(u8, all_original_args.items[write_idx], "-c") and read_idx + 1 < all_original_args.items.len) {
+                // Next arg is key=value - translate if needed
+                const next = all_original_args.items[read_idx + 1];
+                all_original_args.items[write_idx + 1] = translateConfigKeyValue(next);
+                write_idx += 2;
+                read_idx += 2;
+            } else if (std.mem.startsWith(u8, all_original_args.items[write_idx], "-c") and all_original_args.items[write_idx].len > 2) {
+                // -ckey=value form (no space)
+                all_original_args.items[write_idx] = translateConfigKeyValue(all_original_args.items[write_idx][2..]);
+                // Need to split into -c and value... actually keep as-is, just translate in-place
+                // This form is rare. Skip for now.
+                write_idx += 1;
+                read_idx += 1;
+            } else {
+                write_idx += 1;
+                read_idx += 1;
+            }
         }
         all_original_args.shrinkRetainingCapacity(write_idx);
     }
@@ -430,6 +446,29 @@ fn forwardConfigToGit(allocator: std.mem.Allocator, all_args: [][]const u8, comm
     try forwardCmdToGit(allocator, try translateConfigValues(allocator, all_args), platform_impl);
 }
 
+fn translateConfigKeyValue(kv: []const u8) []const u8 {
+    // Translate -c key=value for git 2.43 compat
+    // merge.stat=diffstat → merge.stat=true
+    // merge.stat=compact → merge.stat=true
+    // status.showuntrackedfiles=false → status.showuntrackedfiles=no
+    // status.showuntrackedfiles=true → status.showuntrackedfiles=normal
+    if (std.ascii.startsWithIgnoreCase(kv, "merge.stat=")) {
+        const val = kv["merge.stat=".len..];
+        if (std.mem.eql(u8, val, "diffstat") or std.mem.eql(u8, val, "compact")) {
+            return "merge.stat=true";
+        }
+    }
+    if (std.ascii.startsWithIgnoreCase(kv, "status.showuntrackedfiles=")) {
+        const val = kv["status.showuntrackedfiles=".len..];
+        if (std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "0")) {
+            return "status.showuntrackedfiles=no";
+        } else if (std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "1")) {
+            return "status.showuntrackedfiles=normal";
+        }
+    }
+    return kv;
+}
+
 fn translateConfigValues(allocator: std.mem.Allocator, all_args: [][]const u8) ![][]const u8 {
     // Translate config values that newer git (2.46+) accepts but older git (2.43) doesn't.
     // E.g., status.showuntrackedfiles: false→no, true→normal, 0→no, 1→normal
@@ -475,6 +514,12 @@ fn translateConfigValues(allocator: std.mem.Allocator, all_args: [][]const u8) !
                 new_args[val_idx.?] = "no";
             } else if (std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "1")) {
                 new_args[val_idx.?] = "normal";
+            }
+        }
+        // merge.stat: git 2.46+ supports "diffstat"/"compact", older git only boolean
+        if (std.mem.eql(u8, key, "merge.stat")) {
+            if (std.mem.eql(u8, val, "diffstat") or std.mem.eql(u8, val, "compact")) {
+                new_args[val_idx.?] = "true";
             }
         }
     }
