@@ -1203,6 +1203,15 @@ pub fn build(b: *std.Build) void {
     error_handling_tests.root_module.addImport("ziggit", ziggit_module);
     test_step.dependOn(&b.addRunArtifact(error_handling_tests).step);
 
+    // API coverage tests (comprehensive Repository API tests with git cross-validation)
+    const api_coverage_tests = b.addTest(.{
+        .root_source_file = b.path("test/api_coverage_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    api_coverage_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(api_coverage_tests).step);
+
     // Tree and diff internal tests
     const tree_and_diff_internal_tests = b.addTest(.{
         .root_source_file = b.path("test/tree_and_diff_internal_test.zig"),
