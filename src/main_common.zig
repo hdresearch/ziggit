@@ -26,46 +26,64 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     // Skip program name
     _ = args.skip();
 
-    // Check for -C flag first
+    // Check for global flags first
     var first_arg = args.next() orelse {
         try showUsage(&platform_impl);
         return;
     };
     
-    if (std.mem.eql(u8, first_arg, "-C")) {
-        const dir_path = args.next() orelse {
-            try platform_impl.writeStderr("error: option '-C' requires a directory path\n");
-            std.process.exit(128);
-        };
-        
-        // Change to the specified directory
-        std.process.changeCurDir(dir_path) catch |err| switch (err) {
-            error.AccessDenied => {
-                const msg = try std.fmt.allocPrint(allocator, "fatal: cannot change to '{s}': Permission denied\n", .{dir_path});
-                defer allocator.free(msg);
-                try platform_impl.writeStderr(msg);
+    // Handle global flags in a loop
+    while (true) {
+        if (std.mem.eql(u8, first_arg, "-C")) {
+            const dir_path = args.next() orelse {
+                try platform_impl.writeStderr("error: option '-C' requires a directory path\n");
                 std.process.exit(128);
-            },
-            error.FileNotFound => {
-                const msg = try std.fmt.allocPrint(allocator, "fatal: cannot change to '{s}': No such file or directory\n", .{dir_path});
-                defer allocator.free(msg);
-                try platform_impl.writeStderr(msg);
+            };
+            
+            // Change to the specified directory
+            std.process.changeCurDir(dir_path) catch |err| switch (err) {
+                error.AccessDenied => {
+                    const msg = try std.fmt.allocPrint(allocator, "fatal: cannot change to '{s}': Permission denied\n", .{dir_path});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(128);
+                },
+                error.FileNotFound => {
+                    const msg = try std.fmt.allocPrint(allocator, "fatal: cannot change to '{s}': No such file or directory\n", .{dir_path});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(128);
+                },
+                error.NotDir => {
+                    const msg = try std.fmt.allocPrint(allocator, "fatal: cannot change to '{s}': Not a directory\n", .{dir_path});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(128);
+                },
+                else => return err,
+            };
+            
+            // Get the next argument
+            first_arg = args.next() orelse {
+                try showUsage(&platform_impl);
+                return;
+            };
+        } else if (std.mem.eql(u8, first_arg, "-c")) {
+            // Skip the config setting (bun passes -c core.longpaths=true which we ignore)
+            _ = args.next() orelse {
+                try platform_impl.writeStderr("error: option '-c' requires a config setting\n");
                 std.process.exit(128);
-            },
-            error.NotDir => {
-                const msg = try std.fmt.allocPrint(allocator, "fatal: cannot change to '{s}': Not a directory\n", .{dir_path});
-                defer allocator.free(msg);
-                try platform_impl.writeStderr(msg);
-                std.process.exit(128);
-            },
-            else => return err,
-        };
-        
-        // Get the next argument as the command
-        first_arg = args.next() orelse {
-            try showUsage(&platform_impl);
-            return;
-        };
+            };
+            
+            // Get the next argument
+            first_arg = args.next() orelse {
+                try showUsage(&platform_impl);
+                return;
+            };
+        } else {
+            // Not a global flag, this must be the command
+            break;
+        }
     }
     
     const command = first_arg;
