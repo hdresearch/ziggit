@@ -1787,28 +1787,29 @@ pub const Repository = struct {
         const git_dir = try allocator.dupe(u8, target);
         errdefer allocator.free(git_dir);
 
-        // Create required directories
-        const dirs = [_][]const u8{ "objects", "objects/pack", "refs", "refs/heads", "refs/tags" };
-        for (dirs) |d| {
-            const dir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ target, d });
-            defer allocator.free(dir_path);
-            std.fs.cwd().makePath(dir_path) catch {};
+        // Create required directories using stack buffer (no heap allocs)
+        // Only need leaf dirs; makePath creates parents automatically
+        var path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        {
+            const leaf_dirs = [_][]const u8{ "objects/pack", "refs/heads", "refs/tags" };
+            for (leaf_dirs) |d| {
+                const dir_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ target, d }) catch continue;
+                std.fs.cwd().makePath(dir_path) catch {};
+            }
         }
 
-        // Write HEAD
-        const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{target});
-        defer allocator.free(head_path);
+        // Write HEAD using stack buffer path
         {
-            const f = try std.fs.cwd().createFile(head_path, .{});
+            const hp = std.fmt.bufPrint(&path_buf, "{s}/HEAD", .{target}) catch return error.PathTooLong;
+            const f = try std.fs.cwd().createFile(hp, .{});
             defer f.close();
             try f.writeAll("ref: refs/heads/master\n");
         }
 
-        // Write config for bare repo
-        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{target});
-        defer allocator.free(config_path);
+        // Write config for bare repo using stack buffer path
         {
-            const f = try std.fs.cwd().createFile(config_path, .{});
+            const cp = std.fmt.bufPrint(&path_buf, "{s}/config", .{target}) catch return error.PathTooLong;
+            const f = try std.fs.cwd().createFile(cp, .{});
             defer f.close();
             try f.writeAll("[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n[remote \"origin\"]\n\turl = ");
             try f.writeAll(url);
@@ -1857,8 +1858,7 @@ pub const Repository = struct {
                 }
             }
 
-            const ip = try pack_writer.idxPath(allocator, git_dir, checksum_hex);
-            defer allocator.free(ip);
+            const ip = std.fmt.bufPrint(&path_buf, "{s}/objects/pack/pack-{s}.idx", .{ git_dir, checksum_hex }) catch return error.PathTooLong;
             const idx_file = try std.fs.cwd().createFile(ip, .{});
             defer idx_file.close();
             try idx_file.writeAll(idx_data);
@@ -1866,25 +1866,20 @@ pub const Repository = struct {
 
         // Write .git/shallow file with boundary commits
         if (clone_result.shallow_commits.len > 0) {
-            const shallow_path = try std.fmt.allocPrint(allocator, "{s}/shallow", .{target});
-            defer allocator.free(shallow_path);
-            var shallow_content = std.array_list.Managed(u8).init(allocator);
-            defer shallow_content.deinit();
-            for (clone_result.shallow_commits) |commit_oid| {
-                try shallow_content.appendSlice(&commit_oid);
-                try shallow_content.append('\n');
-            }
-            const sf = try std.fs.cwd().createFile(shallow_path, .{});
+            const sp = std.fmt.bufPrint(&path_buf, "{s}/shallow", .{target}) catch return error.PathTooLong;
+            const sf = try std.fs.cwd().createFile(sp, .{});
             defer sf.close();
-            try sf.writeAll(shallow_content.items);
+            for (clone_result.shallow_commits) |commit_oid| {
+                try sf.writeAll(&commit_oid);
+                try sf.writeAll("\n");
+            }
         }
 
         // Write refs using packed-refs file
         // For shallow clones, only write branch refs (not tags, which point to missing objects)
         var head_ref: ?[]const u8 = null;
         {
-            const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{target});
-            defer allocator.free(packed_refs_path);
+            const pp = std.fmt.bufPrint(&path_buf, "{s}/packed-refs", .{target}) catch return error.PathTooLong;
             var packed_refs = std.array_list.Managed(u8).init(allocator);
             defer packed_refs.deinit();
             try packed_refs.appendSlice("# pack-refs with: peeled fully-peeled sorted \n");
@@ -1901,11 +1896,8 @@ pub const Repository = struct {
 
             for (clone_result.refs) |ref| {
                 if (std.mem.eql(u8, ref.name, "HEAD")) continue;
-                // For shallow clones, only write the branch that HEAD points to
-                // (single-branch behavior - other branches' objects weren't fetched)
                 if (std.mem.startsWith(u8, ref.name, "refs/heads/")) {
                     if (depth > 0) {
-                        // Only write refs whose hash matches HEAD (the only branch we fetched)
                         if (head_hash_oid) |hh| {
                             if (!std.mem.eql(u8, &ref.hash, &hh)) continue;
                         }
@@ -1917,7 +1909,7 @@ pub const Repository = struct {
                 }
             }
 
-            const pf = try std.fs.cwd().createFile(packed_refs_path, .{});
+            const pf = try std.fs.cwd().createFile(pp, .{});
             defer pf.close();
             try pf.writeAll(packed_refs.items);
         }
@@ -1933,7 +1925,8 @@ pub const Repository = struct {
                     break;
                 }
             }
-            const hf = try std.fs.cwd().createFile(head_path, .{});
+            const hp = std.fmt.bufPrint(&path_buf, "{s}/HEAD", .{target}) catch return error.PathTooLong;
+            const hf = try std.fs.cwd().createFile(hp, .{});
             defer hf.close();
             { var buf_: [512]u8 = undefined; const msg_ = std.fmt.bufPrint(&buf_, "ref: {s}\n", .{head_target}) catch unreachable; try hf.writeAll(msg_); }
         }

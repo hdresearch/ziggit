@@ -372,9 +372,8 @@ fn httpPostWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.h
 
     if (response.head.status != .ok) return error.HttpError;
 
-    // Read response - may be chunked
-    var transfer_buf2: [65536]u8 = undefined;
-    return response.reader(&transfer_buf2).allocRemaining(allocator, .limited(max_response_size)) catch return error.HttpError;
+    // Read response - use readAllAlloc for efficiency (handles chunked transfer internally)
+    return req.reader().readAllAlloc(allocator, max_response_size) catch return error.HttpError;
 }
 
 // ============================================================================
