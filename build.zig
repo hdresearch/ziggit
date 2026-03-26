@@ -1492,6 +1492,16 @@ pub fn build(b: *std.Build) void {
     cache_stress_mtime_tests.root_module.addImport("ziggit", ziggit_module);
     test_step.dependOn(&b.addRunArtifact(cache_stress_mtime_tests).step);
 
+    // Cache cross-validation tests (cache APIs vs git CLI, close/reopen, statusPorcelain matching)
+    const cache_crossval_tests = b.addTest(.{
+        .root_source_file = b.path("test/cache_crossval_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cache_crossval_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(cache_crossval_tests).step);
+    e2e_step.dependOn(&b.addRunArtifact(cache_crossval_tests).step);
+
     // Refs internal resolution tests
     const refs_internal_resolution_tests = b.addTest(.{
         .root_source_file = b.path("test/refs_internal_resolution_test.zig"),
