@@ -1621,7 +1621,27 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(validation_sha1_edge_tests).step);
 
-    // Smart HTTP protocol tests
+    // Commit/tree integrity tests (SHA-1, parent chains, tree entries, git fsck cross-validation)
+    const commit_tree_integrity_tests = b.addTest(.{
+        .root_source_file = b.path("test/commit_tree_integrity_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    commit_tree_integrity_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(commit_tree_integrity_tests).step);
+
+    // Internal modules cross-validation tests (config, refs, objects, index vs git CLI)
+    const internal_modules_crossval_tests = b.addTest(.{
+        .root_source_file = b.path("test/internal_modules_crossval_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    internal_modules_crossval_tests.root_module.addAnonymousImport("git", .{
+        .root_source_file = b.path("src/git/git.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(internal_modules_crossval_tests).step);
+
+    // Smart HTTP protocol tests (pkt-line parsing, capability negotiation)
     const smart_http_tests = b.addTest(.{
         .root_source_file = b.path("test/smart_http_test.zig"),
         .target = target,
