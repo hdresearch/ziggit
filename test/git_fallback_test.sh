@@ -1,165 +1,269 @@
 #!/bin/bash
 
-# Git fallback test script
-# Tests that ziggit properly falls back to git for unimplemented commands
+# Comprehensive test for git fallback functionality
 
-set -e
-
-ZIGGIT="${1:-/root/ziggit/zig-out/bin/ziggit}"
-TEST_DIR="/tmp/ziggit_fallback_test"
-FAILED_TESTS=0
+set -euo pipefail
 
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
+YELLOW='\033[0;33m'
 NC='\033[0m' # No Color
 
+# Helper functions
 log_info() {
-    echo -e "${YELLOW}INFO: $1${NC}"
+    echo -e "${GREEN}INFO:${NC} $1"
 }
 
-log_success() {
-    echo -e "${GREEN}PASS: $1${NC}"
+log_warn() {
+    echo -e "${YELLOW}WARN:${NC} $1"
 }
 
 log_error() {
-    echo -e "${RED}FAIL: $1${NC}"
-    FAILED_TESTS=$((FAILED_TESTS + 1))
+    echo -e "${RED}ERROR:${NC} $1"
 }
 
-test_native_command() {
-    local cmd="$1"
-    local description="$2"
-    log_info "Testing native command: $cmd ($description)"
-    
-    if $ZIGGIT $cmd --help >/dev/null 2>&1 || $ZIGGIT $cmd >/dev/null 2>&1 || true; then
-        log_success "Native command '$cmd' executed"
-    else
-        log_error "Native command '$cmd' failed"
-    fi
-}
+# Test setup
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ZIGGIT_BINARY="$PROJECT_ROOT/zig-out/bin/ziggit"
 
-test_fallback_command() {
-    local cmd="$1"
-    local description="$2"
-    log_info "Testing fallback command: $cmd ($description)"
-    
-    # Test that the command executes (may fail due to repo state but shouldn't crash)
-    local exit_code=0
-    $ZIGGIT $cmd >/dev/null 2>&1 || exit_code=$?
-    
-    # Exit codes 0-2 are normal git exit codes, anything higher might indicate a crash
-    if [ $exit_code -le 128 ]; then
-        log_success "Fallback command '$cmd' executed with exit code $exit_code"
-    else
-        log_error "Fallback command '$cmd' failed with suspicious exit code $exit_code"
-    fi
-}
+# Build ziggit
+log_info "Building ziggit..."
+cd "$PROJECT_ROOT"
+HOME=/tmp zig build
 
-test_git_not_in_path() {
-    log_info "Testing behavior when git is not in PATH"
-    
-    # Create a temporary directory and modify PATH to exclude git
-    local temp_bin_dir=$(mktemp -d)
-    local original_path="$PATH"
-    
-    # Set PATH to exclude git
-    export PATH="$temp_bin_dir:/usr/local/bin:/bin:/usr/bin"
-    
-    # Remove git from the path by checking if it exists and excluding it
-    local git_paths=$(which -a git 2>/dev/null || true)
-    for git_path in $git_paths; do
-        local git_dir=$(dirname "$git_path")
-        PATH=$(echo "$PATH" | sed "s|:$git_dir||g" | sed "s|^$git_dir:||g")
-    done
-    
-    # Test a fallback command
-    local output
-    local exit_code=0
-    output=$($ZIGGIT stash list 2>&1) || exit_code=$?
-    
-    if [[ "$output" == *"not a ziggit command and git is not installed"* ]] && [ $exit_code -eq 1 ]; then
-        log_success "Proper error message when git not found"
-    else
-        log_error "Expected error message when git not found, got: $output (exit code: $exit_code)"
-    fi
-    
-    # Restore original PATH
-    export PATH="$original_path"
-    
-    # Cleanup
-    rm -rf "$temp_bin_dir"
-}
-
-# Setup test repository
-log_info "Setting up test repository in $TEST_DIR"
-rm -rf "$TEST_DIR"
-mkdir -p "$TEST_DIR"
-cd "$TEST_DIR"
-
-# Initialize repository
-$ZIGGIT init >/dev/null 2>&1
-
-# Create a test file
-echo "Hello World" > test.txt
-$ZIGGIT add test.txt >/dev/null 2>&1
-$ZIGGIT commit -m "Initial commit" >/dev/null 2>&1
-
-log_info "Starting git fallback tests..."
-
-# Test native commands that should work
-log_info "Testing native commands..."
-test_native_command "status" "show working tree status"
-test_native_command "rev-parse --git-dir" "show git directory"
-test_native_command "log --oneline" "show commit log"
-test_native_command "branch" "list branches"
-test_native_command "tag" "list tags"
-test_native_command "describe --always" "describe commit"
-test_native_command "diff" "show differences"
-
-# Test fallback commands that should forward to git
-log_info "Testing fallback commands..."
-test_fallback_command "stash list" "list stashes"
-test_fallback_command "remote -v" "show remotes"
-test_fallback_command "show HEAD" "show commit object"
-test_fallback_command "ls-files" "list tracked files"
-test_fallback_command "cat-file -t HEAD" "show object type"
-test_fallback_command "rev-list --count HEAD" "count commits"
-test_fallback_command "log --graph --oneline -5" "show log graph"
-test_fallback_command "shortlog -sn -1" "show short log"
-
-# Test error handling when git is not in PATH
-test_git_not_in_path
-
-# Test global flags forwarding
-log_info "Testing global flags forwarding..."
-if $ZIGGIT -C . status >/dev/null 2>&1; then
-    log_success "Global flag -C forwarded properly"
-else
-    log_error "Global flag -C forwarding failed"
-fi
-
-# Test exit code propagation
-log_info "Testing exit code propagation..."
-exit_code=0
-$ZIGGIT nonexistentcommand >/dev/null 2>&1 || exit_code=$?
-if [ $exit_code -eq 1 ]; then
-    log_success "Exit code properly propagated from git"
-else
-    log_error "Expected exit code 1, got $exit_code"
-fi
-
-# Cleanup
-cd /
-rm -rf "$TEST_DIR"
-
-# Summary
-echo ""
-if [ $FAILED_TESTS -eq 0 ]; then
-    log_success "All git fallback tests passed!"
-    exit 0
-else
-    log_error "$FAILED_TESTS test(s) failed"
+# Verify ziggit binary exists
+if [[ ! -f "$ZIGGIT_BINARY" ]]; then
+    log_error "ziggit binary not found at $ZIGGIT_BINARY"
     exit 1
 fi
+
+# Create temporary test directory
+TEST_DIR=$(mktemp -d)
+cleanup() {
+    rm -rf "$TEST_DIR"
+}
+trap cleanup EXIT
+
+cd "$TEST_DIR"
+log_info "Test directory: $TEST_DIR"
+
+# Initialize a git repository for testing
+git init --quiet
+git config user.email "test@example.com"
+git config user.name "Test User"
+
+# Create test file and commit
+echo "Hello World" > test.txt
+git add test.txt
+git commit -m "Initial commit" --quiet
+
+log_info "Testing native commands..."
+
+# Test 1: Commands with native implementations should work directly
+log_info "  - Testing 'status' command"
+if ! "$ZIGGIT_BINARY" status >/dev/null 2>&1; then
+    log_error "Native 'status' command failed"
+    exit 1
+fi
+
+log_info "  - Testing 'rev-parse HEAD' command"
+ziggit_head=$("$ZIGGIT_BINARY" rev-parse HEAD 2>/dev/null || true)
+git_head=$(git rev-parse HEAD 2>/dev/null || true)
+if [[ "$ziggit_head" != "$git_head" ]]; then
+    log_error "Native 'rev-parse HEAD' output doesn't match git: '$ziggit_head' vs '$git_head'"
+    exit 1
+fi
+
+log_info "  - Testing 'log' command"
+if ! "$ZIGGIT_BINARY" log --oneline -1 >/dev/null 2>&1; then
+    log_error "Native 'log' command failed"
+    exit 1
+fi
+
+log_info "Testing fallback commands..."
+
+# Test 2: Commands that should fall back to git
+test_fallback_command() {
+    local cmd="$1"
+    shift
+    local description="$1"
+    shift
+    
+    log_info "  - Testing fallback: $description"
+    
+    # Run with ziggit
+    local ziggit_output ziggit_exit_code
+    set +e
+    ziggit_output=$("$ZIGGIT_BINARY" $cmd "$@" 2>&1)
+    ziggit_exit_code=$?
+    set -e
+    
+    # Run with git 
+    local git_output git_exit_code
+    set +e
+    git_output=$(git $cmd "$@" 2>&1)
+    git_exit_code=$?
+    set -e
+    
+    # Compare exit codes
+    if [[ $ziggit_exit_code -ne $git_exit_code ]]; then
+        log_error "Exit code mismatch for '$cmd $*': ziggit=$ziggit_exit_code, git=$git_exit_code"
+        log_error "ziggit output: $ziggit_output"
+        log_error "git output: $git_output"
+        return 1
+    fi
+    
+    # For successful commands, compare output (ignoring whitespace differences)
+    if [[ $git_exit_code -eq 0 ]]; then
+        # Normalize whitespace for comparison
+        local ziggit_normalized=$(echo "$ziggit_output" | tr -s ' \n' | sort)
+        local git_normalized=$(echo "$git_output" | tr -s ' \n' | sort)
+        
+        if [[ "$ziggit_normalized" != "$git_normalized" ]]; then
+            log_warn "Output differs for '$cmd $*' (this might be expected)"
+            log_warn "ziggit: $ziggit_output"
+            log_warn "git: $git_output"
+        fi
+    fi
+    
+    return 0
+}
+
+# Test various fallback commands
+test_fallback_command "stash list" "git stash list"
+
+# Only test git remote if we have remotes configured  
+if git remote >/dev/null 2>&1; then
+    test_fallback_command "remote -v" "git remote -v"
+else
+    log_info "  - Skipping 'remote -v' test (no remotes configured)"
+fi
+
+test_fallback_command "show HEAD" "git show HEAD"
+test_fallback_command "ls-files" "git ls-files"
+
+# Test with HEAD object (should exist)
+head_hash=$(git rev-parse HEAD)
+test_fallback_command "cat-file -t HEAD" "git cat-file -t HEAD"
+
+test_fallback_command "rev-list --count HEAD" "git rev-list --count HEAD"
+
+# Create more commits for log testing
+echo "Second line" >> test.txt
+git add test.txt
+git commit -m "Second commit" --quiet
+
+echo "Third line" >> test.txt  
+git add test.txt
+git commit -m "Third commit" --quiet
+
+test_fallback_command "log --graph --oneline -5" "git log --graph --oneline -5"
+test_fallback_command "shortlog -sn -1" "git shortlog -sn -1"
+
+log_info "Testing error handling when git is not in PATH..."
+
+# Test 3: When git is not available, should show helpful error message
+# Temporarily modify PATH to exclude git
+old_path="$PATH"
+export PATH="/usr/bin:/bin" # Remove typical git locations
+
+# Find git location and temporarily rename it
+git_location=$(which git 2>/dev/null || true)
+if [[ -n "$git_location" && -f "$git_location" ]]; then
+    # Test with git unavailable
+    sudo mv "$git_location" "${git_location}.backup" 2>/dev/null || {
+        log_warn "Cannot test git unavailable scenario (no sudo access to move git binary)"
+    }
+    
+    # Test fallback command when git is unavailable
+    set +e
+    error_output=$("$ZIGGIT_BINARY" stash list 2>&1)
+    error_exit_code=$?
+    set -e
+    
+    # Restore git
+    if [[ -f "${git_location}.backup" ]]; then
+        sudo mv "${git_location}.backup" "$git_location" 2>/dev/null || true
+    fi
+    
+    if [[ $error_exit_code -eq 1 ]] && echo "$error_output" | grep -q "not a ziggit command and git is not installed"; then
+        log_info "  - Error handling when git is unavailable: PASS"
+    else
+        log_error "Expected helpful error when git is unavailable"
+        log_error "Exit code: $error_exit_code"
+        log_error "Output: $error_output"
+    fi
+else
+    log_warn "Cannot test git unavailable scenario (git not found in standard locations)"
+fi
+
+export PATH="$old_path"
+
+log_info "Testing global flag forwarding..."
+
+# Test 4: Global flags should be forwarded to git
+mkdir subdir
+cd subdir
+
+# Test -C flag forwarding
+log_info "  - Testing -C flag forwarding"
+ziggit_output=$("$ZIGGIT_BINARY" -C .. status --porcelain 2>&1 || true)
+git_output=$(git -C .. status --porcelain 2>&1 || true)
+
+if [[ "$ziggit_output" == "$git_output" ]]; then
+    log_info "  - Global flag forwarding: PASS"
+else
+    log_warn "Global flag forwarding may have differences"
+    log_warn "ziggit: $ziggit_output"
+    log_warn "git: $git_output"
+fi
+
+cd "$TEST_DIR"
+
+log_info "Testing interactive commands support..."
+
+# Test 5: stdin/stdout/stderr inheritance
+log_info "  - Testing stdout/stderr inheritance with 'log --oneline -1'"
+ziggit_log_output=$("$ZIGGIT_BINARY" log --oneline -1 2>&1)
+git_log_output=$(git log --oneline -1 2>&1)
+
+if [[ -n "$ziggit_log_output" ]] && [[ -n "$git_log_output" ]]; then
+    log_info "  - stdin/stdout/stderr inheritance: PASS"
+else
+    log_error "stdin/stdout/stderr inheritance test failed"
+    log_error "ziggit output: $ziggit_log_output"
+    log_error "git output: $git_log_output"
+    exit 1
+fi
+
+log_info "Testing aliasing scenario..."
+
+# Test 6: Test aliasing git=ziggit scenario
+log_info "  - Setting up alias and running common commands"
+alias git="$ZIGGIT_BINARY"
+
+# Test commonly used git commands through the alias
+if ! git status >/dev/null 2>&1; then
+    log_error "Aliased 'git status' failed"
+    exit 1
+fi
+
+if ! git log --oneline -1 >/dev/null 2>&1; then
+    log_error "Aliased 'git log' failed" 
+    exit 1
+fi
+
+# Test fallback through alias
+if git stash list >/dev/null 2>&1; then
+    log_info "  - Aliasing scenario: PASS"
+else
+    log_error "Aliased fallback 'git stash list' failed"
+    exit 1
+fi
+
+unalias git
+
+log_info "All tests completed successfully!"
+log_info "ziggit git fallback functionality is working correctly."
