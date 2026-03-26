@@ -270,7 +270,13 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     // This catches commands with native implementations (clone, etc.) that don't handle -h.
     if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
         var cmd_has_help = false;
+        var cmd_saw_dd = false;
         for (remaining_args_copy) |arg| {
+            if (std.mem.eql(u8, arg, "--")) {
+                cmd_saw_dd = true;
+                continue;
+            }
+            if (cmd_saw_dd) continue;
             if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help-all")) {
                 cmd_has_help = true;
                 break;
@@ -760,6 +766,7 @@ fn forwardToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_i
     var has_help_flag = false;
     var has_help_all = false;
     var past_command = false;
+    var saw_double_dash = false;
     for (all_args) |arg| {
         if (!past_command) {
             // Skip global flags like -C, -c, --git-dir etc
@@ -769,6 +776,12 @@ fn forwardToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_i
             }
             continue;
         }
+        // Don't intercept -h or --help-all after -- (they're arguments, not flags)
+        if (std.mem.eql(u8, arg, "--")) {
+            saw_double_dash = true;
+            continue;
+        }
+        if (saw_double_dash) continue;
         if (std.mem.eql(u8, arg, "-h")) {
             has_help_flag = true;
             break;
