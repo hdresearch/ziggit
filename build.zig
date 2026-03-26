@@ -151,6 +151,15 @@ pub fn build(b: *std.Build) void {
     bun_zig_api_test.root_module.addImport("ziggit", ziggit_module);
     const run_bun_zig_api_test = b.addRunArtifact(bun_zig_api_test);
 
+    // Pack file functionality test
+    const pack_file_test = b.addExecutable(.{
+        .name = "pack_file_test",
+        .root_source_file = b.path("test/pack_file_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_pack_file_test = b.addRunArtifact(pack_file_test);
+
     // Test step runs all tests
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_platform_tests.step);
@@ -163,6 +172,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_lib_status_test.step);
     test_step.dependOn(&run_lib_comprehensive_status_test.step);
     test_step.dependOn(&run_bun_zig_api_test.step);
+    test_step.dependOn(&run_pack_file_test.step);
 
     // ========== BENCHMARKS ==========
     const cli_benchmark = b.addExecutable(.{

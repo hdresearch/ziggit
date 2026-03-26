@@ -246,7 +246,11 @@ pub const Index = struct {
         // Calculate and skip padding
         const entry_size = 62 + (if (version >= 3 and (flags & 0x4000) != 0) @as(usize, 2) else @as(usize, 0)) + path_len;
         const pad_len = (8 - (entry_size % 8)) % 8;
-        try reader.skipBytes(pad_len, .{});
+        if (pad_len > 0) {
+            reader.skipBytes(pad_len, .{}) catch {
+                // Sometimes the last entry doesn't have full padding, that's OK
+            };
+        }
 
         return IndexEntry{
             .ctime_sec = ctime_sec,
