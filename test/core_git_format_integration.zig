@@ -2,10 +2,10 @@ const std = @import("std");
 const testing = std.testing;
 
 // Import core git format modules
-const objects = @import("../src/git/objects.zig");
-const config = @import("../src/git/config.zig");
-const index = @import("../src/git/index.zig");
-const refs = @import("../src/git/refs.zig");
+const objects = @import("git_objects");
+const config = @import("git_config");
+const index = @import("git_index");
+const refs = @import("git_refs");
 
 // Mock platform for testing
 const MockPlatform = struct {

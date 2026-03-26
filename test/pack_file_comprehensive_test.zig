@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const objects = @import("../src/git/objects.zig");
+const objects = @import("git_objects");
 
 // Test pack file functionality comprehensively
 
