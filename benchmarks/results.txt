@@ -1,5 +1,0 @@
-Ziggit vs Git Benchmark Results
-Generated: Thu Mar 26 01:04:56 UTC 2026
-Repository: /tmp/ziggit_benchmark_20500
-Iterations: 1000
-
