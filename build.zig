@@ -189,6 +189,16 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/git/objects.zig"),
     });
 
+    // Pack delta integration tests (OFS_DELTA build+index+read, clone simulation)
+    const pack_delta_integration_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_delta_integration_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_delta_integration_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+
     // Tests using internal src/git/*.zig imports that need refactoring
     // (compiled for syntax checking but excluded from test step)
     const config_enhanced_tests = b.addTest(.{
@@ -347,6 +357,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(pack_write_read_tests).step);
     test_step.dependOn(&b.addRunArtifact(delta_edge_cases_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_index_gen_tests).step);
+    test_step.dependOn(&b.addRunArtifact(pack_delta_integration_tests).step);
     // New tests from other agents (may be slow, included for completeness)
     test_step.dependOn(&b.addRunArtifact(repo_api_tests).step);
     test_step.dependOn(&b.addRunArtifact(object_integrity_tests).step);
