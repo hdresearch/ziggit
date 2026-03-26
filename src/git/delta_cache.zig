@@ -142,22 +142,7 @@ pub const DeltaCache = struct {
         return self.total_bytes;
     }
 
-    /// Atomic get-or-resolve: look up `offset` in cache; if missing, call
-    /// `resolveFn` to produce the data, cache it, and return it.
-    /// This eliminates the common "get, if null then resolve + put" pattern.
-    pub fn getOrPut(
-        self: *Self,
-        offset: usize,
-        type_str: []const u8,
-        resolve_ctx: anytype,
-        resolveFn: fn (@TypeOf(resolve_ctx)) ![]u8,
-    ) !Entry {
-        if (self.get(offset)) |entry| return entry;
-        const data = try resolveFn(resolve_ctx);
-        try self.put(offset, type_str, data);
-        // Return the entry we just inserted (it's at tail)
-        return self.get(offset).?;
-    }
+
 
     pub fn hitRate(self: Self) f64 {
         const total = self.hits + self.misses;
