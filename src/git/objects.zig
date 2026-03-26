@@ -241,6 +241,10 @@ fn loadFromPackFiles(hash_str: []const u8, git_dir: []const u8, platform_impl: a
         }
     }
     
+    // Performance optimization: Use hash prefix for quick filtering
+    const hash_prefix = hash_str[0..2];
+    const hash_prefix_int = std.fmt.parseInt(u8, hash_prefix, 16) catch 0;
+    
     const pack_dir_path = try std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir});
     defer allocator.free(pack_dir_path);
     
@@ -1483,12 +1487,30 @@ const PackIndexCache = struct {
     path: []const u8,
     data: []const u8,
     last_modified: i64,
+    fanout_table: ?[256]u32, // Cached fanout table for faster lookups
     
     pub fn init(allocator: std.mem.Allocator, path: []const u8, data: []const u8) !PackIndexCache {
+        var fanout_table: ?[256]u32 = null;
+        
+        // Pre-compute fanout table if this is a v2 index
+        if (data.len >= 8 + 256 * 4) {
+            const magic = std.mem.readInt(u32, @ptrCast(data[0..4]), .big);
+            if (magic == 0xff744f63) { // v2 magic
+                var table: [256]u32 = undefined;
+                const fanout_start = 8;
+                for (0..256) |i| {
+                    const offset = fanout_start + i * 4;
+                    table[i] = std.mem.readInt(u32, @ptrCast(data[offset..offset + 4]), .big);
+                }
+                fanout_table = table;
+            }
+        }
+        
         return PackIndexCache{
             .path = try allocator.dupe(u8, path),
             .data = try allocator.dupe(u8, data),
             .last_modified = std.time.timestamp(),
+            .fanout_table = fanout_table,
         };
     }
     

@@ -377,10 +377,16 @@ pub const Index = struct {
             // Handle special extensions that we might want to parse in the future
             if (std.mem.eql(u8, &sig, "TREE")) {
                 // Tree cache extension - could be useful for performance
-                // Tree cache extension found
+                // For now, just skip it but this could be cached for faster tree operations
             } else if (std.mem.eql(u8, &sig, "REUC")) {
-                // Resolve undo extension - tracks conflicts  
-                    // Resolve undo extension found
+                // Resolve undo extension - tracks conflicts
+                // This contains information about resolved merge conflicts
+            } else if (std.mem.eql(u8, &sig, "UNTR")) {
+                // Untracked cache extension - performance optimization
+                // Contains cached information about untracked files
+            } else if (std.mem.eql(u8, &sig, "FSMN")) {
+                // File system monitor extension
+                // Used by tools like git-lfs and watchman for performance
             }
             
             // Skip extension data

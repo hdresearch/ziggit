@@ -421,6 +421,11 @@ test "case insensitive matching" {
 fn parseBooleanValue(value: []const u8) ?bool {
     const trimmed = std.mem.trim(u8, value, " \t");
     
+    // Empty value is treated as true in git config
+    if (trimmed.len == 0) {
+        return true;
+    }
+    
     if (std.ascii.eqlIgnoreCase(trimmed, "true") or 
         std.ascii.eqlIgnoreCase(trimmed, "yes") or
         std.ascii.eqlIgnoreCase(trimmed, "on") or
@@ -434,6 +439,11 @@ fn parseBooleanValue(value: []const u8) ?bool {
         std.ascii.eqlIgnoreCase(trimmed, "0")) {
         return false;
     }
+    
+    // Git also accepts any non-zero integer as true
+    if (std.fmt.parseInt(i64, trimmed, 10)) |num| {
+        return num != 0;
+    } else |_| {}
     
     return null;
 }
