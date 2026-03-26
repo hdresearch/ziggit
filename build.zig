@@ -90,9 +90,22 @@ pub fn build(b: *std.Build) void {
     });
     const run_platform_tests = b.addRunArtifact(platform_tests);
 
+    // Platform integration test
+    const platform_integration_test = b.addExecutable(.{
+        .name = "platform_integration_test",
+        .root_source_file = b.path("test/platform_integration_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    platform_integration_test.root_module.addImport("platform", b.createModule(.{
+        .root_source_file = b.path("src/platform/platform.zig"),
+    }));
+    const run_platform_integration_test = b.addRunArtifact(platform_integration_test);
+
     // Test step runs all tests
     const test_step = b.step("test", "Run unit tests and integration tests");
     test_step.dependOn(&run_platform_tests.step);
+    test_step.dependOn(&run_platform_integration_test.step);
     test_step.dependOn(&run_git_interop_test.step);
     test_step.dependOn(&run_workflow_test.step);
     test_step.dependOn(&run_broken_pipe_test.step);
