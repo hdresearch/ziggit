@@ -3916,3 +3916,310 @@ test "bun monorepo workflow: workspace packages with interdependencies" {
     defer allocator.free(git_desc);
     try std.testing.expectEqualStrings("v1.0.0", trimRight(git_desc));
 }
+
+test "ziggit CRLF content -> git preserves byte-for-byte" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    const fp = try std.fmt.allocPrint(allocator, "{s}/crlf.txt", .{tmp});
+    defer allocator.free(fp);
+    {
+        const f = try std.fs.createFileAbsolute(fp, .{});
+        defer f.close();
+        try f.writeAll("line1\r\nline2\r\nline3\r\n");
+    }
+    try repo.add("crlf.txt");
+    _ = try repo.commit("crlf content", "Test", "t@t.com");
+
+    const blob = try execGit(allocator, tmp, &.{ "cat-file", "blob", "HEAD:crlf.txt" });
+    defer allocator.free(blob);
+    try std.testing.expectEqualStrings("line1\r\nline2\r\nline3\r\n", blob);
+}
+
+test "ziggit interleaved with git commits -> fsck passes" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    // ziggit commit 1
+    const f1 = try std.fmt.allocPrint(allocator, "{s}/z1.txt", .{tmp});
+    defer allocator.free(f1);
+    {
+        const f = try std.fs.createFileAbsolute(f1, .{});
+        defer f.close();
+        try f.writeAll("ziggit 1");
+    }
+    try repo.add("z1.txt");
+    _ = try repo.commit("ziggit 1", "Test", "t@t.com");
+
+    // git commit
+    const g1 = try std.fmt.allocPrint(allocator, "{s}/g1.txt", .{tmp});
+    defer allocator.free(g1);
+    {
+        const f = try std.fs.createFileAbsolute(g1, .{});
+        defer f.close();
+        try f.writeAll("git 1");
+    }
+    var add_argv = [_][]const u8{ "git", "add", "g1.txt" };
+    var add_child = std.process.Child.init(&add_argv, allocator);
+    add_child.cwd = tmp;
+    add_child.stderr_behavior = .Ignore;
+    add_child.stdout_behavior = .Ignore;
+    try add_child.spawn();
+    _ = try add_child.wait();
+
+    var commit_argv = [_][]const u8{ "git", "-c", "user.name=T", "-c", "user.email=t@t", "commit", "-m", "git 1" };
+    var commit_child = std.process.Child.init(&commit_argv, allocator);
+    commit_child.cwd = tmp;
+    commit_child.stderr_behavior = .Ignore;
+    commit_child.stdout_behavior = .Ignore;
+    try commit_child.spawn();
+    _ = try commit_child.wait();
+
+    // ziggit commit 2
+    const f2 = try std.fmt.allocPrint(allocator, "{s}/z2.txt", .{tmp});
+    defer allocator.free(f2);
+    {
+        const f = try std.fs.createFileAbsolute(f2, .{});
+        defer f.close();
+        try f.writeAll("ziggit 2");
+    }
+    try repo.add("z2.txt");
+    _ = try repo.commit("ziggit 2", "Test", "t@t.com");
+
+    // Verify chain
+    const count = try execGit(allocator, tmp, &.{ "rev-list", "--count", "HEAD" });
+    defer allocator.free(count);
+    try std.testing.expectEqualStrings("3", trimRight(count));
+
+    // fsck
+    const fsck = try execGit(allocator, tmp, &.{ "fsck", "--no-dangling" });
+    defer allocator.free(fsck);
+    try std.testing.expect(std.mem.indexOf(u8, fsck, "error") == null);
+}
+
+test "ziggit 64KB binary -> git preserves exact size and content" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    const fp = try std.fmt.allocPrint(allocator, "{s}/large.bin", .{tmp});
+    defer allocator.free(fp);
+    {
+        const f = try std.fs.createFileAbsolute(fp, .{});
+        defer f.close();
+        var data: [65536]u8 = undefined;
+        for (&data, 0..) |*b, i| b.* = @intCast(i % 256);
+        try f.writeAll(&data);
+    }
+    try repo.add("large.bin");
+    _ = try repo.commit("large binary", "Test", "t@t.com");
+
+    const size_out = try execGit(allocator, tmp, &.{ "cat-file", "-s", "HEAD:large.bin" });
+    defer allocator.free(size_out);
+    try std.testing.expectEqualStrings("65536", trimRight(size_out));
+}
+
+test "bun workflow: bare clone -> git clone from bare -> verify files" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    // Create source
+    const src_path = try std.fmt.allocPrint(allocator, "{s}/src", .{tmp});
+    defer allocator.free(src_path);
+    try std.fs.makeDirAbsolute(src_path);
+
+    var repo = try ziggit.Repository.init(allocator, src_path);
+    const pkg_path = try std.fmt.allocPrint(allocator, "{s}/package.json", .{src_path});
+    defer allocator.free(pkg_path);
+    {
+        const f = try std.fs.createFileAbsolute(pkg_path, .{});
+        defer f.close();
+        try f.writeAll("{\"name\":\"@bun/clone\",\"version\":\"1.0.0\"}");
+    }
+    const src_dir = try std.fmt.allocPrint(allocator, "{s}/src", .{src_path});
+    defer allocator.free(src_dir);
+    std.fs.makeDirAbsolute(src_dir) catch {};
+    const idx_path = try std.fmt.allocPrint(allocator, "{s}/src/index.js", .{src_path});
+    defer allocator.free(idx_path);
+    {
+        const f = try std.fs.createFileAbsolute(idx_path, .{});
+        defer f.close();
+        try f.writeAll("module.exports = 42;");
+    }
+    try repo.add("package.json");
+    try repo.add("src/index.js");
+    _ = try repo.commit("v1.0.0", "Bun", "bun@bun.sh");
+    try repo.createTag("v1.0.0", null);
+    repo.close();
+
+    // git clone --bare
+    const bare_path = try std.fmt.allocPrint(allocator, "{s}/bare.git", .{tmp});
+    defer allocator.free(bare_path);
+    var clone_bare = [_][]const u8{ "git", "clone", "--bare", src_path, bare_path };
+    var cb = std.process.Child.init(&clone_bare, allocator);
+    cb.stderr_behavior = .Ignore;
+    cb.stdout_behavior = .Ignore;
+    try cb.spawn();
+    _ = try cb.wait();
+
+    // git clone from bare
+    const checkout_path = try std.fmt.allocPrint(allocator, "{s}/checkout", .{tmp});
+    defer allocator.free(checkout_path);
+    var clone_checkout = [_][]const u8{ "git", "clone", bare_path, checkout_path };
+    var cc = std.process.Child.init(&clone_checkout, allocator);
+    cc.stderr_behavior = .Ignore;
+    cc.stdout_behavior = .Ignore;
+    try cc.spawn();
+    _ = try cc.wait();
+
+    // Verify files in checkout
+    const pkg_check = try std.fmt.allocPrint(allocator, "{s}/package.json", .{checkout_path});
+    defer allocator.free(pkg_check);
+    const pkg_file = try std.fs.openFileAbsolute(pkg_check, .{});
+    defer pkg_file.close();
+    const content = try pkg_file.readToEndAlloc(allocator, 4096);
+    defer allocator.free(content);
+    try std.testing.expect(std.mem.indexOf(u8, content, "@bun/clone") != null);
+
+    const idx_check = try std.fmt.allocPrint(allocator, "{s}/src/index.js", .{checkout_path});
+    defer allocator.free(idx_check);
+    std.fs.accessAbsolute(idx_check, .{}) catch return error.TestUnexpectedResult;
+}
+
+test "ziggit tag chain -> each tag resolves to different commit" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    var hashes: [3][40]u8 = undefined;
+    const versions = [_][]const u8{ "1.0.0", "1.1.0", "2.0.0" };
+    for (versions, 0..) |ver, i| {
+        const fp = try std.fmt.allocPrint(allocator, "{s}/version.txt", .{tmp});
+        defer allocator.free(fp);
+        {
+            const f = try std.fs.createFileAbsolute(fp, .{ .truncate = true });
+            defer f.close();
+            try f.writeAll(ver);
+        }
+        try repo.add("version.txt");
+        const msg = try std.fmt.allocPrint(allocator, "v{s}", .{ver});
+        defer allocator.free(msg);
+        hashes[i] = try repo.commit(msg, "Test", "t@t.com");
+        try repo.createTag(msg, null);
+    }
+
+    // Each tag should resolve to a different commit
+    for (versions, 0..) |ver, i| {
+        const tag_name = try std.fmt.allocPrint(allocator, "v{s}", .{ver});
+        defer allocator.free(tag_name);
+        const git_hash = try execGit(allocator, tmp, &.{ "rev-parse", tag_name });
+        defer allocator.free(git_hash);
+        try std.testing.expectEqualStrings(&hashes[i], trimRight(git_hash));
+    }
+
+    // All tags should exist
+    const tags = try execGit(allocator, tmp, &.{ "tag", "-l" });
+    defer allocator.free(tags);
+    try std.testing.expect(std.mem.indexOf(u8, tags, "v1.0.0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tags, "v2.0.0") != null);
+
+    // 3 commits in history
+    const count = try execGit(allocator, tmp, &.{ "rev-list", "--count", "HEAD" });
+    defer allocator.free(count);
+    try std.testing.expectEqualStrings("3", trimRight(count));
+}
+
+test "ziggit .gitignore file -> git show reads content" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    const fp = try std.fmt.allocPrint(allocator, "{s}/.gitignore", .{tmp});
+    defer allocator.free(fp);
+    {
+        const f = try std.fs.createFileAbsolute(fp, .{});
+        defer f.close();
+        try f.writeAll("node_modules/\n*.log\nbun.lockb\n");
+    }
+    try repo.add(".gitignore");
+    _ = try repo.commit("add gitignore", "Test", "t@t.com");
+
+    const content = try execGit(allocator, tmp, &.{ "show", "HEAD:.gitignore" });
+    defer allocator.free(content);
+    try std.testing.expect(std.mem.indexOf(u8, content, "node_modules") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "bun.lockb") != null);
+}
+
+test "ziggit commit -> git format-patch produces valid patch" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    // Need 2 commits for format-patch
+    const fp = try std.fmt.allocPrint(allocator, "{s}/f.txt", .{tmp});
+    defer allocator.free(fp);
+    {
+        const f = try std.fs.createFileAbsolute(fp, .{});
+        defer f.close();
+        try f.writeAll("base");
+    }
+    try repo.add("f.txt");
+    _ = try repo.commit("base", "Patcher", "p@p.com");
+
+    const fp2 = try std.fmt.allocPrint(allocator, "{s}/patch.txt", .{tmp});
+    defer allocator.free(fp2);
+    {
+        const f = try std.fs.createFileAbsolute(fp2, .{});
+        defer f.close();
+        try f.writeAll("new file");
+    }
+    try repo.add("patch.txt");
+    _ = try repo.commit("add patch file", "Patcher", "p@p.com");
+
+    const patch = try execGit(allocator, tmp, &.{ "format-patch", "--stdout", "HEAD~1..HEAD" });
+    defer allocator.free(patch);
+    try std.testing.expect(std.mem.indexOf(u8, patch, "add patch file") != null);
+    try std.testing.expect(std.mem.indexOf(u8, patch, "Patcher") != null);
+}

@@ -2882,3 +2882,192 @@ test "git bun workflow full cycle -> ziggit all APIs" {
     }
     try std.testing.expect(branches.len >= 1);
 }
+
+test "git CRLF content -> ziggit reads HEAD correctly" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    try initGitRepo(allocator, tmp);
+    try writeFile(tmp, "crlf.txt", "line1\r\nline2\r\n", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "crlf.txt" });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "crlf" });
+
+    var repo = try ziggit.Repository.open(allocator, tmp);
+    defer repo.close();
+
+    const head = try repo.revParseHead();
+    const git_head_out = try execGit(allocator, tmp, &.{ "rev-parse", "HEAD" });
+    defer allocator.free(git_head_out);
+    try std.testing.expectEqualStrings(trimRight(git_head_out), &head);
+}
+
+test "git interleaved commits -> ziggit HEAD still matches" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    try initGitRepo(allocator, tmp);
+
+    // 5 commits alternating content
+    var i: usize = 0;
+    while (i < 5) : (i += 1) {
+        var buf: [32]u8 = undefined;
+        const content = std.fmt.bufPrint(&buf, "commit {d}", .{i}) catch unreachable;
+        try writeFile(tmp, "f.txt", content, allocator);
+        try execGitNoOutput(allocator, tmp, &.{ "add", "f.txt" });
+        var msg_buf: [32]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "c{d}", .{i}) catch unreachable;
+        try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", msg });
+    }
+    try execGitNoOutput(allocator, tmp, &.{ "tag", "v1.0.0" });
+
+    var repo = try ziggit.Repository.open(allocator, tmp);
+    defer repo.close();
+
+    const head = try repo.revParseHead();
+    const git_head_out = try execGit(allocator, tmp, &.{ "rev-parse", "HEAD" });
+    defer allocator.free(git_head_out);
+    try std.testing.expectEqualStrings(trimRight(git_head_out), &head);
+
+    const desc = try repo.describeTags(allocator);
+    defer allocator.free(desc);
+    try std.testing.expect(std.mem.indexOf(u8, desc, "v1.0.0") != null);
+}
+
+test "git .gitignore committed -> ziggit reads HEAD" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    try initGitRepo(allocator, tmp);
+    try writeFile(tmp, ".gitignore", "node_modules/\n*.log\n", allocator);
+    try writeFile(tmp, "index.js", "code", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "." });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "with gitignore" });
+
+    var repo = try ziggit.Repository.open(allocator, tmp);
+    defer repo.close();
+
+    const head = try repo.revParseHead();
+    try std.testing.expectEqual(@as(usize, 40), head.len);
+    const clean = try repo.isClean();
+    try std.testing.expect(clean);
+}
+
+test "git multiple branches -> ziggit branchList finds all" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    try initGitRepo(allocator, tmp);
+    try writeFile(tmp, "f.txt", "base", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "f.txt" });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "initial" });
+    try execGitNoOutput(allocator, tmp, &.{ "branch", "develop" });
+    try execGitNoOutput(allocator, tmp, &.{ "branch", "staging" });
+    try execGitNoOutput(allocator, tmp, &.{ "branch", "production" });
+
+    var repo = try ziggit.Repository.open(allocator, tmp);
+    defer repo.close();
+
+    const branches = try repo.branchList(allocator);
+    defer {
+        for (branches) |b| allocator.free(b);
+        allocator.free(branches);
+    }
+
+    // Should have at least 4 branches (master + 3 created)
+    try std.testing.expect(branches.len >= 4);
+}
+
+test "git 64KB binary -> ziggit reads HEAD correctly" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    try initGitRepo(allocator, tmp);
+
+    // Write 64KB binary
+    const fp = try std.fmt.allocPrint(allocator, "{s}/large.bin", .{tmp});
+    defer allocator.free(fp);
+    {
+        const f = try std.fs.createFileAbsolute(fp, .{});
+        defer f.close();
+        var data: [65536]u8 = undefined;
+        for (&data, 0..) |*b, i| b.* = @intCast(i % 256);
+        try f.writeAll(&data);
+    }
+    try execGitNoOutput(allocator, tmp, &.{ "add", "large.bin" });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "large binary" });
+
+    var repo = try ziggit.Repository.open(allocator, tmp);
+    defer repo.close();
+
+    const head = try repo.revParseHead();
+    const git_head_out = try execGit(allocator, tmp, &.{ "rev-parse", "HEAD" });
+    defer allocator.free(git_head_out);
+    try std.testing.expectEqualStrings(trimRight(git_head_out), &head);
+
+    const clean = try repo.isClean();
+    try std.testing.expect(clean);
+}
+
+test "git workspace with deep nesting -> ziggit reads and describes" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    try initGitRepo(allocator, tmp);
+
+    // Create deep bun workspace structure
+    const dirs = [_][]const u8{
+        "packages",
+        "packages/ui",
+        "packages/ui/src",
+        "packages/ui/src/components",
+        "packages/ui/src/components/button",
+    };
+    for (dirs) |d| {
+        const dp = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ tmp, d });
+        defer allocator.free(dp);
+        std.fs.makeDirAbsolute(dp) catch {};
+    }
+
+    try writeFile(tmp, "package.json", "{\"workspaces\":[\"packages/*\"]}", allocator);
+    try writeFile(tmp, "packages/ui/package.json", "{\"name\":\"@ws/ui\",\"version\":\"1.0.0\"}", allocator);
+    try writeFile(tmp, "packages/ui/src/components/button/index.tsx", "export const Button = () => {};", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "." });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "workspace" });
+    try execGitNoOutput(allocator, tmp, &.{ "tag", "v1.0.0" });
+
+    var repo = try ziggit.Repository.open(allocator, tmp);
+    defer repo.close();
+
+    const head = try repo.revParseHead();
+    try std.testing.expectEqual(@as(usize, 40), head.len);
+
+    const desc = try repo.describeTags(allocator);
+    defer allocator.free(desc);
+    try std.testing.expect(std.mem.indexOf(u8, desc, "v1.0.0") != null);
+
+    try std.testing.expect(try repo.isClean());
+}
