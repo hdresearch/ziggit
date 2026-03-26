@@ -194,10 +194,21 @@ pub fn build(b: *std.Build) void {
     bun_scenario_benchmark.root_module.addImport("ziggit", ziggit_module);
     const run_bun_scenario_benchmark = b.addRunArtifact(bun_scenario_benchmark);
 
+    // API vs CLI benchmark (PHASE 1)
+    const api_vs_cli_benchmark = b.addExecutable(.{
+        .name = "api_vs_cli_bench",
+        .root_source_file = b.path("benchmarks/api_vs_cli_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    api_vs_cli_benchmark.root_module.addImport("ziggit", ziggit_module);
+    const run_api_vs_cli_benchmark = b.addRunArtifact(api_vs_cli_benchmark);
+
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&run_cli_benchmark.step);
     bench_step.dependOn(&run_lib_benchmark.step);
     bench_step.dependOn(&run_bun_scenario_benchmark.step);
+    bench_step.dependOn(&run_api_vs_cli_benchmark.step);
 
 
 
