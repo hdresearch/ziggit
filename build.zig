@@ -898,6 +898,46 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(object_create_parse_tests).step);
 
+    // Git interop comprehensive tests
+    const git_interop_comprehensive_tests = b.addTest(.{
+        .root_source_file = b.path("test/git_interop_comprehensive_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    git_interop_comprehensive_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(git_interop_comprehensive_tests).step);
+
+    // Objects store and hash tests (internal git module)
+    const objects_store_hash_tests = b.addTest(.{
+        .root_source_file = b.path("test/objects_store_and_hash_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    objects_store_hash_tests.root_module.addAnonymousImport("git", .{
+        .root_source_file = b.path("src/git/git.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(objects_store_hash_tests).step);
+
+    // Index DIRC format tests
+    const index_dirc_format_tests = b.addTest(.{
+        .root_source_file = b.path("test/index_dirc_format_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    index_dirc_format_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(index_dirc_format_tests).step);
+
+    // Refs and config internal tests
+    const refs_config_internal_tests = b.addTest(.{
+        .root_source_file = b.path("test/refs_and_config_internal_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    refs_config_internal_tests.root_module.addAnonymousImport("git", .{
+        .root_source_file = b.path("src/git/git.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(refs_config_internal_tests).step);
+
     // ========== BENCHMARKS ==========
     
     // CLI benchmark (ziggit vs git performance)
