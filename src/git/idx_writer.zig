@@ -1,5 +1,5 @@
 const std = @import("std");
-const c = @cImport(@cInclude("zlib.h"));
+const stream_utils = @import("stream_utils.zig");
 
 /// Object entry collected during pack index generation
 const IndexEntry = struct {
@@ -8,76 +8,122 @@ const IndexEntry = struct {
     crc32: u32,
 };
 
-/// Cached resolved object
-const CachedObject = struct {
-    type_str: []const u8,
-    data: []u8,
+/// Object info from pass 1 scan
+const ObjectInfo = struct {
+    offset: usize,
+    compressed_start: usize,
+    compressed_len: usize,
+    pack_type: u3,
+    size: usize,
+    base_offset: usize, // for ofs_delta
+    base_sha1: [20]u8, // for ref_delta
+    /// SHA-1 computed in pass 1 for base objects (type 1-4)
+    sha1: [20]u8,
+    crc32: u32,
+    /// true if SHA-1 was already computed
+    resolved: bool,
 };
 
-/// Inflate using C zlib. Returns consumed input bytes and decompressed data.
-fn zlibInflate(allocator: std.mem.Allocator, input: []const u8, size_hint: usize) !struct { consumed: usize, data: []u8 } {
-    var stream: c.z_stream = std.mem.zeroes(c.z_stream);
-    stream.next_in = @constCast(@ptrCast(input.ptr));
-    const in_len: c_uint = @intCast(@min(input.len, std.math.maxInt(c_uint)));
-    stream.avail_in = in_len;
+/// Bounded LRU cache for resolved object data during delta resolution.
+/// Simpler inline implementation to avoid delta_cache.zig compile issues.
+const ResolveCache = struct {
+    const Entry = struct {
+        type_str: []const u8, // static, not owned
+        data: []u8, // owned
+    };
+    const Node = struct {
+        offset: usize,
+        entry: Entry,
+        prev: ?*Node,
+        next: ?*Node,
+    };
 
-    if (c.inflateInit(&stream) != c.Z_OK) return error.ZlibInitFailed;
-    errdefer _ = c.inflateEnd(&stream);
+    allocator: std.mem.Allocator,
+    map: std.AutoHashMap(usize, *Node),
+    head: ?*Node, // LRU
+    tail: ?*Node, // MRU
+    total_bytes: usize,
+    max_bytes: usize,
 
-    var buf_size = if (size_hint > 0) size_hint else 4096;
-    var output = try allocator.alloc(u8, buf_size);
-    errdefer allocator.free(output);
+    fn init(allocator: std.mem.Allocator, max_bytes: usize) ResolveCache {
+        return .{
+            .allocator = allocator,
+            .map = std.AutoHashMap(usize, *Node).init(allocator),
+            .head = null,
+            .tail = null,
+            .total_bytes = 0,
+            .max_bytes = max_bytes,
+        };
+    }
 
-    stream.next_out = @ptrCast(output.ptr);
-    stream.avail_out = @intCast(@min(output.len, std.math.maxInt(c_uint)));
-
-    while (true) {
-        const ret = c.inflate(&stream, c.Z_FINISH);
-        if (ret == c.Z_STREAM_END) break;
-        if (ret == c.Z_BUF_ERROR or (ret == c.Z_OK and stream.avail_out == 0)) {
-            const written = buf_size - @as(usize, @intCast(stream.avail_out));
-            buf_size = if (buf_size < 65536) buf_size * 4 else buf_size * 2;
-            output = try allocator.realloc(output, buf_size);
-            stream.next_out = @ptrCast(output.ptr + written);
-            stream.avail_out = @intCast(@min(buf_size - written, std.math.maxInt(c_uint)));
-            continue;
+    fn deinit(self: *ResolveCache) void {
+        var node = self.head;
+        while (node) |n| {
+            const next = n.next;
+            self.allocator.free(n.entry.data);
+            self.allocator.destroy(n);
+            node = next;
         }
-        _ = c.inflateEnd(&stream);
-        return error.InflateFailed;
+        self.map.deinit();
     }
 
-    const total_out: usize = @intCast(stream.total_out);
-    const consumed: usize = in_len - @as(usize, @intCast(stream.avail_in));
-    _ = c.inflateEnd(&stream);
-
-    return .{ .consumed = consumed, .data = output[0..total_out] };
-}
-
-/// Skip-inflate: just find compressed data boundary without keeping data
-fn zlibSkipInflate(input: []const u8) !usize {
-    var stream: c.z_stream = std.mem.zeroes(c.z_stream);
-    stream.next_in = @constCast(@ptrCast(input.ptr));
-    const in_len: c_uint = @intCast(@min(input.len, std.math.maxInt(c_uint)));
-    stream.avail_in = in_len;
-
-    if (c.inflateInit(&stream) != c.Z_OK) return error.ZlibInitFailed;
-    defer _ = c.inflateEnd(&stream);
-
-    var discard: [16384]u8 = undefined;
-    while (true) {
-        stream.next_out = @ptrCast(&discard);
-        stream.avail_out = discard.len;
-        const ret = c.inflate(&stream, c.Z_NO_FLUSH);
-        if (ret == c.Z_STREAM_END) break;
-        if (ret != c.Z_OK and ret != c.Z_BUF_ERROR) return error.InflateFailed;
+    fn get(self: *ResolveCache, offset: usize) ?Entry {
+        if (self.map.get(offset)) |node| {
+            self.moveToTail(node);
+            return node.entry;
+        }
+        return null;
     }
 
-    return in_len - @as(usize, @intCast(stream.avail_in));
-}
+    /// Insert entry. Cache takes ownership of `data`.
+    fn put(self: *ResolveCache, offset: usize, type_str: []const u8, data: []u8) !void {
+        if (self.map.get(offset)) |existing| {
+            self.total_bytes -= existing.entry.data.len;
+            self.allocator.free(existing.entry.data);
+            existing.entry = .{ .type_str = type_str, .data = data };
+            self.total_bytes += data.len;
+            self.moveToTail(existing);
+            return;
+        }
+        while (self.total_bytes + data.len > self.max_bytes and self.head != null) {
+            self.evictHead();
+        }
+        const node = try self.allocator.create(Node);
+        node.* = .{ .offset = offset, .entry = .{ .type_str = type_str, .data = data }, .prev = null, .next = null };
+        try self.map.put(offset, node);
+        self.appendToTail(node);
+        self.total_bytes += data.len;
+    }
 
-fn typeStr(t: u3) []const u8 {
-    return switch (t) { 1 => "commit", 2 => "tree", 3 => "blob", 4 => "tag", else => "unknown" };
-}
+    fn evictHead(self: *ResolveCache) void {
+        const node = self.head orelse return;
+        self.removeNode(node);
+        _ = self.map.remove(node.offset);
+        self.total_bytes -= node.entry.data.len;
+        self.allocator.free(node.entry.data);
+        self.allocator.destroy(node);
+    }
+
+    fn removeNode(self: *ResolveCache, node: *Node) void {
+        if (node.prev) |p| p.next = node.next else self.head = node.next;
+        if (node.next) |n| n.prev = node.prev else self.tail = node.prev;
+        node.prev = null;
+        node.next = null;
+    }
+
+    fn appendToTail(self: *ResolveCache, node: *Node) void {
+        node.prev = self.tail;
+        node.next = null;
+        if (self.tail) |t| t.next = node else self.head = node;
+        self.tail = node;
+    }
+
+    fn moveToTail(self: *ResolveCache, node: *Node) void {
+        if (self.tail == node) return;
+        self.removeNode(node);
+        self.appendToTail(node);
+    }
+};
 
 /// Generate a .idx file next to the given .pack file.
 pub fn generateIdx(allocator: std.mem.Allocator, pack_path: []const u8) !void {
@@ -97,16 +143,37 @@ pub fn generateIdx(allocator: std.mem.Allocator, pack_path: []const u8) !void {
     try file.writeAll(idx_data);
 }
 
-/// Object info from pass 1 scan
-const ObjectInfo = struct {
-    offset: usize,
-    compressed_start: usize,
-    compressed_len: usize,
-    pack_type: u3,
-    size: usize,
-    base_offset: usize, // for ofs_delta
-    base_sha1: [20]u8, // for ref_delta
-};
+/// Skip zlib-compressed data, returning number of compressed bytes consumed.
+/// Uses streaming decompression with a stack-allocated discard buffer (no heap allocation).
+fn skipInflate(compressed_data: []const u8) !usize {
+    var fbs = std.io.fixedBufferStream(compressed_data);
+    var decompressor = std.compress.zlib.decompressor(fbs.reader());
+    var discard: [16384]u8 = undefined;
+    while (true) {
+        const n = decompressor.read(&discard) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        if (n == 0) break;
+    }
+    return @intCast(fbs.pos);
+}
+
+/// Decompress zlib data into an ArrayList (reusable), returning bytes consumed.
+fn decompressToList(compressed_data: []const u8, output: *std.ArrayList(u8)) !usize {
+    var fbs = std.io.fixedBufferStream(compressed_data);
+    var decompressor = std.compress.zlib.decompressor(fbs.reader());
+    var chunk_buf: [16384]u8 = undefined;
+    while (true) {
+        const n = decompressor.read(&chunk_buf) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        if (n == 0) break;
+        try output.appendSlice(chunk_buf[0..n]);
+    }
+    return @intCast(fbs.pos);
+}
 
 /// Generate idx data from in-memory pack data. Returns owned slice.
 pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) ![]u8 {
@@ -117,10 +184,13 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
     const content_end = pack_data.len - 20;
     const pack_checksum = pack_data[content_end..][0..20];
 
-    // === Pass 1: Scan all objects to find boundaries and identify delta bases ===
+    // ═══ Pass 1: Scan all objects, hash base objects in-line ═══
+    // Base objects (type 1-4): decompressAndHash → SHA-1 with zero heap allocation
+    // Delta objects (type 6,7): skip compressed data to find boundaries
     var objects = try allocator.alloc(ObjectInfo, object_count);
     defer allocator.free(objects);
 
+    // Track which offsets are referenced as delta bases
     var delta_base_set = std.AutoHashMap(usize, void).init(allocator);
     defer delta_base_set.deinit();
 
@@ -130,34 +200,27 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
         while (idx < object_count and pos < content_end) {
             const obj_start = pos;
 
-            // Parse header
-            const first_byte = pack_data[pos];
-            pos += 1;
-            const pt: u3 = @intCast((first_byte >> 4) & 7);
-            var size: usize = @intCast(first_byte & 0x0F);
-            var shift: u6 = 4;
-            var cb = first_byte;
-            while (cb & 0x80 != 0 and pos < content_end) {
-                cb = pack_data[pos];
+            // Parse pack object header
+            const hdr = stream_utils.parsePackObjectHeader(pack_data, pos) catch {
+                idx += 1;
                 pos += 1;
-                size |= @as(usize, @intCast(cb & 0x7F)) << shift;
-                if (shift < 60) shift += 7 else break;
-            }
+                continue;
+            };
+            pos += hdr.header_len;
+            const pt = hdr.type_num;
 
             var base_offset: usize = 0;
             var base_sha1: [20]u8 = .{0} ** 20;
 
             if (pt == 6) {
-                var delta_off: usize = 0;
-                var first_db = true;
-                while (pos < content_end) {
-                    const b = pack_data[pos];
+                const ofs = stream_utils.parseOfsOffset(pack_data, pos) catch {
+                    idx += 1;
                     pos += 1;
-                    if (first_db) { delta_off = @intCast(b & 0x7F); first_db = false; } else { delta_off = (delta_off + 1) << 7; delta_off += @intCast(b & 0x7F); }
-                    if (b & 0x80 == 0) break;
-                }
-                if (delta_off <= obj_start) {
-                    base_offset = obj_start - delta_off;
+                    continue;
+                };
+                pos += ofs.bytes_consumed;
+                if (ofs.negative_offset <= obj_start) {
+                    base_offset = obj_start - ofs.negative_offset;
                     try delta_base_set.put(base_offset, {});
                 }
             } else if (pt == 7) {
@@ -168,27 +231,56 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
             }
 
             const comp_start = pos;
-            const comp_len = zlibSkipInflate(pack_data[pos..content_end]) catch {
-                idx += 1;
-                pos += 1;
-                continue;
-            };
+            var obj_sha1: [20]u8 = .{0} ** 20;
+            var resolved = false;
+            var comp_len: usize = 0;
+
+            if (pt >= 1 and pt <= 4) {
+                // Base object: stream decompress+hash, zero heap allocation
+                const type_str = stream_utils.packTypeToString(pt) orelse "blob";
+                const result = stream_utils.decompressAndHash(
+                    pack_data[comp_start..content_end],
+                    type_str,
+                    hdr.size,
+                ) catch {
+                    idx += 1;
+                    pos += 1;
+                    continue;
+                };
+                comp_len = result.bytes_consumed;
+                obj_sha1 = result.sha1;
+                resolved = true;
+            } else {
+                // Delta: skip compressed data to find boundary
+                comp_len = skipInflate(pack_data[comp_start..content_end]) catch {
+                    idx += 1;
+                    pos += 1;
+                    continue;
+                };
+            }
+
             pos = comp_start + comp_len;
+
+            // CRC32 over raw pack bytes (header + compressed data)
+            const crc = std.hash.crc.Crc32IsoHdlc.hash(pack_data[obj_start..pos]);
 
             objects[idx] = .{
                 .offset = obj_start,
                 .compressed_start = comp_start,
                 .compressed_len = comp_len,
                 .pack_type = pt,
-                .size = size,
+                .size = hdr.size,
                 .base_offset = base_offset,
                 .base_sha1 = base_sha1,
+                .sha1 = obj_sha1,
+                .crc32 = crc,
+                .resolved = resolved,
             };
             idx += 1;
         }
     }
 
-    // Build offset -> object index map for fast lookups
+    // Build offset → object index map
     var offset_map = std.AutoHashMap(usize, u32).init(allocator);
     defer offset_map.deinit();
     try offset_map.ensureTotalCapacity(object_count);
@@ -196,122 +288,102 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
         offset_map.putAssumeCapacity(objects[i].offset, @intCast(i));
     }
 
-    // Also identify transitive delta bases (delta objects that are themselves bases)
+    // Build SHA-1 → offset map for REF_DELTA resolution
+    var sha_to_offset = std.AutoHashMap([20]u8, usize).init(allocator);
+    defer sha_to_offset.deinit();
     {
-        var changed = true;
-        while (changed) {
-            changed = false;
-            for (objects[0..object_count]) |obj| {
-                if (obj.pack_type == 6 and delta_base_set.contains(obj.offset)) {
-                    if (!delta_base_set.contains(obj.base_offset)) {
-                        // base_offset should already be in the set if it's a direct base,
-                        // but this handles chains
-                    }
-                }
+        var count: u32 = 0;
+        for (objects[0..object_count]) |obj| {
+            if (obj.resolved) count += 1;
+        }
+        try sha_to_offset.ensureTotalCapacity(count);
+        for (objects[0..object_count]) |obj| {
+            if (obj.resolved) {
+                sha_to_offset.putAssumeCapacity(obj.sha1, obj.offset);
             }
-            break; // delta bases are identified by who references them, not by type
         }
     }
 
-    // === Pass 2: Compute SHA-1 and CRC32 for all objects ===
+    // ═══ Pass 2: Resolve delta objects ═══
+    // Bounded LRU cache (32MB) for resolved object data
+    var cache = ResolveCache.init(allocator, 32 * 1024 * 1024);
+    defer cache.deinit();
+
+    // Reusable buffer for delta decompression
+    var delta_buf = std.ArrayList(u8).init(allocator);
+    defer delta_buf.deinit();
+
     var entries = try std.ArrayList(IndexEntry).initCapacity(allocator, object_count);
     defer entries.deinit();
 
-    // Cache for delta base resolution (only stores objects that ARE delta bases)
-    var resolve_cache = std.AutoHashMap(usize, CachedObject).init(allocator);
-    defer {
-        var it = resolve_cache.valueIterator();
-        while (it.next()) |v| allocator.free(v.data);
-        resolve_cache.deinit();
+    // Add already-resolved base objects
+    for (objects[0..object_count]) |obj| {
+        if (obj.resolved) {
+            try entries.append(.{
+                .sha1 = obj.sha1,
+                .offset = @intCast(obj.offset),
+                .crc32 = obj.crc32,
+            });
+        }
     }
 
-    for (objects[0..object_count]) |obj| {
-        const crc = std.hash.crc.Crc32IsoHdlc.hash(pack_data[obj.offset .. obj.compressed_start + obj.compressed_len]);
-        var obj_sha1: [20]u8 = undefined;
+    // Resolve delta objects
+    for (objects[0..object_count]) |*obj| {
+        if (obj.resolved) continue;
+        if (obj.pack_type != 6 and obj.pack_type != 7) continue;
 
-        if (obj.pack_type >= 1 and obj.pack_type <= 4) {
-            const ts = typeStr(obj.pack_type);
-            const is_base = delta_base_set.contains(obj.offset);
-
-            if (is_base) {
-                // Decompress and keep data for delta resolution
-                const result = try zlibInflate(allocator, pack_data[obj.compressed_start .. obj.compressed_start + obj.compressed_len], obj.size);
-                // Transfer ownership to cache
-                try resolve_cache.put(obj.offset, .{ .type_str = ts, .data = result.data });
-
-                var hdr_buf: [64]u8 = undefined;
-                const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ ts, result.data.len }) catch unreachable;
-                var sha_hasher = std.crypto.hash.Sha1.init(.{});
-                sha_hasher.update(header);
-                sha_hasher.update(result.data);
-                sha_hasher.final(&obj_sha1);
-            } else {
-                // Streaming: decompress → SHA-1, no allocation needed
-                const result = try zlibInflate(allocator, pack_data[obj.compressed_start .. obj.compressed_start + obj.compressed_len], obj.size);
-                defer allocator.free(result.data);
-
-                var hdr_buf: [64]u8 = undefined;
-                const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ ts, result.data.len }) catch unreachable;
-                var sha_hasher = std.crypto.hash.Sha1.init(.{});
-                sha_hasher.update(header);
-                sha_hasher.update(result.data);
-                sha_hasher.final(&obj_sha1);
-            }
-        } else if (obj.pack_type == 6) {
+        var bo: usize = 0;
+        if (obj.pack_type == 6) {
             if (obj.base_offset == 0) continue;
+            bo = obj.base_offset;
+        } else {
+            bo = sha_to_offset.get(obj.base_sha1) orelse continue;
+        }
 
-            const resolved = try resolveCachedFromInfo(allocator, pack_data, objects[0..object_count], &offset_map, obj.base_offset, &resolve_cache);
+        const base = resolveObject(
+            allocator,
+            pack_data,
+            objects[0..object_count],
+            &offset_map,
+            &sha_to_offset,
+            &cache,
+            bo,
+        ) catch continue;
 
-            const delta_data = try zlibInflate(allocator, pack_data[obj.compressed_start .. obj.compressed_start + obj.compressed_len], obj.size);
-            defer allocator.free(delta_data.data);
+        // Decompress delta instructions (reuse buffer)
+        delta_buf.clearRetainingCapacity();
+        if (obj.size > 0) {
+            try delta_buf.ensureTotalCapacity(obj.size);
+        }
+        _ = try decompressToList(
+            pack_data[obj.compressed_start .. obj.compressed_start + obj.compressed_len],
+            &delta_buf,
+        );
 
-            const result_data = try applyDelta(allocator, resolved.data, delta_data.data);
+        // Apply delta
+        const result_data = try applyDelta(allocator, base.data, delta_buf.items);
 
-            var hdr_buf: [64]u8 = undefined;
-            const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ resolved.type_str, result_data.len }) catch unreachable;
-            var sha_hasher = std.crypto.hash.Sha1.init(.{});
-            sha_hasher.update(header);
-            sha_hasher.update(result_data);
-            sha_hasher.final(&obj_sha1);
+        // Hash the result
+        const sha1 = stream_utils.hashGitObject(base.type_str, result_data);
 
-            if (delta_base_set.contains(obj.offset)) {
-                try resolve_cache.put(obj.offset, .{ .type_str = resolved.type_str, .data = result_data });
-            } else {
-                allocator.free(result_data);
-            }
-        } else if (obj.pack_type == 7) {
-            // REF_DELTA - find base by SHA-1
-            var found_offset: ?usize = null;
-            for (entries.items) |entry| {
-                if (std.mem.eql(u8, &entry.sha1, &obj.base_sha1)) {
-                    found_offset = @intCast(entry.offset);
-                    break;
-                }
-            }
-            const bo = found_offset orelse continue;
+        try entries.append(.{
+            .sha1 = sha1,
+            .offset = @intCast(obj.offset),
+            .crc32 = obj.crc32,
+        });
 
-            const resolved = try resolveCachedFromInfo(allocator, pack_data, objects[0..object_count], &offset_map, bo, &resolve_cache);
+        // Update maps for chained delta resolution
+        sha_to_offset.put(sha1, obj.offset) catch {};
 
-            const delta_data = try zlibInflate(allocator, pack_data[obj.compressed_start .. obj.compressed_start + obj.compressed_len], obj.size);
-            defer allocator.free(delta_data.data);
+        // Cache if this object is a delta base
+        if (delta_base_set.contains(obj.offset)) {
+            try cache.put(obj.offset, base.type_str, result_data);
+        } else {
+            allocator.free(result_data);
+        }
 
-            const result_data = try applyDelta(allocator, resolved.data, delta_data.data);
-
-            var hdr_buf: [64]u8 = undefined;
-            const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ resolved.type_str, result_data.len }) catch unreachable;
-            var sha_hasher = std.crypto.hash.Sha1.init(.{});
-            sha_hasher.update(header);
-            sha_hasher.update(result_data);
-            sha_hasher.final(&obj_sha1);
-
-            if (delta_base_set.contains(obj.offset)) {
-                try resolve_cache.put(obj.offset, .{ .type_str = resolved.type_str, .data = result_data });
-            } else {
-                allocator.free(result_data);
-            }
-        } else continue;
-
-        try entries.append(.{ .sha1 = obj_sha1, .offset = @intCast(obj.offset), .crc32 = crc });
+        obj.resolved = true;
+        obj.sha1 = sha1;
     }
 
     // Sort by SHA-1
@@ -321,7 +393,7 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
         }
     }.lessThan);
 
-    // Build v2 idx
+    // ═══ Build v2 idx file ═══
     var idx = std.ArrayList(u8).init(allocator);
     defer idx.deinit();
     try idx.ensureTotalCapacity(8 + 256 * 4 + entries.items.len * (20 + 4 + 4) + 40);
@@ -363,51 +435,66 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
     return try idx.toOwnedSlice();
 }
 
-/// Resolve object using cached info from pass 1
-fn resolveCachedFromInfo(
+/// Resolve an object at the given offset, returning its type and data.
+/// Uses the ResolveCache for memoization. Recursively resolves delta chains.
+fn resolveObject(
     allocator: std.mem.Allocator,
     pack_data: []const u8,
     objects: []const ObjectInfo,
     offset_map: *std.AutoHashMap(usize, u32),
+    sha_to_offset: *std.AutoHashMap([20]u8, usize),
+    cache: *ResolveCache,
     offset: usize,
-    cache: *std.AutoHashMap(usize, CachedObject),
-) !CachedObject {
-    if (cache.get(offset)) |cached| return cached;
+) !ResolveCache.Entry {
+    if (cache.get(offset)) |entry| return entry;
 
-    // Look up object info by offset
     const idx = offset_map.get(offset) orelse return error.InvalidOffset;
     const obj = objects[idx];
-
     const compressed = pack_data[obj.compressed_start .. obj.compressed_start + obj.compressed_len];
 
     if (obj.pack_type >= 1 and obj.pack_type <= 4) {
-        const result = try zlibInflate(allocator, compressed, obj.size);
-        const ts = typeStr(obj.pack_type);
-        try cache.put(offset, .{ .type_str = ts, .data = result.data });
-        return .{ .type_str = ts, .data = result.data };
+        const type_str = stream_utils.packTypeToString(obj.pack_type) orelse return error.UnsupportedPackType;
+        var output = std.ArrayList(u8).init(allocator);
+        errdefer output.deinit();
+        if (obj.size > 0) try output.ensureTotalCapacity(obj.size);
+        _ = try decompressToList(compressed, &output);
+        const data = try output.toOwnedSlice();
+        try cache.put(offset, type_str, data);
+        return cache.get(offset).?;
     } else if (obj.pack_type == 6) {
         if (obj.base_offset == 0) return error.InvalidDeltaOffset;
-        const base = try resolveCachedFromInfo(allocator, pack_data, objects, offset_map, obj.base_offset, cache);
-
-        const delta_result = try zlibInflate(allocator, compressed, obj.size);
-        defer allocator.free(delta_result.data);
-
-        const applied = try applyDelta(allocator, base.data, delta_result.data);
-        try cache.put(offset, .{ .type_str = base.type_str, .data = applied });
-        return .{ .type_str = base.type_str, .data = applied };
+        const base = try resolveObject(allocator, pack_data, objects, offset_map, sha_to_offset, cache, obj.base_offset);
+        var delta_list = std.ArrayList(u8).init(allocator);
+        defer delta_list.deinit();
+        if (obj.size > 0) try delta_list.ensureTotalCapacity(obj.size);
+        _ = try decompressToList(compressed, &delta_list);
+        const result = try applyDelta(allocator, base.data, delta_list.items);
+        try cache.put(offset, base.type_str, result);
+        return cache.get(offset).?;
+    } else if (obj.pack_type == 7) {
+        const bo = sha_to_offset.get(obj.base_sha1) orelse return error.InvalidDeltaBase;
+        const base = try resolveObject(allocator, pack_data, objects, offset_map, sha_to_offset, cache, bo);
+        var delta_list = std.ArrayList(u8).init(allocator);
+        defer delta_list.deinit();
+        if (obj.size > 0) try delta_list.ensureTotalCapacity(obj.size);
+        _ = try decompressToList(compressed, &delta_list);
+        const result = try applyDelta(allocator, base.data, delta_list.items);
+        try cache.put(offset, base.type_str, result);
+        return cache.get(offset).?;
     }
 
     return error.UnsupportedPackType;
 }
 
-/// Apply a git delta to a base object
+/// Apply a git delta to a base object. Returns owned slice.
 fn applyDelta(allocator: std.mem.Allocator, base: []const u8, delta: []const u8) ![]u8 {
     var dpos: usize = 0;
     _ = readDeltaVarint(delta, &dpos);
     const result_size = readDeltaVarint(delta, &dpos);
 
-    var result = try std.ArrayList(u8).initCapacity(allocator, result_size);
-    errdefer result.deinit();
+    var result = try allocator.alloc(u8, result_size);
+    errdefer allocator.free(result);
+    var rpos: usize = 0;
 
     while (dpos < delta.len) {
         const cmd = delta[dpos];
@@ -425,18 +512,20 @@ fn applyDelta(allocator: std.mem.Allocator, base: []const u8, delta: []const u8)
             if (cmd & 0x40 != 0) { copy_size |= @as(usize, delta[dpos]) << 16; dpos += 1; }
             if (copy_size == 0) copy_size = 0x10000;
             if (copy_offset + copy_size > base.len) return error.DeltaCopyOutOfBounds;
-            try result.appendSlice(base[copy_offset .. copy_offset + copy_size]);
+            @memcpy(result[rpos..][0..copy_size], base[copy_offset..][0..copy_size]);
+            rpos += copy_size;
         } else if (cmd > 0) {
             const n: usize = @intCast(cmd);
             if (dpos + n > delta.len) return error.DeltaInsertOutOfBounds;
-            try result.appendSlice(delta[dpos .. dpos + n]);
+            @memcpy(result[rpos..][0..n], delta[dpos..][0..n]);
+            rpos += n;
             dpos += n;
         } else {
             return error.DeltaReservedCommand;
         }
     }
 
-    return try result.toOwnedSlice();
+    return result;
 }
 
 fn readDeltaVarint(data: []const u8, pos: *usize) usize {
