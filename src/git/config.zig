@@ -177,12 +177,14 @@ pub const GitConfig = struct {
 
     /// Get a config value
     pub fn get(self: GitConfig, section: []const u8, subsection: ?[]const u8, name: []const u8) ?[]const u8 {
+        // Return the last matching entry — later entries (local config) override earlier ones (global).
+        var result: ?[]const u8 = null;
         for (self.entries.items) |entry| {
             if (entry.matches(section, subsection, name)) {
-                return entry.value;
+                result = entry.value;
             }
         }
-        return null;
+        return result;
     }
 
     /// Get all values for a config key (for multi-value configs)
