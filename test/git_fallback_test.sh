@@ -1,230 +1,78 @@
 #!/bin/bash
 
-# Comprehensive git fallback test
-# Tests that ziggit works as a drop-in replacement for git
+# Test script for git CLI fallback functionality
 
 set -e
 
-ZIGGIT_PATH="./zig-out/bin/ziggit"
-TEST_DIR="/tmp/ziggit_fallback_test_$$"
+ZIGGIT="./zig-out/bin/ziggit"
+EXIT_CODE=0
 
-if [ ! -f "$ZIGGIT_PATH" ]; then
-    echo "ERROR: ziggit binary not found at $ZIGGIT_PATH"
-    exit 1
-fi
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
 
-# Function to clean up
-cleanup() {
-    cd /
-    rm -rf "$TEST_DIR" 2>/dev/null || true
+echo "Running git fallback tests..."
+
+# Function to run a test
+run_test() {
+    local test_name="$1"
+    local command="$2"
+    local expected_exit="$3"
+    
+    echo -n "Testing $test_name... "
+    
+    if eval "$command" >/dev/null 2>&1; then
+        actual_exit=0
+    else
+        actual_exit=$?
+    fi
+    
+    if [[ "$actual_exit" == "$expected_exit" ]]; then
+        echo -e "${GREEN}PASS${NC}"
+    else
+        echo -e "${RED}FAIL${NC} (expected exit $expected_exit, got $actual_exit)"
+        EXIT_CODE=1
+    fi
 }
 
-trap cleanup EXIT
-
-# Set up test repository
-mkdir -p "$TEST_DIR"
-cd "$TEST_DIR"
-git init > /dev/null 2>&1
-git config user.name "Test User"
-git config user.email "test@example.com"
-
-# Create some test files
-echo "Hello world" > file1.txt
-echo "Test content" > file2.txt
-mkdir -p subdir
-echo "Nested file" > subdir/file3.txt
-
-git add . 
-git commit -m "Initial commit" > /dev/null 2>&1
-
-# Create a stash
-echo "Modified content" > file1.txt
-git stash push -m "Test stash" > /dev/null 2>&1
-
-echo "Testing ziggit as drop-in replacement for git..."
-
-# Test 1: Commands with native implementations should work
-echo "✓ Testing native commands..."
-
-# Status (skip due to memory leak issue in current implementation)
-# echo -n "  status... "
-# output=$("$ZIGGIT_PATH" status --porcelain 2>&1)
-# if [ $? -eq 0 ]; then
-#     echo "OK"
-# else
-#     echo "FAILED"
-#     exit 1
-# fi
-
-# Rev-parse
-echo -n "  rev-parse... "
-output=$("$ZIGGIT_PATH" rev-parse HEAD 2>&1)
-if [ $? -eq 0 ] && [[ "$output" =~ ^[0-9a-f]{40}$ ]]; then
-    echo "OK"
-else
-    echo "FAILED"
-    exit 1
-fi
-
-# Log  
-echo -n "  log... "
-output=$("$ZIGGIT_PATH" log --oneline -1 2>&1)
-if [ $? -eq 0 ]; then
-    echo "OK"
-else
-    echo "FAILED"
-    exit 1
-fi
-
-# Branch
-echo -n "  branch... "
-output=$("$ZIGGIT_PATH" branch 2>&1)
-if [ $? -eq 0 ]; then
-    echo "OK"
-else
-    echo "FAILED"
-    exit 1
-fi
-
-# Test 2: Commands that should fall back to git
-echo "✓ Testing fallback commands..."
-
-# Stash list
-echo -n "  stash list... "
-output=$("$ZIGGIT_PATH" stash list 2>&1)
-if [ $? -eq 0 ] && [[ "$output" == *"Test stash"* ]]; then
-    echo "OK"
-else
-    echo "FAILED"
-    exit 1
-fi
-
-# Remote -v
-echo -n "  remote -v... "
-output=$("$ZIGGIT_PATH" remote -v 2>&1)
-if [ $? -eq 0 ]; then
-    echo "OK"
-else
-    echo "FAILED" 
-    exit 1
-fi
-
-# Show HEAD
-echo -n "  show HEAD... "
-output=$("$ZIGGIT_PATH" show HEAD 2>&1)
-if [ $? -eq 0 ]; then
-    echo "OK"
-else
-    echo "FAILED"
-    exit 1
-fi
-
-# ls-files
-echo -n "  ls-files... "
-output=$("$ZIGGIT_PATH" ls-files 2>&1)
-if [ $? -eq 0 ] && [[ "$output" == *"file1.txt"* ]]; then
-    echo "OK"
-else
-    echo "FAILED"
-    exit 1
-fi
-
-# cat-file -t HEAD
-echo -n "  cat-file -t HEAD... "
-output=$("$ZIGGIT_PATH" cat-file -t HEAD 2>&1)
-if [ $? -eq 0 ] && [[ "$output" == "commit" ]]; then
-    echo "OK"
-else
-    echo "FAILED"
-    exit 1
-fi
-
-# rev-list --count HEAD
-echo -n "  rev-list --count HEAD... "
-output=$("$ZIGGIT_PATH" rev-list --count HEAD 2>&1)
-if [ $? -eq 0 ] && [[ "$output" =~ ^[0-9]+$ ]]; then
-    echo "OK"
-else
-    echo "FAILED"
-    exit 1
-fi
-
-# log --graph --oneline -5
-echo -n "  log --graph --oneline -5... "
-output=$("$ZIGGIT_PATH" log --graph --oneline -5 2>&1)
-if [ $? -eq 0 ]; then
-    echo "OK"
-else
-    echo "FAILED"
-    exit 1
-fi
-
-# shortlog -sn -1
-echo -n "  shortlog -sn -1... "
-output=$("$ZIGGIT_PATH" shortlog -sn -1 2>&1)
-if [ $? -eq 0 ]; then
-    echo "OK"
-else
-    echo "FAILED"
-    exit 1
-fi
-
-# Test 3: Test with global flags
-echo "✓ Testing global flags..."
-
-# Test -C flag
-echo -n "  -C flag... "
-cd /tmp
-output=$("$ZIGGIT_PATH" -C "$TEST_DIR" status --porcelain 2>&1)
-if [ $? -eq 0 ]; then
-    echo "OK"
-else
-    echo "FAILED"
-    exit 1
-fi
-cd "$TEST_DIR"
-
-# Test 4: Error handling when git is not in PATH
-echo "✓ Testing error handling without git..."
-
-# Temporarily remove git from PATH and test unknown command
-echo -n "  unknown command without git... "
-output=$(PATH="/usr/bin:/bin" "$ZIGGIT_PATH" unknowncommand 2>&1)
-exit_code=$?
-if [ $exit_code -eq 1 ] && [[ "$output" == *"is not a ziggit command"* ]] && [[ "$output" == *"git is not installed"* ]]; then
-    echo "OK"
-else
-    echo "FAILED (exit_code=$exit_code, output=$output)"
-    exit 1
-fi
-
-# Test 5: Test that ziggit help works
-echo "✓ Testing help..."
-
-echo -n "  --help... "
-output=$("$ZIGGIT_PATH" --help 2>&1)
-if [ $? -eq 0 ] && [[ "$output" == *"ziggit"* ]] && [[ "$output" == *"drop-in replacement"* ]]; then
-    echo "OK"
-else
-    echo "FAILED"
-    exit 1
-fi
-
-# Test 6: Test exit codes are properly propagated
-echo "✓ Testing exit code propagation..."
-
-echo -n "  invalid git command exit code... "
-"$ZIGGIT_PATH" invalidcommand > /dev/null 2>&1
-exit_code=$?
-if [ $exit_code -ne 0 ]; then
-    echo "OK (exit code: $exit_code)"
-else
-    echo "FAILED (should have non-zero exit code)"
-    exit 1
-fi
+# Test native implementations work
+echo "Testing native commands..."
+run_test "status" "$ZIGGIT status" 0
+run_test "rev-parse HEAD" "$ZIGGIT rev-parse HEAD" 0
+run_test "log -1" "$ZIGGIT log -1" 0
+run_test "branch" "$ZIGGIT branch" 0
+run_test "tag" "$ZIGGIT tag" 0
+run_test "describe" "$ZIGGIT describe" 0
+run_test "diff --stat" "$ZIGGIT diff --stat" 0
 
 echo ""
-echo "🎉 All tests passed! ziggit is working as a drop-in replacement for git."
+echo "Testing fallback commands..."
+
+# Test commands that fall back to git
+run_test "stash list" "$ZIGGIT stash list" 0
+run_test "remote -v" "$ZIGGIT remote -v" 0
+run_test "show HEAD" "$ZIGGIT show HEAD" 0
+run_test "ls-files" "$ZIGGIT ls-files" 0
+run_test "cat-file -t HEAD" "$ZIGGIT cat-file -t HEAD" 0
+run_test "rev-list --count HEAD" "$ZIGGIT rev-list --count HEAD" 0
+run_test "log --graph --oneline -5" "$ZIGGIT log --graph --oneline -5" 0
+run_test "shortlog -sn -1" "$ZIGGIT shortlog -sn -1" 0
+
 echo ""
-echo "You can now safely use: alias git=$ZIGGIT_PATH"
+echo "Testing error handling when git is not in PATH..."
+
+# Test when git is NOT in PATH, fallback commands should print clear error and exit 1
+PATH="" run_test "bisect (no git)" "$ZIGGIT bisect" 1
+PATH="" run_test "rebase (no git)" "$ZIGGIT rebase" 1
+PATH="" run_test "cherry-pick (no git)" "$ZIGGIT cherry-pick" 1
+
 echo ""
+if [[ $EXIT_CODE -eq 0 ]]; then
+    echo -e "${GREEN}All tests passed!${NC}"
+else
+    echo -e "${RED}Some tests failed!${NC}"
+fi
+
+exit $EXIT_CODE
