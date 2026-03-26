@@ -595,6 +595,10 @@ pub const Repository = struct {
 
         // Update index
         try self.updateIndex(path, hash, file_stat);
+        
+        // Clear cache since index changed
+        self._cached_index_mtime = null;
+        self._cached_is_clean = null;
     }
 
     /// Create commit (pure Zig implementation)  
@@ -680,6 +684,13 @@ pub const Repository = struct {
         } else {
             try tag_file.writeAll(&head_hash);
         }
+        
+        // Clear tags cache since a new tag was created
+        if (self._cached_latest_tag) |old_tag| {
+            self.allocator.free(old_tag);
+        }
+        self._cached_latest_tag = null;
+        self._cached_tags_dir_mtime = null;
     }
 
     /// Checkout (pure Zig implementation - updates HEAD, working tree, and index)
@@ -1254,6 +1265,10 @@ pub const Repository = struct {
             const new_head_file = try std.fs.createFileAbsolute(head_path, .{ .truncate = true });
             defer new_head_file.close();
             try new_head_file.writeAll(commit_hash_hex);
+            // Clear cache since HEAD changed
+            self._cached_head_hash = null;
+            self._cached_index_mtime = null;
+            self._cached_is_clean = null;
             return;
         };
         defer head_file.close();
@@ -1275,6 +1290,11 @@ pub const Repository = struct {
             defer head_file_write.close();
             try head_file_write.writeAll(commit_hash_hex);
         }
+        
+        // Clear cache since HEAD changed
+        self._cached_head_hash = null;
+        self._cached_index_mtime = null;
+        self._cached_is_clean = null;
     }
 
     fn copyMissingObjects(self: *Repository, remote_git_dir: []const u8) !void {

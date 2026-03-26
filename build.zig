@@ -92,6 +92,15 @@ pub fn build(b: *std.Build) void {
     integration_test_suite.root_module.addImport("ziggit", ziggit_module);
     const run_integration_test_suite = b.addRunArtifact(integration_test_suite);
 
+    // Bun API test (ITEM 6)
+    const bun_api_test = b.addTest(.{
+        .root_source_file = b.path("test/bun_zig_api_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bun_api_test.root_module.addImport("ziggit", ziggit_module);
+    const run_bun_api_test = b.addRunArtifact(bun_api_test);
+
     // Consolidated pack tests
     const pack_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_tests.zig"),
@@ -123,9 +132,14 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_git_interop_test.step);
     test_step.dependOn(&run_broken_pipe_test.step);
     test_step.dependOn(&run_integration_test_suite.step);
+    test_step.dependOn(&run_bun_api_test.step);
     test_step.dependOn(&run_pack_tests.step);
     test_step.dependOn(&run_lib_status_test.step);
     test_step.dependOn(&run_build_system_test.step);
+
+    // Bun API test standalone step
+    const test_bun_api_step = b.step("test-bun", "Run bun workflow test using Zig API (ITEM 6)");
+    test_bun_api_step.dependOn(&run_bun_api_test.step);
 
     // ========== BENCHMARKS ==========
     const cli_benchmark = b.addExecutable(.{
