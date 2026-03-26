@@ -40,6 +40,7 @@ const MockPlatform = struct {
         }
         
         pub fn writeFile(self: MockFs, path: []const u8, data: []const u8) !void {
+            _ = self;
             _ = path;
             _ = data;
             // No-op for tests
@@ -73,7 +74,7 @@ fn createRealisticPackIndexV2(allocator: std.mem.Allocator, objects_list: []cons
     try data.writer().writeInt(u32, 2, .big);          // Version
     
     // Sort objects by hash for proper indexing
-    var sorted_objects = try allocator.dupe(TestObject, objects_list);
+    const sorted_objects = try allocator.dupe(TestObject, objects_list);
     defer allocator.free(sorted_objects);
     
     std.sort.block(TestObject, sorted_objects, {}, struct {

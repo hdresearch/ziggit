@@ -40,6 +40,7 @@ const MockPlatform = struct {
         }
         
         pub fn writeFile(self: MockFs, path: []const u8, content: []const u8) !void {
+            _ = self;
             _ = path;
             _ = content;
             // No-op for tests
@@ -296,8 +297,6 @@ test "packed refs support" {
     
     var platform = MockPlatform.init(allocator);
     defer platform.deinit();
-    
-    const git_dir = "/test/.git";
     
     // Create a packed-refs file with multiple refs
     const packed_refs_content =

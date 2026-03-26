@@ -394,6 +394,6 @@ test "pack file performance and robustness" {
     for (test_objects.items, 0..) |obj, i| {
         try testing.expect(obj.hash_str.len == 40);
         try testing.expect(obj.type == .blob);
-        try testing.expectEqual(i, std.fmt.parseInt(usize, obj.hash_str[35..40], 16) catch unreachable / 12345);
+        try testing.expectEqual(i, (std.fmt.parseInt(usize, obj.hash_str[35..40], 16) catch unreachable) / 12345);
     }
 }
