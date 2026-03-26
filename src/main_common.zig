@@ -698,22 +698,17 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 
     // Check if there are any commits
     const current_commit = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
+    defer if (current_commit) |hash| allocator.free(hash);
     
     if (!porcelain) {
         const branch_msg = try std.fmt.allocPrint(allocator, "On branch {s}\n", .{current_branch});
         defer allocator.free(branch_msg);
         try platform_impl.writeStdout(branch_msg);
         
-        if (current_commit) |hash| {
-            allocator.free(hash);
-        } else {
+        if (current_commit == null) {
             try platform_impl.writeStdout("\nNo commits yet\n");
         }
     } else if (porcelain and show_branch) {
-        // Porcelain mode with --branch: show branch header
-        if (current_commit) |hash| {
-            allocator.free(hash);
-        }
         // Check if HEAD is detached
         const head_content_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
         defer allocator.free(head_content_path);
@@ -733,8 +728,6 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             defer allocator.free(branch_header);
             try platform_impl.writeStdout(branch_header);
         }
-    } else if (current_commit) |hash| {
-        allocator.free(hash);
     }
 
     // Load index to check for staged files
@@ -826,11 +819,36 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         }
     }
 
+    // Determine HEAD tree hash for new-file detection
+    var head_tree_hash: ?[]u8 = null;
+    if (current_commit) |cc| {
+        const cobj = objects.GitObject.load(cc, git_path, platform_impl, allocator) catch null;
+        if (cobj) |co| {
+            defer co.deinit(allocator);
+            if (co.type == .commit) {
+                var clines = std.mem.split(u8, co.data, "\n");
+                if (clines.next()) |tl| {
+                    if (std.mem.startsWith(u8, tl, "tree ")) {
+                        head_tree_hash = allocator.dupe(u8, tl["tree ".len..]) catch null;
+                    }
+                }
+            }
+        }
+    }
+    defer if (head_tree_hash) |h| allocator.free(h);
+
     // Show staged files
     if (staged_files.items.len > 0) {
         if (porcelain) {
             for (staged_files.items) |entry| {
-                if (current_commit == null) {
+                const is_new = if (current_commit == null)
+                    true
+                else if (head_tree_hash) |hth|
+                    (lookupBlobInTree(hth, entry.path, git_path, platform_impl, allocator) catch null) == null
+                else
+                    false;
+                
+                if (is_new) {
                     const msg = try std.fmt.allocPrint(allocator, "A  {s}\n", .{entry.path});
                     defer allocator.free(msg);
                     try platform_impl.writeStdout(msg);
@@ -849,7 +867,14 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             }
             
             for (staged_files.items) |entry| {
-                if (current_commit == null) {
+                const is_new = if (current_commit == null)
+                    true
+                else if (head_tree_hash) |hth|
+                    (lookupBlobInTree(hth, entry.path, git_path, platform_impl, allocator) catch null) == null
+                else
+                    false;
+                    
+                if (is_new) {
                     const msg = try std.fmt.allocPrint(allocator, "\tnew file:   {s}\n", .{entry.path});
                     defer allocator.free(msg);
                     try platform_impl.writeStdout(msg);
