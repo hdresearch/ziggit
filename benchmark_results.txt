@@ -1,0 +1,44 @@
+=== ZIGGIT API vs CLI BENCHMARK RESULTS ===
+Date: 2026-03-26
+Compiler: Zig with -Doptimize=ReleaseFast
+Test: 1000 iterations of each operation on repo with 100 files, 10 commits, tags
+
+=== PERFORMANCE RESULTS (all times in microseconds) ===
+
+Operation            | --- PURE ZIG API --- | ------- GIT CLI ------ | Speedup
+                     |  min  | median|  mean |   p95 |   p99 |  min  | median|  mean |   p95 |   p99 |
+--------------------|-------|-------|-------|-------|-------|-------|-------|-------|-------|-------|---------
+rev-parse HEAD       |        3 |        3 |        3 |        4 |       10 |      874 |      900 |      918 |      974 |     1020 |  257.8x
+status --porcelain   |       91 |       94 |       96 |      108 |      129 |     1225 |     1249 |     1276 |     1360 |     1420 |   13.3x
+describe --tags      |        7 |        8 |        8 |        9 |       15 |     1154 |     1181 |     1204 |     1280 |     1317 |  142.0x
+is_clean             |       93 |       95 |       96 |      103 |      123 |     1226 |     1246 |     1270 |     1346 |     1387 |   13.1x
+
+=== PERFORMANCE ANALYSIS ===
+
+• rev-parse HEAD: 257.8x faster (99.6% process spawn overhead eliminated)
+• status --porcelain: 13.3x faster (92.5% process spawn overhead eliminated)  
+• describe --tags: 142.0x faster (99.3% process spawn overhead eliminated)
+• is_clean: 13.1x faster (92.4% process spawn overhead eliminated)
+
+OVERALL SPEEDUP: 22.8x faster on median times
+
+✓ TARGET ACHIEVED for rev-parse HEAD and describe --tags: >100x speedup
+! OPTIMIZATION OPPORTUNITY for status operations: could be 100x+ with further tuning
+
+=== KEY INSIGHTS ===
+
+1. PURE ZIG ADVANTAGE: Direct Zig function calls eliminate process spawn overhead (1ms+ saved per call)
+2. FILE I/O DOMINATES: status operations are limited by file system access patterns, not computation
+3. OPTIMIZATION TARGETS: status --porcelain and is_clean can be further optimized with:
+   - Better index caching
+   - Ultra-fast clean path improvements  
+   - Reduced file system calls
+
+=== WHY THIS MATTERS FOR BUN ===
+
+1. ZERO PROCESS SPAWNING: Direct Zig function calls eliminate fork/exec/wait overhead
+2. MEMORY EFFICIENCY: No subprocess communication or buffering needed
+3. NO C FFI OVERHEAD: Pure Zig-to-Zig calls vs libgit2's C interface  
+4. UNIFIED COMPILATION: Bun + ziggit optimized together by Zig compiler
+5. NO GIT DEPENDENCY: Bun works without git binary installed
+6. PREDICTABLE PERFORMANCE: No process scheduling or I/O overhead variance
