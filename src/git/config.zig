@@ -515,6 +515,36 @@ pub fn getPullRebase(self: GitConfig) bool {
     return self.getBool("pull", null, "rebase", false);
 }
 
+/// Get all configuration entries (for debugging/export purposes)
+pub fn getAllEntries(self: GitConfig) []const ConfigEntry {
+    return self.entries.items;
+}
+
+/// Count total number of configuration entries
+pub fn getEntryCount(self: GitConfig) usize {
+    return self.entries.items.len;
+}
+
+/// Print configuration summary for debugging
+pub fn printSummary(self: GitConfig) void {
+    std.debug.print("Git Configuration Summary:\n");
+    std.debug.print("  Total entries: {}\n", .{self.entries.items.len});
+    
+    // Count by section
+    var section_counts = std.HashMap([]const u8, u32, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(std.testing.allocator);
+    defer section_counts.deinit();
+    
+    for (self.entries.items) |entry| {
+        const count = section_counts.get(entry.section) orelse 0;
+        section_counts.put(entry.section, count + 1) catch {};
+    }
+    
+    var iter = section_counts.iterator();
+    while (iter.next()) |kv| {
+        std.debug.print("  [{s}]: {} entries\n", .{ kv.key_ptr.*, kv.value_ptr.* });
+    }
+}
+
 test "enhanced config features" {
     const testing = std.testing;
     const allocator = testing.allocator;

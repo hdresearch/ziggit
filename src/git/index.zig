@@ -727,9 +727,19 @@ fn isValidExtensionSignature(sig: []const u8) bool {
     return true;
 }
 
-/// Check for index corruption or unusual conditions
+/// Check for index corruption or unusual conditions with enhanced validation
 pub fn validateIndex(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![][]const u8 {
     var issues = std.ArrayList([]const u8).init(allocator);
+    
+    // First check if index file exists
+    const index_path = try std.fmt.allocPrint(allocator, "{s}/index", .{git_dir});
+    defer allocator.free(index_path);
+    
+    const index_exists = platform_impl.fs.exists(index_path) catch false;
+    if (!index_exists) {
+        try issues.append(try allocator.dupe(u8, "Index file does not exist - repository may be corrupted"));
+        return issues.toOwnedSlice();
+    }
     
     const stats = analyzeIndex(git_dir, platform_impl, allocator) catch |err| {
         try issues.append(try std.fmt.allocPrint(allocator, "Failed to analyze index: {}", .{err}));
