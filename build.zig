@@ -92,12 +92,31 @@ pub fn build(b: *std.Build) void {
     integration_test_suite.root_module.addImport("ziggit", ziggit_module);
     const run_integration_test_suite = b.addRunArtifact(integration_test_suite);
 
+    // Consolidated pack tests
+    const pack_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_pack_tests = b.addRunArtifact(pack_tests);
+
+    // Lib status test
+    const lib_status_test = b.addTest(.{
+        .root_source_file = b.path("test/lib_status_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lib_status_test.root_module.addImport("ziggit", ziggit_module);
+    const run_lib_status_test = b.addRunArtifact(lib_status_test);
+
     // Test step runs all tests
-    const test_step = b.step("test", "Run all tests");
+    const test_step = b.step("test", "Run unit tests and integration tests");
     test_step.dependOn(&run_platform_tests.step);
     test_step.dependOn(&run_git_interop_test.step);
     test_step.dependOn(&run_broken_pipe_test.step);
     test_step.dependOn(&run_integration_test_suite.step);
+    test_step.dependOn(&run_pack_tests.step);
+    test_step.dependOn(&run_lib_status_test.step);
 
     // ========== BENCHMARKS ==========
     const cli_benchmark = b.addExecutable(.{
@@ -126,76 +145,10 @@ pub fn build(b: *std.Build) void {
     bun_scenario_benchmark.root_module.addImport("ziggit", ziggit_module);
     const run_bun_scenario_benchmark = b.addRunArtifact(bun_scenario_benchmark);
 
-    // API vs CLI benchmark (PHASE 1) 
-    const api_vs_cli_bench = b.addExecutable(.{
-        .name = "api_vs_cli_bench",
-        .root_source_file = b.path("benchmarks/api_vs_cli_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    api_vs_cli_bench.root_module.addImport("ziggit", ziggit_module);
-    const run_api_vs_cli_bench = b.addRunArtifact(api_vs_cli_bench);
-
-    // Remote benchmark from other agent
-    const zig_api_benchmark = b.addExecutable(.{
-        .name = "zig_api_benchmark",
-        .root_source_file = b.path("benchmarks/zig_api_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    zig_api_benchmark.root_module.addImport("ziggit", ziggit_module);
-    const run_zig_api_benchmark = b.addRunArtifact(zig_api_benchmark);
-
     const bench_step = b.step("bench", "Run all benchmarks");
     bench_step.dependOn(&run_cli_benchmark.step);
     bench_step.dependOn(&run_lib_benchmark.step);
     bench_step.dependOn(&run_bun_scenario_benchmark.step);
-    bench_step.dependOn(&run_api_vs_cli_bench.step);
-    
-    // Alternative API benchmark from remote
-    const bench_api_step_alt = b.step("bench-api-alt", "Run Zig API vs Git CLI benchmark (ITEM 7)");
-    bench_api_step_alt.dependOn(&run_zig_api_benchmark.step);
-
-    // Bun API test (ITEM 6)
-    const bun_api_test = b.addTest(.{
-        .root_source_file = b.path("test/bun_zig_api_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    bun_api_test.root_module.addImport("ziggit", ziggit_module);
-    const run_bun_api_test = b.addRunArtifact(bun_api_test);
-
-    const test_bun_api_step = b.step("test-bun", "Run bun workflow test using Zig API (ITEM 6)");
-    test_bun_api_step.dependOn(&run_bun_api_test.step);
-
-    const api_cli_bench_step = b.step("bench-api", "Run API vs CLI performance comparison (PHASE 1)");
-    api_cli_bench_step.dependOn(&run_api_vs_cli_bench.step);
-
-    // Optimization benchmark (PHASE 2)
-    const optimization_bench = b.addExecutable(.{
-        .name = "optimization_bench",
-        .root_source_file = b.path("benchmarks/optimization_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    optimization_bench.root_module.addImport("ziggit", ziggit_module);
-    const run_optimization_bench = b.addRunArtifact(optimization_bench);
-
-    const optimization_bench_step = b.step("bench-opt", "Run hot path optimization benchmarks (PHASE 2)");
-    optimization_bench_step.dependOn(&run_optimization_bench.step);
-
-    // Debug vs Release comparison (PHASE 3)
-    const debug_release_comparison = b.addExecutable(.{
-        .name = "debug_release_comparison",
-        .root_source_file = b.path("benchmarks/debug_release_comparison.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    debug_release_comparison.root_module.addImport("ziggit", ziggit_module);
-    const run_debug_release_comparison = b.addRunArtifact(debug_release_comparison);
-
-    const debug_release_step = b.step("bench-release", "Run debug vs release performance comparison (PHASE 3)");
-    debug_release_step.dependOn(&run_debug_release_comparison.step);
 
     // ========== WASM TARGET ==========
     const wasm_target = b.resolveTargetQuery(.{
