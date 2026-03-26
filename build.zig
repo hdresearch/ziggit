@@ -82,6 +82,17 @@ pub fn build(b: *std.Build) void {
     const run_command_output_test = b.addRunArtifact(command_output_test);
     run_command_output_test.step.dependOn(b.getInstallStep());
 
+    // Comprehensive integration test (demonstrates ziggit as drop-in replacement)
+    const comprehensive_test = b.addExecutable(.{
+        .name = "comprehensive_integration_test",
+        .root_source_file = b.path("test/comprehensive_integration_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_comprehensive_test = b.addRunArtifact(comprehensive_test);
+    run_comprehensive_test.step.dependOn(b.getInstallStep());
+
     // Individual test steps
     const git_interop_test_step = b.step("test-git-interop", "Run git interoperability tests");
     git_interop_test_step.dependOn(&run_git_interop_test.step);
@@ -95,6 +106,9 @@ pub fn build(b: *std.Build) void {
     const command_output_test_step = b.step("test-command-output", "Run command output compatibility tests");
     command_output_test_step.dependOn(&run_command_output_test.step);
 
+    const comprehensive_test_step = b.step("test-comprehensive", "Run comprehensive integration tests");
+    comprehensive_test_step.dependOn(&run_comprehensive_test.step);
+
     // Main test step runs all tests
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_unit_tests.step);
@@ -102,6 +116,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_index_format_test.step);
     test_step.dependOn(&run_object_format_test.step);
     test_step.dependOn(&run_command_output_test.step);
+    test_step.dependOn(&run_comprehensive_test.step);
 
     // WebAssembly target (WASI)
     const wasm_target = b.resolveTargetQuery(.{

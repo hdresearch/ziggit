@@ -273,6 +273,10 @@ fn runCommand(allocator: std.mem.Allocator, args: []const []const u8, cwd: fs.Di
     
     const term = try child.wait();
     if (term != .Exited or term.Exited != 0) {
+        // For debugging, print stderr if command failed
+        if (stderr.len > 0) {
+            std.debug.print("Command failed with stderr: {s}\n", .{stderr});
+        }
         allocator.free(stdout);
         return error.CommandFailed;
     }
