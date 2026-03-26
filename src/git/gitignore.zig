@@ -222,4 +222,4 @@ test "gitignore negation patterns" {
     
     // But important.log should NOT be ignored due to negation
     try testing.expect(!gitignore.isIgnored("important.log"));
-};
+}
