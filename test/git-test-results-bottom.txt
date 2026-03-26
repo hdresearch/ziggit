@@ -9,7 +9,7 @@ Ziggit: native init, status; all other commands forwarded to /usr/bin/git
   t7810-grep.sh: 260/263 passed
   t7700-repack.sh: 30/47 passed
   t7600-merge.sh: 72/83 passed
-  t7508-status.sh: 39/126 passed
+  t7508-status.sh: 40/126 passed
   t7501-commit-basic-functionality.sh: 76/77 passed
   t7400-submodule-basic.sh: 23/124 passed
   t7201-co.sh: 40/46 passed
@@ -31,7 +31,7 @@ Ziggit: native init, status; all other commands forwarded to /usr/bin/git
   t4000-diff-format.sh: 41/41 passed
   t3900-i18n-commit.sh: 38/38 passed
 
-TOTAL: 1626/2229 passed (603 failed)
+TOTAL: 1627/2229 passed (602 failed)
 Pass rate: 73.0%
 
 === 100% Pass Suites ===
@@ -48,6 +48,16 @@ Pass rate: 73.0%
   t5100-mailinfo.sh: 50/52 (96.2%)
   t7004-tag.sh: 220/231 (95.2%)
 
+=== Key Failure Categories ===
+- t5601/t5510/t5500: httpd tests abort when run as root (0 tests)
+- t9902: completion script not available (247/263 fail)
+- t7508-status: status format differences (86/126 fail)
+  - Column format not implemented
+  - Branch tracking info not shown
+  - Short format with gitignore interactions
+- t7400-submodule: submodule support limited (101/124 fail)
+- t7060-wtstatus: merge conflict status not detected (7/17 fail)
+
 === CLI Fixes Applied ===
 1. Forward most commands to real /usr/bin/git (avoiding ziggit CLI bugs)
 2. Native init: GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME env, template dir support, absolute paths
@@ -57,10 +67,11 @@ Pass rate: 73.0%
 6. Native status: correct new file (A) vs modified (M) detection
 7. Native status: sorted porcelain output (tracked first, then untracked)
 8. Native status: handle -h/--help (exit 129)
-9. Index parser: fixed v2 padding calculation (at least 1 nul byte)
-10. Config: translate git config set/get/unset/list subcommands for git 2.43 compat
-11. Global flags: don't double-process -C for forwarded commands
-12. Version: output "git version" instead of "ziggit version"
-13. Wrapper: add default-hash: sha1 to version --build-options
-14. Plumbing stubs: forward hash-object, write-tree, etc. to real git
-15. findRealGit: use /usr/bin/git to avoid recursive calls
+9. Native status: -uno/--untracked-files=no, status.showUntrackedFiles config
+10. Index parser: fixed v2 padding calculation (at least 1 nul byte)
+11. Config: translate git config set/get/unset/list subcommands for git 2.43 compat
+12. Global flags: don't double-process -C for forwarded commands
+13. Version: output "git version" instead of "ziggit version"
+14. Wrapper: add default-hash: sha1 to version --build-options
+15. Plumbing stubs: forward hash-object, write-tree, etc. to real git
+16. findRealGit: use /usr/bin/git to avoid recursive calls
