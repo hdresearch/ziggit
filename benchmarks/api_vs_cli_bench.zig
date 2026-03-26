@@ -1,7 +1,7 @@
 // PHASE 1: Benchmark ziggit Zig function calls vs git CLI spawning
 // This benchmark proves that calling ziggit Zig functions is 100-1000x faster than spawning git CLI
 const std = @import("std");
-const ziggit = @import("ziggit");
+const Repository = @import("../src/ziggit.zig").Repository;
 
 const ITERATIONS = 1000;
 const TEST_REPO_PATH = "/tmp/ziggit_bench_repo";
@@ -42,7 +42,7 @@ fn setupTestRepo(allocator: std.mem.Allocator) !void {
     
     // Create new repo
     std.fs.makeDirAbsolute(TEST_REPO_PATH) catch {};
-    var repo = try ziggit.Repository.init(allocator, TEST_REPO_PATH);
+    var repo = try Repository.init(allocator, TEST_REPO_PATH);
     defer repo.close();
     
     // Create 100 files
@@ -88,7 +88,7 @@ fn setupTestRepo(allocator: std.mem.Allocator) !void {
 fn benchmarkZigAPI(allocator: std.mem.Allocator) !void {
     std.debug.print("\n=== ZIGGIT ZIG API BENCHMARK (Pure Zig - NO Process Spawning) ===\n", .{});
     
-    var repo = try ziggit.Repository.open(allocator, TEST_REPO_PATH);
+    var repo = try Repository.open(allocator, TEST_REPO_PATH);
     defer repo.close();
     
     var times = try allocator.alloc(u64, ITERATIONS);

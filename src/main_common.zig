@@ -616,6 +616,19 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             try deleted_files.append(entry);
         } else {
             const working_modified = blk: {
+                // OPTIMIZATION: Fast path using mtime/size before computing SHA-1
+                const file_stat = platform_impl.fs.stat(full_path) catch break :blk false;
+                
+                // Compare mtime and size with index entry
+                const work_mtime_sec = @as(u32, @intCast(@divTrunc(file_stat.mtime, 1_000_000_000)));
+                const work_size = @as(u32, @intCast(file_stat.size));
+                
+                // Fast path: if mtime and size match index, file is likely unchanged
+                if (work_mtime_sec == entry.mtime_seconds and work_size == entry.size) {
+                    break :blk false; // File appears unchanged - skip expensive SHA-1 computation
+                }
+                
+                // Slow path: mtime or size differs, need to compute SHA-1 to confirm
                 const current_content = platform_impl.fs.readFile(allocator, full_path) catch break :blk false;
                 defer allocator.free(current_content);
                 
