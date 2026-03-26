@@ -1048,9 +1048,12 @@ fn clonePackShallowV2(allocator: std.mem.Allocator, client: *std.http.Client, ur
     const post_url = try std.fmt.allocPrint(allocator, "{s}/git-upload-pack", .{base});
     defer allocator.free(post_url);
 
-    // Step 1: ls-refs with prefix filtering (HEAD + branches + tags)
-    const ref_prefixes = [_][]const u8{ "HEAD", "refs/heads/", "refs/tags/" };
-    const ls_refs_body = try buildV2LsRefsRequest(allocator, &ref_prefixes, true);
+    // Step 1: ls-refs with prefix filtering
+    // For shallow clones, skip tags (they point to historical commits not in shallow pack)
+    const shallow_prefixes = [_][]const u8{ "HEAD", "refs/heads/" };
+    const full_prefixes = [_][]const u8{ "HEAD", "refs/heads/", "refs/tags/" };
+    const ref_prefixes: []const []const u8 = if (depth > 0) &shallow_prefixes else &full_prefixes;
+    const ls_refs_body = try buildV2LsRefsRequest(allocator, ref_prefixes, true);
     defer allocator.free(ls_refs_body);
 
     const ls_refs_response = try httpPostWithClientV2(allocator, client, post_url, ls_refs_body, "application/x-git-upload-pack-request");
