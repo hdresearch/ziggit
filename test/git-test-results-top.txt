@@ -572,12 +572,14 @@ Tests with >95% pass rate (near-perfect):
   t4150: 85/87, t4202: 146/149, t4205: 122/125
   t4206: 6/7, t4207: 3/4, t4209: 47/48
 
-Total individual tests: 18,651
-Tests passing: 15,906
-Tests failing: 2,745
-Pass rate: 85%
+Total individual tests: 18,857
+Tests passing: 16,111
+Tests failing: 2,746
+Pass rate: 85.4%
 
 Scripts fully passing: 309/511 (60.5%)
+Scripts with failures: 175/511
+Scripts skipped: 27 (various prereqs)
 
 Key fixes applied:
 1. config set --all → --replace-all translation
