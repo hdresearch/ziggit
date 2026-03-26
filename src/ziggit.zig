@@ -1339,7 +1339,7 @@ pub const Repository = struct {
 
             if (fetch_result.pack_data.len >= 32) {
                 // Save pack
-                const checksum_hex = try pack_writer.savePack(self.allocator, self.git_dir, fetch_result.pack_data);
+                const checksum_hex = try pack_writer.savePackFast(self.allocator, self.git_dir, fetch_result.pack_data);
                 defer self.allocator.free(checksum_hex);
 
                 // Generate idx
@@ -1439,7 +1439,7 @@ pub const Repository = struct {
             defer fetch_result.deinit();
 
             if (fetch_result.pack_data.len >= 32) {
-                const checksum_hex = try pack_writer.savePack(self.allocator, self.git_dir, fetch_result.pack_data);
+                const checksum_hex = try pack_writer.savePackFast(self.allocator, self.git_dir, fetch_result.pack_data);
                 defer self.allocator.free(checksum_hex);
 
                 const pp = try pack_writer.packPath(self.allocator, self.git_dir, checksum_hex);
@@ -1553,7 +1553,7 @@ pub const Repository = struct {
 
         // Save pack + generate idx
         if (clone_result.pack_data.len >= 32) {
-            const checksum_hex = try pack_writer.savePack(allocator, git_dir, clone_result.pack_data);
+            const checksum_hex = try pack_writer.savePackFast(allocator, git_dir, clone_result.pack_data);
             defer allocator.free(checksum_hex);
 
             const pp = try pack_writer.packPath(allocator, git_dir, checksum_hex);
@@ -1661,7 +1661,7 @@ pub const Repository = struct {
 
         // Save pack + generate idx
         if (clone_result.pack_data.len >= 32) {
-            const checksum_hex = try pack_writer.savePack(allocator, git_dir, clone_result.pack_data);
+            const checksum_hex = try pack_writer.savePackFast(allocator, git_dir, clone_result.pack_data);
             defer allocator.free(checksum_hex);
 
             // Generate idx from in-memory pack data (avoid re-reading from disk)
@@ -1785,7 +1785,7 @@ pub const Repository = struct {
 
         // Save pack + generate idx
         if (clone_result.pack_data.len >= 32) {
-            const checksum_hex = try pack_writer.savePack(allocator, git_dir, clone_result.pack_data);
+            const checksum_hex = try pack_writer.savePackFast(allocator, git_dir, clone_result.pack_data);
             defer allocator.free(checksum_hex);
 
             const pp = try pack_writer.packPath(allocator, git_dir, checksum_hex);
@@ -1884,7 +1884,7 @@ pub const Repository = struct {
 
         // Save pack + generate idx
         if (clone_result.pack_data.len >= 32) {
-            const checksum_hex = try pack_writer.savePack(allocator, git_dir, clone_result.pack_data);
+            const checksum_hex = try pack_writer.savePackFast(allocator, git_dir, clone_result.pack_data);
             defer allocator.free(checksum_hex);
 
             const pp = try pack_writer.packPath(allocator, git_dir, checksum_hex);
