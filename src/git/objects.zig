@@ -596,7 +596,7 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     // Check for 64-bit offset (MSB set)
     if (object_offset & 0x80000000 != 0) {
         const large_offset_index = object_offset & 0x7FFFFFFF;
-        const large_offset_table_start = offset_table_start + end_index * 4;
+        const large_offset_table_start = offset_table_start + @as(usize, total_objects) * 4;
         const large_offset_table_offset = large_offset_table_start + large_offset_index * 8;
         if (idx_data.len < large_offset_table_offset + 8) return error.ObjectNotFound;
         
@@ -628,8 +628,9 @@ fn findObjectInPackV1(idx_data: []const u8, target_hash: [20]u8, pack_dir_path: 
     if (start_index >= end_index) return error.ObjectNotFound;
     
     // Object entries start after fanout table
+    // V1 format: each entry is 4-byte network-order offset + 20-byte SHA-1
     const entries_start = 256 * 4;
-    const entry_size = 24; // 20 bytes SHA-1 + 4 bytes offset
+    const entry_size = 24; // 4 bytes offset + 20 bytes SHA-1
     
     // Binary search in the entries within the range
     var low = start_index;
@@ -639,15 +640,15 @@ fn findObjectInPackV1(idx_data: []const u8, target_hash: [20]u8, pack_dir_path: 
         const mid = low + (high - low) / 2;
         const entry_offset = entries_start + mid * entry_size;
         
-        if (entry_offset + 20 > idx_data.len) return error.ObjectNotFound;
-        const obj_hash = idx_data[entry_offset..entry_offset + 20];
+        if (entry_offset + entry_size > idx_data.len) return error.ObjectNotFound;
+        // V1: offset is first 4 bytes, SHA-1 is next 20 bytes
+        const obj_hash = idx_data[entry_offset + 4 .. entry_offset + 24];
         
         const cmp = std.mem.order(u8, obj_hash, &target_hash);
         switch (cmp) {
             .eq => {
-                // Found the object, get its offset
-                if (entry_offset + 24 > idx_data.len) return error.ObjectNotFound;
-                const object_offset: u64 = std.mem.readInt(u32, @ptrCast(idx_data[entry_offset + 20..entry_offset + 24]), .big);
+                // Found the object, get its offset (first 4 bytes of entry)
+                const object_offset: u64 = std.mem.readInt(u32, @ptrCast(idx_data[entry_offset .. entry_offset + 4]), .big);
                 
                 // Read from the corresponding .pack file
                 const pack_filename = try std.fmt.allocPrint(allocator, "{s}.pack", .{idx_filename[0..idx_filename.len-4]});
