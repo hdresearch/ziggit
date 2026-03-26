@@ -702,6 +702,17 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(pack_git_real_interop_tests).step);
 
+    // Pack receive pipeline verification tests (OFS_DELTA encoding, delta bit patterns, git cross-validation)
+    const pack_receive_pipeline_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_receive_pipeline_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_receive_pipeline_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(pack_receive_pipeline_tests).step);
+
     // Refs + pack integration tests (clone/fetch workflow simulation)
     const refs_pack_integration_tests = b.addTest(.{
         .root_source_file = b.path("test/refs_and_pack_integration_test.zig"),
