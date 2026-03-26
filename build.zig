@@ -261,6 +261,19 @@ pub fn build(b: *std.Build) void {
     
     const phase3_step = b.step("phase3", "Run Phase 3 release benchmark");
     phase3_step.dependOn(&run_phase3_release_benchmark.step);
+    
+    // Status optimization benchmark
+    const status_optimization_benchmark = b.addExecutable(.{
+        .name = "status_optimization_bench",
+        .root_source_file = b.path("benchmarks/status_optimization_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    status_optimization_benchmark.root_module.addImport("ziggit", ziggit_module);
+    const run_status_optimization_benchmark = b.addRunArtifact(status_optimization_benchmark);
+    
+    const status_opt_step = b.step("status-opt", "Run status optimization benchmark");
+    status_opt_step.dependOn(&run_status_optimization_benchmark.step);
 
 
 
