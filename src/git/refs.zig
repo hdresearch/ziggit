@@ -1676,21 +1676,6 @@ pub fn createRef(ref_name: []const u8, hash: []const u8, git_dir: []const u8, pl
     try platform_impl.fs.writeFile(ref_path, ref_content);
 }
 
-/// Update an existing ref to point to a new hash
-pub fn updateRef(ref_name: []const u8, new_hash: []const u8, git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !void {
-    if (!isValidRefName(ref_name)) return error.InvalidRefName;
-    if (!isValidHash(new_hash)) return error.InvalidHash;
-    
-    const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{git_dir, ref_name});
-    defer allocator.free(ref_path);
-    
-    // Write new hash with newline
-    const ref_content = try std.fmt.allocPrint(allocator, "{s}\n", .{new_hash});
-    defer allocator.free(ref_content);
-    
-    try platform_impl.fs.writeFile(ref_path, ref_content);
-}
-
 /// Delete a ref
 pub fn deleteRef(ref_name: []const u8, git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !void {
     if (!isValidRefName(ref_name)) return error.InvalidRefName;
@@ -1811,72 +1796,5 @@ pub fn resolveRefWithPacked(ref_name: []const u8, git_dir: []const u8, platform_
             return err; // Other error, propagate
         }
     }
-}
-
-/// List all refs from both loose refs and packed-refs
-pub fn listAllRefs(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.ArrayList(Ref) {
-    var all_refs = std.ArrayList(Ref).init(allocator);
-    errdefer {
-        for (all_refs.items) |ref| {
-            ref.deinit(allocator);
-        }
-        all_refs.deinit();
-    }
-    
-    // TODO: Implement directory traversal for loose refs
-    // This would require adding directory listing to the platform interface
-    
-    // Read packed-refs if it exists
-    const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir});
-    defer allocator.free(packed_refs_path);
-    
-    if (platform_impl.fs.readFile(allocator, packed_refs_path)) |packed_content| {
-        defer allocator.free(packed_content);
-        
-        var packed_refs = try parsePackedRefs(packed_content, allocator);
-        defer {
-            for (packed_refs.items) |ref| {
-                ref.deinit(allocator);
-            }
-            packed_refs.deinit();
-        }
-        
-        for (packed_refs.items) |packed_ref| {
-            const ref = Ref{
-                .name = try allocator.dupe(u8, packed_ref.name),
-                .hash = try allocator.dupe(u8, packed_ref.hash),
-            };
-            try all_refs.append(ref);
-        }
-    } else |_| {
-        // No packed-refs file, that's ok
-    }
-    
-    return all_refs;
-}
-
-/// Validate that a ref name follows git naming conventions  
-pub fn isValidRefName(name: []const u8) bool {
-    // Basic validation - reject empty names, names starting with dot, etc.
-    if (name.len == 0) return false;
-    if (name[0] == '.') return false;
-    if (std.mem.indexOf(u8, name, "..") != null) return false;
-    if (std.mem.indexOf(u8, name, " ") != null) return false;
-    if (std.mem.indexOf(u8, name, "~") != null) return false;
-    if (std.mem.indexOf(u8, name, "^") != null) return false;
-    if (std.mem.indexOf(u8, name, ":") != null) return false;
-    if (std.mem.indexOf(u8, name, "?") != null) return false;
-    if (std.mem.indexOf(u8, name, "*") != null) return false;
-    if (std.mem.indexOf(u8, name, "[") != null) return false;
-    if (std.mem.indexOf(u8, name, "\\") != null) return false;
-    if (std.mem.endsWith(u8, name, "/")) return false;
-    if (std.mem.endsWith(u8, name, ".lock")) return false;
-    
-    // Additional checks for ASCII control characters
-    for (name) |c| {
-        if (c < 0x20 or c == 0x7F) return false;
-    }
-    
-    return true;
 }
 

@@ -245,15 +245,11 @@ pub const Repository = struct {
         
         // Load index
         var repo_index = index.Index.load(git_dir, self.plat, self.allocator) catch {
-            // No index file yet, create empty one
-            index.Index.init(self.allocator)
-        };
+            index.Index.init(self.allocator);
         defer repo_index.deinit();
         
         // Load gitignore patterns
-        var ignore_patterns = gitignore.loadGitignore(self.path, self.plat, self.allocator) catch {
-            gitignore.GitignorePattern.init(self.allocator)
-        };
+        var ignore_patterns = gitignore.GitignorePattern.init(self.allocator);
         defer ignore_patterns.deinit();
         
         // Compare index with working tree
