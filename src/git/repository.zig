@@ -244,8 +244,7 @@ pub const Repository = struct {
         status.branch = self.getCurrentBranch() catch null;
         
         // Load index
-        var repo_index = index.Index.load(git_dir, self.plat, self.allocator) catch {
-            index.Index.init(self.allocator);
+        var repo_index = index.Index.load(git_dir, self.plat, self.allocator) catch index.Index.init(self.allocator);
         defer repo_index.deinit();
         
         // Load gitignore patterns
@@ -263,7 +262,7 @@ pub const Repository = struct {
         self: Repository, 
         status: *RepositoryStatus, 
         repo_index: *index.Index, 
-        ignore_patterns: *gitignore.GitignorePattern
+        _: *gitignore.GitignorePattern
     ) !void {
         // Create a set of indexed files for quick lookup
         var indexed_files = std.StringHashMap(index.IndexEntry).init(self.allocator);
@@ -277,8 +276,8 @@ pub const Repository = struct {
         // For now, just process the indexed files to check their status
         
         for (repo_index.entries.items) |entry| {
-            var index_status: FileStatus = .unmodified;
-            var worktree_status: FileStatus = .unmodified;
+            const index_status: FileStatus = .unmodified;
+            const worktree_status: FileStatus = .unmodified;
             
             // Check if file exists in working tree
             const file_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.path, entry.path });
@@ -343,9 +342,7 @@ pub const Repository = struct {
         defer self.allocator.free(git_dir);
         
         // Load current index
-        var repo_index = index.Index.load(git_dir, self.plat, self.allocator) catch {
-            index.Index.init(self.allocator)
-        };
+        var repo_index = index.Index.load(git_dir, self.plat, self.allocator) catch index.Index.init(self.allocator);
         defer repo_index.deinit();
         
         // Get file info
@@ -395,7 +392,6 @@ pub const Repository = struct {
             
             // Note: Would need platform.fs.deleteFile method
             // std.fs.cwd().deleteFile(full_path) catch {};
-            _ = full_path;
         }
         
         // Save index
