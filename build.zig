@@ -119,7 +119,21 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // Test step - runs all integration tests
+    // Core git format integration tests
+    const core_git_format_tests = b.addTest(.{
+        .root_source_file = b.path("test/core_git_format_integration.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Pack file comprehensive tests
+    const pack_comprehensive_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_file_comprehensive_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Test step - runs all unit tests and integration tests
     const test_step = b.step("test", "Run all unit tests and integration tests");
     test_step.dependOn(&b.addRunArtifact(platform_unit_tests).step);
     test_step.dependOn(&b.addRunArtifact(platform_integration_test).step);
@@ -128,6 +142,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(workflow_test).step);
     test_step.dependOn(&b.addRunArtifact(broken_pipe_test).step);
     test_step.dependOn(&b.addRunArtifact(bun_zig_api_test).step);
+    test_step.dependOn(&b.addRunArtifact(core_git_format_tests).step);
+    test_step.dependOn(&b.addRunArtifact(pack_comprehensive_tests).step);
 
     // ========== BENCHMARKS ==========
     
