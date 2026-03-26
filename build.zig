@@ -126,7 +126,7 @@ pub fn build(b: *std.Build) void {
     bun_scenario_benchmark.root_module.addImport("ziggit", ziggit_module);
     const run_bun_scenario_benchmark = b.addRunArtifact(bun_scenario_benchmark);
 
-    // API vs CLI benchmark (PHASE 1)
+    // API vs CLI benchmark (PHASE 1) 
     const api_vs_cli_bench = b.addExecutable(.{
         .name = "api_vs_cli_bench",
         .root_source_file = b.path("benchmarks/api_vs_cli_bench.zig"),
@@ -136,26 +136,37 @@ pub fn build(b: *std.Build) void {
     api_vs_cli_bench.root_module.addImport("ziggit", ziggit_module);
     const run_api_vs_cli_bench = b.addRunArtifact(api_vs_cli_bench);
 
+    // Remote benchmark from other agent
+    const zig_api_benchmark = b.addExecutable(.{
+        .name = "zig_api_benchmark",
+        .root_source_file = b.path("benchmarks/zig_api_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    zig_api_benchmark.root_module.addImport("ziggit", ziggit_module);
+    const run_zig_api_benchmark = b.addRunArtifact(zig_api_benchmark);
+
     const bench_step = b.step("bench", "Run all benchmarks");
     bench_step.dependOn(&run_cli_benchmark.step);
     bench_step.dependOn(&run_lib_benchmark.step);
     bench_step.dependOn(&run_bun_scenario_benchmark.step);
     bench_step.dependOn(&run_api_vs_cli_bench.step);
+    
+    // Alternative API benchmark from remote
+    const bench_api_step_alt = b.step("bench-api-alt", "Run Zig API vs Git CLI benchmark (ITEM 7)");
+    bench_api_step_alt.dependOn(&run_zig_api_benchmark.step);
 
-
-
-
-    const debug_vs_release_bench = b.addExecutable(.{
-        .name = "debug_vs_release_bench",
-        .root_source_file = b.path("benchmarks/debug_vs_release_bench.zig"),
+    // Bun API test (ITEM 6)
+    const bun_api_test = b.addTest(.{
+        .root_source_file = b.path("test/bun_zig_api_test.zig"),
         .target = target,
         .optimize = optimize,
     });
-    debug_vs_release_bench.root_module.addImport("ziggit", ziggit_module);
-    const run_debug_vs_release_bench = b.addRunArtifact(debug_vs_release_bench);
+    bun_api_test.root_module.addImport("ziggit", ziggit_module);
+    const run_bun_api_test = b.addRunArtifact(bun_api_test);
 
-    const debug_release_bench_step = b.step("bench-debug", "Run debug vs release performance comparison (PHASE 3)");
-    debug_release_bench_step.dependOn(&run_debug_vs_release_bench.step);
+    const test_bun_api_step = b.step("test-bun", "Run bun workflow test using Zig API (ITEM 6)");
+    test_bun_api_step.dependOn(&run_bun_api_test.step);
 
     const api_cli_bench_step = b.step("bench-api", "Run API vs CLI performance comparison (PHASE 1)");
     api_cli_bench_step.dependOn(&run_api_vs_cli_bench.step);
