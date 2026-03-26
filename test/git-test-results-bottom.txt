@@ -7,7 +7,6 @@ Date: 2026-03-26
   t7700-repack.sh: 31/47 passed
   t7600-merge.sh: 77/83 passed
   t7508-status.sh: 125/126 passed
-  t7501-commit.sh: SKIP (not found)
   t7400-submodule-basic.sh: 120/124 passed
   t7201-co.sh: 43/46 passed
   t7060-wtstatus.sh: 17/17 passed
@@ -16,7 +15,7 @@ Date: 2026-03-26
   t6300-for-each-ref.sh: 420/429 passed
   t6200-fmt-merge-msg.sh: 37/37 passed
   t6100-rev-list-in-order.sh: 3/3 passed
-  t6000-rev-list-misc.sh: 18/23 passed
+  t6000-rev-list-misc.sh: 19/23 passed
   t5601-clone.sh: 57/109 passed
   t5510-fetch.sh: 203/214 passed
   t5500-fetch-pack.sh: 374/377 passed
@@ -25,7 +24,55 @@ Date: 2026-03-26
   t5100-mailinfo.sh: 50/52 passed
   t4200-rerere.sh: 31/36 passed
   t4150-am.sh: 85/87 passed
+  t4057-diff-combined-paths.sh: 4/4 passed
+  t4055-diff-context.sh: 10/10 passed
+  t4050-diff-histogram.sh: 10/10 passed
+  t4035-diff-quiet.sh: 23/23 passed
+  t4034-diff-words.sh: 64/66 passed
+  t4033-diff-patience.sh: 11/11 passed
+  t4030-diff-textconv.sh: 19/19 passed
+  t4027-diff-submodule.sh: 20/20 passed
+  t4026-color.sh: 33/34 passed
+  t4025-hunk-header.sh: 2/2 passed
+  t4024-diff-optimize-common.sh: 2/2 passed
+  t4023-diff-rename-typechange.sh: 4/4 passed
+  t4022-diff-rewrite.sh: 11/11 passed
+  t4017-diff-retval.sh: 37/38 passed
+  t4015-diff-whitespace.sh: 128/136 passed
+  t4013-diff-various.sh: 208/230 passed
+  t4012-diff-binary.sh: 13/13 passed
+  t4010-diff-pathspec.sh: 17/17 passed
+  t4005-diff-rename-2.sh: 4/4 passed
+  t4003-diff-rename-1.sh: 7/7 passed
+  t4001-diff-rename.sh: 22/23 passed
   t4000-diff-format.sh: 41/41 passed
   t3900-i18n-commit.sh: 38/38 passed
+  t3700-add.sh: 53/58 passed
+  t3600-rm.sh: 81/82 passed
+  t3301-notes.sh: 149/153 passed
+  t3200-branch.sh: 164/167 passed
+  t3101-ls-tree-dirname.sh: 19/19 passed
+  t3100-ls-tree-restrict.sh: 14/14 passed
+  t3070-wildmatch.sh: 1850/1901 passed
+  t3050-subprojects-fetch.sh: 4/4 passed
+  t3010-ls-files-killed-modified.sh: 6/6 passed
+  t3003-ls-files-exclude.sh: 7/7 passed
+  t3002-ls-files-dashpath.sh: 6/6 passed
+  t3000-ls-files-others.sh: 15/15 passed
+  t2100-update-cache-badpath.sh: 5/5 passed
+  t2010-checkout-ambiguous.sh: 10/10 passed
+  t1500-rev-parse.sh: 79/81 passed
+  t1050-large.sh: 20/29 passed
+  t1010-mktree.sh: 8/8 passed
+  t1005-read-tree-reset.sh: 7/7 passed
+  t1002-read-tree-m-u-2way.sh: 22/22 passed
+  t1001-read-tree-m-2way.sh: 29/29 passed
+  t1000-read-tree-m-3way.sh: 83/83 passed
+  t0050-filesystem.sh: 13/13 passed
+  t0027-auto-crlf.sh: 2600/2600 passed
+  t0020-crlf.sh: 36/36 passed
+  t0010-racy-git.sh: 10/10 passed
+  t0005-signals.sh: 1/5 passed
+  t0000-basic.sh: 87/92 passed
 
-TOTAL: 2568/2852 passed (284 failed)
+TOTAL: 8596/8998 passed (402 failed)

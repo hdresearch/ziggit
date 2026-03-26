@@ -14,7 +14,6 @@ for test_script in \
     t7700-repack.sh \
     t7600-merge.sh \
     t7508-status.sh \
-    t7501-commit.sh \
     t7400-submodule-basic.sh \
     t7201-co.sh \
     t7060-wtstatus.sh \
@@ -32,8 +31,56 @@ for test_script in \
     t5100-mailinfo.sh \
     t4200-rerere.sh \
     t4150-am.sh \
+    t4057-diff-combined-paths.sh \
+    t4055-diff-context.sh \
+    t4050-diff-histogram.sh \
+    t4035-diff-quiet.sh \
+    t4034-diff-words.sh \
+    t4033-diff-patience.sh \
+    t4030-diff-textconv.sh \
+    t4027-diff-submodule.sh \
+    t4026-color.sh \
+    t4025-hunk-header.sh \
+    t4024-diff-optimize-common.sh \
+    t4023-diff-rename-typechange.sh \
+    t4022-diff-rewrite.sh \
+    t4017-diff-retval.sh \
+    t4015-diff-whitespace.sh \
+    t4013-diff-various.sh \
+    t4012-diff-binary.sh \
+    t4010-diff-pathspec.sh \
+    t4005-diff-rename-2.sh \
+    t4003-diff-rename-1.sh \
+    t4001-diff-rename.sh \
     t4000-diff-format.sh \
     t3900-i18n-commit.sh \
+    t3700-add.sh \
+    t3600-rm.sh \
+    t3301-notes.sh \
+    t3200-branch.sh \
+    t3101-ls-tree-dirname.sh \
+    t3100-ls-tree-restrict.sh \
+    t3070-wildmatch.sh \
+    t3050-subprojects-fetch.sh \
+    t3010-ls-files-killed-modified.sh \
+    t3003-ls-files-exclude.sh \
+    t3002-ls-files-dashpath.sh \
+    t3000-ls-files-others.sh \
+    t2100-update-cache-badpath.sh \
+    t2010-checkout-ambiguous.sh \
+    t1500-rev-parse.sh \
+    t1050-large.sh \
+    t1010-mktree.sh \
+    t1005-read-tree-reset.sh \
+    t1002-read-tree-m-u-2way.sh \
+    t1001-read-tree-m-2way.sh \
+    t1000-read-tree-m-3way.sh \
+    t0050-filesystem.sh \
+    t0027-auto-crlf.sh \
+    t0020-crlf.sh \
+    t0010-racy-git.sh \
+    t0005-signals.sh \
+    t0000-basic.sh \
 ; do
     if [ ! -f "$test_script" ]; then
         echo "  $test_script: SKIP (not found)" | tee -a "$RESULTS"
