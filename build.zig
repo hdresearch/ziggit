@@ -776,6 +776,26 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(git_index_internal_tests).step);
 
+    // Git internal module tests (objects, config, index via git module)
+    const git_internal_module_tests = b.addTest(.{
+        .root_source_file = b.path("test/git_internal_module_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    git_internal_module_tests.root_module.addAnonymousImport("git", .{
+        .root_source_file = b.path("src/git/git.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(git_internal_module_tests).step);
+
+    // Cache correctness tests
+    const cache_correctness_tests = b.addTest(.{
+        .root_source_file = b.path("test/cache_correctness_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cache_correctness_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(cache_correctness_tests).step);
+
     // E2E validation: git writes, ziggit reads
     const git_writes_test = b.addTest(.{
         .root_source_file = b.path("test/git_writes_ziggit_reads_test.zig"),
