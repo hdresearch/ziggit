@@ -960,6 +960,44 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(refs_config_internal_tests).step);
 
+    // Tag object verification tests
+    const tag_object_verification_tests = b.addTest(.{
+        .root_source_file = b.path("test/tag_object_verification_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    tag_object_verification_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(tag_object_verification_tests).step);
+
+    // Multi-file commit tests
+    const multifile_commit_tests = b.addTest(.{
+        .root_source_file = b.path("test/multifile_commit_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    multifile_commit_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(multifile_commit_tests).step);
+
+    // Config roundtrip tests (internal git module)
+    const config_roundtrip_tests = b.addTest(.{
+        .root_source_file = b.path("test/config_roundtrip_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    config_roundtrip_tests.root_module.addAnonymousImport("git", .{
+        .root_source_file = b.path("src/git/git.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(config_roundtrip_tests).step);
+
+    // Ref chain resolution tests
+    const ref_chain_resolution_tests = b.addTest(.{
+        .root_source_file = b.path("test/ref_chain_resolution_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ref_chain_resolution_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(ref_chain_resolution_tests).step);
+
     // ========== BENCHMARKS ==========
     
     // CLI benchmark (ziggit vs git performance)
