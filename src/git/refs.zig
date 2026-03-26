@@ -51,7 +51,10 @@ pub fn getCurrentCommit(git_dir: []const u8, platform_impl: anytype, allocator: 
         defer allocator.free(ref_file_path);
 
         const ref_content = platform_impl.fs.readFile(allocator, ref_file_path) catch |err| switch (err) {
-            error.FileNotFound => return null, // Branch exists but no commits yet
+            error.FileNotFound => {
+                // Try to find it in packed-refs
+                return readFromPackedRefs(git_dir, ref_path, platform_impl, allocator) catch null;
+            },
             else => return err,
         };
         defer allocator.free(ref_content);
@@ -158,7 +161,21 @@ pub fn branchExists(git_dir: []const u8, branch_name: []const u8, platform_impl:
     const ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_dir, branch_name });
     defer allocator.free(ref_path);
 
-    return platform_impl.fs.exists(ref_path) catch false;
+    if (platform_impl.fs.exists(ref_path) catch false) {
+        return true;
+    }
+    
+    // Check packed-refs
+    const ref_name = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name});
+    defer allocator.free(ref_name);
+    
+    if (readFromPackedRefs(git_dir, ref_name, platform_impl, allocator)) |hash| {
+        allocator.free(hash);
+        return true;
+    } else |err| switch (err) {
+        error.RefNotFound => return false,
+        else => return false,
+    }
 }
 
 pub fn createBranch(git_dir: []const u8, branch_name: []const u8, start_point: ?[]const u8, platform_impl: anytype, allocator: std.mem.Allocator) !void {
@@ -200,7 +217,12 @@ pub fn getBranchCommit(git_dir: []const u8, branch_name: []const u8, platform_im
     defer allocator.free(ref_path);
 
     const content = platform_impl.fs.readFile(allocator, ref_path) catch |err| switch (err) {
-        error.FileNotFound => return null,
+        error.FileNotFound => {
+            // Try to find it in packed-refs
+            const ref_name = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name});
+            defer allocator.free(ref_name);
+            return readFromPackedRefs(git_dir, ref_name, platform_impl, allocator) catch null;
+        },
         else => return err,
     };
     defer allocator.free(content);
@@ -219,4 +241,37 @@ fn isValidHash(hash: []const u8) bool {
         if (!std.ascii.isHex(c)) return false;
     }
     return true;
+}
+
+/// Read ref hash from packed-refs file
+fn readFromPackedRefs(git_dir: []const u8, ref_name: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![]u8 {
+    const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir});
+    defer allocator.free(packed_refs_path);
+
+    const content = platform_impl.fs.readFile(allocator, packed_refs_path) catch |err| switch (err) {
+        error.FileNotFound => return error.RefNotFound,
+        else => return err,
+    };
+    defer allocator.free(content);
+
+    // Parse packed-refs file
+    var lines = std.mem.split(u8, content, "\n");
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        
+        // Skip comments and empty lines
+        if (trimmed.len == 0 or trimmed[0] == '#') continue;
+        
+        // Format: "<hash> <ref_name>"
+        if (std.mem.indexOf(u8, trimmed, " ")) |space_pos| {
+            const hash = trimmed[0..space_pos];
+            const ref_path = trimmed[space_pos + 1..];
+            
+            if (std.mem.eql(u8, ref_path, ref_name) and isValidHash(hash)) {
+                return try allocator.dupe(u8, hash);
+            }
+        }
+    }
+    
+    return error.RefNotFound;
 }
