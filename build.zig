@@ -1038,6 +1038,17 @@ pub fn build(b: *std.Build) void {
     ref_chain_resolution_tests.root_module.addImport("ziggit", ziggit_module);
     test_step.dependOn(&b.addRunArtifact(ref_chain_resolution_tests).step);
 
+    // Pack git interop correctness tests (real git cross-validation, generatePackIndex verify-pack, delta chains)
+    const pack_git_interop_correctness_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_git_interop_correctness_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_git_interop_correctness_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(pack_git_interop_correctness_tests).step);
+
     // ========== BENCHMARKS ==========
     
     // CLI benchmark (ziggit vs git performance)
