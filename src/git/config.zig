@@ -43,6 +43,13 @@ pub const GitConfig = struct {
         };
     }
 
+    /// Convenience function to parse config from string (alias for parseFromString)
+    pub fn parseConfig(allocator: std.mem.Allocator, content: []const u8) !GitConfig {
+        var config = GitConfig.init(allocator);
+        try config.parseFromString(content);
+        return config;
+    }
+
     pub fn deinit(self: *GitConfig) void {
         for (self.entries.items) |entry| {
             entry.deinit(self.allocator);
@@ -165,6 +172,12 @@ pub const GitConfig = struct {
         return self.get("remote", remote_name, "url");
     }
 
+    /// Get remote URL with allocator parameter (for API compatibility)
+    pub fn getRemoteUrlAlloc(self: GitConfig, allocator: std.mem.Allocator, remote_name: []const u8) ?[]const u8 {
+        _ = allocator; // Not used for this operation
+        return self.get("remote", remote_name, "url");
+    }
+
     /// Get user name
     pub fn getUserName(self: GitConfig) ?[]const u8 {
         return self.get("user", null, "name");
@@ -180,9 +193,26 @@ pub const GitConfig = struct {
         return self.get("branch", branch_name, "remote");
     }
 
+    /// Get branch remote with allocator parameter (for API compatibility)
+    pub fn getBranchRemoteAlloc(self: GitConfig, allocator: std.mem.Allocator, branch_name: []const u8) ?[]const u8 {
+        _ = allocator; // Not used for this operation
+        return self.get("branch", branch_name, "remote");
+    }
+
     /// Get branch merge target for a branch
     pub fn getBranchMerge(self: GitConfig, branch_name: []const u8) ?[]const u8 {
         return self.get("branch", branch_name, "merge");
+    }
+
+    /// Get branch merge with allocator parameter (for API compatibility) 
+    pub fn getBranchMergeAlloc(self: GitConfig, allocator: std.mem.Allocator, branch_name: []const u8) ?[]const u8 {
+        _ = allocator; // Not used for this operation
+        return self.get("branch", branch_name, "merge");
+    }
+
+    /// Generic value getter (convenience method for tests)
+    pub fn getValue(self: GitConfig, section: []const u8, name: []const u8) ?[]const u8 {
+        return self.get(section, null, name);
     }
 };
 

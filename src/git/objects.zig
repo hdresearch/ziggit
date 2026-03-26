@@ -278,11 +278,17 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     const magic = std.mem.readInt(u32, @ptrCast(idx_data[0..4]), .big);
     const version = std.mem.readInt(u32, @ptrCast(idx_data[4..8]), .big);
     
-    if (magic != 0xff744f63) return error.ObjectNotFound; // '\377tOc'
-    if (version != 2) {
-        // Try to support version 1 format (no header, just fanout table)
+    if (magic != 0xff744f63) {
+        // No magic header, might be version 1 format
         if (idx_data.len < 256 * 4) return error.ObjectNotFound;
         return findObjectInPackV1(idx_data, target_hash, pack_dir_path, idx_filename, platform_impl, allocator);
+    }
+    if (version != 2) {
+        // Unsupported version, but try v1 fallback just in case
+        if (idx_data.len < 256 * 4) return error.ObjectNotFound;
+        return findObjectInPackV1(idx_data, target_hash, pack_dir_path, idx_filename, platform_impl, allocator) catch {
+            return error.ObjectNotFound; // Neither v2 nor v1 worked
+        };
     }
     
     // Use fanout table for efficient searching
@@ -405,12 +411,36 @@ fn findObjectInPackV1(idx_data: []const u8, target_hash: [20]u8, pack_dir_path: 
     return error.ObjectNotFound;
 }
 
-/// Read object from pack file at given offset
+/// Read object from pack file at given offset with validation
 fn readObjectFromPack(pack_path: []const u8, offset: u64, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
     const pack_data = platform_impl.fs.readFile(allocator, pack_path) catch return error.ObjectNotFound;
     defer allocator.free(pack_data);
     
-    if (offset >= pack_data.len) return error.ObjectNotFound;
+    // Validate pack file format
+    if (pack_data.len < 12) return error.InvalidPackFile; // Minimum header size
+    
+    // Check pack file header: "PACK" + version + object count
+    if (!std.mem.eql(u8, pack_data[0..4], "PACK")) {
+        std.debug.print("Invalid pack file magic in {s}\n", .{pack_path});
+        return error.InvalidPackFile;
+    }
+    
+    const version = std.mem.readInt(u32, @ptrCast(pack_data[4..8]), .big);
+    if (version != 2 and version != 3) {
+        std.debug.print("Unsupported pack version {} in {s}\n", .{ version, pack_path });
+        return error.UnsupportedPackVersion;
+    }
+    
+    const object_count = std.mem.readInt(u32, @ptrCast(pack_data[8..12]), .big);
+    if (object_count == 0) {
+        std.debug.print("Pack file {s} contains no objects\n", .{pack_path});
+        return error.EmptyPackFile;
+    }
+    
+    if (offset >= pack_data.len) {
+        std.debug.print("Offset {} beyond pack file size {} in {s}\n", .{ offset, pack_data.len, pack_path });
+        return error.OffsetOutOfBounds;
+    }
     
     return readPackedObject(pack_data, @intCast(offset), pack_path, platform_impl, allocator);
 }
@@ -607,9 +637,10 @@ fn findOffsetInIdx(idx_data: []const u8, target_hash: [20]u8) ?usize {
     }
 }
 
-/// Apply delta to base data to reconstruct object
+/// Apply delta to base data to reconstruct object with improved error handling
 fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    if (delta_data.len == 0) return error.InvalidDelta;
+    if (delta_data.len < 2) return error.DeltaTooShort; // Need at least base_size and result_size
+    if (base_data.len > 1024 * 1024 * 1024) return error.BaseTooLarge; // 1GB limit
     
     var pos: usize = 0;
     
@@ -624,7 +655,7 @@ fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.
         shift += 7;
     }
     
-    if (pos >= delta_data.len) return error.InvalidDelta;
+    if (pos >= delta_data.len) return error.DeltaTruncated;
     
     // Read result size (variable length) 
     var result_size: usize = 0;
@@ -637,9 +668,17 @@ fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.
         shift += 7;
     }
     
-    // Verify base size and reasonable result size
-    if (base_size != base_data.len) return error.InvalidDelta;
-    if (result_size > 100 * 1024 * 1024) return error.InvalidDelta; // Sanity check for 100MB max
+    // Verify base size matches actual base data
+    if (base_size != base_data.len) {
+        std.debug.print("Delta base size mismatch: expected {}, got {}\n", .{ base_size, base_data.len });
+        return error.BaseSizeMismatch;
+    }
+    
+    // Sanity check result size (100MB max)
+    if (result_size > 100 * 1024 * 1024) {
+        std.debug.print("Delta result size too large: {} bytes\n", .{result_size});
+        return error.ResultTooLarge;
+    }
     
     // Apply delta commands
     var result = std.ArrayList(u8).init(allocator);

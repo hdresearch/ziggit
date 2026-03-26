@@ -51,7 +51,20 @@ pub fn resolveRef(git_dir: []const u8, ref_name: []const u8, platform_impl: anyt
     while (depth < max_depth) {
         defer depth += 1;
         
-        const resolved = try resolveRefOnce(git_dir, current_ref, platform_impl, allocator);
+        const resolved = resolveRefOnce(git_dir, current_ref, platform_impl, allocator) catch |err| {
+            // If resolution fails, try without assuming the ref is partial
+            if (std.mem.eql(u8, current_ref, "HEAD")) {
+                return err; // HEAD should always exist
+            }
+            // Try as full ref path if it failed as a short name
+            if (!std.mem.startsWith(u8, current_ref, "refs/")) {
+                const full_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{current_ref});
+                defer allocator.free(full_ref);
+                return resolveRefOnce(git_dir, full_ref, platform_impl, allocator) catch return err;
+            }
+            return err;
+        };
+        
         if (resolved.is_symbolic) {
             // Update current_ref for next iteration
             allocator.free(current_ref);
@@ -544,7 +557,7 @@ fn findTagsInPackedRefs(git_dir: []const u8, platform_impl: anytype, allocator: 
     return tags;
 }
 
-/// Read ref hash from packed-refs file
+/// Read ref hash from packed-refs file with improved performance
 fn readFromPackedRefs(git_dir: []const u8, ref_name: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![]u8 {
     const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir});
     defer allocator.free(packed_refs_path);
@@ -555,21 +568,65 @@ fn readFromPackedRefs(git_dir: []const u8, ref_name: []const u8, platform_impl: 
     };
     defer allocator.free(content);
 
+    // Check if the file is sorted (git pack-refs --all usually sorts)
+    var is_sorted = false;
+    var lines_iter = std.mem.split(u8, content, "\n");
+    
+    // Parse the header to check for capabilities
+    while (lines_iter.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        
+        if (std.mem.startsWith(u8, trimmed, "#")) {
+            // Check for sorted capability
+            if (std.mem.indexOf(u8, trimmed, "sorted") != null) {
+                is_sorted = true;
+            }
+            continue;
+        }
+        
+        // First non-comment line, we can start searching
+        break;
+    }
+    
+    // Reset iterator for full search
+    lines_iter = std.mem.split(u8, content, "\n");
+    
     // Parse packed-refs file
-    var lines = std.mem.split(u8, content, "\n");
-    while (lines.next()) |line| {
+    var prev_ref: ?[]const u8 = null;
+    while (lines_iter.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
         
         // Skip comments and empty lines
         if (trimmed.len == 0 or trimmed[0] == '#') continue;
+        
+        // Handle peeled refs (start with ^)
+        if (trimmed[0] == '^') {
+            // Peeled ref for previous ref - handle annotated tags
+            if (prev_ref != null and std.mem.eql(u8, prev_ref.?, ref_name) and trimmed.len >= 41) {
+                const peeled_hash = trimmed[1..41];
+                if (isValidHash(peeled_hash)) {
+                    return try allocator.dupe(u8, peeled_hash);
+                }
+            }
+            continue;
+        }
         
         // Format: "<hash> <ref_name>"
         if (std.mem.indexOf(u8, trimmed, " ")) |space_pos| {
             const hash = trimmed[0..space_pos];
             const ref_path = trimmed[space_pos + 1..];
             
+            // Store current ref for peeled ref handling
+            prev_ref = ref_path;
+            
             if (std.mem.eql(u8, ref_path, ref_name) and isValidHash(hash)) {
                 return try allocator.dupe(u8, hash);
+            }
+            
+            // If sorted and we've passed our target, we can stop searching
+            if (is_sorted and std.mem.lessThan(u8, ref_name, ref_path)) {
+                break;
             }
         }
     }

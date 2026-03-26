@@ -112,6 +112,16 @@ pub fn build(b: *std.Build) void {
     // Note: config_test.zig and lib_status_test.zig are removed from build
     // as they import from lib/ and git/ directories which are owned by other agents
 
+    // Pack implementation test
+    const pack_implementation_test = b.addExecutable(.{
+        .name = "pack_implementation_test",
+        .root_source_file = b.path("test/pack_implementation_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_pack_implementation_test = b.addRunArtifact(pack_implementation_test);
+
     // Main test step runs core tests
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_unit_tests.step);
@@ -121,6 +131,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_command_output_test.step);
     test_step.dependOn(&run_pack_delta_unit_tests.step);
     test_step.dependOn(&run_pack_files_test.step);
+    test_step.dependOn(&run_pack_implementation_test.step);
 
     // ========== BENCHMARKS ==========
     // CLI benchmark (ziggit CLI vs git CLI)
