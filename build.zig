@@ -1727,6 +1727,10 @@ pub fn build(b: *std.Build) void {
     });
     risk_hardening_tests.root_module.addImport("ziggit", ziggit_module);
     test_step.dependOn(&b.addRunArtifact(risk_hardening_tests).step);
+    test_step.dependOn(&b.addRunArtifact(add_commit_tests).step);
+
+    const add_commit_step = b.step("test-add-commit", "Run add/commit tests");
+    add_commit_step.dependOn(&b.addRunArtifact(add_commit_tests).step);
 
     // HTTPS integration tests (require network access — run with `zig build https-test`)
     const https_integration_tests = b.addTest(.{

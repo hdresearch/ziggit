@@ -929,17 +929,23 @@ pub const Repository = struct {
         const has_parent = !std.mem.eql(u8, &parent_hash, &([_]u8{'0'} ** 40));
 
         const timestamp = std.time.timestamp();
+        const tz_offset = getTimezoneOffsetSeconds(timestamp);
+        const tz_sign: u8 = if (tz_offset < 0) '-' else '+';
+        const tz_abs: u32 = @intCast(if (tz_offset < 0) -tz_offset else tz_offset);
+        const tz_hours = tz_abs / 3600;
+        const tz_minutes = (tz_abs % 3600) / 60;
+
         const commit_content = if (has_parent)
             try std.fmt.allocPrint(
                 self.allocator,
-                "tree {s}\nparent {s}\nauthor {s} <{s}> {d} +0000\ncommitter {s} <{s}> {d} +0000\n\n{s}\n",
-                .{ tree_hash, parent_hash, author_name, author_email, timestamp, author_name, author_email, timestamp, message }
+                "tree {s}\nparent {s}\nauthor {s} <{s}> {d} {c}{d:0>2}{d:0>2}\ncommitter {s} <{s}> {d} {c}{d:0>2}{d:0>2}\n\n{s}\n",
+                .{ tree_hash, parent_hash, author_name, author_email, timestamp, tz_sign, tz_hours, tz_minutes, author_name, author_email, timestamp, tz_sign, tz_hours, tz_minutes, message },
             )
         else
             try std.fmt.allocPrint(
                 self.allocator,
-                "tree {s}\nauthor {s} <{s}> {d} +0000\ncommitter {s} <{s}> {d} +0000\n\n{s}\n",
-                .{ tree_hash, author_name, author_email, timestamp, author_name, author_email, timestamp, message }
+                "tree {s}\nauthor {s} <{s}> {d} {c}{d:0>2}{d:0>2}\ncommitter {s} <{s}> {d} {c}{d:0>2}{d:0>2}\n\n{s}\n",
+                .{ tree_hash, author_name, author_email, timestamp, tz_sign, tz_hours, tz_minutes, author_name, author_email, timestamp, tz_sign, tz_hours, tz_minutes, message },
             );
         defer self.allocator.free(commit_content);
 
@@ -959,6 +965,133 @@ pub const Repository = struct {
         try self.updateHead(&commit_hash_hex);
 
         return commit_hash_hex;
+    }
+
+    /// Stage all tracked file changes (pure Zig replacement for `git add -u`).
+    /// Updates modified files and removes deleted files from the index.
+    pub fn stageTrackedChanges(self: *Repository) !void {
+        const index_path = try std.fmt.allocPrint(self.allocator, "{s}/index", .{self.git_dir});
+        defer self.allocator.free(index_path);
+
+        var git_index = index_parser.GitIndex.readFromFile(self.allocator, index_path) catch {
+            return; // No index = nothing tracked
+        };
+        defer git_index.deinit();
+
+        // Collect paths to remove and paths to update (with new hash + stat)
+        var to_remove = std.ArrayList([]const u8).init(self.allocator);
+        defer {
+            for (to_remove.items) |p| self.allocator.free(p);
+            to_remove.deinit();
+        }
+
+        const UpdateInfo = struct {
+            path: []const u8,
+            sha1: [20]u8,
+            size: u32,
+            mtime_s: u32,
+            mtime_ns: u32,
+            ctime_s: u32,
+            ctime_ns: u32,
+        };
+        var to_update = std.ArrayList(UpdateInfo).init(self.allocator);
+        defer {
+            for (to_update.items) |u| self.allocator.free(u.path);
+            to_update.deinit();
+        }
+
+        for (git_index.entries.items) |entry| {
+            const full_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.path, entry.path });
+            defer self.allocator.free(full_path);
+
+            const file_exists = blk: {
+                std.fs.accessAbsolute(full_path, .{}) catch break :blk false;
+                break :blk true;
+            };
+
+            if (!file_exists) {
+                try to_remove.append(try self.allocator.dupe(u8, entry.path));
+                continue;
+            }
+
+            // Read file and compute blob hash
+            const file = std.fs.openFileAbsolute(full_path, .{}) catch continue;
+            defer file.close();
+            const content = file.readToEndAlloc(self.allocator, 100 * 1024 * 1024) catch continue;
+            defer self.allocator.free(content);
+
+            const blob_header = try std.fmt.allocPrint(self.allocator, "blob {}\x00", .{content.len});
+            defer self.allocator.free(blob_header);
+
+            var hasher = std.crypto.hash.Sha1.init(.{});
+            hasher.update(blob_header);
+            hasher.update(content);
+            var new_hash: [20]u8 = undefined;
+            hasher.final(&new_hash);
+
+            if (!std.mem.eql(u8, &new_hash, &entry.sha1)) {
+                // Store the new blob object
+                const blob_content = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ blob_header, content });
+                defer self.allocator.free(blob_content);
+
+                var hash_hex: [40]u8 = undefined;
+                _ = std.fmt.bufPrint(&hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&new_hash)}) catch unreachable;
+                try self.saveObject(&hash_hex, blob_content);
+
+                const file_stat = try file.stat();
+                try to_update.append(.{
+                    .path = try self.allocator.dupe(u8, entry.path),
+                    .sha1 = new_hash,
+                    .size = @intCast(file_stat.size),
+                    .mtime_s = @intCast(@divTrunc(file_stat.mtime, 1_000_000_000)),
+                    .mtime_ns = @intCast(@mod(file_stat.mtime, 1_000_000_000)),
+                    .ctime_s = @intCast(@divTrunc(file_stat.ctime, 1_000_000_000)),
+                    .ctime_ns = @intCast(@mod(file_stat.ctime, 1_000_000_000)),
+                });
+            }
+        }
+
+        // Apply removals from in-memory index
+        for (to_remove.items) |path| {
+            var i: usize = 0;
+            while (i < git_index.entries.items.len) {
+                if (std.mem.eql(u8, git_index.entries.items[i].path, path)) {
+                    self.allocator.free(git_index.entries.items[i].path);
+                    _ = git_index.entries.orderedRemove(i);
+                    break;
+                }
+                i += 1;
+            }
+        }
+
+        // Apply updates to in-memory index
+        for (to_update.items) |upd| {
+            for (git_index.entries.items) |*entry| {
+                if (std.mem.eql(u8, entry.path, upd.path)) {
+                    entry.sha1 = upd.sha1;
+                    entry.size = upd.size;
+                    entry.mtime_seconds = upd.mtime_s;
+                    entry.mtime_nanoseconds = upd.mtime_ns;
+                    entry.ctime_seconds = upd.ctime_s;
+                    entry.ctime_nanoseconds = upd.ctime_ns;
+                    break;
+                }
+            }
+        }
+
+        // Save the modified index back to disk once
+        try git_index.writeToFile(index_path);
+
+        // Clear caches
+        self._cached_index_mtime = null;
+        self._cached_is_clean = null;
+        self._cached_index_entries_mtime = null;
+    }
+
+    /// Stage all tracked changes and commit (equivalent of `git commit -a -m "msg"`)
+    pub fn commitAll(self: *Repository, message: []const u8, author_name: []const u8, author_email: []const u8) ![40]u8 {
+        try self.stageTrackedChanges();
+        return self.commit(message, author_name, author_email);
     }
 
     /// Create tag (pure Zig implementation)
@@ -2842,6 +2975,54 @@ pub const Repository = struct {
 };
 
 // Helper functions
+
+/// Get timezone offset in seconds from UTC.
+fn getTimezoneOffsetSeconds(timestamp: i64) i32 {
+    _ = timestamp;
+    // Check TZ environment variable
+    if (std.posix.getenv("TZ")) |tz| {
+        return parseTzOffsetValue(tz);
+    }
+    return 0;
+}
+
+/// Parse a TZ string for an offset value (e.g. "UTC-5", "EST+5", "+0530").
+fn parseTzOffsetValue(tz: []const u8) i32 {
+    var i: usize = 0;
+    while (i < tz.len) : (i += 1) {
+        if (tz[i] == '+' or tz[i] == '-') {
+            // POSIX TZ convention: sign is inverted (UTC-5 means west of UTC = negative offset)
+            const sign: i32 = if (tz[i] == '-') 1 else -1;
+            const rest = tz[i + 1 ..];
+            var colon_pos: ?usize = null;
+            for (rest, 0..) |c, j| {
+                if (c == ':') {
+                    colon_pos = j;
+                    break;
+                }
+            }
+            if (colon_pos) |cp| {
+                const hours = std.fmt.parseInt(i32, rest[0..cp], 10) catch return 0;
+                const mins_str = rest[cp + 1 ..];
+                var end: usize = mins_str.len;
+                for (mins_str, 0..) |c, j| {
+                    if (!std.ascii.isDigit(c)) { end = j; break; }
+                }
+                const minutes = std.fmt.parseInt(i32, mins_str[0..end], 10) catch return 0;
+                return sign * (hours * 3600 + minutes * 60);
+            } else {
+                var end: usize = rest.len;
+                for (rest, 0..) |c, j| {
+                    if (!std.ascii.isDigit(c)) { end = j; break; }
+                }
+                if (end == 0) return 0;
+                const hours = std.fmt.parseInt(i32, rest[0..end], 10) catch return 0;
+                return sign * hours * 3600;
+            }
+        }
+    }
+    return 0;
+}
 
 fn findGitDir(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     // First check for .git subdirectory (normal repository)
