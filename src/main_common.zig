@@ -9,6 +9,7 @@ const index_mod = if (@import("builtin").target.os.tag != .freestanding) @import
 const refs = if (@import("builtin").target.os.tag != .freestanding) @import("git/refs.zig") else void;
 const gitignore_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/gitignore.zig") else void;
 const diff_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/diff.zig") else void;
+const network = if (@import("builtin").target.os.tag != .freestanding) @import("git/network.zig") else void;
 
 const GitError = error{
     NotAGitRepository,
@@ -2035,6 +2036,39 @@ fn createMergeCommit(git_path: []const u8, current_hash: []const u8, target_hash
     try refs.updateRef(git_path, current_branch, commit_hash, platform_impl, allocator);
 }
 
+/// Simplified merge function for pull operations
+fn mergeCommits(git_path: []const u8, current_hash: []const u8, target_hash: []const u8, repo_root: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !bool {
+    _ = repo_root; // unused in this simplified implementation
+    // Check if already up to date
+    if (std.mem.eql(u8, current_hash, target_hash)) {
+        return false; // No conflicts, already up to date
+    }
+    
+    // For now, use a simple merge strategy similar to the existing merge code
+    // Find merge base
+    const merge_base = findMergeBase(git_path, current_hash, target_hash, allocator, platform_impl) catch current_hash;
+    defer if (!std.mem.eql(u8, merge_base, current_hash)) allocator.free(merge_base);
+    
+    // Get trees for the three commits
+    const base_tree = getCommitTree(git_path, merge_base, allocator, platform_impl) catch {
+        return error.MergeConflict;
+    };
+    defer allocator.free(base_tree);
+    
+    const current_tree = getCommitTree(git_path, current_hash, allocator, platform_impl) catch {
+        return error.MergeConflict; 
+    };
+    defer allocator.free(current_tree);
+    
+    const target_tree = getCommitTree(git_path, target_hash, allocator, platform_impl) catch {
+        return error.MergeConflict;
+    };
+    defer allocator.free(target_tree);
+    
+    // Perform the merge
+    return mergeTreesWithConflicts(git_path, base_tree, current_tree, target_tree, allocator, platform_impl) catch true;
+}
+
 fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     if (@import("builtin").target.os.tag == .freestanding) {
         try platform_impl.writeStderr("fetch: not supported in freestanding mode\n");
@@ -2050,19 +2084,37 @@ fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
 
     const remote = args.next() orelse "origin";
     
-    // For now, just show a helpful message about remote operations
-    try platform_impl.writeStdout("ziggit: Remote operations are not yet implemented.\n");
+    // Get remote URL from config
+    const remote_url = getRemoteUrl(git_path, remote, platform_impl, allocator) catch |err| switch (err) {
+        error.RemoteNotFound => {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' does not appear to be a git repository\n", .{remote});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        },
+        else => return err,
+    };
+    defer allocator.free(remote_url);
     
-    const msg = try std.fmt.allocPrint(allocator, 
-        "To use remote operations, please use git alongside ziggit:\n" ++
-        "  git fetch {s}          # Fetch from remote\n" ++
-        "  ziggit log             # View commits with ziggit\n" ++
-        "  ziggit status          # Check status with ziggit\n" ++
-        "\n" ++
-        "ziggit focuses on local repository operations and provides\n" ++
-        "a fast, drop-in replacement for common git commands.\n", .{remote});
-    defer allocator.free(msg);
-    try platform_impl.writeStdout(msg);
+    // Perform fetch using dumb HTTP protocol
+    try platform_impl.writeStdout("Fetching from remote...\n");
+    network.fetchRepository(allocator, remote_url, git_path, platform_impl) catch |err| switch (err) {
+        error.RepositoryNotFound => {
+            try platform_impl.writeStderr("fatal: repository not found\n");
+            std.process.exit(128);
+        },
+        error.InvalidUrl => {
+            try platform_impl.writeStderr("fatal: invalid remote URL\n");
+            std.process.exit(128);
+        },
+        error.HttpError => {
+            try platform_impl.writeStderr("fatal: unable to access remote repository\n");
+            std.process.exit(128);
+        },
+        else => return err,
+    };
+    
+    try platform_impl.writeStdout("Fetch completed successfully.\n");
 }
 
 fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
@@ -2085,18 +2137,89 @@ fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     };
     defer if (!std.mem.eql(u8, branch, "master")) allocator.free(branch);
     
-    try platform_impl.writeStdout("ziggit: Remote operations are not yet implemented.\n");
+    // First, fetch from remote
+    try platform_impl.writeStdout("Fetching from remote...\n");
     
-    const msg = try std.fmt.allocPrint(allocator, 
-        "To pull changes, use git and then continue with ziggit:\n" ++
-        "  git pull {s} {s}       # Pull changes\n" ++
-        "  ziggit status          # Check status\n" ++
-        "  ziggit log             # View history\n" ++
-        "\n" ++
-        "This hybrid approach lets you use git for remote operations\n" ++
-        "and ziggit for fast local repository management.\n", .{ remote, branch });
-    defer allocator.free(msg);
-    try platform_impl.writeStdout(msg);
+    const remote_url = getRemoteUrl(git_path, remote, platform_impl, allocator) catch |err| switch (err) {
+        error.RemoteNotFound => {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' does not appear to be a git repository\n", .{remote});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        },
+        else => return err,
+    };
+    defer allocator.free(remote_url);
+    
+    network.fetchRepository(allocator, remote_url, git_path, platform_impl) catch |err| switch (err) {
+        error.RepositoryNotFound => {
+            try platform_impl.writeStderr("fatal: repository not found\n");
+            std.process.exit(128);
+        },
+        error.InvalidUrl => {
+            try platform_impl.writeStderr("fatal: invalid remote URL\n");
+            std.process.exit(128);
+        },
+        error.HttpError => {
+            try platform_impl.writeStderr("fatal: unable to access remote repository\n");
+            std.process.exit(128);
+        },
+        else => return err,
+    };
+    
+    // Now try to merge the remote branch
+    const remote_branch = try std.fmt.allocPrint(allocator, "remotes/{s}/{s}", .{remote, branch});
+    defer allocator.free(remote_branch);
+    
+    const remote_commit = refs.getRef(git_path, remote_branch, platform_impl, allocator) catch {
+        const msg = try std.fmt.allocPrint(allocator, "fatal: couldn't find remote ref {s}\n", .{remote_branch});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        std.process.exit(1);
+    };
+    defer allocator.free(remote_commit);
+    
+    // Get current commit
+    const current_commit_opt = refs.getCurrentCommit(git_path, platform_impl, allocator) catch {
+        try platform_impl.writeStderr("fatal: no current branch\n");
+        std.process.exit(128);
+    };
+    
+    if (current_commit_opt == null) {
+        try platform_impl.writeStderr("fatal: no current commit\n");
+        std.process.exit(128);
+    }
+    
+    const current_commit = current_commit_opt.?;
+    defer allocator.free(current_commit);
+    
+    // Check if we need to merge (if commits are different)
+    if (std.mem.eql(u8, current_commit, remote_commit)) {
+        try platform_impl.writeStdout("Already up to date.\n");
+    } else {
+        // Perform merge
+        try platform_impl.writeStdout("Merging changes...\n");
+        
+        const repo_root = std.fs.path.dirname(git_path) orelse git_path;
+        const current_branch = try refs.getCurrentBranch(git_path, platform_impl, allocator);
+        defer allocator.free(current_branch);
+        
+        const conflicts = mergeCommits(git_path, current_commit, remote_commit, repo_root, platform_impl, allocator) catch |err| switch (err) {
+            error.MergeConflict => true,
+            else => return err,
+        };
+        
+        if (conflicts) {
+            try platform_impl.writeStderr("Automatic merge failed; fix conflicts and then commit the result.\n");
+            std.process.exit(1);
+        } else {
+            // Create merge commit
+            createMergeCommit(git_path, current_commit, remote_commit, current_branch, branch, allocator, platform_impl) catch |err| switch (err) {
+                else => return err,
+            };
+            try platform_impl.writeStdout("Merge completed successfully.\n");
+        }
+    }
 }
 
 fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
@@ -2110,34 +2233,58 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         std.process.exit(128);
     };
 
-    const target_dir = args.next();
+    const target_dir = args.next() orelse blk: {
+        // Extract directory name from URL
+        if (std.mem.lastIndexOfScalar(u8, url, '/')) |last_slash| {
+            const repo_name = url[last_slash + 1..];
+            if (std.mem.endsWith(u8, repo_name, ".git")) {
+                break :blk repo_name[0..repo_name.len - 4];
+            } else {
+                break :blk repo_name;
+            }
+        } else {
+            break :blk "repository";
+        }
+    };
     
-    try platform_impl.writeStdout("ziggit: Clone operations are not yet implemented.\n");
+    // Check if target directory already exists
+    if (platform_impl.fs.exists(target_dir) catch false) {
+        const msg = try std.fmt.allocPrint(allocator, "fatal: destination path '{s}' already exists and is not an empty directory.\n", .{target_dir});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        std.process.exit(128);
+    }
     
-    const msg = if (target_dir) |dir|
-        try std.fmt.allocPrint(allocator, 
-            "To clone the repository, use git and then use ziggit:\n" ++
-            "  git clone {s} {s}      # Clone repository\n" ++
-            "  cd {s}                 # Enter directory\n" ++
-            "  ziggit status          # Use ziggit for status\n" ++
-            "  ziggit log             # Use ziggit for log\n" ++
-            "  ziggit diff            # Use ziggit for diffs\n" ++
-            "\n" ++
-            "ziggit provides fast local operations while git handles\n" ++
-            "network operations. Both tools are fully interoperable.\n", .{ url, dir, dir })
-    else
-        try std.fmt.allocPrint(allocator, 
-            "To clone the repository, use git and then use ziggit:\n" ++
-            "  git clone {s}          # Clone repository\n" ++
-            "  cd <repository-name>   # Enter directory\n" ++
-            "  ziggit status          # Use ziggit for status\n" ++
-            "  ziggit log             # Use ziggit for log\n" ++
-            "  ziggit diff            # Use ziggit for diffs\n" ++
-            "\n" ++
-            "ziggit provides fast local operations while git handles\n" ++
-            "network operations. Both tools are fully interoperable.\n", .{url});
-    defer allocator.free(msg);
-    try platform_impl.writeStdout(msg);
+    const clone_msg = try std.fmt.allocPrint(allocator, "Cloning into '{s}'...\n", .{target_dir});
+    defer allocator.free(clone_msg);
+    try platform_impl.writeStdout(clone_msg);
+    
+    // Perform clone using dumb HTTP protocol
+    network.cloneRepository(allocator, url, target_dir, platform_impl) catch |err| switch (err) {
+        error.RepositoryNotFound => {
+            try platform_impl.writeStderr("fatal: repository not found\n");
+            std.process.exit(128);
+        },
+        error.InvalidUrl => {
+            try platform_impl.writeStderr("fatal: invalid repository URL\n");
+            std.process.exit(128);
+        },
+        error.HttpError => {
+            try platform_impl.writeStderr("fatal: unable to access remote repository\n");
+            std.process.exit(128);
+        },
+        error.NoValidBranch => {
+            try platform_impl.writeStderr("warning: remote HEAD refers to nonexistent ref, unable to checkout.\n");
+            std.process.exit(128);
+        },
+        error.AlreadyExists => {
+            try platform_impl.writeStderr("fatal: destination path already exists\n");
+            std.process.exit(128);
+        },
+        else => return err,
+    };
+    
+    try platform_impl.writeStdout("Clone completed successfully.\n");
 }
 
 fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
@@ -2188,6 +2335,21 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 }
 
 // Parse git config file to find a specific key's value
+/// Get remote URL from git config
+fn getRemoteUrl(git_path: []const u8, remote_name: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+    defer allocator.free(config_path);
+    
+    const config_content = platform_impl.fs.readFile(allocator, config_path) catch return error.RemoteNotFound;
+    defer allocator.free(config_content);
+    
+    const key = try std.fmt.allocPrint(allocator, "remote \"{s}\".url", .{remote_name});
+    defer allocator.free(key);
+    
+    const url = parseConfigValue(config_content, key, allocator) catch return error.RemoteNotFound;
+    return url orelse error.RemoteNotFound;
+}
+
 fn parseConfigValue(config_content: []const u8, key: []const u8, allocator: std.mem.Allocator) !?[]u8 {
     var lines = std.mem.split(u8, config_content, "\n");
     var current_section: ?[]const u8 = null;
