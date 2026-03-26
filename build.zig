@@ -257,6 +257,15 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/git/objects.zig"),
     });
 
+    const pack_ref_delta_thin_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_ref_delta_and_thin_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_ref_delta_thin_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+
     // Tests using internal src/git/*.zig imports that need refactoring
     // (compiled for syntax checking but excluded from test step)
     const config_enhanced_tests = b.addTest(.{
@@ -438,6 +447,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(pack_network_reception_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_thin_public_api_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_object_read_tests).step);
+    test_step.dependOn(&b.addRunArtifact(pack_ref_delta_thin_tests).step);
     // New tests from other agents (may be slow, included for completeness)
     test_step.dependOn(&b.addRunArtifact(repo_api_tests).step);
     test_step.dependOn(&b.addRunArtifact(object_integrity_tests).step);
