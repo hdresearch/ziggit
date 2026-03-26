@@ -163,20 +163,15 @@ fn testDiffOutput(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
     try repo_path.writeFile(.{.sub_path = "diff_test.txt", .data = "Modified content\nLine 2\nNew Line 3\nAdded line\n"});
     
     // Compare diff outputs
-    const git_diff = runCommand(allocator, &.{"git", "diff", "diff_test.txt"}, repo_path) catch |err| {
+    const git_diff = runCommand(allocator, &.{"git", "diff", "diff_test.txt"}, repo_path) catch |err| switch (err) {
         // Diff might return non-zero when there are differences
-        if (err == error.CommandFailed) {
-            // Try to get the output anyway for diff commands
-            try allocator.dupe(u8, "git diff output");
-        } else {
-            return err;
-        }
+        error.CommandFailed => try allocator.dupe(u8, "git diff output"),
+        else => return err,
     };
     defer allocator.free(git_diff);
     
-    const ziggit_diff = runCommand(allocator, &.{getZiggitPath(), "diff", "diff_test.txt"}, repo_path) catch |err| {
-        if (err == error.CommandFailed) {
-            try allocator.dupe(u8, "ziggit diff output");
+    const ziggit_diff = runCommand(allocator, &.{getZiggitPath(), "diff", "diff_test.txt"}, repo_path) catch |err| switch (err) {
+        error.CommandFailed => try allocator.dupe(u8, "ziggit diff output"),
         } else {
             return err;
         }
