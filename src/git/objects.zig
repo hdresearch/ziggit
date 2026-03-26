@@ -249,7 +249,7 @@ fn loadFromPackFiles(hash_str: []const u8, git_dir: []const u8, platform_impl: a
         error.FileNotFound => return error.ObjectNotFound,
         error.AccessDenied => return error.PackDirectoryAccessDenied,
         error.SymLinkLoop => return error.PackDirectorySymlinkLoop,
-        error.ProcessFdQuotaExceeded => return error.TooManyOpenFiles,
+        error.ProcessFdQuotaExceeded => return error.SystemResourcesExhausted,
         error.SystemFdQuotaExceeded => return error.SystemResourcesExhausted,
         error.NoDevice => return error.PackDirectoryOnUnmountedDevice,
         else => return error.PackDirectoryError,
@@ -269,11 +269,12 @@ fn loadFromPackFiles(hash_str: []const u8, git_dir: []const u8, platform_impl: a
     var iterator = pack_dir.iterate();
     var valid_idx_count: usize = 0;
     
-    while (iterator.next() catch |err| switch (err) {
-        error.AccessDenied => break, // Stop iteration but don't fail
-        error.SystemResources => return error.SystemResourcesExhausted,
-        else => return err,
-    }) |entry| {
+    while (true) {
+        const entry = iterator.next() catch |err| switch (err) {
+            error.AccessDenied => break, // Stop iteration but don't fail
+            error.SystemResources => return error.SystemResourcesExhausted,
+            else => return err,
+        } orelse break;
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
         
@@ -352,9 +353,7 @@ fn loadFromPackFiles(hash_str: []const u8, git_dir: []const u8, platform_impl: a
                 },
                 // Serious errors that indicate system issues - fail fast
                 error.OutOfMemory,
-                error.SystemResourcesExhausted,
-                error.TooManyOpenFiles,
-                error.PackDirectoryAccessDenied => return err,
+                error.SystemResourcesExhausted => return err,
                 else => {
                     last_error = err;
                     continue; // Try other packs even on unexpected errors
