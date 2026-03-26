@@ -5,7 +5,7 @@ const testing = std.testing;
 test "verify core modules compile" {
     const objects = @import("../src/git/objects.zig");
     const config = @import("../src/git/config.zig");
-    const index = @import("../src/git/index.zig");
+    _ = @import("../src/git/index.zig");
     const refs = @import("../src/git/refs.zig");
     
     // Test that types can be created

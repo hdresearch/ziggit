@@ -267,8 +267,8 @@ test "index handling of very long paths" {
     try long_path_index.appendSlice(long_path[0..path_len]);
     
     // Padding
-    const entry_size = 62 + path_len;
-    const pad_len = (8 - (entry_size % 8)) % 8;
+    const entry_size: usize = 62 + path_len;
+    const pad_len: usize = (8 - (entry_size % 8)) % 8;
     for (0..pad_len) |_| {
         try long_path_index.append(0);
     }

@@ -41,6 +41,7 @@ const MockPlatform = struct {
         }
         
         pub fn writeFile(self: MockFs, path: []const u8, data: []const u8) !void {
+            _ = self;
             _ = path;
             _ = data;
         }
