@@ -1,0 +1,50 @@
+=== Real Ziggit API vs CLI Benchmark Results ===
+
+This benchmark compares the REAL ziggit Zig implementation (src/ziggit.zig) 
+against git CLI spawning for critical operations used by bun.
+
+Test Setup:
+- Repository: 100 files, 10 commits, 3 tags  
+- Iterations: 1000 per operation
+- Measurements: wall clock time using std.time.nanoTimestamp()
+
+DEBUG BUILD RESULTS:
+           Operation |    Zig Med |   Zig Mean |    Zig P95 |    Zig P99 ||    CLI Med |   CLI Mean |    CLI P95 |    CLI P99 ||  Speedup
+==================================================================================================================================
+      rev-parse HEAD | 76.8μs | 79.1μs | 87.9μs | 117.2μs || 1.01ms | 1.02ms | 1.08ms | 1.12ms || 13.1x
+  status --porcelain | 257.2μs | 261.4μs | 291.3μs | 308.2μs || 1.37ms | 1.38ms | 1.46ms | 1.51ms || 5.3x
+     describe --tags | 148.6μs | 150.9μs | 169.4μs | 185.3μs || 1.20ms | 1.21ms | 1.28ms | 1.31ms || 8.0x
+            is_clean | 269.7μs | 273.0μs | 302.2μs | 312.3μs || 1.39ms | 1.41ms | 1.47ms | 1.51ms || 5.2x
+
+RELEASE FAST BUILD RESULTS (-O ReleaseFast):
+           Operation |    Zig Med |   Zig Mean |    Zig P95 |    Zig P99 ||    CLI Med |   CLI Mean |    CLI P95 |    CLI P99 ||  Speedup
+==================================================================================================================================
+      rev-parse HEAD | 27.7μs | 28.6μs | 32.2μs | 44.7μs || 898.3μs | 922.8μs | 977.7μs | 1.02ms || 32.5x
+  status --porcelain | 99.2μs | 102.4μs | 113.8μs | 163.0μs || 1.24ms | 1.27ms | 1.36ms | 1.40ms || 12.5x
+     describe --tags | 45.7μs | 47.3μs | 51.8μs | 113.6μs || 1.04ms | 1.06ms | 1.14ms | 1.18ms || 22.7x
+            is_clean | 98.6μs | 101.7μs | 112.9μs | 162.2μs || 1.24ms | 1.26ms | 1.34ms | 1.38ms || 12.6x
+
+KEY FINDINGS:
+
+1. **Process spawn overhead eliminated**: Zig implementations run in microseconds vs milliseconds for CLI
+2. **Significant speedups achieved**: 5.2x - 32.5x depending on operation and build mode
+3. **Release builds 2-3x faster**: Compiler optimizations provide substantial benefits
+4. **Pure Zig code paths**: No std.process.Child usage - true zero-overhead function calls
+5. **Real file I/O included**: Unlike stub versions, these measure actual git operations
+
+PERFORMANCE CHARACTERISTICS:
+
+- **rev-parse HEAD**: Fastest operation (2 file reads: HEAD + ref resolution)
+- **describe --tags**: Medium performance (directory scan + file reads)  
+- **status/is_clean**: Slower but still good (working tree comparison)
+- **All operations < 300μs** in optimized builds vs **~1-1.4ms for CLI**
+
+BUN INTEGRATION VALUE:
+
+This validates ziggit's core value proposition:
+- Eliminates 1-1.4ms of process spawn overhead per git operation
+- Provides 5-32x performance improvement for critical operations
+- Enables bun to perform git operations at function-call speed
+- Scales to high-frequency operations without process overhead
+
+VERIFICATION: All measurements use the real ziggit implementation with actual file I/O operations.

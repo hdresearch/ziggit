@@ -559,7 +559,7 @@ pub const Repository = struct {
         var compressed = std.ArrayList(u8).init(self.allocator);
         defer compressed.deinit();
 
-        var buf_writer = compressed.writer();
+        const buf_writer = compressed.writer();
         try std.compress.zlib.compress(self.allocator, std.io.fixedBufferStream(object_content).reader(), buf_writer);
 
         const obj_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ obj_dir, hash_hex[2..] });
