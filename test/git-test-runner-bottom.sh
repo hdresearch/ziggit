@@ -59,7 +59,10 @@ for test_script in \
         FAIL=$(echo "$LAST_LINE" | grep -o "failed [0-9]*" | grep -o "[0-9]*")
         PASS=$((TOTAL - FAIL))
     else
-        PASS=0; FAIL=0; TOTAL=0
+        # No TAP summary - count ok/not ok lines for partial results
+        PASS=$(echo "$OUTPUT" | grep -c "^ok " || true)
+        FAIL=$(echo "$OUTPUT" | grep -c "^not ok " || true)
+        TOTAL=$((PASS + FAIL))
     fi
 
     echo "  $test_script: $PASS/$TOTAL passed" | tee -a "$RESULTS"
