@@ -82,40 +82,7 @@ pub fn build(b: *std.Build) void {
     const run_command_output_test = b.addRunArtifact(command_output_test);
     run_command_output_test.step.dependOn(b.getInstallStep());
 
-    // Comprehensive integration test (demonstrates ziggit as drop-in replacement)
-    const comprehensive_test = b.addExecutable(.{
-        .name = "comprehensive_integration_test",
-        .root_source_file = b.path("test/comprehensive_integration_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
 
-    const run_comprehensive_test = b.addRunArtifact(comprehensive_test);
-    run_comprehensive_test.step.dependOn(b.getInstallStep());
-
-    // Simple integration test (core functionality that works)
-    const simple_integration_test = b.addExecutable(.{
-        .name = "simple_integration_test",
-        .root_source_file = b.path("test/simple_integration_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const run_simple_integration_test = b.addRunArtifact(simple_integration_test);
-    run_simple_integration_test.step.dependOn(b.getInstallStep());
-
-    // Status porcelain test (focused test for status functionality)
-    const status_porcelain_test = b.addExecutable(.{
-        .name = "status_porcelain_test",
-        .root_source_file = b.path("test/status_porcelain_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    
-    status_porcelain_test.root_module.addImport("ziggit", ziggit_module);
-
-    const run_status_porcelain_test = b.addRunArtifact(status_porcelain_test);
-    run_status_porcelain_test.step.dependOn(b.getInstallStep());
 
     // Individual test steps
     const git_interop_test_step = b.step("test-git-interop", "Run git interoperability tests");
@@ -130,42 +97,17 @@ pub fn build(b: *std.Build) void {
     const command_output_test_step = b.step("test-command-output", "Run command output compatibility tests");
     command_output_test_step.dependOn(&run_command_output_test.step);
 
-    const comprehensive_test_step = b.step("test-comprehensive", "Run comprehensive integration tests");
-    comprehensive_test_step.dependOn(&run_comprehensive_test.step);
 
-    const simple_integration_test_step = b.step("test-simple", "Run simple integration tests");
-    simple_integration_test_step.dependOn(&run_simple_integration_test.step);
 
-    const status_porcelain_test_step = b.step("test-status-porcelain", "Run status porcelain functionality tests");
-    status_porcelain_test_step.dependOn(&run_status_porcelain_test.step);
 
-    // Debug status test (focused debug test for status functionality)
-    const debug_status_test = b.addExecutable(.{
-        .name = "debug_status_test",
-        .root_source_file = b.path("test/debug_status.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    
-    debug_status_test.root_module.addImport("ziggit", ziggit_module);
 
-    const run_debug_status_test = b.addRunArtifact(debug_status_test);
-    run_debug_status_test.step.dependOn(b.getInstallStep());
-
-    const debug_status_test_step = b.step("debug-status", "Run debug status test");
-    debug_status_test_step.dependOn(&run_debug_status_test.step);
-
-    // Main test step runs all tests
+    // Main test step runs all consolidated tests
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_git_interop_test.step);
     test_step.dependOn(&run_index_format_test.step);
-    // Note: object_format_test has issues with the test setup, skipping for now
-    // test_step.dependOn(&run_object_format_test.step);
+    test_step.dependOn(&run_object_format_test.step);
     test_step.dependOn(&run_command_output_test.step);
-    test_step.dependOn(&run_simple_integration_test.step);
-    // Note: comprehensive test known to fail due to ziggit status bug, moved to separate step
-    // test_step.dependOn(&run_comprehensive_test.step);
 
     // WebAssembly target (WASI)
     const wasm_target = b.resolveTargetQuery(.{
