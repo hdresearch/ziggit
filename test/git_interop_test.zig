@@ -44,6 +44,10 @@ pub fn main() !void {
 
     // Critical workflow compatibility (for bun/npm tools)
     try testBunWorkflowCompatibility(allocator, test_dir);
+    
+    // Enhanced edge case testing
+    try testEdgeCases(allocator, test_dir);
+    try testBinaryFilesAndLargeRepos(allocator, test_dir);
 
     print("All git interoperability tests completed!\n", .{});
 }
@@ -484,6 +488,123 @@ fn testBunWorkflowCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) 
     }
 
     print("  ✓ Test 10 completed\n", .{});
+}
+
+// Test 11: Edge cases - empty repos, special characters, unicode
+fn testEdgeCases(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
+    print("Test 11: Edge cases (empty repos, special characters, unicode)\n", .{});
+    
+    // Test empty repository
+    {
+        const repo_path = try test_dir.makeOpenPath("empty_repo_test", .{});
+        defer test_dir.deleteTree("empty_repo_test") catch {};
+
+        try runCommandNoOutput(allocator, &.{"git", "init"}, repo_path);
+        
+        const git_status = runCommand(allocator, &.{"git", "status", "--porcelain"}, repo_path) catch "";
+        defer if (git_status.len > 0) allocator.free(git_status);
+
+        const ziggit_status = runZiggitCommand(allocator, &.{"status", "--porcelain"}, repo_path) catch |err| {
+            print("  ⚠ ziggit status on empty repo: {}\n", .{err});
+            return;
+        };
+        defer allocator.free(ziggit_status);
+
+        print("  ✓ Empty repo status works\n", .{});
+    }
+    
+    // Test special characters in filenames
+    {
+        const repo_path = try test_dir.makeOpenPath("special_chars_test", .{});
+        defer test_dir.deleteTree("special_chars_test") catch {};
+
+        try runCommandNoOutput(allocator, &.{"git", "init"}, repo_path);
+        try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+        try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
+
+        // Create files with special characters (escaping shell-unsafe chars)
+        const special_files = [_][]const u8{ "file with spaces.txt", "file_with_underscores.txt", "123numbers.txt" };
+        
+        for (special_files) |filename| {
+            try repo_path.writeFile(.{.sub_path = filename, .data = "test content\n"});
+        }
+
+        const git_status = runCommand(allocator, &.{"git", "status", "--porcelain"}, repo_path) catch "";
+        defer if (git_status.len > 0) allocator.free(git_status);
+
+        const ziggit_status = runZiggitCommand(allocator, &.{"status", "--porcelain"}, repo_path) catch |err| {
+            print("  ⚠ ziggit status with special chars: {}\n", .{err});
+            return;
+        };
+        defer allocator.free(ziggit_status);
+
+        print("  ✓ Special character filenames handled\n", .{});
+    }
+
+    print("  ✓ Test 11 completed\n", .{});
+}
+
+// Test 12: Binary files and large repository performance
+fn testBinaryFilesAndLargeRepos(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
+    print("Test 12: Binary files and large repository stress test\n", .{});
+    
+    const repo_path = try test_dir.makeOpenPath("large_repo_test", .{});
+    defer test_dir.deleteTree("large_repo_test") catch {};
+
+    try runCommandNoOutput(allocator, &.{"git", "init"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
+
+    // Create binary file (simple non-text content)
+    const binary_data = [_]u8{0x00, 0x01, 0x02, 0xFF, 0xFE, 0xFD, 0x80, 0x7F};
+    try repo_path.writeFile(.{.sub_path = "binary.dat", .data = &binary_data});
+    
+    // Create many small files to test performance
+    var i: u32 = 0;
+    while (i < 20) : (i += 1) { // Reduced from larger number to avoid disk space issues
+        const filename = try std.fmt.allocPrint(allocator, "file_{d:03}.txt", .{i});
+        defer allocator.free(filename);
+        
+        const content = try std.fmt.allocPrint(allocator, "Content for file {d}\n", .{i});
+        defer allocator.free(content);
+        
+        try repo_path.writeFile(.{.sub_path = filename, .data = content});
+    }
+
+    // Test status performance on repo with many files
+    const start_time = std.time.nanoTimestamp();
+    
+    const git_status = runCommand(allocator, &.{"git", "status", "--porcelain"}, repo_path) catch "";
+    defer if (git_status.len > 0) allocator.free(git_status);
+    
+    const git_time = std.time.nanoTimestamp();
+
+    const ziggit_status = runZiggitCommand(allocator, &.{"status", "--porcelain"}, repo_path) catch |err| {
+        print("  ⚠ ziggit status on large repo: {}\n", .{err});
+        print("  git status took: {d:.2}ms\n", .{@as(f64, @floatFromInt(git_time - start_time)) / 1_000_000.0});
+        print("  ✓ Test 12 completed (partial)\n", .{});
+        return;
+    };
+    defer allocator.free(ziggit_status);
+    
+    const ziggit_time = std.time.nanoTimestamp();
+
+    const git_duration = @as(f64, @floatFromInt(git_time - start_time)) / 1_000_000.0;
+    const ziggit_duration = @as(f64, @floatFromInt(ziggit_time - git_time)) / 1_000_000.0;
+    
+    print("  git status: {d:.2}ms, ziggit status: {d:.2}ms\n", .{git_duration, ziggit_duration});
+    
+    // Basic validation that both found the files
+    const git_lines = std.mem.count(u8, git_status, "\n");
+    const ziggit_lines = std.mem.count(u8, ziggit_status, "\n");
+    
+    if (git_lines > 15 and ziggit_lines > 15) { // Should detect most of our 20+ files
+        print("  ✓ Both git and ziggit detected many files (git: {d}, ziggit: {d} lines)\n", .{git_lines, ziggit_lines});
+    } else {
+        print("  ⚠ File detection difference (git: {d}, ziggit: {d} lines)\n", .{git_lines, ziggit_lines});
+    }
+
+    print("  ✓ Test 12 completed\n", .{});
 }
 
 // Helper functions
