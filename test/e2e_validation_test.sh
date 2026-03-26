@@ -353,6 +353,240 @@ else
     fail "hash match" "git=$git_hash, ziggit=$ziggit_hash"
 fi
 
+# --- Test 15: Special characters in filenames ---
+echo "Test 15: Files with special characters"
+d=$(new_repo "t15_special")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "special1" > "$d/hello-world.txt"
+echo "special2" > "$d/under_score.txt"
+echo "special3" > "$d/CamelCase.TXT"
+echo "special4" > "$d/file.with.dots.txt"
+(cd "$d" && "$ZIGGIT" add "hello-world.txt" && "$ZIGGIT" add "under_score.txt" \
+    && "$ZIGGIT" add "CamelCase.TXT" && "$ZIGGIT" add "file.with.dots.txt") >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "special chars") >/dev/null 2>&1
+
+git_ls=$(cd "$d" && git ls-tree --name-only HEAD 2>&1)
+for fname in hello-world.txt under_score.txt CamelCase.TXT file.with.dots.txt; do
+    if echo "$git_ls" | grep -q "$fname"; then
+        pass "special char file $fname visible to git"
+    else
+        fail "special char $fname" "not found in git ls-tree"
+    fi
+done
+
+# --- Test 16: Empty tree (init only, no commits) ---
+echo "Test 16: Empty repo - git fsck"
+d=$(new_repo "t16_empty")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+fsck_out=$(cd "$d" && git fsck 2>&1) || true
+# fsck should not report errors (warnings about dangling are OK)
+if echo "$fsck_out" | grep -qi "error"; then
+    fail "git fsck" "errors found: $fsck_out"
+else
+    pass "git fsck passes on ziggit-initialized repo"
+fi
+
+# --- Test 17: ziggit status --porcelain matches git ---
+echo "Test 17: status --porcelain consistency"
+d=$(new_repo "t17_status")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "tracked" > "$d/tracked.txt"
+(cd "$d" && "$ZIGGIT" add tracked.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "base commit") >/dev/null 2>&1
+
+# Both should show clean
+git_s=$(cd "$d" && git status --porcelain 2>&1)
+ziggit_s=$(cd "$d" && "$ZIGGIT" status --porcelain 2>&1)
+if [ -z "$git_s" ] && [ -z "$ziggit_s" ]; then
+    pass "both ziggit and git report clean status"
+else
+    fail "clean status" "git='$git_s' ziggit='$ziggit_s'"
+fi
+
+# --- Test 18: ziggit log --oneline matches git ---
+echo "Test 18: ziggit log --oneline format"
+d=$(new_repo "t18_log")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "c1" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt && \
+    GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "first log msg") >/dev/null 2>&1
+echo "c2" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt && \
+    GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "second log msg") >/dev/null 2>&1
+
+ziggit_log=$(cd "$d" && "$ZIGGIT" log --oneline 2>&1)
+if echo "$ziggit_log" | grep -q "first log msg" && echo "$ziggit_log" | grep -q "second log msg"; then
+    pass "ziggit log --oneline shows both commit messages"
+else
+    fail "ziggit log" "got: $ziggit_log"
+fi
+
+# Verify git can also read both commits
+git_log=$(cd "$d" && git log --oneline 2>&1)
+if echo "$git_log" | grep -q "first log msg" && echo "$git_log" | grep -q "second log msg"; then
+    pass "git log confirms both commits"
+else
+    fail "git log" "got: $git_log"
+fi
+
+# --- Test 19: Multiple tags on different commits ---
+echo "Test 19: Multiple tags on different commits"
+d=$(new_repo "t19_multitag")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "v1" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt && \
+    GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "release 1") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+first_hash=$(cd "$d" && git rev-parse HEAD | tr -d '[:space:]')
+
+echo "v2" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt && \
+    GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "release 2") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v2.0.0) >/dev/null 2>&1
+
+git_tags=$(cd "$d" && git tag -l | sort)
+if echo "$git_tags" | grep -q "v1.0.0" && echo "$git_tags" | grep -q "v2.0.0"; then
+    pass "git sees both ziggit tags"
+else
+    fail "multiple tags" "got: $git_tags"
+fi
+
+# v1.0.0 should point to first commit
+tag1_target=$(cd "$d" && git rev-parse v1.0.0 | tr -d '[:space:]')
+if [ "$tag1_target" = "$first_hash" ]; then
+    pass "v1.0.0 points to correct commit"
+else
+    fail "v1 tag target" "expected $first_hash, got $tag1_target"
+fi
+
+# --- Test 20: git fsck on repo with multiple commits and tags ---
+echo "Test 20: git fsck validates full repo integrity"
+d=$(new_repo "t20_fsck")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+for i in 1 2 3 4 5; do
+    echo "content $i" > "$d/file$i.txt"
+    (cd "$d" && "$ZIGGIT" add "file$i.txt") >/dev/null 2>&1
+    (cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+        GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+        "$ZIGGIT" commit -m "commit $i") >/dev/null 2>&1
+done
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+
+fsck_out=$(cd "$d" && git fsck --no-dangling 2>&1)
+if echo "$fsck_out" | grep -qi "error\|corrupt\|broken"; then
+    fail "git fsck full repo" "errors: $fsck_out"
+else
+    pass "git fsck validates repo with 5 commits and tag"
+fi
+
+# --- Test 21: ziggit describe after extra commits past tag ---
+echo "Test 21: describe after commits past tag"
+d=$(new_repo "t21_describe_ahead")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "base" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt && \
+    GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "tagged") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+echo "extra" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt && \
+    GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "past tag") >/dev/null 2>&1
+
+# git describe should show v1.0.0-1-g<hash>
+git_desc=$(cd "$d" && git describe --tags 2>&1 | tr -d '[:space:]')
+if echo "$git_desc" | grep -q "v1.0.0-1-g"; then
+    pass "git describe shows commits ahead of ziggit tag"
+else
+    fail "describe ahead" "expected v1.0.0-1-g..., got: $git_desc"
+fi
+
+# --- Test 22: Large file content preserved ---
+echo "Test 22: Large file (1MB) preserved through ziggit"
+d=$(new_repo "t22_large")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+dd if=/dev/urandom bs=1024 count=1024 2>/dev/null | base64 > "$d/large.txt"
+orig_hash=$(sha256sum "$d/large.txt" | cut -d' ' -f1)
+(cd "$d" && "$ZIGGIT" add large.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "large file") >/dev/null 2>&1
+
+# Read back via git and compare
+checkout_hash=$(cd "$d" && git show HEAD:large.txt | sha256sum | cut -d' ' -f1)
+if [ "$orig_hash" = "$checkout_hash" ]; then
+    pass "large file (1MB) content preserved"
+else
+    fail "large file" "hash mismatch"
+fi
+
+# --- Test 23: Bun multi-version workflow ---
+echo "Test 23: Bun multi-version workflow"
+d=$(new_repo "t23_bun_multi")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+
+# Version 1.0.0
+cat > "$d/package.json" << 'EOF'
+{"name":"my-pkg","version":"1.0.0"}
+EOF
+(cd "$d" && "$ZIGGIT" add package.json) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Bun" GIT_AUTHOR_EMAIL="bun@bun.sh" \
+    GIT_COMMITTER_NAME="Bun" GIT_COMMITTER_EMAIL="bun@bun.sh" \
+    "$ZIGGIT" commit -m "v1.0.0") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+
+# Version 1.1.0
+cat > "$d/package.json" << 'EOF'
+{"name":"my-pkg","version":"1.1.0"}
+EOF
+echo "# My Package" > "$d/README.md"
+(cd "$d" && "$ZIGGIT" add package.json && "$ZIGGIT" add README.md) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Bun" GIT_AUTHOR_EMAIL="bun@bun.sh" \
+    GIT_COMMITTER_NAME="Bun" GIT_COMMITTER_EMAIL="bun@bun.sh" \
+    "$ZIGGIT" commit -m "v1.1.0") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.1.0) >/dev/null 2>&1
+
+# Verify from git side
+git_tags=$(cd "$d" && git tag -l | sort)
+git_commits=$(cd "$d" && git rev-list --count HEAD)
+git_pkg=$(cd "$d" && git show HEAD:package.json 2>&1)
+git_v1_pkg=$(cd "$d" && git show v1.0.0:package.json 2>&1)
+
+if [ "$git_commits" = "2" ]; then
+    pass "bun multi-version: 2 commits"
+else
+    fail "bun multi commits" "expected 2, got: $git_commits"
+fi
+if echo "$git_tags" | grep -q "v1.0.0" && echo "$git_tags" | grep -q "v1.1.0"; then
+    pass "bun multi-version: both tags present"
+else
+    fail "bun multi tags" "got: $git_tags"
+fi
+if echo "$git_pkg" | grep -q '"1.1.0"'; then
+    pass "bun multi-version: HEAD has v1.1.0 package.json"
+else
+    fail "bun pkg HEAD" "got: $git_pkg"
+fi
+if echo "$git_v1_pkg" | grep -q '"1.0.0"'; then
+    pass "bun multi-version: v1.0.0 tag has v1.0.0 package.json"
+else
+    fail "bun pkg v1" "got: $git_v1_pkg"
+fi
+
 echo ""
 echo "========================================"
 echo "Results: $PASS passed, $FAIL failed"
