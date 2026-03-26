@@ -1132,7 +1132,7 @@ pub const Repository = struct {
             }
         } else |_| {}
 
-        // For bare repos (no refs/remotes/origin), also scan refs/heads/* directly
+        // For bare repos (no refs/remotes/origin), scan refs/heads/* and packed-refs
         if (!found_remote_refs) {
             const heads_dir = try std.fmt.allocPrint(self.allocator, "{s}/refs/heads", .{self.git_dir});
             defer self.allocator.free(heads_dir);
@@ -1157,6 +1157,39 @@ pub const Repository = struct {
                     }
                 }
             } else |_| {}
+
+            // Also scan packed-refs for refs stored there (e.g., after ziggit clone)
+            var packed_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            const packed_path = std.fmt.bufPrint(&packed_path_buf, "{s}/packed-refs", .{self.git_dir}) catch "";
+            if (packed_path.len > 0) {
+                if (std.fs.cwd().readFileAlloc(self.allocator, packed_path, 4 * 1024 * 1024)) |packed_data| {
+                    defer self.allocator.free(packed_data);
+                    var lines = std.mem.splitScalar(u8, packed_data, '\n');
+                    while (lines.next()) |line| {
+                        if (line.len == 0 or line[0] == '#' or line[0] == '^') continue;
+                        if (line.len > 41 and line[40] == ' ') {
+                            const ref_name_raw = line[41..];
+                            if (std.mem.startsWith(u8, ref_name_raw, "refs/heads/")) {
+                                // Check if already found as loose ref
+                                var already_found = false;
+                                for (local_refs_list.items) |lr| {
+                                    if (std.mem.eql(u8, lr.name, ref_name_raw)) {
+                                        already_found = true;
+                                        break;
+                                    }
+                                }
+                                if (!already_found) {
+                                    const ref_name = try std.fmt.allocPrint(self.allocator, "{s}", .{ref_name_raw});
+                                    try local_refs_list.append(.{
+                                        .hash = line[0..40].*,
+                                        .name = ref_name,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                } else |_| {}
+            }
         }
 
         // Free local ref names when done (ownership was kept for fetchNewPack)
