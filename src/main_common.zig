@@ -3653,10 +3653,53 @@ fn resolveCommitHash(git_path: []const u8, hash_prefix: []const u8, platform_imp
     return found_hash orelse error.CommitNotFound;
 }
 
+fn lookupBlobInTree(tree_hash: []const u8, path: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !?[20]u8 {
+    // Load tree object
+    const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch return null;
+    defer tree_obj.deinit(allocator);
+    
+    if (tree_obj.type != .tree) return null;
+    
+    // Split path into first component and rest
+    const slash_pos = std.mem.indexOfScalar(u8, path, '/');
+    const name_to_find = if (slash_pos) |pos| path[0..pos] else path;
+    const remaining = if (slash_pos) |pos| path[pos + 1 ..] else null;
+    
+    // Parse tree entries
+    var i: usize = 0;
+    while (i < tree_obj.data.len) {
+        const space_pos = std.mem.indexOfScalarPos(u8, tree_obj.data, i, ' ') orelse break;
+        const null_pos = std.mem.indexOfScalarPos(u8, tree_obj.data, space_pos + 1, 0) orelse break;
+        const name = tree_obj.data[space_pos + 1 .. null_pos];
+        
+        const hash_start = null_pos + 1;
+        if (hash_start + 20 > tree_obj.data.len) break;
+        const hash_bytes = tree_obj.data[hash_start .. hash_start + 20];
+        
+        if (std.mem.eql(u8, name, name_to_find)) {
+            if (remaining) |rest| {
+                // This is a directory - recurse
+                const sub_tree_hash = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
+                defer allocator.free(sub_tree_hash);
+                return try lookupBlobInTree(sub_tree_hash, rest, git_path, platform_impl, allocator);
+            } else {
+                // This is the file - return its hash
+                var result: [20]u8 = undefined;
+                @memcpy(&result, hash_bytes);
+                return result;
+            }
+        }
+        
+        i = hash_start + 20;
+    }
+    
+    return null; // Not found
+}
+
 fn checkIfDifferentFromHEAD(entry: index_mod.IndexEntry, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !bool {
     // Get current HEAD commit
     const head_hash_opt = refs.getCurrentCommit(git_path, platform_impl, allocator) catch return false;
-    const head_hash = head_hash_opt orelse return false; // No HEAD commit
+    const head_hash = head_hash_opt orelse return false;
     defer allocator.free(head_hash);
     
     // Load HEAD commit
@@ -3671,43 +3714,12 @@ fn checkIfDifferentFromHEAD(entry: index_mod.IndexEntry, git_path: []const u8, p
     if (!std.mem.startsWith(u8, tree_line, "tree ")) return false;
     const tree_hash = tree_line["tree ".len..];
     
-    // Load tree object  
-    const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch return false;
-    defer tree_obj.deinit(allocator);
+    // Look up the blob hash in the tree (recursively handles subdirectories)
+    const tree_blob_hash = try lookupBlobInTree(tree_hash, entry.path, git_path, platform_impl, allocator);
     
-    if (tree_obj.type != .tree) return false;
-    
-    // Parse tree entries to find our file
-    const entry_hash_str = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
-    defer allocator.free(entry_hash_str);
-    
-    // Simple tree parsing - look for the file name and hash
-    // Tree format is: <mode> <name>\0<20-byte-hash>
-    var i: usize = 0;
-    while (i < tree_obj.data.len) {
-        // Find space
-        const space_pos = std.mem.indexOfScalarPos(u8, tree_obj.data, i, ' ') orelse break;
-        _ = tree_obj.data[i..space_pos]; // mode (unused for now)
-        
-        // Find null terminator
-        const null_pos = std.mem.indexOfScalarPos(u8, tree_obj.data, space_pos + 1, 0) orelse break;
-        const name = tree_obj.data[space_pos + 1..null_pos];
-        
-        // Skip the 20-byte hash
-        const hash_start = null_pos + 1;
-        if (hash_start + 20 > tree_obj.data.len) break;
-        const hash_bytes = tree_obj.data[hash_start..hash_start + 20];
-        
-        // Check if this is our file
-        if (std.mem.eql(u8, name, entry.path)) {
-            // Convert hash bytes to hex string and compare
-            const tree_hash_str = try std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
-            defer allocator.free(tree_hash_str);
-            
-            return !std.mem.eql(u8, entry_hash_str, tree_hash_str);
-        }
-        
-        i = hash_start + 20;
+    if (tree_blob_hash) |hash_bytes| {
+        // Compare with index entry hash
+        return !std.mem.eql(u8, &hash_bytes, &entry.sha1);
     }
     
     // File not found in tree - it's new, so it's staged
