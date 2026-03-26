@@ -515,8 +515,21 @@ fn readPackedObject(pack_data: []const u8, offset: usize, pack_path: []const u8,
             defer allocator.free(base_hash_str);
             _ = try std.fmt.bufPrint(base_hash_str, "{}", .{std.fmt.fmtSliceHexLower(base_sha1)});
             
-            // Recursively read base object from this same pack
-            const base_object = findObjectInPackByHash(base_hash_str, pack_path, platform_impl, allocator) catch return error.ObjectNotFound;
+            // Look up base object offset in pack index, then read directly from pack_data (avoid recursive cycle)
+            const pack_dir = std.fs.path.dirname(pack_path) orelse return error.ObjectNotFound;
+            const pack_fname = std.fs.path.basename(pack_path);
+            if (!std.mem.endsWith(u8, pack_fname, ".pack")) return error.ObjectNotFound;
+            const idx_fname = try std.fmt.allocPrint(allocator, "{s}.idx", .{pack_fname[0 .. pack_fname.len - 5]});
+            defer allocator.free(idx_fname);
+            const idx_path2 = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir, idx_fname });
+            defer allocator.free(idx_path2);
+            const idx_data2 = platform_impl.fs.readFile(allocator, idx_path2) catch return error.ObjectNotFound;
+            defer allocator.free(idx_data2);
+            var base_hash_bytes: [20]u8 = undefined;
+            _ = std.fmt.hexToBytes(&base_hash_bytes, base_hash_str) catch return error.ObjectNotFound;
+            // Search idx for the base object offset
+            const base_offset2 = findOffsetInIdx(idx_data2, base_hash_bytes) orelse return error.ObjectNotFound;
+            const base_object = readPackedObject(pack_data, base_offset2, pack_path, platform_impl, allocator) catch return error.ObjectNotFound;
             defer base_object.deinit(allocator);
             
             // Read and decompress delta data
@@ -533,19 +546,65 @@ fn readPackedObject(pack_data: []const u8, offset: usize, pack_path: []const u8,
     }
 }
 
-/// Find object in pack by hash (for REF_DELTA support)
-fn findObjectInPackByHash(hash_str: []const u8, pack_path: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
-    // Extract pack directory and index filename from pack path
-    const pack_dir_path = std.fs.path.dirname(pack_path) orelse return error.ObjectNotFound;
-    const pack_filename = std.fs.path.basename(pack_path);
+/// Look up an object's offset in a pack index by its SHA-1 hash (non-generic, breaks recursive cycle)
+fn findOffsetInIdx(idx_data: []const u8, target_hash: [20]u8) ?usize {
+    if (idx_data.len < 8) return null;
     
-    // Create index filename by changing .pack to .idx
-    if (!std.mem.endsWith(u8, pack_filename, ".pack")) return error.ObjectNotFound;
-    const idx_filename = try std.fmt.allocPrint(allocator, "{s}.idx", .{pack_filename[0..pack_filename.len-5]});
-    defer allocator.free(idx_filename);
-    
-    // Try to find the object in this specific pack
-    return findObjectInPack(pack_dir_path, idx_filename, hash_str, platform_impl, allocator) catch return error.ObjectNotFound;
+    // Check for v2 magic
+    const magic = std.mem.readInt(u32, @ptrCast(idx_data[0..4]), .big);
+    if (magic == 0xff744f63) {
+        // V2 index
+        const fanout_start: usize = 8;
+        const first_byte = target_hash[0];
+        
+        if (idx_data.len < fanout_start + 256 * 4) return null;
+        
+        const start_index: u32 = if (first_byte == 0) 0 else std.mem.readInt(u32, @ptrCast(idx_data[fanout_start + (@as(usize, first_byte) - 1) * 4 .. fanout_start + (@as(usize, first_byte) - 1) * 4 + 4]), .big);
+        const end_index = std.mem.readInt(u32, @ptrCast(idx_data[fanout_start + @as(usize, first_byte) * 4 .. fanout_start + @as(usize, first_byte) * 4 + 4]), .big);
+        
+        if (start_index >= end_index) return null;
+        
+        const total_objects = std.mem.readInt(u32, @ptrCast(idx_data[fanout_start + 255 * 4 .. fanout_start + 255 * 4 + 4]), .big);
+        const sha1_table_start = fanout_start + 256 * 4;
+        const offset_table_start = sha1_table_start + @as(usize, total_objects) * 24; // 20 bytes SHA + 4 bytes CRC per entry
+        
+        var i: u32 = start_index;
+        while (i < end_index) : (i += 1) {
+            const sha_offset = sha1_table_start + @as(usize, i) * 20;
+            if (sha_offset + 20 > idx_data.len) return null;
+            if (std.mem.eql(u8, idx_data[sha_offset .. sha_offset + 20], &target_hash)) {
+                const off_offset = offset_table_start + @as(usize, i) * 4;
+                if (off_offset + 4 > idx_data.len) return null;
+                const offset_val = std.mem.readInt(u32, @ptrCast(idx_data[off_offset .. off_offset + 4]), .big);
+                return @intCast(offset_val);
+            }
+        }
+        return null;
+    } else {
+        // V1 index - simpler format
+        const fanout_start: usize = 0;
+        const first_byte = target_hash[0];
+        
+        if (idx_data.len < 256 * 4) return null;
+        
+        const start_index: u32 = if (first_byte == 0) 0 else std.mem.readInt(u32, @ptrCast(idx_data[fanout_start + (@as(usize, first_byte) - 1) * 4 .. fanout_start + (@as(usize, first_byte) - 1) * 4 + 4]), .big);
+        const end_index = std.mem.readInt(u32, @ptrCast(idx_data[fanout_start + @as(usize, first_byte) * 4 .. fanout_start + @as(usize, first_byte) * 4 + 4]), .big);
+        
+        if (start_index >= end_index) return null;
+        
+        const entries_start: usize = 256 * 4;
+        
+        var i: u32 = start_index;
+        while (i < end_index) : (i += 1) {
+            const entry_offset = entries_start + @as(usize, i) * 24;
+            if (entry_offset + 24 > idx_data.len) return null;
+            if (std.mem.eql(u8, idx_data[entry_offset + 4 .. entry_offset + 24], &target_hash)) {
+                const offset_val = std.mem.readInt(u32, @ptrCast(idx_data[entry_offset .. entry_offset + 4]), .big);
+                return @intCast(offset_val);
+            }
+        }
+        return null;
+    }
 }
 
 /// Apply delta to base data to reconstruct object
