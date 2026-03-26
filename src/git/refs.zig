@@ -354,12 +354,51 @@ fn isValidHash(hash: []const u8) bool {
 
 /// Resolve annotated tag to commit (if the hash points to a tag object)
 fn resolveAnnotatedTag(git_dir: []const u8, hash: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![]u8 {
-    _ = git_dir;
-    _ = platform_impl;
-    // For now, just return the hash as-is
-    // TODO: Load the object and check if it's a tag object, then follow to the commit
-    // This would require importing objects.zig and loading the object to check its type
-    return try allocator.dupe(u8, hash);
+    const objects = @import("objects.zig");
+    
+    // Try to load the object to see if it's a tag
+    const obj = objects.GitObject.load(hash, git_dir, platform_impl, allocator) catch {
+        // If we can't load the object, just return the hash as-is
+        return try allocator.dupe(u8, hash);
+    };
+    defer obj.deinit(allocator);
+    
+    if (obj.type == .tag) {
+        // Parse tag object to find the commit it points to
+        if (parseTagObject(obj.data)) |target_hash| {
+            // Recursively resolve in case the tag points to another tag
+            return resolveAnnotatedTag(git_dir, target_hash, platform_impl, allocator);
+        } else {
+            // Malformed tag object, return original hash
+            return try allocator.dupe(u8, hash);
+        }
+    } else {
+        // Not a tag object, return the hash as-is
+        return try allocator.dupe(u8, hash);
+    }
+}
+
+/// Parse a tag object to extract the target hash
+fn parseTagObject(tag_content: []const u8) ?[]const u8 {
+    // Tag object format:
+    // object <sha1>
+    // type <object_type>
+    // tag <tag_name>
+    // tagger <author_info>
+    // <blank_line>
+    // <tag_message>
+    
+    var lines = std.mem.split(u8, tag_content, "\n");
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "object ")) {
+            const target_hash = line["object ".len..];
+            // Verify it's a valid 40-character hex hash
+            if (target_hash.len == 40 and isValidHash(target_hash)) {
+                return target_hash;
+            }
+        }
+    }
+    return null;
 }
 
 /// List all remote references

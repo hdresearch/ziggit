@@ -14,6 +14,7 @@ pub const IndexEntry = struct {
     size: u32,
     sha1: [20]u8, // SHA-1 hash of file contents
     flags: u16,
+    extended_flags: ?u16, // For index v3+ extended flags
     path: []const u8,
 
     pub fn init(path: []const u8, stat: std.fs.File.Stat, sha1: [20]u8) IndexEntry {
@@ -30,6 +31,7 @@ pub const IndexEntry = struct {
             .size = @intCast(stat.size),
             .sha1 = sha1,
             .flags = @intCast(path.len),
+            .extended_flags = null, // No extended flags for new entries
             .path = path,
         };
     }
@@ -47,10 +49,18 @@ pub const IndexEntry = struct {
         try writer.writeInt(u32, self.size, .big);
         try writer.writeAll(&self.sha1);
         try writer.writeInt(u16, self.flags, .big);
+        
+        // Write extended flags if present
+        if (self.extended_flags) |ext_flags| {
+            try writer.writeInt(u16, ext_flags, .big);
+        }
+        
         try writer.writeAll(self.path);
         
         // Pad to multiple of 8 bytes
-        const total_len = 62 + self.path.len;
+        const base_len = 62;
+        const ext_len = if (self.extended_flags != null) @as(usize, 2) else @as(usize, 0);
+        const total_len = base_len + ext_len + self.path.len;
         const pad_len = (8 - (total_len % 8)) % 8;
         var i: usize = 0;
         while (i < pad_len) : (i += 1) {
@@ -74,13 +84,19 @@ pub const IndexEntry = struct {
         _ = try reader.readAll(&sha1);
         
         const flags = try reader.readInt(u16, .big);
+        
+        // Check for extended flags (bit 14 set in flags)
+        const extended_flags = if (flags & 0x4000 != 0) try reader.readInt(u16, .big) else null;
+        
         const path_len = flags & 0xFFF;
         
         const path_bytes = try allocator.alloc(u8, path_len);
         _ = try reader.readAll(path_bytes);
         
         // Skip padding
-        const total_len = 62 + path_len;
+        const base_len = 62;
+        const ext_len = if (extended_flags != null) @as(usize, 2) else @as(usize, 0);
+        const total_len = base_len + ext_len + path_len;
         const pad_len = (8 - (total_len % 8)) % 8;
         try reader.skipBytes(pad_len, .{});
 
@@ -97,6 +113,7 @@ pub const IndexEntry = struct {
             .size = size,
             .sha1 = sha1,
             .flags = flags,
+            .extended_flags = extended_flags,
             .path = path_bytes,
         };
     }
@@ -190,10 +207,7 @@ pub const Index = struct {
         const flags = try reader.readInt(u16, .big);
         
         // Handle extended flags for v3 and v4
-        if (version >= 3 and (flags & 0x4000) != 0) {
-            const extended_flags = try reader.readInt(u16, .big);
-            _ = extended_flags; // TODO: Store extended flags in a separate field
-        }
+        const extended_flags = if (version >= 3 and (flags & 0x4000) != 0) try reader.readInt(u16, .big) else null;
         
         // Extract path length
         const path_len = flags & 0xFFF;
@@ -225,7 +239,8 @@ pub const Index = struct {
             .gid = gid,
             .size = size,
             .sha1 = sha1,
-            .flags = flags, // TODO: Handle extended flags properly
+            .flags = flags,
+            .extended_flags = extended_flags,
             .path = path_bytes,
         };
     }
@@ -346,7 +361,9 @@ pub const Index = struct {
             if (std.mem.eql(u8, entry.path, path)) {
                 // Update existing entry
                 entry.deinit(self.allocator);
-                self.entries.items[i] = IndexEntry.init(try self.allocator.dupe(u8, path), fake_stat, hash_bytes);
+                var new_entry = IndexEntry.init(try self.allocator.dupe(u8, path), fake_stat, hash_bytes);
+                new_entry.extended_flags = entry.extended_flags; // Preserve extended flags
+                self.entries.items[i] = new_entry;
                 return;
             }
         }
