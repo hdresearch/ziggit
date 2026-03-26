@@ -1502,6 +1502,15 @@ pub fn build(b: *std.Build) void {
     sequential_ops_tests.root_module.addImport("ziggit", ziggit_module);
     test_step.dependOn(&b.addRunArtifact(sequential_ops_tests).step);
 
+    // Core workflow smoke tests
+    const core_workflow_smoke_tests = b.addTest(.{
+        .root_source_file = b.path("test/core_workflow_smoke_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    core_workflow_smoke_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(core_workflow_smoke_tests).step);
+
     // ========== BENCHMARKS ==========
     
     // CLI benchmark (ziggit vs git performance)
