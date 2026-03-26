@@ -23,7 +23,7 @@ const GitError = error{
 const NATIVE_COMMANDS = [_][]const u8{ 
     "init", "status", "add", "commit", "log", "diff", "branch", 
     "checkout", "merge", "fetch", "pull", "push", "clone", "config", 
-    "rev-parse", "describe", "tag", "show", "cat-file", "rev-list", "remote", "--version", "-v", "--version-info", 
+    "rev-parse", "describe", "tag", "show", "cat-file", "rev-list", "remote", "reset", "rm", "--version", "-v", "--version-info", 
     "--help", "-h", "help" 
 };
 
@@ -234,6 +234,10 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmdRevList(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "remote")) {
         try cmdRemote(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "reset")) {
+        try cmdReset(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "rm")) {
+        try cmdRm(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
         if (version_mod.getVersionString(allocator)) |version_msg| {
             defer allocator.free(version_msg);
@@ -4636,5 +4640,219 @@ fn listRemotes(git_path: []const u8, verbose: bool, platform_impl: *const platfo
                 try platform_impl.writeStdout(output);
             }
         }
+    }
+}
+
+fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    if (@import("builtin").target.os.tag == .freestanding) {
+        try platform_impl.writeStderr("reset: not supported in freestanding mode\n");
+        return;
+    }
+
+    // Find git directory
+    const cwd = try platform_impl.fs.getCwd(allocator);
+    defer allocator.free(cwd);
+    
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+        return;
+    };
+    defer allocator.free(git_path);
+
+    // Parse arguments
+    var reset_mode: enum { soft, mixed, hard } = .mixed; // default is mixed
+    var target_ref: ?[]const u8 = null;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--soft")) {
+            reset_mode = .soft;
+        } else if (std.mem.eql(u8, arg, "--mixed")) {
+            reset_mode = .mixed;
+        } else if (std.mem.eql(u8, arg, "--hard")) {
+            reset_mode = .hard;
+        } else if (target_ref == null and !std.mem.startsWith(u8, arg, "-")) {
+            target_ref = arg;
+        } else {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: unknown option '{s}'\n", .{arg});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+            return;
+        }
+    }
+
+    // If no target ref specified, default to HEAD
+    if (target_ref == null) {
+        target_ref = "HEAD";
+    }
+
+    // Resolve the target commit
+    const target_hash = resolveCommittish(git_path, target_ref.?, platform_impl, allocator) catch {
+        const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\n", .{target_ref.?});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        std.process.exit(128);
+        return;
+    };
+    defer allocator.free(target_hash);
+
+    // Update HEAD to point to the target commit
+    try updateHead(git_path, target_hash, platform_impl, allocator);
+
+    // Handle different reset modes  
+    switch (reset_mode) {
+        .soft => {
+            // Only update HEAD, leave index and working tree unchanged
+        },
+        .mixed => {
+            // Update HEAD and index, leave working tree unchanged
+            // For now, just print a message - full implementation would rebuild index
+            try platform_impl.writeStderr("info: mixed mode implemented partially (HEAD updated, index clearing not yet implemented)\n");
+        },
+        .hard => {
+            // Update HEAD, index, and working tree
+            try platform_impl.writeStderr("warning: --hard mode implemented partially (HEAD updated only, index and working tree unchanged)\n");
+        },
+    }
+}
+
+fn cmdRm(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    if (@import("builtin").target.os.tag == .freestanding) {
+        try platform_impl.writeStderr("rm: not supported in freestanding mode\n");
+        return;
+    }
+
+    // Find git directory
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+        return;
+    };
+    defer allocator.free(git_path);
+
+    // Parse arguments
+    var force = false;
+    var cached = false;
+    var recursive = false;
+    var files = std.ArrayList([]const u8).init(allocator);
+    defer files.deinit();
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
+            force = true;
+        } else if (std.mem.eql(u8, arg, "--cached")) {
+            cached = true;
+        } else if (std.mem.eql(u8, arg, "-r") or std.mem.eql(u8, arg, "--recursive")) {
+            recursive = true;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: unknown option '{s}'\n", .{arg});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+            return;
+        } else {
+            try files.append(arg);
+        }
+    }
+
+    if (files.items.len == 0) {
+        try platform_impl.writeStderr("fatal: no files specified\n");
+        std.process.exit(128);
+        return;
+    }
+
+    // Load the index
+    var index = index_mod.Index.load(git_path, platform_impl, allocator) catch |err| switch (err) {
+        error.IndexNotFound => {
+            try platform_impl.writeStderr("fatal: index file not found\n");
+            std.process.exit(128);
+            return;
+        },
+        else => return err,
+    };
+    defer index.deinit();
+
+    // Remove files from index and optionally from working tree
+    for (files.items) |file_path| {
+        // Find the file in the index
+        var found = false;
+        for (index.entries.items, 0..) |entry, i| {
+            if (std.mem.eql(u8, entry.path, file_path)) {
+                found = true;
+                
+                // Remove from index
+                _ = index.entries.orderedRemove(i);
+                
+                // Remove from working tree unless --cached is specified
+                if (!cached) {
+                    const full_path = try std.fmt.allocPrint(allocator, "{s}/../{s}", .{git_path, file_path});
+                    defer allocator.free(full_path);
+                    
+                    platform_impl.fs.deleteFile(full_path) catch |err| switch (err) {
+                        error.FileNotFound => {
+                            if (!force) {
+                                const msg = try std.fmt.allocPrint(allocator, "fatal: file '{s}' not found in working tree\n", .{file_path});
+                                defer allocator.free(msg);
+                                try platform_impl.writeStderr(msg);
+                                std.process.exit(128);
+                            }
+                        },
+                        else => {
+                            if (!force) {
+                                const msg = try std.fmt.allocPrint(allocator, "fatal: could not remove '{s}': {}\n", .{file_path, err});
+                                defer allocator.free(msg);
+                                try platform_impl.writeStderr(msg);
+                                std.process.exit(128);
+                            }
+                        },
+                    };
+                }
+                break;
+            }
+        }
+        
+        if (!found) {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: pathspec '{s}' did not match any files\n", .{file_path});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+            return;
+        }
+    }
+
+    // Write the updated index back
+    try index.save(git_path, platform_impl);
+}
+
+fn updateHead(git_path: []const u8, target_hash: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+    // Read current HEAD to see if it's a symbolic ref or direct hash
+    const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+    defer allocator.free(head_path);
+
+    const head_content = platform_impl.fs.readFile(allocator, head_path) catch {
+        try platform_impl.writeStderr("fatal: could not read HEAD\n");
+        std.process.exit(128);
+        return;
+    };
+    defer allocator.free(head_content);
+
+    if (std.mem.startsWith(u8, head_content, "ref: ")) {
+        // HEAD is a symbolic reference, update the referenced branch
+        const ref_path = std.mem.trim(u8, head_content[5..], " \t\n\r");
+        const full_ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, ref_path });
+        defer allocator.free(full_ref_path);
+
+        // Write the new hash to the branch ref
+        const hash_with_newline = try std.fmt.allocPrint(allocator, "{s}\n", .{target_hash});
+        defer allocator.free(hash_with_newline);
+
+        try platform_impl.fs.writeFile(full_ref_path, hash_with_newline);
+    } else {
+        // HEAD is a direct hash, update it directly
+        const hash_with_newline = try std.fmt.allocPrint(allocator, "{s}\n", .{target_hash});
+        defer allocator.free(hash_with_newline);
+
+        try platform_impl.fs.writeFile(head_path, hash_with_newline);
     }
 }
