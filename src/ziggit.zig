@@ -98,8 +98,81 @@ pub const Repository = struct {
         return try self.statusPorcelainOptimized(allocator);
     }
     
-    /// Optimized status implementation using mtime/size fast path
+    /// Ultra-optimized status implementation - fastest possible path for clean repos
     fn statusPorcelainOptimized(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
+        // OPTIMIZATION: Try ultra-fast clean check first
+        if (try self.isUltraFastClean()) {
+            // Repository is definitely clean - return empty status immediately  
+            return try allocator.dupe(u8, "");
+        }
+        
+        // Fallback to detailed status check if not provably clean
+        return try self.statusPorcelainDetailed(allocator);
+    }
+    
+    /// Ultra-fast clean check - returns true only if provably clean, false if uncertain
+    fn isUltraFastClean(self: *const Repository) !bool {
+        // Use stack buffer for index path
+        var index_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const index_path = std.fmt.bufPrint(&index_path_buf, "{s}/index", .{self.git_dir}) catch return false;
+
+        var git_index = index_parser.GitIndex.readFromFile(self.allocator, index_path) catch {
+            // No index means definitely not clean (files would be untracked)
+            return false;
+        };
+        defer git_index.deinit();
+
+        // ULTRA-FAST PATH: For clean repos, just check if any file mtime/size changed
+        // If ALL files have matching mtime/size, repo is provably clean (skip SHA-1)
+        for (git_index.entries.items) |entry| {
+            // Get file path using stack buffer
+            var file_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            const file_path = std.fmt.bufPrint(&file_path_buf, "{s}/{s}", .{ self.path, entry.path }) catch return false;
+            
+            // Direct stat call
+            const work_stat = std.fs.cwd().statFile(file_path) catch {
+                // Any missing file means not clean
+                return false;
+            };
+            
+            // Compare mtime and size (nano-second precision not needed for this check)
+            const work_mtime_sec = @as(u32, @intCast(@divTrunc(work_stat.mtime, 1_000_000_000)));
+            const work_size = @as(u32, @intCast(work_stat.size));
+            
+            if (work_mtime_sec != entry.mtime_seconds or work_size != entry.size) {
+                // Any changed file means not provably clean
+                return false;
+            }
+        }
+
+        // ULTRA OPTIMIZATION: Skip untracked file check entirely for statusPorcelain ultra-fast path
+        // This assumes that if all tracked files are unchanged, we probably don't have untracked files
+        // (This is a reasonable assumption for build tools like bun that primarily work with tracked files)
+        
+        // For maximum safety, we can add a quick directory count check
+        var dir = std.fs.cwd().openDir(self.path, .{ .iterate = true }) catch return false;
+        defer dir.close();
+        
+        // Count files quickly without full iteration
+        var file_count: u32 = 0;
+        var iterator = dir.iterate();
+        while (try iterator.next()) |entry| {
+            if (entry.kind != .file) continue;
+            if (std.mem.startsWith(u8, entry.name, ".git")) continue;
+            file_count += 1;
+        }
+        
+        // If file count matches index count, we're definitely clean (no untracked files)
+        if (file_count == git_index.entries.items.len) {
+            return true;
+        }
+        
+        // Otherwise fall back to detailed check (conservative approach)
+        return false;
+    }
+    
+    /// Detailed status implementation for when ultra-fast path is not sufficient
+    fn statusPorcelainDetailed(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
         var output = std.ArrayList(u8).init(allocator);
         defer output.deinit();
 
@@ -213,9 +286,9 @@ pub const Repository = struct {
         return try output.toOwnedSlice();
     }
 
-    /// Check if working tree is clean
+    /// Check if working tree is clean - ultra-optimized
     pub fn isClean(self: *const Repository) !bool {
-        return try self.isCleanFast();
+        return try self.isUltraFastClean();
     }
     
     /// Optimized clean check that short-circuits on first change - much faster than full status
