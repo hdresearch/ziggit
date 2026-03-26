@@ -368,12 +368,14 @@ fn httpPostWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.h
     req.connection.?.flush() catch return error.HttpError;
 
     var redirect_buf: [8192]u8 = undefined;
-    const response = req.receiveHead(&redirect_buf) catch return error.HttpError;
+    var response = req.receiveHead(&redirect_buf) catch return error.HttpError;
 
     if (response.head.status != .ok) return error.HttpError;
 
     // Read response - use readAllAlloc for efficiency (handles chunked transfer internally)
-    return req.reader().readAllAlloc(allocator, max_response_size) catch return error.HttpError;
+    var transfer_buf3: [65536]u8 = undefined;
+    const body_rdr = response.reader(&transfer_buf3);
+    return body_rdr.readAlloc(allocator, max_response_size) catch return error.HttpError;
 }
 
 // ============================================================================
