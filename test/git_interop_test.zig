@@ -403,6 +403,28 @@ fn compareOutputs(git_output: []const u8, ziggit_output: []const u8, test_name: 
         std.debug.print("  {s} output mismatch:\n", .{test_name});
         std.debug.print("  git: '{s}'\n", .{git_trimmed});
         std.debug.print("  ziggit: '{s}'\n", .{ziggit_trimmed});
+        
+        // Show line-by-line comparison for better debugging
+        var git_lines = std.mem.split(u8, git_trimmed, "\n");
+        var ziggit_lines = std.mem.split(u8, ziggit_trimmed, "\n");
+        
+        var line_num: u32 = 1;
+        while (true) {
+            const git_line = git_lines.next();
+            const ziggit_line = ziggit_lines.next();
+            
+            if (git_line == null and ziggit_line == null) break;
+            
+            if (git_line == null) {
+                std.debug.print("  Line {}: git=<missing>, ziggit='{s}'\n", .{line_num, ziggit_line.?});
+            } else if (ziggit_line == null) {
+                std.debug.print("  Line {}: git='{s}', ziggit=<missing>\n", .{line_num, git_line.?});
+            } else if (!std.mem.eql(u8, git_line.?, ziggit_line.?)) {
+                std.debug.print("  Line {}: git='{s}', ziggit='{s}'\n", .{line_num, git_line.?, ziggit_line.?});
+            }
+            
+            line_num += 1;
+        }
     } else {
         std.debug.print("  {s} outputs match perfectly\n", .{test_name});
     }
