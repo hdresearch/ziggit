@@ -454,6 +454,15 @@ pub fn build(b: *std.Build) void {
     commit_checkout_cycle_tests.root_module.addImport("ziggit", ziggit_module);
     test_step.dependOn(&b.addRunArtifact(commit_checkout_cycle_tests).step);
 
+    // Object content verification tests
+    const object_content_verify_tests = b.addTest(.{
+        .root_source_file = b.path("test/object_content_verification_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    object_content_verify_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(object_content_verify_tests).step);
+
     // Index write verification tests
     const index_write_verify_tests = b.addTest(.{
         .root_source_file = b.path("test/index_write_verify_test.zig"),
