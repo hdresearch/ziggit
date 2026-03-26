@@ -1078,7 +1078,7 @@ fn getStatusPorcelainReal(repo: *Repository, buffer: []u8) !void {
                     // File was deleted from working tree
                     const status_line = std.fmt.bufPrint(
                         buffer[output_pos..],
-                        "{}D {s}\n",
+                        "{c}D {s}\n",
                         .{if (staged_status) |s| s else ' ', entry.path}
                     ) catch break;
                     output_pos += status_line.len;
