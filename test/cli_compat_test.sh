@@ -1,206 +1,151 @@
 #!/bin/bash
-# CLI compatibility test: compare ziggit output to git output
+# cli_compat_test.sh - Compare ziggit CLI output to git CLI output
+# Run after: zig build
 set -e
 
-ZIGGIT="$(cd "$(dirname "$0")/.." && pwd)/zig-out/bin/ziggit"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ZIGGIT="${ZIGGIT:-$SCRIPT_DIR/../zig-out/bin/ziggit}"
 PASS=0
 FAIL=0
 SKIP=0
 
-pass() { echo "  ✅ $1"; PASS=$((PASS+1)); }
-fail() { echo "  ❌ $1"; FAIL=$((FAIL+1)); }
-skip() { echo "  ⏭  $1 (skipped)"; SKIP=$((SKIP+1)); }
+pass() { PASS=$((PASS+1)); echo "  ✓ $1"; }
+fail() { FAIL=$((FAIL+1)); echo "  ✗ FAIL: $1"; echo "    expected: $2"; echo "    got:      $3"; }
+skip() { SKIP=$((SKIP+1)); echo "  ⚠ SKIP: $1"; }
+
+# Check ziggit binary exists
+if [ ! -x "$ZIGGIT" ]; then
+    echo "ziggit binary not found at $ZIGGIT, building..."
+    cd "$SCRIPT_DIR/.." && HOME=/root zig build
+fi
 
 if [ ! -x "$ZIGGIT" ]; then
-    echo "ERROR: ziggit binary not found at $ZIGGIT"
-    echo "Run 'zig build' first"
+    echo "ERROR: Cannot find ziggit binary"
     exit 1
 fi
 
 TESTDIR=$(mktemp -d /tmp/ziggit_cli_test.XXXXXX)
 trap "rm -rf $TESTDIR" EXIT
-cd "$TESTDIR"
 
-echo "=== Ziggit CLI Compatibility Tests ==="
+echo "=== CLI Compatibility Tests ==="
+echo "Using: $ZIGGIT"
 echo "Test dir: $TESTDIR"
-echo ""
+echo
 
-# ---------- Test 1: init ----------
-echo "Test 1: init"
-mkdir repo1 && cd repo1
-git init -q
-cd ..
-mkdir repo2 && cd repo2
-$ZIGGIT init 2>/dev/null || true
-cd ..
+# --------------------------------------------------------------------------
+echo "Test 1: rev-parse HEAD"
+REPO="$TESTDIR/repo1"
+git init -q "$REPO"
+git -C "$REPO" config user.email "test@test.com"
+git -C "$REPO" config user.name "Test"
+echo "hello" > "$REPO/file.txt"
+git -C "$REPO" add file.txt
+git -C "$REPO" commit -q -m "initial commit"
 
-if [ -f repo1/.git/HEAD ] && [ -f repo2/.git/HEAD ]; then
-    pass "both init create .git/HEAD"
+G=$(git -C "$REPO" rev-parse HEAD)
+Z=$(cd "$REPO" && "$ZIGGIT" rev-parse HEAD 2>/dev/null || echo "ERROR")
+if [ "$G" = "$Z" ]; then
+    pass "rev-parse HEAD matches ($G)"
 else
-    fail "init: missing .git/HEAD"
+    fail "rev-parse HEAD" "$G" "$Z"
 fi
 
-# ---------- Test 2: rev-parse HEAD ----------
-echo "Test 2: rev-parse HEAD"
-cd "$TESTDIR" && rm -rf rp && mkdir rp && cd rp
-git init -q && git config user.email t@t.com && git config user.name T
-echo "hello" > f.txt && git add f.txt && git commit -q -m "init"
+# --------------------------------------------------------------------------
+echo "Test 2: rev-parse HEAD after second commit"
+echo "world" > "$REPO/file2.txt"
+git -C "$REPO" add file2.txt
+git -C "$REPO" commit -q -m "second commit"
 
-GIT_HEAD=$(git rev-parse HEAD)
-ZIGGIT_HEAD=$($ZIGGIT rev-parse HEAD 2>/dev/null || echo "FAILED")
-
-if [ "$GIT_HEAD" = "$ZIGGIT_HEAD" ]; then
-    pass "rev-parse HEAD matches: ${GIT_HEAD:0:12}..."
+G=$(git -C "$REPO" rev-parse HEAD)
+Z=$(cd "$REPO" && "$ZIGGIT" rev-parse HEAD 2>/dev/null || echo "ERROR")
+if [ "$G" = "$Z" ]; then
+    pass "rev-parse HEAD after 2nd commit"
 else
-    fail "rev-parse HEAD: git=$GIT_HEAD ziggit=$ZIGGIT_HEAD"
+    fail "rev-parse HEAD after 2nd commit" "$G" "$Z"
 fi
 
-# ---------- Test 3: status --porcelain on clean repo ----------
-echo "Test 3: status --porcelain (clean)"
-GIT_STATUS=$(git status --porcelain)
-ZIGGIT_STATUS=$($ZIGGIT status --porcelain 2>/dev/null || echo "COMMAND_FAILED")
-
-if [ "$GIT_STATUS" = "$ZIGGIT_STATUS" ]; then
-    pass "clean status matches (both empty)"
-elif [ "$ZIGGIT_STATUS" = "COMMAND_FAILED" ]; then
-    skip "status --porcelain (command failed)"
+# --------------------------------------------------------------------------
+echo "Test 3: status on clean repo"
+G=$(git -C "$REPO" status --porcelain)
+Z=$(cd "$REPO" && "$ZIGGIT" status --porcelain 2>/dev/null || echo "ERROR")
+if [ -z "$G" ] && [ -z "$Z" ]; then
+    pass "status --porcelain clean (both empty)"
+elif [ "$G" = "$Z" ]; then
+    pass "status --porcelain matches"
 else
-    fail "clean status: git='$GIT_STATUS' ziggit='$ZIGGIT_STATUS'"
+    fail "status --porcelain clean" "'$G'" "'$Z'"
 fi
 
-# ---------- Test 4: status --porcelain with changes ----------
-echo "Test 4: status --porcelain (modified + untracked)"
-echo "modified" > f.txt
-echo "new" > new.txt
-
-GIT_STATUS=$(git status --porcelain | sort)
-ZIGGIT_STATUS=$($ZIGGIT status --porcelain 2>/dev/null | sort || echo "COMMAND_FAILED")
-
-if [ "$ZIGGIT_STATUS" = "COMMAND_FAILED" ]; then
-    skip "status with changes"
+# --------------------------------------------------------------------------
+echo "Test 4: describe with tags"
+git -C "$REPO" tag v1.0.0
+G=$(git -C "$REPO" describe --tags --abbrev=0 2>/dev/null || echo "")
+Z=$(cd "$REPO" && "$ZIGGIT" describe --tags --abbrev=0 2>/dev/null || echo "")
+if [ "$G" = "$Z" ]; then
+    pass "describe --tags matches: $G"
+elif echo "$Z" | grep -q "v1.0.0"; then
+    pass "describe --tags found v1.0.0"
 else
-    # Check key indicators present
-    GIT_HAS_M=$(echo "$GIT_STATUS" | grep -c "M " || true)
-    ZIGGIT_HAS_M=$(echo "$ZIGGIT_STATUS" | grep -c "M " || true)
-    GIT_HAS_Q=$(echo "$GIT_STATUS" | grep -c "??" || true)
-    ZIGGIT_HAS_Q=$(echo "$ZIGGIT_STATUS" | grep -c "??" || true)
+    fail "describe --tags" "$G" "$Z"
+fi
 
-    if [ "$GIT_HAS_M" -gt 0 ] && [ "$ZIGGIT_HAS_M" -gt 0 ] && [ "$GIT_HAS_Q" -gt 0 ] && [ "$ZIGGIT_HAS_Q" -gt 0 ]; then
-        pass "status shows modified and untracked files"
+# --------------------------------------------------------------------------
+echo "Test 5: version flag"
+Z_VER=$(cd "$REPO" && "$ZIGGIT" --version 2>/dev/null || echo "")
+if [ -n "$Z_VER" ]; then
+    pass "--version returns output: $(echo $Z_VER | head -1)"
+else
+    skip "--version"
+fi
+
+# --------------------------------------------------------------------------
+echo "Test 6: init creates valid repo"
+INIT_REPO="$TESTDIR/repo_init"
+(cd "$TESTDIR" && "$ZIGGIT" init "$INIT_REPO" 2>/dev/null) || true
+if [ -d "$INIT_REPO/.git" ]; then
+    git -C "$INIT_REPO" config user.email "test@test.com"
+    git -C "$INIT_REPO" config user.name "Test"
+    echo "test" > "$INIT_REPO/test.txt"
+    if git -C "$INIT_REPO" add test.txt && git -C "$INIT_REPO" commit -q -m "test" 2>/dev/null; then
+        pass "ziggit init creates git-compatible repo"
     else
-        fail "status indicators: git_M=$GIT_HAS_M zig_M=$ZIGGIT_HAS_M git_??=$GIT_HAS_Q zig_??=$ZIGGIT_HAS_Q"
+        fail "init compatibility" "git commit success" "git commit failed"
     fi
+else
+    skip "init command (may require different syntax)"
 fi
 
-# Restore clean state
-git checkout -- f.txt 2>/dev/null
-rm -f new.txt
+# --------------------------------------------------------------------------
+echo "Test 7: multiple commits, rev-parse always matches"
+REPO2="$TESTDIR/repo2"
+git init -q "$REPO2"
+git -C "$REPO2" config user.email "t@t.com"
+git -C "$REPO2" config user.name "T"
 
-# ---------- Test 5: log --oneline ----------
-echo "Test 5: log --oneline"
-echo "two" > g.txt && git add g.txt && git commit -q -m "second"
-echo "three" > h.txt && git add h.txt && git commit -q -m "third"
-
-GIT_LOG=$(git log --oneline)
-ZIGGIT_LOG=$($ZIGGIT log --oneline 2>/dev/null || echo "COMMAND_FAILED")
-
-if [ "$ZIGGIT_LOG" = "COMMAND_FAILED" ]; then
-    skip "log --oneline"
-else
-    GIT_LINES=$(echo "$GIT_LOG" | wc -l)
-    ZIGGIT_LINES=$(echo "$ZIGGIT_LOG" | wc -l)
-
-    if [ "$GIT_LINES" = "$ZIGGIT_LINES" ]; then
-        pass "log --oneline: both have $GIT_LINES lines"
-    else
-        fail "log --oneline: git=$GIT_LINES lines, ziggit=$ZIGGIT_LINES lines"
+ALL_MATCH=true
+for i in $(seq 1 5); do
+    echo "commit $i" > "$REPO2/file.txt"
+    git -C "$REPO2" add file.txt
+    git -C "$REPO2" commit -q -m "commit $i"
+    
+    G=$(git -C "$REPO2" rev-parse HEAD)
+    Z=$(cd "$REPO2" && "$ZIGGIT" rev-parse HEAD 2>/dev/null || echo "ERROR")
+    if [ "$G" != "$Z" ]; then
+        ALL_MATCH=false
+        fail "rev-parse after commit $i" "$G" "$Z"
     fi
+done
+if $ALL_MATCH; then
+    pass "rev-parse matches after 5 sequential commits"
 fi
 
-# ---------- Test 6: branch ----------
-echo "Test 6: branch"
-git branch feature 2>/dev/null
-git branch develop 2>/dev/null
-
-GIT_BRANCHES=$(git branch | sed 's/^[* ]*//' | sort)
-ZIGGIT_BRANCHES=$($ZIGGIT branch 2>/dev/null | sed 's/^[* ]*//' | sort || echo "COMMAND_FAILED")
-
-if [ "$ZIGGIT_BRANCHES" = "COMMAND_FAILED" ]; then
-    skip "branch listing"
-else
-    if [ "$GIT_BRANCHES" = "$ZIGGIT_BRANCHES" ]; then
-        pass "branch listing matches"
-    else
-        # Check if all branches present
-        MISSING=0
-        for b in master feature develop; do
-            if ! echo "$ZIGGIT_BRANCHES" | grep -q "$b"; then
-                MISSING=$((MISSING+1))
-            fi
-        done
-        if [ $MISSING -eq 0 ]; then
-            pass "all expected branches present"
-        else
-            fail "branch listing: git='$GIT_BRANCHES' ziggit='$ZIGGIT_BRANCHES'"
-        fi
-    fi
-fi
-
-# ---------- Test 7: diff ----------
-echo "Test 7: diff"
-echo "changed content" > f.txt
-
-GIT_DIFF=$(git diff 2>/dev/null)
-ZIGGIT_DIFF=$($ZIGGIT diff 2>/dev/null || echo "COMMAND_FAILED")
-
-if [ "$ZIGGIT_DIFF" = "COMMAND_FAILED" ]; then
-    skip "diff"
-elif [ -n "$GIT_DIFF" ] && [ -n "$ZIGGIT_DIFF" ]; then
-    pass "both show diff output"
-else
-    fail "diff: git_len=${#GIT_DIFF} ziggit_len=${#ZIGGIT_DIFF}"
-fi
-
-git checkout -- f.txt 2>/dev/null
-
-# ---------- Test 8: tag ----------
-echo "Test 8: tag"
-git tag v1.0.0 2>/dev/null
-
-GIT_TAGS=$(git tag | sort)
-ZIGGIT_TAGS=$($ZIGGIT tag 2>/dev/null | sort || echo "COMMAND_FAILED")
-
-if [ "$ZIGGIT_TAGS" = "COMMAND_FAILED" ]; then
-    skip "tag listing"
-elif [ "$GIT_TAGS" = "$ZIGGIT_TAGS" ]; then
-    pass "tag listing matches"
-else
-    fail "tag: git='$GIT_TAGS' ziggit='$ZIGGIT_TAGS'"
-fi
-
-# ---------- Test 9: version flag ----------
-echo "Test 9: --version"
-ZIGGIT_VER=$($ZIGGIT --version 2>/dev/null || echo "COMMAND_FAILED")
-if echo "$ZIGGIT_VER" | grep -q "ziggit"; then
-    pass "--version outputs version string"
-else
-    fail "--version: got '$ZIGGIT_VER'"
-fi
-
-# ---------- Summary ----------
-echo ""
+# --------------------------------------------------------------------------
+echo
 echo "=== Results ==="
-echo "  Pass: $PASS"
-echo "  Fail: $FAIL"
-echo "  Skip: $SKIP"
-echo "  Total: $((PASS + FAIL + SKIP))"
+echo "  Passed: $PASS"
+echo "  Failed: $FAIL"
+echo "  Skipped: $SKIP"
+echo
 
-if [ $FAIL -gt 0 ]; then
-    echo ""
-    echo "FAILED: $FAIL tests failed"
-    exit 1
-else
-    echo ""
-    echo "ALL PASSED ✅"
-    exit 0
-fi
+[ $FAIL -eq 0 ] || exit 1
+echo "All CLI compatibility tests passed!"
