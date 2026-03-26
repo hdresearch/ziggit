@@ -1024,19 +1024,27 @@ fn getStatusPorcelainReal(repo: *Repository, buffer: []u8) !void {
         var tracked_files = std.HashMap([]const u8, void, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(global_allocator);
         defer tracked_files.deinit();
         
-        // Simple approach: Check each index entry for working tree modifications
-        // For now, we'll focus on working tree vs index comparison (not staged changes)
+        // Get HEAD commit hash for staged changes comparison
+        var head_buf: [41]u8 = undefined;
+        _ = getHeadCommitHashReal(repo, &head_buf) catch {
+            // If we can't get HEAD hash, set empty hash
+            head_buf[0..40].* = [_]u8{'0'} ** 40;
+            head_buf[40] = 0;
+        };
+        const head_hash_str = std.mem.trim(u8, &head_buf, "\x00");
+        
+        // Check each index entry for both staged and unstaged changes
         for (git_index.entries.items) |entry| {
             try tracked_files.put(entry.path, {});
             
-            // Check if file is modified in working tree against index
+            // Check if file is modified in working tree against index (unstaged changes)
             const index_info = IndexFileInfo{
                 .hash = entry.sha1,
                 .size = entry.size,
                 .mtime_sec = entry.mtime_seconds,
             };
             
-            const is_modified = isFileModifiedAgainstIndex(repo.path, entry.path, index_info) catch |err| switch (err) {
+            const is_unstaged_modified = isFileModifiedAgainstIndex(repo.path, entry.path, index_info) catch |err| switch (err) {
                 error.FileNotFound => {
                     // File was deleted from working tree
                     const status_line = std.fmt.bufPrint(
@@ -1051,8 +1059,39 @@ fn getStatusPorcelainReal(repo: *Repository, buffer: []u8) !void {
                 else => return err,
             };
             
-            // Output status for modified files (working tree different from index)
-            if (is_modified) {
+            // Check if file is staged (index different from HEAD)
+            const is_staged = blk: {
+                if (head_hash_str.len == 0 or std.mem.eql(u8, head_hash_str, "0000000000000000000000000000000000000000")) {
+                    // No HEAD commit, all index entries are staged additions
+                    break :blk true;
+                }
+                
+                // Check if index entry differs from HEAD by comparing hashes
+                const is_staged_change = isFileStagedAgainstHead(repo.path, entry.path, entry.sha1) catch false;
+                break :blk is_staged_change;
+            };
+            
+            // Output status based on staged and unstaged changes
+            if (is_staged and is_unstaged_modified) {
+                // Both staged and unstaged changes
+                const status_line = std.fmt.bufPrint(
+                    buffer[output_pos..],
+                    "MM {s}\n",
+                    .{entry.path}
+                ) catch break;
+                output_pos += status_line.len;
+                if (output_pos >= buffer.len - 1) break;
+            } else if (is_staged) {
+                // Only staged changes
+                const status_line = std.fmt.bufPrint(
+                    buffer[output_pos..],
+                    "M  {s}\n",
+                    .{entry.path}
+                ) catch break;
+                output_pos += status_line.len;
+                if (output_pos >= buffer.len - 1) break;
+            } else if (is_unstaged_modified) {
+                // Only unstaged changes
                 const status_line = std.fmt.bufPrint(
                     buffer[output_pos..],
                     " M {s}\n",
@@ -1570,6 +1609,60 @@ fn isFileModifiedReal(git_dir: []const u8, work_tree: []const u8, file_path: []c
     
     // Use the existing isFileModifiedAgainstIndex function
     return isFileModifiedAgainstIndex(work_tree, file_path, index_info);
+}
+
+// Check if a file in the index is staged (different from HEAD)
+fn isFileStagedAgainstHead(repo_path: []const u8, file_path: []const u8, index_hash: [20]u8) !bool {
+    // Convert binary hash to hex string for comparison
+    var index_hash_hex: [40]u8 = undefined;
+    _ = try std.fmt.bufPrint(&index_hash_hex, "{s}", .{std.fmt.fmtSliceHexLower(&index_hash)});
+    
+    // Use git CLI to get the hash of the file in HEAD
+    // This is a pragmatic approach similar to other functions in this codebase
+    var cwd_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    const old_cwd = std.process.getCwd(&cwd_buffer) catch return false;
+    
+    std.process.changeCurDir(repo_path) catch return false;
+    defer std.process.changeCurDir(old_cwd) catch {};
+    
+    // Try to get the file hash from HEAD tree
+    const result = std.process.Child.run(.{
+        .allocator = global_allocator,
+        .argv = &[_][]const u8{ "git", "show", "--format=", "--name-only", "HEAD" },
+    }) catch return false;
+    defer global_allocator.free(result.stdout);
+    defer global_allocator.free(result.stderr);
+    
+    if (result.term.Exited != 0) {
+        // No HEAD commit or error, treat as staged (new file)
+        return true;
+    }
+    
+    // Check if file exists in HEAD
+    if (std.mem.indexOf(u8, result.stdout, file_path) == null) {
+        // File doesn't exist in HEAD, so it's a staged addition
+        return true;
+    }
+    
+    // Get file hash from HEAD
+    const head_ref = try std.fmt.allocPrint(global_allocator, "HEAD:{s}", .{file_path});
+    defer global_allocator.free(head_ref);
+    
+    const head_hash_result = std.process.Child.run(.{
+        .allocator = global_allocator,
+        .argv = &[_][]const u8{ "git", "rev-parse", head_ref },
+    }) catch return false;
+    defer global_allocator.free(head_hash_result.stdout);
+    defer global_allocator.free(head_hash_result.stderr);
+    
+    if (head_hash_result.term.Exited != 0) {
+        // File doesn't exist in HEAD or error, treat as staged
+        return true;
+    }
+    
+    // Compare hashes
+    const head_hash_trimmed = std.mem.trim(u8, head_hash_result.stdout, " \n\r\t");
+    return !std.mem.eql(u8, &index_hash_hex, head_hash_trimmed);
 }
 
 // Check if a path exists in the repository
