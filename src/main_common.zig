@@ -3360,13 +3360,51 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 
     if (needs_fallback) {
         if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
-            // Forward to real git
+            // Translate newer config subcommands to old-style for git 2.43 compat
+            // git config set <key> <value> [--global etc.] -> git config [--global] <key> <value>
+            // git config get <key> [--global etc.] -> git config [--global] <key>
+            // git config unset <key> [--global etc.] -> git config --unset [--global] <key>
+            // git config list [--global etc.] -> git config --list [--global]
             var argv = std.ArrayList([]const u8).init(allocator);
             defer argv.deinit();
             try argv.append(findRealGit());
             try argv.append("config");
-            for (config_args.items) |arg| {
-                try argv.append(arg);
+
+            if (config_args.items.len >= 1) {
+                const sub = config_args.items[0];
+                if (std.mem.eql(u8, sub, "set") and config_args.items.len >= 3) {
+                    // git config set [flags...] <key> <value>
+                    // Flags come between 'set' and key. Extract flags, key, value
+                    var flags = std.ArrayList([]const u8).init(allocator);
+                    defer flags.deinit();
+                    var positional = std.ArrayList([]const u8).init(allocator);
+                    defer positional.deinit();
+                    for (config_args.items[1..]) |a| {
+                        if (a.len > 0 and a[0] == '-') {
+                            try flags.append(a);
+                        } else {
+                            try positional.append(a);
+                        }
+                    }
+                    for (flags.items) |f| try argv.append(f);
+                    for (positional.items) |p| try argv.append(p);
+                } else if (std.mem.eql(u8, sub, "get") and config_args.items.len >= 2) {
+                    // git config get [flags...] <key>
+                    for (config_args.items[1..]) |a| try argv.append(a);
+                } else if (std.mem.eql(u8, sub, "unset") and config_args.items.len >= 2) {
+                    try argv.append("--unset");
+                    for (config_args.items[1..]) |a| try argv.append(a);
+                } else if (std.mem.eql(u8, sub, "list")) {
+                    try argv.append("--list");
+                    for (config_args.items[1..]) |a| try argv.append(a);
+                } else {
+                    // Pass through as-is
+                    for (config_args.items) |a| try argv.append(a);
+                }
+            } else {
+                for (config_args.items) |arg| {
+                    try argv.append(arg);
+                }
             }
             var child = std.process.Child.init(argv.items, allocator);
             child.stdin_behavior = .Inherit;
