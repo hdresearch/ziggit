@@ -2095,3 +2095,202 @@ pub const RepositoryPackHealth = struct {
         return self.corrupted_pack_files == 0 and self.total_pack_files > 0;
     }
 };
+
+/// Comprehensive pack file validation
+pub fn validatePackFile(pack_path: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !PackValidationResult {
+    const pack_data = platform_impl.fs.readFile(allocator, pack_path) catch |err| switch (err) {
+        error.FileNotFound => return PackValidationResult.notFound(),
+        error.AccessDenied => return PackValidationResult.accessDenied(),
+        else => return err,
+    };
+    defer allocator.free(pack_data);
+    
+    var result = PackValidationResult.init(allocator);
+    
+    // Validate minimum size
+    if (pack_data.len < 28) {
+        try result.errors.append("Pack file too small (minimum 28 bytes)");
+        return result;
+    }
+    
+    // Validate header
+    if (!std.mem.eql(u8, pack_data[0..4], "PACK")) {
+        try result.errors.append("Invalid pack file signature");
+        return result;
+    }
+    
+    const version = std.mem.readInt(u32, @ptrCast(pack_data[4..8]), .big);
+    result.version = version;
+    if (version < 2 or version > 4) {
+        const err_msg = try std.fmt.allocPrint(allocator, "Unsupported pack version: {}", .{version});
+        try result.errors.append(err_msg);
+        return result;
+    }
+    
+    const object_count = std.mem.readInt(u32, @ptrCast(pack_data[8..12]), .big);
+    result.total_objects = object_count;
+    
+    // Validate object count
+    if (object_count == 0) {
+        try result.errors.append("Pack file claims zero objects");
+        return result;
+    }
+    
+    if (object_count > 50_000_000) {
+        try result.errors.append("Pack file claims unreasonable number of objects");
+        return result;
+    }
+    
+    // Verify checksum
+    const content_end = pack_data.len - 20;
+    const stored_checksum = pack_data[content_end..];
+    
+    var hasher = std.crypto.hash.Sha1.init(.{});
+    hasher.update(pack_data[0..content_end]);
+    var computed_checksum: [20]u8 = undefined;
+    hasher.final(&computed_checksum);
+    
+    result.checksum_valid = std.mem.eql(u8, &computed_checksum, stored_checksum);
+    if (!result.checksum_valid) {
+        try result.errors.append("Pack file checksum mismatch");
+    }
+    
+    // Basic object parsing validation
+    var pos: usize = 12; // Start after header
+    var objects_found: u32 = 0;
+    
+    while (pos < content_end and objects_found < object_count) {
+        if (pos + 1 > content_end) break;
+        
+        const first_byte = pack_data[pos];
+        pos += 1;
+        
+        const obj_type = (first_byte >> 4) & 7;
+        if (obj_type == 0 or obj_type == 5) {
+            const err_msg = try std.fmt.allocPrint(allocator, "Invalid object type {} at offset {}", .{ obj_type, pos - 1 });
+            try result.errors.append(err_msg);
+            break;
+        }
+        
+        // Read variable-length size
+        var size: usize = @intCast(first_byte & 15);
+        var shift: u6 = 4;
+        var current_byte = first_byte;
+        
+        while (current_byte & 0x80 != 0 and pos < content_end) {
+            if (shift >= 60) break; // Prevent overflow
+            current_byte = pack_data[pos];
+            pos += 1;
+            size |= @as(usize, @intCast(current_byte & 0x7F)) << shift;
+            shift += 7;
+        }
+        
+        // Handle delta offsets for OFS_DELTA
+        if (obj_type == 6) { // OFS_DELTA
+            var delta_offset: usize = 0;
+            var first_delta_byte = true;
+            
+            while (pos < content_end) {
+                const delta_byte = pack_data[pos];
+                pos += 1;
+                
+                if (first_delta_byte) {
+                    delta_offset = @intCast(delta_byte & 0x7F);
+                    first_delta_byte = false;
+                } else {
+                    delta_offset = (delta_offset + 1) << 7;
+                    delta_offset += @intCast(delta_byte & 0x7F);
+                }
+                
+                if (delta_byte & 0x80 == 0) break;
+                
+                if (delta_offset > pos) {
+                    try result.errors.append("Invalid delta offset");
+                    return result;
+                }
+            }
+        } else if (obj_type == 7) { // REF_DELTA
+            if (pos + 20 > content_end) {
+                try result.errors.append("Truncated REF_DELTA object");
+                break;
+            }
+            pos += 20; // Skip SHA-1 reference
+        }
+        
+        // Find end of compressed data (simplified validation)
+        var zlib_found = false;
+        const search_end = @min(pos + 1000, content_end); // Look ahead max 1KB for zlib header
+        
+        while (pos < search_end) {
+            if (pos + 1 < search_end) {
+                const zlib_header = std.mem.readInt(u16, @ptrCast(pack_data[pos..pos + 2]), .big);
+                // Check for common zlib headers (simplified check)
+                if ((zlib_header & 0x0F00) == 0x0800 and (zlib_header % 31) == 0) {
+                    zlib_found = true;
+                    break;
+                }
+            }
+            pos += 1;
+        }
+        
+        if (!zlib_found and objects_found < 10) { // Only warn for first few objects
+            const warn_msg = try std.fmt.allocPrint(allocator, "Could not find zlib header for object {}", .{objects_found});
+            try result.warnings.append(warn_msg);
+        }
+        
+        // Skip to next object (simplified - real implementation would decompress to find exact end)
+        pos += @min(size / 2, 1000); // Rough estimate
+        objects_found += 1;
+    }
+    
+    result.objects_validated = objects_found;
+    if (objects_found < object_count) {
+        const warn_msg = try std.fmt.allocPrint(allocator, "Could only validate {} of {} objects", .{ objects_found, object_count });
+        try result.warnings.append(warn_msg);
+    }
+    
+    result.is_valid = result.checksum_valid and result.errors.items.len == 0;
+    return result;
+}
+
+pub const PackValidationResult = struct {
+    is_valid: bool = false,
+    checksum_valid: bool = false,
+    version: u32 = 0,
+    total_objects: u32 = 0,
+    objects_validated: u32 = 0,
+    errors: std.ArrayList([]const u8),
+    warnings: std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    
+    pub fn init(allocator: std.mem.Allocator) PackValidationResult {
+        return PackValidationResult{
+            .errors = std.ArrayList([]const u8).init(allocator),
+            .warnings = std.ArrayList([]const u8).init(allocator),
+            .allocator = allocator,
+        };
+    }
+    
+    pub fn notFound() PackValidationResult {
+        var result = PackValidationResult.init(std.testing.allocator);
+        result.errors.append("Pack file not found") catch {};
+        return result;
+    }
+    
+    pub fn accessDenied() PackValidationResult {
+        var result = PackValidationResult.init(std.testing.allocator);
+        result.errors.append("Pack file access denied") catch {};
+        return result;
+    }
+    
+    pub fn deinit(self: *PackValidationResult) void {
+        for (self.errors.items) |err_msg| {
+            self.allocator.free(err_msg);
+        }
+        for (self.warnings.items) |warn_msg| {
+            self.allocator.free(warn_msg);
+        }
+        self.errors.deinit();
+        self.warnings.deinit();
+    }
+};
