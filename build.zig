@@ -547,6 +547,20 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(ref_delta_chain_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_core_verification_tests).step);
 
+    // HTTPS clone tests (pack_writer, idx_writer, roundtrip)
+    const https_clone_tests = b.addTest(.{
+        .root_source_file = b.path("test/https_clone_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    https_clone_tests.root_module.addAnonymousImport("pack_writer", .{
+        .root_source_file = b.path("src/git/pack_writer.zig"),
+    });
+    https_clone_tests.root_module.addAnonymousImport("idx_writer", .{
+        .root_source_file = b.path("src/git/idx_writer.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(https_clone_tests).step);
+
     // Pack format e2e tests (full pipeline: build pack → idx → readback → git cross-validation)
     const pack_format_e2e_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_format_e2e_test.zig"),
