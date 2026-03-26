@@ -1298,6 +1298,16 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(crossval_stress_tests).step);
     e2e_step.dependOn(&b.addRunArtifact(crossval_stress_tests).step);
 
+    // Packed refs interop tests (pack-refs, repack, merge commits, interleaved ops)
+    const packed_refs_interop_tests = b.addTest(.{
+        .root_source_file = b.path("test/packed_refs_interop_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    packed_refs_interop_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(packed_refs_interop_tests).step);
+    e2e_step.dependOn(&b.addRunArtifact(packed_refs_interop_tests).step);
+
     // E2E edge cases validation tests (boundary files, close/reopen cycles, deterministic hashes, octopus merge)
     const e2e_edge_cases_validation_tests = b.addTest(.{
         .root_source_file = b.path("test/e2e_edge_cases_validation_test.zig"),
