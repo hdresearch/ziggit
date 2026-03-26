@@ -259,13 +259,20 @@ fn runCommand(allocator: std.mem.Allocator, args: []const []const u8, cwd: fs.Di
     
     try child.spawn();
     
-    const stdout = try child.stdout.?.reader().readAllAlloc(allocator, 8192);
-    const stderr = try child.stderr.?.reader().readAllAlloc(allocator, 8192);
+    const stdout = child.stdout.?.reader().readAllAlloc(allocator, 8192) catch |err| {
+        _ = child.wait() catch {};
+        return err;
+    };
+    
+    const stderr = child.stderr.?.reader().readAllAlloc(allocator, 8192) catch |err| {
+        allocator.free(stdout);
+        _ = child.wait() catch {};
+        return err;
+    };
     defer allocator.free(stderr);
     
     const term = try child.wait();
     if (term != .Exited or term.Exited != 0) {
-        std.debug.print("Command failed: {s}\n", .{stderr});
         allocator.free(stdout);
         return error.CommandFailed;
     }
