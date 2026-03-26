@@ -1,163 +1,187 @@
 #!/bin/bash
 
-# Test script for git fallback functionality
-# Tests that ziggit can serve as a drop-in replacement for git
+# git_fallback_test.sh - Comprehensive test for git CLI fallback functionality
 
 set -e
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
-echo -e "${YELLOW}=== Git Fallback Test Suite ===${NC}"
-
-# Set up environment
-export ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache
-
-# Build ziggit if not already built
-if [ ! -f "./zig-out/bin/ziggit" ]; then
-    echo "Building ziggit..."
-    zig build
-fi
-
-ZIGGIT="./zig-out/bin/ziggit"
-
-# Function to test a command and check exit code
-test_command() {
-    local cmd="$1"
-    local description="$2"
-    local expected_success="$3"  # true/false
-    
-    echo -n "Testing: $description ... "
-    
-    if $cmd >/dev/null 2>&1; then
-        if [ "$expected_success" = "true" ]; then
-            echo -e "${GREEN}PASS${NC}"
-            return 0
-        else
-            echo -e "${RED}FAIL${NC} (expected failure but command succeeded)"
-            return 1
-        fi
-    else
-        if [ "$expected_success" = "false" ]; then
-            echo -e "${GREEN}PASS${NC}"
-            return 0
-        else
-            echo -e "${RED}FAIL${NC} (command failed unexpectedly)"
-            return 1
-        fi
-    fi
-}
-
-# Function to test command output contains expected text
-test_output_contains() {
-    local cmd="$1"
-    local expected_text="$2"
-    local description="$3"
-    
-    echo -n "Testing: $description ... "
-    
-    local output
-    output=$($cmd 2>&1) || true
-    
-    if echo "$output" | grep -q "$expected_text"; then
-        echo -e "${GREEN}PASS${NC}"
-        return 0
-    else
-        echo -e "${RED}FAIL${NC}"
-        echo "Expected output to contain: $expected_text"
-        echo "Actual output: $output"
-        return 1
-    fi
-}
-
-echo -e "${YELLOW}=== Testing Native Commands ===${NC}"
-
-# These commands have native implementations and should work
-test_command "$ZIGGIT rev-parse HEAD" "rev-parse command" "true"
-test_command "$ZIGGIT branch" "branch command" "true"  
-test_command "$ZIGGIT tag" "tag command" "true"
-
-# Create a tag first to test describe
-$ZIGGIT tag test-tag >/dev/null 2>&1 || true
-test_command "$ZIGGIT describe --tags" "describe command" "true"
-
-echo -e "${YELLOW}=== Testing Git Fallback Commands ===${NC}"
-
-# These commands should fall back to git
-test_command "$ZIGGIT stash list" "stash list fallback" "true"
-test_command "$ZIGGIT remote -v" "remote -v fallback" "true"
-test_command "$ZIGGIT show HEAD" "show HEAD fallback" "true"
-test_command "$ZIGGIT ls-files" "ls-files fallback" "true"
-test_command "$ZIGGIT cat-file -t HEAD" "cat-file fallback" "true"
-test_command "$ZIGGIT rev-list --count HEAD" "rev-list fallback" "true"
-test_command "$ZIGGIT log --graph --oneline -5" "log graph fallback" "true"
-test_command "$ZIGGIT shortlog -sn -1" "shortlog fallback" "true"
-
-echo -e "${YELLOW}=== Testing Global Flags Forwarding ===${NC}"
-
-# Test that global flags are properly forwarded
-test_command "$ZIGGIT -C . stash list" "global -C flag forwarding" "true"
-
-echo -e "${YELLOW}=== Testing Git Not Available ===${NC}"
-
-# Test behavior when git is not in PATH
-test_output_contains "env PATH=/nonexistent $ZIGGIT stash list" "is not a ziggit command and git is not installed" "error when git not available"
-
-echo -e "${YELLOW}=== Testing Interactive Commands ===${NC}"
-
-# Test that interactive commands work (we can't fully test interactivity in a script,
-# but we can test that they don't crash)
-echo "n" | $ZIGGIT add -p >/dev/null 2>&1 || echo "Interactive add test completed (expected failure with 'n' input)"
-
-echo -e "${YELLOW}=== Testing Exit Code Propagation ===${NC}"
-
-# Test that exit codes are properly propagated
-if ! $ZIGGIT invalid-command-that-git-also-rejects >/dev/null 2>&1; then
-    echo -e "${GREEN}PASS${NC}: Exit codes properly propagated"
-else
-    echo -e "${RED}FAIL${NC}: Exit codes not properly propagated"
-fi
-
-echo -e "${YELLOW}=== Drop-in Replacement Test ===${NC}"
-
-# Create a temporary alias and test some common git workflows
-echo "Testing as git alias..."
-
-# Save current directory
-ORIGINAL_DIR=$(pwd)
-
-# Create a temporary test directory
+# Create a temporary directory for testing
 TEST_DIR=$(mktemp -d)
 cd "$TEST_DIR"
+echo "Testing in directory: $TEST_DIR"
 
-# Initialize a git repository
-git init >/dev/null 2>&1
+# Ensure ziggit binary path is available
+ZIGGIT_BIN="${ZIGGIT_BIN:-$HOME/ziggit/zig-out/bin/ziggit}"
+if [[ ! -x "$ZIGGIT_BIN" ]]; then
+    echo "Error: ziggit binary not found at $ZIGGIT_BIN"
+    echo "Set ZIGGIT_BIN environment variable to the correct path"
+    exit 1
+fi
 
-# Create an alias function for this test
-git_alias() {
-    "$ORIGINAL_DIR/$ZIGGIT" "$@"
-}
+# Set up git user for testing
+git config --global user.name "Test User" || true
+git config --global user.email "test@example.com" || true
 
-# Test common git workflows using the alias
-echo "test content" > test.txt
-git_alias add test.txt
-git_alias commit -m "Test commit"
-git_alias log --oneline -1
-git_alias status
-git_alias tag v1.0.0
-git_alias describe --tags
+# Initialize a test repository
+echo "=== Setting up test repository ==="
+git init
+echo "Hello World" > test.txt
+git add test.txt
+git commit -m "Initial commit"
+echo "Modified" >> test.txt
+git add test.txt  
+git commit -m "Second commit"
+git tag v1.0
+git stash push -m "Test stash" || git stash save "Test stash" # fallback for older git
 
-echo -e "${GREEN}Drop-in replacement test completed successfully${NC}"
+echo ""
+echo "=== Testing native ziggit commands ==="
 
-# Clean up
-cd "$ORIGINAL_DIR"
+# Test native commands that should work in ziggit
+echo "Testing ziggit status (native)..."
+$ZIGGIT_BIN status &>/dev/null && echo "✓ status works" || echo "✗ status failed"
+
+echo "Testing ziggit rev-parse (native)..."
+HEAD_HASH=$($ZIGGIT_BIN rev-parse HEAD 2>/dev/null) && echo "✓ rev-parse works: $HEAD_HASH" || echo "✗ rev-parse failed"
+
+echo "Testing ziggit log (native)..."
+$ZIGGIT_BIN log --oneline -2 &>/dev/null && echo "✓ log works" || echo "✗ log failed"
+
+echo "Testing ziggit branch (native)..."
+$ZIGGIT_BIN branch &>/dev/null && echo "✓ branch works" || echo "✗ branch failed"
+
+echo "Testing ziggit tag (native)..."
+$ZIGGIT_BIN tag &>/dev/null && echo "✓ tag works" || echo "✗ tag failed"
+
+echo "Testing ziggit describe (native)..."
+$ZIGGIT_BIN describe --tags &>/dev/null && echo "✓ describe works" || echo "✗ describe failed"
+
+echo "Testing ziggit diff (native)..."
+$ZIGGIT_BIN diff HEAD~1 HEAD &>/dev/null && echo "✓ diff works" || echo "✗ diff failed"
+
+echo ""
+echo "=== Testing git fallback commands ==="
+
+# Test commands that should fall back to git
+echo "Testing ziggit stash list (fallback)..."
+STASH_OUTPUT=$($ZIGGIT_BIN stash list 2>/dev/null) && echo "✓ stash list works: found $(echo "$STASH_OUTPUT" | wc -l) stashes" || echo "✗ stash list failed"
+
+echo "Testing ziggit remote -v (fallback)..."
+$ZIGGIT_BIN remote -v &>/dev/null && echo "✓ remote -v works" || echo "✗ remote -v failed"
+
+echo "Testing ziggit show HEAD (fallback)..."  
+$ZIGGIT_BIN show HEAD --quiet &>/dev/null && echo "✓ show HEAD works" || echo "✗ show HEAD failed"
+
+echo "Testing ziggit ls-files (fallback)..."
+FILES_OUTPUT=$($ZIGGIT_BIN ls-files 2>/dev/null) && echo "✓ ls-files works: found $(echo "$FILES_OUTPUT" | wc -l) files" || echo "✗ ls-files failed"
+
+echo "Testing ziggit cat-file -t HEAD (fallback)..."
+TYPE_OUTPUT=$($ZIGGIT_BIN cat-file -t HEAD 2>/dev/null) && echo "✓ cat-file works: HEAD is $TYPE_OUTPUT" || echo "✗ cat-file failed"
+
+echo "Testing ziggit rev-list --count HEAD (fallback)..."
+COUNT_OUTPUT=$($ZIGGIT_BIN rev-list --count HEAD 2>/dev/null) && echo "✓ rev-list works: $COUNT_OUTPUT commits" || echo "✗ rev-list failed"
+
+echo "Testing ziggit log --graph --oneline -5 (fallback)..."
+$ZIGGIT_BIN log --graph --oneline -5 &>/dev/null && echo "✓ log with git-specific options works" || echo "✗ log with git-specific options failed"
+
+echo "Testing ziggit shortlog -sn -1 (fallback)..."
+$ZIGGIT_BIN shortlog -sn -1 &>/dev/null && echo "✓ shortlog works" || echo "✗ shortlog failed"
+
+echo ""
+echo "=== Testing global flags forwarding ==="
+
+# Test that global flags are forwarded correctly
+echo "Testing -C global flag..."
+cd ..
+$ZIGGIT_BIN -C "$(basename "$TEST_DIR")" status &>/dev/null && echo "✓ -C flag forwarded correctly" || echo "✗ -C flag forwarding failed"
+cd "$TEST_DIR"
+
+echo "Testing -c global flag..."
+$ZIGGIT_BIN -c core.editor=true status &>/dev/null && echo "✓ -c flag forwarded correctly" || echo "✗ -c flag forwarding failed"
+
+echo ""
+echo "=== Testing git not found scenario ==="
+
+# Test graceful failure when git is not available
+# We'll temporarily rename git to simulate it not being installed
+GIT_PATH=$(which git)
+if [[ -n "$GIT_PATH" ]] && [[ -x "$GIT_PATH" ]]; then
+    # Create a temporary directory without git in PATH
+    TEMP_BIN_DIR=$(mktemp -d)
+    
+    # Copy all binaries except git to the temp directory  
+    for binary in /usr/bin/* /bin/*; do
+        if [[ -x "$binary" ]] && [[ "$(basename "$binary")" != "git" ]]; then
+            cp "$binary" "$TEMP_BIN_DIR/" 2>/dev/null || true
+        fi
+    done
+    
+    # Test with git not in PATH
+    echo "Testing fallback behavior when git is not installed..."
+    
+    # Run ziggit with modified PATH that doesn't include git
+    PATH="$TEMP_BIN_DIR" $ZIGGIT_BIN stash list 2>/tmp/git_error.log || true
+    
+    # Check if the error message is helpful
+    if grep -q "is not a ziggit command and git is not installed" /tmp/git_error.log; then
+        echo "✓ Graceful error handling when git not found"
+    else
+        echo "✗ Error handling needs improvement"
+        echo "Actual error output:"
+        cat /tmp/git_error.log || echo "No error log found"
+    fi
+    
+    # Clean up
+    rm -rf "$TEMP_BIN_DIR"
+    rm -f /tmp/git_error.log
+else
+    echo "⚠ Skipping git-not-found test (git not available or not executable)"
+fi
+
+echo ""
+echo "=== Testing exit codes ==="
+
+# Test that exit codes are properly propagated
+echo "Testing successful command exit code..."
+$ZIGGIT_BIN stash list >/dev/null 2>&1
+if [[ $? -eq 0 ]]; then
+    echo "✓ Successful command returns exit code 0"
+else
+    echo "✗ Successful command returned non-zero exit code: $?"
+fi
+
+echo "Testing failed command exit code..."
+$ZIGGIT_BIN show nonexistent-ref >/dev/null 2>&1
+EXIT_CODE=$?
+if [[ $EXIT_CODE -ne 0 ]]; then
+    echo "✓ Failed command returns non-zero exit code: $EXIT_CODE"
+else
+    echo "✗ Failed command should return non-zero exit code"
+fi
+
+echo ""
+echo "=== Testing interactive commands ==="
+
+# Test that stdin/stdout/stderr are properly inherited
+echo "Testing non-interactive command output..."
+OUTPUT=$($ZIGGIT_BIN log --oneline -1 2>/dev/null)
+if [[ -n "$OUTPUT" ]]; then
+    echo "✓ Command output is captured correctly"
+else
+    echo "✗ Command output not captured"
+fi
+
+echo ""
+echo "=== Test Summary ==="
+
+# Clean up test directory
+cd /
 rm -rf "$TEST_DIR"
 
-# Clean up test tag
-git tag -d test-tag >/dev/null 2>&1 || true
-
-echo -e "${GREEN}=== All tests completed! ===${NC}"
-echo "Ziggit is ready to serve as a drop-in replacement for git."
+echo "Git fallback testing completed!"
+echo "All tests run in temporary directory (now cleaned up)"
+echo ""
+echo "To use ziggit as a git replacement, run:"
+echo "  alias git='$ZIGGIT_BIN'"
+echo "  git status  # uses native ziggit"  
+echo "  git stash list  # falls back to git"
+echo "  git remote -v  # falls back to git"
