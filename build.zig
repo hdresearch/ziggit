@@ -136,6 +136,15 @@ pub fn build(b: *std.Build) void {
     });
     lib_benchmark.root_module.addImport("ziggit", ziggit_module);
     
+    // API vs CLI spawn benchmark - critical for proving performance advantage
+    const api_vs_cli_benchmark = b.addExecutable(.{
+        .name = "api_vs_cli_benchmark",
+        .root_source_file = b.path("benchmarks/api_vs_cli_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    api_vs_cli_benchmark.root_module.addImport("ziggit", ziggit_module);
+    
     // Bun/npm workflow scenario benchmark
     const bun_scenario_benchmark = b.addExecutable(.{
         .name = "bun_scenario_benchmark",
@@ -148,6 +157,7 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run all benchmarks");
     bench_step.dependOn(&b.addRunArtifact(cli_benchmark).step);
     bench_step.dependOn(&b.addRunArtifact(lib_benchmark).step);
+    bench_step.dependOn(&b.addRunArtifact(api_vs_cli_benchmark).step);
     bench_step.dependOn(&b.addRunArtifact(bun_scenario_benchmark).step);
 
     // ========== WASM TARGET ==========
