@@ -150,7 +150,7 @@ fn verifyNativeZigPath() void {
 }
 
 // Benchmark rev-parse HEAD: Direct Zig API vs CLI spawning
-fn benchmarkRevParseHead(allocator: std.mem.Allocator, repo: *const ziggit.Repository, repo_path: []const u8, iterations: usize) !BenchResult {
+fn benchmarkRevParseHead(allocator: std.mem.Allocator, repo: *ziggit.Repository, repo_path: []const u8, iterations: usize) !BenchResult {
     var result = BenchResult{ .operation = "rev-parse HEAD" };
     
     // Benchmark pure Zig API
@@ -213,7 +213,7 @@ fn benchmarkRevParseHead(allocator: std.mem.Allocator, repo: *const ziggit.Repos
 }
 
 // Benchmark status --porcelain: Direct Zig API vs CLI spawning  
-fn benchmarkStatusPorcelain(allocator: std.mem.Allocator, repo: *const ziggit.Repository, repo_path: []const u8, iterations: usize) !BenchResult {
+fn benchmarkStatusPorcelain(allocator: std.mem.Allocator, repo: *ziggit.Repository, repo_path: []const u8, iterations: usize) !BenchResult {
     var result = BenchResult{ .operation = "status --porcelain" };
     
     // Benchmark pure Zig API
@@ -275,7 +275,7 @@ fn benchmarkStatusPorcelain(allocator: std.mem.Allocator, repo: *const ziggit.Re
 }
 
 // Benchmark describe --tags: Direct Zig API vs CLI spawning
-fn benchmarkDescribeTags(allocator: std.mem.Allocator, repo: *const ziggit.Repository, repo_path: []const u8, iterations: usize) !BenchResult {
+fn benchmarkDescribeTags(allocator: std.mem.Allocator, repo: *ziggit.Repository, repo_path: []const u8, iterations: usize) !BenchResult {
     var result = BenchResult{ .operation = "describe --tags" };
     
     // Benchmark pure Zig API
@@ -337,7 +337,7 @@ fn benchmarkDescribeTags(allocator: std.mem.Allocator, repo: *const ziggit.Repos
 }
 
 // Benchmark is_clean: Direct Zig API vs CLI spawning
-fn benchmarkIsClean(allocator: std.mem.Allocator, repo: *const ziggit.Repository, repo_path: []const u8, iterations: usize) !BenchResult {
+fn benchmarkIsClean(allocator: std.mem.Allocator, repo: *ziggit.Repository, repo_path: []const u8, iterations: usize) !BenchResult {
     var result = BenchResult{ .operation = "is_clean" };
     
     // Benchmark pure Zig API
