@@ -272,8 +272,7 @@ pub fn fetchNewPack(allocator: std.mem.Allocator, url: []const u8, local_refs: [
         .refs = discovery.refs,
         .capabilities = discovery.capabilities,
         .pack_data = pack_data,
-        .shallow_commits = try allocator.alloc(smart_http.Oid, 0),
-            .allocator = allocator,
+        .allocator = allocator,
     };
 }
 
