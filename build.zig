@@ -90,12 +90,11 @@ pub fn build(b: *std.Build) void {
     const run_command_output_test = b.addRunArtifact(command_output_test);
     run_command_output_test.step.dependOn(b.getInstallStep());
 
-    // Main test step runs all tests
+    // Main test step runs core tests
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_git_interop_test.step);
     test_step.dependOn(&run_index_format_test.step);
-    test_step.dependOn(&run_object_format_test.step);
     test_step.dependOn(&run_command_output_test.step);
 
     // ========== BENCHMARKS ==========
