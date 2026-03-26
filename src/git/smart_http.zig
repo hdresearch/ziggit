@@ -579,9 +579,16 @@ pub const LocalRef = struct {
 };
 
 pub fn fetchNewPack(allocator: std.mem.Allocator, url: []const u8, local_refs: []const LocalRef) !?FetchResult {
-    var discovery = try discoverRefs(allocator, url);
+    // Use a single HTTP client for both requests (TLS connection reuse)
+    var client = std.http.Client{ .allocator = allocator };
+    defer client.deinit();
+
+    var discovery = try discoverRefsWithClient(allocator, &client, url);
+    // On error paths below, we must free discovery since we won't transfer ownership
+    errdefer discovery.deinit();
 
     // Build set of local hashes for each ref name
+    // Use owned keys to avoid use-after-free if local_refs backing memory changes
     var local_map = std.StringHashMap(Oid).init(allocator);
     defer local_map.deinit();
     for (local_refs) |lr| {
@@ -593,8 +600,6 @@ pub fn fetchNewPack(allocator: std.mem.Allocator, url: []const u8, local_refs: [
     defer wants.deinit();
     var haves = std.ArrayList(Oid).init(allocator);
     defer haves.deinit();
-
-
 
     // Collect unique want and have hashes
     var want_set = std.StringHashMap(void).init(allocator);
@@ -637,13 +642,17 @@ pub fn fetchNewPack(allocator: std.mem.Allocator, url: []const u8, local_refs: [
     }
 
     if (wants.items.len == 0) {
-        // Already up to date
+        // Already up to date — discovery ownership not transferred, errdefer will clean up
+        // But we need to explicitly deinit since this is not an error return
         discovery.deinit();
         return null;
     }
 
-    const pack_data = try fetchPack(allocator, url, wants.items, haves.items);
+    // Reuse the same HTTP client for the pack fetch (saves TLS handshake)
+    const pack_data = try fetchPackWithClient(allocator, &client, url, wants.items, haves.items);
 
+    // Transfer ownership of discovery refs/capabilities to the result
+    // (errdefer on discovery is disarmed by successful return)
     return .{
         .refs = discovery.refs,
         .capabilities = discovery.capabilities,
