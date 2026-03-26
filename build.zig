@@ -141,9 +141,6 @@ pub fn build(b: *std.Build) void {
     lib_comprehensive_status_test.root_module.addImport("ziggit", ziggit_mod);
 
     const run_lib_comprehensive_status_test = b.addRunArtifact(lib_comprehensive_status_test);
-    
-    const lib_comprehensive_status_test_step = b.step("lib-comprehensive-status-test", "Run comprehensive library status test");
-    lib_comprehensive_status_test_step.dependOn(&run_lib_comprehensive_status_test.step);
 
     // Bun Zig API test (uses our pure Zig API)
     const bun_zig_api_test = b.addTest(.{
@@ -153,8 +150,6 @@ pub fn build(b: *std.Build) void {
     });
     bun_zig_api_test.root_module.addImport("ziggit", ziggit_module);
     const run_bun_zig_api_test = b.addRunArtifact(bun_zig_api_test);
-    const bun_zig_api_test_step = b.step("bun-zig-api-test", "Test bun workflow using pure Zig API");
-    bun_zig_api_test_step.dependOn(&run_bun_zig_api_test.step);
 
     // Test step runs all tests
     const test_step = b.step("test", "Run unit tests");
@@ -166,6 +161,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_command_output_test.step);
     test_step.dependOn(&run_broken_pipe_test.step);
     test_step.dependOn(&run_lib_status_test.step);
+    test_step.dependOn(&run_lib_comprehensive_status_test.step);
     test_step.dependOn(&run_bun_zig_api_test.step);
 
     // ========== BENCHMARKS ==========
