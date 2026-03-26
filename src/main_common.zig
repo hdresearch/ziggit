@@ -23,7 +23,7 @@ const GitError = error{
 const NATIVE_COMMANDS = [_][]const u8{ 
     "init", "status", "add", "commit", "log", "diff", "branch", 
     "checkout", "merge", "fetch", "pull", "push", "clone", "config", 
-    "rev-parse", "describe", "tag", "show", "cat-file", "rev-list", "--version", "-v", "--version-info", 
+    "rev-parse", "describe", "tag", "show", "cat-file", "rev-list", "remote", "--version", "-v", "--version-info", 
     "--help", "-h", "help" 
 };
 
@@ -232,6 +232,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmdCatFile(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "rev-list")) {
         try cmdRevList(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "remote")) {
+        try cmdRemote(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
         if (version_mod.getVersionString(allocator)) |version_msg| {
             defer allocator.free(version_msg);
@@ -4542,5 +4544,97 @@ fn listCommits(git_path: []const u8, start_commit: []const u8, max_count: ?u32, 
         const new_hash = try allocator.dupe(u8, parent_hash.?);
         allocator.free(commit_hash);
         commit_hash = new_hash;
+    }
+}
+
+fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    if (@import("builtin").target.os.tag == .freestanding) {
+        try platform_impl.writeStderr("remote: not supported in freestanding mode\n");
+        return;
+    }
+
+    // Find .git directory first
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+
+    var verbose = false;
+    var subcommand: ?[]const u8 = null;
+
+    // Parse arguments
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
+            verbose = true;
+        } else if (subcommand == null) {
+            subcommand = arg;
+        } else {
+            // Additional arguments for add/remove/etc. For now, fall back to git
+            const msg = try std.fmt.allocPrint(allocator, "ziggit: remote subcommand '{s}' not fully implemented yet\n", .{subcommand.?});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(1);
+        }
+    }
+
+    // If no subcommand or just -v, list remotes
+    if (subcommand == null or std.mem.eql(u8, subcommand.?, "-v") or std.mem.eql(u8, subcommand.?, "--verbose")) {
+        if (std.mem.eql(u8, subcommand orelse "", "-v") or std.mem.eql(u8, subcommand orelse "", "--verbose")) {
+            verbose = true;
+        }
+        try listRemotes(git_path, verbose, platform_impl, allocator);
+    } else {
+        // For now, unsupported subcommands
+        const msg = try std.fmt.allocPrint(allocator, "ziggit: remote subcommand '{s}' not implemented yet\n", .{subcommand.?});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        std.process.exit(1);
+    }
+}
+
+fn listRemotes(git_path: []const u8, verbose: bool, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+    defer allocator.free(config_path);
+    
+    const config_content = platform_impl.fs.readFile(allocator, config_path) catch |err| switch (err) {
+        error.FileNotFound => {
+            // No config file means no remotes
+            return;
+        },
+        else => return err,
+    };
+    defer allocator.free(config_content);
+
+    var lines = std.mem.split(u8, config_content, "\n");
+    var current_remote: ?[]u8 = null;
+    defer if (current_remote) |r| allocator.free(r);
+    
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        
+        // Check for remote section header [remote "name"]
+        if (std.mem.startsWith(u8, trimmed, "[remote \"") and std.mem.endsWith(u8, trimmed, "\"]")) {
+            if (current_remote) |r| {
+                allocator.free(r);
+            }
+            const start = "[remote \"".len;
+            const end = trimmed.len - "\"]".len;
+            current_remote = try allocator.dupe(u8, trimmed[start..end]);
+        }
+        
+        // Check for URL in current remote section
+        else if (current_remote != null and std.mem.startsWith(u8, trimmed, "url = ")) {
+            const url = trimmed["url = ".len..];
+            if (verbose) {
+                const output = try std.fmt.allocPrint(allocator, "{s}\t{s} (fetch)\n{s}\t{s} (push)\n", .{current_remote.?, url, current_remote.?, url});
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            } else {
+                const output = try std.fmt.allocPrint(allocator, "{s}\n", .{current_remote.?});
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            }
+        }
     }
 }
