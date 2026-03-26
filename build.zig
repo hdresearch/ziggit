@@ -202,6 +202,19 @@ pub fn build(b: *std.Build) void {
     bench_step.dependOn(&run_cli_benchmark.step);
     bench_step.dependOn(&run_lib_benchmark.step);
     bench_step.dependOn(&run_bun_scenario_benchmark.step);
+    
+    // API vs CLI benchmark (minimal essential benchmark)
+    const api_vs_cli_benchmark = b.addExecutable(.{
+        .name = "api_vs_cli_bench",
+        .root_source_file = b.path("benchmarks/api_vs_cli_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    api_vs_cli_benchmark.root_module.addImport("ziggit", ziggit_module);
+    const run_api_vs_cli_benchmark = b.addRunArtifact(api_vs_cli_benchmark);
+    
+    const perf_step = b.step("perf", "Run performance benchmark");
+    perf_step.dependOn(&run_api_vs_cli_benchmark.step);
 
 
     // ========== WASM TARGET ==========
