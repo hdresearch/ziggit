@@ -372,12 +372,12 @@ test "workflow: fetch rejects network URLs" {
     defer repo.close();
 
     const result = repo.fetch("https://github.com/example/repo.git");
-    try testing.expectError(error.NetworkRemoteNotSupported, result);
+    try testing.expectError(error.HttpFetchFailed, result);
 }
 
 test "workflow: cloneBare rejects network URLs" {
     const result = Repository.cloneBare(testing.allocator, "https://github.com/example/repo.git", "/tmp/ziggit_test_bare");
-    try testing.expectError(error.NetworkRemoteNotSupported, result);
+    try testing.expectError(error.HttpCloneFailed, result);
 }
 
 test "workflow: open nonexistent path returns error" {

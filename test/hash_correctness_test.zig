@@ -560,7 +560,7 @@ test "fetch: network URL rejected" {
     var repo = try ziggit.Repository.init(testing.allocator, path);
     defer repo.close();
 
-    try testing.expectError(error.NetworkRemoteNotSupported, repo.fetch("https://github.com/example/repo"));
+    try testing.expectError(error.HttpFetchFailed, repo.fetch("https://github.com/example/repo"));
     try testing.expectError(error.NetworkRemoteNotSupported, repo.fetch("git://example.com/repo"));
     try testing.expectError(error.NetworkRemoteNotSupported, repo.fetch("ssh://example.com/repo"));
 }

@@ -532,7 +532,7 @@ test "open: nonexistent path returns error" {
 
 test "cloneBare: rejects network URLs" {
     const result = Repository.cloneBare(testing.allocator, "https://example.com/repo.git", "/tmp/ziggit_clone_net");
-    try testing.expectError(error.NetworkRemoteNotSupported, result);
+    try testing.expectError(error.HttpCloneFailed, result);
 }
 
 test "cloneNoCheckout: rejects network URLs" {

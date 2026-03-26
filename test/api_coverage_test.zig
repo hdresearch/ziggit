@@ -606,7 +606,7 @@ test "fetch rejects http URLs" {
     defer repo.close();
 
     const result = repo.fetch("https://github.com/example/repo");
-    try testing.expectError(error.NetworkRemoteNotSupported, result);
+    try testing.expectError(error.HttpFetchFailed, result);
 }
 
 // ============================================================================
@@ -615,7 +615,7 @@ test "fetch rejects http URLs" {
 
 test "cloneBare rejects http URLs" {
     const result = Repository.cloneBare(testing.allocator, "https://github.com/example/repo", "/tmp/ziggit_apicov_clone_reject");
-    try testing.expectError(error.NetworkRemoteNotSupported, result);
+    try testing.expectError(error.HttpCloneFailed, result);
 }
 
 // ============================================================================
