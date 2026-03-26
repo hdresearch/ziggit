@@ -45,7 +45,7 @@
 
 ## Bun Fork Integration Status
 - Branch: `hdresearch/bun:ziggit-integration`
-- Commit: `95a7784` — polish: complete error categorization
+- Commit: `38194e9` — fix: clean up partial directory on cloneNoCheckout failure
 - Dependency pinned to ziggit commit `3c01d7f` (includes idx_writer rewrite)
 - `repository.zig`: ziggit used for clone, fetch, findCommit, checkout
 - Fallback: automatic to git CLI on any ziggit failure
