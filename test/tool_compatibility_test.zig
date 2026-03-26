@@ -417,7 +417,9 @@ fn testExitCodeConsistency(allocator: std.mem.Allocator, test_dir: fs.Dir) !void
         
         // Setup if needed
         if (scenario.setup) |setup_cmd| {
-            _ = runCommand(allocator, setup_cmd, test_path) catch {};
+            if (runCommand(allocator, setup_cmd, test_path)) |result| {
+                allocator.free(result);
+            } else |_| {}
         }
 
         // Test git exit code
