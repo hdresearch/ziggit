@@ -1184,6 +1184,29 @@ pub const PackFileStats = struct {
     is_thin: bool,
     version: u32,
     checksum_valid: bool,
+    
+    /// Print detailed statistics for debugging
+    pub fn print(self: PackFileStats) void {
+        std.debug.print("Pack File Statistics:\n");
+        std.debug.print("  Total objects: {}\n", .{self.total_objects});
+        std.debug.print("  - Blobs: {}\n", .{self.blob_count});
+        std.debug.print("  - Trees: {}\n", .{self.tree_count});
+        std.debug.print("  - Commits: {}\n", .{self.commit_count});
+        std.debug.print("  - Tags: {}\n", .{self.tag_count});
+        std.debug.print("  - Deltas: {}\n", .{self.delta_count});
+        std.debug.print("  File size: {} bytes\n", .{self.file_size});
+        std.debug.print("  Pack version: {}\n", .{self.version});
+        std.debug.print("  Checksum valid: {}\n", .{self.checksum_valid});
+        std.debug.print("  Is thin pack: {}\n", .{self.is_thin});
+    }
+    
+    /// Get compression ratio estimate
+    pub fn getCompressionRatio(self: PackFileStats) f32 {
+        if (self.total_objects == 0) return 0.0;
+        const avg_object_size = @as(f32, @floatFromInt(self.file_size)) / @as(f32, @floatFromInt(self.total_objects));
+        const typical_uncompressed_size = 1000.0; // Rough estimate
+        return typical_uncompressed_size / avg_object_size;
+    }
 };
 
 /// Pack index cache entry to avoid re-reading index files

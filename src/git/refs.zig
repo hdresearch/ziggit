@@ -926,6 +926,13 @@ pub const RefResolver = struct {
         entries: usize,
         is_valid: bool,
         expires_in: i64,
+        
+        pub fn print(stats: @This()) void {
+            std.debug.print("RefResolver Cache Statistics:\n");
+            std.debug.print("  Cached entries: {}\n", .{stats.entries});
+            std.debug.print("  Cache valid: {}\n", .{stats.is_valid});
+            std.debug.print("  Expires in: {}s\n", .{stats.expires_in});
+        }
     } {
         const now = std.time.timestamp();
         return .{
