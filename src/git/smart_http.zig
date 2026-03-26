@@ -224,16 +224,15 @@ fn extractAuth(allocator: std.mem.Allocator, url: []const u8) !AuthInfo {
         }
     }
 
-    // Check GITHUB_TOKEN env var
+    // Check GITHUB_TOKEN or GIT_TOKEN env vars
     const env_token = std.process.getEnvVarOwned(allocator, "GITHUB_TOKEN") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => null,
+        error.EnvironmentVariableNotFound => std.process.getEnvVarOwned(allocator, "GIT_TOKEN") catch |err2| switch (err2) {
+            error.EnvironmentVariableNotFound => null,
+            else => return error.OutOfMemory,
+        },
         else => return error.OutOfMemory,
     };
     if (env_token) |t| {
-        // Caller must be aware this is allocated. We'll treat the token as owned.
-        // However since we return it as a slice pointing to owned memory, the
-        // caller's scope handles it. For simplicity, leak it here - the HTTP
-        // request is short-lived.
         return .{ .token = t, .clean_url = url, .needs_free = false };
     }
 
