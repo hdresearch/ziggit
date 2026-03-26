@@ -209,6 +209,37 @@ test "repo with HEAD+index shows correct status" {
         try testing.expectEqualStrings(git_status, lib_status);
         std.debug.print("✓ Deleted file status matches\n", .{});
     }
+    
+    // Scenario 5: Staged new file (should show "A  ")
+    {
+        std.debug.print("\n--- Test 5: Staged new file ---\n", .{});
+        
+        // First restore deleted file to clean state
+        try writeFile(file2_path, "Initial content 2", allocator);
+        
+        // Create and stage a new file
+        const file4_path = try std.fmt.allocPrint(allocator, "{s}/file4.txt", .{repo_path});
+        defer allocator.free(file4_path);
+        try writeFile(file4_path, "New staged file content", allocator);
+        
+        try git_ops.add_file("file4.txt");
+        
+        var repo = try ziggit.repo_open(allocator, repo_path);
+        
+        const lib_status_raw = try ziggit.repo_status(&repo, allocator);
+        defer allocator.free(lib_status_raw);
+        const lib_status = std.mem.trim(u8, lib_status_raw, " \n\r\t");
+        
+        const git_status_raw = try git_ops.get_status_porcelain();
+        defer allocator.free(git_status_raw);
+        const git_status = std.mem.trim(u8, git_status_raw, " \n\r\t");
+        
+        std.debug.print("Git status: '{s}'\n", .{git_status});
+        std.debug.print("Lib status: '{s}'\n", .{lib_status});
+        
+        try testing.expectEqualStrings(git_status, lib_status);
+        std.debug.print("✓ Staged new file status matches\n", .{});
+    }
 }
 
 pub fn main() !void {
