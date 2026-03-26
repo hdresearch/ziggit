@@ -1027,11 +1027,14 @@ pub const Repository = struct {
         try self.updateHead(&commit_hash);
     }
 
-    /// Fetch from local repository
+    /// Fetch from remote repository (local or HTTPS)
     pub fn fetch(self: *Repository, remote_path: []const u8) !void {
-        if (std.mem.startsWith(u8, remote_path, "http://") or
-            std.mem.startsWith(u8, remote_path, "https://") or
-            std.mem.startsWith(u8, remote_path, "git://") or
+        if (std.mem.startsWith(u8, remote_path, "https://") or
+            std.mem.startsWith(u8, remote_path, "http://")) {
+            return self.fetchHttps(remote_path);
+        }
+
+        if (std.mem.startsWith(u8, remote_path, "git://") or
             std.mem.startsWith(u8, remote_path, "ssh://")) {
             return error.NetworkRemoteNotSupported;
         }
@@ -1043,11 +1046,78 @@ pub const Repository = struct {
         try self.updateRemoteRefs(remote_git_dir, "origin");
     }
 
-    /// Clone local repository (bare)
+    /// Fetch from HTTPS remote using smart HTTP protocol
+    fn fetchHttps(self: *Repository, url: []const u8) !void {
+        const smart_http = @import("git/smart_http.zig");
+        const pack_writer = @import("git/pack_writer.zig");
+        const idx_writer = @import("git/idx_writer.zig");
+
+        // Collect local refs for negotiation
+        var local_refs_list = std.ArrayList(smart_http.LocalRef).init(self.allocator);
+        defer local_refs_list.deinit();
+
+        // Read refs/remotes/origin/* to build have list
+        const remote_refs_dir = try std.fmt.allocPrint(self.allocator, "{s}/refs/remotes/origin", .{self.git_dir});
+        defer self.allocator.free(remote_refs_dir);
+
+        if (std.fs.cwd().openDir(remote_refs_dir, .{ .iterate = true })) |*dir_handle| {
+            var dir = dir_handle.*;
+            defer dir.close();
+            var iter = dir.iterate();
+            while (try iter.next()) |entry| {
+                if (entry.kind != .file) continue;
+                const ref_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ remote_refs_dir, entry.name });
+                defer self.allocator.free(ref_path);
+                const content = std.fs.cwd().readFileAlloc(self.allocator, ref_path, 1024) catch continue;
+                defer self.allocator.free(content);
+                const trimmed = std.mem.trim(u8, content, " \t\n\r");
+                if (trimmed.len == 40) {
+                    const ref_name = try std.fmt.allocPrint(self.allocator, "refs/heads/{s}", .{entry.name});
+                    defer self.allocator.free(ref_name);
+                    try local_refs_list.append(.{
+                        .hash = trimmed[0..40].*,
+                        .name = ref_name,
+                    });
+                }
+            }
+        } else |_| {}
+
+        var result = smart_http.fetchNewPack(self.allocator, url, local_refs_list.items) catch |err| {
+            return switch (err) {
+                error.HttpError => error.NetworkRemoteNotSupported,
+                else => error.NetworkRemoteNotSupported,
+            };
+        };
+
+        if (result) |*fetch_result| {
+            defer fetch_result.deinit();
+
+            if (fetch_result.pack_data.len >= 32) {
+                // Save pack
+                const checksum_hex = try pack_writer.savePack(self.allocator, self.git_dir, fetch_result.pack_data);
+                defer self.allocator.free(checksum_hex);
+
+                // Generate idx
+                const pp = try pack_writer.packPath(self.allocator, self.git_dir, checksum_hex);
+                defer self.allocator.free(pp);
+                try idx_writer.generateIdx(self.allocator, pp);
+            }
+
+            // Update remote refs
+            for (fetch_result.refs) |ref| {
+                try writeRemoteRef(self.allocator, self.git_dir, "origin", ref.name, &ref.hash);
+            }
+        }
+    }
+
+    /// Clone repository (bare) — supports local paths and HTTPS URLs
     pub fn cloneBare(allocator: std.mem.Allocator, source: []const u8, target: []const u8) !Repository {
-        if (std.mem.startsWith(u8, source, "http://") or
-            std.mem.startsWith(u8, source, "https://") or
-            std.mem.startsWith(u8, source, "git://") or
+        if (std.mem.startsWith(u8, source, "https://") or
+            std.mem.startsWith(u8, source, "http://")) {
+            return cloneBareHttps(allocator, source, target);
+        }
+
+        if (std.mem.startsWith(u8, source, "git://") or
             std.mem.startsWith(u8, source, "ssh://")) {
             return error.NetworkRemoteNotSupported;
         }
@@ -1065,6 +1135,121 @@ pub const Repository = struct {
         return Repository{
             .path = try allocator.dupe(u8, target),
             .git_dir = try allocator.dupe(u8, target),
+            .allocator = allocator,
+        };
+    }
+
+    /// Clone from HTTPS URL into a bare repository
+    fn cloneBareHttps(allocator: std.mem.Allocator, url: []const u8, target: []const u8) !Repository {
+        const smart_http = @import("git/smart_http.zig");
+        const pack_writer = @import("git/pack_writer.zig");
+        const idx_writer = @import("git/idx_writer.zig");
+
+        // Create bare repo structure
+        std.fs.cwd().makePath(target) catch |err| switch (err) {
+            error.PathAlreadyExists => return error.AlreadyExists,
+            else => return err,
+        };
+        errdefer std.fs.cwd().deleteTree(target) catch {};
+
+        const git_dir = try allocator.dupe(u8, target);
+        errdefer allocator.free(git_dir);
+
+        // Create required directories
+        const dirs = [_][]const u8{ "objects", "objects/pack", "refs", "refs/heads", "refs/tags" };
+        for (dirs) |d| {
+            const dir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ target, d });
+            defer allocator.free(dir_path);
+            std.fs.cwd().makePath(dir_path) catch {};
+        }
+
+        // Write HEAD
+        const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{target});
+        defer allocator.free(head_path);
+        {
+            const f = try std.fs.cwd().createFile(head_path, .{});
+            defer f.close();
+            try f.writeAll("ref: refs/heads/master\n");
+        }
+
+        // Write config for bare repo
+        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{target});
+        defer allocator.free(config_path);
+        {
+            const f = try std.fs.cwd().createFile(config_path, .{});
+            defer f.close();
+            try f.writeAll("[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n[remote \"origin\"]\n\turl = ");
+            try f.writeAll(url);
+            try f.writeAll("\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n");
+        }
+
+        // Clone pack data via smart HTTP
+        var clone_result = smart_http.clonePack(allocator, url) catch |err| {
+            return switch (err) {
+                error.HttpError => error.RepositoryNotFound,
+                else => error.RepositoryNotFound,
+            };
+        };
+        defer clone_result.deinit();
+
+        // Save pack + generate idx
+        if (clone_result.pack_data.len >= 32) {
+            const checksum_hex = try pack_writer.savePack(allocator, git_dir, clone_result.pack_data);
+            defer allocator.free(checksum_hex);
+
+            const pp = try pack_writer.packPath(allocator, git_dir, checksum_hex);
+            defer allocator.free(pp);
+            try idx_writer.generateIdx(allocator, pp);
+        }
+
+        // Write refs
+        var head_ref: ?[]const u8 = null;
+        for (clone_result.refs) |ref| {
+            if (std.mem.eql(u8, ref.name, "HEAD")) {
+                head_ref = &ref.hash;
+                continue;
+            }
+
+            // Write ref files (refs/heads/*, refs/tags/*)
+            if (std.mem.startsWith(u8, ref.name, "refs/")) {
+                const ref_file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ target, ref.name });
+                defer allocator.free(ref_file_path);
+
+                // Ensure parent directory exists
+                if (std.mem.lastIndexOfScalar(u8, ref_file_path, '/')) |last_slash| {
+                    std.fs.cwd().makePath(ref_file_path[0..last_slash]) catch {};
+                }
+
+                const f = std.fs.cwd().createFile(ref_file_path, .{}) catch continue;
+                defer f.close();
+                f.writeAll(&ref.hash) catch continue;
+                f.writeAll("\n") catch {};
+            }
+        }
+
+        // Update HEAD to point to the right branch
+        // Find which branch HEAD points to
+        if (head_ref) |head_hash| {
+            // Check if any branch matches HEAD's hash
+            var head_target: []const u8 = "refs/heads/master";
+            for (clone_result.refs) |ref| {
+                if (std.mem.startsWith(u8, ref.name, "refs/heads/") and
+                    std.mem.eql(u8, &ref.hash, head_hash))
+                {
+                    head_target = ref.name;
+                    break;
+                }
+            }
+            const hf = try std.fs.cwd().createFile(head_path, .{});
+            defer hf.close();
+            try hf.writer().print("ref: {s}\n", .{head_target});
+        }
+
+        const path = try allocator.dupe(u8, target);
+
+        return Repository{
+            .path = path,
+            .git_dir = git_dir,
             .allocator = allocator,
         };
     }
@@ -1718,6 +1903,30 @@ fn isValidHex(str: []const u8) bool {
         }
     }
     return true;
+}
+
+/// Write a remote ref file: refs/remotes/{remote_name}/{branch}
+fn writeRemoteRef(allocator: std.mem.Allocator, git_dir: []const u8, remote_name: []const u8, ref_name: []const u8, hash: *const [40]u8) !void {
+    // Map refs/heads/main -> refs/remotes/origin/main
+    const branch = if (std.mem.startsWith(u8, ref_name, "refs/heads/"))
+        ref_name["refs/heads/".len..]
+    else if (std.mem.startsWith(u8, ref_name, "refs/tags/"))
+        return // Tags are written directly, not as remote refs
+    else
+        return; // Skip HEAD and other non-branch refs
+
+    const ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}/{s}", .{ git_dir, remote_name, branch });
+    defer allocator.free(ref_path);
+
+    // Ensure parent dir exists
+    if (std.mem.lastIndexOfScalar(u8, ref_path, '/')) |last_slash| {
+        std.fs.cwd().makePath(ref_path[0..last_slash]) catch {};
+    }
+
+    const f = try std.fs.cwd().createFile(ref_path, .{});
+    defer f.close();
+    try f.writeAll(hash);
+    try f.writeAll("\n");
 }
 
 fn copyDirectory(source: []const u8, dest: []const u8) !void {
