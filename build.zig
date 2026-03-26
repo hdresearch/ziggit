@@ -204,11 +204,63 @@ pub fn build(b: *std.Build) void {
     api_vs_cli_benchmark.root_module.addImport("ziggit", ziggit_module);
     const run_api_vs_cli_benchmark = b.addRunArtifact(api_vs_cli_benchmark);
 
+    // Phase 1 simple benchmark
+    const phase1_simple_benchmark = b.addExecutable(.{
+        .name = "phase1_simple_bench",
+        .root_source_file = b.path("benchmarks/phase1_simple_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    phase1_simple_benchmark.root_module.addImport("ziggit", ziggit_module);
+    const run_phase1_simple_benchmark = b.addRunArtifact(phase1_simple_benchmark);
+
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&run_cli_benchmark.step);
     bench_step.dependOn(&run_lib_benchmark.step);
     bench_step.dependOn(&run_bun_scenario_benchmark.step);
     bench_step.dependOn(&run_api_vs_cli_benchmark.step);
+    
+    const phase1_step = b.step("phase1", "Run Phase 1 API vs CLI benchmark");
+    phase1_step.dependOn(&run_phase1_simple_benchmark.step);
+    
+    // Debug ref resolution
+    const debug_ref_benchmark = b.addExecutable(.{
+        .name = "debug_ref_resolution",
+        .root_source_file = b.path("benchmarks/debug_ref_resolution.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    debug_ref_benchmark.root_module.addImport("ziggit", ziggit_module);
+    const run_debug_ref_benchmark = b.addRunArtifact(debug_ref_benchmark);
+    
+    const debug_step = b.step("debug-ref", "Debug ref resolution");
+    debug_step.dependOn(&run_debug_ref_benchmark.step);
+    
+    // Phase 2 optimization benchmark
+    const phase2_optimization_benchmark = b.addExecutable(.{
+        .name = "phase2_optimization_bench",
+        .root_source_file = b.path("benchmarks/phase2_optimization_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    phase2_optimization_benchmark.root_module.addImport("ziggit", ziggit_module);
+    const run_phase2_optimization_benchmark = b.addRunArtifact(phase2_optimization_benchmark);
+    
+    const phase2_step = b.step("phase2", "Run Phase 2 optimization benchmark");
+    phase2_step.dependOn(&run_phase2_optimization_benchmark.step);
+    
+    // Phase 3 release benchmark
+    const phase3_release_benchmark = b.addExecutable(.{
+        .name = "phase3_release_bench",
+        .root_source_file = b.path("benchmarks/phase3_release_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    phase3_release_benchmark.root_module.addImport("ziggit", ziggit_module);
+    const run_phase3_release_benchmark = b.addRunArtifact(phase3_release_benchmark);
+    
+    const phase3_step = b.step("phase3", "Run Phase 3 release benchmark");
+    phase3_step.dependOn(&run_phase3_release_benchmark.step);
 
 
 
