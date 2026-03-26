@@ -730,6 +730,11 @@ pub const Repository = struct {
 
     /// Find specific commit hash
     pub fn findCommit(self: *const Repository, committish: []const u8) ![40]u8 {
+        // Special case for HEAD
+        if (std.mem.eql(u8, committish, "HEAD")) {
+            return try self.revParseHeadUncached();
+        }
+        
         if (committish.len == 40 and isValidHex(committish)) {
             var result: [40]u8 = undefined;
             @memcpy(&result, committish);
