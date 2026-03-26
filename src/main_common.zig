@@ -603,11 +603,34 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     defer deleted_files.deinit();
 
     for (index.entries.items) |entry| {
+        // Sanitize path by removing any null characters and non-printable characters
+        const sanitized_path = blk: {
+            if (std.mem.indexOfScalar(u8, entry.path, 0)) |null_pos| {
+                // Path contains null character, truncate at first null
+                break :blk entry.path[0..null_pos];
+            } else {
+                // Check if path contains only printable characters
+                var is_valid = true;
+                for (entry.path) |ch| {
+                    if (ch < 32 or ch > 126) {
+                        is_valid = false;
+                        break;
+                    }
+                }
+                if (is_valid) {
+                    break :blk entry.path;
+                } else {
+                    // Skip this entry as it appears to be corrupted
+                    continue;
+                }
+            }
+        };
+        
         // Check if working directory version is different from index version
-        const full_path = if (std.fs.path.isAbsolute(entry.path))
-            try allocator.dupe(u8, entry.path)
+        const full_path = if (std.fs.path.isAbsolute(sanitized_path))
+            try allocator.dupe(u8, sanitized_path)
         else
-            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path });
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, sanitized_path });
         defer allocator.free(full_path);
         
         // Check if file exists in working directory
