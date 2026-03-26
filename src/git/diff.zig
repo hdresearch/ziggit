@@ -619,6 +619,9 @@ fn toLowercase(content: []const u8, allocator: std.mem.Allocator) ![]u8 {
 
 /// Detect if content is binary
 pub fn isBinary(content: []const u8) bool {
+    // Empty content is not binary
+    if (content.len == 0) return false;
+    
     // Simple heuristic: if we find null bytes in first 8KB, consider it binary
     const check_size = @min(content.len, 8192);
     for (content[0..check_size]) |byte| {
@@ -645,8 +648,8 @@ pub fn generateBinaryDiff(old_size: usize, new_size: usize, file_path: []const u
     const writer = result.writer();
     
     try writer.print("diff --git a/{s} b/{s}\n", .{ file_path, file_path });
-    try writer.print("index binary..binary\n");
-    try writer.print("GIT binary patch\n");
+    try writer.print("index binary..binary\n", .{});
+    try writer.print("GIT binary patch\n", .{});
     try writer.print("Binary files a/{s} and b/{s} differ\n", .{ file_path, file_path });
     try writer.print("Old size: {} bytes, New size: {} bytes\n", .{ old_size, new_size });
     
