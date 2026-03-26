@@ -1532,6 +1532,50 @@ pub fn build(b: *std.Build) void {
     core_workflow_smoke_tests.root_module.addImport("ziggit", ziggit_module);
     test_step.dependOn(&b.addRunArtifact(core_workflow_smoke_tests).step);
 
+    // Config git interop tests (internal git module)
+    const config_git_interop_tests = b.addTest(.{
+        .root_source_file = b.path("test/config_git_interop_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    config_git_interop_tests.root_module.addAnonymousImport("git", .{
+        .root_source_file = b.path("src/git/git.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(config_git_interop_tests).step);
+
+    // Diff generation tests
+    const diff_generation_tests = b.addTest(.{
+        .root_source_file = b.path("test/diff_generation_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    diff_generation_tests.root_module.addAnonymousImport("diff", .{
+        .root_source_file = b.path("src/git/diff.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(diff_generation_tests).step);
+
+    // Tree entry type tests
+    const tree_entry_type_tests = b.addTest(.{
+        .root_source_file = b.path("test/tree_entry_type_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    tree_entry_type_tests.root_module.addAnonymousImport("tree", .{
+        .root_source_file = b.path("src/git/tree.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(tree_entry_type_tests).step);
+
+    // Validation SHA-1 edge case tests
+    const validation_sha1_edge_tests = b.addTest(.{
+        .root_source_file = b.path("test/validation_sha1_edge_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    validation_sha1_edge_tests.root_module.addAnonymousImport("validation", .{
+        .root_source_file = b.path("src/git/validation.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(validation_sha1_edge_tests).step);
+
     // ========== BENCHMARKS ==========
     
     // CLI benchmark (ziggit vs git performance)
