@@ -19,7 +19,7 @@ System git: git version 2.43.0
   t6200-fmt-merge-msg.sh: 37/37 passed ✓
   t6100-rev-list-in-order.sh: 3/3 passed ✓
   t6000-rev-list-misc.sh: 18/23 passed (5 failed)
-  t5601-clone.sh: 53/109 passed (56 failed)
+  t5601-clone.sh: 57/109 passed (52 failed)
   t5510-fetch.sh: 199/214 passed (15 failed)
   t5500-fetch-pack.sh: 374/377 passed (3 failed)
   t5400-send-pack.sh: 16/17 passed (1 failed)
@@ -34,7 +34,10 @@ System git: git version 2.43.0
   t3507-cherry-pick-conflict.sh: 42/44 passed (2 failed)
   t3501-revert-cherry-pick.sh: 17/21 passed (4 failed)
   t3404-rebase-interactive.sh: 101/132 passed (31 failed)
+  t3903-stash.sh: 125/142 passed (17 failed)
   t3400-rebase.sh: 35/39 passed (4 failed)
+  t3305-notes-fanout.sh: 7/7 passed ✓
+  t3301-notes.sh: 149/153 passed (4 failed)
   t3200-branch.sh: 164/167 passed (3 failed)
   t3100-ls-tree-restrict.sh: 14/14 passed ✓
   t3070-wildmatch.sh: 1850/1901 passed (51 failed)
@@ -46,8 +49,10 @@ System git: git version 2.43.0
   t2020-checkout-detach.sh: 24/26 passed (2 failed)
   t2018-checkout-branch.sh: 25/25 passed ✓
   t2012-checkout-last.sh: 22/22 passed ✓
+  t2300-cd-to-toplevel.sh: 5/5 passed ✓
+  t2007-checkout-symlink.sh: 4/4 passed ✓
   t2010-checkout-ambiguous.sh: 10/10 passed ✓
-  t1700-split-index.sh: 11/29 passed (18 failed)
+  t1700-split-index.sh: 10/29 passed (19 failed)
   t1500-rev-parse.sh: 79/81 passed (2 failed)
   t1450-fsck.sh: 84/96 passed (12 failed)
   t1400-update-ref.sh: 179/313 passed (134 failed)
@@ -67,6 +72,9 @@ System git: git version 2.43.0
   t0070-fundamental.sh: 3/11 passed (8 failed)
   t0060-path-utils.sh: 146/219 passed (73 failed)
   t0050-filesystem.sh: 13/13 passed ✓
+  t0004-unwritable.sh: 9/9 passed ✓
+  t0008-ignores.sh: 397/398 passed (1 failed)
+  t0030-stripspace.sh: 28/30 passed (2 failed)
   t0002-gitfile.sh: 14/14 passed ✓
   t0003-attributes.sh: 45/55 passed (10 failed)
   t0010-racy-git.sh: 10/10 passed ✓
@@ -74,4 +82,4 @@ System git: git version 2.43.0
   t0001-init.sh: 70/102 passed (32 failed)
   t0000-basic.sh: 87/92 passed (5 failed)
 
-TOTAL: 6960/7848 passed (888 failed)
+TOTAL: 7687/8596 passed (909 failed)
