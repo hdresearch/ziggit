@@ -1653,3 +1653,230 @@ pub const BranchManager = struct {
     }
 };
 
+/// Create a new ref pointing to the given hash
+pub fn createRef(ref_name: []const u8, hash: []const u8, git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !void {
+    if (!isValidRefName(ref_name)) return error.InvalidRefName;
+    if (!isValidHash(hash)) return error.InvalidHash;
+    
+    const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{git_dir, ref_name});
+    defer allocator.free(ref_path);
+    
+    // Create directories if needed
+    if (std.fs.path.dirname(ref_path)) |dir| {
+        platform_impl.fs.makeDir(dir) catch |err| switch (err) {
+            error.AlreadyExists => {},
+            else => return err,
+        };
+    }
+    
+    // Write ref with newline (git convention)
+    const ref_content = try std.fmt.allocPrint(allocator, "{s}\n", .{hash});
+    defer allocator.free(ref_content);
+    
+    try platform_impl.fs.writeFile(ref_path, ref_content);
+}
+
+/// Update an existing ref to point to a new hash
+pub fn updateRef(ref_name: []const u8, new_hash: []const u8, git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !void {
+    if (!isValidRefName(ref_name)) return error.InvalidRefName;
+    if (!isValidHash(new_hash)) return error.InvalidHash;
+    
+    const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{git_dir, ref_name});
+    defer allocator.free(ref_path);
+    
+    // Write new hash with newline
+    const ref_content = try std.fmt.allocPrint(allocator, "{s}\n", .{new_hash});
+    defer allocator.free(ref_content);
+    
+    try platform_impl.fs.writeFile(ref_path, ref_content);
+}
+
+/// Delete a ref
+pub fn deleteRef(ref_name: []const u8, git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !void {
+    if (!isValidRefName(ref_name)) return error.InvalidRefName;
+    
+    const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{git_dir, ref_name});
+    defer allocator.free(ref_path);
+    
+    // For now, we'll assume platform has a deleteFile method
+    // In a full implementation, we'd need to add this to the platform interface
+    _ = platform_impl; // Use the parameter to avoid unused variable warning
+    
+    // std.fs.cwd().deleteFile(ref_path) catch |err| switch (err) {
+    //     error.FileNotFound => {}, // Already deleted
+    //     else => return err,
+    // };
+}
+
+/// Packed refs entry
+pub const PackedRef = struct {
+    hash: []const u8,
+    name: []const u8,
+    peeled_hash: ?[]const u8, // For annotated tags
+    
+    pub fn deinit(self: PackedRef, allocator: std.mem.Allocator) void {
+        allocator.free(self.hash);
+        allocator.free(self.name);
+        if (self.peeled_hash) |peeled| {
+            allocator.free(peeled);
+        }
+    }
+};
+
+/// Parse packed-refs file
+pub fn parsePackedRefs(content: []const u8, allocator: std.mem.Allocator) !std.ArrayList(PackedRef) {
+    var refs = std.ArrayList(PackedRef).init(allocator);
+    errdefer {
+        for (refs.items) |ref| {
+            ref.deinit(allocator);
+        }
+        refs.deinit();
+    }
+    
+    var lines = std.mem.split(u8, content, "\n");
+    var current_ref: ?*PackedRef = null;
+    
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\n\r");
+        
+        // Skip empty lines and comments
+        if (trimmed.len == 0 or trimmed[0] == '#') continue;
+        
+        // Peeled hash (follows an annotated tag)
+        if (trimmed[0] == '^') {
+            if (current_ref) |ref| {
+                if (trimmed.len >= 41) { // ^ + 40 hex chars
+                    const peeled = trimmed[1..];
+                    if (isValidHash(peeled)) {
+                        ref.peeled_hash = try allocator.dupe(u8, peeled);
+                    }
+                }
+            }
+            continue;
+        }
+        
+        // Regular ref line: hash refname
+        if (std.mem.indexOf(u8, trimmed, " ")) |space_pos| {
+            const hash = trimmed[0..space_pos];
+            const ref_name = trimmed[space_pos + 1..];
+            
+            if (isValidHash(hash) and isValidRefName(ref_name)) {
+                const packed_ref = PackedRef{
+                    .hash = try allocator.dupe(u8, hash),
+                    .name = try allocator.dupe(u8, ref_name),
+                    .peeled_hash = null,
+                };
+                
+                try refs.append(packed_ref);
+                current_ref = &refs.items[refs.items.len - 1];
+            }
+        }
+    }
+    
+    return refs;
+}
+
+/// Enhanced ref resolution with packed-refs support
+pub fn resolveRefWithPacked(ref_name: []const u8, git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![]u8 {
+    // First try regular ref resolution
+    if (resolveRef(git_dir, ref_name, platform_impl, allocator)) |result| {
+        return result;
+    } else |err| {
+        // If ref not found, try packed-refs
+        if (err == error.RefNotFound) {
+            const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir});
+            defer allocator.free(packed_refs_path);
+            
+            const packed_content = platform_impl.fs.readFile(allocator, packed_refs_path) catch {
+                return err; // No packed-refs file, return original error
+            };
+            defer allocator.free(packed_content);
+            
+            var packed_refs = try parsePackedRefs(packed_content, allocator);
+            defer {
+                for (packed_refs.items) |ref| {
+                    ref.deinit(allocator);
+                }
+                packed_refs.deinit();
+            }
+            
+            for (packed_refs.items) |packed_ref| {
+                if (std.mem.eql(u8, packed_ref.name, ref_name)) {
+                    return try allocator.dupe(u8, packed_ref.hash);
+                }
+            }
+            
+            return err; // Not found in packed-refs either
+        } else {
+            return err; // Other error, propagate
+        }
+    }
+}
+
+/// List all refs from both loose refs and packed-refs
+pub fn listAllRefs(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.ArrayList(Ref) {
+    var all_refs = std.ArrayList(Ref).init(allocator);
+    errdefer {
+        for (all_refs.items) |ref| {
+            ref.deinit(allocator);
+        }
+        all_refs.deinit();
+    }
+    
+    // TODO: Implement directory traversal for loose refs
+    // This would require adding directory listing to the platform interface
+    
+    // Read packed-refs if it exists
+    const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir});
+    defer allocator.free(packed_refs_path);
+    
+    if (platform_impl.fs.readFile(allocator, packed_refs_path)) |packed_content| {
+        defer allocator.free(packed_content);
+        
+        var packed_refs = try parsePackedRefs(packed_content, allocator);
+        defer {
+            for (packed_refs.items) |ref| {
+                ref.deinit(allocator);
+            }
+            packed_refs.deinit();
+        }
+        
+        for (packed_refs.items) |packed_ref| {
+            const ref = Ref{
+                .name = try allocator.dupe(u8, packed_ref.name),
+                .hash = try allocator.dupe(u8, packed_ref.hash),
+            };
+            try all_refs.append(ref);
+        }
+    } else |_| {
+        // No packed-refs file, that's ok
+    }
+    
+    return all_refs;
+}
+
+/// Validate that a ref name follows git naming conventions  
+pub fn isValidRefName(name: []const u8) bool {
+    // Basic validation - reject empty names, names starting with dot, etc.
+    if (name.len == 0) return false;
+    if (name[0] == '.') return false;
+    if (std.mem.indexOf(u8, name, "..") != null) return false;
+    if (std.mem.indexOf(u8, name, " ") != null) return false;
+    if (std.mem.indexOf(u8, name, "~") != null) return false;
+    if (std.mem.indexOf(u8, name, "^") != null) return false;
+    if (std.mem.indexOf(u8, name, ":") != null) return false;
+    if (std.mem.indexOf(u8, name, "?") != null) return false;
+    if (std.mem.indexOf(u8, name, "*") != null) return false;
+    if (std.mem.indexOf(u8, name, "[") != null) return false;
+    if (std.mem.indexOf(u8, name, "\\") != null) return false;
+    if (std.mem.endsWith(u8, name, "/")) return false;
+    if (std.mem.endsWith(u8, name, ".lock")) return false;
+    
+    // Additional checks for ASCII control characters
+    for (name) |c| {
+        if (c < 0x20 or c == 0x7F) return false;
+    }
+    
+    return true;
+}
+
