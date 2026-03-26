@@ -93,6 +93,14 @@ pub fn build(b: *std.Build) void {
     });
     broken_pipe_test.root_module.addImport("platform", platform_module);
 
+    // Bun workflow test
+    const bun_zig_api_test = b.addTest(.{
+        .root_source_file = b.path("test/bun_zig_api_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bun_zig_api_test.root_module.addImport("ziggit", ziggit_module);
+
     // Unit tests for platform layer
     const platform_unit_tests = b.addTest(.{
         .root_source_file = b.path("src/platform/platform.zig"),
@@ -107,6 +115,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(git_interop_test).step);
     test_step.dependOn(&b.addRunArtifact(workflow_test).step);
     test_step.dependOn(&b.addRunArtifact(broken_pipe_test).step);
+    test_step.dependOn(&b.addRunArtifact(bun_zig_api_test).step);
 
     // ========== BENCHMARKS ==========
     
