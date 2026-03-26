@@ -473,12 +473,10 @@ pub const Index = struct {
 
 /// Get device ID from file stat (platform-specific)
 fn getDeviceId(stat: std.fs.File.Stat) u32 {
-    return switch (builtin.os.tag) {
-        .linux, .macos, .freebsd, .openbsd, .netbsd => @intCast(stat.dev),
-        .windows => 0, // Windows doesn't have device IDs like Unix
-        .wasi => 0, // WASI doesn't support device IDs
-        else => 0, // Default to 0 for unknown platforms
-    };
+    // std.fs.File.Stat in Zig 0.13 doesn't expose dev directly
+    // Return 0 — git treats this as advisory, not critical
+    _ = stat;
+    return 0;
 }
 
 /// Get current user ID (platform-specific)
