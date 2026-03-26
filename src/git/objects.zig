@@ -1050,6 +1050,80 @@ fn readVarint(data: []const u8, pos: *usize) usize {
     return value;
 }
 
+/// Apply delta into a caller-provided buffer. Zero allocations.
+/// Returns the number of bytes written to `result`.
+/// The caller must ensure `result` is large enough (use `deltaResultSize` to query).
+pub fn applyDeltaInto(base_data: []const u8, delta_data: []const u8, result: []u8) !usize {
+    if (delta_data.len < 2) return error.InvalidDelta;
+
+    var pos: usize = 0;
+    const base_size = readVarint(delta_data, &pos);
+    if (pos >= delta_data.len) return error.InvalidDelta;
+    const result_size = readVarint(delta_data, &pos);
+
+    if (base_size > base_data.len + 1024 or (base_size > 0 and base_data.len > base_size + 1024))
+        return error.InvalidDelta;
+    if (result_size > result.len) return error.InvalidDelta;
+
+    var rp: usize = 0;
+
+    while (pos < delta_data.len) {
+        const cmd = delta_data[pos];
+        pos += 1;
+
+        if (cmd & 0x80 != 0) {
+            var co: usize = 0;
+            var cs: usize = 0;
+            if (cmd & 0x01 != 0) { co = delta_data[pos]; pos += 1; }
+            if (cmd & 0x02 != 0) { co |= @as(usize, delta_data[pos]) << 8; pos += 1; }
+            if (cmd & 0x04 != 0) { co |= @as(usize, delta_data[pos]) << 16; pos += 1; }
+            if (cmd & 0x08 != 0) { co |= @as(usize, delta_data[pos]) << 24; pos += 1; }
+            if (cmd & 0x10 != 0) { cs = delta_data[pos]; pos += 1; }
+            if (cmd & 0x20 != 0) { cs |= @as(usize, delta_data[pos]) << 8; pos += 1; }
+            if (cmd & 0x40 != 0) { cs |= @as(usize, delta_data[pos]) << 16; pos += 1; }
+            if (cs == 0) cs = 0x10000;
+
+            if (co + cs > base_data.len) return error.InvalidDelta;
+            if (rp + cs > result_size) return error.InvalidDelta;
+            @memcpy(result[rp..][0..cs], base_data[co..][0..cs]);
+            rp += cs;
+        } else if (cmd > 0) {
+            const n: usize = @intCast(cmd);
+            if (pos + n > delta_data.len) return error.InvalidDelta;
+            if (rp + n > result_size) return error.InvalidDelta;
+            @memcpy(result[rp..][0..n], delta_data[pos..][0..n]);
+            rp += n;
+            pos += n;
+        } else {
+            return error.InvalidDelta;
+        }
+    }
+
+    if (rp != result_size) return error.InvalidDelta;
+    return result_size;
+}
+
+/// Read the expected result size from a delta without applying it.
+/// Useful for pre-allocating buffers.
+pub fn deltaResultSize(delta_data: []const u8) !usize {
+    if (delta_data.len < 2) return error.InvalidDelta;
+    var pos: usize = 0;
+    _ = readVarint(delta_data, &pos); // skip base_size
+    if (pos >= delta_data.len) return error.InvalidDelta;
+    return readVarint(delta_data, &pos);
+}
+
+/// Apply delta writing into a reusable ArrayList. Clears the list first but
+/// retains its capacity, so repeated calls avoid allocation.
+pub fn applyDeltaReuse(base_data: []const u8, delta_data: []const u8, output: *std.ArrayList(u8)) ![]u8 {
+    output.clearRetainingCapacity();
+    const result_size = try deltaResultSize(delta_data);
+    try output.ensureTotalCapacity(result_size);
+    output.items.len = result_size;
+    const written = try applyDeltaInto(base_data, delta_data, output.items[0..result_size]);
+    output.items.len = written;
+    return output.items;
+}
 
 /// Permissive delta application for edge cases (thin packs, minor corruption).
 /// Uses ArrayList for dynamic result sizing.

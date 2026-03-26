@@ -144,6 +144,73 @@ pub fn decompressInto(
     };
 }
 
+/// Decompress zlib data into a pre-sized buffer (no allocation).
+/// `expected_size` should match the uncompressed size from the pack header.
+/// Returns actual decompressed size and bytes consumed from input.
+pub fn decompressIntoBuf(
+    compressed_data: []const u8,
+    buf: []u8,
+) !struct { decompressed_size: usize, bytes_consumed: usize } {
+    var fbs = std.io.fixedBufferStream(compressed_data);
+    var decompressor = std.compress.zlib.decompressor(fbs.reader());
+
+    var total: usize = 0;
+    while (total < buf.len) {
+        const remaining = buf[total..];
+        const n = decompressor.read(remaining) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        if (n == 0) break;
+        total += n;
+    }
+
+    return .{
+        .decompressed_size = total,
+        .bytes_consumed = @intCast(fbs.pos),
+    };
+}
+
+/// Decompress zlib data and simultaneously hash it, writing into a caller-provided buffer.
+/// Combines decompressIntoBuf + SHA-1 hashing in a single pass.
+/// Useful when the caller needs both the data (for caching as delta base) and the hash.
+pub fn decompressHashIntoBuf(
+    compressed_data: []const u8,
+    git_type: []const u8,
+    object_size: usize,
+    buf: []u8,
+) !struct { sha1: [20]u8, decompressed_size: usize, bytes_consumed: usize } {
+    var sha_hasher = std.crypto.hash.Sha1.init(.{});
+
+    var hdr_buf: [64]u8 = undefined;
+    const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ git_type, object_size }) catch unreachable;
+    sha_hasher.update(header);
+
+    var fbs = std.io.fixedBufferStream(compressed_data);
+    var decompressor = std.compress.zlib.decompressor(fbs.reader());
+
+    var total: usize = 0;
+    while (total < buf.len) {
+        const remaining = buf[total..];
+        const n = decompressor.read(remaining) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        if (n == 0) break;
+        sha_hasher.update(buf[total..][0..n]);
+        total += n;
+    }
+
+    var result_sha1: [20]u8 = undefined;
+    sha_hasher.final(&result_sha1);
+
+    return .{
+        .sha1 = result_sha1,
+        .decompressed_size = total,
+        .bytes_consumed = @intCast(fbs.pos),
+    };
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 test "decompressAndHash matches decompress-then-hash" {
@@ -218,4 +285,38 @@ test "decompressInto returns correct size and consumed" {
     try std.testing.expectEqual(test_data.len, info.decompressed_size);
     try std.testing.expectEqual(compressed.items.len, info.bytes_consumed);
     try std.testing.expectEqualSlices(u8, test_data, output.items);
+}
+
+test "decompressIntoBuf matches decompressInto" {
+    const allocator = std.testing.allocator;
+    const test_data = "buffer-based decompression test data here";
+
+    var compressed = std.ArrayList(u8).init(allocator);
+    defer compressed.deinit();
+    var fbs = std.io.fixedBufferStream(test_data);
+    try std.compress.zlib.compress(fbs.reader(), compressed.writer(), .{});
+
+    var buf: [256]u8 = undefined;
+    const r = try decompressIntoBuf(compressed.items, &buf);
+    try std.testing.expectEqual(test_data.len, r.decompressed_size);
+    try std.testing.expectEqualSlices(u8, test_data, buf[0..r.decompressed_size]);
+}
+
+test "decompressHashIntoBuf matches decompressAndHash" {
+    const allocator = std.testing.allocator;
+    const test_data = "testing buf-based hash+decompress";
+
+    var compressed = std.ArrayList(u8).init(allocator);
+    defer compressed.deinit();
+    var fbs = std.io.fixedBufferStream(test_data);
+    try std.compress.zlib.compress(fbs.reader(), compressed.writer(), .{});
+
+    const r1 = try decompressAndHash(compressed.items, "blob", test_data.len);
+
+    var buf: [256]u8 = undefined;
+    const r2 = try decompressHashIntoBuf(compressed.items, "blob", test_data.len, &buf);
+
+    try std.testing.expectEqualSlices(u8, &r1.sha1, &r2.sha1);
+    try std.testing.expectEqual(r1.decompressed_size, r2.decompressed_size);
+    try std.testing.expectEqualSlices(u8, test_data, buf[0..r2.decompressed_size]);
 }
