@@ -42,36 +42,94 @@ pub fn getCurrentCommit(git_dir: []const u8, platform_impl: anytype, allocator: 
 
 /// Resolve a reference with support for nested symbolic refs and annotated tags
 pub fn resolveRef(git_dir: []const u8, ref_name: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !?[]u8 {
+    // Validate input
+    if (ref_name.len == 0) return error.EmptyRefName;
+    if (ref_name.len > 1024) return error.RefNameTooLong; // Reasonable limit
+    
     var current_ref = try allocator.dupe(u8, ref_name);
     defer allocator.free(current_ref);
     
     var depth: u32 = 0;
-    const max_depth = 10; // Prevent infinite loops
+    const max_depth = 20; // Increased from 10 to handle complex setups
+    var seen_refs = std.ArrayList([]const u8).init(allocator);
+    defer {
+        for (seen_refs.items) |seen_ref| {
+            allocator.free(seen_ref);
+        }
+        seen_refs.deinit();
+    }
     
     while (depth < max_depth) {
         defer depth += 1;
         
+        // Check for circular references
+        for (seen_refs.items) |seen_ref| {
+            if (std.mem.eql(u8, seen_ref, current_ref)) {
+                return error.CircularRef;
+            }
+        }
+        
+        // Track this ref to detect cycles
+        try seen_refs.append(try allocator.dupe(u8, current_ref));
+        
         const resolved = resolveRefOnce(git_dir, current_ref, platform_impl, allocator) catch |err| {
-            // If resolution fails, try without assuming the ref is partial
+            // Enhanced fallback logic for different ref name formats
             if (std.mem.eql(u8, current_ref, "HEAD")) {
-                return err; // HEAD should always exist
+                return err; // HEAD should always exist in a valid repo
             }
-            // Try as full ref path if it failed as a short name
+            
+            // Try different ref namespace patterns
             if (!std.mem.startsWith(u8, current_ref, "refs/")) {
-                const full_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{current_ref});
-                defer allocator.free(full_ref);
-                const backup_resolved = resolveRefOnce(git_dir, full_ref, platform_impl, allocator) catch return err;
-                if (!backup_resolved.is_symbolic) {
-                    const final_hash = try resolveAnnotatedTag(git_dir, backup_resolved.target, platform_impl, allocator);
-                    allocator.free(backup_resolved.target);
-                    return final_hash;
-                } else {
-                    allocator.free(current_ref);
-                    current_ref = backup_resolved.target;
-                    continue;
-                }
+                // Try refs/heads/ first (most common)
+                const head_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{current_ref});
+                defer allocator.free(head_ref);
+                if (resolveRefOnce(git_dir, head_ref, platform_impl, allocator)) |head_resolved| {
+                    const result = if (head_resolved.is_symbolic) blk: {
+                        allocator.free(current_ref);
+                        current_ref = try allocator.dupe(u8, head_resolved.target);
+                        allocator.free(head_resolved.target);
+                        continue; // Continue the loop with the symbolic target
+                    } else blk: {
+                        defer allocator.free(head_resolved.target);
+                        break :blk try resolveAnnotatedTag(git_dir, head_resolved.target, platform_impl, allocator);
+                    };
+                    return result;
+                } else |_| {}
+                
+                // Try refs/tags/ 
+                const tag_ref = try std.fmt.allocPrint(allocator, "refs/tags/{s}", .{current_ref});
+                defer allocator.free(tag_ref);
+                if (resolveRefOnce(git_dir, tag_ref, platform_impl, allocator)) |tag_resolved| {
+                    const result = if (tag_resolved.is_symbolic) blk: {
+                        allocator.free(current_ref);
+                        current_ref = try allocator.dupe(u8, tag_resolved.target);
+                        allocator.free(tag_resolved.target);
+                        continue;
+                    } else blk: {
+                        defer allocator.free(tag_resolved.target);
+                        break :blk try resolveAnnotatedTag(git_dir, tag_resolved.target, platform_impl, allocator);
+                    };
+                    return result;
+                } else |_| {}
+                
+                // Try refs/remotes/ (for remote tracking branches)
+                const remote_ref = try std.fmt.allocPrint(allocator, "refs/remotes/{s}", .{current_ref});
+                defer allocator.free(remote_ref);
+                if (resolveRefOnce(git_dir, remote_ref, platform_impl, allocator)) |remote_resolved| {
+                    const result = if (remote_resolved.is_symbolic) blk: {
+                        allocator.free(current_ref);
+                        current_ref = try allocator.dupe(u8, remote_resolved.target);
+                        allocator.free(remote_resolved.target);
+                        continue;
+                    } else blk: {
+                        defer allocator.free(remote_resolved.target);
+                        break :blk try resolveAnnotatedTag(git_dir, remote_resolved.target, platform_impl, allocator);
+                    };
+                    return result;
+                } else |_| {}
             }
-            return err;
+            
+            return err; // All fallback attempts failed
         };
         
         if (resolved.is_symbolic) {

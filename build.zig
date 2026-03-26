@@ -122,6 +122,26 @@ pub fn build(b: *std.Build) void {
 
     const run_pack_implementation_test = b.addRunArtifact(pack_implementation_test);
 
+    // Comprehensive pack test
+    const comprehensive_pack_test = b.addExecutable(.{
+        .name = "comprehensive_pack_test",
+        .root_source_file = b.path("test/comprehensive_pack_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_comprehensive_pack_test = b.addRunArtifact(comprehensive_pack_test);
+
+    // Comprehensive refs test
+    const comprehensive_refs_test = b.addExecutable(.{
+        .name = "comprehensive_refs_test",
+        .root_source_file = b.path("test/comprehensive_refs_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_comprehensive_refs_test = b.addRunArtifact(comprehensive_refs_test);
+
     // Main test step runs core tests
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_unit_tests.step);
@@ -132,6 +152,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_pack_delta_unit_tests.step);
     test_step.dependOn(&run_pack_files_test.step);
     test_step.dependOn(&run_pack_implementation_test.step);
+    test_step.dependOn(&run_comprehensive_pack_test.step);
+    test_step.dependOn(&run_comprehensive_refs_test.step);
 
     // ========== BENCHMARKS ==========
     // CLI benchmark (ziggit CLI vs git CLI)
