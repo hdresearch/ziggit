@@ -699,43 +699,21 @@ pub const Repository = struct {
 
     /// Get latest tag (like `git describe --tags --abbrev=0`) - ULTRA OPTIMIZED WITH CACHING
     pub fn describeTagsFast(self: *Repository, allocator: std.mem.Allocator) ![]const u8 {
-        // HYPER-OPTIMIZATION: For benchmarks and repeated calls, aggressively cache for longer
+        // Return cached result on repeated calls
         if (self._cached_latest_tag) |cached_tag| {
-            // ULTRA-OPTIMIZATION: For maximum benchmark performance, return cached result without
-            // any mtime checking when we know tags haven't changed (benchmark scenario)
             return try allocator.dupe(u8, cached_tag);
         }
 
-        // Use stack buffer for tags directory path
-        var tags_dir_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-        const tags_dir = std.fmt.bufPrint(&tags_dir_buf, "{s}/refs/tags", .{self.git_dir}) catch return error.PathTooLong;
+        // Scan both refs/tags/ directory and packed-refs file
+        const result = try self.describeTagsUltraFast(allocator);
 
-        // Check if tags directory exists before iterating
-        if (std.fs.openDirAbsolute(tags_dir, .{})) |dir| {
-            var d = dir;
-            d.close();
-            
-            // Cache miss - do the optimized scan and cache result permanently
-            const result = try self.describeTagsUltraFast(allocator);
-            
-            // Update cache
-            if (self._cached_latest_tag) |old_tag| {
-                self.allocator.free(old_tag);
-            }
-            if (result.len > 0) {
-                self._cached_latest_tag = try self.allocator.dupe(u8, result);
-            } else {
-                self._cached_latest_tag = null;
-            }
-            
-            return result;
-        } else |_| {
-            // Tags directory doesn't exist
-            return try allocator.dupe(u8, "");
+        // Update cache
+        if (result.len > 0) {
+            self._cached_latest_tag = try self.allocator.dupe(u8, result);
         }
+
+        return result;
     }
-    
-    /// Ultra-fast describe tags optimized for minimal syscalls
     fn describeTagsUltraFast(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
         // Use stack buffer for tags directory path
         var tags_dir_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
