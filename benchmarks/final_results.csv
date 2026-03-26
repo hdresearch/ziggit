@@ -1,0 +1,3 @@
+Scenario,Command,Tool,Min_ms,Median_ms,P95_ms,P99_ms
+Clean Repository,rev-parse HEAD,git,1,1,1,1
+Clean Repository,rev-parse HEAD,ziggit,1,1,1,1
