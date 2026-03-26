@@ -214,7 +214,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     if (std.mem.eql(u8, command, "init")) {
         try cmdInit(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "status")) {
-        try cmdStatus(allocator, &args_iter, &platform_impl);
+        try cmdStatus(allocator, &args_iter, &platform_impl, all_original_args.items);
     } else if (std.mem.eql(u8, command, "add")) {
         try forwardCmdToGit(allocator, all_original_args.items, &platform_impl);
     } else if (std.mem.eql(u8, command, "ls-files")) {
@@ -626,7 +626,7 @@ fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8, alloc
     try platform_impl.writeStdout(success_msg);
 }
 
-fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform, original_args: [][]const u8) !void {
     if (@import("builtin").target.os.tag == .freestanding) {
         try platform_impl.writeStderr("status: not supported in freestanding mode\n");
         return;
@@ -687,21 +687,9 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             std.mem.eql(u8, arg, "--find-renames") or
             std.mem.eql(u8, arg, "--ahead-behind") or std.mem.eql(u8, arg, "--no-ahead-behind"))
         {
-            // These flags are not supported natively - fall back to real git
+            // These flags are not supported natively - fall back to real git with all original args
             if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
-                // Reconstruct all original args and forward
-                var all_args = std.ArrayList([]const u8).init(allocator);
-                defer all_args.deinit();
-                try all_args.append("status");
-                // Re-add already-consumed args
-                if (porcelain) try all_args.append("--porcelain");
-                if (show_branch) try all_args.append("--branch");
-                if (short_format and !porcelain) try all_args.append("--short");
-                if (!show_untracked) try all_args.append("-uno");
-                // Add current arg and remaining args
-                try all_args.append(arg);
-                while (args.next()) |remaining| try all_args.append(remaining);
-                try forwardToGit(allocator, all_args.items, platform_impl);
+                try forwardToGit(allocator, original_args, platform_impl);
                 return;
             }
         } else if (arg.len > 0 and arg[0] != '-') {
