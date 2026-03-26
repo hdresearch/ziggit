@@ -1,0 +1,30 @@
+Git Test Suite Results (ziggit as drop-in)
+Date: 2026-03-26
+
+  t0001-init.sh: 28/102 passed
+  t0002-gitfile.sh: 1/14 passed
+  t0003-attributes.sh: 8/55 passed
+  t0005-signals.sh: 0/5 passed
+  t0006-date.sh: 16/129 passed
+  t0008-ignores.sh: TIMEOUT (120s)
+  t0012-help.sh: 2/32 passed
+  t0020-crlf.sh: 1/36 passed
+  t0040-parse-options.sh: 0/94 passed
+  t0050-filesystem.sh: 7/13 passed
+  t0060-path-utils.sh: 19/219 passed
+  t1000-read-tree-m-3way.sh: 0/79 passed
+  t1300-config.sh: 86/497 passed
+  t1400-update-ref.sh: TIMEOUT (120s)
+  t1500-rev-parse.sh: 0/0 passed
+  t1700-split-index.sh: 2/29 passed
+  t2000-conflict-when-checking-files-out.sh: 1/14 passed
+  t2200-add-update.sh: 2/19 passed
+  t3000-ls-files-others.sh: 2/15 passed
+  t3100-ls-tree-restrict.sh: 0/14 passed
+  t3200-branch.sh: 7/167 passed
+  t3400-rebase.sh: 4/39 passed
+  t3600-rm.sh: 11/82 passed
+  t3700-add.sh: 13/58 passed
+  t3900-i18n-commit.sh: 2/38 passed
+
+TOTAL: 212/1750 passed (1538 failed)
