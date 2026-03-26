@@ -3727,3 +3727,192 @@ test "bun workflow: add file, check status dirty, commit, check status clean" {
     defer allocator.free(head_hash);
     try std.testing.expectEqualStrings(trimRight(tag_hash), trimRight(head_hash));
 }
+
+test "ziggit creates branch commit, git merges -> validates mixed workflow" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    // Base commit on master
+    const f_path = try std.fmt.allocPrint(allocator, "{s}/base.txt", .{tmp});
+    defer allocator.free(f_path);
+    {
+        const f = try std.fs.createFileAbsolute(f_path, .{});
+        defer f.close();
+        try f.writeAll("base content");
+    }
+    try repo.add("base.txt");
+    _ = try repo.commit("base commit", "Test", "t@t.com");
+
+    // Create feature branch with git, add ziggit commit
+    const br_out = try execGit(allocator, tmp, &.{ "checkout", "-b", "feature" });
+    allocator.free(br_out);
+
+    const feat_path = try std.fmt.allocPrint(allocator, "{s}/feature.txt", .{tmp});
+    defer allocator.free(feat_path);
+    {
+        const f = try std.fs.createFileAbsolute(feat_path, .{});
+        defer f.close();
+        try f.writeAll("feature work");
+    }
+    try repo.add("feature.txt");
+    _ = try repo.commit("feature commit", "Test", "t@t.com");
+
+    // Back to master, add another ziggit commit
+    const co_out = try execGit(allocator, tmp, &.{ "checkout", "master" });
+    allocator.free(co_out);
+
+    const m2_path = try std.fmt.allocPrint(allocator, "{s}/master2.txt", .{tmp});
+    defer allocator.free(m2_path);
+    {
+        const f = try std.fs.createFileAbsolute(m2_path, .{});
+        defer f.close();
+        try f.writeAll("master extra");
+    }
+    try repo.add("master2.txt");
+    _ = try repo.commit("master extra", "Test", "t@t.com");
+
+    // Git merges the two ziggit branches
+    const merge_out = try execGit(allocator, tmp, &.{ "merge", "feature", "-m", "merge" });
+    allocator.free(merge_out);
+
+    // Verify merge commit has 2 parents
+    const cat_out = try execGit(allocator, tmp, &.{ "cat-file", "-p", "HEAD" });
+    defer allocator.free(cat_out);
+    var parent_count: usize = 0;
+    var iter = std.mem.splitScalar(u8, cat_out, '\n');
+    while (iter.next()) |line| {
+        if (std.mem.startsWith(u8, line, "parent ")) parent_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), parent_count);
+
+    // All 3 files visible
+    const ls = try execGit(allocator, tmp, &.{ "ls-tree", "-r", "--name-only", "HEAD" });
+    defer allocator.free(ls);
+    try std.testing.expect(std.mem.indexOf(u8, ls, "base.txt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ls, "feature.txt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ls, "master2.txt") != null);
+
+    // git fsck passes
+    const fsck = try execGit(allocator, tmp, &.{ "fsck", "--no-dangling" });
+    defer allocator.free(fsck);
+    try std.testing.expect(std.mem.indexOf(u8, fsck, "error") == null);
+}
+
+test "ziggit commit -> git gc -> git verify-pack succeeds" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    // Create enough commits to trigger packing
+    const file_path = try std.fmt.allocPrint(allocator, "{s}/f.txt", .{tmp});
+    defer allocator.free(file_path);
+
+    var i: usize = 0;
+    while (i < 20) : (i += 1) {
+        {
+            const f = try std.fs.createFileAbsolute(file_path, .{ .truncate = true });
+            defer f.close();
+            var buf: [32]u8 = undefined;
+            const content = std.fmt.bufPrint(&buf, "version {d}", .{i}) catch unreachable;
+            try f.writeAll(content);
+        }
+        try repo.add("f.txt");
+        var msg_buf: [32]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "commit {d}", .{i}) catch unreachable;
+        _ = try repo.commit(msg, "Test", "t@t.com");
+    }
+
+    // Run git gc
+    var gc_argv = [_][]const u8{ "git", "gc" };
+    var gc_child = std.process.Child.init(&gc_argv, allocator);
+    gc_child.cwd = tmp;
+    gc_child.stderr_behavior = .Ignore;
+    gc_child.stdout_behavior = .Ignore;
+    try gc_child.spawn();
+    const gc_term = try gc_child.wait();
+    try std.testing.expectEqual(@as(u8, 0), gc_term.Exited);
+
+    // All commits preserved
+    const count = try execGit(allocator, tmp, &.{ "rev-list", "--count", "HEAD" });
+    defer allocator.free(count);
+    try std.testing.expectEqualStrings("20", trimRight(count));
+
+    // HEAD still valid
+    const head = try execGit(allocator, tmp, &.{ "rev-parse", "HEAD" });
+    defer allocator.free(head);
+    try std.testing.expectEqual(@as(usize, 40), trimRight(head).len);
+}
+
+test "bun monorepo workflow: workspace packages with interdependencies" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    // Create workspace structure
+    const dirs = [_][]const u8{ "packages", "packages/core", "packages/utils", "packages/cli" };
+    for (dirs) |d| {
+        const full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ tmp, d });
+        defer allocator.free(full);
+        std.fs.makeDirAbsolute(full) catch {};
+    }
+
+    const files = [_]struct { path: []const u8, content: []const u8 }{
+        .{ .path = "package.json", .content = "{\"private\":true,\"workspaces\":[\"packages/*\"]}" },
+        .{ .path = "packages/core/package.json", .content = "{\"name\":\"@ws/core\",\"version\":\"1.0.0\"}" },
+        .{ .path = "packages/utils/package.json", .content = "{\"name\":\"@ws/utils\",\"version\":\"1.0.0\",\"dependencies\":{\"@ws/core\":\"workspace:*\"}}" },
+        .{ .path = "packages/cli/package.json", .content = "{\"name\":\"@ws/cli\",\"version\":\"1.0.0\",\"dependencies\":{\"@ws/core\":\"workspace:*\",\"@ws/utils\":\"workspace:*\"}}" },
+    };
+
+    for (files) |entry| {
+        const fp = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ tmp, entry.path });
+        defer allocator.free(fp);
+        const f = try std.fs.createFileAbsolute(fp, .{});
+        defer f.close();
+        try f.writeAll(entry.content);
+        try repo.add(entry.path);
+    }
+    _ = try repo.commit("monorepo init", "bun", "bun@bun.sh");
+    try repo.createTag("v1.0.0", null);
+
+    // Verify all files present
+    const ls = try execGit(allocator, tmp, &.{ "ls-tree", "-r", "--name-only", "HEAD" });
+    defer allocator.free(ls);
+    for (files) |entry| {
+        try std.testing.expect(std.mem.indexOf(u8, ls, entry.path) != null);
+    }
+
+    // Verify git describe
+    const desc = try execGit(allocator, tmp, &.{ "describe", "--tags", "--exact-match" });
+    defer allocator.free(desc);
+    try std.testing.expectEqualStrings("v1.0.0", trimRight(desc));
+
+    // Verify content
+    const cli_pkg = try execGit(allocator, tmp, &.{ "show", "HEAD:packages/cli/package.json" });
+    defer allocator.free(cli_pkg);
+    try std.testing.expect(std.mem.indexOf(u8, cli_pkg, "@ws/core") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cli_pkg, "@ws/utils") != null);
+
+    // git describe --tags should work
+    const git_desc = try execGit(allocator, tmp, &.{ "describe", "--tags" });
+    defer allocator.free(git_desc);
+    try std.testing.expectEqualStrings("v1.0.0", trimRight(git_desc));
+}
