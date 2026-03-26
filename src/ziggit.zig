@@ -1198,7 +1198,11 @@ pub const Repository = struct {
             // for non-bare repos update refs/remotes/origin/
             const is_bare = self.isBareRepo();
             for (fetch_result.refs) |ref| {
-                if (is_bare and std.mem.startsWith(u8, ref.name, "refs/heads/")) {
+                // Only update relevant refs (branches, tags) — skip PR refs
+                if (!std.mem.startsWith(u8, ref.name, "refs/heads/") and
+                    !std.mem.startsWith(u8, ref.name, "refs/tags/")) continue;
+
+                if (is_bare) {
                     // Write directly to refs/heads/ for bare repos
                     try writeRefDirect(self.allocator, self.git_dir, ref.name, &ref.hash);
                 }
@@ -1308,29 +1312,34 @@ pub const Repository = struct {
             try idx_file.writeAll(idx_data);
         }
 
-        // Write refs
+        // Write refs using packed-refs file (single file instead of thousands of individual files)
         var head_ref: ?[]const u8 = null;
-        for (clone_result.refs) |ref| {
-            if (std.mem.eql(u8, ref.name, "HEAD")) {
-                head_ref = &ref.hash;
-                continue;
-            }
+        {
+            const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{target});
+            defer allocator.free(packed_refs_path);
+            var packed_refs = std.ArrayList(u8).init(allocator);
+            defer packed_refs.deinit();
+            try packed_refs.appendSlice("# pack-refs with: peeled fully-peeled sorted \n");
 
-            // Write ref files (refs/heads/*, refs/tags/*)
-            if (std.mem.startsWith(u8, ref.name, "refs/")) {
-                const ref_file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ target, ref.name });
-                defer allocator.free(ref_file_path);
-
-                // Ensure parent directory exists
-                if (std.mem.lastIndexOfScalar(u8, ref_file_path, '/')) |last_slash| {
-                    std.fs.cwd().makePath(ref_file_path[0..last_slash]) catch {};
+            for (clone_result.refs) |ref| {
+                if (std.mem.eql(u8, ref.name, "HEAD")) {
+                    head_ref = &ref.hash;
+                    continue;
                 }
-
-                const f = std.fs.cwd().createFile(ref_file_path, .{}) catch continue;
-                defer f.close();
-                f.writeAll(&ref.hash) catch continue;
-                f.writeAll("\n") catch {};
+                // Only write relevant refs (branches + tags), skip PR refs
+                if (std.mem.startsWith(u8, ref.name, "refs/heads/") or
+                    std.mem.startsWith(u8, ref.name, "refs/tags/"))
+                {
+                    try packed_refs.appendSlice(&ref.hash);
+                    try packed_refs.append(' ');
+                    try packed_refs.appendSlice(ref.name);
+                    try packed_refs.append('\n');
+                }
             }
+
+            const pf = try std.fs.cwd().createFile(packed_refs_path, .{});
+            defer pf.close();
+            try pf.writeAll(packed_refs.items);
         }
 
         // Update HEAD to point to the right branch

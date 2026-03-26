@@ -521,6 +521,15 @@ pub fn parseFetchPackResponse(allocator: std.mem.Allocator, data: []const u8) ![
 // clonePack
 // ============================================================================
 
+/// Check if a ref name is relevant for cloning (HEAD, branches, tags).
+/// Skips pull request refs, GitHub internal refs, etc.
+fn isCloneRelevantRef(name: []const u8) bool {
+    if (std.mem.eql(u8, name, "HEAD")) return true;
+    if (std.mem.startsWith(u8, name, "refs/heads/")) return true;
+    if (std.mem.startsWith(u8, name, "refs/tags/")) return true;
+    return false;
+}
+
 pub fn clonePack(allocator: std.mem.Allocator, url: []const u8) !CloneResult {
     // Use a single HTTP client for both requests (TLS connection reuse)
     var client = std.http.Client{ .allocator = allocator };
@@ -528,7 +537,8 @@ pub fn clonePack(allocator: std.mem.Allocator, url: []const u8) !CloneResult {
 
     const discovery = try discoverRefsWithClient(allocator, &client, url);
 
-    // Collect unique want hashes
+    // Collect unique want hashes — only for relevant refs (HEAD, branches, tags)
+    // Skip pull request refs (refs/pull/*) which can add thousands of unwanted objects
     var want_set = std.StringHashMap(void).init(allocator);
     defer want_set.deinit();
 
@@ -536,6 +546,7 @@ pub fn clonePack(allocator: std.mem.Allocator, url: []const u8) !CloneResult {
     defer wants.deinit();
 
     for (discovery.refs) |ref| {
+        if (!isCloneRelevantRef(ref.name)) continue;
         const hash_str = ref.hash;
         if (!want_set.contains(&hash_str)) {
             try want_set.put(try allocator.dupe(u8, &hash_str), {});
@@ -600,6 +611,9 @@ pub fn fetchNewPack(allocator: std.mem.Allocator, url: []const u8, local_refs: [
     }
 
     for (discovery.refs) |ref| {
+        // Skip pull request refs and other non-essential refs during fetch
+        if (!isCloneRelevantRef(ref.name)) continue;
+
         if (local_map.get(ref.name)) |local_hash| {
             if (!std.mem.eql(u8, &local_hash, &ref.hash)) {
                 // Updated ref - want new, have old
