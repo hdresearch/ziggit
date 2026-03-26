@@ -72,6 +72,27 @@
 - Partial clone cleanup: failed ziggit clones are cleaned up before git CLI fallback
 - URL transform logging: shows original vs HTTPS-transformed URL
 
+### expressjs/express (medium repo)
+
+| Tool    | Run 1  | Run 2  | Run 3  | Avg    |
+|---------|--------|--------|--------|--------|
+| ziggit  | 0.278s | 0.285s | 0.271s | 0.278s |
+| git CLI | 0.281s | 0.280s | 0.268s | 0.276s |
+
+**Ratio: ~1.01x — parity** ✅
+
+### lodash/lodash (larger repo)
+
+| Tool    | Time   |
+|---------|--------|
+| ziggit  | 0.472s |
+| git CLI | 0.464s |
+
+**Ratio: ~1.02x — parity** ✅
+
+> Multi-repo benchmarks confirm parity holds across repo sizes. Both tools
+> are network-dominated; local pack/idx generation is negligible overhead.
+
 ## Pending
 - [x] idx_writer.zig rewrite (NET-SMART agent) — landed in `57037cb`, refined in `eeba670` (single-pass)
 - [x] Re-benchmark after idx_writer lands — parity maintained (~197ms vs ~202ms)
@@ -79,5 +100,5 @@
 - [x] Fix build.zig.zon branch reference
 - [x] Pin build.zig.zon to specific commit (3c01d7f)
 - [x] Warm-cache benchmarks show parity with git CLI (~205ms vs ~215ms)
-- [ ] Benchmark on larger repos (1000+ objects) — needs more disk space in /tmp
+- [x] Benchmark on larger repos (1000+ objects) — express (0.278s) and lodash (0.472s) at parity
 - [ ] Profile HTTP negotiation overhead (accounts for most of wall time on small repos)
