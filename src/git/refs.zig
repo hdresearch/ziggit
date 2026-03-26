@@ -1200,6 +1200,62 @@ pub fn suggestSimilarRefs(git_dir: []const u8, partial_name: []const u8, platfor
     return suggestions.toOwnedSlice();
 }
 
+/// Get the most recently modified branch (useful for determining active development)
+pub fn getMostRecentlyModifiedBranch(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !?[]u8 {
+    const branches = try listBranches(git_dir, platform_impl, allocator);
+    defer {
+        for (branches.items) |branch| {
+            allocator.free(branch);
+        }
+        branches.deinit();
+    }
+    
+    if (branches.items.len == 0) return null;
+    
+    var most_recent_branch: ?[]const u8 = null;
+    var most_recent_time: i64 = 0;
+    
+    for (branches.items) |branch| {
+        const ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_dir, branch });
+        defer allocator.free(ref_path);
+        
+        if (std.fs.cwd().statFile(ref_path)) |stat| {
+            const mod_time = @divTrunc(stat.mtime, std.time.ns_per_s);
+            if (mod_time > most_recent_time) {
+                most_recent_time = mod_time;
+                most_recent_branch = branch;
+            }
+        } else |_| {
+            // If stat fails, skip this branch
+            continue;
+        }
+    }
+    
+    if (most_recent_branch) |branch| {
+        return try allocator.dupe(u8, branch);
+    }
+    
+    return null;
+}
+
+/// Check if a commit exists in the repository (faster than full object loading)
+pub fn commitExists(git_dir: []const u8, commit_hash: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !bool {
+    if (commit_hash.len != 40 or !isValidHash(commit_hash)) return false;
+    
+    // First try to resolve as a ref in case it's actually a ref name
+    if (resolveRef(git_dir, commit_hash, platform_impl, allocator)) |resolved| {
+        defer allocator.free(resolved);
+        return true;
+    } else |_| {}
+    
+    // Try to load the object to verify it exists and is a commit
+    const objects = @import("objects.zig");
+    const obj = objects.GitObject.load(commit_hash, git_dir, platform_impl, allocator) catch return false;
+    defer obj.deinit(allocator);
+    
+    return obj.type == .commit;
+}
+
 /// Advanced ref management operations
 pub const RefManager = struct {
     git_dir: []const u8,
