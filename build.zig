@@ -1255,6 +1255,16 @@ pub fn build(b: *std.Build) void {
     error_handling_tests.root_module.addImport("ziggit", ziggit_module);
     test_step.dependOn(&b.addRunArtifact(error_handling_tests).step);
 
+    // Cross-validation stress tests (large files, overwrites, annotated tags, clone bare)
+    const crossval_stress_tests = b.addTest(.{
+        .root_source_file = b.path("test/crossval_stress_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    crossval_stress_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(crossval_stress_tests).step);
+    e2e_step.dependOn(&b.addRunArtifact(crossval_stress_tests).step);
+
     // API coverage tests (comprehensive Repository API tests with git cross-validation)
     const api_coverage_tests = b.addTest(.{
         .root_source_file = b.path("test/api_coverage_test.zig"),
