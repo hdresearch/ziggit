@@ -97,6 +97,23 @@ pub fn build(b: *std.Build) void {
     });
     const run_broken_pipe_test = b.addRunArtifact(broken_pipe_test);
 
+    // Core git-ziggit interop test
+    const core_interop_test = b.addExecutable(.{
+        .name = "core_git_ziggit_interop",
+        .root_source_file = b.path("test/core_git_ziggit_interop.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_core_interop_test = b.addRunArtifact(core_interop_test);
+
+    // Pack file comprehensive test  
+    const pack_comprehensive_test = b.addTest(.{
+        .root_source_file = b.path("test/pack_file_comprehensive_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_pack_comprehensive_test = b.addRunArtifact(pack_comprehensive_test);
+
     // Test step runs all tests
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_platform_tests.step);
@@ -104,6 +121,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_integration_test.step);
     test_step.dependOn(&run_git_interop_test.step);
     test_step.dependOn(&run_broken_pipe_test.step);
+    test_step.dependOn(&run_core_interop_test.step);
+    test_step.dependOn(&run_pack_comprehensive_test.step);
 
     // ========== BENCHMARKS ==========
     const cli_benchmark = b.addExecutable(.{
