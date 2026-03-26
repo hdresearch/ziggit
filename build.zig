@@ -228,6 +228,16 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/git/objects.zig"),
     });
 
+    // Pack clone flow tests (end-to-end HTTPS clone/fetch simulation)
+    const pack_clone_flow_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_clone_flow_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_clone_flow_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+
     // Pack network reception tests (clone/fetch infrastructure)
     const pack_network_reception_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_network_reception_test.zig"),
@@ -465,6 +475,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(ref_delta_chain_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_core_verification_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_network_reception_tests).step);
+    test_step.dependOn(&b.addRunArtifact(pack_clone_flow_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_thin_public_api_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_object_read_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_ref_delta_thin_tests).step);
