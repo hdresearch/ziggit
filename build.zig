@@ -170,7 +170,7 @@ pub fn build(b: *std.Build) void {
 
     // ========== BENCHMARKS ==========
     const cli_benchmark = b.addExecutable(.{
-        .name = "cli-benchmark",
+        .name = "cli_benchmark",
         .root_source_file = b.path("benchmarks/cli_benchmark.zig"),
         .target = target,
         .optimize = optimize,
@@ -178,22 +178,22 @@ pub fn build(b: *std.Build) void {
     const run_cli_benchmark = b.addRunArtifact(cli_benchmark);
 
     const lib_benchmark = b.addExecutable(.{
-        .name = "lib-benchmark",
+        .name = "lib_benchmark",
         .root_source_file = b.path("benchmarks/lib_benchmark.zig"),
         .target = target,
         .optimize = optimize,
     });
+    lib_benchmark.root_module.addImport("ziggit", ziggit_module);
     const run_lib_benchmark = b.addRunArtifact(lib_benchmark);
 
     const bun_scenario_benchmark = b.addExecutable(.{
-        .name = "bun-scenario-benchmark",
+        .name = "bun_scenario_benchmark",
         .root_source_file = b.path("benchmarks/bun_scenario_bench.zig"),
         .target = target,
         .optimize = optimize,
     });
+    bun_scenario_benchmark.root_module.addImport("ziggit", ziggit_module);
     const run_bun_scenario_benchmark = b.addRunArtifact(bun_scenario_benchmark);
-
-
 
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&run_cli_benchmark.step);
