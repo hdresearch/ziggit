@@ -23,7 +23,7 @@ const GitError = error{
 const NATIVE_COMMANDS = [_][]const u8{ 
     "init", "status", "add", "commit", "log", "diff", "branch", 
     "checkout", "merge", "fetch", "pull", "push", "clone", "config", 
-    "rev-parse", "describe", "tag", "show", "cat-file", "--version", "-v", "--version-info", 
+    "rev-parse", "describe", "tag", "show", "cat-file", "rev-list", "--version", "-v", "--version-info", 
     "--help", "-h", "help" 
 };
 
@@ -230,6 +230,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmdShow(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "cat-file")) {
         try cmdCatFile(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "rev-list")) {
+        try cmdRevList(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
         if (version_mod.getVersionString(allocator)) |version_msg| {
             defer allocator.free(version_msg);
@@ -4368,5 +4370,177 @@ fn showTreeObjectFormatted(git_object: objects.GitObject, platform_impl: *const 
         const entry_output = try std.fmt.allocPrint(allocator, "{s} {s} {s}\t{s}\n", .{ mode, obj_type, hash_hex, name });
         defer allocator.free(entry_output);
         try platform_impl.writeStdout(entry_output);
+    }
+}
+
+fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    if (@import("builtin").target.os.tag == .freestanding) {
+        try platform_impl.writeStderr("rev-list: not supported in freestanding mode\n");
+        return;
+    }
+
+    // Find .git directory first
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+
+    var count = false;
+    var max_count: ?u32 = null;
+    var start_ref: ?[]const u8 = null;
+
+    // Parse arguments
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--count")) {
+            count = true;
+        } else if (std.mem.startsWith(u8, arg, "-") and arg.len > 1 and std.ascii.isDigit(arg[1])) {
+            // Parse -n format like -1, -5, etc.
+            const count_str = arg[1..];
+            max_count = std.fmt.parseInt(u32, count_str, 10) catch null;
+        } else if (std.mem.eql(u8, arg, "-n")) {
+            // Parse -n followed by number
+            if (args.next()) |count_str| {
+                max_count = std.fmt.parseInt(u32, count_str, 10) catch null;
+            }
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            start_ref = arg;
+        }
+    }
+
+    // Default to HEAD if no starting reference specified
+    if (start_ref == null) {
+        start_ref = "HEAD";
+    }
+
+    // Resolve starting commit
+    const start_commit = resolveCommittish(git_path, start_ref.?, platform_impl, allocator) catch {
+        const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\n", .{start_ref.?});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        std.process.exit(128);
+    };
+    defer allocator.free(start_commit);
+
+    if (count) {
+        // Count commits from starting commit to root
+        const commit_count = try countCommits(git_path, start_commit, platform_impl, allocator);
+        const count_output = try std.fmt.allocPrint(allocator, "{d}\n", .{commit_count});
+        defer allocator.free(count_output);
+        try platform_impl.writeStdout(count_output);
+    } else {
+        // List commit hashes
+        try listCommits(git_path, start_commit, max_count, platform_impl, allocator);
+    }
+}
+
+fn countCommits(git_path: []const u8, start_commit: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !u32 {
+    var commit_hash = try allocator.dupe(u8, start_commit);
+    defer allocator.free(commit_hash);
+
+    var visited = std.StringHashMap(void).init(allocator);
+    defer {
+        var iterator = visited.iterator();
+        while (iterator.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+        }
+        visited.deinit();
+    }
+
+    var count: u32 = 0;
+
+    while (true) {
+        // Avoid infinite loops
+        if (visited.contains(commit_hash)) break;
+        try visited.put(try allocator.dupe(u8, commit_hash), {});
+
+        count += 1;
+
+        // Load commit object
+        const commit_object = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch break;
+        defer commit_object.deinit(allocator);
+
+        if (commit_object.type != .commit) break;
+
+        // Find first parent
+        var lines = std.mem.split(u8, commit_object.data, "\n");
+        var parent_hash: ?[]const u8 = null;
+
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "parent ")) {
+                parent_hash = line["parent ".len..];
+                break;
+            } else if (line.len == 0) {
+                break; // End of headers
+            }
+        }
+
+        if (parent_hash == null) {
+            break; // No parent, reached the root commit
+        }
+
+        // Move to parent
+        const new_hash = try allocator.dupe(u8, parent_hash.?);
+        allocator.free(commit_hash);
+        commit_hash = new_hash;
+    }
+
+    return count;
+}
+
+fn listCommits(git_path: []const u8, start_commit: []const u8, max_count: ?u32, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+    var commit_hash = try allocator.dupe(u8, start_commit);
+    defer allocator.free(commit_hash);
+
+    var visited = std.StringHashMap(void).init(allocator);
+    defer {
+        var iterator = visited.iterator();
+        while (iterator.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+        }
+        visited.deinit();
+    }
+
+    var count: u32 = 0;
+
+    while (max_count == null or count < max_count.?) {
+        // Avoid infinite loops
+        if (visited.contains(commit_hash)) break;
+        try visited.put(try allocator.dupe(u8, commit_hash), {});
+
+        // Output commit hash
+        const output = try std.fmt.allocPrint(allocator, "{s}\n", .{commit_hash});
+        defer allocator.free(output);
+        try platform_impl.writeStdout(output);
+
+        count += 1;
+
+        // Load commit object
+        const commit_object = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch break;
+        defer commit_object.deinit(allocator);
+
+        if (commit_object.type != .commit) break;
+
+        // Find first parent
+        var lines = std.mem.split(u8, commit_object.data, "\n");
+        var parent_hash: ?[]const u8 = null;
+
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "parent ")) {
+                parent_hash = line["parent ".len..];
+                break;
+            } else if (line.len == 0) {
+                break; // End of headers
+            }
+        }
+
+        if (parent_hash == null) {
+            break; // No parent, reached the root commit
+        }
+
+        // Move to parent
+        const new_hash = try allocator.dupe(u8, parent_hash.?);
+        allocator.free(commit_hash);
+        commit_hash = new_hash;
     }
 }
