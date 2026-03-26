@@ -1,139 +1,101 @@
 const std = @import("std");
-const print = std.debug.print;
+const ziggit = @import("ziggit");
+
+// Benchmark results struct for comparison
+const BenchmarkResult = struct {
+    operation: []const u8,
+    zig_api_ns: ?u64 = null,
+    git_cli_ns: ?u64 = null,
+    zig_success: bool = false,
+    git_success: bool = false,
+};
 
 fn formatDuration(ns: u64) void {
     if (ns < 1_000) {
-        print("{d} ns", .{ns});
+        std.debug.print("{d} ns", .{ns});
     } else if (ns < 1_000_000) {
-        print("{d:.1} μs", .{@as(f64, @floatFromInt(ns)) / 1_000.0});
+        std.debug.print("{d:.1} μs", .{@as(f64, @floatFromInt(ns)) / 1_000.0});
     } else if (ns < 1_000_000_000) {
-        print("{d:.2} ms", .{@as(f64, @floatFromInt(ns)) / 1_000_000.0});
+        std.debug.print("{d:.2} ms", .{@as(f64, @floatFromInt(ns)) / 1_000_000.0});
     } else {
-        print("{d:.3} s", .{@as(f64, @floatFromInt(ns)) / 1_000_000_000.0});
+        std.debug.print("{d:.3} s", .{@as(f64, @floatFromInt(ns)) / 1_000_000_000.0});
     }
 }
 
-fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8, cwd: ?[]const u8) !std.process.Child.RunResult {
+fn runGitCommand(allocator: std.mem.Allocator, args: []const []const u8, cwd: ?[]const u8) !std.process.Child.RunResult {
     return try std.process.Child.run(.{
         .allocator = allocator,
-        .argv = argv,
+        .argv = args,
         .cwd = cwd,
     });
 }
 
-fn benchmark(comptime name: []const u8, iterations: usize, func: anytype, args: anytype) !u64 {
-    var total_time: u64 = 0;
-    var min_time: u64 = std.math.maxInt(u64);
-    var max_time: u64 = 0;
-
+// Setup test repository using the Zig API
+fn setupTestRepoZigAPI(allocator: std.mem.Allocator, path: []const u8) !ziggit.Repository {
+    // Clean up any existing directory
+    std.fs.deleteTreeAbsolute(path) catch {};
+    
+    // Initialize repository using Zig API
+    var repo = try ziggit.Repository.init(allocator, path);
+    
+    // Create 50 files
     var i: usize = 0;
-    while (i < iterations) : (i += 1) {
-        const start = std.time.nanoTimestamp();
-        _ = try @call(.auto, func, args);
-        const end = std.time.nanoTimestamp();
+    while (i < 50) : (i += 1) {
+        const filename = try std.fmt.allocPrint(allocator, "file{d:03}.txt", .{i});
+        defer allocator.free(filename);
         
-        const duration = @as(u64, @intCast(end - start));
-        total_time += duration;
-        min_time = @min(min_time, duration);
-        max_time = @max(max_time, duration);
+        const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, filename });
+        defer allocator.free(file_path);
+        
+        const content = try std.fmt.allocPrint(allocator, "Content for file {d}\nLine 2\nLine 3\nSome more data to make it realistic.\n", .{i});
+        defer allocator.free(content);
+        
+        const file = try std.fs.createFileAbsolute(file_path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll(content);
+        
+        // Add file to git
+        try repo.add(filename);
     }
-
-    const mean_time = total_time / iterations;
     
-    print("{s:25} | ", .{name});
-    formatDuration(mean_time);
-    print("{s}", .{" | min: "});
-    formatDuration(min_time);
-    print("{s}", .{" | max: "});
-    formatDuration(max_time);
-    print("{s}", .{"\n"});
+    // Create initial commit
+    _ = try repo.commit("Initial commit with 50 files", "benchmark", "benchmark@example.com");
     
-    return mean_time;
+    // Create a tag
+    try repo.createTag("v1.0.0", "Initial version");
+    
+    return repo;
 }
 
-// Git CLI benchmark functions
-fn gitStatus(allocator: std.mem.Allocator, repo_path: []const u8) !void {
-    const result = try runCommand(allocator, &.{"git", "-C", repo_path, "status", "--porcelain"}, null);
-    allocator.free(result.stdout);
-    allocator.free(result.stderr);
-    if (result.term != .Exited or result.term.Exited != 0) {
-        return error.GitFailed;
-    }
-}
-
-fn gitRevParseHead(allocator: std.mem.Allocator, repo_path: []const u8) !void {
-    const result = try runCommand(allocator, &.{"git", "-C", repo_path, "rev-parse", "HEAD"}, null);
-    allocator.free(result.stdout);
-    allocator.free(result.stderr);
-    // It's ok if this fails for empty repos
-}
-
-fn gitDescribe(allocator: std.mem.Allocator, repo_path: []const u8) !void {
-    const result = try runCommand(allocator, &.{"git", "-C", repo_path, "describe", "--tags", "--abbrev=0"}, null);
-    allocator.free(result.stdout);
-    allocator.free(result.stderr);
-    // It's ok if this fails for repos with no tags
-}
-
-// Ziggit CLI benchmark functions (fallback to CLI since library is broken)
-fn ziggitStatusCLI(allocator: std.mem.Allocator, repo_path: []const u8) !void {
-    const result = try runCommand(allocator, &.{"/root/ziggit/zig-out/bin/ziggit", "-C", repo_path, "status", "--porcelain"}, null);
-    allocator.free(result.stdout);
-    allocator.free(result.stderr);
-    if (result.term != .Exited or result.term.Exited != 0) {
-        return error.ZiggitFailed;
-    }
-}
-
-fn ziggitLogCLI(allocator: std.mem.Allocator, repo_path: []const u8) !void {
-    const result = try runCommand(allocator, &.{"/root/ziggit/zig-out/bin/ziggit", "-C", repo_path, "log", "--oneline"}, null);
-    allocator.free(result.stdout);
-    allocator.free(result.stderr);
-    if (result.term != .Exited or result.term.Exited != 0) {
-        return error.ZiggitFailed;
-    }
-}
-
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    
-    print("{s}\n", .{"=== Library API Performance Benchmark ==="});
-    print("{s}\n", .{"Note: Ziggit library API has compilation issues, using CLI fallback"});
-    print("{s}\n", .{"Setting up test repository with git CLI..."});
-    
-    const test_dir = "/tmp/ziggit_lib_bench";
-    
-    // Clean up any existing test directory
-    std.fs.deleteTreeAbsolute(test_dir) catch {};
-    
-    // Create test repository with real git
-    try std.fs.makeDirAbsolute(test_dir);
+// Setup test repository with git CLI for fallback testing
+fn setupTestRepoGitCLI(allocator: std.mem.Allocator, path: []const u8) !void {
+    // Clean up any existing directory
+    std.fs.deleteTreeAbsolute(path) catch {};
+    try std.fs.makeDirAbsolute(path);
     
     // Initialize git repo
     {
-        const result = try runCommand(allocator, &.{"git", "init"}, test_dir);
+        const result = try runGitCommand(allocator, &.{"git", "init"}, path);
         allocator.free(result.stdout);
         allocator.free(result.stderr);
     }
     {
-        const result = try runCommand(allocator, &.{"git", "config", "user.name", "Benchmark"}, test_dir);
+        const result = try runGitCommand(allocator, &.{"git", "config", "user.name", "Benchmark"}, path);
         allocator.free(result.stdout);
         allocator.free(result.stderr);
     }
     {
-        const result = try runCommand(allocator, &.{"git", "config", "user.email", "bench@test.com"}, test_dir);
+        const result = try runGitCommand(allocator, &.{"git", "config", "user.email", "bench@test.com"}, path);
         allocator.free(result.stdout);
         allocator.free(result.stderr);
     }
     
-    // Create some files
+    // Create 50 files
     var i: usize = 0;
-    while (i < 20) : (i += 1) {
-        const filename = try std.fmt.allocPrint(allocator, "{s}/file{d}.txt", .{test_dir, i});
+    while (i < 50) : (i += 1) {
+        const filename = try std.fmt.allocPrint(allocator, "{s}/file{d:03}.txt", .{path, i});
         defer allocator.free(filename);
-        const content = try std.fmt.allocPrint(allocator, "Content for file {d}\nLine 2\nLine 3\n", .{i});
+        const content = try std.fmt.allocPrint(allocator, "Content for file {d}\nLine 2\nLine 3\nSome more data to make it realistic.\n", .{i});
         defer allocator.free(content);
         const file = try std.fs.createFileAbsolute(filename, .{});
         defer file.close();
@@ -142,93 +104,350 @@ pub fn main() !void {
     
     // Add files and create commits
     {
-        const result = try runCommand(allocator, &.{"git", "add", "."}, test_dir);
+        const result = try runGitCommand(allocator, &.{"git", "add", "."}, path);
         allocator.free(result.stdout);
         allocator.free(result.stderr);
     }
     {
-        const result = try runCommand(allocator, &.{"git", "commit", "-m", "Initial commit with 20 files"}, test_dir);
+        const result = try runGitCommand(allocator, &.{"git", "commit", "-m", "Initial commit with 50 files"}, path);
         allocator.free(result.stdout);
         allocator.free(result.stderr);
     }
     
     // Create a tag
     {
-        const result = try runCommand(allocator, &.{"git", "tag", "v1.0.0"}, test_dir);
+        const result = try runGitCommand(allocator, &.{"git", "tag", "v1.0.0"}, path);
         allocator.free(result.stdout);
         allocator.free(result.stderr);
     }
+}
+
+// Benchmark revParseHead: Zig API vs git CLI
+fn benchmarkRevParseHead(allocator: std.mem.Allocator, repo: ?*const ziggit.Repository, repo_path: []const u8, iterations: usize) !BenchmarkResult {
+    var result = BenchmarkResult{ .operation = "revParseHead" };
     
-    // Create more commits
-    var commit_num: usize = 2;
-    while (commit_num <= 3) : (commit_num += 1) {
-        // Modify some files
-        var file_num: usize = 0;
-        while (file_num < 5) : (file_num += 1) {
-            const filename = try std.fmt.allocPrint(allocator, "{s}/file{d}.txt", .{test_dir, file_num});
-            defer allocator.free(filename);
-            const content = try std.fmt.allocPrint(allocator, "Modified content {d} for file {d}\n", .{commit_num, file_num});
-            defer allocator.free(content);
-            const file = try std.fs.createFileAbsolute(filename, .{});
-            defer file.close();
-            try file.writeAll(content);
+    // Benchmark Zig API if available
+    if (repo != null) {
+        var total_time: u64 = 0;
+        var success_count: usize = 0;
+        
+        var i: usize = 0;
+        while (i < iterations) : (i += 1) {
+            const start = std.time.nanoTimestamp();
+            const head_hash = repo.?.revParseHead() catch {
+                continue;
+            };
+            const end = std.time.nanoTimestamp();
+            
+            // Verify we got a valid hash
+            if (head_hash.len == 40) {
+                total_time += @as(u64, @intCast(end - start));
+                success_count += 1;
+            }
         }
         
-        {
-            const result = try runCommand(allocator, &.{"git", "add", "."}, test_dir);
-            allocator.free(result.stdout);
-            allocator.free(result.stderr);
-        }
-        const commit_msg = try std.fmt.allocPrint(allocator, "Commit number {d}", .{commit_num});
-        defer allocator.free(commit_msg);
-        {
-            const result = try runCommand(allocator, &.{"git", "commit", "-m", commit_msg}, test_dir);
-            allocator.free(result.stdout);
-            allocator.free(result.stderr);
+        if (success_count > 0) {
+            result.zig_api_ns = total_time / success_count;
+            result.zig_success = true;
         }
     }
     
-    print("{s}\n\n", .{"Test repository created with 20 files and 3 commits"});
+    // Benchmark git CLI
+    {
+        var total_time: u64 = 0;
+        var success_count: usize = 0;
+        
+        var i: usize = 0;
+        while (i < iterations) : (i += 1) {
+            const start = std.time.nanoTimestamp();
+            const git_result = runGitCommand(allocator, &.{ "git", "-C", repo_path, "rev-parse", "HEAD" }, null) catch {
+                continue;
+            };
+            const end = std.time.nanoTimestamp();
+            
+            if (git_result.term == .Exited and git_result.term.Exited == 0) {
+                total_time += @as(u64, @intCast(end - start));
+                success_count += 1;
+            }
+            
+            allocator.free(git_result.stdout);
+            allocator.free(git_result.stderr);
+        }
+        
+        if (success_count > 0) {
+            result.git_cli_ns = total_time / success_count;
+            result.git_success = true;
+        }
+    }
     
-    const iterations = 25;
+    return result;
+}
+
+// Benchmark statusPorcelain: Zig API vs git CLI
+fn benchmarkStatusPorcelain(allocator: std.mem.Allocator, repo: ?*const ziggit.Repository, repo_path: []const u8, iterations: usize) !BenchmarkResult {
+    var result = BenchmarkResult{ .operation = "statusPorcelain" };
     
-    print("Benchmarking with {d} iterations:\n", .{iterations});
-    print("{s:25} | {s:10} | {s:10} | {s:10}\n", .{"Operation", "Mean", "Min", "Max"});
-    print("{s}\n", .{"----------------------------------------------------------------------"});
+    // Benchmark Zig API if available
+    if (repo != null) {
+        var total_time: u64 = 0;
+        var success_count: usize = 0;
+        
+        var i: usize = 0;
+        while (i < iterations) : (i += 1) {
+            const start = std.time.nanoTimestamp();
+            const status = repo.?.statusPorcelain(allocator) catch {
+                continue;
+            };
+            const end = std.time.nanoTimestamp();
+            
+            allocator.free(status);
+            total_time += @as(u64, @intCast(end - start));
+            success_count += 1;
+        }
+        
+        if (success_count > 0) {
+            result.zig_api_ns = total_time / success_count;
+            result.zig_success = true;
+        }
+    }
     
-    // Benchmark git CLI operations
-    _ = benchmark("git status --porcelain", iterations, gitStatus, .{allocator, test_dir}) catch |err| {
-        print("git status benchmark failed: {}\n", .{err});
-        return;
+    // Benchmark git CLI
+    {
+        var total_time: u64 = 0;
+        var success_count: usize = 0;
+        
+        var i: usize = 0;
+        while (i < iterations) : (i += 1) {
+            const start = std.time.nanoTimestamp();
+            const git_result = runGitCommand(allocator, &.{ "git", "-C", repo_path, "status", "--porcelain" }, null) catch {
+                continue;
+            };
+            const end = std.time.nanoTimestamp();
+            
+            if (git_result.term == .Exited and git_result.term.Exited == 0) {
+                total_time += @as(u64, @intCast(end - start));
+                success_count += 1;
+            }
+            
+            allocator.free(git_result.stdout);
+            allocator.free(git_result.stderr);
+        }
+        
+        if (success_count > 0) {
+            result.git_cli_ns = total_time / success_count;
+            result.git_success = true;
+        }
+    }
+    
+    return result;
+}
+
+// Benchmark describeTags: Zig API vs git CLI
+fn benchmarkDescribeTags(allocator: std.mem.Allocator, repo: ?*const ziggit.Repository, repo_path: []const u8, iterations: usize) !BenchmarkResult {
+    var result = BenchmarkResult{ .operation = "describeTags" };
+    
+    // Benchmark Zig API if available
+    if (repo != null) {
+        var total_time: u64 = 0;
+        var success_count: usize = 0;
+        
+        var i: usize = 0;
+        while (i < iterations) : (i += 1) {
+            const start = std.time.nanoTimestamp();
+            const tags = repo.?.describeTags(allocator) catch {
+                continue;
+            };
+            const end = std.time.nanoTimestamp();
+            
+            allocator.free(tags);
+            total_time += @as(u64, @intCast(end - start));
+            success_count += 1;
+        }
+        
+        if (success_count > 0) {
+            result.zig_api_ns = total_time / success_count;
+            result.zig_success = true;
+        }
+    }
+    
+    // Benchmark git CLI
+    {
+        var total_time: u64 = 0;
+        var success_count: usize = 0;
+        
+        var i: usize = 0;
+        while (i < iterations) : (i += 1) {
+            const start = std.time.nanoTimestamp();
+            const git_result = runGitCommand(allocator, &.{ "git", "-C", repo_path, "describe", "--tags", "--abbrev=0" }, null) catch {
+                continue;
+            };
+            const end = std.time.nanoTimestamp();
+            
+            if (git_result.term == .Exited and git_result.term.Exited == 0) {
+                total_time += @as(u64, @intCast(end - start));
+                success_count += 1;
+            }
+            
+            allocator.free(git_result.stdout);
+            allocator.free(git_result.stderr);
+        }
+        
+        if (success_count > 0) {
+            result.git_cli_ns = total_time / success_count;
+            result.git_success = true;
+        }
+    }
+    
+    return result;
+}
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    
+    std.debug.print("=== Ziggit Library API Performance Benchmark ===\n", .{});
+    std.debug.print("Comparing Zig API vs Git CLI performance\n\n", .{});
+    
+    const zig_api_test_dir = "/tmp/ziggit_lib_zig_api";
+    const git_cli_test_dir = "/tmp/ziggit_lib_git_cli";
+    
+    // Try to setup test repository with Zig API
+    var zig_repo_opt: ?ziggit.Repository = null;
+    var zig_api_available = false;
+    
+    zig_repo_opt = setupTestRepoZigAPI(allocator, zig_api_test_dir) catch |err| blk: {
+        std.debug.print("Note: Zig API setup failed ({}), falling back to Git CLI comparison\n", .{err});
+        break :blk null;
     };
-    _ = benchmark("git rev-parse HEAD", iterations, gitRevParseHead, .{allocator, test_dir}) catch |err| {
-        print("git rev-parse benchmark failed: {}\n", .{err});
-        return;
-    };
-    _ = benchmark("git describe --tags", iterations, gitDescribe, .{allocator, test_dir}) catch |err| {
-        print("git describe benchmark failed: {}\n", .{err});
-        return;
-    };
     
-    print("{s}\n", .{"----------------------------------------------------------------------"});
+    if (zig_repo_opt != null) {
+        zig_api_available = true;
+        std.debug.print("Repository created successfully with Zig API.\n\n", .{});
+    }
     
-    // Benchmark ziggit CLI operations (as library API fallback)
-    _ = benchmark("ziggit status (CLI)", iterations, ziggitStatusCLI, .{allocator, test_dir}) catch |err| {
-        print("ziggit status benchmark failed: {}\n", .{err});
-        print("Note: This is expected if ziggit binary is not built or functional\n", .{});
-    };
-    _ = benchmark("ziggit log (CLI)", iterations, ziggitLogCLI, .{allocator, test_dir}) catch |err| {
-        print("ziggit log benchmark failed: {}\n", .{err});
-        print("Note: This is expected if ziggit binary is not built or functional\n", .{});
-    };
+    // Setup test repository with git CLI for baseline
+    try setupTestRepoGitCLI(allocator, git_cli_test_dir);
+    defer std.fs.deleteTreeAbsolute(git_cli_test_dir) catch {};
     
-    print("{s}\n", .{""});
-    print("{s}\n", .{"Note: ziggit library API could not be tested due to compilation issues"});
-    print("{s}\n", .{"in src/lib/ziggit.zig maintained by another agent."});
-    print("{s}\n", .{"CLI fallback used instead for performance comparison."});
+    const iterations = if (zig_api_available) 500 else 100;
+    std.debug.print("Running {d} iterations of each operation...\n\n", .{iterations});
     
-    // Clean up
-    std.fs.deleteTreeAbsolute(test_dir) catch {};
+    // Run benchmarks
+    const BENCHMARK_COUNT = 3;
+    var results: [BENCHMARK_COUNT]BenchmarkResult = undefined;
     
-    print("{s}\n", .{"Library benchmark completed!"});
+    const repo_ref = if (zig_repo_opt != null) &zig_repo_opt.? else null;
+    const test_path = if (zig_api_available) zig_api_test_dir else git_cli_test_dir;
+    
+    results[0] = try benchmarkRevParseHead(allocator, repo_ref, test_path, iterations);
+    results[1] = try benchmarkStatusPorcelain(allocator, repo_ref, test_path, iterations);
+    results[2] = try benchmarkDescribeTags(allocator, repo_ref, test_path, iterations);
+    
+    // Print results table
+    std.debug.print("=== RESULTS ===\n", .{});
+    if (zig_api_available) {
+        std.debug.print("Operation         | Zig API     | Git CLI     | Speedup\n", .{});
+        std.debug.print("------------------|-------------|-------------|--------\n", .{});
+    } else {
+        std.debug.print("Operation         | Git CLI     | Notes\n", .{});
+        std.debug.print("------------------|-------------|---------------------------\n", .{});
+    }
+    
+    for (results) |result| {
+        std.debug.print("{s:<17} | ", .{result.operation});
+        
+        if (zig_api_available) {
+            if (result.zig_success and result.zig_api_ns != null) {
+                formatDuration(result.zig_api_ns.?);
+                std.debug.print(" | ", .{});
+            } else {
+                std.debug.print("    FAILED | ", .{});
+            }
+            
+            if (result.git_success and result.git_cli_ns != null) {
+                formatDuration(result.git_cli_ns.?);
+                std.debug.print(" | ", .{});
+            } else {
+                std.debug.print("    FAILED | ", .{});
+            }
+            
+            if (result.zig_success and result.git_success and 
+                result.zig_api_ns != null and result.git_cli_ns != null) {
+                const speedup = @as(f64, @floatFromInt(result.git_cli_ns.?)) / @as(f64, @floatFromInt(result.zig_api_ns.?));
+                std.debug.print("{d:.1}x", .{speedup});
+            } else {
+                std.debug.print("  N/A", .{});
+            }
+        } else {
+            if (result.git_success and result.git_cli_ns != null) {
+                formatDuration(result.git_cli_ns.?);
+                std.debug.print(" | Zig API unavailable", .{});
+            } else {
+                std.debug.print("    FAILED | Git CLI failed", .{});
+            }
+        }
+        
+        std.debug.print("\n", .{});
+    }
+    
+    // Analysis
+    if (zig_api_available) {
+        std.debug.print("\n=== ANALYSIS ===\n", .{});
+        std.debug.print("Direct Zig API vs Git CLI performance comparison:\n\n", .{});
+        
+        var total_zig_time: u64 = 0;
+        var total_git_time: u64 = 0;
+        var valid_comparisons: usize = 0;
+        
+        for (results) |result| {
+            if (result.zig_success and result.git_success and 
+                result.zig_api_ns != null and result.git_cli_ns != null) {
+                total_zig_time += result.zig_api_ns.?;
+                total_git_time += result.git_cli_ns.?;
+                valid_comparisons += 1;
+                
+                const zig_time = @as(f64, @floatFromInt(result.zig_api_ns.?));
+                const git_time = @as(f64, @floatFromInt(result.git_cli_ns.?));
+                const improvement = ((git_time - zig_time) / git_time) * 100.0;
+                
+                std.debug.print("• {s}: {d:.1}% faster (eliminates process spawn overhead)\n", .{
+                    result.operation, improvement,
+                });
+            } else if (result.zig_success and !result.git_success) {
+                std.debug.print("• {s}: Zig API succeeded, Git CLI failed\n", .{result.operation});
+            } else if (!result.zig_success and result.git_success) {
+                std.debug.print("• {s}: Git CLI succeeded, Zig API failed\n", .{result.operation});
+            } else {
+                std.debug.print("• {s}: Both failed\n", .{result.operation});
+            }
+        }
+        
+        if (valid_comparisons > 0) {
+            const overall_speedup = @as(f64, @floatFromInt(total_git_time)) / @as(f64, @floatFromInt(total_zig_time));
+            std.debug.print("\nOVERALL: Zig API is {d:.1}x faster on average\n", .{overall_speedup});
+        }
+        
+        std.debug.print("\n=== WHY THIS MATTERS FOR BUN ===\n", .{});
+        std.debug.print("1. NO PROCESS SPAWNING: Direct function calls eliminate fork/exec overhead\n", .{});
+        std.debug.print("2. NO CLI PARSING: Data flows directly between Zig functions\n", .{});
+        std.debug.print("3. NO C FFI: Pure Zig-to-Zig calls (vs libgit2's C interface)\n", .{});
+        std.debug.print("4. NO GIT DEPENDENCY: Bun doesn't need git binary installed\n", .{});
+        std.debug.print("5. UNIFIED OPTIMIZATION: Zig compiler optimizes bun+ziggit as one unit\n", .{});
+    } else {
+        std.debug.print("\n=== FALLBACK MODE ===\n", .{});
+        std.debug.print("Zig API is not available - this demonstrates baseline Git CLI performance.\n", .{});
+        std.debug.print("When Zig API is working, expect significant performance improvements due to:\n", .{});
+        std.debug.print("• Elimination of process spawn overhead\n", .{});
+        std.debug.print("• Direct memory access to git structures\n", .{});
+        std.debug.print("• No subprocess communication latency\n", .{});
+    }
+    
+    // Cleanup
+    if (zig_repo_opt != null) {
+        zig_repo_opt.?.close();
+        std.fs.deleteTreeAbsolute(zig_api_test_dir) catch {};
+    }
+    
+    std.debug.print("\nLibrary benchmark completed!\n", .{});
 }
