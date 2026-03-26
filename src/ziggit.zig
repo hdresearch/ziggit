@@ -1773,6 +1773,9 @@ pub const Repository = struct {
         const pack_writer = @import("git/pack_writer.zig");
         const idx_writer = @import("git/idx_writer.zig");
 
+        const trace_timing = std.posix.getenv("ZIGGIT_TRACE_TIMING") != null;
+        var timer = std.time.Timer.start() catch null;
+
         // Create bare repo structure
         std.fs.cwd().makePath(target) catch |err| switch (err) {
             error.PathAlreadyExists => return error.AlreadyExists,
@@ -1811,19 +1814,47 @@ pub const Repository = struct {
             try f.writeAll("\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n");
         }
 
+        if (trace_timing) {
+            if (timer) |*t| {
+                std.debug.print("[timing] setup: {}ms\n", .{t.read() / std.time.ns_per_ms});
+                t.reset();
+            }
+        }
+
         // Clone pack data via smart HTTP with shallow depth
         var clone_result = smart_http.clonePackShallow(allocator, url, depth) catch {
             return error.HttpCloneFailed;
         };
         defer clone_result.deinit();
 
+        if (trace_timing) {
+            if (timer) |*t| {
+                std.debug.print("[timing] network (ref discovery + pack fetch): {}ms, pack_size={}, refs={}\n", .{ t.read() / std.time.ns_per_ms, clone_result.pack_data.len, clone_result.refs.len });
+                t.reset();
+            }
+        }
+
         // Save pack + generate idx
         if (clone_result.pack_data.len >= 32) {
             const checksum_hex = try pack_writer.savePackFast(allocator, git_dir, clone_result.pack_data);
             defer allocator.free(checksum_hex);
 
+            if (trace_timing) {
+                if (timer) |*t| {
+                    std.debug.print("[timing] save pack: {}ms\n", .{t.read() / std.time.ns_per_ms});
+                    t.reset();
+                }
+            }
+
             const idx_data = try idx_writer.generateIdxFromData(allocator, clone_result.pack_data);
             defer allocator.free(idx_data);
+
+            if (trace_timing) {
+                if (timer) |*t| {
+                    std.debug.print("[timing] generate idx: {}ms\n", .{t.read() / std.time.ns_per_ms});
+                    t.reset();
+                }
+            }
 
             const ip = try pack_writer.idxPath(allocator, git_dir, checksum_hex);
             defer allocator.free(ip);
