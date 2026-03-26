@@ -314,6 +314,22 @@ pub fn build(b: *std.Build) void {
     });
     dirty_detection_tests.root_module.addImport("ziggit", ziggit_module);
 
+    // Objects parser tests
+    const objects_parser_tests = b.addTest(.{
+        .root_source_file = b.path("test/objects_parser_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    objects_parser_tests.root_module.addImport("ziggit", ziggit_module);
+
+    // Ref resolution tests
+    const ref_resolution_tests = b.addTest(.{
+        .root_source_file = b.path("test/ref_resolution_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ref_resolution_tests.root_module.addImport("ziggit", ziggit_module);
+
     // Test step - runs all unit tests and integration tests
     const test_step = b.step("test", "Run all unit tests and integration tests");
     test_step.dependOn(&b.addRunArtifact(platform_unit_tests).step);
@@ -356,6 +372,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(commit_graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(index_binary_format_tests).step);
     test_step.dependOn(&b.addRunArtifact(dirty_detection_tests).step);
+    test_step.dependOn(&b.addRunArtifact(objects_parser_tests).step);
+    test_step.dependOn(&b.addRunArtifact(ref_resolution_tests).step);
 
     // E2E validation: ziggit writes, git reads
     const ziggit_writes_test = b.addTest(.{
