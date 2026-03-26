@@ -293,7 +293,11 @@ pub const Repository = struct {
 
     /// Check if working tree is clean - ultra-optimized
     pub fn isClean(self: *const Repository) !bool {
-        return try self.isUltraFastClean();
+        // For now, use a simple status-based check
+        // TODO: Re-enable ultra-fast path after fixing timing issues
+        const status = try self.statusPorcelain(self.allocator);
+        defer self.allocator.free(status);
+        return status.len == 0;
     }
     
     /// Optimized clean check that short-circuits on first change - much faster than full status
