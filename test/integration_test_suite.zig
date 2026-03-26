@@ -13,12 +13,12 @@ pub fn main() !void {
     defer {
         const leaked = gpa.deinit();
         if (leaked == .leak) {
-            print("Warning: memory leaked in integration tests\n");
+            print("Warning: memory leaked in integration tests\n", .{});
         }
     }
     const allocator = gpa.allocator();
 
-    print("=== Ziggit Integration Test Suite ===\n");
+    print("=== Ziggit Integration Test Suite ===\n", .{});
 
     // Configure git for testing
     _ = runCommandSafe(allocator, &.{"git", "config", "--global", "user.name", "Test User"}, fs.cwd());
@@ -41,12 +41,12 @@ pub fn main() !void {
     // Repository format compatibility
     try testRepositoryFormatCompatibility(allocator, test_dir);
 
-    print("✅ All integration tests passed!\n");
+    print("✅ All integration tests passed!\n", .{});
 }
 
 // Test: Create repo with git, verify ziggit can read it correctly
 fn testGitToZiggitInterop(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
-    print("🧪 Testing Git → Ziggit interoperability...\n");
+    print("🧪 Testing Git → Ziggit interoperability...\n", .{});
     
     const repo_dir = try test_dir.makeOpenPath("git_to_ziggit", .{});
     defer test_dir.deleteTree("git_to_ziggit") catch {};
@@ -58,6 +58,7 @@ fn testGitToZiggitInterop(allocator: std.mem.Allocator, test_dir: fs.Dir) !void 
     
     // Create and add files with git
     try repo_dir.writeFile(.{.sub_path = "README.md", .data = "# Test Project\n"});
+    try repo_dir.makeDir("src");
     try repo_dir.writeFile(.{.sub_path = "src/main.c", .data = "int main() { return 0; }\n"});
     _ = try runCommand(allocator, &.{"git", "add", "."}, repo_dir);
     _ = try runCommand(allocator, &.{"git", "commit", "-m", "Initial commit"}, repo_dir);
@@ -94,12 +95,12 @@ fn testGitToZiggitInterop(allocator: std.mem.Allocator, test_dir: fs.Dir) !void 
         return error.TestFailed;
     }
 
-    print("✅ Git → Ziggit interoperability test passed\n");
+    print("✅ Git → Ziggit interoperability test passed\n", .{});
 }
 
 // Test: Create repo with ziggit, verify git can read it correctly
 fn testZiggitToGitInterop(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
-    print("🧪 Testing Ziggit → Git interoperability...\n");
+    print("🧪 Testing Ziggit → Git interoperability...\n", .{});
     
     const repo_dir = try test_dir.makeOpenPath("ziggit_to_git", .{});
     defer test_dir.deleteTree("ziggit_to_git") catch {};
@@ -131,11 +132,11 @@ fn testZiggitToGitInterop(allocator: std.mem.Allocator, test_dir: fs.Dir) !void 
         return error.TestFailed;
     }
 
-    print("✅ Ziggit → Git interoperability test passed\n");
+    print("✅ Ziggit → Git interoperability test passed\n", .{});
 }
 
 fn testStatusPorcelainCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
-    print("🧪 Testing status --porcelain compatibility...\n");
+    print("🧪 Testing status --porcelain compatibility...\n", .{});
     
     const repo_dir = try test_dir.makeOpenPath("status_test", .{});
     defer test_dir.deleteTree("status_test") catch {};
@@ -165,17 +166,17 @@ fn testStatusPorcelainCompatibility(allocator: std.mem.Allocator, test_dir: fs.D
     const ziggit_has_modified = std.mem.containsAtLeast(u8, ziggit_status, 1, "tracked.txt");
     
     if (!git_has_modified or !ziggit_has_modified) {
-        print("❌ Status outputs don't both detect modified files\n");
+        print("❌ Status outputs don't both detect modified files\n", .{});
         print("   Git: '{s}'\n", .{git_status});
         print("   Ziggit: '{s}'\n", .{ziggit_status});
         return error.TestFailed;
     }
     
-    print("✅ Status --porcelain compatibility test passed\n");
+    print("✅ Status --porcelain compatibility test passed\n", .{});
 }
 
 fn testLogOnelineCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
-    print("🧪 Testing log --oneline compatibility...\n");
+    print("🧪 Testing log --oneline compatibility...\n", .{});
     
     const repo_dir = try test_dir.makeOpenPath("log_test", .{});
     defer test_dir.deleteTree("log_test") catch {};
@@ -208,17 +209,17 @@ fn testLogOnelineCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) !
                               std.mem.containsAtLeast(u8, ziggit_log, 1, "Second commit");
     
     if (!git_has_commits or !ziggit_has_commits) {
-        print("❌ Log outputs don't both contain expected commits\n");
+        print("❌ Log outputs don't both contain expected commits\n", .{});
         print("   Git: '{s}'\n", .{git_log});
         print("   Ziggit: '{s}'\n", .{ziggit_log});
         return error.TestFailed;
     }
     
-    print("✅ Log --oneline compatibility test passed\n");
+    print("✅ Log --oneline compatibility test passed\n", .{});
 }
 
 fn testBranchCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
-    print("🧪 Testing branch compatibility...\n");
+    print("🧪 Testing branch compatibility...\n", .{});
     
     const repo_dir = try test_dir.makeOpenPath("branch_test", .{});
     defer test_dir.deleteTree("branch_test") catch {};
@@ -257,11 +258,11 @@ fn testBranchCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) !void
         }
     }
     
-    print("✅ Branch compatibility test passed\n");
+    print("✅ Branch compatibility test passed\n", .{});
 }
 
 fn testDiffCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
-    print("🧪 Testing diff compatibility...\n");
+    print("🧪 Testing diff compatibility...\n", .{});
     
     const repo_dir = try test_dir.makeOpenPath("diff_test", .{});
     defer test_dir.deleteTree("diff_test") catch {};
@@ -298,17 +299,17 @@ fn testDiffCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
                                   std.mem.containsAtLeast(u8, ziggit_diff, 1, "test.txt");
     
     if (git_detects_change and !ziggit_detects_change) {
-        print("❌ Git detected changes but ziggit didn't\n");
+        print("❌ Git detected changes but ziggit didn't\n", .{});
         print("   Git: '{s}'\n", .{git_diff});
         print("   Ziggit: '{s}'\n", .{ziggit_diff});
         return error.TestFailed;
     }
     
-    print("✅ Diff compatibility test passed\n");
+    print("✅ Diff compatibility test passed\n", .{});
 }
 
 fn testCheckoutCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
-    print("🧪 Testing checkout compatibility...\n");
+    print("🧪 Testing checkout compatibility...\n", .{});
     
     const repo_dir = try test_dir.makeOpenPath("checkout_test", .{});
     defer test_dir.deleteTree("checkout_test") catch {};
@@ -340,15 +341,15 @@ fn testCheckoutCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) !vo
     
     const is_on_main = std.mem.containsAtLeast(u8, current_branch, 1, "main");
     if (!is_on_main and !std.mem.eql(u8, ziggit_checkout, "ziggit checkout failed")) {
-        print("❌ Ziggit checkout may not have worked as expected\n");
+        print("❌ Ziggit checkout may not have worked as expected\n", .{});
         print("   Current branch: '{s}'\n", .{current_branch});
     }
     
-    print("✅ Checkout compatibility test passed\n");
+    print("✅ Checkout compatibility test passed\n", .{});
 }
 
 fn testRepositoryFormatCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
-    print("🧪 Testing repository format compatibility...\n");
+    print("🧪 Testing repository format compatibility...\n", .{});
     
     const repo_dir = try test_dir.makeOpenPath("format_test", .{});
     defer test_dir.deleteTree("format_test") catch {};
@@ -359,7 +360,7 @@ fn testRepositoryFormatCompatibility(allocator: std.mem.Allocator, test_dir: fs.
     // Verify git can recognize it as a valid repository
     const git_status = runCommand(allocator, &.{"git", "status"}, repo_dir) catch |err| switch (err) {
         error.CommandFailed => {
-            print("❌ Git cannot recognize ziggit-created repository\n");
+            print("❌ Git cannot recognize ziggit-created repository\n", .{});
             return error.TestFailed;
         },
         else => return err,
@@ -367,13 +368,12 @@ fn testRepositoryFormatCompatibility(allocator: std.mem.Allocator, test_dir: fs.
     defer allocator.free(git_status);
     
     // Check .git directory structure
-    const git_dir_exists = repo_dir.access(".git", .{}) catch false;
-    if (!git_dir_exists) {
-        print("❌ Ziggit init didn't create .git directory\n");
+    repo_dir.access(".git", .{}) catch {
+        print("❌ Ziggit init didn't create .git directory\n", .{});
         return error.TestFailed;
-    }
+    };
     
-    print("✅ Repository format compatibility test passed\n");
+    print("✅ Repository format compatibility test passed\n", .{});
 }
 
 // Utility functions

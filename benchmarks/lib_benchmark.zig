@@ -330,7 +330,7 @@ pub fn main() !void {
     try setupTestRepoGitCLI(allocator, git_cli_test_dir);
     defer std.fs.deleteTreeAbsolute(git_cli_test_dir) catch {};
     
-    const iterations = if (zig_api_available) 500 else 100;
+    const iterations: u32 = if (zig_api_available) 500 else 100;
     std.debug.print("Running {d} iterations of each operation...\n\n", .{iterations});
     
     // Run benchmarks
