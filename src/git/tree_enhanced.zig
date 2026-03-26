@@ -1,5 +1,6 @@
 const std = @import("std");
 const objects = @import("objects.zig");
+const platform_mod = @import("../platform/platform.zig");
 
 /// Git tree entry representing a file or directory
 pub const TreeEntry = struct {
@@ -269,10 +270,10 @@ fn compareEntries(context: void, a: TreeEntry, b: TreeEntry) bool {
 /// Tree walker for recursive traversal
 pub const TreeWalker = struct {
     git_dir: []const u8,
-    platform_impl: anytype,
+    platform_impl: *const platform_mod.Platform,
     allocator: std.mem.Allocator,
     
-    pub fn init(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) TreeWalker {
+    pub fn init(git_dir: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) TreeWalker {
         return TreeWalker{
             .git_dir = git_dir,
             .platform_impl = platform_impl,
