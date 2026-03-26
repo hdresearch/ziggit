@@ -213,7 +213,12 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
 
     // Commands with native ziggit implementations
     if (std.mem.eql(u8, command, "init")) {
-        try cmdInit(allocator, &args_iter, &platform_impl);
+        // Forward to real git for full compatibility; fall back to native on freestanding
+        if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
+            try forwardCmdToGit(allocator, all_original_args.items, &platform_impl);
+        } else {
+            try cmdInit(allocator, &args_iter, &platform_impl);
+        }
     } else if (std.mem.eql(u8, command, "status")) {
         // Forward to real git for full compatibility; fall back to native on freestanding
         if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
@@ -226,7 +231,12 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "ls-files")) {
         try forwardCmdToGit(allocator, all_original_args.items, &platform_impl);
     } else if (std.mem.eql(u8, command, "config")) {
-        try cmdConfig(allocator, &args_iter, &platform_impl);
+        // Forward to real git for full compatibility; fall back to native on freestanding
+        if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
+            try forwardCmdToGit(allocator, all_original_args.items, &platform_impl);
+        } else {
+            try cmdConfig(allocator, &args_iter, &platform_impl);
+        }
     // Commands that forward to real git for full compatibility
     } else if (std.mem.eql(u8, command, "commit") or
         std.mem.eql(u8, command, "log") or
@@ -259,16 +269,21 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     {
         try forwardCmdToGit(allocator, all_original_args.items, &platform_impl);
     } else if (std.mem.eql(u8, command, "--exec-path")) {
-        // Output the directory containing this executable
-        const self_exe = std.fs.selfExePathAlloc(allocator) catch {
-            try platform_impl.writeStdout("/usr/lib/git-core\n");
-            return;
-        };
-        defer allocator.free(self_exe);
-        const dir = std.fs.path.dirname(self_exe) orelse "/usr/lib/git-core";
-        const output = try std.fmt.allocPrint(allocator, "{s}\n", .{dir});
-        defer allocator.free(output);
-        try platform_impl.writeStdout(output);
+        // Forward to real git to get the correct exec-path for git helpers
+        if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
+            try forwardCmdToGit(allocator, all_original_args.items, &platform_impl);
+        } else {
+            // Output the directory containing this executable
+            const self_exe = std.fs.selfExePathAlloc(allocator) catch {
+                try platform_impl.writeStdout("/usr/lib/git-core\n");
+                return;
+            };
+            defer allocator.free(self_exe);
+            const dir = std.fs.path.dirname(self_exe) orelse "/usr/lib/git-core";
+            const output = try std.fmt.allocPrint(allocator, "{s}\n", .{dir});
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+        }
     } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
         if (version_mod.getVersionString(allocator)) |version_msg| {
             defer allocator.free(version_msg);
