@@ -194,36 +194,10 @@ pub fn build(b: *std.Build) void {
     bun_scenario_benchmark.root_module.addImport("ziggit", ziggit_module);
     const run_bun_scenario_benchmark = b.addRunArtifact(bun_scenario_benchmark);
 
-    // API vs CLI benchmark (PHASE 1 goal)
-    const api_vs_cli_bench = b.addExecutable(.{
-        .name = "api-vs-cli-bench",
-        .root_source_file = b.path("benchmarks/api_vs_cli_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    api_vs_cli_bench.root_module.addImport("ziggit", ziggit_module);
-    const run_api_vs_cli_bench = b.addRunArtifact(api_vs_cli_bench);
-    
-    const api_vs_cli_step = b.step("api-vs-cli", "Run API vs CLI benchmark");
-    api_vs_cli_step.dependOn(&run_api_vs_cli_bench.step);
-
-    // Optimized status benchmark
-    const optimized_status_bench = b.addExecutable(.{
-        .name = "optimized-status-bench",
-        .root_source_file = b.path("benchmarks/optimized_status_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    optimized_status_bench.root_module.addImport("ziggit", ziggit_module);
-    const run_optimized_status_bench = b.addRunArtifact(optimized_status_bench);
-    
-    const opt_status_step = b.step("opt-status", "Run optimized status benchmark");
-    opt_status_step.dependOn(&run_optimized_status_bench.step);
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&run_cli_benchmark.step);
     bench_step.dependOn(&run_lib_benchmark.step);
     bench_step.dependOn(&run_bun_scenario_benchmark.step);
-    bench_step.dependOn(&run_api_vs_cli_bench.step);
 
 
 
