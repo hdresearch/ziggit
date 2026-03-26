@@ -955,187 +955,105 @@ fn findOffsetInIdx(idx_data: []const u8, target_hash: [20]u8) ?usize {
 
 /// Apply delta to base data to reconstruct object with enhanced error handling and validation
 pub fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    // First try strict delta application
-    return applyDeltaWithFallback(base_data, delta_data, allocator) catch |err| {
-        // If standard delta application fails, try recovery strategies
+    // Fast path: optimized delta application (no fallback overhead)
+    return applyDeltaFast(base_data, delta_data, allocator) catch |err| {
+        // Only fall back for data-level errors, not OOM
         switch (err) {
-            error.InvalidDelta, 
-            error.ResultSizeMismatch,
-            error.DeltaTruncated,
-            error.BaseSizeMismatch => {
-                // Try more permissive delta application for recovery
-                return applyDeltaPermissive(base_data, delta_data, allocator) catch |recovery_err| {
-                    // If even permissive mode fails, try last resort
-                    if (recovery_err == error.InvalidDelta or recovery_err == error.ResultSizeMismatch) {
-                        return applyDeltaLastResort(base_data, delta_data, allocator) catch err; // Return original error
-                    }
-                    return recovery_err;
-                };
-            },
-            else => return err, // Don't attempt recovery for memory/system errors
+            error.OutOfMemory => return err,
+            else => {},
         }
+        // Fallback: try permissive then last-resort
+        return applyDeltaPermissive(base_data, delta_data, allocator) catch {
+            return applyDeltaLastResort(base_data, delta_data, allocator) catch err;
+        };
     };
 }
 
-/// Standard delta application with strict validation
-fn applyDeltaWithFallback(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    // Enhanced validation with specific error messages
-    if (delta_data.len < 2) return error.DeltaMissingHeaders;
-    if (base_data.len == 0) return error.EmptyBaseData;
-    if (base_data.len > 1024 * 1024 * 1024) return error.BaseDataTooLarge; // Increased to 1GB for large repos
-    if (delta_data.len > 100 * 1024 * 1024) return error.DeltaDataTooLarge; // Increased to 100MB delta limit
-    
+/// Optimized primary delta application path.
+/// Reads varint headers, pre-allocates result, applies copy/insert commands
+/// with minimal bounds checking on the hot path.
+fn applyDeltaFast(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    if (delta_data.len < 2) return error.InvalidDelta;
+
     var pos: usize = 0;
-    
-    // Read base size (variable length)
-    var base_size: usize = 0;
-    const ShiftT = std.math.Log2Int(usize); var shift: ShiftT = 0;
-    while (pos < delta_data.len and shift < 64) {
-        const b = delta_data[pos];
-        pos += 1;
-        base_size |= @as(usize, @intCast(b & 0x7F)) << shift;
-        if (b & 0x80 == 0) break;
-        shift += 7;
-        
-        // Prevent unreasonably large base sizes
-        if (shift > 32) { // Max 4GB base size
-            // debug print removed
-            return error.DeltaCorrupted;
-        }
-    }
-    
-    if (pos >= delta_data.len) return error.DeltaTruncated;
-    
-    // Read result size (variable length) 
-    var result_size: usize = 0;
-    shift = 0;
-    while (pos < delta_data.len and shift < 64) {
-        const b = delta_data[pos];
-        pos += 1;
-        result_size |= @as(usize, @intCast(b & 0x7F)) << shift;
-        if (b & 0x80 == 0) break;
-        shift += 7;
-        
-        // Prevent unreasonably large result sizes  
-        if (shift > 32) { // Max 4GB result size
-            // debug print removed
-            return error.DeltaCorrupted;
-        }
-    }
-    
-    // Verify base size matches actual base data
+
+    // Read base size varint
+    const base_size = readVarint(delta_data, &pos);
+    if (pos >= delta_data.len) return error.InvalidDelta;
+
+    // Read result size varint
+    const result_size = readVarint(delta_data, &pos);
+
+    // Validate base size (allow minor mismatch for thin packs)
     if (base_size != base_data.len) {
-        // debug print removed
-        return error.BaseSizeMismatch;
+        // Strict check — if sizes don't match, fall through to permissive
+        return error.InvalidDelta;
     }
-    
-    // Sanity check result size (100MB max for regular use)
-    if (result_size > 100 * 1024 * 1024) {
-        // debug print removed
-        return error.ResultTooLarge;
-    }
-    
-    // Basic sanity check: result size shouldn't be astronomically large
-    // Note: valid deltas CAN have result >> base (e.g., small shared header, large new content)
-    // Only reject truly unreasonable sizes (>100MB result from <1KB base)
-    if (result_size > 100 * 1024 * 1024 and base_size < 1024) {
-        return error.SuspiciousDelta;
-    }
-    
-    // Apply delta commands
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
-    try result.ensureTotalCapacity(result_size);
-    
+
+    // Sanity: reject absurdly large results
+    if (result_size > 1024 * 1024 * 1024) return error.InvalidDelta;
+
+    // Pre-allocate exact result size
+    var result = try allocator.alloc(u8, result_size);
+    errdefer allocator.free(result);
+    var result_pos: usize = 0;
+
     while (pos < delta_data.len) {
-        if (pos >= delta_data.len) break; // Safety check
-        
         const cmd = delta_data[pos];
         pos += 1;
-        
+
         if (cmd & 0x80 != 0) {
-            // Copy command
+            // COPY from base — decode offset and size inline
             var copy_offset: usize = 0;
             var copy_size: usize = 0;
-            
-            // Read offset (up to 4 bytes, little-endian)
-            if (cmd & 0x01 != 0) { 
-                if (pos >= delta_data.len) return error.DeltaTruncated;
-                copy_offset |= @as(usize, delta_data[pos]); 
-                pos += 1; 
-            }
-            if (cmd & 0x02 != 0) { 
-                if (pos >= delta_data.len) return error.DeltaTruncated;
-                copy_offset |= @as(usize, delta_data[pos]) << 8; 
-                pos += 1; 
-            }
-            if (cmd & 0x04 != 0) { 
-                if (pos >= delta_data.len) return error.DeltaTruncated;
-                copy_offset |= @as(usize, delta_data[pos]) << 16; 
-                pos += 1; 
-            }
-            if (cmd & 0x08 != 0) { 
-                if (pos >= delta_data.len) return error.DeltaTruncated;
-                copy_offset |= @as(usize, delta_data[pos]) << 24; 
-                pos += 1; 
-            }
-            
-            // Read size (up to 3 bytes, little-endian)
-            if (cmd & 0x10 != 0) { 
-                if (pos >= delta_data.len) return error.DeltaTruncated;
-                copy_size |= @as(usize, delta_data[pos]); 
-                pos += 1; 
-            }
-            if (cmd & 0x20 != 0) { 
-                if (pos >= delta_data.len) return error.DeltaTruncated;
-                copy_size |= @as(usize, delta_data[pos]) << 8; 
-                pos += 1; 
-            }
-            if (cmd & 0x40 != 0) { 
-                if (pos >= delta_data.len) return error.DeltaTruncated;
-                copy_size |= @as(usize, delta_data[pos]) << 16; 
-                pos += 1; 
-            }
-            
-            // Size 0 means 0x10000
+
+            if (cmd & 0x01 != 0) { copy_offset = delta_data[pos]; pos += 1; }
+            if (cmd & 0x02 != 0) { copy_offset |= @as(usize, delta_data[pos]) << 8; pos += 1; }
+            if (cmd & 0x04 != 0) { copy_offset |= @as(usize, delta_data[pos]) << 16; pos += 1; }
+            if (cmd & 0x08 != 0) { copy_offset |= @as(usize, delta_data[pos]) << 24; pos += 1; }
+            if (cmd & 0x10 != 0) { copy_size = delta_data[pos]; pos += 1; }
+            if (cmd & 0x20 != 0) { copy_size |= @as(usize, delta_data[pos]) << 8; pos += 1; }
+            if (cmd & 0x40 != 0) { copy_size |= @as(usize, delta_data[pos]) << 16; pos += 1; }
             if (copy_size == 0) copy_size = 0x10000;
-            
-            // Validate copy parameters
-            if (copy_offset >= base_data.len) return error.InvalidDelta;
+
             if (copy_offset + copy_size > base_data.len) return error.InvalidDelta;
-            if (copy_size == 0) return error.InvalidDelta;
-            
-            // Prevent result from growing too large
-            if (result.items.len + copy_size > result_size) return error.InvalidDelta;
-            
-            // Copy data from base
-            try result.appendSlice(base_data[copy_offset..copy_offset + copy_size]);
+            if (result_pos + copy_size > result_size) return error.InvalidDelta;
+
+            @memcpy(result[result_pos..][0..copy_size], base_data[copy_offset..][0..copy_size]);
+            result_pos += copy_size;
         } else if (cmd > 0) {
-            // Insert command - copy data from delta
-            const insert_size = @as(usize, cmd);
-            if (pos + insert_size > delta_data.len) return error.DeltaTruncated;
-            
-            // Prevent result from growing too large
-            if (result.items.len + insert_size > result_size) return error.InvalidDelta;
-            
-            try result.appendSlice(delta_data[pos..pos + insert_size]);
-            pos += insert_size;
+            // INSERT literal bytes from delta stream
+            const n: usize = @intCast(cmd);
+            if (pos + n > delta_data.len) return error.InvalidDelta;
+            if (result_pos + n > result_size) return error.InvalidDelta;
+
+            @memcpy(result[result_pos..][0..n], delta_data[pos..][0..n]);
+            result_pos += n;
+            pos += n;
         } else {
-            // cmd == 0 is reserved and invalid
-            return error.InvalidDelta;
+            return error.InvalidDelta; // cmd == 0 reserved
         }
-        
-        // Safety check: don't let result grow beyond expected size
-        if (result.items.len > result_size) return error.InvalidDelta;
     }
-    
-    // Verify result size matches expected
-    if (result.items.len != result_size) {
-        return error.ResultSizeMismatch;
-    }
-    
-    return try allocator.dupe(u8, result.items);
+
+    if (result_pos != result_size) return error.InvalidDelta;
+    return result;
 }
+
+/// Read a variable-length size from delta data (7 bits per byte, MSB = continuation).
+fn readVarint(data: []const u8, pos: *usize) usize {
+    var value: usize = 0;
+    var shift: u6 = 0;
+    while (pos.* < data.len) {
+        const b = data[pos.*];
+        pos.* += 1;
+        value |= @as(usize, b & 0x7F) << shift;
+        if (b & 0x80 == 0) break;
+        if (shift >= 56) break; // prevent overflow
+        shift += 7;
+    }
+    return value;
+}
+
 
 /// More permissive delta application for recovery from corrupted deltas
 fn applyDeltaPermissive(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
