@@ -258,7 +258,7 @@ const PackObjectType = enum(u3) {
     ref_delta = 7,
 };
 
-/// Find object in a specific pack file
+/// Find object in a specific pack file with enhanced validation and performance
 fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_str: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
     // Validate input hash format
     if (hash_str.len != 40) return error.InvalidHash;
@@ -274,11 +274,19 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     const idx_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{pack_dir_path, idx_filename});
     defer allocator.free(idx_path);
     
-    const idx_data = platform_impl.fs.readFile(allocator, idx_path) catch return error.ObjectNotFound;
+    const idx_data = platform_impl.fs.readFile(allocator, idx_path) catch |err| switch (err) {
+        error.FileNotFound => return error.ObjectNotFound,
+        error.AccessDenied => return error.PackIndexAccessDenied,
+        else => return error.PackIndexReadError,
+    };
     defer allocator.free(idx_data);
     
-    // Minimum size check for any pack index format
+    // Enhanced size validation
     if (idx_data.len < 8) return error.CorruptedPackIndex;
+    if (idx_data.len > 100 * 1024 * 1024) { // 100MB max for pack index
+        std.debug.print("Warning: pack index file {s} is very large ({} bytes)\n", .{idx_filename, idx_data.len});
+        return error.PackIndexTooLarge;
+    }
     
     // Check for pack index magic and version
     const magic = std.mem.readInt(u32, @ptrCast(idx_data[0..4]), .big);
@@ -303,22 +311,40 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
         }
     }
     
-    // Use fanout table for efficient searching
+    // Use fanout table for efficient searching with bounds checking
     const fanout_start = 8;
     const fanout_end = fanout_start + 256 * 4;
     if (idx_data.len < fanout_end) return error.ObjectNotFound;
     
-    // Get search range from fanout table
+    // Get search range from fanout table with enhanced bounds checking
     const first_byte = target_hash[0];
-    const start_index = if (first_byte == 0) 0 else std.mem.readInt(u32, @ptrCast(idx_data[fanout_start + (@as(usize, first_byte) - 1) * 4..fanout_start + (@as(usize, first_byte) - 1) * 4 + 4]), .big);
-    const end_index = std.mem.readInt(u32, @ptrCast(idx_data[fanout_start + @as(usize, first_byte) * 4..fanout_start + @as(usize, first_byte) * 4 + 4]), .big);
+    const start_index = if (first_byte == 0) 0 else blk: {
+        const offset = fanout_start + (@as(usize, first_byte) - 1) * 4;
+        if (offset + 4 > idx_data.len) return error.CorruptedPackIndex;
+        break :blk std.mem.readInt(u32, @ptrCast(idx_data[offset..offset + 4]), .big);
+    };
+    const end_index = blk: {
+        const offset = fanout_start + @as(usize, first_byte) * 4;
+        if (offset + 4 > idx_data.len) return error.CorruptedPackIndex;
+        break :blk std.mem.readInt(u32, @ptrCast(idx_data[offset..offset + 4]), .big);
+    };
+    
+    // Validate fanout table consistency
+    if (start_index > end_index) return error.CorruptedPackIndex;
+    if (end_index > 50_000_000) { // Sanity check: 50M objects max
+        std.debug.print("Warning: pack index claims {} objects, which seems excessive\n", .{end_index});
+        return error.SuspiciousPackIndex;
+    }
     
     if (start_index >= end_index) return error.ObjectNotFound;
     
-    // Binary search in the SHA-1 table within the range
+    // Binary search in the SHA-1 table within the range with better bounds checking
     const sha1_table_start = fanout_end;
     const sha1_table_end = sha1_table_start + end_index * 20;
-    if (idx_data.len < sha1_table_end) return error.ObjectNotFound;
+    if (idx_data.len < sha1_table_end) {
+        std.debug.print("Pack index truncated: expected {} bytes, got {} bytes\n", .{sha1_table_end, idx_data.len});
+        return error.CorruptedPackIndex;
+    }
     
     var low = start_index;
     var high = end_index;
