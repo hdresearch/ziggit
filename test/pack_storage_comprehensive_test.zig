@@ -864,3 +864,220 @@ test "idx offset entries are valid pack offsets" {
         try std.testing.expect(offset < pack_data.len - 20);
     }
 }
+
+// ============================================================================
+// Full round-trip: git creates repo -> we re-index -> git verifies
+// ============================================================================
+
+test "round-trip: git gc pack -> our idx -> git cat-file reads all objects" {
+    const allocator = std.testing.allocator;
+    const tmp_dir = try setupTmpDir();
+    defer cleanupTmpDir(tmp_dir);
+
+    // Create a git repo with several commits for delta creation
+    const src_dir = try std.fmt.allocPrint(allocator, "{s}/src_repo", .{tmp_dir});
+    defer allocator.free(src_dir);
+
+    try std.fs.cwd().makePath(src_dir);
+
+    const init_cmds = [_][]const u8{
+        "git init",
+        "git config user.email test@test.com",
+        "git config user.name Test",
+    };
+    for (init_cmds) |cmd| {
+        const full_cmd = try std.fmt.allocPrint(allocator, "cd {s} && {s}", .{ src_dir, cmd });
+        defer allocator.free(full_cmd);
+        const r = try std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{ "bash", "-c", full_cmd },
+            .max_output_bytes = 1024 * 1024,
+        });
+        allocator.free(r.stdout);
+        allocator.free(r.stderr);
+    }
+
+    // Multiple commits with similar content (triggers deltas on gc)
+    for (0..8) |i| {
+        var buf: [256]u8 = undefined;
+        const content = std.fmt.bufPrint(&buf, "Version {}\nShared content across versions\nMore shared text\nLine 4\nLine 5\n", .{i}) catch unreachable;
+        const fp = try std.fmt.allocPrint(allocator, "{s}/data.txt", .{src_dir});
+        defer allocator.free(fp);
+        {
+            const f = try std.fs.cwd().createFile(fp, .{});
+            defer f.close();
+            try f.writeAll(content);
+        }
+        var msg_buf: [32]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "v{}", .{i}) catch unreachable;
+        const cmd = try std.fmt.allocPrint(allocator, "cd {s} && git add -A && git commit -m '{s}'", .{ src_dir, msg });
+        defer allocator.free(cmd);
+        const r = try std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "bash", "-c", cmd }, .max_output_bytes = 1024 * 1024 });
+        allocator.free(r.stdout);
+        allocator.free(r.stderr);
+    }
+
+    // gc to create pack with deltas
+    {
+        const cmd = try std.fmt.allocPrint(allocator, "cd {s} && git gc --aggressive", .{src_dir});
+        defer allocator.free(cmd);
+        const r = try std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "bash", "-c", cmd }, .max_output_bytes = 1024 * 1024 });
+        allocator.free(r.stdout);
+        allocator.free(r.stderr);
+    }
+
+    // Find git's pack file
+    const pack_dir = try std.fmt.allocPrint(allocator, "{s}/.git/objects/pack", .{src_dir});
+    defer allocator.free(pack_dir);
+
+    var dir = try std.fs.cwd().openDir(pack_dir, .{ .iterate = true });
+    defer dir.close();
+    var iter = dir.iterate();
+    var pack_name: ?[]u8 = null;
+    defer if (pack_name) |pn| allocator.free(pn);
+
+    while (try iter.next()) |entry| {
+        if (std.mem.endsWith(u8, entry.name, ".pack")) {
+            pack_name = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir, entry.name });
+            break;
+        }
+    }
+    const git_pack = pack_name orelse return error.NoPackFileFound;
+
+    // Read git's pack
+    const pack_data = try std.fs.cwd().readFileAlloc(allocator, git_pack, 512 * 1024 * 1024);
+    defer allocator.free(pack_data);
+
+    // Create a new bare repo and save+index with our code
+    const dst_dir = try std.fmt.allocPrint(allocator, "{s}/dst_repo.git", .{tmp_dir});
+    defer allocator.free(dst_dir);
+    {
+        const r = try std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "git", "init", "--bare", dst_dir } });
+        allocator.free(r.stdout);
+        allocator.free(r.stderr);
+    }
+
+    const checksum = try pack_writer.savePack(allocator, dst_dir, pack_data);
+    defer allocator.free(checksum);
+    const pp = try pack_writer.packPath(allocator, dst_dir, checksum);
+    defer allocator.free(pp);
+
+    // Delete git's idx so we generate our own
+    try idx_writer.generateIdx(allocator, pp);
+
+    // Get the HEAD hash from source repo
+    const head_cmd = try std.fmt.allocPrint(allocator, "cd {s} && git rev-parse HEAD", .{src_dir});
+    defer allocator.free(head_cmd);
+    const head_r = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "bash", "-c", head_cmd },
+    });
+    defer allocator.free(head_r.stdout);
+    defer allocator.free(head_r.stderr);
+    const head_hash = std.mem.trimRight(u8, head_r.stdout, "\n\r ");
+
+    // Write refs in dst
+    const refs = [_]pack_writer.RefUpdate{
+        .{ .name = "refs/heads/master", .hash = head_hash },
+    };
+    try pack_writer.updateRefsAfterClone(allocator, dst_dir, &refs, true);
+
+    // git verify-pack with our idx
+    {
+        const r = try std.process.Child.run(.{
+            .allocator = allocator,
+            .max_output_bytes = 10 * 1024 * 1024,
+            .argv = &.{ "git", "verify-pack", "-v", pp },
+        });
+        defer allocator.free(r.stdout);
+        defer allocator.free(r.stderr);
+        try std.testing.expectEqual(@as(u8, 0), r.term.Exited);
+    }
+
+    // git log should work in dst
+    {
+        const r = try std.process.Child.run(.{
+            .allocator = allocator,
+            .max_output_bytes = 10 * 1024 * 1024,
+            .argv = &.{ "git", "--git-dir", dst_dir, "log", "--oneline" },
+        });
+        defer allocator.free(r.stdout);
+        defer allocator.free(r.stderr);
+        try std.testing.expectEqual(@as(u8, 0), r.term.Exited);
+        // Should see all 8 commits
+        var line_count: usize = 0;
+        var lines = std.mem.splitScalar(u8, std.mem.trimRight(u8, r.stdout, "\n"), '\n');
+        while (lines.next()) |_| line_count += 1;
+        try std.testing.expect(line_count >= 8);
+    }
+
+    // git cat-file --batch-all-objects should work (verifies every object is readable)
+    {
+        const r = try std.process.Child.run(.{
+            .allocator = allocator,
+            .max_output_bytes = 10 * 1024 * 1024,
+            .argv = &.{ "git", "--git-dir", dst_dir, "cat-file", "--batch-check", "--batch-all-objects" },
+        });
+        defer allocator.free(r.stdout);
+        defer allocator.free(r.stderr);
+        try std.testing.expectEqual(@as(u8, 0), r.term.Exited);
+        // Should list all objects (at least commits + trees + blobs)
+        var obj_lines: usize = 0;
+        var lines = std.mem.splitScalar(u8, std.mem.trimRight(u8, r.stdout, "\n"), '\n');
+        while (lines.next()) |line| {
+            if (line.len > 0) obj_lines += 1;
+        }
+        try std.testing.expect(obj_lines >= 16); // 8 commits + 8 trees + at least 1 blob
+    }
+}
+
+// ============================================================================
+// Large blob test (> 16KB to stress streaming decompression)
+// ============================================================================
+
+test "idx generation works with large blobs (>64KB)" {
+    const allocator = std.testing.allocator;
+    const tmp_dir = try setupTmpDir();
+    defer cleanupTmpDir(tmp_dir);
+
+    const git_dir = try std.fmt.allocPrint(allocator, "{s}/.git", .{tmp_dir});
+    defer allocator.free(git_dir);
+    {
+        const r = try std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "git", "init", "--bare", git_dir } });
+        allocator.free(r.stdout);
+        allocator.free(r.stderr);
+    }
+
+    // Create a 100KB blob
+    const large_data = try allocator.alloc(u8, 100 * 1024);
+    defer allocator.free(large_data);
+    for (large_data, 0..) |*b, i| {
+        b.* = @intCast(i % 256);
+    }
+
+    const objects = [_]PackObject{
+        .{ .type_str = "blob", .data = large_data },
+    };
+    const pack_data = try buildPackFile(allocator, &objects);
+    defer allocator.free(pack_data);
+
+    const hex = try pack_writer.savePack(allocator, git_dir, pack_data);
+    defer allocator.free(hex);
+    const pp = try pack_writer.packPath(allocator, git_dir, hex);
+    defer allocator.free(pp);
+    try idx_writer.generateIdx(allocator, pp);
+
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .max_output_bytes = 10 * 1024 * 1024,
+        .argv = &.{ "git", "verify-pack", "-v", pp },
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try std.testing.expectEqual(@as(u8, 0), result.term.Exited);
+
+    // Check SHA-1 matches our expectation
+    const expected_sha = gitHashObject(allocator, "blob", large_data);
+    const hex_expected = std.fmt.bytesToHex(expected_sha, .lower);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, &hex_expected) != null);
+}
