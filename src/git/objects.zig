@@ -1564,6 +1564,111 @@ pub fn analyzePackFile(pack_path: []const u8, platform_impl: anytype, allocator:
     return stats;
 }
 
+/// Analyze pack file health and provide diagnostics
+pub fn analyzePackFileHealth(pack_dir_path: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !PackHealthReport {
+    var report = PackHealthReport{
+        .total_packs = 0,
+        .total_objects = 0,
+        .corrupted_packs = std.ArrayList([]const u8).init(allocator),
+        .missing_indices = std.ArrayList([]const u8).init(allocator),
+        .pack_sizes = std.ArrayList(u64).init(allocator),
+        .health_score = 1.0,
+    };
+    
+    var pack_dir = std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return report, // No pack directory is valid
+        else => return err,
+    };
+    defer pack_dir.close();
+    
+    var iterator = pack_dir.iterate();
+    while (iterator.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".pack")) continue;
+        
+        report.total_packs += 1;
+        const pack_stat = pack_dir.statFile(entry.name) catch continue;
+        try report.pack_sizes.append(pack_stat.size);
+        
+        // Check if corresponding .idx file exists
+        const idx_name = try std.fmt.allocPrint(allocator, "{s}.idx", .{entry.name[0..entry.name.len-5]});
+        defer allocator.free(idx_name);
+        
+        pack_dir.statFile(idx_name) catch {
+            try report.missing_indices.append(try allocator.dupe(u8, entry.name));
+            report.health_score -= 0.2;
+            continue;
+        };
+        
+        // Try to read pack header to validate
+        const pack_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{pack_dir_path, entry.name});
+        defer allocator.free(pack_path);
+        
+        const header_data = platform_impl.fs.readFile(allocator, pack_path) catch {
+            try report.corrupted_packs.append(try allocator.dupe(u8, entry.name));
+            report.health_score -= 0.3;
+            continue;
+        };
+        defer allocator.free(header_data);
+        
+        if (header_data.len < 12) {
+            try report.corrupted_packs.append(try allocator.dupe(u8, entry.name));
+            report.health_score -= 0.3;
+            continue;
+        }
+        
+        if (!std.mem.eql(u8, header_data[0..4], "PACK")) {
+            try report.corrupted_packs.append(try allocator.dupe(u8, entry.name));
+            report.health_score -= 0.3;
+            continue;
+        }
+        
+        const object_count = std.mem.readInt(u32, @ptrCast(header_data[8..12]), .big);
+        report.total_objects += object_count;
+    }
+    
+    // Ensure health score doesn't go below 0
+    if (report.health_score < 0) report.health_score = 0;
+    
+    return report;
+}
+
+/// Pack file health analysis report
+pub const PackHealthReport = struct {
+    total_packs: u32,
+    total_objects: u64,
+    corrupted_packs: std.ArrayList([]const u8),
+    missing_indices: std.ArrayList([]const u8),
+    pack_sizes: std.ArrayList(u64),
+    health_score: f32, // 0.0 = very unhealthy, 1.0 = perfect health
+    
+    pub fn deinit(self: *PackHealthReport) void {
+        for (self.corrupted_packs.items) |pack_name| {
+            self.corrupted_packs.allocator.free(pack_name);
+        }
+        self.corrupted_packs.deinit();
+        
+        for (self.missing_indices.items) |pack_name| {
+            self.missing_indices.allocator.free(pack_name);
+        }
+        self.missing_indices.deinit();
+        
+        self.pack_sizes.deinit();
+    }
+    
+    pub fn isHealthy(self: PackHealthReport) bool {
+        return self.health_score > 0.7 and self.corrupted_packs.items.len == 0;
+    }
+    
+    pub fn getTotalPackSizeBytes(self: PackHealthReport) u64 {
+        var total: u64 = 0;
+        for (self.pack_sizes.items) |size| {
+            total += size;
+        }
+        return total;
+    }
+};
+
 /// Get pack file info without loading the entire file (for performance)
 pub fn getPackFileInfo(pack_path: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !PackFileStats {
     // Read just the header (first 32 bytes) for basic info
