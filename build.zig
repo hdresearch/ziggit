@@ -539,12 +539,12 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(pack_format_unit_tests).step);
 
     test_step.dependOn(&b.addRunArtifact(pack_network_reception_tests).step);
+    test_step.dependOn(&b.addRunArtifact(pack_network_e2e_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_clone_flow_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_thin_public_api_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_object_read_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_ref_delta_thin_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_readback_thin_tests).step);
-    test_step.dependOn(&b.addRunArtifact(pack_network_e2e_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_infrastructure_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_git_exact_compat_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_end_to_end_tests).step);
