@@ -192,6 +192,30 @@ pub fn build(b: *std.Build) void {
     });
     repo_api_tests.root_module.addImport("ziggit", ziggit_module);
 
+    // Object integrity tests
+    const object_integrity_tests = b.addTest(.{
+        .root_source_file = b.path("test/object_integrity_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    object_integrity_tests.root_module.addImport("ziggit", ziggit_module);
+
+    // Index roundtrip tests
+    const index_roundtrip_tests = b.addTest(.{
+        .root_source_file = b.path("test/index_roundtrip_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    index_roundtrip_tests.root_module.addImport("ziggit", ziggit_module);
+
+    // Edge case tests
+    const edge_cases_tests = b.addTest(.{
+        .root_source_file = b.path("test/edge_cases_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    edge_cases_tests.root_module.addImport("ziggit", ziggit_module);
+
     // Test step - runs all unit tests and integration tests
     const test_step = b.step("test", "Run all unit tests and integration tests");
     test_step.dependOn(&b.addRunArtifact(platform_unit_tests).step);
@@ -216,6 +240,9 @@ pub fn build(b: *std.Build) void {
     _ = refs_enhanced_tests;
     _ = validation_comprehensive_tests;
     test_step.dependOn(&b.addRunArtifact(repo_api_tests).step);
+    test_step.dependOn(&b.addRunArtifact(object_integrity_tests).step);
+    test_step.dependOn(&b.addRunArtifact(index_roundtrip_tests).step);
+    test_step.dependOn(&b.addRunArtifact(edge_cases_tests).step);
 
     // E2E validation: ziggit writes, git reads
     const ziggit_writes_test = b.addTest(.{
