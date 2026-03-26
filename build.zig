@@ -227,6 +227,18 @@ pub fn build(b: *std.Build) void {
     const status_bench_step = b.step("bench-status", "Run status optimization benchmark");
     status_bench_step.dependOn(&run_status_optimization_benchmark.step);
 
+    const optimize_status_bench = b.addExecutable(.{
+        .name = "optimize_status_bench",
+        .root_source_file = b.path("optimize_status_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    optimize_status_bench.root_module.addImport("ziggit", ziggit_module);
+    const run_optimize_status_bench = b.addRunArtifact(optimize_status_bench);
+
+    const optimize_bench_step = b.step("bench-optimize", "Run optimization benchmark");
+    optimize_bench_step.dependOn(&run_optimize_status_bench.step);
+
     // ========== WASM TARGET ==========
     const wasm_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,

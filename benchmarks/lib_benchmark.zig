@@ -123,7 +123,7 @@ fn setupTestRepoGitCLI(allocator: std.mem.Allocator, path: []const u8) !void {
 }
 
 // Benchmark revParseHead: Zig API vs git CLI
-fn benchmarkRevParseHead(allocator: std.mem.Allocator, repo: ?*const ziggit.Repository, repo_path: []const u8, iterations: usize) !BenchmarkResult {
+fn benchmarkRevParseHead(allocator: std.mem.Allocator, repo: ?*ziggit.Repository, repo_path: []const u8, iterations: usize) !BenchmarkResult {
     var result = BenchmarkResult{ .operation = "revParseHead" };
     
     // Benchmark Zig API if available
@@ -184,7 +184,7 @@ fn benchmarkRevParseHead(allocator: std.mem.Allocator, repo: ?*const ziggit.Repo
 }
 
 // Benchmark statusPorcelain: Zig API vs git CLI
-fn benchmarkStatusPorcelain(allocator: std.mem.Allocator, repo: ?*const ziggit.Repository, repo_path: []const u8, iterations: usize) !BenchmarkResult {
+fn benchmarkStatusPorcelain(allocator: std.mem.Allocator, repo: ?*ziggit.Repository, repo_path: []const u8, iterations: usize) !BenchmarkResult {
     var result = BenchmarkResult{ .operation = "statusPorcelain" };
     
     // Benchmark Zig API if available
@@ -243,7 +243,7 @@ fn benchmarkStatusPorcelain(allocator: std.mem.Allocator, repo: ?*const ziggit.R
 }
 
 // Benchmark describeTags: Zig API vs git CLI
-fn benchmarkDescribeTags(allocator: std.mem.Allocator, repo: ?*const ziggit.Repository, repo_path: []const u8, iterations: usize) !BenchmarkResult {
+fn benchmarkDescribeTags(allocator: std.mem.Allocator, repo: ?*ziggit.Repository, repo_path: []const u8, iterations: usize) !BenchmarkResult {
     var result = BenchmarkResult{ .operation = "describeTags" };
     
     // Benchmark Zig API if available

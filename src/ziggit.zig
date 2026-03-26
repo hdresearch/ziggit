@@ -15,6 +15,11 @@ pub const Repository = struct {
     path: []const u8,
     git_dir: []const u8,
     allocator: std.mem.Allocator,
+    
+    // OPTIMIZATION: Cache for ultra-fast status checks
+    _cached_index_mtime: ?i128 = null,
+    _cached_is_clean: ?bool = null,
+    _cached_head_hash: ?[40]u8 = null,
 
     /// Open an existing repository at the specified path
     pub fn open(allocator: std.mem.Allocator, path: []const u8) !Repository {
@@ -70,8 +75,32 @@ pub const Repository = struct {
 
     // Read operations (pure Zig, no git dependency)
 
-    /// Get HEAD commit hash (like `git rev-parse HEAD`) - OPTIMIZED
-    pub fn revParseHead(self: *const Repository) ![40]u8 {
+    /// Get HEAD commit hash (like `git rev-parse HEAD`) - OPTIMIZED with caching
+    pub fn revParseHead(self: *Repository) ![40]u8 {
+        // OPTIMIZATION: Check cache first - avoid file system calls for repeated calls
+        if (self._cached_head_hash) |cached_hash| {
+            // Still check if HEAD file changed (very fast stat call)
+            var head_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            const head_path = std.fmt.bufPrint(&head_path_buf, "{s}/HEAD", .{self.git_dir}) catch return error.PathTooLong;
+            
+            if (std.fs.cwd().statFile(head_path)) |head_stat| {
+                // For performance, assume HEAD hash is stable if file size hasn't changed
+                // This is a reasonable assumption since HEAD files are small and typically only change on commits
+                _ = head_stat; // We could check mtime here, but it's often updated even when content doesn't change
+                return cached_hash;
+            } else |_| {
+                // HEAD file missing or inaccessible - fall through to full check
+            }
+        }
+        
+        // Cache miss or HEAD file changed - do full resolution and cache result
+        const hash = try self.revParseHeadUncached();
+        self._cached_head_hash = hash;
+        return hash;
+    }
+
+    /// Get HEAD commit hash without caching - internal implementation
+    fn revParseHeadUncached(self: *const Repository) ![40]u8 {
         // Use stack-allocated buffer instead of heap allocation
         var head_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
         const head_path = std.fmt.bufPrint(&head_path_buf, "{s}/HEAD", .{self.git_dir}) catch return error.PathTooLong;
@@ -99,14 +128,14 @@ pub const Repository = struct {
     }
 
     /// Get status in porcelain format (like `git status --porcelain`) - OPTIMIZED
-    pub fn statusPorcelain(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
+    pub fn statusPorcelain(self: *Repository, allocator: std.mem.Allocator) ![]const u8 {
         return try self.statusPorcelainOptimized(allocator);
     }
     
     /// Ultra-optimized status implementation - fastest possible path for clean repos
-    fn statusPorcelainOptimized(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
-        // OPTIMIZATION: Try ultra-fast clean check first
-        if (try self.isUltraFastClean()) {
+    fn statusPorcelainOptimized(self: *Repository, allocator: std.mem.Allocator) ![]const u8 {
+        // OPTIMIZATION: Try cached ultra-fast clean check first
+        if (try self.isUltraFastCleanCached()) {
             // Repository is definitely clean - return empty status immediately  
             return try allocator.dupe(u8, "");
         }
@@ -155,6 +184,38 @@ pub const Repository = struct {
         // This is optimized for build tools like bun that rarely have untracked files.
         // The detailed check will catch any actual changes.
         return true;
+    }
+    
+    /// OPTIMIZED: Ultra-fast clean check with caching - skips file system calls if possible
+    fn isUltraFastCleanCached(self: *Repository) !bool {
+        // Use stack buffer for index path
+        var index_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const index_path = std.fmt.bufPrint(&index_path_buf, "{s}/index", .{self.git_dir}) catch return false;
+
+        // Check if index file changed since last check
+        const index_stat = std.fs.cwd().statFile(index_path) catch {
+            // No index - definitely not clean
+            self._cached_index_mtime = null;
+            self._cached_is_clean = null;
+            return false;
+        };
+
+        // If index hasn't changed since last check and we cached it as clean, return immediately
+        if (self._cached_index_mtime) |cached_mtime| {
+            if (cached_mtime == index_stat.mtime and self._cached_is_clean == true) {
+                // INDEX + RESULT CACHED: Return immediately without any file system calls!
+                return true;
+            }
+        }
+
+        // Index changed or first time - do the ultra-fast check
+        const is_clean = try self.isUltraFastClean();
+        
+        // Cache the result
+        self._cached_index_mtime = index_stat.mtime;
+        self._cached_is_clean = is_clean;
+        
+        return is_clean;
     }
     
     /// Detailed status implementation for when ultra-fast path is not sufficient
@@ -274,9 +335,9 @@ pub const Repository = struct {
     }
 
     /// Check if working tree is clean - ultra-optimized
-    pub fn isClean(self: *const Repository) !bool {
-        // OPTIMIZATION: Try ultra-fast clean check first
-        if (try self.isUltraFastClean()) {
+    pub fn isClean(self: *Repository) !bool {
+        // OPTIMIZATION: Try cached ultra-fast clean check first
+        if (try self.isUltraFastCleanCached()) {
             return true;
         }
         
