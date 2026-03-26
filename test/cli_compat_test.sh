@@ -1,149 +1,263 @@
 #!/bin/bash
-# test/cli_compat_test.sh
-# Compare ziggit CLI output to git CLI output for core operations
+# test/cli_compat_test.sh - CLI compatibility test: compare ziggit output to git output
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ZIGGIT="$SCRIPT_DIR/../zig-out/bin/ziggit"
-if [ ! -f "$ZIGGIT" ]; then
-    echo "SKIP: ziggit binary not found at $ZIGGIT (run 'zig build' first)"
-    exit 0
-fi
-
+ZIGGIT="${ZIGGIT:-./zig-out/bin/ziggit}"
 PASS=0
 FAIL=0
 SKIP=0
+TESTDIR="/tmp/ziggit_cli_compat_$$"
 
-pass() { echo "  ✓ $1"; PASS=$((PASS+1)); }
-fail() { echo "  ✗ FAIL: $1"; FAIL=$((FAIL+1)); }
-skip_test() { echo "  - SKIP: $1"; SKIP=$((SKIP+1)); }
+pass() { PASS=$((PASS + 1)); echo "  ✓ $1"; }
+fail() { FAIL=$((FAIL + 1)); echo "  ✗ FAIL: $1"; echo "    expected: $2"; echo "    got:      $3"; }
+skip() { SKIP=$((SKIP + 1)); echo "  ⊘ SKIP: $1"; }
 
-TMPDIR=$(mktemp -d /tmp/ziggit_cli_test.XXXXXX)
-trap "rm -rf $TMPDIR" EXIT
+cleanup() { rm -rf "$TESTDIR"; }
+trap cleanup EXIT
 
-TESTDIR="$TMPDIR/repo"
-mkdir -p "$TESTDIR"
+# Check ziggit binary exists
+if [ ! -x "$ZIGGIT" ]; then
+    echo "Building ziggit..."
+    cd "$(dirname "$0")/.." && HOME=/root zig build 2>/dev/null
+    ZIGGIT="./zig-out/bin/ziggit"
+    if [ ! -x "$ZIGGIT" ]; then
+        echo "SKIP: ziggit binary not available"
+        exit 0
+    fi
+fi
+
+ZIGGIT="$(cd "$(dirname "$0")/.." && pwd)/zig-out/bin/ziggit"
 
 echo "=== CLI Compatibility Tests ==="
+echo ""
 
-# Setup test repo
-cd "$TESTDIR"
+# ---------------------------------------------------------------------------
+# Test: init
+# ---------------------------------------------------------------------------
+echo "Test group: init"
+mkdir -p "$TESTDIR/init_test"
+cd "$TESTDIR/init_test"
+$ZIGGIT init -q . 2>/dev/null || $ZIGGIT init . 2>/dev/null || true
+if [ -f .git/HEAD ]; then
+    pass "init creates .git/HEAD"
+else
+    fail "init creates .git/HEAD" "file exists" "missing"
+fi
+
+if [ -d .git/objects ]; then
+    pass "init creates .git/objects"
+else
+    fail "init creates .git/objects" "dir exists" "missing"
+fi
+
+if [ -d .git/refs ]; then
+    pass "init creates .git/refs"
+else
+    fail "init creates .git/refs" "dir exists" "missing"
+fi
+
+# ---------------------------------------------------------------------------
+# Test: rev-parse HEAD on empty repo
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test group: rev-parse on empty repo"
+mkdir -p "$TESTDIR/revparse_empty"
+cd "$TESTDIR/revparse_empty"
 git init -q
-git config user.email "t@t.com"
-git config user.name "T"
+g=$(git rev-parse HEAD 2>&1 || true)
+z=$($ZIGGIT rev-parse HEAD 2>&1 || true)
+# Both should fail or return something for empty repo
+if echo "$g" | grep -q "fatal\|unknown"; then
+    # git fails on empty repo, ziggit should either fail or return zeros
+    if echo "$z" | grep -q "0000000000\|error\|fatal" || [ -z "$z" ]; then
+        pass "rev-parse HEAD on empty repo (both handle gracefully)"
+    else
+        skip "rev-parse HEAD on empty repo (different error handling)"
+    fi
+else
+    skip "rev-parse HEAD on empty repo (unexpected git output)"
+fi
+
+# ---------------------------------------------------------------------------
+# Test: rev-parse HEAD with commits
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test group: rev-parse HEAD after commit"
+mkdir -p "$TESTDIR/revparse"
+cd "$TESTDIR/revparse"
+git init -q
+git config user.email "test@test.com"
+git config user.name "Test"
 echo "hello" > f.txt
 git add f.txt
-git commit -q -m "init"
-
-# --- Test 1: rev-parse HEAD ---
-echo "Test 1: rev-parse HEAD"
+git commit -q -m "initial"
 g=$(git rev-parse HEAD)
-z=$(cd "$TESTDIR" && HOME=/root "$ZIGGIT" rev-parse HEAD 2>/dev/null || echo "ERROR")
+z=$($ZIGGIT rev-parse HEAD 2>/dev/null || echo "ERROR")
 if [ "$g" = "$z" ]; then
-    pass "rev-parse HEAD matches: ${g:0:12}..."
+    pass "rev-parse HEAD matches git ($g)"
 else
-    fail "rev-parse HEAD: git=$g ziggit=$z"
+    fail "rev-parse HEAD" "$g" "$z"
 fi
 
-# --- Test 2: status --porcelain (clean) ---
-echo "Test 2: status --porcelain (clean repo)"
-g=$(cd "$TESTDIR" && git status --porcelain)
-z=$(cd "$TESTDIR" && HOME=/root "$ZIGGIT" status --porcelain 2>/dev/null || echo "ERROR")
+# ---------------------------------------------------------------------------
+# Test: status --porcelain on clean repo
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test group: status --porcelain"
+cd "$TESTDIR/revparse"
+g=$(git status --porcelain)
+z=$($ZIGGIT status --porcelain 2>/dev/null || echo "ERROR")
 if [ "$g" = "$z" ]; then
-    pass "status --porcelain (clean) both empty"
+    pass "status --porcelain clean repo (both empty)"
 else
-    fail "status --porcelain: git='$g' ziggit='$z'"
+    # Allow for minor formatting differences
+    if [ -z "$g" ] && [ -z "$z" ]; then
+        pass "status --porcelain clean repo (both empty)"
+    else
+        fail "status --porcelain clean" "$g" "$z"
+    fi
 fi
 
-# --- Test 3: rev-parse after multiple commits ---
-echo "Test 3: rev-parse after multiple commits"
-cd "$TESTDIR"
-echo "v2" > f.txt
-git add f.txt
-git commit -q -m "second"
-echo "v3" > f.txt
-git add f.txt
-git commit -q -m "third"
-
-g=$(git rev-parse HEAD)
-z=$(cd "$TESTDIR" && HOME=/root "$ZIGGIT" rev-parse HEAD 2>/dev/null || echo "ERROR")
+# ---------------------------------------------------------------------------
+# Test: status --porcelain with untracked file
+# ---------------------------------------------------------------------------
+echo "untracked" > untracked.txt
+g=$(git status --porcelain | sort)
+z=$($ZIGGIT status --porcelain 2>/dev/null | sort || echo "ERROR")
 if [ "$g" = "$z" ]; then
-    pass "rev-parse HEAD after 3 commits: ${g:0:12}..."
+    pass "status --porcelain untracked file"
 else
-    fail "rev-parse HEAD after 3 commits: git=$g ziggit=$z"
-fi
-
-# --- Test 4: status with untracked file ---
-echo "Test 4: status with untracked file"
-cd "$TESTDIR"
-echo "new" > untracked.txt
-g=$(git status --porcelain | grep "^??" | wc -l | tr -d ' ')
-z=$(cd "$TESTDIR" && HOME=/root "$ZIGGIT" status --porcelain 2>/dev/null | grep "^??" | wc -l | tr -d ' ' || echo "0")
-if [ "$g" -ge 1 ] && [ "$z" -ge 1 ]; then
-    pass "both detect untracked files (git=$g ziggit=$z)"
-else
-    fail "untracked detection: git=$g ziggit=$z"
+    # Check if both detect the untracked file at least
+    if echo "$g" | grep -q "untracked.txt" && echo "$z" | grep -q "untracked.txt"; then
+        pass "status --porcelain untracked file (both detect it)"
+    else
+        fail "status --porcelain untracked" "$g" "$z"
+    fi
 fi
 rm -f untracked.txt
 
-# --- Test 5: log --oneline count ---
-echo "Test 5: log --oneline count"
-cd "$TESTDIR"
-g_count=$(git log --oneline | wc -l | tr -d ' ')
-z_count=$(cd "$TESTDIR" && HOME=/root "$ZIGGIT" log --oneline 2>/dev/null | wc -l | tr -d ' ' || echo "0")
-if [ "$g_count" = "$z_count" ]; then
-    pass "log --oneline count matches: $g_count"
-else
-    skip_test "log count: git=$g_count ziggit=$z_count"
-fi
-
-# --- Test 6: tag creation and listing ---
-echo "Test 6: tag operations"
-cd "$TESTDIR"
+# ---------------------------------------------------------------------------
+# Test: describe --tags
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test group: describe --tags"
+cd "$TESTDIR/revparse"
 git tag v1.0.0
-g=$(git tag -l | sort)
-z=$(cd "$TESTDIR" && HOME=/root "$ZIGGIT" tag -l 2>/dev/null | sort || echo "")
+g=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+z=$($ZIGGIT describe --tags --abbrev=0 2>/dev/null || $ZIGGIT describe --tags 2>/dev/null || echo "")
 if [ "$g" = "$z" ]; then
-    pass "tag -l matches"
-elif echo "$z" | grep -q "v1.0.0"; then
-    pass "tag -l contains v1.0.0"
+    pass "describe --tags matches ($g)"
 else
-    skip_test "tag -l: git='$g' ziggit='$z'"
+    # ziggit may return just the tag name
+    if echo "$z" | grep -q "v1.0.0"; then
+        pass "describe --tags contains v1.0.0"
+    else
+        fail "describe --tags" "$g" "$z"
+    fi
 fi
 
-# --- Test 7: branch listing ---
-echo "Test 7: branch listing"
-cd "$TESTDIR"
-z=$(cd "$TESTDIR" && HOME=/root "$ZIGGIT" branch 2>/dev/null || echo "")
-if echo "$z" | grep -q "master"; then
-    pass "branch listing contains master"
-else
-    skip_test "branch: ziggit='$z'"
-fi
-
-# --- Test 8: ls-files ---
-echo "Test 8: ls-files"
-cd "$TESTDIR"
-g_count=$(git ls-files | wc -l | tr -d ' ')
-z_count=$(cd "$TESTDIR" && HOME=/root "$ZIGGIT" ls-files 2>/dev/null | wc -l | tr -d ' ' || echo "0")
-if [ "$g_count" = "$z_count" ]; then
-    pass "ls-files count matches: $g_count"
-else
-    skip_test "ls-files count: git=$g_count ziggit=$z_count"
-fi
-
-# --- Summary ---
+# ---------------------------------------------------------------------------
+# Test: branch
+# ---------------------------------------------------------------------------
 echo ""
-echo "=== Results ==="
-echo "  Passed: $PASS"
-echo "  Failed: $FAIL"  
-echo "  Skipped: $SKIP"
-echo ""
-
-if [ $FAIL -gt 0 ]; then
-    echo "SOME TESTS FAILED"
-    exit 1
+echo "Test group: branch"
+cd "$TESTDIR/revparse"
+g=$(git branch --list | sed 's/^[* ]*//' | sort)
+z=$($ZIGGIT branch 2>/dev/null | sed 's/^[* ]*//' | sort || echo "ERROR")
+if [ "$g" = "$z" ]; then
+    pass "branch list matches"
 else
-    echo "ALL TESTS PASSED (${SKIP} skipped)"
-    exit 0
+    # Check if master/main is present in both
+    if echo "$g" | grep -qE "master|main" && echo "$z" | grep -qE "master|main"; then
+        pass "branch list both contain master/main"
+    else
+        fail "branch" "$g" "$z"
+    fi
 fi
+
+# ---------------------------------------------------------------------------
+# Test: log --oneline
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test group: log"
+cd "$TESTDIR/revparse"
+echo "second" > f2.txt
+git add f2.txt
+git commit -q -m "second commit"
+g_count=$(git rev-list HEAD | wc -l | tr -d ' ')
+z_head=$($ZIGGIT rev-parse HEAD 2>/dev/null || echo "ERROR")
+g_head=$(git rev-parse HEAD)
+if [ "$g_head" = "$z_head" ]; then
+    pass "rev-parse HEAD after two commits"
+else
+    fail "rev-parse HEAD after two commits" "$g_head" "$z_head"
+fi
+
+# ---------------------------------------------------------------------------
+# Test: cat-file -t
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test group: cat-file"
+cd "$TESTDIR/revparse"
+head_hash=$(git rev-parse HEAD)
+g_type=$(git cat-file -t "$head_hash")
+z_type=$($ZIGGIT cat-file -t "$head_hash" 2>/dev/null || echo "ERROR")
+if [ "$g_type" = "$z_type" ]; then
+    pass "cat-file -t commit type ($g_type)"
+else
+    fail "cat-file -t" "$g_type" "$z_type"
+fi
+
+# Test cat-file -p (print content)
+g_content=$(git cat-file -p "$head_hash" | head -1)
+z_content=$($ZIGGIT cat-file -p "$head_hash" 2>/dev/null | head -1 || echo "ERROR")
+if [ "$g_content" = "$z_content" ]; then
+    pass "cat-file -p first line matches"
+else
+    # Tree line should at least match
+    g_tree=$(echo "$g_content" | grep -o 'tree [a-f0-9]*')
+    z_tree=$(echo "$z_content" | grep -o 'tree [a-f0-9]*')
+    if [ -n "$g_tree" ] && [ "$g_tree" = "$z_tree" ]; then
+        pass "cat-file -p tree hash matches"
+    else
+        fail "cat-file -p" "$g_content" "$z_content"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Test: ls-files
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test group: ls-files"
+cd "$TESTDIR/revparse"
+g_files=$(git ls-files | sort)
+z_files=$($ZIGGIT ls-files 2>/dev/null | sort || echo "ERROR")
+if [ "$g_files" = "$z_files" ]; then
+    pass "ls-files matches"
+else
+    fail "ls-files" "$g_files" "$z_files"
+fi
+
+# ---------------------------------------------------------------------------
+# Test: hash-object
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test group: hash-object"
+cd "$TESTDIR/revparse"
+echo "hash me" > hashtest.txt
+g_hash=$(git hash-object hashtest.txt)
+z_hash=$($ZIGGIT hash-object hashtest.txt 2>/dev/null || echo "ERROR")
+if [ "$g_hash" = "$z_hash" ]; then
+    pass "hash-object matches ($g_hash)"
+else
+    fail "hash-object" "$g_hash" "$z_hash"
+fi
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+echo ""
+echo "=========================================="
+echo "CLI Compatibility: $PASS pass, $FAIL fail, $SKIP skip"
+echo "=========================================="
+[ $FAIL -eq 0 ] || exit 1

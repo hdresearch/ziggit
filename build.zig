@@ -737,6 +737,42 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(ziggit_writes_test).step);
     test_step.dependOn(&b.addRunArtifact(git_writes_test).step);
 
+    // Clone and fetch tests
+    const clone_and_fetch_tests = b.addTest(.{
+        .root_source_file = b.path("test/clone_and_fetch_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    clone_and_fetch_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(clone_and_fetch_tests).step);
+
+    // Object decompression tests
+    const object_decompression_tests = b.addTest(.{
+        .root_source_file = b.path("test/object_decompression_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    object_decompression_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(object_decompression_tests).step);
+
+    // Objects parser comprehensive tests
+    const objects_parser_comprehensive_tests = b.addTest(.{
+        .root_source_file = b.path("test/objects_parser_comprehensive_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    objects_parser_comprehensive_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(objects_parser_comprehensive_tests).step);
+
+    // Fast index parser tests
+    const fast_index_parser_tests = b.addTest(.{
+        .root_source_file = b.path("test/fast_index_parser_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    fast_index_parser_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(fast_index_parser_tests).step);
+
     // ========== BENCHMARKS ==========
     
     // CLI benchmark (ziggit vs git performance)
