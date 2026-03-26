@@ -1163,6 +1163,57 @@ pub fn build(b: *std.Build) void {
     index_format_roundtrip_tests.root_module.addImport("ziggit", ziggit_module);
     test_step.dependOn(&b.addRunArtifact(index_format_roundtrip_tests).step);
 
+    // Full workflow cross-validation tests
+    const full_workflow_crossval_tests = b.addTest(.{
+        .root_source_file = b.path("test/full_workflow_crossval_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    full_workflow_crossval_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(full_workflow_crossval_tests).step);
+
+    // Error handling tests
+    const error_handling_tests = b.addTest(.{
+        .root_source_file = b.path("test/error_handling_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    error_handling_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(error_handling_tests).step);
+
+    // Tree and diff internal tests
+    const tree_and_diff_internal_tests = b.addTest(.{
+        .root_source_file = b.path("test/tree_and_diff_internal_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    tree_and_diff_internal_tests.root_module.addAnonymousImport("tree", .{
+        .root_source_file = b.path("src/git/tree.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(tree_and_diff_internal_tests).step);
+
+    // Diff internal tests
+    const diff_internal_tests = b.addTest(.{
+        .root_source_file = b.path("test/diff_internal_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    diff_internal_tests.root_module.addAnonymousImport("diff", .{
+        .root_source_file = b.path("src/git/diff.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(diff_internal_tests).step);
+
+    // Validation internal tests
+    const validation_internal_tests = b.addTest(.{
+        .root_source_file = b.path("test/validation_internal_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    validation_internal_tests.root_module.addAnonymousImport("validation", .{
+        .root_source_file = b.path("src/git/validation.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(validation_internal_tests).step);
+
     // ========== BENCHMARKS ==========
     
     // CLI benchmark (ziggit vs git performance)
