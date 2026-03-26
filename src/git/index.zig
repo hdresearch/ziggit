@@ -315,8 +315,6 @@ pub const Index = struct {
                 break;
             }
             
-            // Log extensions for debugging (only show first few chars to avoid binary data)
-            const safe_sig = if (is_printable) sig else [_]u8{ '?', '?', '?', '?' };
             // Silently skip unknown index extensions
             
             // Handle special extensions that we might want to parse in the future
