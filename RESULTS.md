@@ -39,11 +39,12 @@
 
 ## Bun Fork Integration Status
 - Branch: `hdresearch/bun:ziggit-integration`
-- Commit: `f8c37f0` — debug logging + build.zig.zon fix
+- Commit: `648dcd0` — structured error logging + partial clone cleanup
 - `repository.zig`: ziggit used for clone, fetch, findCommit, checkout
 - Fallback: automatic to git CLI on any ziggit failure
 - Debug logging: `BUN_DEBUG_GitRepository=1` to see ziggit vs CLI decisions
-- Fixed: `build.zig.zon` ziggit URL now points to `master` branch (was `main`)
+- Error categorization: SSH auth, network, protocol errors get distinct log messages
+- Partial clone cleanup: failed ziggit clones are cleaned up before git CLI fallback
 
 ## Pending
 - [ ] idx_writer.zig rewrite (NET-SMART agent) — expected to improve pack indexing speed
