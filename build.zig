@@ -326,6 +326,16 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/git/objects.zig"),
     });
 
+    // Pack network receive flow tests (clone/fetch simulation with save+load round-trip)
+    const pack_network_receive_flow_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_network_receive_flow_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_network_receive_flow_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+
     // Pack exact compatibility tests (git ↔ ziggit byte-level verification)
     const pack_git_exact_compat_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_git_exact_compat_test.zig"),
@@ -550,6 +560,7 @@ pub fn build(b: *std.Build) void {
 
     test_step.dependOn(&b.addRunArtifact(pack_network_reception_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_network_e2e_tests).step);
+    test_step.dependOn(&b.addRunArtifact(pack_network_receive_flow_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_clone_flow_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_git_groundtruth_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_thin_public_api_tests).step);
