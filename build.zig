@@ -1661,6 +1661,42 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/git/smart_http.zig"),
     });
     test_step.dependOn(&b.addRunArtifact(smart_http_tests).step);
+    const smart_http_step = b.step("smart-http-test", "Run smart HTTP protocol tests");
+    smart_http_step.dependOn(&b.addRunArtifact(smart_http_tests).step);
+
+    // Pack format verification tests (pack_writer + idx_writer + git verify-pack)
+    const pack_format_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_format_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_format_tests.root_module.addAnonymousImport("pack_writer", .{
+        .root_source_file = b.path("src/git/pack_writer.zig"),
+    });
+    pack_format_tests.root_module.addAnonymousImport("idx_writer", .{
+        .root_source_file = b.path("src/git/idx_writer.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(pack_format_tests).step);
+    const pack_format_step = b.step("pack-format-test", "Run pack format verification tests");
+    pack_format_step.dependOn(&b.addRunArtifact(pack_format_tests).step);
+
+    // HTTPS end-to-end tests (require network access — run with `zig build https-e2e-test`)
+    const https_e2e_tests = b.addTest(.{
+        .root_source_file = b.path("test/https_e2e_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    https_e2e_tests.root_module.addAnonymousImport("smart_http", .{
+        .root_source_file = b.path("src/git/smart_http.zig"),
+    });
+    https_e2e_tests.root_module.addAnonymousImport("pack_writer", .{
+        .root_source_file = b.path("src/git/pack_writer.zig"),
+    });
+    https_e2e_tests.root_module.addAnonymousImport("idx_writer", .{
+        .root_source_file = b.path("src/git/idx_writer.zig"),
+    });
+    const https_e2e_step = b.step("https-e2e-test", "Run HTTPS end-to-end tests (requires network)");
+    https_e2e_step.dependOn(&b.addRunArtifact(https_e2e_tests).step);
 
     // Risk hardening tests (memory leaks, edge cases, pack-based checkout)
     const risk_hardening_tests = b.addTest(.{
