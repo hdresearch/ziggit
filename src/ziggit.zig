@@ -257,12 +257,8 @@ pub const Repository = struct {
         const index_path = try std.fmt.allocPrint(self.allocator, "{s}/index", .{self.git_dir});
         defer self.allocator.free(index_path);
 
-        const git_index = index_parser.GitIndex.readFromFile(self.allocator, index_path) catch blk: {
-            break :blk index_parser.GitIndex{
-                .version = 2,
-                .entries = std.ArrayList(index_parser.IndexEntry).init(self.allocator),
-                .allocator = self.allocator,
-            };
+        var git_index = index_parser.GitIndex.readFromFile(self.allocator, index_path) catch blk: {
+            break :blk index_parser.GitIndex.init(self.allocator);
         };
         defer git_index.deinit();
 
@@ -472,6 +468,44 @@ pub const Repository = struct {
         var output = std.ArrayList(u8).init(allocator);
         defer output.deinit();
 
+        const index_path = try std.fmt.allocPrint(allocator, "{s}/index", .{self.git_dir});
+        defer allocator.free(index_path);
+
+        var git_index = index_parser.GitIndex.readFromFile(allocator, index_path) catch {
+            return try self.scanAllFilesAsUntracked(allocator);
+        };
+        defer git_index.deinit();
+
+        var dir = std.fs.cwd().openDir(self.path, .{ .iterate = true }) catch return try allocator.dupe(u8, "");
+        defer dir.close();
+
+        var iterator = dir.iterate();
+        while (try iterator.next()) |entry| {
+            if (entry.kind != .file) continue;
+            if (std.mem.startsWith(u8, entry.name, ".git")) continue;
+
+            var is_tracked = false;
+            for (git_index.entries.items) |index_entry| {
+                if (std.mem.eql(u8, index_entry.path, entry.name)) {
+                    is_tracked = true;
+                    break;
+                }
+            }
+
+            if (!is_tracked) {
+                try output.appendSlice("?? ");
+                try output.appendSlice(entry.name);
+                try output.append('\n');
+            }
+        }
+
+        return try output.toOwnedSlice();
+    }
+
+    fn scanAllFilesAsUntracked(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
+        var output = std.ArrayList(u8).init(allocator);
+        defer output.deinit();
+
         var dir = std.fs.cwd().openDir(self.path, .{ .iterate = true }) catch return try allocator.dupe(u8, "");
         defer dir.close();
 
@@ -493,11 +527,7 @@ pub const Repository = struct {
         defer self.allocator.free(index_path);
 
         var git_index = index_parser.GitIndex.readFromFile(self.allocator, index_path) catch blk: {
-            break :blk index_parser.GitIndex{
-                .version = 2,
-                .entries = std.ArrayList(index_parser.IndexEntry).init(self.allocator),
-                .allocator = self.allocator,
-            };
+            break :blk index_parser.GitIndex.init(self.allocator);
         };
         defer git_index.deinit();
 
@@ -507,14 +537,14 @@ pub const Repository = struct {
             .ctime_nanoseconds = @intCast(@mod(file_stat.ctime, 1_000_000_000)),
             .mtime_seconds = @intCast(@divTrunc(file_stat.mtime, 1_000_000_000)),
             .mtime_nanoseconds = @intCast(@mod(file_stat.mtime, 1_000_000_000)),
-            .dev = @intCast(file_stat.dev),
-            .ino = @intCast(file_stat.ino),
+            .dev = if (@hasField(@TypeOf(file_stat), "dev")) @intCast(file_stat.dev) else 0,
+            .ino = if (@hasField(@TypeOf(file_stat), "ino")) @intCast(file_stat.ino) else 0,
             .mode = 33188, // 100644
             .uid = 0,
             .gid = 0,
             .size = @intCast(file_stat.size),
             .sha1 = hash,
-            .flags = @intCast(std.math.min(path.len, 0xfff)),
+            .flags = @intCast(@min(path.len, 0xfff)),
             .path = try self.allocator.dupe(u8, path),
         });
 
@@ -559,8 +589,8 @@ pub const Repository = struct {
         var compressed = std.ArrayList(u8).init(self.allocator);
         defer compressed.deinit();
 
-        const buf_writer = compressed.writer();
-        try std.compress.zlib.compress(self.allocator, std.io.fixedBufferStream(object_content).reader(), buf_writer);
+        var stream = std.io.fixedBufferStream(object_content);
+        try std.compress.zlib.compress(stream.reader(), compressed.writer(), .{});
 
         const obj_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ obj_dir, hash_hex[2..] });
         defer self.allocator.free(obj_path);
@@ -656,7 +686,7 @@ fn createGitRepository(allocator: std.mem.Allocator, repo_path: []const u8, git_
     };
 
     std.fs.makeDirAbsolute(git_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => return error.AlreadyExists,
+        error.PathAlreadyExists => {},
         else => return err,
     };
 
