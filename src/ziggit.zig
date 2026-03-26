@@ -1829,12 +1829,20 @@ pub const Repository = struct {
 // Helper functions
 
 fn findGitDir(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    // First check for .git subdirectory (normal repository)
     const git_dir = try std.fmt.allocPrint(allocator, "{s}/.git", .{path});
     
     std.fs.accessAbsolute(git_dir, .{}) catch |err| switch (err) {
         error.FileNotFound => {
             allocator.free(git_dir);
-            return error.NotAGitRepository;
+            // Check if path itself is a bare repository (has HEAD file directly)
+            const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{path});
+            defer allocator.free(head_path);
+            std.fs.accessAbsolute(head_path, .{}) catch {
+                return error.NotAGitRepository;
+            };
+            // Looks like a bare repo — the git dir is the path itself
+            return try allocator.dupe(u8, path);
         },
         else => {
             allocator.free(git_dir);

@@ -2615,39 +2615,90 @@ fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
 
     // Parse arguments for flags and remote
     var quiet = false;
-    var remote: ?[]const u8 = null;
+    var remote_name: []const u8 = "origin";
     
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--quiet")) {
+        if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
             quiet = true;
-        } else if (remote == null) {
-            remote = arg;
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            remote_name = arg;
         }
     }
 
-    // Shell out to real git for fetch operations (as per requirements)
-    var git_cmd = std.ArrayList(u8).init(allocator);
-    defer git_cmd.deinit();
-    
-    try git_cmd.appendSlice("git fetch");
-    
-    if (quiet) {
-        try git_cmd.appendSlice(" --quiet");
-    }
-    
-    if (remote) |r| {
-        try git_cmd.appendSlice(" ");
-        try git_cmd.appendSlice(r);
+    // Read the remote URL from config
+    const remote_url = getRemoteUrl(git_path, remote_name, platform_impl, allocator) catch |err| switch (err) {
+        error.RemoteNotFound => {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' does not appear to be a git repository\n", .{remote_name});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        },
+        else => return err,
+    };
+    defer allocator.free(remote_url);
+
+    // For HTTPS URLs, use native Zig fetch
+    if (std.mem.startsWith(u8, remote_url, "https://") or std.mem.startsWith(u8, remote_url, "http://")) {
+        const ziggit = @import("ziggit.zig");
+        // Determine the repo path: for bare repos git_path IS the repo, for normal repos it's the parent
+        const is_bare_repo = !std.mem.endsWith(u8, git_path, "/.git");
+        const repo_path = if (is_bare_repo) git_path else (std.fs.path.dirname(git_path) orelse ".");
+        var repo = ziggit.Repository.open(allocator, repo_path) catch |err| {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: {}\n", .{err});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        };
+        defer repo.close();
+
+        repo.fetch(remote_url) catch |err| {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: could not fetch from '{s}': {}\n", .{ remote_url, err });
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        };
+
+        if (!quiet) {
+            // Mimic git's quiet fetch output (no output on success with --quiet is default git behavior,
+            // but without --quiet we print nothing extra either since git fetch is normally quiet on success)
+        }
+        return;
     }
 
-    // Just print a message for now since process spawning has complexity
-    const msg = try std.fmt.allocPrint(allocator, 
-        "ziggit: For fetch operations, use git directly:\n" ++
-        "  {s}\n" ++
-        "\nziggit supports most git commands. Use git for remote operations\n" ++
-        "like fetch, pull, and push.\n", .{git_cmd.items});
-    defer allocator.free(msg);
-    try platform_impl.writeStdout(msg);
+    // For non-HTTPS URLs, shell out to git
+    if (build_options.enable_git_fallback) {
+        var git_args = std.ArrayList([]const u8).init(allocator);
+        defer git_args.deinit();
+
+        try git_args.append("git");
+        try git_args.append("fetch");
+        if (quiet) try git_args.append("--quiet");
+        try git_args.append(remote_name);
+
+        var child = std.process.Child.init(git_args.items, allocator);
+        child.stdin_behavior = .Inherit;
+        child.stdout_behavior = .Inherit;
+        child.stderr_behavior = .Inherit;
+
+        const term = child.spawnAndWait() catch |err| {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: failed to execute git: {}\n", .{err});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        };
+
+        switch (term) {
+            .Exited => |code| {
+                if (code != 0) std.process.exit(@intCast(code));
+            },
+            .Signal => |_| std.process.exit(128),
+            .Stopped => |_| std.process.exit(128),
+            .Unknown => |_| std.process.exit(1),
+        }
+    } else {
+        try platform_impl.writeStderr("fatal: non-HTTPS fetch not supported without git fallback\n");
+        std.process.exit(128);
+    }
 }
 
 fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
