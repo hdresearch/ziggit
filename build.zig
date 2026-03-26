@@ -837,10 +837,19 @@ pub fn build(b: *std.Build) void {
     });
     git_writes_test.root_module.addImport("ziggit", ziggit_module);
 
+    // Bun workflow e2e tests
+    const bun_workflow_e2e_tests = b.addTest(.{
+        .root_source_file = b.path("test/bun_workflow_e2e_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bun_workflow_e2e_tests.root_module.addImport("ziggit", ziggit_module);
+
     // E2E validation step (separate from main test to allow independent running)
     const e2e_step = b.step("e2e", "Run end-to-end validation tests");
     e2e_step.dependOn(&b.addRunArtifact(ziggit_writes_test).step);
     e2e_step.dependOn(&b.addRunArtifact(git_writes_test).step);
+    e2e_step.dependOn(&b.addRunArtifact(bun_workflow_e2e_tests).step);
 
     // API git cross-check tests
     const api_git_crosscheck_tests = b.addTest(.{
@@ -874,6 +883,7 @@ pub fn build(b: *std.Build) void {
     // E2E tests also available via main test step (may be slow)
     test_step.dependOn(&b.addRunArtifact(ziggit_writes_test).step);
     test_step.dependOn(&b.addRunArtifact(git_writes_test).step);
+    test_step.dependOn(&b.addRunArtifact(bun_workflow_e2e_tests).step);
 
     // Repository workflow tests
     const repo_workflow_tests = b.addTest(.{
