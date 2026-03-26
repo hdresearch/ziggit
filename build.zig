@@ -119,20 +119,48 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // NOTE: The following tests import internal src/git/*.zig modules directly which
-    // cross-import each other, causing "file exists in multiple modules" errors.
-    // They need to be refactored to use the public ziggit module API.
-    // They are compiled here to catch syntax errors but excluded from the test step.
+    // Core git format integration tests (uses git module for proper imports)
     const core_git_format_tests = b.addTest(.{
         .root_source_file = b.path("test/core_git_format_integration.zig"),
         .target = target,
         .optimize = optimize,
     });
+    core_git_format_tests.root_module.addAnonymousImport("git", .{
+        .root_source_file = b.path("src/git/git.zig"),
+    });
+
+    // Pack file comprehensive tests
     const pack_comprehensive_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_file_comprehensive_test.zig"),
         .target = target,
         .optimize = optimize,
     });
+    pack_comprehensive_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+
+    // Delta application tests
+    const delta_apply_tests = b.addTest(.{
+        .root_source_file = b.path("test/delta_apply_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    delta_apply_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+
+    // Pack round-trip tests (create pack + idx with git, read with ziggit)
+    const pack_roundtrip_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_roundtrip_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_roundtrip_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+
+    // Tests using internal src/git/*.zig imports that need refactoring
+    // (compiled for syntax checking but excluded from test step)
     const config_enhanced_tests = b.addTest(.{
         .root_source_file = b.path("test/config_enhanced_test.zig"),
         .target = target,
@@ -241,10 +269,17 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(workflow_test).step);
     test_step.dependOn(&b.addRunArtifact(broken_pipe_test).step);
     test_step.dependOn(&b.addRunArtifact(bun_zig_api_test).step);
-    // Tests using internal src/git/*.zig imports are excluded until refactored
-    // to use the public ziggit module (causes "file exists in multiple modules" errors).
-    _ = core_git_format_tests;
-    _ = pack_comprehensive_tests;
+    // Tests with proper module imports (run in test step)
+    test_step.dependOn(&b.addRunArtifact(core_git_format_tests).step);
+    test_step.dependOn(&b.addRunArtifact(pack_comprehensive_tests).step);
+    test_step.dependOn(&b.addRunArtifact(delta_apply_tests).step);
+    test_step.dependOn(&b.addRunArtifact(pack_roundtrip_tests).step);
+    // New tests from other agents (may be slow, included for completeness)
+    test_step.dependOn(&b.addRunArtifact(repo_api_tests).step);
+    test_step.dependOn(&b.addRunArtifact(object_integrity_tests).step);
+    test_step.dependOn(&b.addRunArtifact(index_roundtrip_tests).step);
+    test_step.dependOn(&b.addRunArtifact(edge_cases_tests).step);
+    // Tests using internal imports excluded until refactored
     _ = config_enhanced_tests;
     _ = core_format_integration_tests;
     _ = enhanced_functionality_tests;
@@ -283,7 +318,7 @@ pub fn build(b: *std.Build) void {
     e2e_step.dependOn(&b.addRunArtifact(ziggit_writes_test).step);
     e2e_step.dependOn(&b.addRunArtifact(git_writes_test).step);
 
-    // Also add to main test step
+    // E2E tests also available via main test step (may be slow)
     test_step.dependOn(&b.addRunArtifact(ziggit_writes_test).step);
     test_step.dependOn(&b.addRunArtifact(git_writes_test).step);
 
