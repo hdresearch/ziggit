@@ -1,44 +1,57 @@
 #!/bin/bash
-# test/git-test-runner.sh — Run git's test suite against ziggit
+# test/git-test-runner-batch2.sh — Second batch of git tests
 set -u
 cd /tmp/git-tests/t
 
 RESULTS_FILE="/root/ziggit/test/git-test-results.txt"
-echo "Git Test Suite Results (ziggit as drop-in)" > "$RESULTS_FILE"
-echo "Date: $(date -u +%Y-%m-%d)" >> "$RESULTS_FILE"
+# Append to existing results
 echo "" >> "$RESULTS_FILE"
+echo "=== Batch 2 ===" >> "$RESULTS_FILE"
 
 TOTAL_PASS=0
 TOTAL_FAIL=0
 TOTAL_TESTS=0
 
 TEST_LIST=(
-    t0001-init.sh
-    t0002-gitfile.sh
-    t0003-attributes.sh
-    t0005-signals.sh
-    t0006-date.sh
-    t0008-ignores.sh
-    t0012-help.sh
-    t0020-crlf.sh
-    t0040-parse-options.sh
-    t0050-filesystem.sh
-    t0060-path-utils.sh
-    t1000-read-tree-m-3way.sh
-    t1004-read-tree-m-u-wf.sh
-    t1300-config.sh
-    t1400-update-ref.sh
-    t1500-rev-parse.sh
-    t1700-split-index.sh
-    t2000-conflict-when-checking-files-out.sh
-    t2200-add-update.sh
-    t3000-ls-files-others.sh
-    t3100-ls-tree-restrict.sh
-    t3200-branch.sh
-    t3400-rebase.sh
-    t3600-rm.sh
-    t3700-add.sh
-    t3900-i18n-commit.sh
+    t0004-unwritable.sh
+    t0007-git-var.sh
+    t0009-git-dir-validation.sh
+    t0010-racy-git.sh
+    t0014-alias.sh
+    t0017-env-helper.sh
+    t0018-advice.sh
+    t0021-conversion.sh
+    t0022-crlf-rename.sh
+    t0030-stripspace.sh
+    t1001-read-tree-m-2way.sh
+    t1002-read-tree-m-u-2way.sh
+    t1003-read-tree-prefix.sh
+    t1005-read-tree-reset.sh
+    t1006-cat-file.sh
+    t1007-hash-object.sh
+    t1008-read-tree-overlay.sh
+    t1009-read-tree-new-index.sh
+    t1010-mktree.sh
+    t4000-diff-format.sh
+    t4001-diff-rename.sh
+    t4002-diff-basic.sh
+    t4003-diff-rename-1.sh
+    t4010-diff-pathspec.sh
+    t5300-pack-object.sh
+    t6000-rev-list-misc.sh
+    t6001-rev-list-graft.sh
+    t6003-rev-list-topo-order.sh
+    t6010-merge-base.sh
+    t7001-mv.sh
+    t7004-tag.sh
+    t7005-editor.sh
+    t7060-wtstatus.sh
+    t7102-reset.sh
+    t7300-clean.sh
+    t7500-commit-template-squash-signoff.sh
+    t7502-commit-porcelain.sh
+    t7600-merge.sh
+    t7700-repack.sh
 )
 
 for test_script in "${TEST_LIST[@]}"; do
@@ -52,7 +65,6 @@ for test_script in "${TEST_LIST[@]}"; do
              timeout 120 bash "$test_script" 2>&1)
     EXIT_CODE=$?
 
-    # Parse results
     LAST_LINE=$(echo "$OUTPUT" | grep "^# failed\|^# passed all" | tail -1)
     TOTAL=$(echo "$OUTPUT" | grep "^1\.\." | tail -1 | sed 's/1\.\.//')
 
@@ -83,4 +95,4 @@ for test_script in "${TEST_LIST[@]}"; do
 done
 
 echo "" >> "$RESULTS_FILE"
-echo "TOTAL: $TOTAL_PASS/$TOTAL_TESTS passed ($TOTAL_FAIL failed)" | tee -a "$RESULTS_FILE"
+echo "BATCH 2 TOTAL: $TOTAL_PASS/$TOTAL_TESTS passed ($TOTAL_FAIL failed)" | tee -a "$RESULTS_FILE"

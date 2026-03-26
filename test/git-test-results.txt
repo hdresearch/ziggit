@@ -1,350 +1,95 @@
-Git Test Suite Results (ziggit as drop-in)
+Git Test Suite Results (ziggit as drop-in replacement for git)
 Date: 2026-03-26
-Tests run: 156 test scripts
+Runner: test/git-test-runner.sh
 
-=== PERFECT SCORES (100%) ===
-  t1304-default-acl.sh: 4/4 passed (ALL PASS)
-  t2014-checkout-switch.sh: 4/4 passed (ALL PASS)
-  t7511-status-index.sh: 24/24 passed (ALL PASS)
+================================================================
+SUMMARY: 391/3187 passed (12.3%) across 63 test scripts
+================================================================
+  - 1 test script fully passed (t0004-unwritable: 9/9)
+  - 2 timeouts (t0008-ignores, t1400-update-ref)
+  - 2 errors (t1500-rev-parse, t7502-commit-porcelain)
 
-=== HIGH PASS RATE (>50%) ===
-  t7006-pager.sh: 99/109 passed (91%)
-  t5003-archive-zip.sh: 64/78 passed (82%)
-  t5002-archive-attr-pattern.sh: 15/19 passed (79%)
-  t3302-notes-index-expensive.sh: 10/12 passed (83%)
-  t3070-wildmatch.sh: 1237/1901 passed (65%)
-  t5001-archive-attr.sh: 24/44 passed (55%)
-  t0050-filesystem.sh: 7/13 passed (54%)
-  t4024-diff-optimize-common.sh: 1/2 passed (50%)
-  t4025-hunk-header.sh: 1/2 passed (50%)
-  t0022-crlf-rename.sh: 1/2 passed (50%)
-  t5004-archive-corner-cases.sh: 7/14 passed (50%)
-  t0062-revision-walking.sh: 1/2 passed (50%)
+DETAILED RESULTS (sorted by test number):
+================================================================
 
-=== DETAILED RESULTS BY TEST SCRIPT ===
+t0001-init.sh:                              28/102 passed  (27.5%)
+t0002-gitfile.sh:                            1/14  passed  ( 7.1%)
+t0003-attributes.sh:                         8/55  passed  (14.5%)
+t0004-unwritable.sh:                         9/9   passed  (100% ) ★
+t0005-signals.sh:                            0/5   passed  ( 0.0%)
+t0006-date.sh:                              16/129 passed  (12.4%)
+t0007-git-var.sh:                            4/27  passed  (14.8%)
+t0008-ignores.sh:                           TIMEOUT
+t0009-git-dir-validation.sh:                 1/6   passed  (16.7%)
+t0010-racy-git.sh:                           0/10  passed  ( 0.0%)
+t0012-help.sh:                               2/32  passed  ( 6.3%)
+t0014-alias.sh:                              1/21  passed  ( 4.8%)
+t0017-env-helper.sh:                         1/5   passed  (20.0%)
+t0018-advice.sh:                             0/6   passed  ( 0.0%)
+t0020-crlf.sh:                               1/36  passed  ( 2.8%)
+t0021-conversion.sh:                        10/42  passed  (23.8%)
+t0022-crlf-rename.sh:                        1/2   passed  (50.0%)
+t0030-stripspace.sh:                         0/30  passed  ( 0.0%)
+t0040-parse-options.sh:                      0/94  passed  ( 0.0%)
+t0050-filesystem.sh:                         7/13  passed  (53.8%)
+t0060-path-utils.sh:                        19/219 passed  ( 8.7%)
+t1000-read-tree-m-3way.sh:                   0/79  passed  ( 0.0%)
+t1001-read-tree-m-2way.sh:                   0/29  passed  ( 0.0%)
+t1002-read-tree-m-u-2way.sh:                 0/22  passed  ( 0.0%)
+t1003-read-tree-prefix.sh:                   0/3   passed  ( 0.0%)
+t1004-read-tree-m-u-wf.sh:                   4/17  passed  (23.5%)
+t1005-read-tree-reset.sh:                    0/7   passed  ( 0.0%)
+t1006-cat-file.sh:                           2/260 passed  ( 0.8%)
+t1007-hash-object.sh:                       13/40  passed  (32.5%)
+t1008-read-tree-overlay.sh:                  0/2   passed  ( 0.0%)
+t1009-read-tree-new-index.sh:                1/3   passed  (33.3%)
+t1010-mktree.sh:                             0/8   passed  ( 0.0%)
+t1300-config.sh:                            86/497 passed  (17.3%)
+t1400-update-ref.sh:                        TIMEOUT
+t1500-rev-parse.sh:                         ERROR (no TAP output)
+t1700-split-index.sh:                        2/29  passed  ( 6.9%)
+t2000-conflict-when-checking-files-out.sh:   1/14  passed  ( 7.1%)
+t2200-add-update.sh:                         2/19  passed  (10.5%)
+t3000-ls-files-others.sh:                    2/15  passed  (13.3%)
+t3100-ls-tree-restrict.sh:                   0/14  passed  ( 0.0%)
+t3200-branch.sh:                             7/167 passed  ( 4.2%)
+t3400-rebase.sh:                             4/39  passed  (10.3%)
+t3600-rm.sh:                                11/82  passed  (13.4%)
+t3700-add.sh:                               13/58  passed  (22.4%)
+t3900-i18n-commit.sh:                        2/38  passed  ( 5.3%)
+t4000-diff-format.sh:                       11/41  passed  (26.8%)
+t4001-diff-rename.sh:                        1/23  passed  ( 4.3%)
+t4002-diff-basic.sh:                         0/59  passed  ( 0.0%)
+t4003-diff-rename-1.sh:                      0/7   passed  ( 0.0%)
+t4010-diff-pathspec.sh:                      2/17  passed  (11.8%)
+t5300-pack-object.sh:                        3/63  passed  ( 4.8%)
+t6000-rev-list-misc.sh:                      6/23  passed  (26.1%)
+t6001-rev-list-graft.sh:                     8/14  passed  (57.1%)
+t6003-rev-list-topo-order.sh:                6/36  passed  (16.7%)
+t6010-merge-base.sh:                         0/12  passed  ( 0.0%)
+t7001-mv.sh:                                10/54  passed  (18.5%)
+t7004-tag.sh:                               53/231 passed  (22.9%)
+t7005-editor.sh:                             1/11  passed  ( 9.1%)
+t7060-wtstatus.sh:                           0/17  passed  ( 0.0%)
+t7102-reset.sh:                              0/38  passed  ( 0.0%)
+t7300-clean.sh:                              9/55  passed  (16.4%)
+t7500-commit-template-squash-signoff.sh:    10/57  passed  (17.5%)
+t7502-commit-porcelain.sh:                  ERROR (no TAP output)
+t7600-merge.sh:                             10/83  passed  (12.0%)
+t7700-repack.sh:                             2/47  passed  ( 4.3%)
 
---- t0xxx (basic/infrastructure) ---
-  t0001-init.sh: 28/102 passed
-  t0002-gitfile.sh: 1/14 passed
-  t0003-attributes.sh: 8/55 passed
-  t0005-signals.sh: 0/5 passed
-  t0006-date.sh: 16/129 passed
-  t0008-ignores.sh: TIMEOUT (120s)
-  t0010-racy-git.sh: 0/10 passed
-  t0012-help.sh: 2/32 passed
-  t0014-alias.sh: 1/21 passed
-  t0018-advice.sh: 0/6 passed
-  t0020-crlf.sh: 1/36 passed
-  t0021-conversion.sh: 10/42 passed
-  t0022-crlf-rename.sh: 1/2 passed
-  t0027-auto-crlf.sh: TIMEOUT (120s)
-  t0030-stripspace.sh: 0/30 passed
-  t0033-safe-directory.sh: 3/22 passed
-  t0040-parse-options.sh: 0/94 passed
-  t0050-filesystem.sh: 7/13 passed
-  t0055-beyond-symlinks.sh: 0/3 passed
-  t0056-git-C.sh: 0/11 passed
-  t0060-path-utils.sh: 19/219 passed
-  t0061-run-command.sh: 4/24 passed
-  t0062-revision-walking.sh: 1/2 passed
-  t0067-parse_pathspec_file.sh: 0/8 passed
-  t0068-for-each-repo.sh: 0/5 passed
-  t0070-fundamental.sh: 2/11 passed
-  t0091-bugreport.sh: 4/13 passed
-
---- t1xxx (plumbing) ---
-  t1000-read-tree-m-3way.sh: 0/79 passed
-  t1001-read-tree-m-2way.sh: 0/29 passed
-  t1002-read-tree-m-u-2way.sh: 0/22 passed
-  t1003-read-tree-prefix.sh: 0/3 passed
-  t1004-read-tree-m-u-wf.sh: 4/17 passed
-  t1005-read-tree-reset.sh: 0/7 passed
-  t1006-cat-file.sh: 2/260 passed
-  t1007-hash-object.sh: 13/40 passed
-  t1008-read-tree-overlay.sh: 0/2 passed
-  t1009-read-tree-new-index.sh: 1/3 passed
-  t1013-read-tree-submodule.sh: 10/68 passed
-  t1014-read-tree-confusing.sh: 0/28 passed
-  t1020-subdirectory.sh: 1/15 passed
-  t1050-large.sh: 1/29 passed
-  t1060-object-corruption.sh: 12/17 passed
-  t1090-sparse-checkout-scope.sh: 2/7 passed
-  t1091-sparse-checkout-builtin.sh: 3/77 passed
-  t1092-sparse-checkout-compatibility.sh: 2/106 passed
-  t1100-commit-tree-options.sh: 0/5 passed
-  t1300-config.sh: 86/497 passed
-  t1301-shared-repo.sh: 0/17 passed
-  t1302-repo-version.sh: 8/18 passed
-  t1303-wacky-config.sh: 0/11 passed
-  t1304-default-acl.sh: 4/4 passed (ALL PASS)
-  t1305-config-include.sh: 3/37 passed
-  t1306-xdg-files.sh: 1/21 passed
-  t1307-config-blob.sh: 9/13 passed
-  t1308-config-set.sh: 2/39 passed
-  t1309-early-config.sh: 2/10 passed
-  t1400-update-ref.sh: TIMEOUT (120s)
-  t1401-symbolic-ref.sh: 6/25 passed
-  t1404-update-ref-errors.sh: 1/38 passed
-  t1405-main-ref-store.sh: 1/16 passed
-  t1406-submodule-ref-store.sh: 7/15 passed
-  t1410-reflog.sh: 1/41 passed
-  t1411-reflog-show.sh: 1/17 passed
-  t1412-reflog-loop.sh: 0/3 passed
-  t1413-reflog-detach.sh: 1/7 passed
-  t1414-reflog-walk.sh: 2/12 passed
-  t1415-worktree-refs.sh: 0/10 passed
-  t1416-ref-transaction-hooks.sh: 0/9 passed
-  t1450-fsck.sh: 1/96 passed
-  t1451-fsck-buffer.sh: 9/72 passed
-  t1500-rev-parse.sh: 0/0 passed (test infrastructure error)
-  t1501-work-tree.sh: 2/39 passed
-  t1502-rev-parse-parseopt.sh: 11/37 passed
-  t1503-rev-parse-verify.sh: 1/12 passed
-  t1504-ceiling-dirs.sh: 13/44 passed
-  t1505-rev-parse-last.sh: 1/7 passed
-  t1506-rev-parse-diagnosis.sh: 5/30 passed
-  t1507-rev-parse-upstream.sh: 1/29 passed
-  t1508-at-combinations.sh: 7/35 passed
-  t1510-repo-setup.sh: 2/109 passed
-  t1511-rev-parse-caret.sh: 6/17 passed
-  t1512-rev-parse-disambiguation.sh: 0/3 passed
-  t1513-rev-parse-prefix.sh: 1/11 passed
-  t1514-rev-parse-push.sh: 0/9 passed
-  t1515-rev-parse-outside-repo.sh: 1/4 passed
-  t1700-split-index.sh: 2/29 passed
-
---- t2xxx (checkout/index) ---
-  t2000-conflict-when-checking-files-out.sh: 1/14 passed
-  t2002-checkout-cache-u.sh: 0/3 passed
-  t2003-checkout-cache-mkdir.sh: 0/10 passed
-  t2004-checkout-cache-temp.sh: 1/23 passed
-  t2005-checkout-index-symlinks.sh: 0/3 passed
-  t2006-checkout-index-basic.sh: 2/9 passed
-  t2007-checkout-symlink.sh: 1/4 passed
-  t2010-checkout-ambiguous.sh: 2/10 passed
-  t2011-checkout-invalid-head.sh: 2/10 passed
-  t2012-checkout-last.sh: 1/22 passed
-  t2013-checkout-submodule.sh: 10/74 passed
-  t2014-checkout-switch.sh: 4/4 passed (ALL PASS)
-  t2015-checkout-unborn.sh: 1/6 passed
-  t2016-checkout-patch.sh: 0/19 passed
-  t2017-checkout-orphan.sh: 1/13 passed
-  t2018-checkout-branch.sh: 0/25 passed
-  t2019-checkout-ambiguous-ref.sh: 3/9 passed
-  t2021-checkout-overwrite.sh: 0/9 passed
-  t2022-checkout-paths.sh: 0/5 passed
-  t2023-checkout-m.sh: 1/5 passed
-  t2024-checkout-dwim.sh: 0/23 passed
-  t2025-checkout-no-overlay.sh: 1/6 passed
-  t2026-checkout-pathspec-file.sh: 0/11 passed
-  t2027-checkout-track.sh: 0/5 passed
-  t2060-switch.sh: 2/16 passed
-  t2070-restore.sh: 1/15 passed
-  t2071-restore-patch.sh: 0/15 passed
-  t2072-restore-pathspec-file.sh: 0/12 passed
-  t2200-add-update.sh: 2/19 passed
-
---- t3xxx (ls-files/ls-tree/branch/rebase/rm/add) ---
-  t3000-ls-files-others.sh: 2/15 passed
-  t3002-ls-files-dashpath.sh: 1/6 passed
-  t3003-ls-files-exclude.sh: 2/7 passed
-  t3004-ls-files-basic.sh: 0/6 passed
-  t3005-ls-files-relative.sh: 0/4 passed
-  t3006-ls-files-long.sh: 0/3 passed
-  t3007-ls-files-recurse-submodules.sh: 0/24 passed
-  t3008-ls-files-lazy-init-name-hash.sh: 0/1 passed
-  t3010-ls-files-killed-modified.sh: 0/6 passed
-  t3020-ls-files-error-unmatch.sh: 1/3 passed
-  t3060-ls-files-with-tree.sh: 1/8 passed
-  t3070-wildmatch.sh: 1237/1901 passed
-  t3100-ls-tree-restrict.sh: 0/14 passed
-  t3101-ls-tree-dirname.sh: 0/19 passed
-  t3102-ls-tree-wildcards.sh: 2/4 passed
-  t3103-ls-tree-misc.sh: 1/10 passed
-  t3104-ls-tree-format.sh: 0/19 passed
-  t3200-branch.sh: 7/167 passed
-  t3201-branch-contains.sh: 3/24 passed
-  t3202-show-branch.sh: 3/27 passed
-  t3203-branch-output.sh: 3/41 passed
-  t3205-branch-color.sh: 0/4 passed
-  t3206-range-diff.sh: 1/48 passed
-  t3300-funny-names.sh: 2/21 passed
-  t3301-notes.sh: 8/153 passed
-  t3302-notes-index-expensive.sh: 10/12 passed
-  t3303-notes-subtrees.sh: 0/23 passed
-  t3304-notes-mixed.sh: 0/6 passed
-  t3305-notes-fanout.sh: TIMEOUT (120s)
-  t3310-notes-merge-manual-resolve.sh: 3/22 passed
-  t3400-rebase.sh: 4/39 passed
-  t3401-rebase-and-am-rename.sh: 2/10 passed
-  t3404-rebase-interactive.sh: 2/132 passed
-  t3412-rebase-root.sh: 4/25 passed
-  t3415-rebase-autosquash.sh: 1/28 passed
-  t3418-rebase-continue.sh: 1/30 passed
-  t3419-rebase-patch-id.sh: 1/8 passed
-  t3420-rebase-autostash.sh: 3/52 passed
-  t3421-rebase-topology-linear.sh: 1/64 passed
-  t3430-rebase-merges.sh: 0/34 passed
-  t3500-cherry.sh: 0/4 passed
-  t3501-revert-cherry-pick.sh: 0/21 passed
-  t3502-cherry-pick-merge.sh: 0/12 passed
-  t3503-cherry-pick-root.sh: 0/6 passed
-  t3504-cherry-pick-rerere.sh: 1/9 passed
-  t3505-cherry-pick-empty.sh: 2/17 passed
-  t3506-cherry-pick-ff.sh: 1/11 passed
-  t3507-cherry-pick-conflict.sh: 0/44 passed
-  t3508-cherry-pick-many-commits.sh: 1/14 passed
-  t3509-cherry-pick-merge-df.sh: 1/9 passed
-  t3510-cherry-pick-sequence.sh: 3/55 passed
-  t3600-rm.sh: 11/82 passed
-  t3601-rm-pathspec-file.sh: 1/5 passed
-  t3602-rm-sparse-checkout.sh: 0/13 passed
-  t3700-add.sh: 13/58 passed
-  t3701-add-interactive.sh: 25/130 passed
-  t3702-add-edit.sh: 1/3 passed
-  t3703-add-magic-pathspec.sh: 2/6 passed
-  t3704-add-pathspec-file.sh: 0/11 passed
-  t3900-i18n-commit.sh: 2/38 passed
-
---- t4xxx (diff) ---
-  t4000-diff-format.sh: 11/41 passed
-  t4001-diff-rename.sh: 1/23 passed
-  t4002-diff-basic.sh: 0/59 passed
-  t4003-diff-rename-1.sh: 0/7 passed
-  t4004-diff-rename-symlink.sh: 0/4 passed
-  t4005-diff-rename-2.sh: 0/4 passed
-  t4006-diff-mode.sh: 0/7 passed
-  t4007-rename-3.sh: 1/13 passed
-  t4008-diff-break-rewrite.sh: 0/14 passed
-  t4010-diff-pathspec.sh: 2/17 passed
-  t4011-diff-symlink.sh: 0/8 passed
-  t4012-diff-binary.sh: 0/13 passed
-  t4013-diff-various.sh: 22/230 passed
-  t4014-format-patch.sh: 13/215 passed
-  t4015-diff-whitespace.sh: 21/136 passed
-  t4016-diff-quote.sh: 1/5 passed
-  t4017-diff-retval.sh: 10/38 passed
-  t4018-diff-funcname.sh: 0/4 passed
-  t4019-diff-wserror.sh: 1/21 passed
-  t4020-diff-external.sh: 5/72 passed
-  t4021-format-patch-numbered.sh: 1/14 passed
-  t4022-diff-rewrite.sh: 4/11 passed
-  t4023-diff-rename-typechange.sh: 0/4 passed
-  t4024-diff-optimize-common.sh: 1/2 passed
-  t4025-hunk-header.sh: 1/2 passed
-  t4026-color.sh: 7/34 passed
-  t4027-diff-submodule.sh: 1/20 passed
-  t4028-format-patch-mime-headers.sh: 1/3 passed
-  t4029-diff-trailing-space.sh: 0/1 passed
-  t4030-diff-textconv.sh: 0/19 passed
-  t4031-diff-rewrite-binary.sh: 1/8 passed
-  t4032-diff-inter-hunk-context.sh: 6/37 passed
-  t4033-diff-patience.sh: 1/11 passed
-  t4034-diff-words.sh: 2/66 passed
-
---- t5xxx (transport/pack/archive) ---
-  t5000-tar-tree.sh: 21/90 passed
-  t5001-archive-attr.sh: 24/44 passed
-  t5002-archive-attr-pattern.sh: 15/19 passed
-  t5003-archive-zip.sh: 64/78 passed
-  t5004-archive-corner-cases.sh: 7/14 passed
-  t5100-mailinfo.sh: 0/25 passed
-  t5300-pack-object.sh: 3/63 passed
-  t5301-sliding-window.sh: 0/6 passed
-  t5302-pack-index.sh: 5/36 passed
-  t5303-pack-corruption-resilience.sh: 8/36 passed
-  t5304-prune.sh: 1/32 passed
-  t5305-include-tag.sh: 0/15 passed
-  t5310-pack-bitmaps.sh: 6/236 passed
-  t5316-pack-delta-depth.sh: 0/5 passed
-  t5317-pack-objects-filter-objects.sh: 9/33 passed
-  t5318-commit-graph.sh: 4/109 passed
-  t5319-multi-pack-index.sh: 4/98 passed
-  t5320-delta-islands.sh: 0/15 passed
-  t5500-fetch-pack.sh: TIMEOUT (120s)
-  t5502-quickfetch.sh: 0/7 passed
-  t5503-tagfollow.sh: 4/12 passed
-  t5504-fetch-receive-strict.sh: 1/29 passed
-  t5505-remote.sh: 5/130 passed
-  t5506-remote-groups.sh: 0/9 passed
-  t5510-fetch.sh: 6/321 passed
-  t5512-ls-remote.sh: 5/40 passed
-  t5515-fetch-merge-logic.sh: 0/17 passed
-  t5516-fetch-push.sh: 0/124 passed
-  t5520-pull.sh: 3/80 passed
-
---- t7xxx (porcelain) ---
-  t7001-mv.sh: 10/54 passed
-  t7002-mv-sparse-checkout.sh: 0/22 passed
-  t7003-filter-branch.sh: 6/48 passed
-  t7004-tag.sh: 53/231 passed
-  t7005-editor.sh: 1/11 passed
-  t7006-pager.sh: 99/109 passed
-  t7007-show.sh: 2/18 passed
-  t7008-filter-branch-null-sha1.sh: 2/6 passed
-  t7010-setup.sh: 3/16 passed
-  t7012-skip-worktree-writing.sh: 0/11 passed
-  t7030-verify-tag.sh: 2/16 passed
-  t7060-wtstatus.sh: 0/17 passed
-  t7061-wtstatus-ignore.sh: 0/25 passed
-  t7064-wtstatus-pv2.sh: 0/28 passed
-  t7102-reset.sh: 0/38 passed
-  t7104-reset-hard.sh: 0/3 passed
-  t7105-reset-patch.sh: 0/13 passed
-  t7106-reset-unborn-branch.sh: 2/7 passed
-  t7107-reset-pathspec-file.sh: 1/11 passed
-  t7110-reset-merge.sh: 2/21 passed
-  t7111-reset-table.sh: 0/42 passed
-  t7112-reset-submodule.sh: 12/82 passed
-  t7113-post-index-change-hook.sh: 1/4 passed
-  t7300-clean.sh: 9/55 passed
-  t7400-submodule-basic.sh: 13/124 passed
-  t7500-commit-template-squash-signoff.sh: 10/57 passed
-  t7501-commit-basic-functionality.sh: 16/77 passed
-  t7504-commit-msg-hook.sh: 10/30 passed
-  t7505-prepare-commit-msg-hook.sh: 2/23 passed
-  t7506-status-submodule.sh: 4/40 passed
-  t7507-commit-verbose.sh: 3/45 passed
-  t7508-status.sh: 19/126 passed
-  t7509-commit-authorship.sh: 0/12 passed
-  t7510-signed-commit.sh: 0/28 passed
-  t7511-status-index.sh: 24/24 passed (ALL PASS)
-  t7512-status-help.sh: 0/47 passed
-  t7513-interpret-trailers.sh: 5/99 passed
-  t7514-commit-patch.sh: 1/3 passed
-  t7515-status-symlinks.sh: 1/3 passed
-  t7517-per-repo-email.sh: 0/16 passed
-  t7518-ident-corner-cases.sh: 0/5 passed
-  t7519-status-fsmonitor.sh: 3/27 passed
-  t7520-ignored-hook-warning.sh: 1/5 passed
-  t7525-status-rename.sh: 1/15 passed
-  t7526-commit-pathspec-file.sh: 0/11 passed
-  t7600-merge.sh: 10/83 passed
-  t7601-merge-pull-config.sh: 2/65 passed
-  t7602-merge-octopus-many.sh: 1/5 passed
-  t7610-mergetool.sh: 0/31 passed
-  t7700-repack.sh: 2/47 passed
-
-=== TIMEOUTS ===
-  t0008-ignores.sh
-  t0027-auto-crlf.sh
-  t1400-update-ref.sh
-  t3305-notes-fanout.sh
-  t5500-fetch-pack.sh
-
-=== SUMMARY ===
-Total test scripts run: 148 (5 timeouts, 3 parse errors, 8 not found)
-Scripts with 100% pass: 3 (t1304, t2014, t7511)
-Scripts with >50% pass: 12
-
-Individual test counts (from 148 scripts, excluding timeouts/errors):
-  Passed: 2405
-  Total:  11955
-  Overall pass rate: 20.1%
-
-Top contributors to pass count:
-  t3070-wildmatch.sh: 1237 passes (largest single contributor)
-  t7006-pager.sh: 99 passes
-  t1300-config.sh: 86 passes
-  t5003-archive-zip.sh: 64 passes
-  t7004-tag.sh: 53 passes
+TOP PERFORMERS (>20% pass rate):
+  t0004-unwritable.sh          100%  (9/9)
+  t6001-rev-list-graft.sh       57%  (8/14)
+  t0050-filesystem.sh           54%  (7/13)
+  t0022-crlf-rename.sh          50%  (1/2)
+  t1009-read-tree-new-index.sh  33%  (1/3)
+  t1007-hash-object.sh          33%  (13/40)
+  t0001-init.sh                 27%  (28/102)
+  t4000-diff-format.sh          27%  (11/41)
+  t6000-rev-list-misc.sh        26%  (6/23)
+  t0021-conversion.sh           24%  (10/42)
+  t1004-read-tree-m-u-wf.sh     24%  (4/17)
+  t7004-tag.sh                  23%  (53/231)
+  t3700-add.sh                  22%  (13/58)
+  t0017-env-helper.sh           20%  (1/5)
