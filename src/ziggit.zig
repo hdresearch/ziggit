@@ -1789,7 +1789,7 @@ pub const Repository = struct {
 
         // Create required directories using stack buffer (no heap allocs)
         // Only need leaf dirs; makePath creates parents automatically
-        var path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         {
             const leaf_dirs = [_][]const u8{ "objects/pack", "refs/heads", "refs/tags" };
             for (leaf_dirs) |d| {

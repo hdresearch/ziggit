@@ -825,9 +825,9 @@ fn forwardToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_i
                 std.process.exit(1);
             },
         };
-        const stdout_data = child.stdout.?.reader().readAllAlloc(allocator, 4 * 1024 * 1024) catch "";
+        const stdout_data = child.stdout.?.readToEndAlloc(allocator, 4 * 1024 * 1024) catch "";
         defer allocator.free(stdout_data);
-        const stderr_data = child.stderr.?.reader().readAllAlloc(allocator, 4 * 1024 * 1024) catch "";
+        const stderr_data = child.stderr.?.readToEndAlloc(allocator, 4 * 1024 * 1024) catch "";
         defer allocator.free(stderr_data);
         const term = try child.wait();
         
@@ -840,7 +840,7 @@ fn forwardToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_i
         
         // Check if --help-all failed (exit 128 = not in repo). Fall back to -h.
         if (has_help_all and exit_code == 128) {
-            var argv2 = std.ArrayList([]const u8).init(allocator);
+            var argv2 = std.array_list.Managed([]const u8).init(allocator);
             defer argv2.deinit();
             try argv2.append(findRealGit());
             for (all_args) |arg| {
@@ -857,9 +857,9 @@ fn forwardToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_i
             _ = child2.spawn() catch {
                 std.process.exit(1);
             };
-            const stdout2 = child2.stdout.?.reader().readAllAlloc(allocator, 4 * 1024 * 1024) catch "";
+            const stdout2 = child2.stdout.?.readToEndAlloc(allocator, 4 * 1024 * 1024) catch "";
             defer allocator.free(stdout2);
-            const stderr2 = child2.stderr.?.reader().readAllAlloc(allocator, 4 * 1024 * 1024) catch "";
+            const stderr2 = child2.stderr.?.readToEndAlloc(allocator, 4 * 1024 * 1024) catch "";
             defer allocator.free(stderr2);
             const term2 = try child2.wait();
             
