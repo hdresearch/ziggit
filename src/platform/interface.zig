@@ -63,4 +63,7 @@ pub const FileSystem = struct {
     
     /// List directory contents (returns just filenames, not full paths)
     readDir: *const fn (allocator: std.mem.Allocator, path: []const u8) anyerror![][]u8,
+    
+    /// Get file statistics
+    stat: *const fn (path: []const u8) anyerror!std.fs.File.Stat,
 };

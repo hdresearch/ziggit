@@ -114,6 +114,12 @@ fn readDirImpl(allocator: std.mem.Allocator, path: []const u8) ![][]u8 {
     return try entries.toOwnedSlice();
 }
 
+fn statImpl(path: []const u8) !std.fs.File.Stat {
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+    return try file.stat();
+}
+
 pub const wasi_platform = interface.Platform{
     .getArgs = getArgsImpl,
     .writeStdout = writeStdoutImpl,
@@ -127,5 +133,6 @@ pub const wasi_platform = interface.Platform{
         .getCwd = getCwdImpl,
         .chdir = chdirImpl,
         .readDir = readDirImpl,
+        .stat = statImpl,
     },
 };
