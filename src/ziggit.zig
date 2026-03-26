@@ -1484,6 +1484,17 @@ pub const Repository = struct {
     }
 
     /// Clone repository (bare) — supports local paths, HTTPS URLs, and SSH URLs
+    /// Clone into a bare repository with optional shallow depth.
+    /// When depth > 0, performs a shallow clone fetching only that many commits.
+    pub fn cloneBareShallow(allocator: std.mem.Allocator, source: []const u8, target: []const u8, depth: u32) !Repository {
+        if (std.mem.startsWith(u8, source, "https://") or
+            std.mem.startsWith(u8, source, "http://")) {
+            return cloneBareHttpsShallow(allocator, source, target, depth);
+        }
+        // For non-HTTP protocols, shallow is not yet supported; fall back to full clone
+        return cloneBare(allocator, source, target);
+    }
+
     pub fn cloneBare(allocator: std.mem.Allocator, source: []const u8, target: []const u8) !Repository {
         if (std.mem.startsWith(u8, source, "https://") or
             std.mem.startsWith(u8, source, "http://")) {
@@ -1731,6 +1742,142 @@ pub const Repository = struct {
         // Find which branch HEAD points to
         if (head_ref) |head_hash| {
             // Check if any branch matches HEAD's hash
+            var head_target: []const u8 = "refs/heads/master";
+            for (clone_result.refs) |ref| {
+                if (std.mem.startsWith(u8, ref.name, "refs/heads/") and
+                    std.mem.eql(u8, &ref.hash, head_hash))
+                {
+                    head_target = ref.name;
+                    break;
+                }
+            }
+            const hf = try std.fs.cwd().createFile(head_path, .{});
+            defer hf.close();
+            try hf.writer().print("ref: {s}\n", .{head_target});
+        }
+
+        const path = try allocator.dupe(u8, target);
+
+        return Repository{
+            .path = path,
+            .git_dir = git_dir,
+            .allocator = allocator,
+        };
+    }
+
+    /// Clone from HTTPS URL into a bare repository with shallow depth support.
+    fn cloneBareHttpsShallow(allocator: std.mem.Allocator, url: []const u8, target: []const u8, depth: u32) !Repository {
+        if (depth == 0) return cloneBareHttps(allocator, url, target);
+
+        const smart_http = @import("git/smart_http.zig");
+        const pack_writer = @import("git/pack_writer.zig");
+        const idx_writer = @import("git/idx_writer.zig");
+
+        // Create bare repo structure
+        std.fs.cwd().makePath(target) catch |err| switch (err) {
+            error.PathAlreadyExists => return error.AlreadyExists,
+            else => return err,
+        };
+        errdefer std.fs.cwd().deleteTree(target) catch {};
+
+        const git_dir = try allocator.dupe(u8, target);
+        errdefer allocator.free(git_dir);
+
+        // Create required directories
+        const dirs = [_][]const u8{ "objects", "objects/pack", "refs", "refs/heads", "refs/tags" };
+        for (dirs) |d| {
+            const dir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ target, d });
+            defer allocator.free(dir_path);
+            std.fs.cwd().makePath(dir_path) catch {};
+        }
+
+        // Write HEAD
+        const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{target});
+        defer allocator.free(head_path);
+        {
+            const f = try std.fs.cwd().createFile(head_path, .{});
+            defer f.close();
+            try f.writeAll("ref: refs/heads/master\n");
+        }
+
+        // Write config for bare repo
+        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{target});
+        defer allocator.free(config_path);
+        {
+            const f = try std.fs.cwd().createFile(config_path, .{});
+            defer f.close();
+            try f.writeAll("[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n[remote \"origin\"]\n\turl = ");
+            try f.writeAll(url);
+            try f.writeAll("\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n");
+        }
+
+        // Clone pack data via smart HTTP with shallow depth
+        var clone_result = smart_http.clonePackShallow(allocator, url, depth) catch {
+            return error.HttpCloneFailed;
+        };
+        defer clone_result.deinit();
+
+        // Save pack + generate idx
+        if (clone_result.pack_data.len >= 32) {
+            const checksum_hex = try pack_writer.savePackFast(allocator, git_dir, clone_result.pack_data);
+            defer allocator.free(checksum_hex);
+
+            const idx_data = try idx_writer.generateIdxFromData(allocator, clone_result.pack_data);
+            defer allocator.free(idx_data);
+
+            const ip = try pack_writer.idxPath(allocator, git_dir, checksum_hex);
+            defer allocator.free(ip);
+            const idx_file = try std.fs.cwd().createFile(ip, .{});
+            defer idx_file.close();
+            try idx_file.writeAll(idx_data);
+        }
+
+        // Write .git/shallow file with boundary commits
+        if (clone_result.shallow_commits.len > 0) {
+            const shallow_path = try std.fmt.allocPrint(allocator, "{s}/shallow", .{target});
+            defer allocator.free(shallow_path);
+            var shallow_content = std.ArrayList(u8).init(allocator);
+            defer shallow_content.deinit();
+            for (clone_result.shallow_commits) |commit_oid| {
+                try shallow_content.appendSlice(&commit_oid);
+                try shallow_content.append('\n');
+            }
+            const sf = try std.fs.cwd().createFile(shallow_path, .{});
+            defer sf.close();
+            try sf.writeAll(shallow_content.items);
+        }
+
+        // Write refs using packed-refs file
+        // For shallow clones, only write branch refs (not tags, which point to missing objects)
+        var head_ref: ?[]const u8 = null;
+        {
+            const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{target});
+            defer allocator.free(packed_refs_path);
+            var packed_refs = std.ArrayList(u8).init(allocator);
+            defer packed_refs.deinit();
+            try packed_refs.appendSlice("# pack-refs with: peeled fully-peeled sorted \n");
+
+            for (clone_result.refs) |ref| {
+                if (std.mem.eql(u8, ref.name, "HEAD")) {
+                    head_ref = &ref.hash;
+                    continue;
+                }
+                // Only write branch refs for shallow clones (tags point to missing objects)
+                if (std.mem.startsWith(u8, ref.name, "refs/heads/")) {
+                    try packed_refs.appendSlice(&ref.hash);
+                    try packed_refs.append(' ');
+                    try packed_refs.appendSlice(ref.name);
+                    try packed_refs.append('\n');
+                }
+            }
+
+            const pf = try std.fs.cwd().createFile(packed_refs_path, .{});
+            defer pf.close();
+            try pf.writeAll(packed_refs.items);
+        }
+
+        // Update HEAD to point to the right branch
+        if (head_ref) |head_hash| {
             var head_target: []const u8 = "refs/heads/master";
             for (clone_result.refs) |ref| {
                 if (std.mem.startsWith(u8, ref.name, "refs/heads/") and

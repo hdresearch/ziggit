@@ -165,6 +165,7 @@ pub fn clonePack(allocator: std.mem.Allocator, url: []const u8) !CloneResult {
             .refs = discovery.refs,
             .capabilities = discovery.capabilities,
             .pack_data = try allocator.alloc(u8, 0),
+            .shallow_commits = try allocator.alloc(smart_http.Oid, 0),
             .allocator = allocator,
         };
     }
@@ -186,7 +187,8 @@ pub fn clonePack(allocator: std.mem.Allocator, url: []const u8) !CloneResult {
         .refs = discovery.refs,
         .capabilities = discovery.capabilities,
         .pack_data = pack_data,
-        .allocator = allocator,
+        .shallow_commits = try allocator.alloc(smart_http.Oid, 0),
+            .allocator = allocator,
     };
 }
 
@@ -270,7 +272,8 @@ pub fn fetchNewPack(allocator: std.mem.Allocator, url: []const u8, local_refs: [
         .refs = discovery.refs,
         .capabilities = discovery.capabilities,
         .pack_data = pack_data,
-        .allocator = allocator,
+        .shallow_commits = try allocator.alloc(smart_http.Oid, 0),
+            .allocator = allocator,
     };
 }
 
