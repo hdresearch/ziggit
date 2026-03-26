@@ -1,0 +1,32 @@
+Git Test Suite Results — Bottom Half (High Numbers)
+Date: 2026-03-26
+Runner: ziggit via /tmp/ziggit-as-git/git
+
+  t9902-completion.sh: 14/263 passed
+  t7900-maintenance.sh: 30/72 passed
+  t7810-grep.sh: 111/263 passed
+  t7700-repack.sh: 19/47 passed
+  t7600-merge.sh: 72/83 passed
+  t7508-status.sh: 25/126 passed
+  t7501-commit.sh: SKIPPED (not found)
+  t7400-submodule-basic.sh: 19/124 passed
+  t7201-co.sh: 35/46 passed
+  t7060-wtstatus.sh: 10/17 passed
+  t7004-tag.sh: 219/231 passed
+  t7001-mv.sh: 38/54 passed
+  t6300-for-each-ref.sh: 414/429 passed
+  t6200-fmt-merge-msg.sh: 5/37 passed
+  t6100-rev-list-in-order.sh: 3/3 passed
+  t6000-rev-list-misc.sh: 17/23 passed
+  t5601-clone.sh: 0/0 (no test plan)
+  t5510-fetch.sh: 0/0 (no test plan)
+  t5500-fetch-pack.sh: 0/0 (no test plan)
+  t5400-send-pack.sh: 3/17 passed
+  t5300-pack-object.sh: 25/63 passed
+  t5100-mailinfo.sh: 50/52 passed
+  t4200-rerere.sh: 13/36 passed
+  t4150-am.sh: 72/87 passed
+  t4000-diff-format.sh: 40/41 passed
+  t3900-i18n-commit.sh: 38/38 passed
+
+TOTAL: 1272/2152 passed (880 failed)

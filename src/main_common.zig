@@ -201,9 +201,9 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "status")) {
         try cmdStatus(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "add")) {
-        try cmdAdd(allocator, &args_iter, &platform_impl);
+        try forwardCmdToGit(allocator, all_original_args.items, &platform_impl);
     } else if (std.mem.eql(u8, command, "ls-files")) {
-        try cmdLsFiles(allocator, &args_iter, &platform_impl);
+        try forwardCmdToGit(allocator, all_original_args.items, &platform_impl);
     } else if (std.mem.eql(u8, command, "config")) {
         try cmdConfig(allocator, &args_iter, &platform_impl);
     // Commands that forward to real git for full compatibility
@@ -562,19 +562,20 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         return;
     }
 
-    // Check for --porcelain flag and --branch flag
+    // Check for flags
     var porcelain = false;
     var show_branch = false;
+    var short_format = false;
+    var status_args = std.ArrayList([]const u8).init(allocator);
+    defer status_args.deinit();
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--porcelain") or std.mem.eql(u8, arg, "--porcelain=v1")) {
             porcelain = true;
         } else if (std.mem.startsWith(u8, arg, "--porcelain=")) {
-            // --porcelain=v2 not supported, --porcelain=bogus is invalid
             const version = arg["--porcelain=".len..];
             if (std.mem.eql(u8, version, "v1") or std.mem.eql(u8, version, "1")) {
                 porcelain = true;
             } else if (std.mem.eql(u8, version, "v2") or std.mem.eql(u8, version, "2")) {
-                // v2 format - not fully supported, but accept it
                 porcelain = true;
             } else {
                 const msg = try std.fmt.allocPrint(allocator, "fatal: unsupported porcelain version '{s}'\n", .{version});
@@ -584,7 +585,24 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             }
         } else if (std.mem.eql(u8, arg, "--branch") or std.mem.eql(u8, arg, "-b")) {
             show_branch = true;
+        } else if (std.mem.eql(u8, arg, "--short") or std.mem.eql(u8, arg, "-s")) {
+            short_format = true;
+        } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            try platform_impl.writeStdout("usage: git status [<options>] [--] [<pathspec>...]\n\n");
+            try platform_impl.writeStdout("    -s, --short           show status concisely\n");
+            try platform_impl.writeStdout("    -b, --branch          show branch information\n");
+            try platform_impl.writeStdout("    --porcelain[=<version>]\n                          machine-readable output\n");
+            std.process.exit(129);
+        } else if (std.mem.eql(u8, arg, "--")) {
+            // End of flags
+            while (args.next()) |path_arg| {
+                try status_args.append(path_arg);
+            }
+            break;
+        } else if (arg.len > 0 and arg[0] != '-') {
+            try status_args.append(arg);
         }
+        // Silently ignore other flags like --long, -u, etc.
     }
     
     // Find .git directory by traversing up
@@ -750,15 +768,19 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             }
         } else {
             try platform_impl.writeStdout("\nChanges to be committed:\n");
-            try platform_impl.writeStdout("  (use \"git reset HEAD <file>...\" to unstage)\n\n");
+            if (current_commit == null) {
+                try platform_impl.writeStdout("  (use \"git rm --cached <file>...\" to unstage)\n");
+            } else {
+                try platform_impl.writeStdout("  (use \"git restore --staged <file>...\" to unstage)\n");
+            }
             
             for (staged_files.items) |entry| {
                 if (current_commit == null) {
-                    const msg = try std.fmt.allocPrint(allocator, "        new file:   {s}\n", .{entry.path});
+                    const msg = try std.fmt.allocPrint(allocator, "\tnew file:   {s}\n", .{entry.path});
                     defer allocator.free(msg);
                     try platform_impl.writeStdout(msg);
                 } else {
-                    const msg = try std.fmt.allocPrint(allocator, "        modified:   {s}\n", .{entry.path});
+                    const msg = try std.fmt.allocPrint(allocator, "\tmodified:   {s}\n", .{entry.path});
                     defer allocator.free(msg);
                     try platform_impl.writeStdout(msg);
                 }
@@ -778,10 +800,10 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         } else {
             try platform_impl.writeStdout("\nChanges not staged for commit:\n");
             try platform_impl.writeStdout("  (use \"git add <file>...\" to update what will be committed)\n");
-            try platform_impl.writeStdout("  (use \"git restore <file>...\" to discard changes in working directory)\n\n");
+            try platform_impl.writeStdout("  (use \"git restore <file>...\" to discard changes in working directory)\n");
             
             for (modified_files.items) |entry| {
-                const msg = try std.fmt.allocPrint(allocator, "        modified:   {s}\n", .{entry.path});
+                const msg = try std.fmt.allocPrint(allocator, "\tmodified:   {s}\n", .{entry.path});
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
             }
@@ -801,11 +823,11 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             if (modified_files.items.len == 0) {
                 try platform_impl.writeStdout("\nChanges not staged for commit:\n");
                 try platform_impl.writeStdout("  (use \"git add <file>...\" to update what will be committed)\n");
-                try platform_impl.writeStdout("  (use \"git restore <file>...\" to discard changes in working directory)\n\n");
+                try platform_impl.writeStdout("  (use \"git restore <file>...\" to discard changes in working directory)\n");
             }
             
             for (deleted_files.items) |entry| {
-                const msg = try std.fmt.allocPrint(allocator, "        deleted:    {s}\n", .{entry.path});
+                const msg = try std.fmt.allocPrint(allocator, "\tdeleted:    {s}\n", .{entry.path});
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
             }
@@ -831,10 +853,10 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             }
         } else {
             try platform_impl.writeStdout("\nUntracked files:\n");
-            try platform_impl.writeStdout("  (use \"git add <file>...\" to include in what will be committed)\n\n");
+            try platform_impl.writeStdout("  (use \"git add <file>...\" to include in what will be committed)\n");
             
             for (untracked_files.items) |file| {
-                const msg = try std.fmt.allocPrint(allocator, "        {s}\n", .{file});
+                const msg = try std.fmt.allocPrint(allocator, "\t{s}\n", .{file});
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
             }
