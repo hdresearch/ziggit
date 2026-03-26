@@ -920,45 +920,7 @@ pub const DetailedIndexStats = struct {
         std.debug.print("  - Largest file: {} bytes\n", .{self.largest_file_size});
         std.debug.print("  - Total tracked size: {} bytes\n", .{self.total_tracked_size});
     }
-}
-    
-    const stats = analyzeIndex(git_dir, platform_impl, allocator) catch |err| {
-        try issues.append(try std.fmt.allocPrint(allocator, "Failed to analyze index: {}", .{err}));
-        return issues.toOwnedSlice();
-    };
-    
-    // Check version
-    if (stats.version < 2 or stats.version > 4) {
-        try issues.append(try std.fmt.allocPrint(allocator, "Unsupported index version: {}", .{stats.version}));
-    }
-    
-    // Check checksum
-    if (!stats.checksum_valid) {
-        try issues.append(try allocator.dupe(u8, "Index checksum is invalid - file may be corrupted"));
-    }
-    
-    // Check file size
-    if (stats.file_size > 100 * 1024 * 1024) {
-        try issues.append(try std.fmt.allocPrint(allocator, "Index file is very large: {} bytes", .{stats.file_size}));
-    }
-    
-    // Check entry count
-    if (stats.total_entries > 1_000_000) {
-        try issues.append(try std.fmt.allocPrint(allocator, "Very large number of entries: {}", .{stats.total_entries}));
-    }
-    
-    // Report conflicts
-    if (stats.has_conflicts) {
-        try issues.append(try allocator.dupe(u8, "Index contains merge conflicts that need to be resolved"));
-    }
-    
-    // Report sparse checkout
-    if (stats.has_sparse_checkout) {
-        try issues.append(try allocator.dupe(u8, "Repository uses sparse-checkout"));
-    }
-    
-    return issues.toOwnedSlice();
-}
+};
 
 /// Optimize index performance by sorting and compacting entries
 pub fn optimizeIndex(self: *Index) void {
