@@ -1791,6 +1791,22 @@ pub fn build(b: *std.Build) void {
     const pack_idx_advanced_step = b.step("pack-idx-advanced-test", "Run pack idx advanced tests");
     pack_idx_advanced_step.dependOn(&b.addRunArtifact(pack_idx_advanced_tests).step);
 
+    // Pack annotated tag tests (tag objects in packs, SHA-1, git cat-file interop)
+    const pack_annotated_tag_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_annotated_tag_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_annotated_tag_tests.root_module.addAnonymousImport("idx_writer", .{
+        .root_source_file = b.path("src/git/idx_writer.zig"),
+    });
+    pack_annotated_tag_tests.root_module.addAnonymousImport("pack_writer", .{
+        .root_source_file = b.path("src/git/pack_writer.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(pack_annotated_tag_tests).step);
+    const pack_annotated_tag_step = b.step("pack-annotated-tag-test", "Run pack annotated tag tests");
+    pack_annotated_tag_step.dependOn(&b.addRunArtifact(pack_annotated_tag_tests).step);
+
     // Pack clone interop tests (git pack-objects -> our idx -> git reads back, incremental fetch, tags)
     const pack_clone_interop_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_clone_interop_test.zig"),
