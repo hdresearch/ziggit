@@ -992,6 +992,15 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     }
     defer allocator.free(start_commit);
 
+    // Fast path for common case: log --format=%H -1 (just output HEAD commit hash)
+    if (format_string != null and std.mem.eql(u8, format_string.?, "%H") and 
+        (max_count == 1) and committish == null) {
+        const output = try std.fmt.allocPrint(allocator, "{s}\n", .{start_commit});
+        defer allocator.free(output);
+        try platform_impl.writeStdout(output);
+        return;
+    }
+    
     // Walk the commit history
     var commit_hash = try allocator.dupe(u8, start_commit);
     defer allocator.free(commit_hash);
