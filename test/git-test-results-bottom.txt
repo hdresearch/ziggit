@@ -10,7 +10,7 @@ Runner: ziggit via /tmp/ziggit-as-git/git
   t7508-status.sh: 36/126 passed
   t7501-commit-basic-functionality.sh: 76/77 passed
   t7400-submodule-basic.sh: 23/124 passed
-  t7201-co.sh: 38/46 passed
+  t7201-co.sh: 40/46 passed
   t7060-wtstatus.sh: 10/17 passed
   t7004-tag.sh: 220/231 passed
   t7001-mv.sh: 40/54 passed
@@ -24,9 +24,9 @@ Runner: ziggit via /tmp/ziggit-as-git/git
   t5400-send-pack.sh: 16/17 passed
   t5300-pack-object.sh: 43/63 passed
   t5100-mailinfo.sh: 50/52 passed
-  t4200-rerere.sh: 19/36 passed
+  t4200-rerere.sh: 18/36 passed
   t4150-am.sh: 85/87 passed
   t4000-diff-format.sh: 41/41 passed
   t3900-i18n-commit.sh: 38/38 passed
 
-TOTAL: 1622/2229 passed (607 failed)
+TOTAL: 1623/2229 passed (606 failed)

@@ -655,8 +655,12 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             }
         } else if (std.mem.eql(u8, arg, "--branch") or std.mem.eql(u8, arg, "-b")) {
             show_branch = true;
-        } else if (std.mem.eql(u8, arg, "--short") or std.mem.eql(u8, arg, "-s")) {
+        } else if (std.mem.eql(u8, arg, "--short") or std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "-sb") or std.mem.eql(u8, arg, "-bs")) {
             short_format = true;
+            porcelain = true; // short format uses same output as porcelain
+            if (std.mem.eql(u8, arg, "-sb") or std.mem.eql(u8, arg, "-bs")) {
+                show_branch = true;
+            }
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try platform_impl.writeStdout("usage: git status [<options>] [--] [<pathspec>...]\n\n");
             try platform_impl.writeStdout("    -s, --short           show status concisely\n");
