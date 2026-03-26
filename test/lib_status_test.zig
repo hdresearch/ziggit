@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const ziggit = @import("../src/lib/ziggit.zig");
+const ziggit = @import("ziggit");
 const Allocator = std.mem.Allocator;
 
 const GitOps = struct {
