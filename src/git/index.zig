@@ -2,6 +2,10 @@ const std = @import("std");
 const objects = @import("objects.zig");
 const builtin = @import("builtin");
 
+// Index stage constants for merge conflicts
+pub const INDEX_STAGE_MASK: u16 = 0x3000;
+pub const INDEX_STAGE_SHIFT: u4 = 12;
+
 pub const IndexEntry = struct {
     ctime_sec: u32,
     ctime_nsec: u32,
@@ -1135,3 +1139,188 @@ pub const ConflictResolutionStrategy = enum {
     base,        // Use base version (stage 1)
     first_parent, // Alias for ours
 };
+
+/// Variable length integer encoding for index v4
+pub fn writeVarInt(writer: anytype, value: u32) !void {
+    var remaining = value;
+    while (remaining >= 0x80) {
+        try writer.writeByte(@as(u8, @intCast((remaining & 0x7F) | 0x80)));
+        remaining >>= 7;
+    }
+    try writer.writeByte(@as(u8, @intCast(remaining)));
+}
+
+/// Variable length integer decoding for index v4
+pub fn readVarInt(reader: anytype) !u32 {
+    var result: u32 = 0;
+    var shift: u5 = 0;
+    
+    while (true) {
+        const byte = try reader.readByte();
+        result |= (@as(u32, @intCast(byte & 0x7F))) << shift;
+        
+        if (byte & 0x80 == 0) break;
+        
+        shift += 7;
+        if (shift >= 32) return error.VarIntTooLarge;
+    }
+    
+    return result;
+}
+
+/// Index extension information
+pub const IndexExtension = struct {
+    signature: [4]u8,
+    size: u32,
+    data: []const u8,
+    
+    pub fn deinit(self: IndexExtension, allocator: std.mem.Allocator) void {
+        allocator.free(self.data);
+    }
+};
+
+/// Enhanced index parsing with extension support
+pub fn parseIndexWithExtensions(data: []const u8, allocator: std.mem.Allocator) !struct {
+    entries: std.ArrayList(IndexEntry),
+    extensions: std.ArrayList(IndexExtension),
+    version: u32,
+} {
+    if (data.len < 12) return error.InvalidIndex;
+    
+    // Check magic
+    if (!std.mem.eql(u8, data[0..4], "DIRC")) return error.InvalidIndex;
+    
+    const version = std.mem.readInt(u32, @ptrCast(data[4..8]), .big);
+    const entry_count = std.mem.readInt(u32, @ptrCast(data[8..12]), .big);
+    
+    if (version < 2 or version > 4) return error.UnsupportedIndexVersion;
+    
+    var entries = std.ArrayList(IndexEntry).init(allocator);
+    errdefer {
+        for (entries.items) |entry| {
+            entry.deinit(allocator);
+        }
+        entries.deinit();
+    }
+    
+    var extensions = std.ArrayList(IndexExtension).init(allocator);
+    errdefer {
+        for (extensions.items) |ext| {
+            ext.deinit(allocator);
+        }
+        extensions.deinit();
+    }
+    
+    var pos: usize = 12;
+    
+    // Parse entries
+    for (0..entry_count) |_| {
+        if (pos >= data.len - 20) break; // Need space for checksum
+        
+        var stream = std.io.fixedBufferStream(data[pos..]);
+        const entry = IndexEntry.readFromBuffer(stream.reader(), allocator) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        
+        try entries.append(entry);
+        pos += stream.pos;
+    }
+    
+    // Parse extensions (between entries and checksum)
+    const checksum_start = data.len - 20;
+    while (pos + 8 <= checksum_start) {
+        // Read extension header
+        const signature = data[pos..pos + 4];
+        const ext_size = std.mem.readInt(u32, @ptrCast(data[pos + 4..pos + 8]), .big);
+        pos += 8;
+        
+        if (pos + ext_size > checksum_start) break;
+        
+        // Copy extension data
+        const ext_data = try allocator.dupe(u8, data[pos..pos + ext_size]);
+        
+        var sig_array: [4]u8 = undefined;
+        @memcpy(&sig_array, signature);
+        
+        try extensions.append(IndexExtension{
+            .signature = sig_array,
+            .size = ext_size,
+            .data = ext_data,
+        });
+        
+        pos += ext_size;
+    }
+    
+    return .{
+        .entries = entries,
+        .extensions = extensions, 
+        .version = version,
+    };
+}
+
+/// Verify index file integrity
+pub fn verifyIndexIntegrity(data: []const u8) !bool {
+    if (data.len < 32) return error.IndexTooSmall;
+    
+    // Verify checksum
+    const content_end = data.len - 20;
+    const stored_checksum = data[content_end..];
+    
+    var hasher = std.crypto.hash.Sha1.init(.{});
+    hasher.update(data[0..content_end]);
+    var computed_checksum: [20]u8 = undefined;
+    hasher.final(&computed_checksum);
+    
+    return std.mem.eql(u8, &computed_checksum, stored_checksum);
+}
+
+/// Get index statistics for performance monitoring
+pub const IndexStats = struct {
+    total_entries: u32,
+    conflicted_entries: u32,
+    total_size: u64,
+    version: u32,
+    extensions: u32,
+    
+    pub fn print(self: IndexStats) void {
+        std.debug.print("Index Statistics:\n");
+        std.debug.print("  Total entries: {}\n", .{self.total_entries});
+        std.debug.print("  Conflicted entries: {}\n", .{self.conflicted_entries});
+        std.debug.print("  Total size: {} bytes\n", .{self.total_size});
+        std.debug.print("  Version: {}\n", .{self.version});
+        std.debug.print("  Extensions: {}\n", .{self.extensions});
+    }
+};
+
+/// Analyze index file and return statistics
+pub fn analyzeIndex(data: []const u8, allocator: std.mem.Allocator) !IndexStats {
+    const parsed = try parseIndexWithExtensions(data, allocator);
+    defer {
+        for (parsed.entries.items) |entry| {
+            entry.deinit(allocator);
+        }
+        parsed.entries.deinit();
+        
+        for (parsed.extensions.items) |ext| {
+            ext.deinit(allocator);
+        }
+        parsed.extensions.deinit();
+    }
+    
+    var conflicted_count: u32 = 0;
+    for (parsed.entries.items) |entry| {
+        const stage = (entry.flags & INDEX_STAGE_MASK) >> INDEX_STAGE_SHIFT;
+        if (stage > 0) {
+            conflicted_count += 1;
+        }
+    }
+    
+    return IndexStats{
+        .total_entries = @intCast(parsed.entries.items.len),
+        .conflicted_entries = conflicted_count,
+        .total_size = data.len,
+        .version = parsed.version,
+        .extensions = @intCast(parsed.extensions.items.len),
+    };
+}
