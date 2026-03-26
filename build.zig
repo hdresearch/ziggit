@@ -940,6 +940,15 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(git_writes_test).step);
     test_step.dependOn(&b.addRunArtifact(bun_workflow_e2e_tests).step);
 
+    // Bun workflow E2E validation tests (ziggit API -> git CLI verification)
+    const bun_workflow_e2e_validation_tests = b.addTest(.{
+        .root_source_file = b.path("test/bun_workflow_e2e_validation_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bun_workflow_e2e_validation_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(bun_workflow_e2e_validation_tests).step);
+
     // Repository workflow tests
     const repo_workflow_tests = b.addTest(.{
         .root_source_file = b.path("test/repo_workflow_test.zig"),
