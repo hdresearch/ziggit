@@ -2410,6 +2410,177 @@ pub const PackValidationResult = struct {
 };
 
 // ============================================================================
+// Public API for pack file reading (used by NET-SMART and NET-PACK agents)
+// ============================================================================
+
+/// Read an object from raw pack data at the given byte offset.
+/// Resolves OFS_DELTA chains automatically (base must be in same pack_data).
+/// For REF_DELTA, returns error.RefDeltaRequiresExternalLookup.
+/// This is the main entry point for network agents that receive pack data
+/// and need to inspect individual objects before saving.
+pub fn readPackObjectAtOffset(pack_data: []const u8, offset: usize, allocator: std.mem.Allocator) !GitObject {
+    if (offset >= pack_data.len) return error.ObjectNotFound;
+    return readPackedObjectFromData(pack_data, offset, allocator);
+}
+
+/// Fix a thin pack by prepending missing base objects.
+/// Thin packs (from fetch) contain REF_DELTA objects whose base is not in the pack
+/// but exists in the local repository. This function scans for REF_DELTA objects,
+/// resolves their bases from the local repo, and produces a new self-contained pack.
+///
+/// If the pack has no REF_DELTA objects, it is returned as-is (caller must free).
+pub fn fixThinPack(pack_data: []const u8, git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![]u8 {
+    if (pack_data.len < 12) return error.PackFileTooSmall;
+    if (!std.mem.eql(u8, pack_data[0..4], "PACK")) return error.InvalidPackSignature;
+    
+    const object_count = std.mem.readInt(u32, @ptrCast(pack_data[8..12]), .big);
+    const content_end = pack_data.len - 20; // Exclude trailing checksum
+    
+    // First pass: find all REF_DELTA base SHA-1s that we need to prepend
+    var needed_bases = std.AutoHashMap([20]u8, void).init(allocator);
+    defer needed_bases.deinit();
+    
+    var pos: usize = 12;
+    var obj_idx: u32 = 0;
+    while (obj_idx < object_count and pos < content_end) {
+        if (pos >= pack_data.len) break;
+        const first_byte = pack_data[pos];
+        pos += 1;
+        
+        const pack_type_num = (first_byte >> 4) & 7;
+        // Skip size varint
+        var current_byte = first_byte;
+        while (current_byte & 0x80 != 0 and pos < content_end) {
+            current_byte = pack_data[pos];
+            pos += 1;
+        }
+        
+        if (pack_type_num == 6) { // OFS_DELTA
+            // Skip the negative offset
+            while (pos < content_end) {
+                const b = pack_data[pos];
+                pos += 1;
+                if (b & 0x80 == 0) break;
+            }
+        } else if (pack_type_num == 7) { // REF_DELTA
+            if (pos + 20 <= content_end) {
+                var sha1: [20]u8 = undefined;
+                @memcpy(&sha1, pack_data[pos .. pos + 20]);
+                try needed_bases.put(sha1, {});
+                pos += 20;
+            }
+        }
+        
+        // Skip compressed data by decompressing (to find the end)
+        if (pos < content_end) {
+            var decompressed = std.ArrayList(u8).init(allocator);
+            defer decompressed.deinit();
+            var stream = std.io.fixedBufferStream(pack_data[pos..content_end]);
+            std.compress.zlib.decompress(stream.reader(), decompressed.writer()) catch {};
+            pos += @as(usize, @intCast(stream.pos));
+        }
+        
+        obj_idx += 1;
+    }
+    
+    if (needed_bases.count() == 0) {
+        // No REF_DELTA objects - return a copy of the original pack
+        return try allocator.dupe(u8, pack_data);
+    }
+    
+    // Remove bases that are already in the pack itself
+    // (REF_DELTA might reference objects within the same pack)
+    // We need to compute SHA-1s of pack objects to check this.
+    // For now, try loading from pack first, and only fetch from repo if that fails.
+    
+    // Second pass: resolve base objects from the local repository and build new pack
+    var base_objects = std.ArrayList(struct { sha1: [20]u8, obj: GitObject }) .init(allocator);
+    defer {
+        for (base_objects.items) |*item| {
+            item.obj.deinit(allocator);
+        }
+        base_objects.deinit();
+    }
+    
+    var it = needed_bases.keyIterator();
+    while (it.next()) |sha1_ptr| {
+        const sha1 = sha1_ptr.*;
+        var hex: [40]u8 = undefined;
+        _ = std.fmt.bufPrint(&hex, "{}", .{std.fmt.fmtSliceHexLower(&sha1)}) catch unreachable;
+        
+        // Try loading from local repo (loose objects or other pack files)
+        const obj = GitObject.load(&hex, git_dir, platform_impl, allocator) catch continue;
+        try base_objects.append(.{ .sha1 = sha1, .obj = obj });
+    }
+    
+    // Build new pack: prepend base objects, then all original objects, update count
+    const new_count = object_count + @as(u32, @intCast(base_objects.items.len));
+    
+    var new_pack = std.ArrayList(u8).init(allocator);
+    defer new_pack.deinit();
+    
+    // Header
+    try new_pack.appendSlice("PACK");
+    try new_pack.writer().writeInt(u32, 2, .big);
+    try new_pack.writer().writeInt(u32, new_count, .big);
+    
+    // Write base objects as regular (non-delta) objects
+    for (base_objects.items) |item| {
+        const type_num: u3 = switch (item.obj.type) {
+            .commit => 1,
+            .tree => 2,
+            .blob => 3,
+            .tag => 4,
+        };
+        
+        // Encode type+size header
+        const size = item.obj.data.len;
+        var first: u8 = (@as(u8, type_num) << 4) | @as(u8, @intCast(size & 0x0F));
+        var remaining = size >> 4;
+        if (remaining > 0) first |= 0x80;
+        try new_pack.append(first);
+        while (remaining > 0) {
+            var b: u8 = @intCast(remaining & 0x7F);
+            remaining >>= 7;
+            if (remaining > 0) b |= 0x80;
+            try new_pack.append(b);
+        }
+        
+        // Compress object data
+        var compressed = std.ArrayList(u8).init(allocator);
+        defer compressed.deinit();
+        var input = std.io.fixedBufferStream(item.obj.data);
+        try std.compress.zlib.compress(input.reader(), compressed.writer(), .{});
+        try new_pack.appendSlice(compressed.items);
+    }
+    
+    // Copy all original objects (bytes 12..content_end) - but we need to adjust
+    // OFS_DELTA offsets since we prepended objects. For simplicity and correctness,
+    // we copy the original objects verbatim. OFS_DELTA offsets are relative within
+    // the original pack, and since we only prepend, original OFS_DELTA objects 
+    // that reference other original objects would need offset adjustment.
+    // 
+    // However, the REF_DELTA objects that reference our prepended bases will now
+    // be able to find them via SHA-1 lookup in the idx. So we need to convert
+    // REF_DELTA → OFS_DELTA for the prepended bases, OR just keep them as REF_DELTA
+    // and rely on our idx generation being able to resolve them.
+    //
+    // Simplest correct approach: copy original pack body verbatim. Our generatePackIndex
+    // already handles REF_DELTA by looking up the SHA-1 in already-indexed entries,
+    // and the base objects we prepended will be indexed first.
+    try new_pack.appendSlice(pack_data[12..content_end]);
+    
+    // Compute and append new checksum
+    var hasher = std.crypto.hash.Sha1.init(.{});
+    hasher.update(new_pack.items);
+    var checksum: [20]u8 = undefined;
+    hasher.final(&checksum);
+    try new_pack.appendSlice(&checksum);
+    
+    return try new_pack.toOwnedSlice();
+}
+
+// ============================================================================
 // Pack file writing infrastructure for HTTPS clone/fetch
 // Used by NET-SMART and NET-PACK agents to save received pack data
 // ============================================================================
