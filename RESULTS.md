@@ -39,7 +39,7 @@
 
 ## Bun Fork Integration Status
 - Branch: `hdresearch/bun:ziggit-integration`
-- Commit: `be7ae7e` — polish: expand error matching (SSH agent/key, DNS, TLS, BrokenPipe, data integrity aliases)
+- Commit: `95a7784` — polish: complete error categorization (extract isSshAuthError/isProtocolError/isDataIntegrityError helpers, all 12 network errors, all 5 data integrity errors)
 - `repository.zig`: ziggit used for clone, fetch, findCommit, checkout
 - Fallback: automatic to git CLI on any ziggit failure
 - Debug logging: `BUN_DEBUG_GitRepository=1` to see ziggit vs CLI decisions
