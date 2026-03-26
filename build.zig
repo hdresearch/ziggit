@@ -558,6 +558,16 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(pack_format_unit_tests).step);
 
+    const pack_save_load_roundtrip_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_save_load_roundtrip_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_save_load_roundtrip_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(pack_save_load_roundtrip_tests).step);
+
     test_step.dependOn(&b.addRunArtifact(pack_network_reception_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_network_e2e_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_network_receive_flow_tests).step);
