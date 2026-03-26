@@ -966,72 +966,17 @@ pub fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.
     };
 }
 
-/// Primary delta application path. Handles both exact and minor base size mismatches.
-/// Pre-allocates result buffer and applies copy/insert commands with @memcpy.
+/// Primary delta application path. Pre-allocates exact result buffer and
+/// delegates to the zero-alloc `applyDeltaInto` for the actual work.
+/// Single implementation = single hot path for the CPU branch predictor.
 fn applyDeltaCore(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    if (delta_data.len < 2) return error.InvalidDelta;
-
-    var pos: usize = 0;
-
-    // Read base size varint
-    const base_size = readVarint(delta_data, &pos);
-    if (pos >= delta_data.len) return error.InvalidDelta;
-
-    // Read result size varint
-    const result_size = readVarint(delta_data, &pos);
-
-    // Allow minor base size mismatch for thin packs (up to 1KB tolerance)
-    if (base_size > base_data.len + 1024 or (base_size > 0 and base_data.len > base_size + 1024)) {
-        return error.InvalidDelta;
-    }
-
-    // Sanity: reject absurdly large results
+    const result_size = try deltaResultSize(delta_data);
     if (result_size > 1024 * 1024 * 1024) return error.InvalidDelta;
 
-    // Pre-allocate exact result size
     const result = try allocator.alloc(u8, result_size);
     errdefer allocator.free(result);
-    var result_pos: usize = 0;
 
-    while (pos < delta_data.len) {
-        const cmd = delta_data[pos];
-        pos += 1;
-
-        if (cmd & 0x80 != 0) {
-            // COPY from base — decode offset and size inline
-            var copy_offset: usize = 0;
-            var copy_size: usize = 0;
-
-            if (cmd & 0x01 != 0) { copy_offset = delta_data[pos]; pos += 1; }
-            if (cmd & 0x02 != 0) { copy_offset |= @as(usize, delta_data[pos]) << 8; pos += 1; }
-            if (cmd & 0x04 != 0) { copy_offset |= @as(usize, delta_data[pos]) << 16; pos += 1; }
-            if (cmd & 0x08 != 0) { copy_offset |= @as(usize, delta_data[pos]) << 24; pos += 1; }
-            if (cmd & 0x10 != 0) { copy_size = delta_data[pos]; pos += 1; }
-            if (cmd & 0x20 != 0) { copy_size |= @as(usize, delta_data[pos]) << 8; pos += 1; }
-            if (cmd & 0x40 != 0) { copy_size |= @as(usize, delta_data[pos]) << 16; pos += 1; }
-            if (copy_size == 0) copy_size = 0x10000;
-
-            // Bounds check against actual base data (handles thin pack mismatch)
-            if (copy_offset + copy_size > base_data.len) return error.InvalidDelta;
-            if (result_pos + copy_size > result_size) return error.InvalidDelta;
-
-            @memcpy(result[result_pos..][0..copy_size], base_data[copy_offset..][0..copy_size]);
-            result_pos += copy_size;
-        } else if (cmd > 0) {
-            // INSERT literal bytes from delta stream
-            const n: usize = @intCast(cmd);
-            if (pos + n > delta_data.len) return error.InvalidDelta;
-            if (result_pos + n > result_size) return error.InvalidDelta;
-
-            @memcpy(result[result_pos..][0..n], delta_data[pos..][0..n]);
-            result_pos += n;
-            pos += n;
-        } else {
-            return error.InvalidDelta; // cmd == 0 reserved
-        }
-    }
-
-    if (result_pos != result_size) return error.InvalidDelta;
+    _ = try applyDeltaInto(base_data, delta_data, result);
     return result;
 }
 fn readVarint(data: []const u8, pos: *usize) usize {
