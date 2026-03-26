@@ -723,14 +723,40 @@ fn isShallowCloneRelevantRef(name: []const u8) bool {
 
 /// Clone a repository with shallow depth support.
 /// When depth > 0, sends "deepen N" to the server for a shallow clone.
+/// Implements --single-branch behavior by default for shallow clones (like git does):
+/// only fetches the HEAD branch to minimize transfer size.
 pub fn clonePackShallow(allocator: std.mem.Allocator, url: []const u8, depth: u32) !CloneResult {
     var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
 
     const discovery = try discoverRefsWithClient(allocator, &client, url);
 
+    // For shallow clones with depth > 0, use single-branch behavior (like git --depth implies --single-branch).
+    // Find what HEAD points to and only fetch that branch's hash.
+    var head_hash: ?Oid = null;
+    var head_branch: ?[]const u8 = null;
+    if (depth > 0) {
+        for (discovery.refs) |ref| {
+            if (std.mem.eql(u8, ref.name, "HEAD")) {
+                head_hash = ref.hash;
+                break;
+            }
+        }
+        // Find the branch that HEAD points to (same hash)
+        if (head_hash) |hh| {
+            for (discovery.refs) |ref| {
+                if (std.mem.startsWith(u8, ref.name, "refs/heads/") and
+                    std.mem.eql(u8, &ref.hash, &hh))
+                {
+                    head_branch = ref.name;
+                    break;
+                }
+            }
+        }
+    }
+
     // Collect unique want hashes
-    // For shallow clones, only want HEAD + branches (skip tags to reduce transfer size)
+    // For shallow clones, only want HEAD (single-branch) to minimize transfer size
     var want_set = std.StringHashMap(void).init(allocator);
     defer want_set.deinit();
 
@@ -738,10 +764,14 @@ pub fn clonePackShallow(allocator: std.mem.Allocator, url: []const u8, depth: u3
     defer wants.deinit();
 
     for (discovery.refs) |ref| {
-        const relevant = if (depth > 0)
-            isShallowCloneRelevantRef(ref.name)
-        else
-            isCloneRelevantRef(ref.name);
+        const relevant = if (depth > 0) blk: {
+            // Single-branch: only HEAD and its matching branch ref
+            if (std.mem.eql(u8, ref.name, "HEAD")) break :blk true;
+            if (head_branch) |hb| {
+                if (std.mem.eql(u8, ref.name, hb)) break :blk true;
+            }
+            break :blk false;
+        } else isCloneRelevantRef(ref.name);
         if (!relevant) continue;
         const hash_str = ref.hash;
         if (!want_set.contains(&hash_str)) {

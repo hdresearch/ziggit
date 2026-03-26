@@ -1857,13 +1857,27 @@ pub const Repository = struct {
             defer packed_refs.deinit();
             try packed_refs.appendSlice("# pack-refs with: peeled fully-peeled sorted \n");
 
+            // For shallow clones, determine which branch HEAD points to (single-branch mode)
+            var head_hash_oid: ?[40]u8 = null;
             for (clone_result.refs) |ref| {
                 if (std.mem.eql(u8, ref.name, "HEAD")) {
                     head_ref = &ref.hash;
-                    continue;
+                    head_hash_oid = ref.hash;
+                    break;
                 }
-                // Only write branch refs for shallow clones (tags point to missing objects)
+            }
+
+            for (clone_result.refs) |ref| {
+                if (std.mem.eql(u8, ref.name, "HEAD")) continue;
+                // For shallow clones, only write the branch that HEAD points to
+                // (single-branch behavior - other branches' objects weren't fetched)
                 if (std.mem.startsWith(u8, ref.name, "refs/heads/")) {
+                    if (depth > 0) {
+                        // Only write refs whose hash matches HEAD (the only branch we fetched)
+                        if (head_hash_oid) |hh| {
+                            if (!std.mem.eql(u8, &ref.hash, &hh)) continue;
+                        }
+                    }
                     try packed_refs.appendSlice(&ref.hash);
                     try packed_refs.append(' ');
                     try packed_refs.appendSlice(ref.name);
