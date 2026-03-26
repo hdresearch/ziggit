@@ -95,17 +95,105 @@ pub const Repository = struct {
 
     /// Get status in porcelain format (like `git status --porcelain`) - OPTIMIZED
     pub fn statusPorcelain(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
-        // Use stack buffer to avoid heap allocation
-        var head_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-        const head_path = std.fmt.bufPrint(&head_path_buf, "{s}/HEAD", .{self.git_dir}) catch return error.PathTooLong;
+        return try self.statusPorcelainOptimized(allocator);
+    }
+    
+    /// Optimized status implementation using mtime/size fast path
+    fn statusPorcelainOptimized(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
+        var output = std.ArrayList(u8).init(allocator);
+        defer output.deinit();
 
-        std.fs.accessAbsolute(head_path, .{}) catch |err| switch (err) {
-            error.FileNotFound => return try allocator.dupe(u8, ""),
-            else => return err,
+        // Use stack buffer for index path
+        var index_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const index_path = std.fmt.bufPrint(&index_path_buf, "{s}/index", .{self.git_dir}) catch return error.PathTooLong;
+
+        var git_index = index_parser.GitIndex.readFromFile(allocator, index_path) catch {
+            // No index means all files are untracked
+            return try self.scanAllFilesAsUntrackedFast(allocator);
         };
+        defer git_index.deinit();
 
-        // Optimized implementation - check for untracked files
-        return try self.scanUntrackedFast(allocator);
+        // Build HashMap for O(1) tracked file lookups
+        var tracked_files = std.HashMap([]const u8, void, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator);
+        defer tracked_files.deinit();
+
+        // Check each indexed file for modifications using mtime/size fast path
+        for (git_index.entries.items) |entry| {
+            try tracked_files.put(entry.path, {});
+            
+            // Get file path in working directory
+            var file_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            const file_path = std.fmt.bufPrint(&file_path_buf, "{s}/{s}", .{ self.path, entry.path }) catch continue;
+            
+            // Stat the file in working directory
+            const work_file = std.fs.openFileAbsolute(file_path, .{}) catch |err| switch (err) {
+                error.FileNotFound => {
+                    // File was deleted
+                    try output.appendSlice(" D ");
+                    try output.appendSlice(entry.path);
+                    try output.append('\n');
+                    continue;
+                },
+                else => continue,
+            };
+            defer work_file.close();
+            
+            const work_stat = work_file.stat() catch continue;
+            
+            // Fast path: compare mtime and size
+            const work_mtime_sec = @as(u32, @intCast(@divTrunc(work_stat.mtime, 1_000_000_000)));
+            const work_size = @as(u32, @intCast(work_stat.size));
+            
+            if (work_mtime_sec == entry.mtime_seconds and work_size == entry.size) {
+                // File appears unchanged (mtime/size match) - skip SHA-1 computation
+                continue;
+            }
+            
+            // Slow path: file mtime/size differs, need to compute SHA-1 to check if content changed
+            const work_content = work_file.readToEndAlloc(allocator, 100 * 1024 * 1024) catch continue;
+            defer allocator.free(work_content);
+            
+            // Create blob content for SHA-1: "blob <size>\0<content>"
+            var blob_content = std.ArrayList(u8).init(allocator);
+            defer blob_content.deinit();
+            
+            const blob_header = try std.fmt.allocPrint(allocator, "blob {}\x00", .{work_content.len});
+            defer allocator.free(blob_header);
+            
+            try blob_content.appendSlice(blob_header);
+            try blob_content.appendSlice(work_content);
+            
+            // Compute SHA-1 of working file
+            var work_hash: [20]u8 = undefined;
+            std.crypto.hash.Sha1.hash(blob_content.items, &work_hash, .{});
+            
+            // Compare with index SHA-1
+            if (!std.mem.eql(u8, &work_hash, &entry.sha1)) {
+                // File content has changed
+                try output.appendSlice(" M ");
+                try output.appendSlice(entry.path);
+                try output.append('\n');
+            }
+        }
+
+        // Scan for untracked files (files not in the index)
+        var dir = std.fs.cwd().openDir(self.path, .{ .iterate = true }) catch return try output.toOwnedSlice();
+        defer dir.close();
+
+        var iterator = dir.iterate();
+        while (try iterator.next()) |entry| {
+            if (entry.kind != .file) continue;
+            if (std.mem.startsWith(u8, entry.name, ".git")) continue;
+
+            // O(1) lookup to check if file is tracked
+            if (!tracked_files.contains(entry.name)) {
+                try output.appendSlice("?? ");
+                try output.appendSlice(entry.name);
+                try output.append('\n');
+            }
+        }
+
+        return try output.toOwnedSlice();
     }
 
     /// Check if working tree is clean
