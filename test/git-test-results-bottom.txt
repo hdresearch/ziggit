@@ -2,6 +2,20 @@ Git Test Suite Results — Bottom Half (comprehensive)
 Date: 2026-03-26
 
   t9902-completion.sh: 172/263 passed
+  t8014-blame-ignore-fuzzy.sh: 16/16 passed ✓
+  t8013-blame-ignore-revs.sh: 15/19 passed
+  t8012-blame-colors.sh: 119/120 passed
+  t8011-blame-split-file.sh: 10/10 passed ✓
+  t8010-cat-file-filters.sh: 9/9 passed ✓
+  t8009-blame-vs-topicbranches.sh: 2/2 passed ✓
+  t8008-blame-formats.sh: 5/5 passed ✓
+  t8007-cat-file-textconv.sh: 15/15 passed ✓
+  t8006-blame-textconv.sh: 16/16 passed ✓
+  t8005-blame-i18n.sh: 5/5 passed ✓
+  t8004-blame-with-conflicts.sh: 3/3 passed ✓
+  t8003-blame-corner-cases.sh: 30/30 passed ✓
+  t8002-blame.sh: 134/135 passed
+  t8001-annotate.sh: 117/117 passed ✓
   t7900-maintenance.sh: 33/72 passed
   t7810-grep.sh: 256/263 passed
   t7700-repack.sh: 31/47 passed
@@ -20,6 +34,8 @@ Date: 2026-03-26
   t7505-prepare-commit-msg-hook.sh: 23/23 passed ✓
   t7504-commit-msg-hook.sh: 30/30 passed ✓
   t7502-commit-porcelain.sh: 79/82 passed
+  t7501-commit-basic-functionality.sh: 76/77 passed
+  t7500-commit-template-squash-signoff.sh: 54/57 passed
   t7420-submodule-set-url.sh: 3/3 passed ✓
   t7419-submodule-set-branch.sh: 9/9 passed ✓
   t7418-submodule-sparse-gitmodules.sh: 7/9 passed
@@ -50,8 +66,20 @@ Date: 2026-03-26
   t7103-reset-bare.sh: 13/13 passed ✓
   t7102-reset.sh: 37/38 passed
   t7101-reset-empty-subdirs.sh: 10/10 passed ✓
+  t7064-wtstatus-pv2.sh: 28/28 passed ✓
   t7060-wtstatus.sh: 17/17 passed ✓
+  t7031-verify-tag-signed-ssh.sh: 14/14 passed ✓
+  t7030-verify-tag.sh: 16/16 passed ✓
+  t7012-skip-worktree-writing.sh: 11/11 passed ✓
+  t7011-skip-worktree-reading.sh: 15/15 passed ✓
+  t7010-setup.sh: 16/16 passed ✓
+  t7008-filter-branch-null-sha1.sh: 6/6 passed ✓
+  t7007-show.sh: 18/18 passed ✓
+  t7006-pager.sh: 108/109 passed
+  t7005-editor.sh: 12/12 passed ✓
   t7004-tag.sh: 220/231 passed
+  t7003-filter-branch.sh: 48/48 passed ✓
+  t7002-mv-sparse-checkout.sh: 6/22 passed
   t7001-mv.sh: 52/54 passed
   t6302-for-each-ref-filter.sh: 42/62 passed
   t6301-for-each-ref-errors.sh: 5/6 passed
@@ -144,207 +172,3 @@ Date: 2026-03-26
   t5504-fetch-receive-strict.sh: 26/29 passed
   t5503-tagfollow.sh: 12/12 passed ✓
   t5502-quickfetch.sh: 7/7 passed ✓
-  t5500-fetch-pack.sh: 374/377 passed
-  t5400-send-pack.sh: 16/17 passed
-  t5300-pack-object.sh: 49/63 passed
-  t5100-mailinfo.sh: 50/52 passed
-  t4200-rerere.sh: 31/36 passed
-  t4150-am.sh: 85/87 passed
-  t4137-apply-submodule.sh: 28/28 passed ✓
-  t4136-apply-check.sh: 6/6 passed ✓
-  t4135-apply-weird-filenames.sh: 20/20 passed ✓
-  t4134-apply-submodule.sh: 2/2 passed ✓
-  t4133-apply-filenames.sh: 4/4 passed ✓
-  t4132-apply-removal.sh: 14/14 passed ✓
-  t4131-apply-fake-ancestor.sh: 3/3 passed ✓
-  t4130-apply-criss-cross-rename.sh: 7/7 passed ✓
-  t4127-apply-same-fn.sh: 7/7 passed ✓
-  t4125-apply-ws-fuzz.sh: 4/4 passed ✓
-  t4123-apply-shrink.sh: 2/2 passed ✓
-  t4122-apply-symlink-inside.sh: 7/7 passed ✓
-  t4121-apply-diffs.sh: 2/2 passed ✓
-  t4120-apply-popt.sh: 8/8 passed ✓
-  t4119-apply-config.sh: 11/11 passed ✓
-  t4118-apply-empty-context.sh: 3/3 passed ✓
-  t4117-apply-reject.sh: 8/8 passed ✓
-  t4116-apply-reverse.sh: 7/7 passed ✓
-  t4115-apply-symlink.sh: 8/8 passed ✓
-  t4114-apply-typechange.sh: 12/12 passed ✓
-  t4113-apply-ending.sh: 3/3 passed ✓
-  t4112-apply-renames.sh: 2/2 passed ✓
-  t4111-apply-subdir.sh: 10/10 passed ✓
-  t4110-apply-scan.sh: 1/1 passed ✓
-  t4109-apply-multifrag.sh: 3/3 passed ✓
-  t4106-apply-stdin.sh: 3/3 passed ✓
-  t4105-apply-fuzz.sh: 9/9 passed ✓
-  t4104-apply-boundary.sh: 24/24 passed ✓
-  t4102-apply-rename.sh: 5/5 passed ✓
-  t4101-apply-nonl.sh: 12/12 passed ✓
-  t4069-remerge-diff.sh: 14/16 passed
-  t4068-diff-symmetric-merge-base.sh: 36/36 passed ✓
-  t4066-diff-emit-delay.sh: 2/2 passed ✓
-  t4065-diff-anchored.sh: 7/7 passed ✓
-  t4064-diff-oidfind.sh: 10/10 passed ✓
-  t4063-diff-blobs.sh: 18/18 passed ✓
-  t4062-diff-pickaxe.sh: 3/3 passed ✓
-  t4061-diff-indent.sh: 33/33 passed ✓
-  t4060-diff-submodule-option-diff-format.sh: 51/51 passed ✓
-  t4059-diff-submodule-not-initialized.sh: 8/8 passed ✓
-  t4057-diff-combined-paths.sh: 4/4 passed ✓
-  t4056-diff-order.sh: 23/23 passed ✓
-  t4055-diff-context.sh: 10/10 passed ✓
-  t4054-diff-bogus-tree.sh: 14/14 passed ✓
-  t4050-diff-histogram.sh: 10/10 passed ✓
-  t4049-diff-stat-count.sh: 4/4 passed ✓
-  t4048-diff-combined-binary.sh: 14/14 passed ✓
-  t4047-diff-dirstat.sh: 41/41 passed ✓
-  t4045-diff-relative.sh: 39/39 passed ✓
-  t4044-diff-index-unique-abbrev.sh: 2/2 passed ✓
-  t4043-diff-rename-binary.sh: 3/3 passed ✓
-  t4041-diff-submodule-option.sh: 47/47 passed ✓
-  t4040-whitespace-status.sh: 11/11 passed ✓
-  t4039-diff-assume-unchanged.sh: 4/4 passed ✓
-  t4038-diff-combined.sh: 26/26 passed ✓
-  t4037-diff-r-t-dirs.sh: 2/2 passed ✓
-  t4036-format-patch-signer-mime.sh: 5/5 passed ✓
-  t4035-diff-quiet.sh: 23/23 passed ✓
-  t4033-diff-patience.sh: 11/11 passed ✓
-  t4032-diff-inter-hunk-context.sh: 37/37 passed ✓
-  t4030-diff-textconv.sh: 19/19 passed ✓
-  t4029-diff-trailing-space.sh: 1/1 passed ✓
-  t4028-format-patch-mime-headers.sh: 3/3 passed ✓
-  t4027-diff-submodule.sh: 20/20 passed ✓
-  t4025-hunk-header.sh: 2/2 passed ✓
-  t4024-diff-optimize-common.sh: 2/2 passed ✓
-  t4023-diff-rename-typechange.sh: 4/4 passed ✓
-  t4022-diff-rewrite.sh: 11/11 passed ✓
-  t4021-format-patch-numbered.sh: 14/14 passed ✓
-  t4019-diff-wserror.sh: 21/21 passed ✓
-  t4016-diff-quote.sh: 5/5 passed ✓
-  t4012-diff-binary.sh: 13/13 passed ✓
-  t4011-diff-symlink.sh: 8/8 passed ✓
-  t4010-diff-pathspec.sh: 17/17 passed ✓
-  t4009-diff-rename-4.sh: 7/7 passed ✓
-  t4008-diff-break-rewrite.sh: 14/14 passed ✓
-  t4006-diff-mode.sh: 7/7 passed ✓
-  t4005-diff-rename-2.sh: 4/4 passed ✓
-  t4004-diff-rename-symlink.sh: 4/4 passed ✓
-  t4003-diff-rename-1.sh: 7/7 passed ✓
-  t4002-diff-basic.sh: 63/63 passed ✓
-  t4000-diff-format.sh: 41/41 passed ✓
-  t3900-i18n-commit.sh: 38/38 passed ✓
-  t3700-add.sh: 53/58 passed
-  t3600-rm.sh: 81/82 passed
-  t3500-cherry.sh: 4/4 passed ✓
-  t3430-rebase-merges.sh: 32/34 passed
-  t3420-rebase-autostash.sh: 42/52 passed
-  t3415-rebase-autosquash.sh: 14/28 passed
-  t3404-rebase-interactive.sh: 101/132 passed
-  t3403-rebase-skip.sh: 20/20 passed ✓
-  t3400-rebase.sh: 35/39 passed
-  t3301-notes.sh: 149/153 passed
-  t3300-funny-names.sh: 21/21 passed ✓
-  t3200-branch.sh: 164/167 passed
-  t3101-ls-tree-dirname.sh: 19/19 passed ✓
-  t3100-ls-tree-restrict.sh: 14/14 passed ✓
-  t3070-wildmatch.sh: 1850/1901 passed
-  t3060-ls-files-with-tree.sh: 8/8 passed ✓
-  t3050-subprojects-fetch.sh: 4/4 passed ✓
-  t3040-subprojects-basic.sh: 11/11 passed ✓
-  t3020-ls-files-error-unmatch.sh: 3/3 passed ✓
-  t3010-ls-files-killed-modified.sh: 6/6 passed ✓
-  t3000-ls-files-others.sh: 15/15 passed ✓
-  t2200-add-update.sh: 18/19 passed
-  t2100-update-cache-badpath.sh: 5/5 passed ✓
-  t2072-restore-pathspec-file.sh: 12/12 passed ✓
-  t2070-restore.sh: 15/15 passed ✓
-  t2060-switch.sh: 15/16 passed
-  t2050-git-dir-relative.sh: 4/4 passed ✓
-  t2030-unresolve-info.sh: 14/14 passed ✓
-  t2027-checkout-track.sh: 4/5 passed
-  t2026-checkout-pathspec-file.sh: 11/11 passed ✓
-  t2025-checkout-no-overlay.sh: 6/6 passed ✓
-  t2024-checkout-dwim.sh: 23/23 passed ✓
-  t2021-checkout-overwrite.sh: 9/9 passed ✓
-  t2020-checkout-detach.sh: 24/26 passed
-  t2019-checkout-ambiguous-ref.sh: 9/9 passed ✓
-  t2018-checkout-branch.sh: 25/25 passed ✓
-  t2017-checkout-orphan.sh: 13/13 passed ✓
-  t2015-checkout-unborn.sh: 6/6 passed ✓
-  t2014-checkout-switch.sh: 4/4 passed ✓
-  t2013-checkout-submodule.sh: 74/74 passed ✓
-  t2012-checkout-last.sh: 22/22 passed ✓
-  t2011-checkout-invalid-head.sh: 10/10 passed ✓
-  t2010-checkout-ambiguous.sh: 10/10 passed ✓
-  t2009-checkout-statinfo.sh: 3/3 passed ✓
-  t2008-checkout-subdir.sh: 9/9 passed ✓
-  t2007-checkout-symlink.sh: 4/4 passed ✓
-  t2005-checkout-index-symlinks.sh: 3/3 passed ✓
-  t2004-checkout-cache-temp.sh: 23/23 passed ✓
-  t2003-checkout-cache-mkdir.sh: 10/10 passed ✓
-  t2022-checkout-paths.sh: 5/5 passed ✓
-  t1510-repo-setup.sh: 109/109 passed ✓
-  t1507-rev-parse-upstream.sh: 29/29 passed ✓
-  t1506-rev-parse-diagnosis.sh: 30/30 passed ✓
-  t1505-rev-parse-last.sh: 7/7 passed ✓
-  t1504-ceiling-dirs.sh: 44/44 passed ✓
-  t1503-rev-parse-verify.sh: 12/12 passed ✓
-  t1502-rev-parse-parseopt.sh: 36/37 passed
-  t1500-rev-parse.sh: 79/81 passed
-  t1451-fsck-buffer.sh: 72/72 passed ✓
-  t1450-fsck.sh: 84/96 passed
-  t1418-reflog-exists.sh: 6/6 passed ✓
-  t1417-reflog-updateref.sh: 21/21 passed ✓
-  t1414-reflog-walk.sh: 12/12 passed ✓
-  t1404-update-ref-errors.sh: 38/38 passed ✓
-  t1401-symbolic-ref.sh: 25/25 passed ✓
-  t1307-config-blob.sh: 13/13 passed ✓
-  t1306-xdg-files.sh: 21/21 passed ✓
-  t1305-config-include.sh: 36/37 passed
-  t1303-wacky-config.sh: 11/11 passed ✓
-  t1302-repo-version.sh: 18/18 passed ✓
-  t1301-shared-repo.sh: 22/22 passed ✓
-  t1100-commit-tree-options.sh: 5/5 passed ✓
-  t1050-large.sh: 20/29 passed
-  t1010-mktree.sh: 8/8 passed ✓
-  t1005-read-tree-reset.sh: 7/7 passed ✓
-  t1002-read-tree-m-u-2way.sh: 22/22 passed ✓
-  t1001-read-tree-m-2way.sh: 29/29 passed ✓
-  t1000-read-tree-m-3way.sh: 83/83 passed ✓
-  t0410-partial-clone.sh: 35/37 passed
-  t0302-credential-store.sh: 65/65 passed ✓
-  t0303-credential-external.sh: 23/23 passed ✓
-  t0301-credential-cache.sh: 50/52 passed
-  t0300-credentials.sh: 49/56 passed
-  t0201-gettext-fallbacks.sh: 8/8 passed ✓
-  t0202-gettext-perl.sh: 1/1 passed ✓
-  t0101-at-syntax.sh: 8/8 passed ✓
-  t0100-previous.sh: 6/6 passed ✓
-  t0091-bugreport.sh: 12/13 passed
-  t0055-beyond-symlinks.sh: 3/3 passed ✓
-  t0050-filesystem.sh: 13/13 passed ✓
-  t0041-usage.sh: 16/16 passed ✓
-  t0028-working-tree-encoding.sh: 22/22 passed ✓
-  t0027-auto-crlf.sh: 2600/2600 passed ✓
-  t0020-crlf.sh: 36/36 passed ✓
-  t0010-racy-git.sh: 10/10 passed ✓
-  t0005-signals.sh: 1/5 passed
-  t0002-gitfile.sh: 14/14 passed ✓
-  t0000-basic.sh: 87/92 passed
-
-TOTAL: 13574/14234 passed (660 failed) across 330 scripts
-Pass rate: 95.4% — 248 scripts at 100%
-
-CLI Fixes Applied:
-- Translate -ufalse/-utrue/-uyes/-u0/-u1/-uon to -uno/-unormal for git 2.43
-- Translate --untracked-files=false/true to no/normal
-- Translate status.showuntrackedfiles config: false→no, true→normal, 0→no, 1→normal
-- Translate merge.stat config: diffstat→true, compact→true
-- Translate 'git config set --append' to 'git config --add'
-- Translate 'git config unset --all' to 'git config --unset-all'
-- Translate 'git config get --all' to 'git config --get-all'
-- Translate 'git config get --regexp' to 'git config --get-regexp'
-- Strip --i-still-use-this flag (deprecated command acknowledgment)
-- Strip --ref-format= and --no-advice flags
-- Implement rev-list -z via NUL-byte output conversion (with --objects and --boundary format)
-- Translate -c key=value pairs for config value compatibility
