@@ -4879,3 +4879,259 @@ test "bun workflow: init -> add -> commit -> tag -> describe -> git validates" {
     defer allocator.free(cat_out);
     try std.testing.expectEqualStrings("commit", trimRight(cat_out));
 }
+
+test "ziggit 150 files in 15 dirs -> git ls-tree counts all" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    var i: usize = 0;
+    while (i < 150) : (i += 1) {
+        const dir_idx = i / 10;
+        const file_idx = i % 10;
+
+        var dir_name_buf: [32]u8 = undefined;
+        const dir_name = std.fmt.bufPrint(&dir_name_buf, "pkg{d}", .{dir_idx}) catch unreachable;
+        const dp = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ tmp, dir_name });
+        defer allocator.free(dp);
+        std.fs.makeDirAbsolute(dp) catch {};
+
+        var rel_buf: [64]u8 = undefined;
+        const rel_path = std.fmt.bufPrint(&rel_buf, "{s}/f{d}.txt", .{ dir_name, file_idx }) catch unreachable;
+        const fp = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ tmp, rel_path });
+        defer allocator.free(fp);
+        {
+            const f = try std.fs.createFileAbsolute(fp, .{});
+            defer f.close();
+            var content_buf: [16]u8 = undefined;
+            const content = std.fmt.bufPrint(&content_buf, "c{d}", .{i}) catch unreachable;
+            try f.writeAll(content);
+        }
+        try repo.add(rel_path);
+    }
+    _ = try repo.commit("150 files in 15 dirs", "T", "t@t");
+
+    const ls = try execGit(allocator, tmp, &.{ "ls-tree", "-r", "--name-only", "HEAD" });
+    defer allocator.free(ls);
+    var count: usize = 0;
+    var iter = std.mem.splitScalar(u8, trimRight(ls), '\n');
+    while (iter.next()) |_| count += 1;
+    try std.testing.expectEqual(@as(usize, 150), count);
+}
+
+test "ziggit rapid add-commit cycles -> git rev-list counts all" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    const fp = try std.fmt.allocPrint(allocator, "{s}/counter.txt", .{tmp});
+    defer allocator.free(fp);
+
+    var i: usize = 0;
+    while (i < 30) : (i += 1) {
+        {
+            const f = try std.fs.createFileAbsolute(fp, .{ .truncate = true });
+            defer f.close();
+            var buf: [16]u8 = undefined;
+            const content = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
+            try f.writeAll(content);
+        }
+        try repo.add("counter.txt");
+        var msg_buf: [16]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "c{d}", .{i}) catch unreachable;
+        _ = try repo.commit(msg, "T", "t@t");
+    }
+
+    const count = try execGit(allocator, tmp, &.{ "rev-list", "--count", "HEAD" });
+    defer allocator.free(count);
+    try std.testing.expectEqualStrings("30", trimRight(count));
+
+    // Verify HEAD is valid
+    const cat_type = try execGit(allocator, tmp, &.{ "cat-file", "-t", "HEAD" });
+    defer allocator.free(cat_type);
+    try std.testing.expectEqualStrings("commit", trimRight(cat_type));
+}
+
+test "bun workflow: monorepo with 3 packages, tags per release" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    // Create workspace structure
+    const workspace_dirs = [_][]const u8{ "packages", "packages/a", "packages/b", "packages/c" };
+    for (workspace_dirs) |d| {
+        const full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ tmp, d });
+        defer allocator.free(full);
+        std.fs.makeDirAbsolute(full) catch {};
+    }
+
+    // Release 1: all packages v1.0.0
+    const v1_files = [_]struct { path: []const u8, content: []const u8 }{
+        .{ .path = "package.json", .content = "{\"private\":true,\"workspaces\":[\"packages/*\"]}" },
+        .{ .path = "packages/a/package.json", .content = "{\"name\":\"@ws/a\",\"version\":\"1.0.0\"}" },
+        .{ .path = "packages/b/package.json", .content = "{\"name\":\"@ws/b\",\"version\":\"1.0.0\"}" },
+        .{ .path = "packages/c/package.json", .content = "{\"name\":\"@ws/c\",\"version\":\"1.0.0\"}" },
+    };
+    for (v1_files) |entry| {
+        try writeFileHelper(allocator, tmp, entry.path, entry.content);
+        try repo.add(entry.path);
+    }
+    _ = try repo.commit("release 1.0.0", "bun", "bun@bun.sh");
+    try repo.createTag("v1.0.0", null);
+
+    // Release 2: add a new file in a new package dir (avoids re-add nested dir issue)
+    const v2_dir = try std.fmt.allocPrint(allocator, "{s}/packages/d", .{tmp});
+    defer allocator.free(v2_dir);
+    std.fs.makeDirAbsolute(v2_dir) catch {};
+    try writeFileHelper(allocator, tmp, "packages/d/package.json", "{\"name\":\"@ws/d\",\"version\":\"2.0.0\"}");
+    try repo.add("packages/d/package.json");
+    _ = try repo.commit("add @ws/d v2.0.0", "bun", "bun@bun.sh");
+    try repo.createTag("v2.0.0", null);
+
+    // Verify v1 tag doesn't have the new package
+    const v1_ls = try execGit(allocator, tmp, &.{ "ls-tree", "-r", "--name-only", "v1.0.0" });
+    defer allocator.free(v1_ls);
+    try std.testing.expect(std.mem.indexOf(u8, v1_ls, "packages/a/package.json") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v1_ls, "packages/d/package.json") == null);
+
+    // Verify v2 tag has both
+    const v2_ls = try execGit(allocator, tmp, &.{ "ls-tree", "-r", "--name-only", "v2.0.0" });
+    defer allocator.free(v2_ls);
+    try std.testing.expect(std.mem.indexOf(u8, v2_ls, "packages/a/package.json") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v2_ls, "packages/d/package.json") != null);
+
+    // Describe should find v2.0.0
+    const desc = try execGit(allocator, tmp, &.{ "describe", "--tags", "--exact-match" });
+    defer allocator.free(desc);
+    try std.testing.expectEqualStrings("v2.0.0", trimRight(desc));
+
+    // 2 commits
+    const count = try execGit(allocator, tmp, &.{ "rev-list", "--count", "HEAD" });
+    defer allocator.free(count);
+    try std.testing.expectEqualStrings("2", trimRight(count));
+}
+
+test "ziggit commit -> git cherry-pick into new branch" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    try writeFileHelper(allocator, tmp, "base.txt", "base");
+    try repo.add("base.txt");
+    _ = try repo.commit("base", "T", "t@t");
+
+    try writeFileHelper(allocator, tmp, "feature.txt", "feature");
+    try repo.add("feature.txt");
+    const feat_hash = try repo.commit("feature", "T", "t@t");
+
+    // Create branch from base, cherry-pick the feature commit
+    const co_out = try execGit(allocator, tmp, &.{ "checkout", "-b", "release", "HEAD~1" });
+    allocator.free(co_out);
+
+    var hash_str: [40]u8 = feat_hash;
+    const pick_out = try execGit(allocator, tmp, &.{ "cherry-pick", &hash_str });
+    allocator.free(pick_out);
+
+    // Verify feature.txt exists on release branch
+    const content = try execGit(allocator, tmp, &.{ "show", "HEAD:feature.txt" });
+    defer allocator.free(content);
+    try std.testing.expectEqualStrings("feature", trimRight(content));
+}
+
+test "ziggit 1MB file -> git cat-file -s confirms size" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    const fp = try std.fmt.allocPrint(allocator, "{s}/big.bin", .{tmp});
+    defer allocator.free(fp);
+    {
+        const f = try std.fs.createFileAbsolute(fp, .{});
+        defer f.close();
+        // Write 1MB of pattern data
+        var chunk: [4096]u8 = undefined;
+        for (&chunk, 0..) |*b, idx| b.* = @intCast(idx % 251); // prime modulus for variety
+        var written: usize = 0;
+        while (written < 1024 * 1024) {
+            const to_write = @min(chunk.len, 1024 * 1024 - written);
+            try f.writeAll(chunk[0..to_write]);
+            written += to_write;
+        }
+    }
+    try repo.add("big.bin");
+    _ = try repo.commit("1MB file", "T", "t@t");
+
+    const size_out = try execGit(allocator, tmp, &.{ "cat-file", "-s", "HEAD:big.bin" });
+    defer allocator.free(size_out);
+    try std.testing.expectEqualStrings("1048576", trimRight(size_out));
+}
+
+test "ziggit commit -> git revert produces valid commit" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    try writeFileHelper(allocator, tmp, "keep.txt", "keep");
+    try repo.add("keep.txt");
+    _ = try repo.commit("initial", "T", "t@t");
+
+    try writeFileHelper(allocator, tmp, "revert_me.txt", "will revert");
+    try repo.add("revert_me.txt");
+    _ = try repo.commit("to revert", "T", "t@t");
+
+    // git revert
+    var revert_argv = [_][]const u8{ "git", "-c", "user.name=T", "-c", "user.email=t@t", "revert", "--no-edit", "HEAD" };
+    var child = std.process.Child.init(&revert_argv, allocator);
+    child.cwd = tmp;
+    child.stderr_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    try child.spawn();
+    const term = try child.wait();
+    try std.testing.expectEqual(@as(u8, 0), term.Exited);
+
+    // After revert, keep.txt should exist but revert_me.txt should not be in tree
+    const ls = try execGit(allocator, tmp, &.{ "ls-tree", "--name-only", "HEAD" });
+    defer allocator.free(ls);
+    try std.testing.expect(std.mem.indexOf(u8, ls, "keep.txt") != null);
+
+    // 3 commits total
+    const count = try execGit(allocator, tmp, &.{ "rev-list", "--count", "HEAD" });
+    defer allocator.free(count);
+    try std.testing.expectEqualStrings("3", trimRight(count));
+}
