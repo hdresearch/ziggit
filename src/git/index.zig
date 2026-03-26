@@ -136,6 +136,14 @@ pub const Index = struct {
         };
         defer allocator.free(data);
 
+        try index.parseIndexData(data);
+        return index;
+    }
+
+    /// Parse index data from buffer with improved format support
+    pub fn parseIndexData(self: *Index, data: []const u8) !void {
+        if (data.len < 12) return error.InvalidIndex;
+        
         var stream = std.io.fixedBufferStream(data);
         const reader = stream.reader();
 
@@ -145,17 +153,138 @@ pub const Index = struct {
         if (!std.mem.eql(u8, &signature, "DIRC")) return error.InvalidIndex;
 
         const version = try reader.readInt(u32, .big);
-        if (version != 2) return error.UnsupportedIndexVersion;
+        if (version < 2 or version > 4) return error.UnsupportedIndexVersion;
 
         const entry_count = try reader.readInt(u32, .big);
 
+        // Read entries
         var i: u32 = 0;
         while (i < entry_count) : (i += 1) {
-            const entry = try IndexEntry.readFromBuffer(reader, allocator);
-            try index.entries.append(entry);
+            const entry = try self.readIndexEntry(reader, version);
+            try self.entries.append(entry);
         }
 
-        return index;
+        // Handle extensions (read and skip them)
+        try self.readExtensions(reader, data);
+
+        // Verify SHA-1 checksum
+        try self.verifyChecksum(data);
+    }
+
+    /// Read a single index entry with version-specific handling
+    fn readIndexEntry(self: *Index, reader: anytype, version: u32) !IndexEntry {
+        const ctime_sec = try reader.readInt(u32, .big);
+        const ctime_nsec = try reader.readInt(u32, .big);
+        const mtime_sec = try reader.readInt(u32, .big);
+        const mtime_nsec = try reader.readInt(u32, .big);
+        const dev = try reader.readInt(u32, .big);
+        const ino = try reader.readInt(u32, .big);
+        const mode = try reader.readInt(u32, .big);
+        const uid = try reader.readInt(u32, .big);
+        const gid = try reader.readInt(u32, .big);
+        const size = try reader.readInt(u32, .big);
+        
+        var sha1: [20]u8 = undefined;
+        _ = try reader.readAll(&sha1);
+        
+        const flags = try reader.readInt(u16, .big);
+        
+        // Handle extended flags for v3 and v4
+        if (version >= 3 and (flags & 0x4000) != 0) {
+            const extended_flags = try reader.readInt(u16, .big);
+            _ = extended_flags; // TODO: Store extended flags in a separate field
+        }
+        
+        // Extract path length
+        const path_len = flags & 0xFFF;
+        if (version >= 4) {
+            // In v4, if path length is 0xFFF, path length is stored separately
+            if (path_len == 0xFFF) {
+                // For now, treat this as an error since we don't fully support v4 variable-length paths
+                return error.UnsupportedIndexVersion;
+            }
+        }
+        
+        const path_bytes = try self.allocator.alloc(u8, path_len);
+        _ = try reader.readAll(path_bytes);
+        
+        // Calculate and skip padding
+        const entry_size = 62 + (if (version >= 3 and (flags & 0x4000) != 0) @as(usize, 2) else @as(usize, 0)) + path_len;
+        const pad_len = (8 - (entry_size % 8)) % 8;
+        try reader.skipBytes(pad_len, .{});
+
+        return IndexEntry{
+            .ctime_sec = ctime_sec,
+            .ctime_nsec = ctime_nsec,
+            .mtime_sec = mtime_sec,
+            .mtime_nsec = mtime_nsec,
+            .dev = dev,
+            .ino = ino,
+            .mode = mode,
+            .uid = uid,
+            .gid = gid,
+            .size = size,
+            .sha1 = sha1,
+            .flags = flags, // TODO: Handle extended flags properly
+            .path = path_bytes,
+        };
+    }
+
+    /// Read and skip index extensions
+    fn readExtensions(self: *Index, reader: anytype, data: []const u8) !void {
+        _ = self; // Not used currently
+        
+        while (true) {
+            // Check if we have enough bytes left for checksum (20 bytes)
+            const current_pos = try reader.context.getPos();
+            if (current_pos + 20 >= data.len) break;
+            
+            // Try to read extension signature
+            var sig: [4]u8 = undefined;
+            _ = reader.readAll(&sig) catch break; // EOF or not enough data
+            
+            // Check if this is actually the start of the SHA-1 checksum
+            // Extensions have printable ASCII signatures, checksum starts with hash bytes
+            if (sig[0] < 32 or sig[0] > 126) {
+                // Likely the start of checksum, rewind
+                try reader.context.seekTo(current_pos);
+                break;
+            }
+            
+            // Read extension size
+            const ext_size = reader.readInt(u32, .big) catch {
+                // Rewind if we can't read size
+                try reader.context.seekTo(current_pos);
+                break;
+            };
+            
+            // Skip extension data
+            reader.skipBytes(ext_size, .{}) catch {
+                // If we can't skip the extension, we're probably at the checksum
+                try reader.context.seekTo(current_pos);
+                break;
+            };
+        }
+    }
+
+    /// Verify the SHA-1 checksum of the index
+    fn verifyChecksum(self: *Index, data: []const u8) !void {
+        _ = self; // Not used currently
+        
+        if (data.len < 20) return error.InvalidIndex;
+        
+        // The last 20 bytes should be the SHA-1 checksum
+        const content = data[0..data.len - 20];
+        const stored_checksum = data[data.len - 20..];
+        
+        var hasher = std.crypto.hash.Sha1.init(.{});
+        hasher.update(content);
+        var computed_checksum: [20]u8 = undefined;
+        hasher.final(&computed_checksum);
+        
+        if (!std.mem.eql(u8, &computed_checksum, stored_checksum)) {
+            return error.ChecksumMismatch;
+        }
     }
 
     pub fn save(self: Index, git_dir: []const u8, platform_impl: anytype) !void {
@@ -259,23 +388,6 @@ pub const Index = struct {
         const data = std.fs.cwd().readFileAlloc(self.allocator, index_path, 1024 * 1024) catch return error.FileNotFound;
         defer self.allocator.free(data);
         
-        var stream = std.io.fixedBufferStream(data);
-        const reader = stream.reader();
-        
-        // Read header
-        var signature: [4]u8 = undefined;
-        _ = try reader.readAll(&signature);
-        if (!std.mem.eql(u8, &signature, "DIRC")) return error.InvalidIndex;
-        
-        const version = try reader.readInt(u32, .big);
-        if (version != 2) return error.UnsupportedIndexVersion;
-        
-        const entry_count = try reader.readInt(u32, .big);
-        
-        var i: u32 = 0;
-        while (i < entry_count) : (i += 1) {
-            const entry = try IndexEntry.readFromBuffer(reader, self.allocator);
-            try self.entries.append(entry);
-        }
+        try self.parseIndexData(data);
     }
 };

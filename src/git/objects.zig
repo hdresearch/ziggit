@@ -248,6 +248,16 @@ fn loadFromPackFiles(hash_str: []const u8, git_dir: []const u8, platform_impl: a
     return error.ObjectNotFound;
 }
 
+/// Pack object types
+const PackObjectType = enum(u3) {
+    commit = 1,
+    tree = 2,
+    blob = 3,
+    tag = 4,
+    ofs_delta = 6,
+    ref_delta = 7,
+};
+
 /// Find object in a specific pack file
 fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_str: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
     // Convert hash string to bytes for searching
@@ -261,7 +271,7 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     const idx_data = platform_impl.fs.readFile(allocator, idx_path) catch return error.ObjectNotFound;
     defer allocator.free(idx_data);
     
-    // Parse pack index v2 format (simplified)
+    // Parse pack index v2 format
     if (idx_data.len < 8) return error.ObjectNotFound;
     
     // Check for pack index magic and version
@@ -271,40 +281,62 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     if (magic != 0xff744f63) return error.ObjectNotFound; // '\377tOc'
     if (version != 2) return error.ObjectNotFound;
     
-    // Skip fanout table (256 * 4 bytes) 
+    // Use fanout table for efficient searching
     const fanout_start = 8;
     const fanout_end = fanout_start + 256 * 4;
     if (idx_data.len < fanout_end) return error.ObjectNotFound;
     
-    // Get number of objects from last fanout entry
-    const num_objects = std.mem.readInt(u32, @ptrCast(idx_data[fanout_end - 4..fanout_end]), .big);
-    if (num_objects == 0) return error.ObjectNotFound;
+    // Get search range from fanout table
+    const first_byte = target_hash[0];
+    const start_index = if (first_byte == 0) 0 else std.mem.readInt(u32, @ptrCast(idx_data[fanout_start + (@as(usize, first_byte) - 1) * 4..fanout_start + (@as(usize, first_byte) - 1) * 4 + 4]), .big);
+    const end_index = std.mem.readInt(u32, @ptrCast(idx_data[fanout_start + @as(usize, first_byte) * 4..fanout_start + @as(usize, first_byte) * 4 + 4]), .big);
     
-    // Find object in sorted SHA-1 table
+    if (start_index >= end_index) return error.ObjectNotFound;
+    
+    // Binary search in the SHA-1 table within the range
     const sha1_table_start = fanout_end;
-    const sha1_table_end = sha1_table_start + num_objects * 20;
+    const sha1_table_end = sha1_table_start + end_index * 20;
     if (idx_data.len < sha1_table_end) return error.ObjectNotFound;
     
+    var low = start_index;
+    var high = end_index;
     var object_index: ?u32 = null;
-    var i: u32 = 0;
-    while (i < num_objects) : (i += 1) {
-        const sha1_offset = sha1_table_start + i * 20;
+    
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        const sha1_offset = sha1_table_start + mid * 20;
         const obj_hash = idx_data[sha1_offset..sha1_offset + 20];
         
-        if (std.mem.eql(u8, obj_hash, &target_hash)) {
-            object_index = i;
-            break;
+        const cmp = std.mem.order(u8, obj_hash, &target_hash);
+        switch (cmp) {
+            .eq => {
+                object_index = mid;
+                break;
+            },
+            .lt => low = mid + 1,
+            .gt => high = mid,
         }
     }
     
     if (object_index == null) return error.ObjectNotFound;
     
-    // Get offset from offset table (simplified - assumes 32-bit offsets)
-    const offset_table_start = sha1_table_end + num_objects * 4; // Skip CRC table
+    // Get offset from offset table - handle both 32-bit and 64-bit offsets
+    const crc_table_start = sha1_table_end;
+    const offset_table_start = crc_table_start + end_index * 4; // Skip CRC table
     const offset_table_offset = offset_table_start + object_index.? * 4;
     if (idx_data.len < offset_table_offset + 4) return error.ObjectNotFound;
     
-    const object_offset = std.mem.readInt(u32, @ptrCast(idx_data[offset_table_offset..offset_table_offset + 4]), .big);
+    var object_offset: u64 = std.mem.readInt(u32, @ptrCast(idx_data[offset_table_offset..offset_table_offset + 4]), .big);
+    
+    // Check for 64-bit offset (MSB set)
+    if (object_offset & 0x80000000 != 0) {
+        const large_offset_index = object_offset & 0x7FFFFFFF;
+        const large_offset_table_start = offset_table_start + end_index * 4;
+        const large_offset_table_offset = large_offset_table_start + large_offset_index * 8;
+        if (idx_data.len < large_offset_table_offset + 8) return error.ObjectNotFound;
+        
+        object_offset = std.mem.readInt(u64, @ptrCast(idx_data[large_offset_table_offset..large_offset_table_offset + 8]), .big);
+    }
     
     // Now read from the corresponding .pack file
     const pack_filename = try std.fmt.allocPrint(allocator, "{s}.pack", .{idx_filename[0..idx_filename.len-4]});
@@ -316,54 +348,190 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     return readObjectFromPack(pack_path, object_offset, platform_impl, allocator);
 }
 
-/// Read object from pack file at given offset (simplified implementation)
-fn readObjectFromPack(pack_path: []const u8, offset: u32, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
+/// Read object from pack file at given offset
+fn readObjectFromPack(pack_path: []const u8, offset: u64, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
     const pack_data = platform_impl.fs.readFile(allocator, pack_path) catch return error.ObjectNotFound;
     defer allocator.free(pack_data);
     
     if (offset >= pack_data.len) return error.ObjectNotFound;
     
-    // Parse pack object header (simplified)
-    var pos: usize = offset;
-    if (pos >= pack_data.len) return error.ObjectNotFound;
+    return readPackedObject(pack_data, @intCast(offset), pack_path, platform_impl, allocator);
+}
+
+/// Read a packed object with delta support
+fn readPackedObject(pack_data: []const u8, offset: usize, pack_path: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
+    if (offset >= pack_data.len) return error.ObjectNotFound;
     
+    var pos = offset;
     const first_byte = pack_data[pos];
     pos += 1;
     
-    const obj_type_num = (first_byte >> 4) & 7;
-    const obj_type: ObjectType = switch (obj_type_num) {
-        1 => .commit,
-        2 => .tree, 
-        3 => .blob,
-        4 => .tag,
-        else => return error.ObjectNotFound,
-    };
+    const pack_type_num = (first_byte >> 4) & 7;
+    const pack_type = std.meta.intToEnum(PackObjectType, pack_type_num) catch return error.ObjectNotFound;
     
-    // Read variable-length size (simplified)
+    // Read variable-length size
     var size: usize = @intCast(first_byte & 15);
     var shift: u6 = 4;
+    var current_byte = first_byte;
     
-    while (first_byte & 0x80 != 0 and pos < pack_data.len) {
-        const next_byte = pack_data[pos];
+    while (current_byte & 0x80 != 0 and pos < pack_data.len) {
+        current_byte = pack_data[pos];
         pos += 1;
-        size |= @as(usize, @intCast(next_byte & 0x7F)) << shift;
+        size |= @as(usize, @intCast(current_byte & 0x7F)) << shift;
         shift += 7;
-        if (next_byte & 0x80 == 0) break;
     }
     
-    // Decompress object data using zlib
-    if (pos >= pack_data.len) return error.ObjectNotFound;
+    switch (pack_type) {
+        .commit, .tree, .blob, .tag => {
+            // Regular object - decompress and return
+            if (pos >= pack_data.len) return error.ObjectNotFound;
+            
+            var decompressed = std.ArrayList(u8).init(allocator);
+            defer decompressed.deinit();
+            
+            var stream = std.io.fixedBufferStream(pack_data[pos..]);
+            std.compress.zlib.decompress(stream.reader(), decompressed.writer()) catch return error.ObjectNotFound;
+            
+            if (decompressed.items.len != size) return error.ObjectNotFound;
+            
+            const obj_type: ObjectType = switch (pack_type) {
+                .commit => .commit,
+                .tree => .tree,
+                .blob => .blob,
+                .tag => .tag,
+                else => unreachable,
+            };
+            
+            const data = try allocator.dupe(u8, decompressed.items);
+            return GitObject.init(obj_type, data);
+        },
+        .ofs_delta => {
+            // Offset delta - read offset to base object using git's encoding
+            if (pos >= pack_data.len) return error.ObjectNotFound;
+            
+            var base_offset_delta: usize = 0;
+            var first_offset_byte = true;
+            
+            while (pos < pack_data.len) {
+                const offset_byte = pack_data[pos];
+                pos += 1;
+                
+                if (first_offset_byte) {
+                    base_offset_delta = @intCast(offset_byte & 0x7F);
+                    first_offset_byte = false;
+                } else {
+                    base_offset_delta = (base_offset_delta + 1) << 7;
+                    base_offset_delta += @intCast(offset_byte & 0x7F);
+                }
+                
+                if (offset_byte & 0x80 == 0) break;
+            }
+            
+            // Calculate base object offset
+            if (base_offset_delta >= offset) return error.ObjectNotFound;
+            const base_offset = offset - base_offset_delta;
+            
+            // Recursively read base object
+            const base_object = readPackedObject(pack_data, base_offset, pack_path, platform_impl, allocator) catch return error.ObjectNotFound;
+            defer base_object.deinit(allocator);
+            
+            // Read and decompress delta data
+            var delta_data = std.ArrayList(u8).init(allocator);
+            defer delta_data.deinit();
+            
+            var stream = std.io.fixedBufferStream(pack_data[pos..]);
+            std.compress.zlib.decompress(stream.reader(), delta_data.writer()) catch return error.ObjectNotFound;
+            
+            // Apply delta to base object
+            const result_data = try applyDelta(base_object.data, delta_data.items, allocator);
+            return GitObject.init(base_object.type, result_data);
+        },
+        .ref_delta => {
+            // Reference delta - read 20-byte SHA-1 of base object
+            if (pos + 20 > pack_data.len) return error.ObjectNotFound;
+            
+            // For now, skip ref_delta objects as they require recursive resolution
+            // TODO: Implement proper ref_delta support
+            return error.ObjectNotFound;
+        },
+    }
+}
+
+/// Apply delta to base data to reconstruct object
+fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    var pos: usize = 0;
     
-    var decompressed = std.ArrayList(u8).init(allocator);
-    defer decompressed.deinit();
+    // Read base size (variable length)
+    var base_size: usize = 0;
+    var shift: u6 = 0;
+    while (pos < delta_data.len) {
+        const b = delta_data[pos];
+        pos += 1;
+        base_size |= @as(usize, @intCast(b & 0x7F)) << shift;
+        if (b & 0x80 == 0) break;
+        shift += 7;
+    }
     
-    var stream = std.io.fixedBufferStream(pack_data[pos..]);
-    std.compress.zlib.decompress(stream.reader(), decompressed.writer()) catch return error.ObjectNotFound;
+    // Read result size (variable length) 
+    var result_size: usize = 0;
+    shift = 0;
+    while (pos < delta_data.len) {
+        const b = delta_data[pos];
+        pos += 1;
+        result_size |= @as(usize, @intCast(b & 0x7F)) << shift;
+        if (b & 0x80 == 0) break;
+        shift += 7;
+    }
     
-    if (decompressed.items.len != size) return error.ObjectNotFound;
+    // Verify base size
+    if (base_size != base_data.len) return error.InvalidDelta;
     
-    const data = try allocator.dupe(u8, decompressed.items);
-    return GitObject.init(obj_type, data);
+    // Apply delta commands
+    var result = std.ArrayList(u8).init(allocator);
+    defer result.deinit();
+    try result.ensureTotalCapacity(result_size);
+    
+    while (pos < delta_data.len) {
+        const cmd = delta_data[pos];
+        pos += 1;
+        
+        if (cmd & 0x80 != 0) {
+            // Copy command
+            var copy_offset: usize = 0;
+            var copy_size: usize = 0;
+            
+            // Read offset
+            if (cmd & 0x01 != 0) { copy_offset |= @as(usize, delta_data[pos]); pos += 1; }
+            if (cmd & 0x02 != 0) { copy_offset |= @as(usize, delta_data[pos]) << 8; pos += 1; }
+            if (cmd & 0x04 != 0) { copy_offset |= @as(usize, delta_data[pos]) << 16; pos += 1; }
+            if (cmd & 0x08 != 0) { copy_offset |= @as(usize, delta_data[pos]) << 24; pos += 1; }
+            
+            // Read size
+            if (cmd & 0x10 != 0) { copy_size |= @as(usize, delta_data[pos]); pos += 1; }
+            if (cmd & 0x20 != 0) { copy_size |= @as(usize, delta_data[pos]) << 8; pos += 1; }
+            if (cmd & 0x40 != 0) { copy_size |= @as(usize, delta_data[pos]) << 16; pos += 1; }
+            
+            // Size 0 means 0x10000
+            if (copy_size == 0) copy_size = 0x10000;
+            
+            // Copy data from base
+            if (copy_offset + copy_size > base_data.len) return error.InvalidDelta;
+            try result.appendSlice(base_data[copy_offset..copy_offset + copy_size]);
+        } else {
+            // Insert command - copy data from delta
+            const insert_size = @as(usize, cmd);
+            if (insert_size == 0) return error.InvalidDelta;
+            if (pos + insert_size > delta_data.len) return error.InvalidDelta;
+            
+            try result.appendSlice(delta_data[pos..pos + insert_size]);
+            pos += insert_size;
+        }
+    }
+    
+    // Verify result size
+    if (result.items.len != result_size) return error.InvalidDelta;
+    
+    return try allocator.dupe(u8, result.items);
 }
 
 /// Legacy function for compatibility with tests - reads and decompresses git object
