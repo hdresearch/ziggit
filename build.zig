@@ -633,6 +633,39 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(git_objects_internal_tests).step);
 
+    // Object store/load roundtrip tests
+    const object_store_load_tests = b.addTest(.{
+        .root_source_file = b.path("test/object_store_load_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    object_store_load_tests.root_module.addAnonymousImport("git", .{
+        .root_source_file = b.path("src/git/git.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(object_store_load_tests).step);
+
+    // Packed refs tests
+    const packed_refs_tests = b.addTest(.{
+        .root_source_file = b.path("test/packed_refs_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    packed_refs_tests.root_module.addAnonymousImport("git", .{
+        .root_source_file = b.path("src/git/git.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(packed_refs_tests).step);
+
+    // Index write/read roundtrip tests
+    const index_write_read_tests = b.addTest(.{
+        .root_source_file = b.path("test/index_write_read_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    index_write_read_tests.root_module.addAnonymousImport("git", .{
+        .root_source_file = b.path("src/git/git.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(index_write_read_tests).step);
+
     // Git index internal tests (parseIndexData, binary format)
     const git_index_internal_tests = b.addTest(.{
         .root_source_file = b.path("test/git_index_internal_test.zig"),
