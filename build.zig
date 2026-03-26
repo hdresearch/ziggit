@@ -85,6 +85,28 @@ pub fn build(b: *std.Build) void {
     });
     const run_command_output_test = b.addRunArtifact(command_output_test);
 
+    // BrokenPipe handling test
+    const broken_pipe_test = b.addExecutable(.{
+        .name = "broken_pipe_test",
+        .root_source_file = b.path("test/broken_pipe_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_broken_pipe_test = b.addRunArtifact(broken_pipe_test);
+
+    // Library status test (requires ziggit module)
+    const lib_status_test = b.addTest(.{
+        .root_source_file = b.path("test/lib_status_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    const ziggit_mod = b.addModule("ziggit", .{
+        .root_source_file = b.path("src/lib/ziggit.zig"),
+    });
+    lib_status_test.root_module.addImport("ziggit", ziggit_mod);
+    const run_lib_status_test = b.addRunArtifact(lib_status_test);
+
     // Test step runs all tests
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_platform_tests.step);
@@ -92,6 +114,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_index_format_test.step);
     test_step.dependOn(&run_object_format_test.step);
     test_step.dependOn(&run_command_output_test.step);
+    test_step.dependOn(&run_broken_pipe_test.step);
+    test_step.dependOn(&run_lib_status_test.step);
 
     // ========== BENCHMARKS ==========
     const cli_benchmark = b.addExecutable(.{
