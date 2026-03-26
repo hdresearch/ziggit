@@ -60,7 +60,16 @@ pub fn resolveRef(git_dir: []const u8, ref_name: []const u8, platform_impl: anyt
             if (!std.mem.startsWith(u8, current_ref, "refs/")) {
                 const full_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{current_ref});
                 defer allocator.free(full_ref);
-                return resolveRefOnce(git_dir, full_ref, platform_impl, allocator) catch return err;
+                const backup_resolved = resolveRefOnce(git_dir, full_ref, platform_impl, allocator) catch return err;
+                if (!backup_resolved.is_symbolic) {
+                    const final_hash = try resolveAnnotatedTag(git_dir, backup_resolved.target, platform_impl, allocator);
+                    allocator.free(backup_resolved.target);
+                    return final_hash;
+                } else {
+                    allocator.free(current_ref);
+                    current_ref = backup_resolved.target;
+                    continue;
+                }
             }
             return err;
         };
