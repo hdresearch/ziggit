@@ -547,6 +547,17 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(ref_delta_chain_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_core_verification_tests).step);
 
+    // Pack format e2e tests (full pipeline: build pack → idx → readback → git cross-validation)
+    const pack_format_e2e_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_format_e2e_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_format_e2e_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(pack_format_e2e_tests).step);
+
     // Pack format unit tests (byte-level pack construction, all object types, delta chains)
     const pack_format_unit_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_format_unit_test.zig"),
