@@ -1059,6 +1059,28 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(pack_git_interop_correctness_tests).step);
 
+    // Diff module tests
+    const diff_module_tests = b.addTest(.{
+        .root_source_file = b.path("test/diff_module_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    diff_module_tests.root_module.addAnonymousImport("diff", .{
+        .root_source_file = b.path("src/git/diff.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(diff_module_tests).step);
+
+    // Tree parse/create tests
+    const tree_parse_create_tests = b.addTest(.{
+        .root_source_file = b.path("test/tree_parse_create_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    tree_parse_create_tests.root_module.addAnonymousImport("tree", .{
+        .root_source_file = b.path("src/git/tree.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(tree_parse_create_tests).step);
+
     // ========== BENCHMARKS ==========
     
     // CLI benchmark (ziggit vs git performance)
