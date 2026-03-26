@@ -2237,6 +2237,10 @@ pub const Repository = struct {
         PipeBusy,
         AntivirusInterference,
         FileLocksNotSupported,
+        Canceled,
+        ProcessNotFound,
+        LockViolation,
+        PermissionDenied,
     };
 
     /// Read and decompress a git object (loose or packed).
