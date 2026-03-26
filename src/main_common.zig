@@ -318,6 +318,13 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "clone")) {
         // Use our native clone implementation (supports --depth for shallow clones)
         try cmdClone(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "rev-parse")) {
+        // Intercept rev-parse for --show-ref-format (git 2.45+)
+        if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
+            try forwardRevParseToGit(allocator, all_original_args.items, command_index, &platform_impl);
+        } else {
+            try forwardCmdToGit(allocator, all_original_args.items, &platform_impl);
+        }
     } else if (std.mem.eql(u8, command, "commit") or
         std.mem.eql(u8, command, "log") or
         std.mem.eql(u8, command, "diff") or
@@ -327,7 +334,6 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         std.mem.eql(u8, command, "fetch") or
         std.mem.eql(u8, command, "pull") or
         std.mem.eql(u8, command, "push") or
-        std.mem.eql(u8, command, "rev-parse") or
         std.mem.eql(u8, command, "describe") or
         std.mem.eql(u8, command, "tag") or
         std.mem.eql(u8, command, "show") or
@@ -425,28 +431,51 @@ fn forwardConfigToGit(allocator: std.mem.Allocator, all_args: [][]const u8, comm
             const rest_start = subcmd_index + 1;
             
             if (std.mem.eql(u8, subcmd, "set")) {
-                // git config set [--flags] <key> <value>
-                // → git config [--flags] <key> <value>
-                // Just skip "set" and pass through rest
-                // Translate --append to --add for git 2.43 compat
+                // git config set [--all] [--append] [--comment=...] [--flags] <key> <value>
+                // → git config [--replace-all] [--add] [--flags] <key> <value>
+                // Translate new-style flags for git 2.43 compat
+                var set_has_all = false;
+                for (all_args[rest_start..]) |a| {
+                    if (std.mem.eql(u8, a, "--all")) {
+                        set_has_all = true;
+                        break;
+                    }
+                }
+                if (set_has_all) {
+                    try new_args.append("--replace-all");
+                }
                 for (all_args[rest_start..]) |arg| {
-                    if (std.mem.eql(u8, arg, "--append")) {
+                    if (std.mem.eql(u8, arg, "--all")) {
+                        continue; // already handled above
+                    } else if (std.mem.eql(u8, arg, "--append")) {
                         try new_args.append("--add");
+                    } else if (std.mem.startsWith(u8, arg, "--comment")) {
+                        continue; // --comment is git 2.45+, strip it for 2.43
+                    } else if (std.mem.eql(u8, arg, "--value")) {
+                        continue; // --value is git 2.46+, strip it
                     } else {
                         try new_args.append(arg);
                     }
                 }
             } else if (std.mem.eql(u8, subcmd, "get")) {
-                // git config get [--all] [--flags] <key>
-                // → git config --get [--flags] <key>
-                // → git config --get-all [--flags] <key> (if --all present)
+                // git config get [--all] [--regexp] [--value=<pattern>] [--url=<url>] [--flags] <key>
+                // → git config --get [--flags] <key> [<pattern>]
+                // → git config --get-all [--flags] <key> [<pattern>] (if --all)
+                // → git config --get-regexp [--flags] <key> [<pattern>] (if --regexp)
+                // → git config --get-urlmatch [--flags] <key> <url> (if --url=<url>)
                 var get_has_all = false;
                 var get_has_regexp = false;
+                var get_url: ?[]const u8 = null;
+                var get_value_pattern: ?[]const u8 = null;
                 for (all_args[rest_start..]) |a| {
                     if (std.mem.eql(u8, a, "--all")) get_has_all = true;
                     if (std.mem.eql(u8, a, "--regexp")) get_has_regexp = true;
+                    if (std.mem.startsWith(u8, a, "--url=")) get_url = a[6..];
+                    if (std.mem.startsWith(u8, a, "--value=")) get_value_pattern = a[8..];
                 }
-                if (get_has_regexp) {
+                if (get_url != null) {
+                    try new_args.append("--get-urlmatch");
+                } else if (get_has_regexp) {
                     try new_args.append("--get-regexp");
                 } else if (get_has_all) {
                     try new_args.append("--get-all");
@@ -455,18 +484,28 @@ fn forwardConfigToGit(allocator: std.mem.Allocator, all_args: [][]const u8, comm
                 }
                 for (all_args[rest_start..]) |arg| {
                     if (std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "--regexp")) continue;
+                    if (std.mem.startsWith(u8, arg, "--url=")) continue;
+                    if (std.mem.startsWith(u8, arg, "--value=")) continue;
+                    if (std.mem.eql(u8, arg, "--show-names")) continue; // git 2.46+
                     try new_args.append(arg);
                 }
+                // Append value-pattern at end if present
+                if (get_value_pattern) |vp| {
+                    try new_args.append(vp);
+                }
+                // Append URL at end if present
+                if (get_url) |url| {
+                    try new_args.append(url);
+                }
             } else if (std.mem.eql(u8, subcmd, "unset")) {
-                // git config unset [--all] [--flags] <key>
-                // → git config --unset [--flags] <key>
-                // → git config --unset-all [--flags] <key> (if --all present)
+                // git config unset [--all] [--value=<pattern>] [--flags] <key>
+                // → git config --unset [--flags] <key> [<pattern>]
+                // → git config --unset-all [--flags] <key> [<pattern>] (if --all)
                 var has_all = false;
+                var unset_value_pattern: ?[]const u8 = null;
                 for (all_args[rest_start..]) |a| {
-                    if (std.mem.eql(u8, a, "--all")) {
-                        has_all = true;
-                        break;
-                    }
+                    if (std.mem.eql(u8, a, "--all")) has_all = true;
+                    if (std.mem.startsWith(u8, a, "--value=")) unset_value_pattern = a[8..];
                 }
                 if (has_all) {
                     try new_args.append("--unset-all");
@@ -474,9 +513,14 @@ fn forwardConfigToGit(allocator: std.mem.Allocator, all_args: [][]const u8, comm
                     try new_args.append("--unset");
                 }
                 for (all_args[rest_start..]) |arg| {
-                    if (!std.mem.eql(u8, arg, "--all")) {
-                        try new_args.append(arg);
-                    }
+                    if (std.mem.eql(u8, arg, "--all")) continue;
+                    if (std.mem.startsWith(u8, arg, "--value=")) continue;
+                    if (std.mem.startsWith(u8, arg, "--comment")) continue; // git 2.45+
+                    try new_args.append(arg);
+                }
+                // Append value-pattern at end if present
+                if (unset_value_pattern) |vp| {
+                    try new_args.append(vp);
                 }
             } else if (std.mem.eql(u8, subcmd, "list")) {
                 // git config list [--flags]
@@ -575,6 +619,47 @@ fn translateConfigValues(allocator: std.mem.Allocator, all_args: [][]const u8) !
     }
     
     return new_args;
+}
+
+fn forwardRevParseToGit(allocator: std.mem.Allocator, all_args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    // Intercept --show-ref-format (git 2.45+ feature not in 2.43)
+    // Always output "files" since git 2.43 only supports files backend
+    const rest_start = command_index + 1;
+    var has_show_ref_format = false;
+    for (all_args[rest_start..]) |arg| {
+        if (std.mem.eql(u8, arg, "--show-ref-format")) {
+            has_show_ref_format = true;
+            break;
+        }
+    }
+    
+    if (has_show_ref_format) {
+        // Check if there are other rev-parse args besides --show-ref-format
+        var only_show_ref_format = true;
+        for (all_args[rest_start..]) |arg| {
+            if (!std.mem.eql(u8, arg, "--show-ref-format")) {
+                only_show_ref_format = false;
+                break;
+            }
+        }
+        if (only_show_ref_format) {
+            try platform_impl.writeStdout("files\n");
+            return;
+        }
+        // Build new args without --show-ref-format, output "files" then forward rest
+        var new_args = std.ArrayList([]const u8).init(allocator);
+        defer new_args.deinit();
+        for (all_args) |arg| {
+            if (std.mem.eql(u8, arg, "--show-ref-format")) continue;
+            try new_args.append(arg);
+        }
+        try platform_impl.writeStdout("files\n");
+        try forwardToGit(allocator, new_args.items, platform_impl);
+        return;
+    }
+    
+    // No special handling needed
+    try forwardToGit(allocator, all_args, platform_impl);
 }
 
 fn forwardVersionToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_impl: *const platform_mod.Platform) !void {
