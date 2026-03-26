@@ -350,6 +350,22 @@ pub fn build(b: *std.Build) void {
     });
     ref_resolution_tests.root_module.addImport("ziggit", ziggit_module);
 
+    // Objects parser unit tests (SHA-1, commit format, tree format, cross-validation)
+    const objects_parser_unit_tests = b.addTest(.{
+        .root_source_file = b.path("test/objects_parser_unit_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    objects_parser_unit_tests.root_module.addImport("ziggit", ziggit_module);
+
+    // Cross-validation tests (ziggit writes/git reads, git writes/ziggit reads)
+    const cross_validation_tests = b.addTest(.{
+        .root_source_file = b.path("test/cross_validation_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cross_validation_tests.root_module.addImport("ziggit", ziggit_module);
+
     // Test step - runs all unit tests and integration tests
     const test_step = b.step("test", "Run all unit tests and integration tests");
     test_step.dependOn(&b.addRunArtifact(platform_unit_tests).step);
@@ -396,6 +412,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(dirty_detection_tests).step);
     test_step.dependOn(&b.addRunArtifact(objects_parser_tests).step);
     test_step.dependOn(&b.addRunArtifact(ref_resolution_tests).step);
+    test_step.dependOn(&b.addRunArtifact(objects_parser_unit_tests).step);
+    test_step.dependOn(&b.addRunArtifact(cross_validation_tests).step);
 
     // E2E validation: ziggit writes, git reads
     const ziggit_writes_test = b.addTest(.{
