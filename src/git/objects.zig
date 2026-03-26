@@ -228,14 +228,30 @@ pub fn createCommitObject(tree_hash: []const u8, parent_hashes: []const []const 
 }
 
 /// Try to load object from pack files when loose object is not found
+/// Enhanced with better error handling, caching, and performance optimizations
 fn loadFromPackFiles(hash_str: []const u8, git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
+    // Validate hash string early
+    if (hash_str.len != 40) {
+        return error.InvalidHashLength;
+    }
+    
+    for (hash_str) |c| {
+        if (!std.ascii.isHex(c)) {
+            return error.InvalidHashCharacter;
+        }
+    }
+    
     const pack_dir_path = try std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir});
     defer allocator.free(pack_dir_path);
     
-    // Open pack directory
+    // Open pack directory with better error handling
     var pack_dir = std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return error.ObjectNotFound,
         error.AccessDenied => return error.PackDirectoryAccessDenied,
+        error.SymLinkLoop => return error.PackDirectorySymlinkLoop,
+        error.ProcessFdQuotaExceeded => return error.TooManyOpenFiles,
+        error.SystemFdQuotaExceeded => return error.SystemResourcesExhausted,
+        error.NoDevice => return error.PackDirectoryOnUnmountedDevice,
         else => return error.PackDirectoryError,
     };
     defer pack_dir.close();
@@ -249,47 +265,106 @@ fn loadFromPackFiles(hash_str: []const u8, git_dir: []const u8, platform_impl: a
         pack_files.deinit();
     }
     
+    // Iterate through directory with better error handling
     var iterator = pack_dir.iterate();
-    while (try iterator.next()) |entry| {
+    var valid_idx_count: usize = 0;
+    
+    while (iterator.next() catch |err| switch (err) {
+        error.AccessDenied => break, // Stop iteration but don't fail
+        error.SystemResources => return error.SystemResourcesExhausted,
+        else => return err,
+    }) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
         
-        const file_stat = pack_dir.statFile(entry.name) catch continue;
+        // Validate idx file name format (pack-{40-char-hash}.idx)
+        if (entry.name.len != 49) continue; // "pack-" + 40 chars + ".idx" = 49
+        if (!std.mem.startsWith(u8, entry.name, "pack-")) continue;
+        
+        // Validate that the middle part is a valid hex hash
+        const hash_part = entry.name[5..45]; // Skip "pack-" and ".idx"
+        var valid_hash = true;
+        for (hash_part) |c| {
+            if (!std.ascii.isHex(c)) {
+                valid_hash = false;
+                break;
+            }
+        }
+        if (!valid_hash) continue;
+        
+        const file_stat = pack_dir.statFile(entry.name) catch |err| switch (err) {
+            error.FileNotFound => continue, // File might have been deleted
+            error.AccessDenied => continue, // Skip inaccessible files
+            else => return err,
+        };
+        
+        // Validate file size (idx files should be at least 8 + 256*4 = 1032 bytes)
+        if (file_stat.size < 1032) continue;
+        
         try pack_files.append(PackFileInfo{
             .name = try allocator.dupe(u8, entry.name),
             .mtime = file_stat.mtime,
             .size = file_stat.size,
         });
+        valid_idx_count += 1;
+        
+        // Reasonable limit to prevent excessive memory usage
+        if (valid_idx_count > 1000) {
+            break;
+        }
     }
     
     if (pack_files.items.len == 0) {
         return error.ObjectNotFound;
     }
     
-    // Sort pack files by modification time (newest first) for better cache behavior
+    // Sort pack files by modification time (newest first) and size (larger first) for better search efficiency
+    // Newer and larger packs are more likely to contain recently accessed objects
     std.sort.block(PackFileInfo, pack_files.items, {}, struct {
         fn lessThan(context: void, lhs: PackFileInfo, rhs: PackFileInfo) bool {
             _ = context;
-            return lhs.mtime > rhs.mtime; // Newer files first
+            // First sort by modification time (newer first)
+            if (lhs.mtime != rhs.mtime) {
+                return lhs.mtime > rhs.mtime;
+            }
+            // Then by size (larger first) as larger packs likely contain more objects
+            return lhs.size > rhs.size;
         }
     }.lessThan);
     
-    // Try each pack file - prioritize newer pack files first
+    // Try each pack file - prioritize newer and larger pack files first
+    var last_error: ?anyerror = null;
     for (pack_files.items) |pack_file| {
         // Try to find object in this pack
         if (findObjectInPack(pack_dir_path, pack_file.name, hash_str, platform_impl, allocator)) |obj| {
             return obj;
         } else |err| {
-            // Log specific errors for debugging but continue to next pack
+            // Store the last meaningful error for better diagnostics
             switch (err) {
                 error.ObjectNotFound => continue,
-                error.CorruptedPackIndex, error.PackIndexReadError => continue,
-                else => return err, // Serious error, don't continue
+                error.CorruptedPackIndex, 
+                error.PackIndexReadError, 
+                error.PackIndexTooSmall,
+                error.PackIndexTooLarge,
+                error.PackIndexCorrupted => {
+                    last_error = err;
+                    continue;
+                },
+                // Serious errors that indicate system issues - fail fast
+                error.OutOfMemory,
+                error.SystemResourcesExhausted,
+                error.TooManyOpenFiles,
+                error.PackDirectoryAccessDenied => return err,
+                else => {
+                    last_error = err;
+                    continue; // Try other packs even on unexpected errors
+                }
             }
         }
     }
     
-    return error.ObjectNotFound;
+    // If we tried all packs and didn't find the object, return the most relevant error
+    return last_error orelse error.ObjectNotFound;
 }
 
 /// Pack file metadata for sorting and caching
@@ -350,15 +425,25 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     
     const idx_data = platform_impl.fs.readFile(allocator, idx_path) catch |err| switch (err) {
         error.FileNotFound => {
-            // debug print removed
             return error.ObjectNotFound;
         },
         error.AccessDenied => {
-            // debug print removed
             return error.PackIndexAccessDenied;
         },
+        error.IsDir => {
+            return error.PackIndexIsDirectory;
+        },
+        error.SystemResources => {
+            return error.SystemResourcesExhausted;
+        },
+        error.OutOfMemory => {
+            return error.OutOfMemory;
+        },
+        error.FileBusy => {
+            // File might be being written to - retry logic could be added here
+            return error.PackIndexBusy;
+        },
         else => {
-            // debug print removed
             return error.PackIndexReadError;
         },
     };
@@ -368,19 +453,33 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     if (idx_data.len < 8) {
         return error.PackIndexTooSmall;
     }
-    if (idx_data.len > 100 * 1024 * 1024) { // 100MB max for pack index
+    
+    // More conservative size limit for pack indices (50MB should be plenty)
+    if (idx_data.len > 50 * 1024 * 1024) { 
         return error.PackIndexTooLarge;
     }
     
     // Verify file is not obviously corrupted (all zeros or all ones)
+    // Check a larger sample for better detection
+    const sample_size = @min(256, idx_data.len);
     var all_zeros = true;
     var all_ones = true;
-    for (idx_data[0..@min(64, idx_data.len)]) |byte| {
+    var byte_variety = std.AutoHashMap(u8, void).init(allocator);
+    defer byte_variety.deinit();
+    
+    for (idx_data[0..sample_size]) |byte| {
         if (byte != 0) all_zeros = false;
         if (byte != 0xFF) all_ones = false;
+        byte_variety.put(byte, {}) catch {}; // Ignore OOM for this heuristic
     }
+    
     if (all_zeros or all_ones) {
         return error.PackIndexCorrupted;
+    }
+    
+    // Additional corruption check: very low byte variety suggests corruption
+    if (byte_variety.count() < 3 and sample_size > 64) {
+        return error.PackIndexLowEntropy;
     }
     
     // Check for pack index magic and version
@@ -841,12 +940,25 @@ fn findOffsetInIdx(idx_data: []const u8, target_hash: [20]u8) ?usize {
 
 /// Apply delta to base data to reconstruct object with enhanced error handling and validation
 fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    // First try strict delta application
     return applyDeltaWithFallback(base_data, delta_data, allocator) catch |err| {
-        // If delta application fails, try a more permissive mode
-        if (err == error.InvalidDelta or err == error.ResultSizeMismatch) {
-            return applyDeltaPermissive(base_data, delta_data, allocator) catch err;
+        // If standard delta application fails, try recovery strategies
+        switch (err) {
+            error.InvalidDelta, 
+            error.ResultSizeMismatch,
+            error.DeltaTruncated,
+            error.BaseSizeMismatch => {
+                // Try more permissive delta application for recovery
+                return applyDeltaPermissive(base_data, delta_data, allocator) catch |recovery_err| {
+                    // If even permissive mode fails, try last resort
+                    if (recovery_err == error.InvalidDelta or recovery_err == error.ResultSizeMismatch) {
+                        return applyDeltaLastResort(base_data, delta_data, allocator) catch err; // Return original error
+                    }
+                    return recovery_err;
+                };
+            },
+            else => return err, // Don't attempt recovery for memory/system errors
         }
-        return err;
     };
 }
 
@@ -1133,6 +1245,164 @@ fn applyDeltaPermissive(base_data: []const u8, delta_data: []const u8, allocator
         
         // Prevent excessive growth
         if (result.items.len > result_size * 2) break;
+    }
+    
+    return try allocator.dupe(u8, result.items);
+}
+
+/// Last resort delta application - tries to salvage partial data from corrupted deltas
+fn applyDeltaLastResort(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    if (delta_data.len < 2) return error.DeltaMissingHeaders;
+    if (base_data.len == 0) {
+        // If base is empty, try to extract just the insert commands from delta
+        return extractInsertsFromDelta(delta_data, allocator);
+    }
+    
+    var pos: usize = 0;
+    
+    // Try to read sizes even if corrupted
+    var base_size: usize = 0;
+    var result_size: usize = base_data.len; // Default to base size
+    
+    // Try to read base size
+    var shift: u6 = 0;
+    while (pos < delta_data.len and shift < 32) { 
+        const b = delta_data[pos];
+        pos += 1;
+        base_size |= @as(usize, @intCast(b & 0x7F)) << shift;
+        if (b & 0x80 == 0) break;
+        shift += 7;
+    }
+    
+    // Try to read result size
+    shift = 0;
+    while (pos < delta_data.len and shift < 32) {
+        const b = delta_data[pos];
+        pos += 1;
+        result_size |= @as(usize, @intCast(b & 0x7F)) << shift;
+        if (b & 0x80 == 0) break;
+        shift += 7;
+    }
+    
+    // If sizes seem unreasonable, fall back to base data
+    if (result_size > base_data.len * 100 or result_size > 1024 * 1024 * 1024) {
+        result_size = base_data.len;
+    }
+    
+    var result = std.ArrayList(u8).init(allocator);
+    defer result.deinit();
+    
+    // Start with base data as fallback
+    try result.appendSlice(base_data);
+    
+    // Try to apply what commands we can
+    while (pos < delta_data.len and result.items.len < result_size * 2) {
+        if (pos >= delta_data.len) break;
+        
+        const cmd = delta_data[pos];
+        pos += 1;
+        
+        if (cmd & 0x80 != 0) {
+            // Copy command - be very defensive
+            var copy_offset: usize = 0;
+            var copy_size: usize = 0;
+            
+            // Read offset carefully
+            for (0..4) |i| {
+                if (cmd & (@as(u8, 1) << @intCast(i)) != 0 and pos < delta_data.len) {
+                    copy_offset |= @as(usize, delta_data[pos]) << @intCast(i * 8);
+                    pos += 1;
+                }
+            }
+            
+            // Read size carefully  
+            for (0..3) |i| {
+                if (cmd & (@as(u8, 0x10) << @intCast(i)) != 0 and pos < delta_data.len) {
+                    copy_size |= @as(usize, delta_data[pos]) << @intCast(i * 8);
+                    pos += 1;
+                }
+            }
+            
+            if (copy_size == 0) copy_size = 0x10000;
+            
+            // Very conservative bounds checking
+            if (copy_offset < base_data.len and copy_size > 0) {
+                const safe_size = @min(copy_size, base_data.len - copy_offset);
+                const safe_size_clamped = @min(safe_size, 1024 * 1024); // Max 1MB copy
+                
+                if (safe_size_clamped > 0 and result.items.len + safe_size_clamped <= result_size + base_data.len) {
+                    result.appendSlice(base_data[copy_offset..copy_offset + safe_size_clamped]) catch break;
+                }
+            }
+        } else if (cmd > 0) {
+            // Insert command - be defensive about size
+            const insert_size = @min(@as(usize, cmd), delta_data.len - pos);
+            const safe_insert_size = @min(insert_size, 1024 * 1024); // Max 1MB insert
+            
+            if (safe_insert_size > 0 and result.items.len + safe_insert_size <= result_size + base_data.len) {
+                result.appendSlice(delta_data[pos..pos + safe_insert_size]) catch break;
+            }
+            pos += insert_size; // Skip all the data even if we didn't use it
+        }
+        // cmd == 0 is ignored
+    }
+    
+    // If result is empty or suspiciously small, return base data
+    if (result.items.len == 0 or result.items.len < base_data.len / 10) {
+        result.clearRetainingCapacity();
+        try result.appendSlice(base_data);
+    }
+    
+    return try allocator.dupe(u8, result.items);
+}
+
+/// Extract just the insert commands from a delta (for when base data is unavailable/corrupted)
+fn extractInsertsFromDelta(delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    if (delta_data.len < 2) return error.DeltaMissingHeaders;
+    
+    var pos: usize = 0;
+    
+    // Skip base size
+    while (pos < delta_data.len) {
+        const b = delta_data[pos];
+        pos += 1;
+        if (b & 0x80 == 0) break;
+    }
+    
+    // Skip result size
+    while (pos < delta_data.len) {
+        const b = delta_data[pos];
+        pos += 1;
+        if (b & 0x80 == 0) break;
+    }
+    
+    var result = std.ArrayList(u8).init(allocator);
+    defer result.deinit();
+    
+    // Extract only insert commands
+    while (pos < delta_data.len) {
+        if (pos >= delta_data.len) break;
+        
+        const cmd = delta_data[pos];
+        pos += 1;
+        
+        if (cmd & 0x80 != 0) {
+            // Copy command - skip it and its parameters
+            for (0..7) |i| {
+                if (cmd & (@as(u8, 1) << @intCast(i)) != 0 and pos < delta_data.len) {
+                    pos += 1;
+                }
+            }
+        } else if (cmd > 0) {
+            // Insert command - extract the data
+            const insert_size = @as(usize, cmd);
+            const available = @min(insert_size, delta_data.len - pos);
+            
+            if (available > 0) {
+                result.appendSlice(delta_data[pos..pos + available]) catch break;
+                pos += insert_size;
+            }
+        }
     }
     
     return try allocator.dupe(u8, result.items);

@@ -21,9 +21,10 @@ const GitError = error{
 
 
 const NATIVE_COMMANDS = [_][]const u8{ 
-    "rev-parse", "describe", "tag", 
-    "--version", "-v", "--version-info", 
-    "--help", "-h", "help" 
+    "init", "status", "add", "commit", "log", "diff", "branch", "checkout", "merge", 
+    "fetch", "pull", "push", "clone", "config", "rev-parse", "describe", "tag", 
+    "show", "cat-file", "rev-list", "ls-files", "remote", "reset", "rm",
+    "--version", "-v", "--version-info", "--help", "-h", "help" 
 };
 
 fn isNativeCommand(command: []const u8) bool {
