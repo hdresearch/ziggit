@@ -718,6 +718,8 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     var message: ?[]const u8 = null;
     var allow_empty = false;
     var amend = false;
+    var add_all = false;
+    var quiet = false;
 
     // Parse arguments
     while (args.next()) |arg| {
@@ -728,10 +730,23 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             };
         } else if (std.mem.startsWith(u8, arg, "-m")) {
             message = arg[2..];
+        } else if (std.mem.eql(u8, arg, "-a")) {
+            add_all = true;
+        } else if (std.mem.eql(u8, arg, "-am") or std.mem.eql(u8, arg, "-ma")) {
+            add_all = true;
+            message = args.next() orelse {
+                try platform_impl.writeStderr("error: option `-am' requires a message\n");
+                std.process.exit(129);
+            };
+        } else if (std.mem.startsWith(u8, arg, "-am")) {
+            add_all = true;
+            message = arg[3..];
         } else if (std.mem.eql(u8, arg, "--allow-empty")) {
             allow_empty = true;
         } else if (std.mem.eql(u8, arg, "--amend")) {
             amend = true;
+        } else if (std.mem.eql(u8, arg, "--quiet")) {
+            quiet = true;
         }
     }
 
@@ -757,6 +772,41 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         std.process.exit(128);
     };
     defer allocator.free(git_path);
+
+    // If -a flag is set, run "git add -u" first to stage all modified tracked files
+    if (add_all) {
+        var git_args = std.ArrayList([]const u8).init(allocator);
+        defer git_args.deinit();
+        
+        try git_args.append("git");
+        try git_args.append("add");
+        try git_args.append("-u");
+
+        var child = std.process.Child.init(git_args.items, allocator);
+        const result = child.spawnAndWait() catch |err| {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: failed to execute git add -u: {}\n", .{err});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        };
+        
+        switch (result) {
+            .Exited => |code| {
+                if (code != 0) {
+                    std.process.exit(@intCast(code));
+                }
+            },
+            .Signal => |_| {
+                std.process.exit(128);
+            },
+            .Stopped => |_| {
+                std.process.exit(128);
+            },
+            .Unknown => |_| {
+                std.process.exit(128);
+            },
+        }
+    }
 
     // Load index
     var index = index_mod.Index.load(git_path, platform_impl, allocator) catch |err| switch (err) {
@@ -873,11 +923,13 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     // We don't clear the index, but we save it to ensure it's properly persisted
     try index.save(git_path, platform_impl);
 
-    // Output success message
-    const short_hash = commit_hash[0..7];
-    const success_msg = try std.fmt.allocPrint(allocator, "[{s} {s}] {s}\n", .{ current_branch, short_hash, message.? });
-    defer allocator.free(success_msg);
-    try platform_impl.writeStdout(success_msg);
+    // Output success message (unless --quiet was specified)
+    if (!quiet) {
+        const short_hash = commit_hash[0..7];
+        const success_msg = try std.fmt.allocPrint(allocator, "[{s} {s}] {s}\n", .{ current_branch, short_hash, message.? });
+        defer allocator.free(success_msg);
+        try platform_impl.writeStdout(success_msg);
+    }
 }
 
 fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
