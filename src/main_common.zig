@@ -414,7 +414,10 @@ fn forwardConfigToGit(allocator: std.mem.Allocator, all_args: [][]const u8, comm
         const is_new_style = std.mem.eql(u8, subcmd, "set") or 
                              std.mem.eql(u8, subcmd, "get") or 
                              std.mem.eql(u8, subcmd, "unset") or 
-                             std.mem.eql(u8, subcmd, "list");
+                             std.mem.eql(u8, subcmd, "list") or
+                             std.mem.eql(u8, subcmd, "edit") or
+                             std.mem.eql(u8, subcmd, "rename-section") or
+                             std.mem.eql(u8, subcmd, "remove-section");
         
         if (is_new_style) {
             var new_args = std.ArrayList([]const u8).init(allocator);
@@ -526,6 +529,27 @@ fn forwardConfigToGit(allocator: std.mem.Allocator, all_args: [][]const u8, comm
                 // git config list [--flags]
                 // → git config --list [--flags]
                 try new_args.append("--list");
+                for (all_args[rest_start..]) |arg| {
+                    try new_args.append(arg);
+                }
+            } else if (std.mem.eql(u8, subcmd, "edit")) {
+                // git config edit [--flags]
+                // → git config --edit [--flags]
+                try new_args.append("--edit");
+                for (all_args[rest_start..]) |arg| {
+                    try new_args.append(arg);
+                }
+            } else if (std.mem.eql(u8, subcmd, "rename-section")) {
+                // git config rename-section <old-name> <new-name>
+                // → git config --rename-section <old-name> <new-name>
+                try new_args.append("--rename-section");
+                for (all_args[rest_start..]) |arg| {
+                    try new_args.append(arg);
+                }
+            } else if (std.mem.eql(u8, subcmd, "remove-section")) {
+                // git config remove-section <name>
+                // → git config --remove-section <name>
+                try new_args.append("--remove-section");
                 for (all_args[rest_start..]) |arg| {
                     try new_args.append(arg);
                 }
