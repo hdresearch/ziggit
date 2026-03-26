@@ -769,23 +769,38 @@ fn getRemoteUrl(repo: *Repository, remote_name: []const u8, buffer: []u8) !void 
     const git_dir = try findGitDirForRepo(repo);
     defer global_allocator.free(git_dir);
     
-    // Use the comprehensive config parser from src/git/config.zig
-    const config = @import("../git/config.zig");
-    var git_config = config.loadGitConfig(git_dir, global_allocator) catch |err| switch (err) {
-        error.FileNotFound => return error.NotFound,
-        else => return err,
-    };
-    defer git_config.deinit();
+    // Simple config file reading for remote URL (avoids module import issues) 
+    const config_path = try std.fmt.allocPrint(global_allocator, "{s}/config", .{git_dir});
+    defer global_allocator.free(config_path);
     
-    // Use the comprehensive config parser to get the remote URL
-    if (git_config.getRemoteUrl(remote_name)) |url| {
-        // Copy URL to buffer
-        if (url.len >= buffer.len) {
-            return error.InvalidPath; // Buffer too small
+    const config_file = std.fs.openFileAbsolute(config_path, .{}) catch {
+        return error.NotFound;
+    };
+    defer config_file.close();
+    
+    const config_content = try config_file.readToEndAlloc(global_allocator, 1024 * 1024);
+    defer global_allocator.free(config_content);
+    
+    // Simple parser to find [remote "origin"] url = ...
+    const remote_section = try std.fmt.allocPrint(global_allocator, "[remote \"{s}\"]", .{remote_name});
+    defer global_allocator.free(remote_section);
+    
+    if (std.mem.indexOf(u8, config_content, remote_section)) |section_start| {
+        // Find the url line in this section
+        const section_content = config_content[section_start..];
+        if (std.mem.indexOf(u8, section_content, "url = ")) |url_start_rel| {
+            const url_start = url_start_rel + 6; // skip "url = "
+            if (std.mem.indexOf(u8, section_content[url_start..], "\n")) |url_end| {
+                const url = std.mem.trim(u8, section_content[url_start..url_start + url_end], " \t\r\n");
+                
+                if (url.len >= buffer.len) {
+                    return error.InvalidPath; // Buffer too small
+                }
+                @memcpy(buffer[0..url.len], url);
+                buffer[url.len] = 0; // Null terminate
+                return;
+            }
         }
-        @memcpy(buffer[0..url.len], url);
-        buffer[url.len] = 0; // Null terminate
-        return;
     }
     
     return error.NotFound;
