@@ -3060,9 +3060,91 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     
     const clone_msg = try std.fmt.allocPrint(allocator, "Cloning into '{s}'...\n", .{final_target_dir});
     defer allocator.free(clone_msg);
-    try platform_impl.writeStdout(clone_msg);
+    try platform_impl.writeStderr(clone_msg);
     
-    // Perform clone using dumb HTTP protocol
+    // For HTTPS URLs, use native smart HTTP clone + checkout
+    if (std.mem.startsWith(u8, url.?, "https://") or std.mem.startsWith(u8, url.?, "http://")) {
+        const ziggit = @import("ziggit.zig");
+        const bare_target = try std.fmt.allocPrint(allocator, "{s}/.git", .{final_target_dir});
+        defer allocator.free(bare_target);
+
+        // Create the worktree directory first
+        std.fs.cwd().makePath(final_target_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: destination path '{s}' already exists and is not an empty directory.\n", .{final_target_dir});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            },
+            else => return err,
+        };
+
+        // Clone bare into .git subdirectory
+        var repo = ziggit.Repository.cloneBare(allocator, url.?, bare_target) catch |err| {
+            std.fs.cwd().deleteTree(final_target_dir) catch {};
+            const emsg = try std.fmt.allocPrint(allocator, "fatal: {}\n", .{err});
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
+            std.process.exit(128);
+        };
+        repo.close();
+
+        // Convert bare repo to non-bare: update config to set bare = false
+        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{bare_target});
+        defer allocator.free(config_path);
+        const config_content = std.fs.cwd().readFileAlloc(allocator, config_path, 1024 * 1024) catch |err| {
+            const emsg = try std.fmt.allocPrint(allocator, "fatal: failed to read config: {}\n", .{err});
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
+            std.process.exit(128);
+        };
+        defer allocator.free(config_content);
+
+        // Replace bare = true with bare = false
+        var new_config = std.ArrayList(u8).init(allocator);
+        defer new_config.deinit();
+        var config_lines = std.mem.splitSequence(u8, config_content, "\n");
+        var first = true;
+        while (config_lines.next()) |cline| {
+            if (!first) try new_config.appendSlice("\n");
+            first = false;
+            const trimmed = std.mem.trim(u8, cline, " \t\r");
+            if (std.mem.eql(u8, trimmed, "bare = true")) {
+                for (cline) |c| {
+                    if (c == ' ' or c == '\t') {
+                        try new_config.append(c);
+                    } else break;
+                }
+                try new_config.appendSlice("bare = false");
+            } else {
+                try new_config.appendSlice(cline);
+            }
+        }
+
+        {
+            const cf = try std.fs.cwd().createFile(config_path, .{});
+            defer cf.close();
+            try cf.writeAll(new_config.items);
+        }
+
+        // Checkout HEAD into worktree
+        const head_commit = refs.getCurrentCommit(bare_target, platform_impl, allocator) catch {
+            // Empty repository - no checkout needed
+            return;
+        };
+        if (head_commit) |commit_hash| {
+            defer allocator.free(commit_hash);
+            checkoutCommitTree(bare_target, commit_hash, allocator, platform_impl) catch |err| {
+                const emsg = try std.fmt.allocPrint(allocator, "warning: checkout failed: {}, repository cloned but working tree not populated\n", .{err});
+                defer allocator.free(emsg);
+                try platform_impl.writeStderr(emsg);
+            };
+        }
+
+        return;
+    }
+
+    // Perform clone using dumb HTTP protocol (non-HTTPS fallback)
     network.cloneRepository(allocator, url.?, final_target_dir, platform_impl) catch |err| switch (err) {
         error.RepositoryNotFound => {
             try platform_impl.writeStderr("fatal: repository not found\n");
@@ -3086,8 +3168,6 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         },
         else => return err,
     };
-    
-    try platform_impl.writeStdout("Clone completed successfully.\n");
 }
 
 fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
