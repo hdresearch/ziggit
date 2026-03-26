@@ -1361,7 +1361,7 @@ fn isFileModifiedAgainstIndex(work_tree: []const u8, file_path: []const u8, inde
     defer global_allocator.free(full_path);
     
     const file_handle = std.fs.openFileAbsolute(full_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return true, // File deleted
+        error.FileNotFound => return error.FileNotFound, // File deleted
         else => return err,
     };
     defer file_handle.close();
@@ -1554,56 +1554,22 @@ fn isFileModified(git_dir: []const u8, work_tree: []const u8, file_path: []const
     return isFileModifiedAgainstIndex(work_tree, file_path, index_info);
 }
 
-// Real file modification check that compares SHA1 hashes
+// Real file modification check that compares files against index using isFileModifiedAgainstIndex
 fn isFileModifiedReal(git_dir: []const u8, work_tree: []const u8, file_path: []const u8, git_index: *const index_parser.GitIndex) !bool {
     _ = git_dir;
     
     // Find the file in the index
-    const index_entry = git_index.findEntry(file_path) orelse return false; // Not in index, so can't be modified
+    const index_entry = git_index.findEntry(file_path) orelse return false; // Not in index, so can't be modified relative to index
     
-    // Read the working tree file
-    const full_path = try std.fmt.allocPrint(global_allocator, "{s}/{s}", .{ work_tree, file_path });
-    defer global_allocator.free(full_path);
-    
-    const file = std.fs.openFileAbsolute(full_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return true, // File deleted
-        else => return err,
+    // Create IndexFileInfo for the isFileModifiedAgainstIndex call
+    const index_info = IndexFileInfo{
+        .hash = index_entry.sha1,
+        .size = index_entry.size,
+        .mtime_sec = index_entry.mtime_seconds,
     };
-    defer file.close();
     
-    // Quick check: compare file size first
-    const file_size = try file.getEndPos();
-    if (file_size != index_entry.size) {
-        return true; // Size changed, definitely modified
-    }
-    
-    // Check file modification time (quick check before computing SHA1)
-    const stat = try file.stat();
-    const mtime_sec = @as(u32, @intCast(@divFloor(stat.mtime, std.time.ns_per_s)));
-    const mtime_nsec = @as(u32, @intCast(@rem(stat.mtime, std.time.ns_per_s)));
-    
-    // If mtime matches exactly, assume file is not modified (optimization)
-    if (mtime_sec == index_entry.mtime_seconds and mtime_nsec == index_entry.mtime_nanoseconds) {
-        return false;
-    }
-    
-    // Mtime differs, need to compute SHA1 to be sure
-    const file_content = try file.readToEndAlloc(global_allocator, file_size);
-    defer global_allocator.free(file_content);
-    
-    // Compute SHA1 of file content as git does: "blob <size>\0<content>"
-    var hasher = std.crypto.hash.Sha1.init(.{});
-    const blob_header = try std.fmt.allocPrint(global_allocator, "blob {d}\x00", .{file_content.len});
-    defer global_allocator.free(blob_header);
-    
-    hasher.update(blob_header);
-    hasher.update(file_content);
-    
-    var computed_sha: [20]u8 = undefined;
-    hasher.final(&computed_sha);
-    
-    // Compare with index entry SHA1
-    return !std.mem.eql(u8, &computed_sha, &index_entry.sha1);
+    // Use the existing isFileModifiedAgainstIndex function
+    return isFileModifiedAgainstIndex(work_tree, file_path, index_info);
 }
 
 // Check if a path exists in the repository
