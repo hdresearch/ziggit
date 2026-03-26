@@ -636,6 +636,7 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     var porcelain = false;
     var show_branch = false;
     var short_format = false;
+    var show_untracked = true; // default: show untracked files
     var status_args = std.ArrayList([]const u8).init(allocator);
     defer status_args.deinit();
     while (args.next()) |arg| {
@@ -661,6 +662,10 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             if (std.mem.eql(u8, arg, "-sb") or std.mem.eql(u8, arg, "-bs")) {
                 show_branch = true;
             }
+        } else if (std.mem.eql(u8, arg, "-uno") or std.mem.eql(u8, arg, "--untracked-files=no") or std.mem.eql(u8, arg, "-u") or std.mem.eql(u8, arg, "--no-untracked-files")) {
+            show_untracked = false;
+        } else if (std.mem.eql(u8, arg, "-unormal") or std.mem.eql(u8, arg, "--untracked-files=normal") or std.mem.eql(u8, arg, "--untracked-files") or std.mem.eql(u8, arg, "-uall") or std.mem.eql(u8, arg, "--untracked-files=all")) {
+            show_untracked = true;
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try platform_impl.writeStdout("usage: git status [<options>] [--] [<pathspec>...]\n\n");
             try platform_impl.writeStdout("    -s, --short           show status concisely\n");
@@ -691,6 +696,21 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         try platform_impl.writeStderr("fatal: unable to determine repository root\n");
         std.process.exit(128);
     };
+
+    // Check config for status.showUntrackedFiles (if not overridden by command line)
+    if (show_untracked) {
+        const config_path_for_ut = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+        defer allocator.free(config_path_for_ut);
+        if (platform_impl.fs.readFile(allocator, config_path_for_ut)) |cfg| {
+            defer allocator.free(cfg);
+            if (parseConfigValue(cfg, "status.showuntrackedfiles", allocator) catch null) |val| {
+                defer allocator.free(val);
+                if (std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "0")) {
+                    show_untracked = false;
+                }
+            }
+        } else |_| {}
+    }
 
     // Get current branch
     const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch try allocator.dupe(u8, "master");
@@ -934,7 +954,10 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     }
 
     // Find untracked files
-    var untracked_files = findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.ArrayList([]u8).init(allocator);
+    var untracked_files = if (show_untracked)
+        findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.ArrayList([]u8).init(allocator)
+    else
+        std.ArrayList([]u8).init(allocator);
     defer {
         for (untracked_files.items) |file| {
             allocator.free(file);
@@ -992,6 +1015,9 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             try platform_impl.writeStdout("nothing added to commit but untracked files present (use \"git add\" to track)\n");
         } else if (staged_files.items.len == 0 and (modified_files.items.len > 0 or deleted_files.items.len > 0)) {
             try platform_impl.writeStdout("no changes added to commit (use \"git add\" and/or \"git commit -a\")\n");
+        }
+        if (!show_untracked) {
+            try platform_impl.writeStdout("Untracked files not listed (use -u option to show untracked files)\n");
         }
     }
 }
