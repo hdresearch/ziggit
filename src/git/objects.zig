@@ -280,15 +280,28 @@ const PackObjectType = enum(u3) {
 
 /// Find object in a specific pack file with enhanced validation and performance
 fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_str: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
-    // Validate input hash format
+    // Enhanced input validation
     if (hash_str.len != 40) {
-            // debug print removed
-        return error.InvalidHash;
+        return error.InvalidHashLength;
+    }
+    if (!std.ascii.isLower(hash_str[0])) {
+        // Git hashes are lowercase by convention - convert if needed
+        var normalized_hash = try allocator.alloc(u8, 40);
+        defer allocator.free(normalized_hash);
+        for (hash_str, 0..) |c, i| {
+            normalized_hash[i] = std.ascii.toLower(c);
+        }
+        for (normalized_hash) |c| {
+            if (!std.ascii.isHex(c)) {
+                return error.InvalidHashCharacter;
+            }
+        }
+        // Recursively call with normalized hash
+        return findObjectInPack(pack_dir_path, idx_filename, normalized_hash, platform_impl, allocator);
     }
     for (hash_str) |c| {
         if (!std.ascii.isHex(c)) {
-            // debug print removed
-            return error.InvalidHash;
+            return error.InvalidHashCharacter;
         }
     }
     
@@ -318,15 +331,23 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     };
     defer allocator.free(idx_data);
     
-    // Enhanced size validation
-            // debug print removed
+    // Enhanced size validation with better error messages
     if (idx_data.len < 8) {
-            // debug print removed
-        return error.CorruptedPackIndex;
+        return error.PackIndexTooSmall;
     }
     if (idx_data.len > 100 * 1024 * 1024) { // 100MB max for pack index
-            // debug print removed
         return error.PackIndexTooLarge;
+    }
+    
+    // Verify file is not obviously corrupted (all zeros or all ones)
+    var all_zeros = true;
+    var all_ones = true;
+    for (idx_data[0..@min(64, idx_data.len)]) |byte| {
+        if (byte != 0) all_zeros = false;
+        if (byte != 0xFF) all_ones = false;
+    }
+    if (all_zeros or all_ones) {
+        return error.PackIndexCorrupted;
     }
     
     // Check for pack index magic and version
@@ -505,46 +526,53 @@ fn findObjectInPackV1(idx_data: []const u8, target_hash: [20]u8, pack_dir_path: 
 
 /// Read object from pack file at given offset with validation
 fn readObjectFromPack(pack_path: []const u8, offset: u64, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
-    const pack_data = platform_impl.fs.readFile(allocator, pack_path) catch return error.ObjectNotFound;
+    const pack_data = platform_impl.fs.readFile(allocator, pack_path) catch return error.PackFileNotFound;
     defer allocator.free(pack_data);
     
-    // Validate pack file format
-    if (pack_data.len < 12) return error.InvalidPackFile; // Minimum header size
+    // Enhanced pack file validation
+    if (pack_data.len < 28) return error.PackFileTooSmall; // Header (12) + minimum object (4) + checksum (20)
     
     // Check pack file header: "PACK" + version + object count
     if (!std.mem.eql(u8, pack_data[0..4], "PACK")) {
-            // debug print removed
-        return error.InvalidPackFile;
+        return error.InvalidPackSignature;
     }
     
     const version = std.mem.readInt(u32, @ptrCast(pack_data[4..8]), .big);
-    if (version != 2 and version != 3) {
-            // debug print removed
+    if (version < 2 or version > 4) {
         return error.UnsupportedPackVersion;
     }
     
     const object_count = std.mem.readInt(u32, @ptrCast(pack_data[8..12]), .big);
     if (object_count == 0) {
-            // debug print removed
         return error.EmptyPackFile;
     }
     
-    // Sanity check object count (prevent malicious/corrupted pack files)
-    const max_reasonable_objects = 10_000_000; // 10 million objects max
+    // Enhanced sanity checks
+    const max_reasonable_objects = 50_000_000; // Increased to 50M for very large repositories
     if (object_count > max_reasonable_objects) {
-            // debug print removed
-        return error.SuspiciousPackFile;
+        return error.TooManyObjectsInPack;
     }
     
-    if (offset >= pack_data.len) {
-            // debug print removed
-        return error.OffsetOutOfBounds;
+    // Verify pack file checksum (last 20 bytes)
+    const content_end = pack_data.len - 20;
+    const stored_checksum = pack_data[content_end..];
+    
+    var hasher = std.crypto.hash.Sha1.init(.{});
+    hasher.update(pack_data[0..content_end]);
+    var computed_checksum: [20]u8 = undefined;
+    hasher.final(&computed_checksum);
+    
+    if (!std.mem.eql(u8, &computed_checksum, stored_checksum)) {
+        return error.PackChecksumMismatch;
     }
     
-    // Ensure we're not too close to the end (need at least a few bytes for object header)
-    if (offset > pack_data.len - 4) {
-            // debug print removed
-        return error.OffsetOutOfBounds;
+    // Validate offset bounds
+    if (offset >= content_end) {
+        return error.OffsetBeyondPackContent;
+    }
+    
+    if (offset > content_end - 4) {
+        return error.InsufficientDataAtOffset;
     }
     
     return readPackedObject(pack_data, @intCast(offset), pack_path, platform_impl, allocator);
@@ -778,11 +806,13 @@ fn findOffsetInIdx(idx_data: []const u8, target_hash: [20]u8) ?usize {
     }
 }
 
-/// Apply delta to base data to reconstruct object with improved error handling
+/// Apply delta to base data to reconstruct object with enhanced error handling and validation
 fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    if (delta_data.len < 2) return error.DeltaTooShort; // Need at least base_size and result_size
-    if (base_data.len > 1024 * 1024 * 1024) return error.BaseTooLarge; // 1GB limit
-    if (delta_data.len > 100 * 1024 * 1024) return error.DeltaTooLarge; // 100MB delta limit
+    // Enhanced validation with specific error messages
+    if (delta_data.len < 2) return error.DeltaMissingHeaders;
+    if (base_data.len == 0) return error.EmptyBaseData;
+    if (base_data.len > 512 * 1024 * 1024) return error.BaseDataTooLarge; // 512MB limit for safety
+    if (delta_data.len > 50 * 1024 * 1024) return error.DeltaDataTooLarge; // 50MB delta limit
     
     var pos: usize = 0;
     
@@ -936,6 +966,80 @@ fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.
     }
     
     return try allocator.dupe(u8, result.items);
+}
+
+/// Check if a pack file might be a "thin pack" (missing some base objects)
+fn isPackFileThin(pack_data: []const u8) bool {
+    if (pack_data.len < 12) return false;
+    
+    // Heuristic: thin packs are usually smaller and may have unusual object count patterns
+    const object_count = std.mem.readInt(u32, @ptrCast(pack_data[8..12]), .big);
+    
+    // Very rough heuristic - thin packs tend to have fewer objects relative to file size
+    const avg_object_size = if (object_count > 0) pack_data.len / object_count else 0;
+    
+    // If objects are unusually large on average, might indicate missing base objects
+    return avg_object_size > 10000 and object_count < 100;
+}
+
+/// Validate pack file integrity beyond just checksum
+fn validatePackFileStructure(pack_data: []const u8) !void {
+    if (pack_data.len < 28) return error.PackFileTooSmall;
+    
+    // Check for reasonable object density
+    const object_count = std.mem.readInt(u32, @ptrCast(pack_data[8..12]), .big);
+    if (object_count == 0) return error.EmptyPackFile;
+    
+    // Validate that we can at least read the first object header
+    if (pack_data.len > 12) {
+        const first_byte = pack_data[12];
+        const pack_type_num = (first_byte >> 4) & 7;
+        
+        // Validate pack type is in valid range
+        if (pack_type_num == 0 or pack_type_num == 5 or pack_type_num > 7) {
+            return error.InvalidPackObjectType;
+        }
+    }
+}
+
+/// Enhanced pack file statistics for debugging and monitoring
+pub const PackFileStats = struct {
+    total_objects: u32,
+    blob_count: u32,
+    tree_count: u32,
+    commit_count: u32,
+    tag_count: u32,
+    delta_count: u32,
+    file_size: u64,
+    is_thin: bool,
+};
+
+/// Analyze pack file structure and return statistics
+pub fn analyzePackFile(pack_path: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !PackFileStats {
+    const pack_data = platform_impl.fs.readFile(allocator, pack_path) catch return error.PackFileNotFound;
+    defer allocator.free(pack_data);
+    
+    try validatePackFileStructure(pack_data);
+    
+    var stats = PackFileStats{
+        .total_objects = 0,
+        .blob_count = 0,
+        .tree_count = 0,
+        .commit_count = 0,
+        .tag_count = 0,
+        .delta_count = 0,
+        .file_size = pack_data.len,
+        .is_thin = isPackFileThin(pack_data),
+    };
+    
+    if (pack_data.len >= 12) {
+        stats.total_objects = std.mem.readInt(u32, @ptrCast(pack_data[8..12]), .big);
+    }
+    
+    // Note: Full object type analysis would require parsing all objects,
+    // which is expensive. This is a basic implementation.
+    
+    return stats;
 }
 
 /// Legacy function for compatibility with tests - reads and decompresses git object

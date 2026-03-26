@@ -623,6 +623,10 @@ fn findTagsInPackedRefs(git_dir: []const u8, platform_impl: anytype, allocator: 
 
 /// Read ref hash from packed-refs file with enhanced performance and validation
 fn readFromPackedRefs(git_dir: []const u8, ref_name: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![]u8 {
+    // Input validation
+    if (ref_name.len == 0) return error.EmptyRefName;
+    if (ref_name.len > 1024) return error.RefNameTooLong;
+    
     const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir});
     defer allocator.free(packed_refs_path);
 

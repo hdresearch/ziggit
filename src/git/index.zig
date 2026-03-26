@@ -266,12 +266,14 @@ pub const Index = struct {
         };
     }
 
-    /// Read and skip index extensions with better error handling  
+    /// Read and skip index extensions with enhanced error handling and logging
     fn readExtensions(self: *Index, reader: anytype, data: []const u8) !void {
         _ = self; // Not used currently
         
         var extensions_found: u32 = 0;
-        const max_extensions = 50; // Increased limit for repositories with many extensions
+        const max_extensions = 100; // Increased limit for repositories with many extensions
+        var total_extension_size: u64 = 0;
+        const max_total_extension_size = 50 * 1024 * 1024; // 50MB max for all extensions combined
         
         while (extensions_found < max_extensions) {
             // Check if we have enough bytes left for checksum (20 bytes) plus extension header (8 bytes)
@@ -317,13 +319,18 @@ pub const Index = struct {
                 break;
             };
             
-            // Enhanced sanity check extension size
+            // Enhanced extension size validation
             const max_reasonable_ext_size = 10 * 1024 * 1024; // 10MB max per extension
             if (ext_size > max_reasonable_ext_size or ext_size > data.len or current_pos + 8 + ext_size > data.len - 20) {
                 // Extension size is invalid, probably hit the checksum
-                // Suspicious extension size, treating as checksum
                 try reader.context.seekTo(current_pos);
                 break;
+            }
+            
+            // Check total extension size limit
+            total_extension_size += ext_size;
+            if (total_extension_size > max_total_extension_size) {
+                return error.ExtensionDataTooLarge;
             }
             
             // Silently skip unknown index extensions
