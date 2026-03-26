@@ -1,297 +1,359 @@
 const std = @import("std");
 const testing = std.testing;
+const config = @import("../src/git/config.zig");
 
-// We can't directly import from outside the module path in newer Zig versions,
-// so let's test the config functionality by creating our own version
-// that matches the requirements
-
-const ConfigEntry = struct {
-    section: []const u8,
-    subsection: ?[]const u8,
-    name: []const u8,
-    value: []const u8,
-
-    pub fn deinit(self: ConfigEntry, allocator: std.mem.Allocator) void {
-        allocator.free(self.section);
-        if (self.subsection) |subsection| {
-            allocator.free(subsection);
-        }
-        allocator.free(self.name);
-        allocator.free(self.value);
-    }
-
-    pub fn matches(self: ConfigEntry, section: []const u8, subsection: ?[]const u8, name: []const u8) bool {
-        if (!std.ascii.eqlIgnoreCase(self.section, section)) return false;
-        if (!std.ascii.eqlIgnoreCase(self.name, name)) return false;
-        
-        if (subsection) |sub| {
-            if (self.subsection) |self_sub| {
-                return std.ascii.eqlIgnoreCase(self_sub, sub);
-            }
-            return false;
-        } else {
-            return self.subsection == null;
-        }
-    }
-};
-
-const GitConfig = struct {
-    entries: std.ArrayList(ConfigEntry),
-    allocator: std.mem.Allocator,
-
-    pub fn init(allocator: std.mem.Allocator) GitConfig {
-        return GitConfig{
-            .entries = std.ArrayList(ConfigEntry).init(allocator),
-            .allocator = allocator,
-        };
-    }
-
-    pub fn deinit(self: *GitConfig) void {
-        for (self.entries.items) |entry| {
-            entry.deinit(self.allocator);
-        }
-        self.entries.deinit();
-    }
-
-    pub fn parseFromString(self: *GitConfig, content: []const u8) !void {
-        var lines = std.mem.split(u8, content, "\n");
-        var current_section: ?[]const u8 = null;
-        var current_subsection: ?[]const u8 = null;
-        
-        while (lines.next()) |line| {
-            const trimmed = std.mem.trim(u8, line, " \t\r");
-            
-            // Skip empty lines and comments
-            if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') {
-                continue;
-            }
-            
-            // Section header: [section] or [section "subsection"]
-            if (trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']') {
-                const section_content = trimmed[1..trimmed.len - 1];
-                
-                // Check for subsection: section "subsection"
-                if (std.mem.indexOf(u8, section_content, "\"")) |quote_start| {
-                    const section = std.mem.trim(u8, section_content[0..quote_start], " \t");
-                    
-                    // Find closing quote
-                    if (std.mem.lastIndexOf(u8, section_content, "\"")) |quote_end| {
-                        if (quote_end > quote_start) {
-                            const subsection = section_content[quote_start + 1..quote_end];
-                            
-                            // Free previous section/subsection
-                            if (current_section) |sec| self.allocator.free(sec);
-                            if (current_subsection) |sub| self.allocator.free(sub);
-                            
-                            current_section = try self.allocator.dupe(u8, section);
-                            current_subsection = try self.allocator.dupe(u8, subsection);
-                            continue;
-                        }
-                    }
-                }
-                
-                // Simple section without subsection
-                if (current_section) |sec| self.allocator.free(sec);
-                if (current_subsection) |sub| self.allocator.free(sub);
-                
-                current_section = try self.allocator.dupe(u8, section_content);
-                current_subsection = null;
-                continue;
-            }
-            
-            // Key-value pair: name = value
-            if (std.mem.indexOf(u8, trimmed, "=")) |equals_pos| {
-                if (current_section == null) continue; // No section, skip
-                
-                const key = std.mem.trim(u8, trimmed[0..equals_pos], " \t");
-                const value = std.mem.trim(u8, trimmed[equals_pos + 1..], " \t");
-                
-                // Remove quotes from value if present
-                const clean_value = if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"')
-                    value[1..value.len - 1]
-                else
-                    value;
-                
-                const entry = ConfigEntry{
-                    .section = try self.allocator.dupe(u8, current_section.?),
-                    .subsection = if (current_subsection) |sub| try self.allocator.dupe(u8, sub) else null,
-                    .name = try self.allocator.dupe(u8, key),
-                    .value = try self.allocator.dupe(u8, clean_value),
-                };
-                
-                try self.entries.append(entry);
-            }
-        }
-        
-        // Cleanup
-        if (current_section) |sec| self.allocator.free(sec);
-        if (current_subsection) |sub| self.allocator.free(sub);
-    }
-
-    pub fn get(self: GitConfig, section: []const u8, subsection: ?[]const u8, name: []const u8) ?[]const u8 {
-        for (self.entries.items) |entry| {
-            if (entry.matches(section, subsection, name)) {
-                return entry.value;
-            }
-        }
-        return null;
-    }
-
-    pub fn getRemoteUrl(self: GitConfig, remote_name: []const u8) ?[]const u8 {
-        return self.get("remote", remote_name, "url");
-    }
-
-    pub fn getUserName(self: GitConfig) ?[]const u8 {
-        return self.get("user", null, "name");
-    }
-
-    pub fn getUserEmail(self: GitConfig) ?[]const u8 {
-        return self.get("user", null, "email");
-    }
-
-    pub fn getBranchRemote(self: GitConfig, branch_name: []const u8) ?[]const u8 {
-        return self.get("branch", branch_name, "remote");
-    }
-};
-
-test "config parsing - remote origin url" {
+test "git config comprehensive parsing" {
     const allocator = testing.allocator;
     
-    var config = GitConfig.init(allocator);
-    defer config.deinit();
+    var git_config = config.GitConfig.init(allocator);
+    defer git_config.deinit();
     
-    const config_content =
-        \\[remote "origin"]
-        \\    url = https://github.com/user/repo.git
-        \\    fetch = +refs/heads/*:refs/remotes/origin/*
-    ;
-    
-    try config.parseFromString(config_content);
-    
-    const url = config.getRemoteUrl("origin");
-    try testing.expect(url != null);
-    try testing.expectEqualStrings("https://github.com/user/repo.git", url.?);
-}
-
-test "config parsing - branch master remote" {
-    const allocator = testing.allocator;
-    
-    var config = GitConfig.init(allocator);
-    defer config.deinit();
-    
-    const config_content =
-        \\[branch "master"]
-        \\    remote = origin
-        \\    merge = refs/heads/master
-    ;
-    
-    try config.parseFromString(config_content);
-    
-    const remote = config.getBranchRemote("master");
-    try testing.expect(remote != null);
-    try testing.expectEqualStrings("origin", remote.?);
-    
-    const merge = config.get("branch", "master", "merge");
-    try testing.expect(merge != null);
-    try testing.expectEqualStrings("refs/heads/master", merge.?);
-}
-
-test "config parsing - user name and email" {
-    const allocator = testing.allocator;
-    
-    var config = GitConfig.init(allocator);
-    defer config.deinit();
-    
-    const config_content =
-        \\[user]
-        \\    name = John Doe
-        \\    email = john@example.com
-    ;
-    
-    try config.parseFromString(config_content);
-    
-    const name = config.getUserName();
-    try testing.expect(name != null);
-    try testing.expectEqualStrings("John Doe", name.?);
-    
-    const email = config.getUserEmail();
-    try testing.expect(email != null);
-    try testing.expectEqualStrings("john@example.com", email.?);
-}
-
-test "config parsing - complete example with all requirements" {
-    const allocator = testing.allocator;
-    
-    var config = GitConfig.init(allocator);
-    defer config.deinit();
-    
-    const config_content =
+    const complex_config =
         \\# Git configuration file
+        \\[core]
+        \\    repositoryformatversion = 0
+        \\    filemode = true
+        \\    bare = false
+        \\    logallrefupdates = true
+        \\    ignorecase = true
+        \\    editor = "vim"
+        \\
         \\[user]
-        \\    name = Test User
-        \\    email = test@example.com
+        \\    name = "John Doe"
+        \\    email = john.doe@example.com
+        \\    signingkey = ABCD1234
         \\
         \\[remote "origin"]
         \\    url = https://github.com/user/repo.git
         \\    fetch = +refs/heads/*:refs/remotes/origin/*
+        \\    pushurl = git@github.com:user/repo.git
         \\
-        \\[remote "upstream"]  
-        \\    url = "https://github.com/upstream/repo.git"
+        \\[remote "upstream"]
+        \\    url = https://github.com/original/repo.git
         \\    fetch = +refs/heads/*:refs/remotes/upstream/*
         \\
         \\[branch "master"]
         \\    remote = origin
         \\    merge = refs/heads/master
+        \\    rebase = true
         \\
         \\[branch "develop"]
         \\    remote = upstream
         \\    merge = refs/heads/develop
         \\
-        \\[core]
-        \\    editor = vim
-        \\    autocrlf = false
+        \\[alias]
+        \\    co = checkout
+        \\    br = branch
+        \\    ci = commit
+        \\    st = status
+        \\    unstage = "reset HEAD --"
+        \\    last = "log -1 HEAD"
+        \\
+        \\[push]
+        \\    default = simple
+        \\    followTags = true
+        \\
+        \\[pull]
+        \\    rebase = false
+        \\
+        \\[diff]
+        \\    tool = vimdiff
+        \\
+        \\[merge]
+        \\    tool = vimdiff
+        \\
+        \\[color]
+        \\    ui = auto
+        \\
+        \\[color "branch"]
+        \\    current = yellow reverse
+        \\    local = yellow
+        \\    remote = green
+        \\
+        \\[color "diff"]
+        \\    meta = "yellow bold"
+        \\    frag = "magenta bold"
+        \\    old = "red bold"
+        \\    new = "green bold"
+        \\
+        \\[url "https://github.com/"]
+        \\    insteadOf = gh:
+        \\
+        \\[credential]
+        \\    helper = store
     ;
     
-    try config.parseFromString(config_content);
+    try git_config.parseFromString(complex_config);
     
-    // Test user config
-    try testing.expectEqualStrings("Test User", config.getUserName().?);
-    try testing.expectEqualStrings("test@example.com", config.getUserEmail().?);
+    // Test core configuration
+    try testing.expectEqualStrings("0", git_config.get("core", null, "repositoryformatversion").?);
+    try testing.expectEqualStrings("true", git_config.get("core", null, "filemode").?);
+    try testing.expectEqualStrings("false", git_config.get("core", null, "bare").?);
+    try testing.expectEqualStrings("vim", git_config.get("core", null, "editor").?);
     
-    // Test remote config  
-    try testing.expectEqualStrings("https://github.com/user/repo.git", config.getRemoteUrl("origin").?);
-    try testing.expectEqualStrings("https://github.com/upstream/repo.git", config.getRemoteUrl("upstream").?);
+    // Test user configuration
+    try testing.expectEqualStrings("John Doe", git_config.getUserName().?);
+    try testing.expectEqualStrings("john.doe@example.com", git_config.getUserEmail().?);
+    try testing.expectEqualStrings("ABCD1234", git_config.get("user", null, "signingkey").?);
     
-    // Test branch config
-    try testing.expectEqualStrings("origin", config.getBranchRemote("master").?);
-    try testing.expectEqualStrings("upstream", config.getBranchRemote("develop").?);
+    // Test remote configuration
+    try testing.expectEqualStrings("https://github.com/user/repo.git", git_config.getRemoteUrl("origin").?);
+    try testing.expectEqualStrings("https://github.com/original/repo.git", git_config.getRemoteUrl("upstream").?);
+    try testing.expectEqualStrings("+refs/heads/*:refs/remotes/origin/*", git_config.get("remote", "origin", "fetch").?);
+    try testing.expectEqualStrings("git@github.com:user/repo.git", git_config.get("remote", "origin", "pushurl").?);
     
-    // Test other config
-    try testing.expectEqualStrings("vim", config.get("core", null, "editor").?);
-    try testing.expectEqualStrings("false", config.get("core", null, "autocrlf").?);
+    // Test branch configuration
+    try testing.expectEqualStrings("origin", git_config.getBranchRemote("master").?);
+    try testing.expectEqualStrings("refs/heads/master", git_config.getBranchMerge("master").?);
+    try testing.expectEqualStrings("upstream", git_config.getBranchRemote("develop").?);
+    try testing.expectEqualStrings("refs/heads/develop", git_config.getBranchMerge("develop").?);
+    try testing.expectEqualStrings("true", git_config.get("branch", "master", "rebase").?);
+    
+    // Test aliases
+    try testing.expectEqualStrings("checkout", git_config.get("alias", null, "co").?);
+    try testing.expectEqualStrings("branch", git_config.get("alias", null, "br").?);
+    try testing.expectEqualStrings("commit", git_config.get("alias", null, "ci").?);
+    try testing.expectEqualStrings("status", git_config.get("alias", null, "st").?);
+    try testing.expectEqualStrings("reset HEAD --", git_config.get("alias", null, "unstage").?);
+    try testing.expectEqualStrings("log -1 HEAD", git_config.get("alias", null, "last").?);
+    
+    // Test other configuration sections
+    try testing.expectEqualStrings("simple", git_config.get("push", null, "default").?);
+    try testing.expectEqualStrings("true", git_config.get("push", null, "followTags").?);
+    try testing.expectEqualStrings("false", git_config.get("pull", null, "rebase").?);
+    try testing.expectEqualStrings("vimdiff", git_config.get("diff", null, "tool").?);
+    try testing.expectEqualStrings("vimdiff", git_config.get("merge", null, "tool").?);
+    try testing.expectEqualStrings("auto", git_config.get("color", null, "ui").?);
+    try testing.expectEqualStrings("store", git_config.get("credential", null, "helper").?);
+    
+    // Test color subsections
+    try testing.expectEqualStrings("yellow reverse", git_config.get("color", "branch", "current").?);
+    try testing.expectEqualStrings("yellow", git_config.get("color", "branch", "local").?);
+    try testing.expectEqualStrings("green", git_config.get("color", "branch", "remote").?);
+    try testing.expectEqualStrings("yellow bold", git_config.get("color", "diff", "meta").?);
+    try testing.expectEqualStrings("magenta bold", git_config.get("color", "diff", "frag").?);
+    try testing.expectEqualStrings("red bold", git_config.get("color", "diff", "old").?);
+    try testing.expectEqualStrings("green bold", git_config.get("color", "diff", "new").?);
+    
+    // Test URL rewriting
+    try testing.expectEqualStrings("gh:", git_config.get("url", "https://github.com/", "insteadOf").?);
+    
+    // Test case-insensitive access
+    try testing.expectEqualStrings("John Doe", git_config.get("USER", null, "NAME").?);
+    try testing.expectEqualStrings("https://github.com/user/repo.git", git_config.get("REMOTE", "ORIGIN", "URL").?);
+    try testing.expectEqualStrings("origin", git_config.get("BRANCH", "MASTER", "REMOTE").?);
 }
 
-test "config parsing - case insensitive" {
+test "git config edge cases and error handling" {
     const allocator = testing.allocator;
     
-    var config = GitConfig.init(allocator);
-    defer config.deinit();
+    // Test empty configuration
+    {
+        var git_config = config.GitConfig.init(allocator);
+        defer git_config.deinit();
+        
+        try git_config.parseFromString("");
+        try testing.expect(git_config.get("user", null, "name") == null);
+    }
     
-    const config_content =
-        \\[User]
-        \\    Name = Test User
-        \\    EMAIL = test@example.com
+    // Test configuration with only comments
+    {
+        var git_config = config.GitConfig.init(allocator);
+        defer git_config.deinit();
+        
+        const comment_only = 
+            \\# This is a comment
+            \\; This is also a comment
+            \\  # Indented comment
+            \\
+            \\    ; Another comment
+        ;
+        
+        try git_config.parseFromString(comment_only);
+        try testing.expect(git_config.get("user", null, "name") == null);
+    }
+    
+    // Test malformed sections (should be skipped)
+    {
+        var git_config = config.GitConfig.init(allocator);
+        defer git_config.deinit();
+        
+        const malformed =
+            \\[user]
+            \\    name = John Doe
+            \\[invalid section without closing bracket
+            \\    ignored = value
+            \\[core]
+            \\    editor = vim
+        ;
+        
+        try git_config.parseFromString(malformed);
+        try testing.expectEqualStrings("John Doe", git_config.get("user", null, "name").?);
+        try testing.expectEqualStrings("vim", git_config.get("core", null, "editor").?);
+        try testing.expect(git_config.get("invalid", null, "ignored") == null);
+    }
+    
+    // Test values without sections (should be ignored)
+    {
+        var git_config = config.GitConfig.init(allocator);
+        defer git_config.deinit();
+        
+        const orphaned_values =
+            \\orphaned = value
+            \\[user]
+            \\    name = John Doe
+            \\another_orphan = another_value
+        ;
+        
+        try git_config.parseFromString(orphaned_values);
+        try testing.expectEqualStrings("John Doe", git_config.get("user", null, "name").?);
+        try testing.expect(git_config.get("", null, "orphaned") == null);
+    }
+    
+    // Test quoted values with special characters
+    {
+        var git_config = config.GitConfig.init(allocator);
+        defer git_config.deinit();
+        
+        const quoted_values =
+            \\[user]
+            \\    name = "John \"Johnny\" Doe"
+            \\    email = "john@example.com"
+            \\[core]
+            \\    editor = "code --wait"
+            \\    excludesfile = "~/.gitignore_global"
+        ;
+        
+        try git_config.parseFromString(quoted_values);
+        try testing.expectEqualStrings("John \"Johnny\" Doe", git_config.get("user", null, "name").?);
+        try testing.expectEqualStrings("john@example.com", git_config.get("user", null, "email").?);
+        try testing.expectEqualStrings("code --wait", git_config.get("core", null, "editor").?);
+        try testing.expectEqualStrings("~/.gitignore_global", git_config.get("core", null, "excludesfile").?);
+    }
+    
+    // Test subsections with spaces and special characters
+    {
+        var git_config = config.GitConfig.init(allocator);
+        defer git_config.deinit();
+        
+        const special_subsections =
+            \\[remote "origin with spaces"]
+            \\    url = https://github.com/user/repo.git
+            \\[branch "feature/branch-name"]
+            \\    remote = origin
+            \\[url "https://github.com/"]
+            \\    insteadOf = github:
+        ;
+        
+        try git_config.parseFromString(special_subsections);
+        try testing.expectEqualStrings("https://github.com/user/repo.git", git_config.get("remote", "origin with spaces", "url").?);
+        try testing.expectEqualStrings("origin", git_config.get("branch", "feature/branch-name", "remote").?);
+        try testing.expectEqualStrings("github:", git_config.get("url", "https://github.com/", "insteadOf").?);
+    }
+}
+
+test "git config multi-value support" {
+    const allocator = testing.allocator;
+    
+    var git_config = config.GitConfig.init(allocator);
+    defer git_config.deinit();
+    
+    const multi_value_config =
+        \\[remote "origin"]
+        \\    url = https://github.com/user/repo.git
+        \\    fetch = +refs/heads/*:refs/remotes/origin/*
+        \\    fetch = +refs/pull/*/head:refs/remotes/origin/pr/*
+        \\    fetch = +refs/tags/*:refs/tags/*
         \\
-        \\[Remote "Origin"]
-        \\    URL = https://github.com/user/repo.git
+        \\[receive]
+        \\    denyNonFastforwards = true
+        \\    denyNonFastforwards = false
     ;
     
-    try config.parseFromString(config_content);
+    try git_config.parseFromString(multi_value_config);
     
-    // Should match case-insensitively
-    try testing.expectEqualStrings("Test User", config.get("user", null, "name").?);
-    try testing.expectEqualStrings("Test User", config.get("USER", null, "NAME").?);
-    try testing.expectEqualStrings("test@example.com", config.get("user", null, "email").?);
-    try testing.expectEqualStrings("https://github.com/user/repo.git", config.get("remote", "origin", "url").?);
-    try testing.expectEqualStrings("https://github.com/user/repo.git", config.get("REMOTE", "ORIGIN", "URL").?);
+    // Test getting all values for a multi-value key
+    const fetch_values = try git_config.getAll("remote", "origin", "fetch", allocator);
+    defer allocator.free(fetch_values);
+    
+    try testing.expectEqual(@as(usize, 3), fetch_values.len);
+    try testing.expectEqualStrings("+refs/heads/*:refs/remotes/origin/*", fetch_values[0]);
+    try testing.expectEqualStrings("+refs/pull/*/head:refs/remotes/origin/pr/*", fetch_values[1]);
+    try testing.expectEqualStrings("+refs/tags/*:refs/tags/*", fetch_values[2]);
+    
+    // Test that get() returns the last value for multi-value keys
+    try testing.expectEqualStrings("+refs/tags/*:refs/tags/*", git_config.get("remote", "origin", "fetch").?);
+    try testing.expectEqualStrings("false", git_config.get("receive", null, "denyNonFastforwards").?);
+}
+
+test "config utility functions" {
+    const allocator = testing.allocator;
+    
+    var git_config = config.GitConfig.init(allocator);
+    defer git_config.deinit();
+    
+    const test_config =
+        \\[user]
+        \\    name = Jane Doe
+        \\    email = jane@example.com
+        \\
+        \\[remote "origin"]
+        \\    url = https://github.com/jane/repo.git
+        \\
+        \\[remote "upstream"]
+        \\    url = https://github.com/original/repo.git
+        \\
+        \\[branch "main"]
+        \\    remote = origin
+        \\    merge = refs/heads/main
+        \\
+        \\[branch "feature"]
+        \\    remote = upstream
+        \\    merge = refs/heads/feature
+    ;
+    
+    try git_config.parseFromString(test_config);
+    
+    // Test convenience methods
+    try testing.expectEqualStrings("Jane Doe", git_config.getUserName().?);
+    try testing.expectEqualStrings("jane@example.com", git_config.getUserEmail().?);
+    
+    // Test remote URL methods
+    try testing.expectEqualStrings("https://github.com/jane/repo.git", git_config.getRemoteUrl("origin").?);
+    try testing.expectEqualStrings("https://github.com/original/repo.git", git_config.getRemoteUrl("upstream").?);
+    try testing.expect(git_config.getRemoteUrl("nonexistent") == null);
+    
+    // Test branch methods
+    try testing.expectEqualStrings("origin", git_config.getBranchRemote("main").?);
+    try testing.expectEqualStrings("upstream", git_config.getBranchRemote("feature").?);
+    try testing.expect(git_config.getBranchRemote("nonexistent") == null);
+    
+    try testing.expectEqualStrings("refs/heads/main", git_config.getBranchMerge("main").?);
+    try testing.expectEqualStrings("refs/heads/feature", git_config.getBranchMerge("feature").?);
+    try testing.expect(git_config.getBranchMerge("nonexistent") == null);
+    
+    // Test allocator variants (they should return the same results but accept allocator parameter)
+    try testing.expectEqualStrings("https://github.com/jane/repo.git", git_config.getRemoteUrlAlloc(allocator, "origin").?);
+    try testing.expectEqualStrings("origin", git_config.getBranchRemoteAlloc(allocator, "main").?);
+    try testing.expectEqualStrings("refs/heads/main", git_config.getBranchMergeAlloc(allocator, "main").?);
+}
+
+test "parseConfig convenience function" {
+    const allocator = testing.allocator;
+    
+    const simple_config =
+        \\[user]
+        \\    name = Test User
+        \\    email = test@example.com
+        \\
+        \\[core]
+        \\    editor = nano
+    ;
+    
+    var git_config = try config.GitConfig.parseConfig(allocator, simple_config);
+    defer git_config.deinit();
+    
+    try testing.expectEqualStrings("Test User", git_config.getUserName().?);
+    try testing.expectEqualStrings("test@example.com", git_config.getUserEmail().?);
+    try testing.expectEqualStrings("nano", git_config.get("core", null, "editor").?);
 }
