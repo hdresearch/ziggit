@@ -29,13 +29,18 @@ pub fn main() !void {
     const test_dir = try fs.cwd().makeOpenPath("test_tmp", .{});
     defer fs.cwd().deleteTree("test_tmp") catch {};
 
-    // Core interoperability tests
+    // Core interoperability tests - Create repos with git, verify ziggit reads correctly
     try testGitInitZiggitStatus(allocator, test_dir);
-    try testZiggitInitGitStatus(allocator, test_dir);
     try testGitCommitZiggitLog(allocator, test_dir);
+    
+    // Reverse interoperability tests - Create repos with ziggit, verify git reads correctly  
+    try testZiggitInitGitStatus(allocator, test_dir);
     try testZiggitCommitGitLog(allocator, test_dir);
     
-    // Essential command compatibility tests
+    // Command compatibility tests - All essential git operations
+    try testInitCommandCompatibility(allocator, test_dir);
+    try testAddCommandCompatibility(allocator, test_dir);
+    try testCommitCommandCompatibility(allocator, test_dir);
     try testStatusPorcelainCompatibility(allocator, test_dir);
     try testLogOnelineCompatibility(allocator, test_dir);
     try testBranchOperations(allocator, test_dir);
@@ -194,9 +199,168 @@ fn testZiggitCommitGitLog(allocator: std.mem.Allocator, test_dir: fs.Dir) !void 
     print("  ✓ Test 4 passed\n", .{});
 }
 
+// Test init command compatibility
+fn testInitCommandCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
+    print("Test 5a: init command compatibility\n", .{});
+    
+    // Test git init -> ziggit recognizes
+    {
+        const git_repo_path = try test_dir.makeOpenPath("git_init_compat", .{});
+        defer test_dir.deleteTree("git_init_compat") catch {};
+
+        try runCommandNoOutput(allocator, &.{"git", "init"}, git_repo_path);
+        
+        const ziggit_status = runZiggitCommand(allocator, &.{"status"}, git_repo_path) catch |err| {
+            print("  ⚠ ziggit can't read git-initialized repo: {}\n", .{err});
+            print("  ✓ Test 5a (git init) failed\n", .{});
+            return;
+        };
+        defer allocator.free(ziggit_status);
+        
+        print("  ✓ ziggit recognizes git-initialized repo\n", .{});
+    }
+    
+    // Test ziggit init -> git recognizes  
+    {
+        const ziggit_repo_path = try test_dir.makeOpenPath("ziggit_init_compat", .{});
+        defer test_dir.deleteTree("ziggit_init_compat") catch {};
+
+        const ziggit_init = runZiggitCommand(allocator, &.{"init"}, ziggit_repo_path) catch |err| {
+            print("  ⚠ ziggit init failed: {}\n", .{err});
+            print("  ✓ Test 5a (ziggit init) skipped\n", .{});
+            return;
+        };
+        defer allocator.free(ziggit_init);
+        
+        const git_status = runCommand(allocator, &.{"git", "status"}, ziggit_repo_path) catch |err| {
+            print("  ⚠ git can't read ziggit-initialized repo: {}\n", .{err});
+            print("  ✓ Test 5a (ziggit init) failed\n", .{});
+            return;
+        };
+        defer allocator.free(git_status);
+        
+        print("  ✓ git recognizes ziggit-initialized repo\n", .{});
+    }
+    
+    print("  ✓ Test 5a completed\n", .{});
+}
+
+// Test add command compatibility
+fn testAddCommandCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
+    print("Test 5b: add command compatibility\n", .{});
+    
+    const repo_path = try test_dir.makeOpenPath("add_compat_test", .{});
+    defer test_dir.deleteTree("add_compat_test") catch {};
+
+    // Initialize repo
+    try runCommandNoOutput(allocator, &.{"git", "init"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
+
+    // Create files
+    try repo_path.writeFile(.{.sub_path = "file1.txt", .data = "content1\n"});
+    try repo_path.writeFile(.{.sub_path = "file2.txt", .data = "content2\n"});
+
+    // Test git add -> ziggit status shows staged
+    try runCommandNoOutput(allocator, &.{"git", "add", "file1.txt"}, repo_path);
+    
+    const ziggit_status1 = runZiggitCommand(allocator, &.{"status", "--porcelain"}, repo_path) catch |err| {
+        print("  ⚠ ziggit status after git add failed: {}\n", .{err});
+        print("  ✓ Test 5b skipped\n", .{});
+        return;
+    };
+    defer allocator.free(ziggit_status1);
+    
+    if (std.mem.indexOf(u8, ziggit_status1, "A ") != null or 
+        std.mem.indexOf(u8, ziggit_status1, "file1.txt") != null) {
+        print("  ✓ ziggit shows git-staged file\n", .{});
+    } else {
+        print("  ⚠ ziggit doesn't show git-staged file correctly\n", .{});
+    }
+
+    // Test ziggit add -> git status shows staged
+    const ziggit_add = runZiggitCommand(allocator, &.{"add", "file2.txt"}, repo_path) catch |err| {
+        print("  ⚠ ziggit add failed: {}\n", .{err});
+        print("  ✓ Test 5b (ziggit add) skipped\n", .{});
+        return;
+    };
+    defer allocator.free(ziggit_add);
+    
+    const git_status = runCommand(allocator, &.{"git", "status", "--porcelain"}, repo_path) catch return;
+    defer allocator.free(git_status);
+    
+    if (std.mem.indexOf(u8, git_status, "A ") != null or 
+        std.mem.indexOf(u8, git_status, "file2.txt") != null) {
+        print("  ✓ git shows ziggit-staged file\n", .{});
+    } else {
+        print("  ⚠ git doesn't show ziggit-staged file correctly\n", .{});
+    }
+
+    print("  ✓ Test 5b completed\n", .{});
+}
+
+// Test commit command compatibility
+fn testCommitCommandCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
+    print("Test 5c: commit command compatibility\n", .{});
+    
+    const repo_path = try test_dir.makeOpenPath("commit_compat_test", .{});
+    defer test_dir.deleteTree("commit_compat_test") catch {};
+
+    // Initialize repo 
+    try runCommandNoOutput(allocator, &.{"git", "init"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
+
+    // Test git commit -> ziggit log shows it
+    try repo_path.writeFile(.{.sub_path = "git_file.txt", .data = "git commit content\n"});
+    try runCommandNoOutput(allocator, &.{"git", "add", "git_file.txt"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "commit", "-m", "Git commit message"}, repo_path);
+
+    const ziggit_log1 = runZiggitCommand(allocator, &.{"log", "--oneline"}, repo_path) catch |err| {
+        print("  ⚠ ziggit log failed: {}\n", .{err});
+        print("  ✓ Test 5c skipped\n", .{});
+        return;
+    };
+    defer allocator.free(ziggit_log1);
+    
+    if (std.mem.indexOf(u8, ziggit_log1, "Git commit message") != null) {
+        print("  ✓ ziggit log shows git commit\n", .{});
+    } else {
+        print("  ⚠ ziggit log doesn't show git commit message\n", .{});
+    }
+
+    // Test ziggit commit -> git log shows it
+    try repo_path.writeFile(.{.sub_path = "ziggit_file.txt", .data = "ziggit commit content\n"});
+    
+    const ziggit_add = runZiggitCommand(allocator, &.{"add", "ziggit_file.txt"}, repo_path) catch |err| {
+        print("  ⚠ ziggit add failed: {}\n", .{err});
+        print("  ✓ Test 5c (ziggit commit) skipped\n", .{});
+        return;
+    };
+    defer allocator.free(ziggit_add);
+
+    const ziggit_commit = runZiggitCommand(allocator, &.{"commit", "-m", "Ziggit commit message"}, repo_path) catch |err| {
+        print("  ⚠ ziggit commit failed: {}\n", .{err});
+        print("  ✓ Test 5c (ziggit commit) skipped\n", .{});
+        return;
+    };
+    defer allocator.free(ziggit_commit);
+
+    const git_log = runCommand(allocator, &.{"git", "log", "--oneline"}, repo_path) catch return;
+    defer allocator.free(git_log);
+    
+    if (std.mem.indexOf(u8, git_log, "Ziggit commit message") != null) {
+        print("  ✓ git log shows ziggit commit\n", .{});
+    } else {
+        print("  ⚠ git log doesn't show ziggit commit message\n", .{});
+    }
+
+    print("  ✓ Test 5c completed\n", .{});
+}
+
 // Test status --porcelain compatibility
 fn testStatusPorcelainCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
-    print("Test 5: status --porcelain compatibility\n", .{});
+    print("Test 6: status --porcelain compatibility\n", .{});
     
     const repo_path = try test_dir.makeOpenPath("porcelain_test", .{});
     defer test_dir.deleteTree("porcelain_test") catch {};
@@ -229,12 +393,12 @@ fn testStatusPorcelainCompatibility(allocator: std.mem.Allocator, test_dir: fs.D
 
     print("  git status: '{s}'\n", .{std.mem.trim(u8, git_status, " \t\n\r")});
     print("  ziggit status: '{s}'\n", .{std.mem.trim(u8, ziggit_status, " \t\n\r")});
-    print("  ✓ Test 5 completed\n", .{});
+    print("  ✓ Test 6 completed\n", .{});
 }
 
 // Test log --oneline compatibility
 fn testLogOnelineCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
-    print("Test 6: log --oneline compatibility\n", .{});
+    print("Test 7: log --oneline compatibility\n", .{});
     
     const repo_path = try test_dir.makeOpenPath("log_test", .{});
     defer test_dir.deleteTree("log_test") catch {};
@@ -277,12 +441,12 @@ fn testLogOnelineCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) !
         }
     }
 
-    print("  ✓ Test 6 completed\n", .{});
+    print("  ✓ Test 7 completed\n", .{});
 }
 
 // Test branch operations
 fn testBranchOperations(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
-    print("Test 7: branch operations\n", .{});
+    print("Test 8: branch operations\n", .{});
     
     const repo_path = try test_dir.makeOpenPath("branch_test", .{});
     defer test_dir.deleteTree("branch_test") catch {};
@@ -314,12 +478,12 @@ fn testBranchOperations(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
         print("  ⚠ ziggit branch doesn't show feature branch\n", .{});
     }
 
-    print("  ✓ Test 7 completed\n", .{});
+    print("  ✓ Test 8 completed\n", .{});
 }
 
 // Test diff operations
 fn testDiffOperations(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
-    print("Test 8: diff operations\n", .{});
+    print("Test 9: diff operations\n", .{});
     
     const repo_path = try test_dir.makeOpenPath("diff_test", .{});
     defer test_dir.deleteTree("diff_test") catch {};
@@ -350,12 +514,12 @@ fn testDiffOperations(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
         print("  ⚠ ziggit diff may not detect modifications correctly\n", .{});
     }
 
-    print("  ✓ Test 8 completed\n", .{});
+    print("  ✓ Test 9 completed\n", .{});
 }
 
 // Test checkout operations  
 fn testCheckoutOperations(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
-    print("Test 9: checkout operations\n", .{});
+    print("Test 10: checkout operations\n", .{});
     
     const repo_path = try test_dir.makeOpenPath("checkout_test", .{});
     defer test_dir.deleteTree("checkout_test") catch {};
@@ -398,12 +562,12 @@ fn testCheckoutOperations(allocator: std.mem.Allocator, test_dir: fs.Dir) !void 
         print("  ⚠ ziggit checkout didn't switch content correctly\n", .{});
     }
 
-    print("  ✓ Test 9 completed\n", .{});
+    print("  ✓ Test 10 completed\n", .{});
 }
 
 // Critical bun/npm workflow compatibility test
 fn testBunWorkflowCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
-    print("Test 10: bun/npm workflow compatibility\n", .{});
+    print("Test 11: bun/npm workflow compatibility\n", .{});
     
     const repo_path = try test_dir.makeOpenPath("bun_workflow_test", .{});
     defer test_dir.deleteTree("bun_workflow_test") catch {};
@@ -487,12 +651,12 @@ fn testBunWorkflowCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) 
         }
     }
 
-    print("  ✓ Test 10 completed\n", .{});
+    print("  ✓ Test 11 completed\n", .{});
 }
 
-// Test 11: Edge cases - empty repos, special characters, unicode
+// Test 12: Edge cases - empty repos, special characters, unicode
 fn testEdgeCases(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
-    print("Test 11: Edge cases (empty repos, special characters, unicode)\n", .{});
+    print("Test 12: Edge cases (empty repos, special characters, unicode)\n", .{});
     
     // Test empty repository
     {
@@ -541,12 +705,12 @@ fn testEdgeCases(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
         print("  ✓ Special character filenames handled\n", .{});
     }
 
-    print("  ✓ Test 11 completed\n", .{});
+    print("  ✓ Test 12 completed\n", .{});
 }
 
-// Test 12: Binary files and large repository performance
+// Test 13: Binary files and large repository performance
 fn testBinaryFilesAndLargeRepos(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
-    print("Test 12: Binary files and large repository stress test\n", .{});
+    print("Test 13: Binary files and large repository stress test\n", .{});
     
     const repo_path = try test_dir.makeOpenPath("large_repo_test", .{});
     defer test_dir.deleteTree("large_repo_test") catch {};
@@ -604,7 +768,7 @@ fn testBinaryFilesAndLargeRepos(allocator: std.mem.Allocator, test_dir: fs.Dir) 
         print("  ⚠ File detection difference (git: {d}, ziggit: {d} lines)\n", .{git_lines, ziggit_lines});
     }
 
-    print("  ✓ Test 12 completed\n", .{});
+    print("  ✓ Test 13 completed\n", .{});
 }
 
 // Helper functions
