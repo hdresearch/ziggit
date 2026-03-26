@@ -49,7 +49,7 @@ pub const GitignoreEntry = struct {
                 .ignore,
             .is_absolute = is_absolute,
             .has_wildcard = has_wildcard,
-        };
+        }
     }
     
     pub fn deinit(self: GitignoreEntry, allocator: std.mem.Allocator) void {
@@ -91,7 +91,7 @@ pub const GitignoreEntry = struct {
             return std.mem.eql(u8, self.pattern, text);
         }
     }
-};
+}
 
 pub const GitignorePattern = struct {
     entries: std.ArrayList(GitignoreEntry),
@@ -101,7 +101,7 @@ pub const GitignorePattern = struct {
         return GitignorePattern{
             .entries = std.ArrayList(GitignoreEntry).init(allocator),
             .allocator = allocator,
-        };
+        }
     }
 
     pub fn deinit(self: *GitignorePattern) void {
@@ -118,7 +118,7 @@ pub const GitignorePattern = struct {
         const content = platform_impl.fs.readFile(allocator, path) catch |err| switch (err) {
             error.FileNotFound => return patterns, // No .gitignore file, return empty
             else => return err,
-        };
+        }
         defer allocator.free(content);
 
         try patterns.parseContent(content);
@@ -173,7 +173,7 @@ pub const GitignorePattern = struct {
         }
         return patterns;
     }
-};
+}
 
 // Legacy alias for compatibility
 pub const GitIgnore = GitignorePattern;
@@ -192,7 +192,7 @@ pub fn loadGitignore(repo_path: []const u8, platform_impl: anytype, allocator: s
     const file_patterns = GitignorePattern.loadFromFile(allocator, gitignore_path, platform_impl) catch |err| switch (err) {
         error.FileNotFound => return patterns, // No .gitignore, return empty
         else => return err,
-    };
+    }
     defer file_patterns.deinit();
     
     // Merge patterns
@@ -334,7 +334,6 @@ pub fn createDefaultPatterns(allocator: std.mem.Allocator, project_type: []const
     
     return patterns;
 }
-    }
 
     /// Enhanced pattern matching with gitignore semantics
     fn matchPattern(pattern: []const u8, path: []const u8) bool {
@@ -423,8 +422,7 @@ pub fn createDefaultPatterns(allocator: std.mem.Allocator, project_type: []const
         }
         
         return p_idx == pattern.len;
-    }
-};
+}
 
 /// Load gitignore patterns from multiple sources (global, repo-level, etc.)
 pub fn loadGitIgnore(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !GitIgnore {
