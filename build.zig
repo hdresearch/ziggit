@@ -53,6 +53,15 @@ pub fn build(b: *std.Build) void {
     });
 
     // ========== TESTS ==========
+    // Core git-ziggit interoperability test
+    const core_test = b.addExecutable(.{
+        .name = "git_ziggit_core_test",
+        .root_source_file = b.path("test/git_ziggit_core_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_core_test = b.addRunArtifact(core_test);
+    
     // Comprehensive integration test suite
     const integration_test = b.addExecutable(.{
         .name = "integration_test_suite",
@@ -60,17 +69,15 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    
     const run_integration_test = b.addRunArtifact(integration_test);
     
-    // Legacy git interop test (still available)
+    // Existing git interop test
     const git_interop_test = b.addExecutable(.{
         .name = "git_interop_test",
         .root_source_file = b.path("test/git_interop_test.zig"),
         .target = target,
         .optimize = optimize,
     });
-    
     const run_git_interop_test = b.addRunArtifact(git_interop_test);
 
     // Platform unit tests
@@ -81,11 +88,22 @@ pub fn build(b: *std.Build) void {
     });
     const run_platform_tests = b.addRunArtifact(platform_tests);
 
+    // BrokenPipe test
+    const broken_pipe_test = b.addExecutable(.{
+        .name = "broken_pipe_test",
+        .root_source_file = b.path("test/broken_pipe_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_broken_pipe_test = b.addRunArtifact(broken_pipe_test);
+
     // Test step runs all tests
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_platform_tests.step);
+    test_step.dependOn(&run_core_test.step);
     test_step.dependOn(&run_integration_test.step);
     test_step.dependOn(&run_git_interop_test.step);
+    test_step.dependOn(&run_broken_pipe_test.step);
 
     // ========== BENCHMARKS ==========
     const cli_benchmark = b.addExecutable(.{
@@ -114,21 +132,10 @@ pub fn build(b: *std.Build) void {
     bun_scenario_benchmark.root_module.addImport("ziggit", ziggit_module);
     const run_bun_scenario_benchmark = b.addRunArtifact(bun_scenario_benchmark);
 
-    // Zig API vs CLI benchmark (ITEM 7)
-    const zig_api_benchmark = b.addExecutable(.{
-        .name = "zig_api_benchmark",
-        .root_source_file = b.path("benchmarks/zig_api_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    zig_api_benchmark.root_module.addImport("ziggit", ziggit_module);
-    const run_zig_api_benchmark = b.addRunArtifact(zig_api_benchmark);
-
     const bench_step = b.step("bench", "Run all benchmarks");
     bench_step.dependOn(&run_cli_benchmark.step);
     bench_step.dependOn(&run_lib_benchmark.step);
     bench_step.dependOn(&run_bun_scenario_benchmark.step);
-    bench_step.dependOn(&run_zig_api_benchmark.step);
 
     // ========== WASM TARGET ==========
     const wasm_target = b.resolveTargetQuery(.{
