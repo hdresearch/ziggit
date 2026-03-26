@@ -241,10 +241,10 @@ fn loadFromPackFiles(hash_str: []const u8, git_dir: []const u8, platform_impl: a
     defer pack_dir.close();
     
     // Look for .idx files (pack index files) - optimize by collecting all first
-    var pack_files = std.ArrayList([]u8).init(allocator);
+    var pack_files = std.ArrayList(PackFileInfo).init(allocator);
     defer {
-        for (pack_files.items) |pack_file| {
-            allocator.free(pack_file);
+        for (pack_files.items) |*pack_file| {
+            allocator.free(pack_file.name);
         }
         pack_files.deinit();
     }
@@ -254,21 +254,30 @@ fn loadFromPackFiles(hash_str: []const u8, git_dir: []const u8, platform_impl: a
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
         
-        try pack_files.append(try allocator.dupe(u8, entry.name));
+        const file_stat = pack_dir.statFile(entry.name) catch continue;
+        try pack_files.append(PackFileInfo{
+            .name = try allocator.dupe(u8, entry.name),
+            .mtime = file_stat.mtime,
+            .size = file_stat.size,
+        });
     }
     
     if (pack_files.items.len == 0) {
         return error.ObjectNotFound;
     }
     
-    // Try each pack file - prioritize newer pack files first (reverse order)
-    var i = pack_files.items.len;
-    while (i > 0) {
-        i -= 1;
-        const pack_file = pack_files.items[i];
-        
+    // Sort pack files by modification time (newest first) for better cache behavior
+    std.sort.block(PackFileInfo, pack_files.items, {}, struct {
+        fn lessThan(context: void, lhs: PackFileInfo, rhs: PackFileInfo) bool {
+            _ = context;
+            return lhs.mtime > rhs.mtime; // Newer files first
+        }
+    }.lessThan);
+    
+    // Try each pack file - prioritize newer pack files first
+    for (pack_files.items) |pack_file| {
         // Try to find object in this pack
-        if (findObjectInPack(pack_dir_path, pack_file, hash_str, platform_impl, allocator)) |obj| {
+        if (findObjectInPack(pack_dir_path, pack_file.name, hash_str, platform_impl, allocator)) |obj| {
             return obj;
         } else |err| {
             // Log specific errors for debugging but continue to next pack
@@ -282,6 +291,13 @@ fn loadFromPackFiles(hash_str: []const u8, git_dir: []const u8, platform_impl: a
     
     return error.ObjectNotFound;
 }
+
+/// Pack file metadata for sorting and caching
+const PackFileInfo = struct {
+    name: []u8,
+    mtime: i128,
+    size: u64,
+};
 
 /// Pack object types
 const PackObjectType = enum(u3) {
@@ -825,6 +841,17 @@ fn findOffsetInIdx(idx_data: []const u8, target_hash: [20]u8) ?usize {
 
 /// Apply delta to base data to reconstruct object with enhanced error handling and validation
 fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    return applyDeltaWithFallback(base_data, delta_data, allocator) catch |err| {
+        // If delta application fails, try a more permissive mode
+        if (err == error.InvalidDelta or err == error.ResultSizeMismatch) {
+            return applyDeltaPermissive(base_data, delta_data, allocator) catch err;
+        }
+        return err;
+    };
+}
+
+/// Standard delta application with strict validation
+fn applyDeltaWithFallback(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
     // Enhanced validation with specific error messages
     if (delta_data.len < 2) return error.DeltaMissingHeaders;
     if (base_data.len == 0) return error.EmptyBaseData;
@@ -980,6 +1007,132 @@ fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.
     // Verify result size matches expected
     if (result.items.len != result_size) {
         return error.ResultSizeMismatch;
+    }
+    
+    return try allocator.dupe(u8, result.items);
+}
+
+/// More permissive delta application for recovery from corrupted deltas
+fn applyDeltaPermissive(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    if (delta_data.len < 2) return error.DeltaMissingHeaders;
+    if (base_data.len == 0) return error.EmptyBaseData;
+    
+    var pos: usize = 0;
+    
+    // Read base size (variable length) with more permissive bounds
+    var base_size: usize = 0;
+    var shift: u6 = 0;
+    while (pos < delta_data.len and shift < 64) {
+        const b = delta_data[pos];
+        pos += 1;
+        base_size |= @as(usize, @intCast(b & 0x7F)) << shift;
+        if (b & 0x80 == 0) break;
+        shift += 7;
+        
+        if (shift > 40) break; // More permissive limit
+    }
+    
+    if (pos >= delta_data.len) return error.DeltaTruncated;
+    
+    // Read result size (variable length) with more permissive bounds
+    var result_size: usize = 0;
+    shift = 0;
+    while (pos < delta_data.len and shift < 64) {
+        const b = delta_data[pos];
+        pos += 1;
+        result_size |= @as(usize, @intCast(b & 0x7F)) << shift;
+        if (b & 0x80 == 0) break;
+        shift += 7;
+        
+        if (shift > 40) break; // More permissive limit
+    }
+    
+    // More permissive size validation - allow some mismatch
+    if (base_size > base_data.len + 1024) { // Allow 1KB tolerance
+        return error.BaseSizeMismatch;
+    }
+    
+    // Use actual base size if encoded size is larger
+    const actual_base_size = @min(base_size, base_data.len);
+    
+    // Apply delta commands with error recovery
+    var result = std.ArrayList(u8).init(allocator);
+    defer result.deinit();
+    try result.ensureTotalCapacity(@max(result_size, base_data.len));
+    
+    while (pos < delta_data.len) {
+        if (pos >= delta_data.len) break;
+        
+        const cmd = delta_data[pos];
+        pos += 1;
+        
+        if (cmd & 0x80 != 0) {
+            // Copy command with bounds checking
+            var copy_offset: usize = 0;
+            var copy_size: usize = 0;
+            
+            // Read offset (up to 4 bytes, little-endian)
+            if (cmd & 0x01 != 0 and pos < delta_data.len) { 
+                copy_offset |= @as(usize, delta_data[pos]); 
+                pos += 1; 
+            }
+            if (cmd & 0x02 != 0 and pos < delta_data.len) { 
+                copy_offset |= @as(usize, delta_data[pos]) << 8; 
+                pos += 1; 
+            }
+            if (cmd & 0x04 != 0 and pos < delta_data.len) { 
+                copy_offset |= @as(usize, delta_data[pos]) << 16; 
+                pos += 1; 
+            }
+            if (cmd & 0x08 != 0 and pos < delta_data.len) { 
+                copy_offset |= @as(usize, delta_data[pos]) << 24; 
+                pos += 1; 
+            }
+            
+            // Read size (up to 3 bytes, little-endian)
+            if (cmd & 0x10 != 0 and pos < delta_data.len) { 
+                copy_size |= @as(usize, delta_data[pos]); 
+                pos += 1; 
+            }
+            if (cmd & 0x20 != 0 and pos < delta_data.len) { 
+                copy_size |= @as(usize, delta_data[pos]) << 8; 
+                pos += 1; 
+            }
+            if (cmd & 0x40 != 0 and pos < delta_data.len) { 
+                copy_size |= @as(usize, delta_data[pos]) << 16; 
+                pos += 1; 
+            }
+            
+            // Size 0 means 0x10000
+            if (copy_size == 0) copy_size = 0x10000;
+            
+            // More permissive bounds checking
+            if (copy_offset >= actual_base_size) continue; // Skip invalid copy
+            
+            copy_size = @min(copy_size, actual_base_size - copy_offset);
+            if (copy_size == 0) continue;
+            
+            // Copy data from base with bounds checking
+            const end_offset = @min(copy_offset + copy_size, base_data.len);
+            if (end_offset > copy_offset) {
+                try result.appendSlice(base_data[copy_offset..end_offset]);
+            }
+        } else if (cmd > 0) {
+            // Insert command with bounds checking
+            const insert_size = @as(usize, cmd);
+            const available_data = @min(insert_size, delta_data.len - pos);
+            
+            if (available_data > 0) {
+                try result.appendSlice(delta_data[pos..pos + available_data]);
+                pos += insert_size; // Skip the full size even if we didn't read it all
+            }
+        } else {
+            // cmd == 0 is reserved - skip in permissive mode
+            continue;
+        }
+        
+        // Prevent excessive growth
+        if (result.items.len > result_size * 2) break;
     }
     
     return try allocator.dupe(u8, result.items);

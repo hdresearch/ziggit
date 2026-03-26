@@ -292,6 +292,10 @@ pub const Index = struct {
         var total_extension_size: u64 = 0;
         const max_total_extension_size = 100 * 1024 * 1024; // Increased to 100MB max for very large repos
         
+        // Track seen extensions to detect duplicates
+        var seen_extensions = std.ArrayList([4]u8).init(self.allocator);
+        defer seen_extensions.deinit();
+        
         while (extensions_found < max_extensions) {
             // Check if we have enough bytes left for checksum (20 bytes) plus extension header (8 bytes)
             const current_pos = try reader.context.getPos();
@@ -301,6 +305,15 @@ pub const Index = struct {
             var sig: [4]u8 = undefined;
             _ = reader.readAll(&sig) catch break; // EOF or not enough data
             
+            // Check for duplicate extensions
+            for (seen_extensions.items) |seen_sig| {
+                if (std.mem.eql(u8, &sig, &seen_sig)) {
+                    // Duplicate extension found - this might indicate corruption
+                    try reader.context.seekTo(current_pos);
+                    break;
+                }
+            }
+            
             // Check if this is actually the start of the SHA-1 checksum
             // Extensions have specific signature patterns:
             // - TREE: tree cache extension
@@ -308,6 +321,8 @@ pub const Index = struct {
             // - link: split index extension
             // - UNTR: untracked cache extension
             // - FSMN: file system monitor extension
+            // - IEOT: index entry offset table
+            // - EOIE: end of index entries
             const known_extensions = [_][]const u8{ "TREE", "REUC", "link", "UNTR", "FSMN", "IEOT", "EOIE" };
             
             var is_known_extension = false;
@@ -323,11 +338,19 @@ pub const Index = struct {
                 if (c < 32 or c > 126) break false;
             } else true;
             
-            // If it's not a known extension and not printable ASCII, assume it's the checksum
-            if (!is_known_extension and !is_printable) {
+            // Additional validation: check if signature looks like SHA-1 data
+            const looks_like_sha1 = for (sig) |c| {
+                if (!std.ascii.isHex(c) and c < 32) break true; // Binary data, likely SHA-1
+            } else false;
+            
+            // If it's not a known extension, not printable ASCII, or looks like SHA-1, assume it's the checksum
+            if ((!is_known_extension and !is_printable) or looks_like_sha1) {
                 try reader.context.seekTo(current_pos);
                 break;
             }
+            
+            // Track this extension to detect duplicates
+            try seen_extensions.append(sig);
             
             // Read extension size
             const ext_size = reader.readInt(u32, .big) catch {
