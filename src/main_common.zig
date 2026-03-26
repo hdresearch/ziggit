@@ -435,10 +435,20 @@ fn forwardConfigToGit(allocator: std.mem.Allocator, all_args: [][]const u8, comm
                     }
                 }
             } else if (std.mem.eql(u8, subcmd, "get")) {
-                // git config get [--flags] <key>
+                // git config get [--all] [--flags] <key>
                 // → git config --get [--flags] <key>
-                try new_args.append("--get");
+                // → git config --get-all [--flags] <key> (if --all present)
+                var get_has_all = false;
+                for (all_args[rest_start..]) |a| {
+                    if (std.mem.eql(u8, a, "--all")) get_has_all = true;
+                }
+                if (get_has_all) {
+                    try new_args.append("--get-all");
+                } else {
+                    try new_args.append("--get");
+                }
                 for (all_args[rest_start..]) |arg| {
+                    if (std.mem.eql(u8, arg, "--all")) continue;
                     try new_args.append(arg);
                 }
             } else if (std.mem.eql(u8, subcmd, "unset")) {
