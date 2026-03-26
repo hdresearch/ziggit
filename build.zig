@@ -4,6 +4,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // ========== BUILD OPTIONS ==========
+    const enable_git_fallback = b.option(bool, "git-fallback", "Enable git CLI fallback for unimplemented commands (not available in WASM)") orelse true;
+
     // ========== MAIN CLI EXECUTABLE (default target) ==========
     const exe = b.addExecutable(.{
         .name = "ziggit",
@@ -11,6 +14,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    
+    const exe_options = b.addOptions();
+    exe_options.addOption(bool, "enable_git_fallback", enable_git_fallback);
+    exe.root_module.addOptions("build_options", exe_options);
     
     b.installArtifact(exe);
 
@@ -160,6 +167,11 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSmall,
         .strip = true,
     });
+    
+    // WASM target always has git fallback disabled
+    const wasm_options = b.addOptions();
+    wasm_options.addOption(bool, "enable_git_fallback", false);
+    wasm_exe.root_module.addOptions("build_options", wasm_options);
     
     wasm_exe.stack_size = 256 * 1024; // 256KB stack
     wasm_exe.initial_memory = 16 * 1024 * 1024; // 16MB initial memory
