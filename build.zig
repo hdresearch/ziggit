@@ -1856,7 +1856,12 @@ pub fn build(b: *std.Build) void {
     browser_wasm.max_memory = 64 * 1024 * 1024; // 64MB max
 
     const browser_step = b.step("wasm-browser", "Build for browser (freestanding, exports ziggit API)");
-    browser_step.dependOn(&b.addInstallArtifact(browser_wasm, .{}).step);
+    const install_browser = b.addInstallArtifact(browser_wasm, .{});
+    browser_step.dependOn(&install_browser.step);
+
+    // Also copy wasm to browser/ directory for easy serving
+    const copy_to_browser = b.addInstallFile(browser_wasm.getEmittedBin(), "../browser/ziggit-browser.wasm");
+    browser_step.dependOn(&copy_to_browser.step);
 
     // ========== UTILITY COMMANDS ==========
     
