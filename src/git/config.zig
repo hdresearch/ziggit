@@ -845,4 +845,165 @@ pub const ConfigManager = struct {
         defer self.allocator.free(config_path);
         try local_config.writeToFile(config_path);
     }
+    
+    /// Validate config file integrity and format
+    pub fn validateConfigFile(self: ConfigManager, config_path: []const u8) !ConfigValidationResult {
+        var result = ConfigValidationResult.init(self.allocator);
+        
+        // Check if file exists and is readable
+        const content = std.fs.cwd().readFileAlloc(self.allocator, config_path, 10 * 1024 * 1024) catch |err| switch (err) {
+            error.FileNotFound => {
+                try result.errors.append("Config file not found");
+                return result;
+            },
+            error.AccessDenied => {
+                try result.errors.append("Config file access denied");
+                return result;
+            },
+            error.IsDir => {
+                try result.errors.append("Config path is a directory, not a file");
+                return result;
+            },
+            else => {
+                const err_msg = try std.fmt.allocPrint(self.allocator, "Failed to read config file: {}", .{err});
+                try result.errors.append(err_msg);
+                return result;
+            },
+        };
+        defer self.allocator.free(content);
+        
+        // Basic content validation
+        if (content.len == 0) {
+            try result.warnings.append("Config file is empty");
+            result.is_valid = true; // Empty config is technically valid
+            return result;
+        }
+        
+        // Check for binary content (should be text)
+        for (content, 0..) |byte, i| {
+            if (byte == 0) {
+                const err_msg = try std.fmt.allocPrint(self.allocator, "Config file contains null byte at position {}", .{i});
+                try result.errors.append(err_msg);
+                return result;
+            }
+            if (byte < 9 or (byte > 13 and byte < 32) or byte > 126) {
+                // Allow common whitespace chars (9=tab, 10=LF, 13=CR, 32=space)
+                if (!(byte == 9 or byte == 10 or byte == 13)) {
+                    const warn_msg = try std.fmt.allocPrint(self.allocator, "Config file contains non-ASCII byte {} at position {}", .{ byte, i });
+                    try result.warnings.append(warn_msg);
+                }
+            }
+        }
+        
+        // Try to parse the config
+        var test_config = GitConfig.init(self.allocator);
+        defer test_config.deinit();
+        
+        test_config.parseFromString(content) catch |err| {
+            const err_msg = try std.fmt.allocPrint(self.allocator, "Failed to parse config: {}", .{err});
+            try result.errors.append(err_msg);
+            return result;
+        };
+        
+        result.total_entries = test_config.entries.items.len;
+        
+        // Validate specific configuration entries
+        var section_counts = std.HashMap([]const u8, u32, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(self.allocator);
+        defer section_counts.deinit();
+        
+        for (test_config.entries.items) |entry| {
+            // Count sections
+            const count = section_counts.get(entry.section) orelse 0;
+            section_counts.put(entry.section, count + 1) catch {};
+            
+            // Validate common configuration values
+            if (std.mem.eql(u8, entry.section, "user")) {
+                if (std.mem.eql(u8, entry.name, "email")) {
+                    if (std.mem.indexOf(u8, entry.value, "@") == null) {
+                        const warn_msg = try std.fmt.allocPrint(self.allocator, "User email '{s}' does not contain @ symbol", .{entry.value});
+                        try result.warnings.append(warn_msg);
+                    }
+                } else if (std.mem.eql(u8, entry.name, "name")) {
+                    if (entry.value.len == 0) {
+                        try result.warnings.append("User name is empty");
+                    }
+                }
+            } else if (std.mem.eql(u8, entry.section, "core")) {
+                if (std.mem.eql(u8, entry.name, "autocrlf")) {
+                    const valid_values = [_][]const u8{ "true", "false", "input" };
+                    var is_valid = false;
+                    for (valid_values) |valid| {
+                        if (std.ascii.eqlIgnoreCase(entry.value, valid)) {
+                            is_valid = true;
+                            break;
+                        }
+                    }
+                    if (!is_valid) {
+                        const warn_msg = try std.fmt.allocPrint(self.allocator, "Invalid core.autocrlf value: '{s}' (should be true, false, or input)", .{entry.value});
+                        try result.warnings.append(warn_msg);
+                    }
+                } else if (std.mem.eql(u8, entry.name, "filemode")) {
+                    if (!std.ascii.eqlIgnoreCase(entry.value, "true") and !std.ascii.eqlIgnoreCase(entry.value, "false")) {
+                        const warn_msg = try std.fmt.allocPrint(self.allocator, "Invalid core.filemode value: '{s}' (should be true or false)", .{entry.value});
+                        try result.warnings.append(warn_msg);
+                    }
+                }
+            } else if (std.mem.eql(u8, entry.section, "remote")) {
+                if (std.mem.eql(u8, entry.name, "url")) {
+                    if (entry.value.len == 0) {
+                        const warn_msg = try std.fmt.allocPrint(self.allocator, "Remote URL is empty for remote '{s}'", .{entry.subsection orelse "unknown"});
+                        try result.warnings.append(warn_msg);
+                    } else if (!std.mem.startsWith(u8, entry.value, "http://") and 
+                              !std.mem.startsWith(u8, entry.value, "https://") and
+                              !std.mem.startsWith(u8, entry.value, "git://") and
+                              !std.mem.startsWith(u8, entry.value, "ssh://") and
+                              !std.mem.startsWith(u8, entry.value, "git@")) {
+                        const warn_msg = try std.fmt.allocPrint(self.allocator, "Remote URL '{s}' doesn't use a common protocol", .{entry.value});
+                        try result.warnings.append(warn_msg);
+                    }
+                }
+            }
+        }
+        
+        // Check for required configuration
+        if (test_config.getUserName() == null) {
+            try result.warnings.append("user.name is not configured");
+        }
+        if (test_config.getUserEmail() == null) {
+            try result.warnings.append("user.email is not configured");
+        }
+        
+        result.is_valid = result.errors.items.len == 0;
+        result.section_count = section_counts.count();
+        
+        return result;
+    }
+};
+
+pub const ConfigValidationResult = struct {
+    is_valid: bool = false,
+    total_entries: usize = 0,
+    section_count: usize = 0,
+    errors: std.ArrayList([]const u8),
+    warnings: std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    
+    pub fn init(allocator: std.mem.Allocator) ConfigValidationResult {
+        return ConfigValidationResult{
+            .errors = std.ArrayList([]const u8).init(allocator),
+            .warnings = std.ArrayList([]const u8).init(allocator),
+            .allocator = allocator,
+        };
+    }
+    
+    pub fn deinit(self: *ConfigValidationResult) void {
+        for (self.errors.items) |err_msg| {
+            self.allocator.free(err_msg);
+        }
+        for (self.warnings.items) |warn_msg| {
+            self.allocator.free(warn_msg);
+        }
+        self.errors.deinit();
+        self.warnings.deinit();
+    }
 };

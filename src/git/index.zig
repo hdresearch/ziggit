@@ -322,9 +322,13 @@ pub const Index = struct {
         var total_extension_size: u64 = 0;
         const max_total_extension_size = 100 * 1024 * 1024; // Increased to 100MB max for very large repos
         
-        // Track seen extensions to detect duplicates
+        // Track seen extensions to detect duplicates and store useful ones
         var seen_extensions = std.ArrayList([4]u8).init(self.allocator);
         defer seen_extensions.deinit();
+        
+        // Store tree cache for potential future use
+        var tree_cache_data: ?[]const u8 = null;
+        defer if (tree_cache_data) |data_ptr| self.allocator.free(data_ptr);
         
         while (extensions_found < max_extensions) {
             // Check if we have enough bytes left for checksum (20 bytes) plus extension header (8 bytes)
@@ -411,16 +415,37 @@ pub const Index = struct {
             // Handle special extensions that we might want to parse in the future
             if (std.mem.eql(u8, &sig, "TREE")) {
                 // Tree cache extension - could be useful for performance
-                // For now, just skip it but this could be cached for faster tree operations
+                // Store the tree cache data for potential future use
+                if (ext_size > 0) {
+                    var tree_data = try self.allocator.alloc(u8, ext_size);
+                    _ = reader.readAll(tree_data) catch {
+                        self.allocator.free(tree_data);
+                        try reader.context.seekTo(current_pos);
+                        break;
+                    };
+                    tree_cache_data = tree_data;
+                    continue; // Don't skip again below
+                }
             } else if (std.mem.eql(u8, &sig, "REUC")) {
                 // Resolve undo extension - tracks conflicts
                 // This contains information about resolved merge conflicts
+                // Could be parsed for better merge conflict handling
+                
             } else if (std.mem.eql(u8, &sig, "UNTR")) {
                 // Untracked cache extension - performance optimization
                 // Contains cached information about untracked files
+                
             } else if (std.mem.eql(u8, &sig, "FSMN")) {
                 // File system monitor extension
                 // Used by tools like git-lfs and watchman for performance
+                
+            } else if (std.mem.eql(u8, &sig, "IEOT")) {
+                // Index entry offset table - for very large indices
+                // Used to speed up partial index reads
+                
+            } else if (std.mem.eql(u8, &sig, "EOIE")) {
+                // End of index entries marker
+                // Indicates the end of the main index entries section
             }
             
             // Skip extension data
