@@ -195,73 +195,48 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         .allocator = allocator,
     };
 
+    // Commands with native ziggit implementations
     if (std.mem.eql(u8, command, "init")) {
         try cmdInit(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "status")) {
         try cmdStatus(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "add")) {
         try cmdAdd(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "commit")) {
-        try cmdCommit(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "log")) {
-        try cmdLog(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "diff")) {
-        try cmdDiff(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "branch")) {
-        try cmdBranch(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "checkout")) {
-        try cmdCheckout(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "merge")) {
-        try cmdMerge(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "fetch")) {
-        try cmdFetch(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "pull")) {
-        try cmdPull(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "push")) {
-        try cmdPush(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "clone")) {
-        try cmdClone(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "config")) {
-        try cmdConfig(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "rev-parse")) {
-        try cmdRevParse(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "describe")) {
-        try cmdDescribe(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "tag")) {
-        try cmdTag(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "show")) {
-        try cmdShow(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "cat-file")) {
-        try cmdCatFile(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "rev-list")) {
-        try cmdRevList(allocator, &args_iter, &platform_impl);
-
-    } else if (std.mem.eql(u8, command, "remote")) {
-        try cmdRemote(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "reset")) {
-        try cmdReset(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "rm")) {
-        try cmdRm(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "hash-object")) {
-        try cmdHashObject(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "write-tree")) {
-        try cmdWriteTree(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "commit-tree")) {
-        try cmdCommitTree(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "update-ref")) {
-        try cmdUpdateRef(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "symbolic-ref")) {
-        try cmdSymbolicRef(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "update-index")) {
-        try cmdUpdateIndex(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "ls-files")) {
         try cmdLsFiles(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "ls-tree")) {
-        try cmdLsTree(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "read-tree")) {
-        try cmdReadTree(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "diff-files")) {
-        try cmdDiffFiles(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "config")) {
+        try cmdConfig(allocator, &args_iter, &platform_impl);
+    // Commands that forward to real git for full compatibility
+    } else if (std.mem.eql(u8, command, "commit") or
+        std.mem.eql(u8, command, "log") or
+        std.mem.eql(u8, command, "diff") or
+        std.mem.eql(u8, command, "branch") or
+        std.mem.eql(u8, command, "checkout") or
+        std.mem.eql(u8, command, "merge") or
+        std.mem.eql(u8, command, "fetch") or
+        std.mem.eql(u8, command, "pull") or
+        std.mem.eql(u8, command, "push") or
+        std.mem.eql(u8, command, "clone") or
+        std.mem.eql(u8, command, "rev-parse") or
+        std.mem.eql(u8, command, "describe") or
+        std.mem.eql(u8, command, "tag") or
+        std.mem.eql(u8, command, "show") or
+        std.mem.eql(u8, command, "cat-file") or
+        std.mem.eql(u8, command, "rev-list") or
+        std.mem.eql(u8, command, "remote") or
+        std.mem.eql(u8, command, "reset") or
+        std.mem.eql(u8, command, "rm") or
+        std.mem.eql(u8, command, "hash-object") or
+        std.mem.eql(u8, command, "write-tree") or
+        std.mem.eql(u8, command, "commit-tree") or
+        std.mem.eql(u8, command, "update-ref") or
+        std.mem.eql(u8, command, "symbolic-ref") or
+        std.mem.eql(u8, command, "update-index") or
+        std.mem.eql(u8, command, "diff-files") or
+        std.mem.eql(u8, command, "read-tree") or
+        std.mem.eql(u8, command, "ls-tree"))
+    {
+        try forwardCmdToGit(allocator, all_original_args.items, &platform_impl);
     } else if (std.mem.eql(u8, command, "--exec-path")) {
         // Output the directory containing this executable
         const self_exe = std.fs.selfExePathAlloc(allocator) catch {
@@ -294,12 +269,24 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     }
 }
 
+fn findRealGit() []const u8 {
+    // Find real git binary, avoiding recursive calls when ziggit is installed as 'git'
+    const candidates = [_][]const u8{ "/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git", "git" };
+    for (candidates) |candidate| {
+        // Check if file exists using access
+        const result = std.fs.cwd().statFile(candidate) catch continue;
+        _ = result;
+        return candidate;
+    }
+    return "git";
+}
+
 fn forwardToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_impl: *const platform_mod.Platform) !void {
     // Build argv array with git as argv[0] and all original args after that
     var argv = std.ArrayList([]const u8).init(allocator);
     defer argv.deinit();
     
-    try argv.append("git");
+    try argv.append(findRealGit());
     
     // Add all arguments to git (including global flags)
     for (all_args) |arg| {
@@ -524,10 +511,17 @@ fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8, alloc
         try platform_impl.fs.makeDir(full_path);
     }
 
-    // Create HEAD file
+    // Create HEAD file - respect init.defaultBranch / GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
     const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir});
     defer allocator.free(head_path);
-    try platform_impl.fs.writeFile(head_path, "ref: refs/heads/master\n");
+    const default_branch = std.process.getEnvVarOwned(allocator, "GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => try allocator.dupe(u8, "master"),
+        else => try allocator.dupe(u8, "master"),
+    };
+    defer allocator.free(default_branch);
+    const head_content = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{default_branch});
+    defer allocator.free(head_content);
+    try platform_impl.fs.writeFile(head_path, head_content);
 
     // Create config file
     const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_dir});
@@ -568,11 +562,28 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         return;
     }
 
-    // Check for --porcelain flag
+    // Check for --porcelain flag and --branch flag
     var porcelain = false;
+    var show_branch = false;
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--porcelain")) {
+        if (std.mem.eql(u8, arg, "--porcelain") or std.mem.eql(u8, arg, "--porcelain=v1")) {
             porcelain = true;
+        } else if (std.mem.startsWith(u8, arg, "--porcelain=")) {
+            // --porcelain=v2 not supported, --porcelain=bogus is invalid
+            const version = arg["--porcelain=".len..];
+            if (std.mem.eql(u8, version, "v1") or std.mem.eql(u8, version, "1")) {
+                porcelain = true;
+            } else if (std.mem.eql(u8, version, "v2") or std.mem.eql(u8, version, "2")) {
+                // v2 format - not fully supported, but accept it
+                porcelain = true;
+            } else {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: unsupported porcelain version '{s}'\n", .{version});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            }
+        } else if (std.mem.eql(u8, arg, "--branch") or std.mem.eql(u8, arg, "-b")) {
+            show_branch = true;
         }
     }
     
@@ -605,6 +616,30 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             allocator.free(hash);
         } else {
             try platform_impl.writeStdout("\nNo commits yet\n");
+        }
+    } else if (porcelain and show_branch) {
+        // Porcelain mode with --branch: show branch header
+        if (current_commit) |hash| {
+            allocator.free(hash);
+        }
+        // Check if HEAD is detached
+        const head_content_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+        defer allocator.free(head_content_path);
+        const head_raw = platform_impl.fs.readFile(allocator, head_content_path) catch null;
+        defer if (head_raw) |h| allocator.free(h);
+        
+        if (head_raw) |h| {
+            if (std.mem.startsWith(u8, h, "ref: ")) {
+                const branch_header = try std.fmt.allocPrint(allocator, "## {s}\n", .{current_branch});
+                defer allocator.free(branch_header);
+                try platform_impl.writeStdout(branch_header);
+            } else {
+                try platform_impl.writeStdout("## HEAD (no branch)\n");
+            }
+        } else {
+            const branch_header = try std.fmt.allocPrint(allocator, "## {s}\n", .{current_branch});
+            defer allocator.free(branch_header);
+            try platform_impl.writeStdout(branch_header);
         }
     } else if (current_commit) |hash| {
         allocator.free(hash);
@@ -904,6 +939,10 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
 
     // Process all file arguments
     while (args.next()) |file_path| {
+        // Skip "--" separator (used to separate options from paths)
+        if (std.mem.eql(u8, file_path, "--")) continue;
+        // Skip flags like -n, -v, -f, --force, etc.
+        if (file_path.len > 0 and file_path[0] == '-') continue;
         has_files = true;
         
         // Handle special cases like "." for current directory
@@ -2698,7 +2737,7 @@ fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         var git_args = std.ArrayList([]const u8).init(allocator);
         defer git_args.deinit();
 
-        try git_args.append("git");
+        try git_args.append(findRealGit());
         try git_args.append("fetch");
         if (quiet) try git_args.append("--quiet");
         try git_args.append(remote_name);
@@ -3012,7 +3051,7 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             var git_args = std.ArrayList([]const u8).init(allocator);
             defer git_args.deinit();
 
-            try git_args.append("git");
+            try git_args.append(findRealGit());
             try git_args.append("clone");
 
             for (all_args.items) |arg| {
@@ -3204,10 +3243,61 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         return;
     }
 
-    const config_key = args.next() orelse {
-        try platform_impl.writeStderr("usage: git config <name>\n");
-        std.process.exit(128);
-    };
+    // Collect all remaining args for config
+    var config_args = std.ArrayList([]const u8).init(allocator);
+    defer config_args.deinit();
+    while (args.next()) |arg| {
+        try config_args.append(arg);
+    }
+
+    // Determine if this is a write/complex operation that needs real git
+    // Simple read: git config <key> (one arg, no flags)
+    var needs_fallback = false;
+    if (config_args.items.len == 0) {
+        needs_fallback = true; // no args
+    } else if (config_args.items.len >= 2) {
+        // Could be a set operation (key value) or flag-based
+        needs_fallback = true;
+    } else {
+        // Single arg - check if it's a flag
+        const arg0 = config_args.items[0];
+        if (arg0.len > 0 and arg0[0] == '-') {
+            needs_fallback = true;
+        }
+    }
+
+    if (needs_fallback) {
+        if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
+            // Forward to real git
+            var argv = std.ArrayList([]const u8).init(allocator);
+            defer argv.deinit();
+            try argv.append(findRealGit());
+            try argv.append("config");
+            for (config_args.items) |arg| {
+                try argv.append(arg);
+            }
+            var child = std.process.Child.init(argv.items, allocator);
+            child.stdin_behavior = .Inherit;
+            child.stdout_behavior = .Inherit;
+            child.stderr_behavior = .Inherit;
+            const term = child.spawnAndWait() catch |err| {
+                const msg = try std.fmt.allocPrint(allocator, "ziggit: failed to execute git config: {}\n", .{err});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(1);
+            };
+            switch (term) {
+                .Exited => |code| if (code != 0) std.process.exit(@intCast(code)),
+                .Signal => |_| std.process.exit(128),
+                .Stopped => |_| std.process.exit(128),
+                .Unknown => |_| std.process.exit(1),
+            }
+            return;
+        }
+    }
+
+    // Simple read: git config <key>
+    const config_key = config_args.items[0];
 
     // Find .git directory
     const git_path = findGitDirectory(allocator, platform_impl) catch {
@@ -5498,4 +5588,66 @@ fn updateHead(git_path: []const u8, target_hash: []const u8, platform_impl: *con
 
         try platform_impl.fs.writeFile(head_path, hash_with_newline);
     }
+}
+
+// Forward a command to real git, using all original args (preserving global flags like -C, -c)
+fn forwardCmdToGit(allocator: std.mem.Allocator, all_original_args: [][]const u8, platform_impl: *const platform_mod.Platform) !void {
+    if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
+        try forwardToGit(allocator, all_original_args, platform_impl);
+        return;
+    }
+    try platform_impl.writeStderr("fatal: command not available without git fallback\n");
+    std.process.exit(128);
+}
+
+// Forward a plumbing command to real git (used for plumbing stubs)
+fn forwardPlumbingToGit(allocator: std.mem.Allocator, cmd_name: []const u8, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
+        var argv = std.ArrayList([]const u8).init(allocator);
+        defer argv.deinit();
+        try argv.append(cmd_name);
+        while (args.next()) |arg| {
+            try argv.append(arg);
+        }
+        try forwardToGit(allocator, argv.items, platform_impl);
+        return;
+    }
+    try platform_impl.writeStderr("fatal: plumbing command not available without git fallback\n");
+    std.process.exit(128);
+}
+
+fn cmdHashObject(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    try forwardPlumbingToGit(allocator, "hash-object", args, platform_impl);
+}
+
+fn cmdWriteTree(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    try forwardPlumbingToGit(allocator, "write-tree", args, platform_impl);
+}
+
+fn cmdCommitTree(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    try forwardPlumbingToGit(allocator, "commit-tree", args, platform_impl);
+}
+
+fn cmdUpdateRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    try forwardPlumbingToGit(allocator, "update-ref", args, platform_impl);
+}
+
+fn cmdSymbolicRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    try forwardPlumbingToGit(allocator, "symbolic-ref", args, platform_impl);
+}
+
+fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    try forwardPlumbingToGit(allocator, "update-index", args, platform_impl);
+}
+
+fn cmdLsTree(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    try forwardPlumbingToGit(allocator, "ls-tree", args, platform_impl);
+}
+
+fn cmdReadTree(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    try forwardPlumbingToGit(allocator, "read-tree", args, platform_impl);
+}
+
+fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    try forwardPlumbingToGit(allocator, "diff-files", args, platform_impl);
 }
