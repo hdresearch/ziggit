@@ -16,7 +16,8 @@ test "comprehensive pack file handling after git gc" {
     defer std.fs.cwd().deleteTree(temp_dir_path) catch {};
 
     // Change to the temp directory for git operations
-    const temp_dir = try std.fs.openDirAbsolute(temp_dir_path, .{});
+    var temp_dir = try std.fs.openDirAbsolute(temp_dir_path, .{ .iterate = true });
+    defer temp_dir.close();
     
     // Initialize git repository
     var init_cmd = std.process.Child.init(&.{"git", "init"}, allocator);
@@ -111,7 +112,7 @@ test "comprehensive pack file handling after git gc" {
     print("  git gc completed successfully\n", .{});
 
     // Check if pack files were created
-    const pack_dir = temp_dir.openDir(".git/objects/pack", .{ .iterate = true }) catch |err| {
+    var pack_dir = temp_dir.openDir(".git/objects/pack", .{ .iterate = true }) catch |err| {
         print("  No pack directory found: {}, test inconclusive\n", .{err});
         return;
     };
