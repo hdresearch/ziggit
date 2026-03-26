@@ -142,6 +142,15 @@ pub fn build(b: *std.Build) void {
     });
     const run_build_system_test = b.addRunArtifact(build_system_test);
 
+    // Comprehensive integration test
+    const comprehensive_integration_test = b.addExecutable(.{
+        .name = "comprehensive_integration_test",
+        .root_source_file = b.path("test/comprehensive_integration_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_comprehensive_integration_test = b.addRunArtifact(comprehensive_integration_test);
+
     // Test step runs all tests
     const test_step = b.step("test", "Run unit tests and integration tests");
     test_step.dependOn(&run_platform_tests.step);
@@ -154,6 +163,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_pack_improvement_tests.step);
     test_step.dependOn(&run_lib_status_test.step);
     test_step.dependOn(&run_build_system_test.step);
+    test_step.dependOn(&run_comprehensive_integration_test.step);
 
     // Bun API test standalone step
     const test_bun_api_step = b.step("test-bun", "Run bun workflow test using Zig API (ITEM 6)");

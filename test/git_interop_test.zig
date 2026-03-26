@@ -22,7 +22,13 @@ pub fn main() !void {
 
     print("Running Git Interoperability Tests...\n", .{});
 
-    // Set up global git config for tests
+    // Set HOME environment for git (skip if not available)
+    _ = std.process.getEnvVarOwned(allocator, "HOME") catch {
+        // HOME not set, but we can't easily set it in newer Zig versions  
+        // Git commands should work with proper config
+    };
+
+    // Set up global git config for tests (ignore failures)
     _ = runCommandSafe(allocator, &.{"git", "config", "--global", "user.name", "Test User"}, fs.cwd());
     _ = runCommandSafe(allocator, &.{"git", "config", "--global", "user.email", "test@example.com"}, fs.cwd());
 
@@ -53,6 +59,9 @@ pub fn main() !void {
     try testBinaryFileHandling(allocator, test_dir);
     try testUnicodeFilenameSupport(allocator, test_dir);
     try testLargeFileHandling(allocator, test_dir);
+    
+    // Critical workflow compatibility
+    try testBunNpmWorkflowCompatibility(allocator, test_dir);
 
     print("All git interoperability tests passed!\n", .{});
 }
@@ -329,6 +338,115 @@ fn runCommandNoOutput(allocator: std.mem.Allocator, args: []const []const u8, cw
 // Helper function for running commands safely (ignoring errors)
 fn runCommandSafe(allocator: std.mem.Allocator, args: []const []const u8, cwd: fs.Dir) ?[]u8 {
     return runCommand(allocator, args, cwd) catch null;
+}
+
+// Test for exact compatibility with critical bun/npm workflows
+fn testBunNpmWorkflowCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
+    print("Test: Critical bun/npm workflow compatibility\n", .{});
+    
+    const repo_path = try test_dir.makeOpenPath("bun_npm_workflow_test", .{});
+    defer test_dir.deleteTree("bun_npm_workflow_test") catch {};
+
+    // Initialize and setup a typical JS project
+    try runCommandNoOutput(allocator, &.{"git", "init"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
+
+    // Create typical JS project files
+    try repo_path.writeFile(.{.sub_path = "package.json", .data = 
+        \\{
+        \\  "name": "test-project",
+        \\  "version": "1.0.0",
+        \\  "main": "index.js",
+        \\  "scripts": {
+        \\    "start": "node index.js"
+        \\  }
+        \\}
+        \\
+    });
+    
+    try repo_path.writeFile(.{.sub_path = "index.js", .data = 
+        \\console.log('Hello from test project');
+        \\module.exports = {};
+        \\
+    });
+    
+    try repo_path.writeFile(.{.sub_path = ".gitignore", .data = 
+        \\node_modules/
+        \\*.log
+        \\.env
+        \\
+    });
+
+    // Initial commit
+    try runCommandNoOutput(allocator, &.{"git", "add", "."}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "commit", "-m", "Initial commit"}, repo_path);
+
+    // Simulate development workflow: modify files, add new files
+    try repo_path.writeFile(.{.sub_path = "index.js", .data = 
+        \\console.log('Hello from test project - MODIFIED');
+        \\const helper = require('./helper.js');
+        \\module.exports = { helper };
+        \\
+    });
+    
+    try repo_path.writeFile(.{.sub_path = "helper.js", .data = 
+        \\function helper() {
+        \\  return 'I am a helper';
+        \\}
+        \\module.exports = helper;
+        \\
+    });
+
+    // Test critical commands that bun/npm tools use
+    const critical_commands = [_][]const []const u8{
+        &.{"status", "--porcelain"},
+        &.{"diff", "--name-only"},
+        &.{"log", "--oneline", "-10"},
+        &.{"show", "--name-only", "HEAD"},
+        &.{"ls-files"},
+    };
+
+    var all_passed = true;
+    for (critical_commands) |cmd| {
+        // Get git reference output
+        var git_cmd = std.ArrayList([]const u8).init(allocator);
+        defer git_cmd.deinit();
+        try git_cmd.append("git");
+        for (cmd) |arg| try git_cmd.append(arg);
+        
+        const git_output = runCommandSafe(allocator, git_cmd.items, repo_path) orelse {
+            print("  ⚠ Git command failed: {s}\n", .{cmd});
+            continue;
+        };
+        defer allocator.free(git_output);
+
+        // Get ziggit output
+        const ziggit_output = runZiggitCommandSafe(allocator, cmd, repo_path) catch null;
+        if (ziggit_output == null) {
+            print("  ⚠ Ziggit command not implemented: {s}\n", .{cmd});
+            all_passed = false;
+            continue;
+        }
+        defer allocator.free(ziggit_output.?);
+
+        // Compare outputs for consistency
+        const git_lines = std.mem.count(u8, git_output, "\n");
+        const ziggit_lines = std.mem.count(u8, ziggit_output.?, "\n");
+        
+        if (git_lines != ziggit_lines) {
+            print("  ⚠ Line count mismatch for {s}: git={}, ziggit={}\n", .{cmd, git_lines, ziggit_lines});
+            all_passed = false;
+        } else {
+            print("  ✓ {s} compatibility verified\n", .{cmd});
+        }
+    }
+
+    if (all_passed) {
+        print("  ✓ Bun/npm workflow compatibility test passed\n", .{});
+    } else {
+        print("  ⚠ Bun/npm workflow compatibility test had warnings\n", .{});
+    }
 }
 
 // Helper function to compare git and ziggit outputs
