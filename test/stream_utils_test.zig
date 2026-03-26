@@ -281,6 +281,50 @@ test "decompressHashIntoBuf matches streaming" {
     try std.testing.expectEqual(streaming.decompressed_size, buf_result.decompressed_size);
 }
 
+// ── 4. Pack header parsing utilities ──
+
+test "parsePackObjectHeader commit type" {
+    // type=1 (commit), size=150
+    // byte0: continuation | (1 << 4) | (150 & 0x0F) = 0x80 | 0x10 | 0x06 = 0x96
+    // byte1: (150 >> 4) = 9 (no continuation)
+    const data = [_]u8{ 0x96, 0x09 };
+    const hdr = try stream_utils.parsePackObjectHeader(&data, 0);
+    try std.testing.expectEqual(@as(u3, 1), hdr.type_num);
+    try std.testing.expectEqual(@as(usize, 150), hdr.size);
+    try std.testing.expectEqual(@as(usize, 2), hdr.header_len);
+}
+
+test "parsePackObjectHeader blob type small" {
+    // type=3 (blob), size=5 — fits in one byte
+    const data = [_]u8{0x35};
+    const hdr = try stream_utils.parsePackObjectHeader(&data, 0);
+    try std.testing.expectEqual(@as(u3, 3), hdr.type_num);
+    try std.testing.expectEqual(@as(usize, 5), hdr.size);
+}
+
+test "parseOfsOffset single byte" {
+    const data = [_]u8{0x05};
+    const r = try stream_utils.parseOfsOffset(&data, 0);
+    try std.testing.expectEqual(@as(usize, 5), r.negative_offset);
+    try std.testing.expectEqual(@as(usize, 1), r.bytes_consumed);
+}
+
+test "parseOfsOffset multi byte" {
+    const data = [_]u8{ 0x81, 0x00 };
+    const r = try stream_utils.parseOfsOffset(&data, 0);
+    try std.testing.expectEqual(@as(usize, 256), r.negative_offset);
+    try std.testing.expectEqual(@as(usize, 2), r.bytes_consumed);
+}
+
+test "packTypeToString" {
+    try std.testing.expectEqualSlices(u8, "commit", stream_utils.packTypeToString(1).?);
+    try std.testing.expectEqualSlices(u8, "tree", stream_utils.packTypeToString(2).?);
+    try std.testing.expectEqualSlices(u8, "blob", stream_utils.packTypeToString(3).?);
+    try std.testing.expectEqualSlices(u8, "tag", stream_utils.packTypeToString(4).?);
+    try std.testing.expect(stream_utils.packTypeToString(6) == null);
+    try std.testing.expect(stream_utils.packTypeToString(7) == null);
+}
+
 test "decompressHashAndCapture roundtrip" {
     const allocator = std.testing.allocator;
     const data = "tree entry content\x00hash_bytes_here";
