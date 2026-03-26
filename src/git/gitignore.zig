@@ -72,7 +72,7 @@ pub const GitIgnore = struct {
         
         // Path starts with pattern/ (directory matching)
         if (std.mem.endsWith(u8, path, actual_pattern) or 
-            std.mem.indexOf(u8, path, actual_pattern)) |_| {
+            std.mem.indexOf(u8, path, actual_pattern) != null) {
             return !is_negation;
         }
         
