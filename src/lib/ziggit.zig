@@ -1363,7 +1363,12 @@ fn isFileModifiedAgainstIndex(work_tree: []const u8, file_path: []const u8, inde
         const content = try file_handle.readToEndAlloc(global_allocator, stat.size);
         defer global_allocator.free(content);
         
+        // Compute SHA1 of file content as git does: "blob <size>\0<content>"
         var hasher = std.crypto.hash.Sha1.init(.{});
+        const blob_header = try std.fmt.allocPrint(global_allocator, "blob {d}\x00", .{content.len});
+        defer global_allocator.free(blob_header);
+        
+        hasher.update(blob_header);
         hasher.update(content);
         var file_hash: [20]u8 = undefined;
         hasher.final(&file_hash);
