@@ -23,7 +23,7 @@ const GitError = error{
 const NATIVE_COMMANDS = [_][]const u8{ 
     "init", "status", "add", "commit", "log", "diff", "branch", "checkout", "merge", 
     "fetch", "pull", "push", "clone", "config", "rev-parse", "describe", "tag", 
-    "show", "cat-file", "rev-list", "ls-files", "remote", "reset", "rm",
+    "show", "cat-file", "rev-list", "remote", "reset", "rm",
     "--version", "-v", "--version-info", "--help", "-h", "help" 
 };
 
@@ -232,8 +232,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmdCatFile(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "rev-list")) {
         try cmdRevList(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "ls-files")) {
-        try cmdLsFiles(allocator, &args_iter, &platform_impl);
+
     } else if (std.mem.eql(u8, command, "remote")) {
         try cmdRemote(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "reset")) {
