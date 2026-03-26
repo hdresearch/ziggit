@@ -234,7 +234,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "config")) {
         // Forward to real git for full compatibility; fall back to native on freestanding
         if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
-            try forwardCmdToGit(allocator, all_original_args.items, &platform_impl);
+            // Translate new-style config subcommands (git 2.46+) for older git
+            try forwardConfigToGit(allocator, all_original_args.items, command_index, &platform_impl);
         } else {
             try cmdConfig(allocator, &args_iter, &platform_impl);
         }
@@ -323,6 +324,74 @@ fn findRealGit() []const u8 {
         return candidate;
     }
     return "git";
+}
+
+fn forwardConfigToGit(allocator: std.mem.Allocator, all_args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    // Translate new-style config subcommands (git 2.46+) to old-style flags
+    // git config set <key> <value> [--flags]  → git config [--flags] <key> <value>
+    // git config get <key> [--flags]          → git config --get [--flags] <key>
+    // git config unset <key> [--flags]        → git config --unset [--flags] <key>
+    // git config list [--flags]               → git config --list [--flags]
+    
+    const subcmd_index = command_index + 1;
+    if (subcmd_index < all_args.len) {
+        const subcmd = all_args[subcmd_index];
+        const is_new_style = std.mem.eql(u8, subcmd, "set") or 
+                             std.mem.eql(u8, subcmd, "get") or 
+                             std.mem.eql(u8, subcmd, "unset") or 
+                             std.mem.eql(u8, subcmd, "list");
+        
+        if (is_new_style) {
+            var new_args = std.ArrayList([]const u8).init(allocator);
+            defer new_args.deinit();
+            
+            // Copy args before config command (global flags)
+            for (all_args[0..command_index]) |arg| {
+                try new_args.append(arg);
+            }
+            // Keep "config"
+            try new_args.append("config");
+            
+            // Collect remaining args after subcmd
+            const rest_start = subcmd_index + 1;
+            
+            if (std.mem.eql(u8, subcmd, "set")) {
+                // git config set [--flags] <key> <value>
+                // → git config [--flags] <key> <value>
+                // Just skip "set" and pass through rest
+                for (all_args[rest_start..]) |arg| {
+                    try new_args.append(arg);
+                }
+            } else if (std.mem.eql(u8, subcmd, "get")) {
+                // git config get [--flags] <key>
+                // → git config --get [--flags] <key>
+                try new_args.append("--get");
+                for (all_args[rest_start..]) |arg| {
+                    try new_args.append(arg);
+                }
+            } else if (std.mem.eql(u8, subcmd, "unset")) {
+                // git config unset [--flags] <key>
+                // → git config --unset [--flags] <key>
+                try new_args.append("--unset");
+                for (all_args[rest_start..]) |arg| {
+                    try new_args.append(arg);
+                }
+            } else if (std.mem.eql(u8, subcmd, "list")) {
+                // git config list [--flags]
+                // → git config --list [--flags]
+                try new_args.append("--list");
+                for (all_args[rest_start..]) |arg| {
+                    try new_args.append(arg);
+                }
+            }
+            
+            try forwardToGit(allocator, new_args.items, platform_impl);
+            return;
+        }
+    }
+    
+    // Not a new-style subcommand, forward as-is
+    try forwardCmdToGit(allocator, all_args, platform_impl);
 }
 
 fn forwardVersionToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_impl: *const platform_mod.Platform) !void {
