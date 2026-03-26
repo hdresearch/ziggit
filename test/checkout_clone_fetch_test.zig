@@ -259,7 +259,7 @@ test "cloneBare: rejects already existing target" {
 
 test "cloneNoCheckout: rejects network URL" {
     const result = Repository.cloneNoCheckout(testing.allocator, "https://github.com/foo/bar", "/tmp/nope");
-    try testing.expectError(error.NetworkRemoteNotSupported, result);
+    try testing.expectError(error.HttpCloneFailed, result);
 }
 
 test "cloneBare: rejects network URL" {

@@ -624,7 +624,7 @@ test "cloneBare rejects http URLs" {
 
 test "cloneNoCheckout rejects http URLs" {
     const result = Repository.cloneNoCheckout(testing.allocator, "https://github.com/example/repo", "/tmp/ziggit_apicov_nocheckout_reject");
-    try testing.expectError(error.NetworkRemoteNotSupported, result);
+    try testing.expectError(error.HttpCloneFailed, result);
 }
 
 // ============================================================================

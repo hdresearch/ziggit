@@ -150,7 +150,7 @@ test "cloneNoCheckout: fails on network URL" {
     defer cleanup(dst);
 
     const result = Repository.cloneNoCheckout(testing.allocator, "https://github.com/example/repo.git", dst);
-    try testing.expectError(error.NetworkRemoteNotSupported, result);
+    try testing.expectError(error.HttpCloneFailed, result);
 }
 
 // ============================================================================

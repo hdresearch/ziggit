@@ -531,7 +531,7 @@ test "cloneNoCheckout fails on network URL" {
         "https://github.com/test/repo.git",
         "/tmp/ziggit_t_clone_net",
     );
-    try testing.expectError(error.NetworkRemoteNotSupported, result);
+    try testing.expectError(error.HttpCloneFailed, result);
 }
 
 test "fetch fails on network URL" {
