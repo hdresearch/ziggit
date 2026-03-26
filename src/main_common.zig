@@ -25,7 +25,9 @@ const NATIVE_COMMANDS = [_][]const u8{
     "init", "status", "add", "commit", "log", "diff", "branch", "checkout", "merge", 
     "fetch", "pull", "push", "clone", "config", "rev-parse", "describe", "tag", 
     "show", "cat-file", "rev-list", "remote", "reset", "rm",
-    "--version", "-v", "--version-info", "--help", "-h", "help" 
+    "hash-object", "write-tree", "commit-tree", "update-ref", "symbolic-ref",
+    "update-index", "ls-files", "ls-tree", "read-tree", "diff-files",
+    "--version", "-v", "--version-info", "--help", "-h", "help", "--exec-path",
 };
 
 fn isNativeCommand(command: []const u8) bool {
@@ -240,6 +242,37 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmdReset(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "rm")) {
         try cmdRm(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "hash-object")) {
+        try cmdHashObject(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "write-tree")) {
+        try cmdWriteTree(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "commit-tree")) {
+        try cmdCommitTree(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "update-ref")) {
+        try cmdUpdateRef(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "symbolic-ref")) {
+        try cmdSymbolicRef(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "update-index")) {
+        try cmdUpdateIndex(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "ls-files")) {
+        try cmdLsFiles(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "ls-tree")) {
+        try cmdLsTree(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "read-tree")) {
+        try cmdReadTree(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "diff-files")) {
+        try cmdDiffFiles(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "--exec-path")) {
+        // Output the directory containing this executable
+        const self_exe = std.fs.selfExePathAlloc(allocator) catch {
+            try platform_impl.writeStdout("/usr/lib/git-core\n");
+            return;
+        };
+        defer allocator.free(self_exe);
+        const dir = std.fs.path.dirname(self_exe) orelse "/usr/lib/git-core";
+        const output = try std.fmt.allocPrint(allocator, "{s}\n", .{dir});
+        defer allocator.free(output);
+        try platform_impl.writeStdout(output);
     } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
         if (version_mod.getVersionString(allocator)) |version_msg| {
             defer allocator.free(version_msg);
