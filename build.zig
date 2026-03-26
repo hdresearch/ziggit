@@ -520,6 +520,39 @@ pub fn build(b: *std.Build) void {
     });
     ziggit_writes_test.root_module.addImport("ziggit", ziggit_module);
 
+    // Config parsing tests (internal git module)
+    const config_parsing_tests = b.addTest(.{
+        .root_source_file = b.path("test/config_parsing_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    config_parsing_tests.root_module.addAnonymousImport("git", .{
+        .root_source_file = b.path("src/git/git.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(config_parsing_tests).step);
+
+    // Git objects internal tests (hash, store, load)
+    const git_objects_internal_tests = b.addTest(.{
+        .root_source_file = b.path("test/git_objects_internal_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    git_objects_internal_tests.root_module.addAnonymousImport("git", .{
+        .root_source_file = b.path("src/git/git.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(git_objects_internal_tests).step);
+
+    // Git index internal tests (parseIndexData, binary format)
+    const git_index_internal_tests = b.addTest(.{
+        .root_source_file = b.path("test/git_index_internal_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    git_index_internal_tests.root_module.addAnonymousImport("git", .{
+        .root_source_file = b.path("src/git/git.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(git_index_internal_tests).step);
+
     // E2E validation: git writes, ziggit reads
     const git_writes_test = b.addTest(.{
         .root_source_file = b.path("test/git_writes_ziggit_reads_test.zig"),
