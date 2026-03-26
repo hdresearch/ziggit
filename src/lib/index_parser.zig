@@ -135,7 +135,10 @@ fn writeIndexEntry(file: std.fs.File, entry: IndexEntry) !void {
     try file.writeAll(&entry.sha1);
     try writeU16BigEndian(file, entry.flags);
     try file.writeAll(entry.path);
-    const entry_size = 62 + entry.path.len;
+    // Write null terminator to match what the parser expects
+    const null_terminator = [_]u8{0};
+    try file.writeAll(&null_terminator);
+    const entry_size = 62 + entry.path.len + 1; // +1 for null terminator
     const padding_needed = (8 - (entry_size % 8)) % 8;
     if (padding_needed > 0) {
         const padding = [_]u8{0} ** 8;

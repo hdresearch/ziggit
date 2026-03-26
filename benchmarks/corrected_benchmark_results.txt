@@ -1,0 +1,36 @@
+=== CORRECTED ZIGGIT BENCHMARK RESULTS (After Index Corruption Fix) ===
+Date: 2026-03-26
+Build: ReleaseFast
+Issue: Previous results were artificially fast due to index corruption bug
+
+=== CORRECTED PERFORMANCE RESULTS ===
+revParseHead (Zig):    3.47μs  vs  Git CLI: 909μs   → 262x faster  ✅ EXCELLENT
+statusPorcelain (Zig): 211μs   vs  Git CLI: 1290μs  → 6.1x faster  ⚠️ NEEDS OPTIMIZATION  
+describeTags (Zig):    9.22μs  vs  Git CLI: 1276μs  → 138x faster  ✅ EXCELLENT
+isClean (Zig):         212μs   vs  Git CLI: 1297μs  → 6.1x faster  ⚠️ NEEDS OPTIMIZATION
+
+=== ANALYSIS ===
+The index corruption fix revealed the true performance baseline:
+
+BEFORE FIX (Corrupted index):
+- statusPorcelain: 125μs (artificially fast - wrong results, all files marked untracked)
+- isClean: 41μs (artificially fast - wrong results, repository appeared different than reality)
+
+AFTER FIX (Correct index):
+- statusPorcelain: 211μs (correct results - properly checks 100 tracked files)
+- isClean: 212μs (correct results - properly checks all files for changes)
+
+The ~211μs time represents legitimately processing 100 files:
+1. Read index with 100 entries
+2. Build HashMap for O(1) lookups  
+3. Stat 100 files and compare mtime/size
+4. Find repository is clean (no changes)
+
+OPTIMIZATION TARGETS:
+statusPorcelain and isClean can be optimized from ~211μs to ~20-50μs by:
+1. Early termination for clean repositories
+2. Batch file operations
+3. Reduced allocations
+4. Smart caching
+
+TARGET: Achieve 20-50x improvement (from 6x to 30-60x vs git CLI)
