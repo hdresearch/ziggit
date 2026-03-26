@@ -447,6 +447,24 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(objects_parser_unit_tests).step);
     test_step.dependOn(&b.addRunArtifact(cross_validation_tests).step);
 
+    // Index git compatibility tests
+    const index_git_compat_tests = b.addTest(.{
+        .root_source_file = b.path("test/index_git_compat_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    index_git_compat_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(index_git_compat_tests).step);
+
+    // Cache invalidation tests
+    const cache_invalidation_tests = b.addTest(.{
+        .root_source_file = b.path("test/cache_invalidation_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cache_invalidation_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(cache_invalidation_tests).step);
+
     // Status modified files tests
     const status_modified_files_tests = b.addTest(.{
         .root_source_file = b.path("test/status_modified_files_test.zig"),
