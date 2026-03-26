@@ -1672,6 +1672,19 @@ pub fn build(b: *std.Build) void {
     const smart_http_step = b.step("smart-http-test", "Run smart HTTP protocol tests");
     smart_http_step.dependOn(&b.addRunArtifact(smart_http_tests).step);
 
+    // SSH transport tests (URL parsing, pkt-line integration)
+    const ssh_transport_tests = b.addTest(.{
+        .root_source_file = b.path("test/ssh_transport_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ssh_transport_tests.root_module.addAnonymousImport("ssh_transport", .{
+        .root_source_file = b.path("src/git/ssh_transport.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(ssh_transport_tests).step);
+    const ssh_transport_step = b.step("ssh-transport-test", "Run SSH transport tests");
+    ssh_transport_step.dependOn(&b.addRunArtifact(ssh_transport_tests).step);
+
     // Pack format verification tests (pack_writer + idx_writer + git verify-pack)
     const pack_format_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_format_test.zig"),

@@ -1095,12 +1095,22 @@ pub const Repository = struct {
             return self.fetchHttps(remote_path);
         }
 
-        if (std.mem.startsWith(u8, remote_path, "git://") or
-            std.mem.startsWith(u8, remote_path, "ssh://")) {
+        const ssh_transport = @import("git/ssh_transport.zig");
+        if (ssh_transport.isSshUrl(remote_path)) {
+            return self.fetchSsh(remote_path);
+        }
+
+        if (std.mem.startsWith(u8, remote_path, "git://")) {
             return error.NetworkRemoteNotSupported;
         }
 
-        const remote_git_dir = try findGitDir(self.allocator, remote_path);
+        // Support file:// URLs by stripping the prefix
+        const effective_path = if (std.mem.startsWith(u8, remote_path, "file://"))
+            remote_path[7..]
+        else
+            remote_path;
+
+        const remote_git_dir = try findGitDir(self.allocator, effective_path);
         defer self.allocator.free(remote_git_dir);
 
         try self.copyMissingObjects(remote_git_dir);
@@ -1211,24 +1221,126 @@ pub const Repository = struct {
         }
     }
 
+    /// Fetch from SSH remote using git-upload-pack over SSH
+    fn fetchSsh(self: *Repository, url: []const u8) !void {
+        const ssh_transport = @import("git/ssh_transport.zig");
+        const pack_writer = @import("git/pack_writer.zig");
+        const idx_writer = @import("git/idx_writer.zig");
+
+        // Collect local refs for negotiation (same logic as fetchHttps)
+        var local_refs_list = std.ArrayList(ssh_transport.LocalRef).init(self.allocator);
+        defer local_refs_list.deinit();
+
+        const remote_refs_dir = try std.fmt.allocPrint(self.allocator, "{s}/refs/remotes/origin", .{self.git_dir});
+        defer self.allocator.free(remote_refs_dir);
+
+        var found_remote_refs = false;
+        if (std.fs.cwd().openDir(remote_refs_dir, .{ .iterate = true })) |*dir_handle| {
+            var dir = dir_handle.*;
+            defer dir.close();
+            var iter = dir.iterate();
+            while (try iter.next()) |entry| {
+                if (entry.kind != .file) continue;
+                found_remote_refs = true;
+                const ref_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ remote_refs_dir, entry.name });
+                defer self.allocator.free(ref_path);
+                const content = std.fs.cwd().readFileAlloc(self.allocator, ref_path, 1024) catch continue;
+                defer self.allocator.free(content);
+                const trimmed = std.mem.trim(u8, content, " \t\n\r");
+                if (trimmed.len == 40) {
+                    const ref_name = try std.fmt.allocPrint(self.allocator, "refs/heads/{s}", .{entry.name});
+                    try local_refs_list.append(.{
+                        .hash = trimmed[0..40].*,
+                        .name = ref_name,
+                    });
+                }
+            }
+        } else |_| {}
+
+        if (!found_remote_refs) {
+            const heads_dir = try std.fmt.allocPrint(self.allocator, "{s}/refs/heads", .{self.git_dir});
+            defer self.allocator.free(heads_dir);
+
+            if (std.fs.cwd().openDir(heads_dir, .{ .iterate = true })) |*dir_handle| {
+                var dir = dir_handle.*;
+                defer dir.close();
+                var iter = dir.iterate();
+                while (try iter.next()) |entry| {
+                    if (entry.kind != .file) continue;
+                    const ref_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ heads_dir, entry.name });
+                    defer self.allocator.free(ref_path);
+                    const content = std.fs.cwd().readFileAlloc(self.allocator, ref_path, 1024) catch continue;
+                    defer self.allocator.free(content);
+                    const trimmed = std.mem.trim(u8, content, " \t\n\r");
+                    if (trimmed.len == 40) {
+                        const ref_name = try std.fmt.allocPrint(self.allocator, "refs/heads/{s}", .{entry.name});
+                        try local_refs_list.append(.{
+                            .hash = trimmed[0..40].*,
+                            .name = ref_name,
+                        });
+                    }
+                }
+            } else |_| {}
+        }
+
+        defer for (local_refs_list.items) |lr| {
+            self.allocator.free(lr.name);
+        };
+
+        var result = ssh_transport.fetchNewPack(self.allocator, url, local_refs_list.items) catch {
+            return error.SshFetchFailed;
+        };
+
+        if (result) |*fetch_result| {
+            defer fetch_result.deinit();
+
+            if (fetch_result.pack_data.len >= 32) {
+                const checksum_hex = try pack_writer.savePack(self.allocator, self.git_dir, fetch_result.pack_data);
+                defer self.allocator.free(checksum_hex);
+
+                const pp = try pack_writer.packPath(self.allocator, self.git_dir, checksum_hex);
+                defer self.allocator.free(pp);
+                try idx_writer.generateIdx(self.allocator, pp);
+            }
+
+            const is_bare = self.isBareRepo();
+            for (fetch_result.refs) |ref| {
+                if (is_bare and std.mem.startsWith(u8, ref.name, "refs/heads/")) {
+                    try writeRefDirect(self.allocator, self.git_dir, ref.name, &ref.hash);
+                }
+                try writeRemoteRef(self.allocator, self.git_dir, "origin", ref.name, &ref.hash);
+            }
+        }
+    }
+
     fn isBareRepo(self: *Repository) bool {
         // Check if git_dir == path (bare repo) or git_dir ends with .git
         return std.mem.eql(u8, self.git_dir, self.path);
     }
 
-    /// Clone repository (bare) — supports local paths and HTTPS URLs
+    /// Clone repository (bare) — supports local paths, HTTPS URLs, and SSH URLs
     pub fn cloneBare(allocator: std.mem.Allocator, source: []const u8, target: []const u8) !Repository {
         if (std.mem.startsWith(u8, source, "https://") or
             std.mem.startsWith(u8, source, "http://")) {
             return cloneBareHttps(allocator, source, target);
         }
 
-        if (std.mem.startsWith(u8, source, "git://") or
-            std.mem.startsWith(u8, source, "ssh://")) {
+        const ssh_transport = @import("git/ssh_transport.zig");
+        if (ssh_transport.isSshUrl(source)) {
+            return cloneBareSsh(allocator, source, target);
+        }
+
+        if (std.mem.startsWith(u8, source, "git://")) {
             return error.NetworkRemoteNotSupported;
         }
 
-        const source_git_dir = try findGitDir(allocator, source);
+        // Support file:// URLs by stripping the prefix
+        const effective_source = if (std.mem.startsWith(u8, source, "file://"))
+            source[7..]
+        else
+            source;
+
+        const source_git_dir = try findGitDir(allocator, effective_source);
         defer allocator.free(source_git_dir);
 
         std.fs.makeDirAbsolute(target) catch |err| switch (err) {
@@ -1241,6 +1353,114 @@ pub const Repository = struct {
         return Repository{
             .path = try allocator.dupe(u8, target),
             .git_dir = try allocator.dupe(u8, target),
+            .allocator = allocator,
+        };
+    }
+
+    /// Clone from SSH URL into a bare repository
+    fn cloneBareSsh(allocator: std.mem.Allocator, url: []const u8, target: []const u8) !Repository {
+        const ssh_transport = @import("git/ssh_transport.zig");
+        const pack_writer = @import("git/pack_writer.zig");
+        const idx_writer = @import("git/idx_writer.zig");
+
+        // Create bare repo structure
+        std.fs.cwd().makePath(target) catch |err| switch (err) {
+            error.PathAlreadyExists => return error.AlreadyExists,
+            else => return err,
+        };
+        errdefer std.fs.cwd().deleteTree(target) catch {};
+
+        const git_dir = try allocator.dupe(u8, target);
+        errdefer allocator.free(git_dir);
+
+        // Create required directories
+        const dirs = [_][]const u8{ "objects", "objects/pack", "refs", "refs/heads", "refs/tags" };
+        for (dirs) |d| {
+            const dir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ target, d });
+            defer allocator.free(dir_path);
+            std.fs.cwd().makePath(dir_path) catch {};
+        }
+
+        // Write HEAD
+        const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{target});
+        defer allocator.free(head_path);
+        {
+            const f = try std.fs.cwd().createFile(head_path, .{});
+            defer f.close();
+            try f.writeAll("ref: refs/heads/master\n");
+        }
+
+        // Write config for bare repo
+        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{target});
+        defer allocator.free(config_path);
+        {
+            const f = try std.fs.cwd().createFile(config_path, .{});
+            defer f.close();
+            try f.writeAll("[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n[remote \"origin\"]\n\turl = ");
+            try f.writeAll(url);
+            try f.writeAll("\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n");
+        }
+
+        // Clone pack data via SSH
+        var clone_result = ssh_transport.clonePack(allocator, url) catch {
+            return error.SshCloneFailed;
+        };
+        defer clone_result.deinit();
+
+        // Save pack + generate idx
+        if (clone_result.pack_data.len >= 32) {
+            const checksum_hex = try pack_writer.savePack(allocator, git_dir, clone_result.pack_data);
+            defer allocator.free(checksum_hex);
+
+            const pp = try pack_writer.packPath(allocator, git_dir, checksum_hex);
+            defer allocator.free(pp);
+            try idx_writer.generateIdx(allocator, pp);
+        }
+
+        // Write refs
+        var head_ref: ?[]const u8 = null;
+        for (clone_result.refs) |ref| {
+            if (std.mem.eql(u8, ref.name, "HEAD")) {
+                head_ref = &ref.hash;
+                continue;
+            }
+
+            if (std.mem.startsWith(u8, ref.name, "refs/")) {
+                const ref_file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ target, ref.name });
+                defer allocator.free(ref_file_path);
+
+                if (std.mem.lastIndexOfScalar(u8, ref_file_path, '/')) |last_slash| {
+                    std.fs.cwd().makePath(ref_file_path[0..last_slash]) catch {};
+                }
+
+                const f = std.fs.cwd().createFile(ref_file_path, .{}) catch continue;
+                defer f.close();
+                f.writeAll(&ref.hash) catch continue;
+                f.writeAll("\n") catch {};
+            }
+        }
+
+        // Update HEAD to point to the right branch
+        if (head_ref) |head_hash| {
+            var head_target: []const u8 = "refs/heads/master";
+            for (clone_result.refs) |ref| {
+                if (std.mem.startsWith(u8, ref.name, "refs/heads/") and
+                    std.mem.eql(u8, &ref.hash, head_hash))
+                {
+                    head_target = ref.name;
+                    break;
+                }
+            }
+            const hf = try std.fs.cwd().createFile(head_path, .{});
+            defer hf.close();
+            try hf.writer().print("ref: {s}\n", .{head_target});
+        }
+
+        const path = try allocator.dupe(u8, target);
+
+        return Repository{
+            .path = path,
+            .git_dir = git_dir,
             .allocator = allocator,
         };
     }
@@ -1469,19 +1689,127 @@ pub const Repository = struct {
         };
     }
 
-    /// Clone repository (no checkout) — supports local paths and HTTPS URLs
+    /// Clone from SSH URL into a non-bare repository without checking out files
+    fn cloneNoCheckoutSsh(allocator: std.mem.Allocator, url: []const u8, target: []const u8) !Repository {
+        const ssh_transport = @import("git/ssh_transport.zig");
+        const pack_writer = @import("git/pack_writer.zig");
+        const idx_writer = @import("git/idx_writer.zig");
+
+        // Create non-bare repo structure
+        std.fs.cwd().makePath(target) catch |err| switch (err) {
+            error.PathAlreadyExists => return error.AlreadyExists,
+            else => return err,
+        };
+        errdefer std.fs.cwd().deleteTree(target) catch {};
+
+        const git_dir = try std.fmt.allocPrint(allocator, "{s}/.git", .{target});
+        errdefer allocator.free(git_dir);
+
+        const dirs = [_][]const u8{ ".git", ".git/objects", ".git/objects/pack", ".git/refs", ".git/refs/heads", ".git/refs/tags", ".git/refs/remotes", ".git/refs/remotes/origin" };
+        for (dirs) |d| {
+            const dir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ target, d });
+            defer allocator.free(dir_path);
+            std.fs.cwd().makePath(dir_path) catch {};
+        }
+
+        // Write HEAD
+        const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir});
+        defer allocator.free(head_path);
+        {
+            const f = try std.fs.cwd().createFile(head_path, .{});
+            defer f.close();
+            try f.writeAll("ref: refs/heads/master\n");
+        }
+
+        // Write config
+        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_dir});
+        defer allocator.free(config_path);
+        {
+            const f = try std.fs.cwd().createFile(config_path, .{});
+            defer f.close();
+            try f.writeAll("[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n[remote \"origin\"]\n\turl = ");
+            try f.writeAll(url);
+            try f.writeAll("\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n");
+        }
+
+        // Clone pack data via SSH
+        var clone_result = ssh_transport.clonePack(allocator, url) catch {
+            return error.SshCloneFailed;
+        };
+        defer clone_result.deinit();
+
+        // Save pack + generate idx
+        if (clone_result.pack_data.len >= 32) {
+            const checksum_hex = try pack_writer.savePack(allocator, git_dir, clone_result.pack_data);
+            defer allocator.free(checksum_hex);
+
+            const pp = try pack_writer.packPath(allocator, git_dir, checksum_hex);
+            defer allocator.free(pp);
+            try idx_writer.generateIdx(allocator, pp);
+        }
+
+        // Write refs and update HEAD
+        var head_ref: ?[]const u8 = null;
+        for (clone_result.refs) |ref| {
+            if (std.mem.eql(u8, ref.name, "HEAD")) {
+                head_ref = &ref.hash;
+                continue;
+            }
+            if (std.mem.startsWith(u8, ref.name, "refs/heads/")) {
+                try writeRefDirect(allocator, git_dir, ref.name, &ref.hash);
+                try writeRemoteRef(allocator, git_dir, "origin", ref.name, &ref.hash);
+            } else if (std.mem.startsWith(u8, ref.name, "refs/tags/")) {
+                try writeRefDirect(allocator, git_dir, ref.name, &ref.hash);
+            }
+        }
+
+        if (head_ref) |head_hash| {
+            var head_target: []const u8 = "refs/heads/master";
+            for (clone_result.refs) |ref| {
+                if (std.mem.startsWith(u8, ref.name, "refs/heads/") and
+                    std.mem.eql(u8, &ref.hash, head_hash))
+                {
+                    head_target = ref.name;
+                    break;
+                }
+            }
+            const hf = try std.fs.cwd().createFile(head_path, .{});
+            defer hf.close();
+            try hf.writer().print("ref: {s}\n", .{head_target});
+        }
+
+        const path = try allocator.dupe(u8, target);
+
+        return Repository{
+            .path = path,
+            .git_dir = git_dir,
+            .allocator = allocator,
+        };
+    }
+
+    /// Clone repository (no checkout) — supports local paths, HTTPS URLs, and SSH URLs
     pub fn cloneNoCheckout(allocator: std.mem.Allocator, source: []const u8, target: []const u8) !Repository {
         if (std.mem.startsWith(u8, source, "https://") or
             std.mem.startsWith(u8, source, "http://")) {
             return cloneNoCheckoutHttps(allocator, source, target);
         }
 
-        if (std.mem.startsWith(u8, source, "git://") or
-            std.mem.startsWith(u8, source, "ssh://")) {
+        const ssh_transport = @import("git/ssh_transport.zig");
+        if (ssh_transport.isSshUrl(source)) {
+            return cloneNoCheckoutSsh(allocator, source, target);
+        }
+
+        if (std.mem.startsWith(u8, source, "git://")) {
             return error.NetworkRemoteNotSupported;
         }
 
-        const source_git_dir = try findGitDir(allocator, source);
+        // Support file:// URLs by stripping the prefix
+        const effective_source = if (std.mem.startsWith(u8, source, "file://"))
+            source[7..]
+        else
+            source;
+
+        const source_git_dir = try findGitDir(allocator, effective_source);
         defer allocator.free(source_git_dir);
 
         std.fs.makeDirAbsolute(target) catch |err| switch (err) {
