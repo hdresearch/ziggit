@@ -4223,3 +4223,255 @@ test "ziggit commit -> git format-patch produces valid patch" {
     try std.testing.expect(std.mem.indexOf(u8, patch, "add patch file") != null);
     try std.testing.expect(std.mem.indexOf(u8, patch, "Patcher") != null);
 }
+
+test "ziggit file with spaces in name -> git reads" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    const fp = try std.fmt.allocPrint(allocator, "{s}/my file.txt", .{tmp});
+    defer allocator.free(fp);
+    {
+        const f = try std.fs.createFileAbsolute(fp, .{});
+        defer f.close();
+        try f.writeAll("spaces in name");
+    }
+    try repo.add("my file.txt");
+    _ = try repo.commit("file with spaces", "Test", "t@t.com");
+
+    const content = try execGit(allocator, tmp, &.{ "show", "HEAD:my file.txt" });
+    defer allocator.free(content);
+    try std.testing.expectEqualStrings("spaces in name", trimRight(content));
+}
+
+test "ziggit all 256 byte values in single file -> git cat-file preserves exactly" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    const fp = try std.fmt.allocPrint(allocator, "{s}/allbytes.bin", .{tmp});
+    defer allocator.free(fp);
+    {
+        const f = try std.fs.createFileAbsolute(fp, .{});
+        defer f.close();
+        var data: [256]u8 = undefined;
+        for (&data, 0..) |*b, i| b.* = @intCast(i);
+        try f.writeAll(&data);
+    }
+    try repo.add("allbytes.bin");
+    _ = try repo.commit("all 256 bytes", "Test", "t@t.com");
+
+    const blob = try execGit(allocator, tmp, &.{ "cat-file", "blob", "HEAD:allbytes.bin" });
+    defer allocator.free(blob);
+    try std.testing.expectEqual(@as(usize, 256), blob.len);
+    for (blob, 0..) |b, i| {
+        try std.testing.expectEqual(@as(u8, @intCast(i)), b);
+    }
+}
+
+test "ziggit git show-ref lists refs correctly" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    const fp = try std.fmt.allocPrint(allocator, "{s}/f.txt", .{tmp});
+    defer allocator.free(fp);
+    {
+        const f = try std.fs.createFileAbsolute(fp, .{});
+        defer f.close();
+        try f.writeAll("showref");
+    }
+    try repo.add("f.txt");
+    const hash = try repo.commit("for show-ref", "Test", "t@t.com");
+    try repo.createTag("alpha", null);
+    try repo.createTag("beta", null);
+
+    const showref = try execGit(allocator, tmp, &.{ "show-ref" });
+    defer allocator.free(showref);
+    try std.testing.expect(std.mem.indexOf(u8, showref, "refs/tags/alpha") != null);
+    try std.testing.expect(std.mem.indexOf(u8, showref, "refs/tags/beta") != null);
+    // Both tags should point to the same commit hash
+    try std.testing.expect(std.mem.indexOf(u8, showref, &hash) != null);
+}
+
+test "ziggit git log --reverse shows chronological order" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    const fp = try std.fmt.allocPrint(allocator, "{s}/f.txt", .{tmp});
+    defer allocator.free(fp);
+
+    const msgs = [_][]const u8{ "first-msg", "second-msg", "third-msg" };
+    for (msgs) |msg| {
+        {
+            const f = try std.fs.createFileAbsolute(fp, .{ .truncate = true });
+            defer f.close();
+            try f.writeAll(msg);
+        }
+        try repo.add("f.txt");
+        _ = try repo.commit(msg, "Test", "t@t.com");
+    }
+
+    const log = try execGit(allocator, tmp, &.{ "log", "--format=%s", "--reverse" });
+    defer allocator.free(log);
+    const first_nl = std.mem.indexOf(u8, log, "\n") orelse log.len;
+    try std.testing.expectEqualStrings("first-msg", log[0..first_nl]);
+}
+
+test "ziggit git rev-list --all counts all commits" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    const fp = try std.fmt.allocPrint(allocator, "{s}/f.txt", .{tmp});
+    defer allocator.free(fp);
+
+    var i: usize = 0;
+    while (i < 7) : (i += 1) {
+        {
+            const f = try std.fs.createFileAbsolute(fp, .{ .truncate = true });
+            defer f.close();
+            var buf: [16]u8 = undefined;
+            const content = std.fmt.bufPrint(&buf, "v{d}", .{i}) catch unreachable;
+            try f.writeAll(content);
+        }
+        try repo.add("f.txt");
+        var msg_buf: [16]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "c{d}", .{i}) catch unreachable;
+        _ = try repo.commit(msg, "Test", "t@t.com");
+    }
+
+    const count = try execGit(allocator, tmp, &.{ "rev-list", "--all", "--count" });
+    defer allocator.free(count);
+    try std.testing.expectEqualStrings("7", trimRight(count));
+}
+
+test "ziggit git stash works on repo" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    const fp = try std.fmt.allocPrint(allocator, "{s}/f.txt", .{tmp});
+    defer allocator.free(fp);
+    {
+        const f = try std.fs.createFileAbsolute(fp, .{});
+        defer f.close();
+        try f.writeAll("original");
+    }
+    try repo.add("f.txt");
+    _ = try repo.commit("base", "Test", "t@t.com");
+
+    // Dirty the file
+    {
+        const f = try std.fs.createFileAbsolute(fp, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("dirty");
+    }
+
+    // git stash should work on ziggit-created repo
+    var stash_argv = [_][]const u8{ "git", "-c", "user.name=T", "-c", "user.email=t@t", "stash" };
+    var stash_child = std.process.Child.init(&stash_argv, allocator);
+    stash_child.cwd = tmp;
+    stash_child.stderr_behavior = .Ignore;
+    stash_child.stdout_behavior = .Ignore;
+    try stash_child.spawn();
+    const stash_term = try stash_child.wait();
+    try std.testing.expectEqual(@as(u8, 0), stash_term.Exited);
+
+    // After stash, file should be back to original
+    const show = try execGit(allocator, tmp, &.{ "show", "HEAD:f.txt" });
+    defer allocator.free(show);
+    try std.testing.expectEqualStrings("original", trimRight(show));
+}
+
+test "bun workflow: TypeScript project with src, dist, types" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    var repo = try ziggit.Repository.init(allocator, tmp);
+    defer repo.close();
+
+    // Create directories
+    const dirs = [_][]const u8{ "src", "dist", "types" };
+    for (dirs) |d| {
+        const dp = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ tmp, d });
+        defer allocator.free(dp);
+        std.fs.makeDirAbsolute(dp) catch {};
+    }
+
+    const files = [_]struct { path: []const u8, content: []const u8 }{
+        .{ .path = "package.json", .content = "{\"name\":\"@bun/ts\",\"version\":\"1.0.0\",\"main\":\"dist/index.js\",\"types\":\"types/index.d.ts\"}" },
+        .{ .path = "tsconfig.json", .content = "{\"compilerOptions\":{\"outDir\":\"dist\",\"declaration\":true}}" },
+        .{ .path = "src/index.ts", .content = "export const greet = (name: string) => `Hello ${name}`;" },
+        .{ .path = "dist/index.js", .content = "var greet = (name) => `Hello ${name}`; exports.greet = greet;" },
+        .{ .path = "types/index.d.ts", .content = "export declare const greet: (name: string) => string;" },
+    };
+
+    for (files) |file| {
+        const fp = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ tmp, file.path });
+        defer allocator.free(fp);
+        const f = try std.fs.createFileAbsolute(fp, .{});
+        defer f.close();
+        try f.writeAll(file.content);
+        try repo.add(file.path);
+    }
+    _ = try repo.commit("v1.0.0: TypeScript library", "Bun", "bun@bun.sh");
+    try repo.createTag("v1.0.0", null);
+
+    // Verify all files
+    const ls = try execGit(allocator, tmp, &.{ "ls-tree", "-r", "--name-only", "HEAD" });
+    defer allocator.free(ls);
+    for (files) |file| {
+        try std.testing.expect(std.mem.indexOf(u8, ls, file.path) != null);
+    }
+
+    const desc = try execGit(allocator, tmp, &.{ "describe", "--tags", "--exact-match" });
+    defer allocator.free(desc);
+    try std.testing.expectEqualStrings("v1.0.0", trimRight(desc));
+
+    // Verify TypeScript source content
+    const ts_src = try execGit(allocator, tmp, &.{ "show", "HEAD:src/index.ts" });
+    defer allocator.free(ts_src);
+    try std.testing.expect(std.mem.indexOf(u8, ts_src, "greet") != null);
+}
