@@ -743,7 +743,7 @@ fn readPackedObject(pack_data: []const u8, offset: usize, pack_path: []const u8,
         current_byte = pack_data[pos];
         pos += 1;
         size |= @as(usize, @intCast(current_byte & 0x7F)) << shift;
-        shift += 7;
+        if (shift < 60) shift += 7 else break;
     }
     
     switch (pack_type) {
@@ -1835,8 +1835,8 @@ fn readPackedObjectHeader(pack_data: []const u8, offset: usize) !ObjectHeaderInf
         current_byte = pack_data[pos];
         pos += 1;
         size |= @as(usize, @intCast(current_byte & 0x7F)) << shift;
+        if (shift >= 53) return error.ObjectSizeTooLarge; // Prevent u6 overflow
         shift += 7;
-        if (shift > 32) return error.ObjectSizeTooLarge; // Prevent overflow
     }
     
     // For delta objects, skip the delta header
@@ -2659,7 +2659,7 @@ fn readPackedObjectFromData(pack_data: []const u8, offset: usize, allocator: std
         current_byte = pack_data[pos];
         pos += 1;
         size |= @as(usize, @intCast(current_byte & 0x7F)) << shift;
-        shift += 7;
+        if (shift < 60) shift += 7 else break;
     }
     
     switch (pack_type) {
