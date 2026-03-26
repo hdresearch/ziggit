@@ -69,12 +69,24 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    git_interop_test.root_module.addImport("ziggit", ziggit_module);
     const run_git_interop_test = b.addRunArtifact(git_interop_test);
+
+    // Additional integration tests
+    const broken_pipe_test = b.addExecutable(.{
+        .name = "broken_pipe_test",
+        .root_source_file = b.path("test/broken_pipe_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    broken_pipe_test.root_module.addImport("ziggit", ziggit_module);
+    const run_broken_pipe_test = b.addRunArtifact(broken_pipe_test);
 
     // Test step runs all tests
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_platform_tests.step);
     test_step.dependOn(&run_git_interop_test.step);
+    test_step.dependOn(&run_broken_pipe_test.step);
 
     // ========== BENCHMARKS ==========
     const cli_benchmark = b.addExecutable(.{
