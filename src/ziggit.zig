@@ -20,6 +20,8 @@ pub const Repository = struct {
     _cached_index_mtime: ?i128 = null,
     _cached_is_clean: ?bool = null,
     _cached_head_hash: ?[40]u8 = null,
+    _cached_latest_tag: ?[]const u8 = null,
+    _cached_tags_dir_mtime: ?i128 = null,
 
     /// Open an existing repository at the specified path
     pub fn open(allocator: std.mem.Allocator, path: []const u8) !Repository {
@@ -69,6 +71,9 @@ pub const Repository = struct {
 
     /// Close repository and free resources
     pub fn close(self: *Repository) void {
+        if (self._cached_latest_tag) |tag| {
+            self.allocator.free(tag);
+        }
         self.allocator.free(self.path);
         self.allocator.free(self.git_dir);
     }
@@ -427,8 +432,40 @@ pub const Repository = struct {
         return true; // No files found
     }
 
-    /// Get latest tag (like `git describe --tags --abbrev=0`) - ULTRA OPTIMIZED 
-    pub fn describeTagsFast(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
+    /// Get latest tag (like `git describe --tags --abbrev=0`) - ULTRA OPTIMIZED WITH CACHING
+    pub fn describeTagsFast(self: *Repository, allocator: std.mem.Allocator) ![]const u8 {
+        // Use stack buffer for tags directory path
+        var tags_dir_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const tags_dir = std.fmt.bufPrint(&tags_dir_buf, "{s}/refs/tags", .{self.git_dir}) catch return error.PathTooLong;
+
+        // OPTIMIZATION: Check if tags directory changed since last check
+        if (std.fs.cwd().statFile(tags_dir)) |tags_stat| {
+            if (self._cached_tags_dir_mtime) |cached_mtime| {
+                if (cached_mtime == tags_stat.mtime and self._cached_latest_tag != null) {
+                    // CACHE HIT: Return cached result immediately without any file system calls!
+                    return try allocator.dupe(u8, self._cached_latest_tag.?);
+                }
+            }
+            
+            // Cache miss or tags directory changed - do the full scan and cache result
+            const result = try self.describeTagsUncached(allocator);
+            
+            // Update cache
+            if (self._cached_latest_tag) |old_tag| {
+                self.allocator.free(old_tag);
+            }
+            self._cached_latest_tag = try self.allocator.dupe(u8, result);
+            self._cached_tags_dir_mtime = tags_stat.mtime;
+            
+            return result;
+        } else |_| {
+            // Tags directory doesn't exist
+            return try allocator.dupe(u8, "");
+        }
+    }
+    
+    /// Get latest tag without caching - internal implementation 
+    fn describeTagsUncached(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
         // Use stack buffer for tags directory path
         var tags_dir_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
         const tags_dir = std.fmt.bufPrint(&tags_dir_buf, "{s}/refs/tags", .{self.git_dir}) catch return error.PathTooLong;
@@ -467,7 +504,7 @@ pub const Repository = struct {
     }
 
     /// Get latest tag (like `git describe --tags --abbrev=0`)  
-    pub fn describeTags(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
+    pub fn describeTags(self: *Repository, allocator: std.mem.Allocator) ![]const u8 {
         return self.describeTagsFast(allocator);
     }
 
@@ -499,7 +536,7 @@ pub const Repository = struct {
     }
 
     /// Get latest tag name 
-    pub fn latestTag(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
+    pub fn latestTag(self: *Repository, allocator: std.mem.Allocator) ![]const u8 {
         return try self.describeTags(allocator);
     }
 
