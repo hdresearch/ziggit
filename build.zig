@@ -3,6 +3,11 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    
+    // Create the ziggit module for imports
+    const ziggit_module = b.addModule("ziggit", .{
+        .root_source_file = b.path("src/lib/ziggit.zig"),
+    });
 
     const exe = b.addExecutable(.{
         .name = "ziggit",
@@ -532,4 +537,62 @@ pub fn build(b: *std.Build) void {
     // Install the ziggit vs git benchmark executable
     const install_ziggit_vs_git_bench = b.addInstallArtifact(ziggit_vs_git_bench_exe, .{});
     bench_ziggit_vs_git_step.dependOn(&install_ziggit_vs_git_bench.step);
+    
+    // Real comprehensive benchmark (ziggit library vs git CLI)
+    const real_benchmark_exe = b.addExecutable(.{
+        .name = "real-benchmark",
+        .root_source_file = b.path("benchmarks/real_benchmark.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    // Link the static library for C integration testing
+    real_benchmark_exe.linkLibrary(lib_static);
+    real_benchmark_exe.linkLibC();
+    real_benchmark_exe.addIncludePath(b.path("src/lib"));
+
+    const run_real_benchmark = b.addRunArtifact(real_benchmark_exe);
+
+    const bench_real_step = b.step("bench", "Run comprehensive real benchmark (ziggit library vs git CLI)");
+    bench_real_step.dependOn(&run_real_benchmark.step);
+
+    // Install the real benchmark executable
+    const install_real_benchmark = b.addInstallArtifact(real_benchmark_exe, .{});
+    bench_real_step.dependOn(&install_real_benchmark.step);
+    
+    // Simple baseline benchmark (no ziggit, just git CLI measurements)
+    const simple_benchmark_exe = b.addExecutable(.{
+        .name = "simple-benchmark",
+        .root_source_file = b.path("benchmarks/simple_benchmark.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_simple_benchmark = b.addRunArtifact(simple_benchmark_exe);
+
+    const bench_simple_baseline_step = b.step("bench-git-baseline", "Run git CLI baseline benchmark");
+    bench_simple_baseline_step.dependOn(&run_simple_benchmark.step);
+
+    // Install the simple benchmark executable
+    const install_simple_benchmark = b.addInstallArtifact(simple_benchmark_exe, .{});
+    bench_simple_baseline_step.dependOn(&install_simple_benchmark.step);
+    
+    // Zig API vs Git CLI benchmark (uses pure Zig API, no C)
+    const zig_benchmark_exe = b.addExecutable(.{
+        .name = "zig-vs-git-benchmark",
+        .root_source_file = b.path("benchmarks/zig_vs_git_benchmark.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    zig_benchmark_exe.root_module.addImport("ziggit", ziggit_module);
+
+    const run_zig_benchmark = b.addRunArtifact(zig_benchmark_exe);
+
+    const bench_zig_step = b.step("bench-zig", "Run ziggit Zig API vs git CLI benchmark");
+    bench_zig_step.dependOn(&run_zig_benchmark.step);
+
+    // Install the zig benchmark executable
+    const install_zig_benchmark = b.addInstallArtifact(zig_benchmark_exe, .{});
+    bench_zig_step.dependOn(&install_zig_benchmark.step);
 }

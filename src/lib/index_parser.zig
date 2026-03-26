@@ -1,0 +1,151 @@
+const std = @import("std");
+
+pub const IndexEntry = struct {
+    ctime_seconds: u32,
+    ctime_nanoseconds: u32,
+    mtime_seconds: u32,
+    mtime_nanoseconds: u32,
+    dev: u32,
+    ino: u32,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    size: u32,
+    sha1: [20]u8,
+    flags: u16,
+    path: []u8,
+    
+    pub fn deinit(self: *IndexEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+    }
+};
+
+pub const GitIndex = struct {
+    entries: std.ArrayList(IndexEntry),
+    allocator: std.mem.Allocator,
+    
+    pub fn init(allocator: std.mem.Allocator) GitIndex {
+        return GitIndex{
+            .entries = std.ArrayList(IndexEntry).init(allocator),
+            .allocator = allocator,
+        };
+    }
+    
+    pub fn deinit(self: *GitIndex) void {
+        for (self.entries.items) |*entry| {
+            entry.deinit(self.allocator);
+        }
+        self.entries.deinit();
+    }
+    
+    pub fn readFromFile(allocator: std.mem.Allocator, index_path: []const u8) !GitIndex {
+        const file = try std.fs.openFileAbsolute(index_path, .{});
+        defer file.close();
+        
+        const file_size = try file.getEndPos();
+        const content = try allocator.alloc(u8, file_size);
+        defer allocator.free(content);
+        _ = try file.readAll(content);
+        
+        return parseIndex(allocator, content);
+    }
+    
+    pub fn parseIndex(allocator: std.mem.Allocator, data: []const u8) !GitIndex {
+        if (data.len < 12) return error.InvalidIndex;
+        
+        // Check signature "DIRC"
+        if (!std.mem.eql(u8, data[0..4], "DIRC")) {
+            return error.InvalidIndexSignature;
+        }
+        
+        // Read version (big endian)
+        const version = std.mem.readInt(u32, data[4..8][0..4], .big);
+        if (version != 2 and version != 3 and version != 4) {
+            return error.UnsupportedIndexVersion;
+        }
+        
+        // Read number of entries (big endian)
+        const num_entries = std.mem.readInt(u32, data[8..12][0..4], .big);
+        
+        var index = GitIndex.init(allocator);
+        errdefer index.deinit();
+        
+        var pos: usize = 12;
+        
+        for (0..num_entries) |_| {
+            const entry = try parseIndexEntry(allocator, data, &pos);
+            try index.entries.append(entry);
+        }
+        
+        return index;
+    }
+    
+    pub fn findEntry(self: *const GitIndex, path: []const u8) ?*const IndexEntry {
+        for (self.entries.items) |*entry| {
+            if (std.mem.eql(u8, entry.path, path)) {
+                return entry;
+            }
+        }
+        return null;
+    }
+};
+
+fn parseIndexEntry(allocator: std.mem.Allocator, data: []const u8, pos: *usize) !IndexEntry {
+    if (data.len < pos.* + 62) return error.InvalidIndexEntry;
+    
+    const entry_start = pos.*;
+    
+    // Read fixed-size fields (all big endian)
+    const ctime_seconds = std.mem.readInt(u32, data[entry_start + 0..entry_start + 4][0..4], .big);
+    const ctime_nanoseconds = std.mem.readInt(u32, data[entry_start + 4..entry_start + 8][0..4], .big);
+    const mtime_seconds = std.mem.readInt(u32, data[entry_start + 8..entry_start + 12][0..4], .big);
+    const mtime_nanoseconds = std.mem.readInt(u32, data[entry_start + 12..entry_start + 16][0..4], .big);
+    const dev = std.mem.readInt(u32, data[entry_start + 16..entry_start + 20][0..4], .big);
+    const ino = std.mem.readInt(u32, data[entry_start + 20..entry_start + 24][0..4], .big);
+    const mode = std.mem.readInt(u32, data[entry_start + 24..entry_start + 28][0..4], .big);
+    const uid = std.mem.readInt(u32, data[entry_start + 28..entry_start + 32][0..4], .big);
+    const gid = std.mem.readInt(u32, data[entry_start + 32..entry_start + 36][0..4], .big);
+    const size = std.mem.readInt(u32, data[entry_start + 36..entry_start + 40][0..4], .big);
+    
+    // Read SHA-1 hash (20 bytes)
+    var sha1: [20]u8 = undefined;
+    @memcpy(&sha1, data[entry_start + 40..entry_start + 60]);
+    
+    // Read flags (16-bit big endian)
+    const flags = std.mem.readInt(u16, data[entry_start + 60..entry_start + 62][0..2], .big);
+    const path_length = flags & 0x0FFF; // Lower 12 bits contain path length
+    
+    pos.* = entry_start + 62;
+    
+    // Read path
+    const path_end = pos.* + path_length;
+    if (data.len < path_end) return error.InvalidIndexEntry;
+    
+    const path = try allocator.dupe(u8, data[pos.*..path_end]);
+    pos.* = path_end;
+    
+    // Handle null terminator if present
+    if (pos.* < data.len and data[pos.*] == 0) {
+        pos.* += 1;
+    }
+    
+    // Align to 8-byte boundary
+    const padding = (8 - ((62 + path_length + 1) % 8)) % 8;
+    pos.* += padding;
+    
+    return IndexEntry{
+        .ctime_seconds = ctime_seconds,
+        .ctime_nanoseconds = ctime_nanoseconds,
+        .mtime_seconds = mtime_seconds,
+        .mtime_nanoseconds = mtime_nanoseconds,
+        .dev = dev,
+        .ino = ino,
+        .mode = mode,
+        .uid = uid,
+        .gid = gid,
+        .size = size,
+        .sha1 = sha1,
+        .flags = flags,
+        .path = path,
+    };
+}
