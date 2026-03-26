@@ -1462,6 +1462,37 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(validation_internal_tests).step);
 
+    // Cache stress and mtime tests
+    const cache_stress_mtime_tests = b.addTest(.{
+        .root_source_file = b.path("test/cache_stress_and_mtime_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cache_stress_mtime_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(cache_stress_mtime_tests).step);
+
+    // Refs internal resolution tests
+    const refs_internal_resolution_tests = b.addTest(.{
+        .root_source_file = b.path("test/refs_internal_resolution_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    refs_internal_resolution_tests.root_module.addAnonymousImport("git", .{
+        .root_source_file = b.path("src/git/git.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(refs_internal_resolution_tests).step);
+
+    // Objects hash and store tests
+    const objects_hash_store_tests = b.addTest(.{
+        .root_source_file = b.path("test/objects_hash_and_store_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    objects_hash_store_tests.root_module.addAnonymousImport("git", .{
+        .root_source_file = b.path("src/git/git.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(objects_hash_store_tests).step);
+
     // ========== BENCHMARKS ==========
     
     // CLI benchmark (ziggit vs git performance)
