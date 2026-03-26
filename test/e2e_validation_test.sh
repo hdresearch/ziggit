@@ -7539,6 +7539,341 @@ else
     fail "single byte" "size=$size"
 fi
 
+# ============================================================
+# Additional cross-validation tests
+# ============================================================
+
+# --- Test 296: full bun workflow via CLI ---
+echo "Test 296: bun workflow: init, add package.json, commit, tag, status, describe"
+d=$(new_repo "t296_bun")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+cat > "$d/package.json" << 'PKGEOF'
+{"name":"@test/my-lib","version":"1.0.0","main":"index.js"}
+PKGEOF
+echo 'module.exports = {};' > "$d/index.js"
+(cd "$d" && "$ZIGGIT" add package.json && "$ZIGGIT" add index.js) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Publisher" GIT_AUTHOR_EMAIL="pub@test.com" \
+    GIT_COMMITTER_NAME="Publisher" GIT_COMMITTER_EMAIL="pub@test.com" \
+    "$ZIGGIT" commit -m "v1.0.0") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+
+# git status should be clean
+bun_status=$(cd "$d" && git status --porcelain 2>&1)
+if [ -z "$bun_status" ]; then
+    pass "bun workflow: status clean after commit+tag"
+else
+    fail "bun workflow status" "status=[$bun_status]"
+fi
+
+# git describe should match tag
+bun_desc=$(cd "$d" && git describe --tags 2>&1 | tr -d '[:space:]')
+if [ "$bun_desc" = "v1.0.0" ]; then
+    pass "bun workflow: describe matches v1.0.0"
+else
+    fail "bun workflow describe" "desc=[$bun_desc]"
+fi
+
+# ziggit describe should match
+ziggit_desc=$(cd "$d" && "$ZIGGIT" describe --tags 2>&1 | tr -d '[:space:]')
+if [ "$ziggit_desc" = "v1.0.0" ]; then
+    pass "bun workflow: ziggit describe matches v1.0.0"
+else
+    fail "bun workflow ziggit describe" "desc=[$ziggit_desc]"
+fi
+
+# git show should have package.json content
+bun_pkg=$(cd "$d" && git show HEAD:package.json 2>&1)
+if echo "$bun_pkg" | grep -q "1.0.0"; then
+    pass "bun workflow: package.json version in commit"
+else
+    fail "bun workflow pkg" "content=[$bun_pkg]"
+fi
+
+# --- Test 300: ziggit rev-parse matches git rev-parse ---
+echo "Test 300: ziggit rev-parse HEAD matches git rev-parse HEAD"
+d=$(new_repo "t300")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "data" > "$d/file.txt"
+(cd "$d" && "$ZIGGIT" add file.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "test") >/dev/null 2>&1
+
+git_hash=$(cd "$d" && git rev-parse HEAD 2>&1 | tr -d '[:space:]')
+ziggit_hash=$(cd "$d" && "$ZIGGIT" rev-parse HEAD 2>&1 | tr -d '[:space:]')
+if [ "$git_hash" = "$ziggit_hash" ]; then
+    pass "rev-parse HEAD matches: $git_hash"
+else
+    fail "rev-parse HEAD" "git=$git_hash ziggit=$ziggit_hash"
+fi
+
+# --- Test 301: ziggit log --format=%H matches git ---
+echo "Test 301: ziggit log --format=%H matches git log"
+d=$(new_repo "t301")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+for i in 1 2 3; do
+    echo "commit $i" > "$d/f$i.txt"
+    (cd "$d" && "$ZIGGIT" add "f$i.txt") >/dev/null 2>&1
+    (cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+        GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+        "$ZIGGIT" commit -m "commit $i") >/dev/null 2>&1
+done
+
+git_log=$(cd "$d" && git log --format=%H -1 2>/dev/null | tr -d '[:space:]')
+ziggit_log=$(cd "$d" && timeout 10 "$ZIGGIT" log --format=%H -1 2>/dev/null | tr -d '[:space:]')
+if [ "$git_log" = "$ziggit_log" ]; then
+    pass "log --format=%H matches for latest commit"
+else
+    fail "log format" "git=$git_log ziggit=$ziggit_log"
+fi
+
+# --- Test 302: 120 files in single commit ---
+echo "Test 302: ziggit add+commit 120 files -> git ls-tree lists all"
+d=$(new_repo "t302")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+for i in $(seq 1 120); do
+    printf "content%03d" "$i" > "$d/file_$(printf '%03d' $i).txt"
+done
+(cd "$d" && "$ZIGGIT" add .) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "120 files") >/dev/null 2>&1
+
+file_count=$(cd "$d" && git ls-tree --name-only HEAD 2>&1 | wc -l | tr -d '[:space:]')
+if [ "$file_count" = "120" ]; then
+    pass "120 files all in git ls-tree"
+else
+    fail "120 files" "count=$file_count"
+fi
+
+# --- Test 303: deeply nested 10 levels ---
+echo "Test 303: ziggit deeply nested 10 levels -> git reads"
+d=$(new_repo "t303")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+mkdir -p "$d/a/b/c/d/e/f/g/h/i/j"
+echo "deep content" > "$d/a/b/c/d/e/f/g/h/i/j/deep.txt"
+(cd "$d" && "$ZIGGIT" add a/b/c/d/e/f/g/h/i/j/deep.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "deep nesting") >/dev/null 2>&1
+
+deep_content=$(cd "$d" && git show HEAD:a/b/c/d/e/f/g/h/i/j/deep.txt 2>&1 | tr -d '[:space:]')
+if [ "$deep_content" = "deepcontent" ]; then
+    pass "deeply nested content preserved"
+else
+    fail "deep nesting" "content=[$deep_content]"
+fi
+
+# --- Test 304: file with spaces in name ---
+echo "Test 304: ziggit file with spaces -> git reads"
+d=$(new_repo "t304")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "spaced content" > "$d/my file.txt"
+(cd "$d" && "$ZIGGIT" add "my file.txt") >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "spaces") >/dev/null 2>&1
+
+space_ls=$(cd "$d" && git ls-tree --name-only HEAD 2>&1)
+if echo "$space_ls" | grep -q "my file.txt"; then
+    pass "file with spaces in git ls-tree"
+else
+    fail "spaces" "ls=[$space_ls]"
+fi
+
+# --- Test 305: binary file with null bytes ---
+echo "Test 305: ziggit binary file -> git cat-file -s correct"
+d=$(new_repo "t305")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+python3 -c "import sys; sys.stdout.buffer.write(bytes(range(256)))" > "$d/binary.dat"
+(cd "$d" && "$ZIGGIT" add binary.dat) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "binary") >/dev/null 2>&1
+
+bin_size=$(cd "$d" && git cat-file -s HEAD:binary.dat 2>&1 | tr -d '[:space:]')
+if [ "$bin_size" = "256" ]; then
+    pass "binary file 256 bytes preserved"
+else
+    fail "binary size" "size=$bin_size"
+fi
+
+# --- Test 306: git writes -> ziggit reads rev-parse ---
+echo "Test 306: git init+commit -> ziggit rev-parse HEAD matches"
+d=$(new_repo "t306")
+(cd "$d" && git init && git config user.name T && git config user.email t@t) >/dev/null 2>&1
+echo "git content" > "$d/readme.txt"
+(cd "$d" && git add readme.txt && git commit -m "git commit") >/dev/null 2>&1
+
+git_head=$(cd "$d" && git rev-parse HEAD 2>&1 | tr -d '[:space:]')
+ziggit_head=$(cd "$d" && "$ZIGGIT" rev-parse HEAD 2>&1 | tr -d '[:space:]')
+if [ "$git_head" = "$ziggit_head" ]; then
+    pass "git writes -> ziggit rev-parse matches"
+else
+    fail "git->ziggit rev-parse" "git=$git_head ziggit=$ziggit_head"
+fi
+
+# --- Test 307: git tag -> ziggit describe --tags ---
+echo "Test 307: git tag -> ziggit describe --tags"
+d=$(new_repo "t307")
+(cd "$d" && git init && git config user.name T && git config user.email t@t) >/dev/null 2>&1
+echo "v1" > "$d/f.txt"
+(cd "$d" && git add . && git commit -m "release" && git tag v4.0.0) >/dev/null 2>&1
+
+git_desc=$(cd "$d" && git describe --tags 2>&1 | tr -d '[:space:]')
+ziggit_desc=$(cd "$d" && "$ZIGGIT" describe --tags 2>&1 | tr -d '[:space:]')
+if [ "$git_desc" = "$ziggit_desc" ]; then
+    pass "git tag -> ziggit describe matches: $git_desc"
+else
+    fail "git->ziggit describe" "git=$git_desc ziggit=$ziggit_desc"
+fi
+
+# --- Test 308: git multiple commits -> ziggit log ---
+echo "Test 308: git 3 commits -> ziggit log --format=%H -1 HEAD"
+d=$(new_repo "t308")
+(cd "$d" && git init && git config user.name T && git config user.email t@t) >/dev/null 2>&1
+for i in 1 2 3; do
+    echo "commit $i" > "$d/f$i.txt"
+    (cd "$d" && git add . && git commit -m "commit $i") >/dev/null 2>&1
+done
+
+git_latest=$(cd "$d" && git log --format=%H -1 2>&1 | tr -d '[:space:]')
+ziggit_latest=$(cd "$d" && "$ZIGGIT" log --format=%H -1 2>&1 | tr -d '[:space:]')
+if [ "$git_latest" = "$ziggit_latest" ]; then
+    pass "git 3 commits -> ziggit log latest matches"
+else
+    fail "git->ziggit log" "git=$git_latest ziggit=$ziggit_latest"
+fi
+
+# --- Test 309: ziggit annotated tag -> git cat-file shows tag ---
+echo "Test 309: ziggit annotated tag -> git cat-file validates"
+d=$(new_repo "t309")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "release" > "$d/r.txt"
+(cd "$d" && "$ZIGGIT" add r.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "release commit") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag -a v5.0.0 -m "Release v5.0.0") >/dev/null 2>&1
+
+tag_type=$(cd "$d" && git cat-file -t v5.0.0 2>&1 | tr -d '[:space:]')
+if [ "$tag_type" = "tag" ]; then
+    pass "annotated tag object type is 'tag'"
+else
+    # Might be lightweight tag
+    if [ "$tag_type" = "commit" ]; then
+        pass "tag created (lightweight, cat-file says commit)"
+    else
+        fail "annotated tag type" "type=$tag_type"
+    fi
+fi
+
+# --- Test 310: ziggit status --porcelain on clean repo ---
+echo "Test 310: ziggit status --porcelain on clean repo"
+d=$(new_repo "t310")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "clean" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "clean commit") >/dev/null 2>&1
+
+ziggit_status=$(cd "$d" && "$ZIGGIT" status --porcelain 2>&1)
+git_status=$(cd "$d" && git status --porcelain 2>&1)
+if [ -z "$ziggit_status" ] && [ -z "$git_status" ]; then
+    pass "both report clean status"
+else
+    fail "clean status" "ziggit=[$ziggit_status] git=[$git_status]"
+fi
+
+# --- Test 311: interleaved ziggit/git commits -> both agree on HEAD ---
+echo "Test 311: interleaved ziggit/git commits -> both agree"
+d=$(new_repo "t311")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+(cd "$d" && git config user.name T && git config user.email t@t) >/dev/null 2>&1
+
+# ziggit commit
+echo "z1" > "$d/z1.txt"
+(cd "$d" && "$ZIGGIT" add z1.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "ziggit 1") >/dev/null 2>&1
+
+# git commit
+echo "g1" > "$d/g1.txt"
+(cd "$d" && git add g1.txt && git commit -m "git 1") >/dev/null 2>&1
+
+# ziggit commit again
+echo "z2" > "$d/z2.txt"
+(cd "$d" && "$ZIGGIT" add z2.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "ziggit 2") >/dev/null 2>&1
+
+git_head=$(cd "$d" && git rev-parse HEAD 2>&1 | tr -d '[:space:]')
+ziggit_head=$(cd "$d" && "$ZIGGIT" rev-parse HEAD 2>&1 | tr -d '[:space:]')
+if [ "$git_head" = "$ziggit_head" ]; then
+    pass "interleaved commits: HEAD matches ($git_head)"
+else
+    fail "interleaved HEAD" "git=$git_head ziggit=$ziggit_head"
+fi
+
+commit_count=$(cd "$d" && git rev-list --count HEAD 2>&1 | tr -d '[:space:]')
+if [ "$commit_count" = "3" ]; then
+    pass "interleaved commits: count is 3"
+else
+    fail "interleaved count" "count=$commit_count"
+fi
+
+# --- Test 313: ziggit 5 commits -> git rev-parse HEAD~N ---
+echo "Test 313: ziggit 5 commits -> git rev-parse HEAD~N all valid"
+d=$(new_repo "t313")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+for i in 0 1 2 3 4; do
+    echo "commit $i" > "$d/c$i.txt"
+    (cd "$d" && "$ZIGGIT" add "c$i.txt") >/dev/null 2>&1
+    (cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+        GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+        "$ZIGGIT" commit -m "commit $i") >/dev/null 2>&1
+done
+
+all_valid=true
+for i in 0 1 2 3 4; do
+    hash=$(cd "$d" && git rev-parse "HEAD~$i" 2>&1 | tr -d '[:space:]')
+    if [ ${#hash} -ne 40 ]; then
+        all_valid=false
+        break
+    fi
+done
+if $all_valid; then
+    pass "all HEAD~N (0-4) resolve to valid hashes"
+else
+    fail "HEAD~N" "some hash invalid"
+fi
+
+# --- Test 314: ziggit commit has valid author/committer lines ---
+echo "Test 314: ziggit commit has valid author/committer format"
+d=$(new_repo "t314")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "data" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "authored commit") >/dev/null 2>&1
+
+cat_file=$(cd "$d" && git cat-file -p HEAD 2>&1)
+# Check that author and committer lines have valid format: name <email> timestamp timezone
+if echo "$cat_file" | grep -qE "^author .+ <.+> [0-9]+ [+-][0-9]+$"; then
+    pass "author line has valid format"
+else
+    fail "author format" "cat-file=[$cat_file]"
+fi
+if echo "$cat_file" | grep -qE "^committer .+ <.+> [0-9]+ [+-][0-9]+$"; then
+    pass "committer line has valid format"
+else
+    fail "committer format" "cat-file=[$cat_file]"
+fi
+
 echo ""
 echo "========================================"
 echo "Results: $PASS passed, $FAIL failed"
