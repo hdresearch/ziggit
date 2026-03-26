@@ -288,12 +288,11 @@ fn testGitIndexZiggitRead(allocator: std.mem.Allocator, test_dir: fs.Dir) !void 
     defer allocator.free(ziggit_status_result);
 
     // Verify ziggit can access .git/index file directly
-    const index_exists = repo_path.access(".git/index", .{}) catch false;
-    if (!index_exists) {
+    repo_path.access(".git/index", .{}) catch {
         std.debug.print("  Warning: .git/index file not found\n", .{});
         std.debug.print("  ✓ Test 5 passed (with warnings)\n", .{});
         return;
-    }
+    };
 
     // Should be able to read the index without errors
     std.debug.print("  ziggit reading git-created index: success\n", .{});
@@ -390,11 +389,11 @@ fn compareOutputs(git_output: []const u8, ziggit_output: []const u8, test_name: 
     const ziggit_trimmed = std.mem.trim(u8, ziggit_output, " \t\n\r");
     
     if (!std.mem.eql(u8, git_trimmed, ziggit_trimmed)) {
-        std.debug.print("  {} output mismatch:\n", .{test_name});
+        std.debug.print("  {s} output mismatch:\n", .{test_name});
         std.debug.print("  git: '{s}'\n", .{git_trimmed});
         std.debug.print("  ziggit: '{s}'\n", .{ziggit_trimmed});
     } else {
-        std.debug.print("  {} outputs match perfectly\n", .{test_name});
+        std.debug.print("  {s} outputs match perfectly\n", .{test_name});
     }
 }
 
