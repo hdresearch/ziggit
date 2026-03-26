@@ -515,6 +515,189 @@ pub fn getPullRebase(self: GitConfig) bool {
     return self.getBool("pull", null, "rebase", false);
 }
 
+/// Get init.defaultBranch setting (for git init)
+pub fn getInitDefaultBranch(self: GitConfig) ?[]const u8 {
+    return self.get("init", null, "defaultBranch");
+}
+
+/// Get merge.conflictStyle setting
+pub fn getMergeConflictStyle(self: GitConfig) ?[]const u8 {
+    return self.get("merge", null, "conflictStyle");
+}
+
+/// Get diff.tool setting
+pub fn getDiffTool(self: GitConfig) ?[]const u8 {
+    return self.get("diff", null, "tool");
+}
+
+/// Get merge.tool setting
+pub fn getMergeTool(self: GitConfig) ?[]const u8 {
+    return self.get("merge", null, "tool");
+}
+
+/// Get remote.origin.pushurl setting (if different from fetch url)
+pub fn getRemotePushUrl(self: GitConfig, remote_name: []const u8) ?[]const u8 {
+    return self.get("remote", remote_name, "pushurl");
+}
+
+/// Get branch upstream configuration
+pub fn getBranchUpstream(self: GitConfig, branch_name: []const u8) ?[]const u8 {
+    if (self.getBranchRemote(branch_name)) |remote| {
+        if (self.getBranchMerge(branch_name)) |merge_ref| {
+            // Extract branch name from refs/heads/branch_name
+            if (std.mem.startsWith(u8, merge_ref, "refs/heads/")) {
+                const upstream_branch = merge_ref["refs/heads/".len..];
+                // Return remote/branch format
+                const result = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ remote, upstream_branch }) catch return null;
+                return result;
+            }
+        }
+    }
+    return null;
+}
+
+/// Validate configuration values
+pub fn validateConfig(self: GitConfig, allocator: std.mem.Allocator) ![][]const u8 {
+    var issues = std.ArrayList([]const u8).init(allocator);
+    
+    // Check for required user configuration
+    if (self.getUserName() == null) {
+        try issues.append(try allocator.dupe(u8, "user.name is not configured"));
+    }
+    
+    if (self.getUserEmail() == null) {
+        try issues.append(try allocator.dupe(u8, "user.email is not configured"));
+    }
+    
+    // Validate user.email format (basic check)
+    if (self.getUserEmail()) |email| {
+        if (std.mem.indexOf(u8, email, "@") == null) {
+            try issues.append(try allocator.dupe(u8, "user.email does not contain @ symbol"));
+        }
+    }
+    
+    // Check for suspicious configurations
+    if (self.get("core", null, "autocrlf")) |autocrlf| {
+        if (!std.mem.eql(u8, autocrlf, "true") and !std.mem.eql(u8, autocrlf, "false") and !std.mem.eql(u8, autocrlf, "input")) {
+            const issue = try std.fmt.allocPrint(allocator, "Invalid core.autocrlf value: {s} (should be true, false, or input)", .{autocrlf});
+            try issues.append(issue);
+        }
+    }
+    
+    // Validate push.default setting
+    if (self.getPushDefault()) |push_default| {
+        const valid_values = [_][]const u8{ "nothing", "current", "upstream", "simple", "matching" };
+        var is_valid = false;
+        for (valid_values) |valid_value| {
+            if (std.mem.eql(u8, push_default, valid_value)) {
+                is_valid = true;
+                break;
+            }
+        }
+        if (!is_valid) {
+            const issue = try std.fmt.allocPrint(allocator, "Invalid push.default value: {s}", .{push_default});
+            try issues.append(issue);
+        }
+    }
+    
+    return issues.toOwnedSlice();
+}
+
+/// Get all remotes configured in the repository
+pub fn getAllRemotes(self: GitConfig, allocator: std.mem.Allocator) ![][]const u8 {
+    var remotes = std.ArrayList([]const u8).init(allocator);
+    
+    for (self.entries.items) |entry| {
+        if (std.mem.eql(u8, entry.section, "remote") and entry.subsection != null) {
+            const remote_name = entry.subsection.?;
+            
+            // Check if we already have this remote
+            var already_added = false;
+            for (remotes.items) |existing_remote| {
+                if (std.mem.eql(u8, existing_remote, remote_name)) {
+                    already_added = true;
+                    break;
+                }
+            }
+            
+            if (!already_added) {
+                try remotes.append(try allocator.dupe(u8, remote_name));
+            }
+        }
+    }
+    
+    return remotes.toOwnedSlice();
+}
+
+/// Get all configured branches with their remote tracking information
+pub fn getAllBranches(self: GitConfig, allocator: std.mem.Allocator) ![]BranchInfo {
+    var branches = std.ArrayList(BranchInfo).init(allocator);
+    
+    for (self.entries.items) |entry| {
+        if (std.mem.eql(u8, entry.section, "branch") and entry.subsection != null) {
+            const branch_name = entry.subsection.?;
+            
+            // Check if we already have this branch
+            var branch_info: ?*BranchInfo = null;
+            for (branches.items) |*existing_branch| {
+                if (std.mem.eql(u8, existing_branch.name, branch_name)) {
+                    branch_info = existing_branch;
+                    break;
+                }
+            }
+            
+            if (branch_info == null) {
+                try branches.append(BranchInfo{
+                    .name = try allocator.dupe(u8, branch_name),
+                    .remote = null,
+                    .merge = null,
+                    .rebase = false,
+                });
+                branch_info = &branches.items[branches.items.len - 1];
+            }
+            
+            // Set the specific configuration
+            if (std.mem.eql(u8, entry.name, "remote")) {
+                if (branch_info.?.remote) |old_remote| allocator.free(old_remote);
+                branch_info.?.remote = try allocator.dupe(u8, entry.value);
+            } else if (std.mem.eql(u8, entry.name, "merge")) {
+                if (branch_info.?.merge) |old_merge| allocator.free(old_merge);
+                branch_info.?.merge = try allocator.dupe(u8, entry.value);
+            } else if (std.mem.eql(u8, entry.name, "rebase")) {
+                branch_info.?.rebase = parseBooleanValue(entry.value) orelse false;
+            }
+        }
+    }
+    
+    return branches.toOwnedSlice();
+}
+
+/// Branch information with tracking details
+pub const BranchInfo = struct {
+    name: []const u8,
+    remote: ?[]const u8,
+    merge: ?[]const u8,
+    rebase: bool,
+    
+    pub fn deinit(self: BranchInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        if (self.remote) |remote| allocator.free(remote);
+        if (self.merge) |merge| allocator.free(merge);
+    }
+    
+    pub fn getUpstreamRef(self: BranchInfo, allocator: std.mem.Allocator) !?[]u8 {
+        if (self.remote == null or self.merge == null) return null;
+        
+        // Convert refs/heads/branch to remote/branch format
+        if (std.mem.startsWith(u8, self.merge.?, "refs/heads/")) {
+            const branch_name = self.merge.?["refs/heads/".len..];
+            return try std.fmt.allocPrint(allocator, "{s}/{s}", .{ self.remote.?, branch_name });
+        }
+        
+        return null;
+    }
+};
+
 /// Get all configuration entries (for debugging/export purposes)
 pub fn getAllEntries(self: GitConfig) []const ConfigEntry {
     return self.entries.items;
