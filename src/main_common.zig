@@ -164,7 +164,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
             }
             
             arg_index += 1;
-            // Skip the config setting (bun passes -c core.longpaths=true which we ignore)
+            // Skip the config setting for native commands (not implemented)
+            // For forwarded commands, it'll be passed through as part of all_original_args
             arg_index += 1;
         } else if (std.mem.eql(u8, arg, "--git-dir")) {
             if (arg_index + 1 >= all_original_args.items.len) {
