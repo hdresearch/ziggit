@@ -2407,3 +2407,374 @@ pub const PackValidationResult = struct {
         self.warnings.deinit();
     }
 };
+
+// ============================================================================
+// Pack file writing infrastructure for HTTPS clone/fetch
+// Used by NET-SMART and NET-PACK agents to save received pack data
+// ============================================================================
+
+/// Save a received pack file to the repository and generate its idx file.
+/// Returns the pack checksum hex string (used in the filename).
+/// The pack_data must be a valid git pack file (PACK header + objects + SHA-1 checksum).
+pub fn saveReceivedPack(pack_data: []const u8, git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![]u8 {
+    // Validate pack header
+    if (pack_data.len < 32) return error.PackFileTooSmall;
+    if (!std.mem.eql(u8, pack_data[0..4], "PACK")) return error.InvalidPackSignature;
+    
+    const version = std.mem.readInt(u32, @ptrCast(pack_data[4..8]), .big);
+    if (version < 2 or version > 3) return error.UnsupportedPackVersion;
+    
+    // Verify pack checksum
+    const content_end = pack_data.len - 20;
+    const stored_checksum = pack_data[content_end..];
+    var hasher = std.crypto.hash.Sha1.init(.{});
+    hasher.update(pack_data[0..content_end]);
+    var computed_checksum: [20]u8 = undefined;
+    hasher.final(&computed_checksum);
+    if (!std.mem.eql(u8, &computed_checksum, stored_checksum)) {
+        return error.PackChecksumMismatch;
+    }
+    
+    // Checksum hex for filename
+    const checksum_hex = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(stored_checksum)});
+    defer allocator.free(checksum_hex);
+    
+    // Ensure pack directory exists
+    const pack_dir = try std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir});
+    defer allocator.free(pack_dir);
+    
+    std.fs.cwd().makePath(pack_dir) catch {};
+    
+    // Write .pack file
+    const pack_path = try std.fmt.allocPrint(allocator, "{s}/pack-{s}.pack", .{ pack_dir, checksum_hex });
+    defer allocator.free(pack_path);
+    try platform_impl.fs.writeFile(pack_path, pack_data);
+    
+    // Generate .idx file
+    const idx_data = try generatePackIndex(pack_data, allocator);
+    defer allocator.free(idx_data);
+    
+    const idx_path = try std.fmt.allocPrint(allocator, "{s}/pack-{s}.idx", .{ pack_dir, checksum_hex });
+    defer allocator.free(idx_path);
+    try platform_impl.fs.writeFile(idx_path, idx_data);
+    
+    return try allocator.dupe(u8, checksum_hex);
+}
+
+/// Object entry collected during pack index generation
+const IndexEntry = struct {
+    sha1: [20]u8,
+    offset: u64,
+    crc32: u32,
+};
+
+/// Read a packed object from in-memory pack data (no filesystem access).
+/// Handles base objects and OFS_DELTA only. REF_DELTA requires external lookup.
+fn readPackedObjectFromData(pack_data: []const u8, offset: usize, allocator: std.mem.Allocator) !GitObject {
+    if (offset >= pack_data.len) return error.ObjectNotFound;
+    
+    var pos = offset;
+    const first_byte = pack_data[pos];
+    pos += 1;
+    
+    const pack_type_num = (first_byte >> 4) & 7;
+    const pack_type = std.meta.intToEnum(PackObjectType, pack_type_num) catch return error.ObjectNotFound;
+    
+    var size: usize = @intCast(first_byte & 15);
+    var shift: u6 = 4;
+    var current_byte = first_byte;
+    while (current_byte & 0x80 != 0 and pos < pack_data.len) {
+        current_byte = pack_data[pos];
+        pos += 1;
+        size |= @as(usize, @intCast(current_byte & 0x7F)) << shift;
+        shift += 7;
+    }
+    
+    switch (pack_type) {
+        .commit, .tree, .blob, .tag => {
+            if (pos >= pack_data.len) return error.ObjectNotFound;
+            var decompressed = std.ArrayList(u8).init(allocator);
+            defer decompressed.deinit();
+            var stream = std.io.fixedBufferStream(pack_data[pos..]);
+            std.compress.zlib.decompress(stream.reader(), decompressed.writer()) catch return error.ObjectNotFound;
+            if (decompressed.items.len != size) return error.ObjectNotFound;
+            const obj_type: ObjectType = switch (pack_type) {
+                .commit => .commit, .tree => .tree, .blob => .blob, .tag => .tag,
+                else => unreachable,
+            };
+            return GitObject.init(obj_type, try allocator.dupe(u8, decompressed.items));
+        },
+        .ofs_delta => {
+            if (pos >= pack_data.len) return error.ObjectNotFound;
+            var base_offset_delta: usize = 0;
+            var first_offset_byte = true;
+            while (pos < pack_data.len) {
+                const offset_byte = pack_data[pos];
+                pos += 1;
+                if (first_offset_byte) {
+                    base_offset_delta = @intCast(offset_byte & 0x7F);
+                    first_offset_byte = false;
+                } else {
+                    base_offset_delta = (base_offset_delta + 1) << 7;
+                    base_offset_delta += @intCast(offset_byte & 0x7F);
+                }
+                if (offset_byte & 0x80 == 0) break;
+            }
+            if (base_offset_delta >= offset) return error.ObjectNotFound;
+            const base_offset = offset - base_offset_delta;
+            const base_object = readPackedObjectFromData(pack_data, base_offset, allocator) catch return error.ObjectNotFound;
+            defer base_object.deinit(allocator);
+            var delta_data = std.ArrayList(u8).init(allocator);
+            defer delta_data.deinit();
+            var stream = std.io.fixedBufferStream(pack_data[pos..]);
+            std.compress.zlib.decompress(stream.reader(), delta_data.writer()) catch return error.ObjectNotFound;
+            const result_data = try applyDelta(base_object.data, delta_data.items, allocator);
+            return GitObject.init(base_object.type, result_data);
+        },
+        .ref_delta => return error.RefDeltaRequiresExternalLookup,
+    }
+}
+
+/// Generate a v2 pack index (.idx) from pack data.
+/// This is a pure-Zig implementation - no need to shell out to git index-pack.
+pub fn generatePackIndex(pack_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    if (pack_data.len < 32) return error.PackFileTooSmall;
+    if (!std.mem.eql(u8, pack_data[0..4], "PACK")) return error.InvalidPackSignature;
+    
+    const object_count = std.mem.readInt(u32, @ptrCast(pack_data[8..12]), .big);
+    const content_end = pack_data.len - 20;
+    const pack_checksum = pack_data[content_end..pack_data.len];
+    
+    // Collect all objects: parse each object to get its SHA-1, offset, and CRC32
+    var entries = std.ArrayList(IndexEntry).init(allocator);
+    defer entries.deinit();
+    
+    var pos: usize = 12; // After header
+    var obj_idx: u32 = 0;
+    
+    while (obj_idx < object_count and pos < content_end) {
+        const obj_start = pos;
+        
+        // Parse object header
+        const first_byte = pack_data[pos];
+        pos += 1;
+        const pack_type_num: u3 = @intCast((first_byte >> 4) & 7);
+        var size: usize = @intCast(first_byte & 0x0F);
+        var shift: u6 = 4;
+        var current_byte = first_byte;
+        
+        while (current_byte & 0x80 != 0 and pos < content_end) {
+            current_byte = pack_data[pos];
+            pos += 1;
+            size |= @as(usize, @intCast(current_byte & 0x7F)) << shift;
+            if (shift < 60) shift += 7 else break;
+        }
+        
+        // Handle delta headers
+        var base_offset: ?usize = null;
+        var base_sha1: ?[20]u8 = null;
+        
+        if (pack_type_num == 6) { // OFS_DELTA
+            var delta_off: usize = 0;
+            var first_delta_byte = true;
+            while (pos < content_end) {
+                const b = pack_data[pos];
+                pos += 1;
+                if (first_delta_byte) {
+                    delta_off = @intCast(b & 0x7F);
+                    first_delta_byte = false;
+                } else {
+                    delta_off = (delta_off + 1) << 7;
+                    delta_off += @intCast(b & 0x7F);
+                }
+                if (b & 0x80 == 0) break;
+            }
+            if (delta_off <= obj_start) {
+                base_offset = obj_start - delta_off;
+            }
+        } else if (pack_type_num == 7) { // REF_DELTA
+            if (pos + 20 <= content_end) {
+                var sha1: [20]u8 = undefined;
+                @memcpy(&sha1, pack_data[pos..pos + 20]);
+                base_sha1 = sha1;
+                pos += 20;
+            }
+        }
+        
+        // Decompress object data to find end of zlib stream and compute SHA-1
+        const compressed_start = pos;
+        var decompressed = std.ArrayList(u8).init(allocator);
+        defer decompressed.deinit();
+        
+        var stream = std.io.fixedBufferStream(pack_data[pos..content_end]);
+        std.compress.zlib.decompress(stream.reader(), decompressed.writer()) catch {
+            // If decompression fails, skip this object
+            obj_idx += 1;
+            continue;
+        };
+        pos = compressed_start + @as(usize, @intCast(stream.pos));
+        
+        // Compute CRC32 of the raw pack data for this object (from obj_start to pos)
+        const crc = std.hash.crc.Crc32IsoHdlc.hash(pack_data[obj_start..pos]);
+        
+        // Compute SHA-1 of the git object
+        var obj_sha1: [20]u8 = undefined;
+        
+        if (pack_type_num >= 1 and pack_type_num <= 4) {
+            // Regular object: hash = SHA1("type size\0data")
+            const type_str: []const u8 = switch (pack_type_num) {
+                1 => "commit",
+                2 => "tree",
+                3 => "blob",
+                4 => "tag",
+                else => unreachable,
+            };
+            const header = try std.fmt.allocPrint(allocator, "{s} {}\x00", .{ type_str, decompressed.items.len });
+            defer allocator.free(header);
+            
+            var sha_hasher = std.crypto.hash.Sha1.init(.{});
+            sha_hasher.update(header);
+            sha_hasher.update(decompressed.items);
+            sha_hasher.final(&obj_sha1);
+        } else if (pack_type_num == 6) {
+            // OFS_DELTA: resolve base, apply delta, hash result
+            if (base_offset) |bo| {
+                const base_obj = readPackedObjectFromData(pack_data, bo, allocator) catch {
+                    obj_idx += 1;
+                    continue;
+                };
+                defer base_obj.deinit(allocator);
+                const result_data = applyDelta(base_obj.data, decompressed.items, allocator) catch {
+                    obj_idx += 1;
+                    continue;
+                };
+                defer allocator.free(result_data);
+                
+                const type_str = base_obj.type.toString();
+                const header = try std.fmt.allocPrint(allocator, "{s} {}\x00", .{ type_str, result_data.len });
+                defer allocator.free(header);
+                var sha_hasher = std.crypto.hash.Sha1.init(.{});
+                sha_hasher.update(header);
+                sha_hasher.update(result_data);
+                sha_hasher.final(&obj_sha1);
+            } else {
+                obj_idx += 1;
+                continue;
+            }
+        } else if (pack_type_num == 7) {
+            // REF_DELTA: need to find base by SHA-1 in already-indexed entries
+            if (base_sha1) |target_sha| {
+                // Find the base object offset in our collected entries
+                var found_base_offset: ?usize = null;
+                for (entries.items) |entry| {
+                    if (std.mem.eql(u8, &entry.sha1, &target_sha)) {
+                        found_base_offset = @intCast(entry.offset);
+                        break;
+                    }
+                }
+                if (found_base_offset) |bo| {
+                    const base_obj = readPackedObjectFromData(pack_data, bo, allocator) catch {
+                        obj_idx += 1;
+                        continue;
+                    };
+                    defer base_obj.deinit(allocator);
+                    const result_data = applyDelta(base_obj.data, decompressed.items, allocator) catch {
+                        obj_idx += 1;
+                        continue;
+                    };
+                    defer allocator.free(result_data);
+                    
+                    const type_str = base_obj.type.toString();
+                    const header = try std.fmt.allocPrint(allocator, "{s} {}\x00", .{ type_str, result_data.len });
+                    defer allocator.free(header);
+                    var sha_hasher = std.crypto.hash.Sha1.init(.{});
+                    sha_hasher.update(header);
+                    sha_hasher.update(result_data);
+                    sha_hasher.final(&obj_sha1);
+                } else {
+                    obj_idx += 1;
+                    continue;
+                }
+            } else {
+                obj_idx += 1;
+                continue;
+            }
+        } else {
+            obj_idx += 1;
+            continue;
+        }
+        
+        try entries.append(IndexEntry{
+            .sha1 = obj_sha1,
+            .offset = @intCast(obj_start),
+            .crc32 = crc,
+        });
+        
+        obj_idx += 1;
+    }
+    
+    // Sort entries by SHA-1 (required for binary search in idx)
+    std.sort.block(IndexEntry, entries.items, {}, struct {
+        fn lessThan(_: void, a: IndexEntry, b: IndexEntry) bool {
+            return std.mem.order(u8, &a.sha1, &b.sha1) == .lt;
+        }
+    }.lessThan);
+    
+    // Build v2 idx file
+    var idx = std.ArrayList(u8).init(allocator);
+    defer idx.deinit();
+    
+    // Magic + version
+    try idx.writer().writeInt(u32, 0xff744f63, .big);
+    try idx.writer().writeInt(u32, 2, .big);
+    
+    // Fanout table (256 entries)
+    for (0..256) |i| {
+        var count: u32 = 0;
+        for (entries.items) |entry| {
+            if (entry.sha1[0] <= @as(u8, @intCast(i))) count += 1;
+        }
+        try idx.writer().writeInt(u32, count, .big);
+    }
+    
+    // SHA-1 table
+    for (entries.items) |entry| {
+        try idx.appendSlice(&entry.sha1);
+    }
+    
+    // CRC32 table
+    for (entries.items) |entry| {
+        try idx.writer().writeInt(u32, entry.crc32, .big);
+    }
+    
+    // Offset table (32-bit; 64-bit entries would go in a separate table for offsets >= 2GB)
+    var large_offsets = std.ArrayList(u64).init(allocator);
+    defer large_offsets.deinit();
+    
+    for (entries.items) |entry| {
+        if (entry.offset >= 0x80000000) {
+            // Large offset: store index into 64-bit table with MSB set
+            try idx.writer().writeInt(u32, @as(u32, @intCast(large_offsets.items.len)) | 0x80000000, .big);
+            try large_offsets.append(entry.offset);
+        } else {
+            try idx.writer().writeInt(u32, @intCast(entry.offset), .big);
+        }
+    }
+    
+    // 64-bit offset table (if any)
+    for (large_offsets.items) |offset| {
+        try idx.writer().writeInt(u64, offset, .big);
+    }
+    
+    // Pack checksum (copy from pack file)
+    try idx.appendSlice(pack_checksum);
+    
+    // Idx checksum (SHA-1 of everything above)
+    var idx_hasher = std.crypto.hash.Sha1.init(.{});
+    idx_hasher.update(idx.items);
+    var idx_checksum: [20]u8 = undefined;
+    idx_hasher.final(&idx_checksum);
+    try idx.appendSlice(&idx_checksum);
+    
+    return try idx.toOwnedSlice();
+}
