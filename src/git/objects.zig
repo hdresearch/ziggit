@@ -1035,14 +1035,16 @@ fn applyDeltaCore(base_data: []const u8, delta_data: []const u8, allocator: std.
     return result;
 }
 fn readVarint(data: []const u8, pos: *usize) usize {
+    const ShiftType = std.math.Log2Int(usize);
+    const max_shift = @bitSizeOf(usize) - 7; // 57 on 64-bit, 25 on 32-bit
     var value: usize = 0;
-    var shift: u6 = 0;
+    var shift: ShiftType = 0;
     while (pos.* < data.len) {
         const b = data[pos.*];
         pos.* += 1;
         value |= @as(usize, b & 0x7F) << shift;
         if (b & 0x80 == 0) break;
-        if (shift >= 56) break; // prevent overflow
+        if (shift >= max_shift) break; // prevent overflow
         shift += 7;
     }
     return value;
