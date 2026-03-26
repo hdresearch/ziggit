@@ -95,12 +95,28 @@ fn benchmarkRepoStatus(allocator: std.mem.Allocator, test_dir: []const u8) !Benc
     defer cleanupTestDir(ziggit_path);
     
     // Initialize repos
-    _ = runCommand(allocator, &.{ "git", "init", git_path }, null) catch return result;
-    _ = runCommand(allocator, &.{ "git", "config", "user.name", "Test" }, git_path) catch return result;
-    _ = runCommand(allocator, &.{ "git", "config", "user.email", "test@example.com" }, git_path) catch return result;
+    {
+        const cmd_result = runCommand(allocator, &.{ "git", "init", git_path }, null) catch return result;
+        allocator.free(cmd_result.stdout);
+        allocator.free(cmd_result.stderr);
+    }
+    {
+        const cmd_result = runCommand(allocator, &.{ "git", "config", "user.name", "Test" }, git_path) catch return result;
+        allocator.free(cmd_result.stdout);
+        allocator.free(cmd_result.stderr);
+    }
+    {
+        const cmd_result = runCommand(allocator, &.{ "git", "config", "user.email", "test@example.com" }, git_path) catch return result;
+        allocator.free(cmd_result.stdout);
+        allocator.free(cmd_result.stderr);
+    }
     
     try std.fs.makeDirAbsolute(ziggit_path);
-    _ = runCommand(allocator, &.{ "/root/ziggit/zig-out/bin/ziggit", "init" }, ziggit_path) catch return result;
+    {
+        const cmd_result = runCommand(allocator, &.{ "/root/ziggit/zig-out/bin/ziggit", "init" }, ziggit_path) catch return result;
+        allocator.free(cmd_result.stdout);
+        allocator.free(cmd_result.stderr);
+    }
     
     // Add some files
     const git_file_path = try std.fmt.allocPrint(allocator, "{s}/test.txt", .{git_path});
@@ -164,13 +180,29 @@ fn benchmarkBunWorkflow(allocator: std.mem.Allocator, test_dir: []const u8) !Ben
     defer cleanupTestDir(ziggit_path);
     
     // Setup git repository
-    _ = runCommand(allocator, &.{ "git", "init", git_path }, null) catch return result;
-    _ = runCommand(allocator, &.{ "git", "config", "user.name", "Bun Test" }, git_path) catch return result;
-    _ = runCommand(allocator, &.{ "git", "config", "user.email", "bun@test.com" }, git_path) catch return result;
+    {
+        const cmd_result = runCommand(allocator, &.{ "git", "init", git_path }, null) catch return result;
+        allocator.free(cmd_result.stdout);
+        allocator.free(cmd_result.stderr);
+    }
+    {
+        const cmd_result = runCommand(allocator, &.{ "git", "config", "user.name", "Bun Test" }, git_path) catch return result;
+        allocator.free(cmd_result.stdout);
+        allocator.free(cmd_result.stderr);
+    }
+    {
+        const cmd_result = runCommand(allocator, &.{ "git", "config", "user.email", "bun@test.com" }, git_path) catch return result;
+        allocator.free(cmd_result.stdout);
+        allocator.free(cmd_result.stderr);
+    }
     
     // Setup ziggit repository
     try std.fs.makeDirAbsolute(ziggit_path);
-    _ = runCommand(allocator, &.{ "/root/ziggit/zig-out/bin/ziggit", "init" }, ziggit_path) catch return result;
+    {
+        const cmd_result = runCommand(allocator, &.{ "/root/ziggit/zig-out/bin/ziggit", "init" }, ziggit_path) catch return result;
+        allocator.free(cmd_result.stdout);
+        allocator.free(cmd_result.stderr);
+    }
     
     // Simulate bun package.json and lockfile creation
     const package_json = "{\n  \"name\": \"test-project\",\n  \"version\": \"1.0.0\"\n}\n";

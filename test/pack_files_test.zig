@@ -17,14 +17,22 @@ pub fn main() !void {
     std.debug.print("Running Pack File Tests...\n", .{});
 
     // Set up global git config for tests
-    _ = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{"git", "config", "--global", "user.name", "Test User"},
-    }) catch {};
-    _ = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{"git", "config", "--global", "user.email", "test@example.com"},
-    }) catch {};
+    {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"git", "config", "--global", "user.name", "Test User"},
+        }) catch return;
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+    {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"git", "config", "--global", "user.email", "test@example.com"},
+        }) catch return;
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
 
     // Create temporary test directory
     const test_dir = try fs.cwd().makeOpenPath("test_tmp_pack", .{});
@@ -42,12 +50,12 @@ fn testPackFileReading(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
     defer test_dir.deleteTree("pack_repo") catch {};
 
     // Initialize repository
-    _ = try runCommand(allocator, &.{"git", "init"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "init"}, repo_path);
 
     // Create initial file and commit
     try repo_path.writeFile(.{.sub_path = "initial.txt", .data = "Initial content\n"});
-    _ = try runCommand(allocator, &.{"git", "add", "initial.txt"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "commit", "-m", "Initial commit"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "add", "initial.txt"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "commit", "-m", "Initial commit"}, repo_path);
 
     // Create several commits to trigger pack creation
     var i: u32 = 1;
@@ -58,11 +66,11 @@ fn testPackFileReading(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
         defer allocator.free(content);
         
         try repo_path.writeFile(.{.sub_path = filename, .data = content});
-        _ = try runCommand(allocator, &.{"git", "add", filename}, repo_path);
+        try runCommandNoOutput(allocator, &.{"git", "add", filename}, repo_path);
         
         const commit_msg = try std.fmt.allocPrint(allocator, "Commit {}", .{i});
         defer allocator.free(commit_msg);
-        _ = try runCommand(allocator, &.{"git", "commit", "-m", commit_msg}, repo_path);
+        try runCommandNoOutput(allocator, &.{"git", "commit", "-m", commit_msg}, repo_path);
     }
 
     // Show git log before gc
@@ -185,6 +193,12 @@ fn runCommand(allocator: std.mem.Allocator, args: []const []const u8, cwd: fs.Di
     }
     
     return stdout;
+}
+
+// Helper function for running commands when output is not needed
+fn runCommandNoOutput(allocator: std.mem.Allocator, args: []const []const u8, cwd: fs.Dir) !void {
+    const result = try runCommand(allocator, args, cwd);
+    defer allocator.free(result);
 }
 
 fn runZiggitCommand(allocator: std.mem.Allocator, args: []const []const u8, cwd: fs.Dir) ![]u8 {
