@@ -52,6 +52,9 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/ziggit.zig"),
     });
 
+    // Expose the module for the library
+    lib_static.root_module.addImport("ziggit", ziggit_module);
+
     const platform_module = b.addModule("platform", .{
         .root_source_file = b.path("src/platform/platform.zig"),
     });
