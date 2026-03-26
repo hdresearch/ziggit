@@ -41,7 +41,10 @@ for test_script in \
     t3507-cherry-pick-conflict.sh \
     t3501-revert-cherry-pick.sh \
     t3404-rebase-interactive.sh \
+    t3903-stash.sh \
     t3400-rebase.sh \
+    t3305-notes-fanout.sh \
+    t3301-notes.sh \
     t3200-branch.sh \
     t3100-ls-tree-restrict.sh \
     t3070-wildmatch.sh \
@@ -53,6 +56,8 @@ for test_script in \
     t2020-checkout-detach.sh \
     t2018-checkout-branch.sh \
     t2012-checkout-last.sh \
+    t2300-cd-to-toplevel.sh \
+    t2007-checkout-symlink.sh \
     t2010-checkout-ambiguous.sh \
     t1700-split-index.sh \
     t1500-rev-parse.sh \
@@ -74,6 +79,9 @@ for test_script in \
     t0070-fundamental.sh \
     t0060-path-utils.sh \
     t0050-filesystem.sh \
+    t0004-unwritable.sh \
+    t0008-ignores.sh \
+    t0030-stripspace.sh \
     t0002-gitfile.sh \
     t0003-attributes.sh \
     t0010-racy-git.sh \
