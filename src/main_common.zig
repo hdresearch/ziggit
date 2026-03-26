@@ -1099,6 +1099,59 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     }
 }
 
+fn resolveHeadRelative(git_path: []const u8, steps: u32, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
+    // Start from HEAD
+    var current_hash = refs.getCurrentCommit(git_path, platform_impl, allocator) catch {
+        return error.UnknownRevision;
+    };
+    
+    if (current_hash == null) {
+        return error.UnknownRevision;
+    }
+    
+    // Walk back 'steps' number of parents
+    var i: u32 = 0;
+    while (i < steps) {
+        const commit_obj = objects.GitObject.load(current_hash.?, git_path, platform_impl, allocator) catch {
+            allocator.free(current_hash.?);
+            return error.UnknownRevision;
+        };
+        defer commit_obj.deinit(allocator);
+        
+        if (commit_obj.type != .commit) {
+            allocator.free(current_hash.?);
+            return error.UnknownRevision;
+        }
+        
+        // Parse commit data to find the first parent
+        var lines = std.mem.split(u8, commit_obj.data, "\n");
+        var parent_hash: ?[]const u8 = null;
+        
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "parent ")) {
+                parent_hash = line["parent ".len..];
+                break;
+            } else if (line.len == 0) {
+                break; // End of headers
+            }
+        }
+        
+        if (parent_hash == null) {
+            // No parent found, can't go further back
+            allocator.free(current_hash.?);
+            return error.UnknownRevision;
+        }
+        
+        const new_hash = try allocator.dupe(u8, parent_hash.?);
+        allocator.free(current_hash.?);
+        current_hash = new_hash;
+        
+        i += 1;
+    }
+    
+    return current_hash.?;
+}
+
 fn resolveCommittish(git_path: []const u8, committish: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
     // First try as a direct hash
     if (committish.len >= 4 and isValidHashPrefix(committish)) {
@@ -1149,6 +1202,22 @@ fn resolveCommittish(git_path: []const u8, committish: []const u8, platform_impl
         if (head_commit) |commit| {
             return commit;
         }
+    }
+    
+    // Try HEAD~N relative references
+    if (std.mem.startsWith(u8, committish, "HEAD~")) {
+        const tilde_part = committish[5..]; // Skip "HEAD~"
+        
+        if (tilde_part.len == 0) {
+            // HEAD~ is equivalent to HEAD~1
+            return resolveHeadRelative(git_path, 1, platform_impl, allocator);
+        }
+        
+        const n = std.fmt.parseInt(u32, tilde_part, 10) catch {
+            return error.UnknownRevision;
+        };
+        
+        return resolveHeadRelative(git_path, n, platform_impl, allocator);
     }
     
     return error.UnknownRevision;

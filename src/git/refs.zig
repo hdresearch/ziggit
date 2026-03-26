@@ -84,7 +84,7 @@ pub fn resolveRef(git_dir: []const u8, ref_name: []const u8, platform_impl: anyt
                 const head_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{current_ref});
                 defer allocator.free(head_ref);
                 if (resolveRefOnce(git_dir, head_ref, platform_impl, allocator)) |head_resolved| {
-                    const result = if (head_resolved.is_symbolic) blk: {
+                    const result = if (head_resolved.is_symbolic) {
                         allocator.free(current_ref);
                         current_ref = try allocator.dupe(u8, head_resolved.target);
                         allocator.free(head_resolved.target);
@@ -100,7 +100,7 @@ pub fn resolveRef(git_dir: []const u8, ref_name: []const u8, platform_impl: anyt
                 const tag_ref = try std.fmt.allocPrint(allocator, "refs/tags/{s}", .{current_ref});
                 defer allocator.free(tag_ref);
                 if (resolveRefOnce(git_dir, tag_ref, platform_impl, allocator)) |tag_resolved| {
-                    const result = if (tag_resolved.is_symbolic) blk: {
+                    const result = if (tag_resolved.is_symbolic) {
                         allocator.free(current_ref);
                         current_ref = try allocator.dupe(u8, tag_resolved.target);
                         allocator.free(tag_resolved.target);
@@ -116,7 +116,7 @@ pub fn resolveRef(git_dir: []const u8, ref_name: []const u8, platform_impl: anyt
                 const remote_ref = try std.fmt.allocPrint(allocator, "refs/remotes/{s}", .{current_ref});
                 defer allocator.free(remote_ref);
                 if (resolveRefOnce(git_dir, remote_ref, platform_impl, allocator)) |remote_resolved| {
-                    const result = if (remote_resolved.is_symbolic) blk: {
+                    const result = if (remote_resolved.is_symbolic) {
                         allocator.free(current_ref);
                         current_ref = try allocator.dupe(u8, remote_resolved.target);
                         allocator.free(remote_resolved.target);
