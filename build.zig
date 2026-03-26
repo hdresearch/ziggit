@@ -1014,6 +1014,16 @@ pub fn build(b: *std.Build) void {
     bun_workflow_e2e_validation_tests.root_module.addImport("ziggit", ziggit_module);
     test_step.dependOn(&b.addRunArtifact(bun_workflow_e2e_validation_tests).step);
 
+    // Round-trip consistency tests (ziggit API <-> git CLI cross-validation)
+    const roundtrip_consistency_tests = b.addTest(.{
+        .root_source_file = b.path("test/roundtrip_consistency_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    roundtrip_consistency_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(roundtrip_consistency_tests).step);
+    e2e_step.dependOn(&b.addRunArtifact(roundtrip_consistency_tests).step);
+
     // Repository workflow tests
     const repo_workflow_tests = b.addTest(.{
         .root_source_file = b.path("test/repo_workflow_test.zig"),
