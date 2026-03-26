@@ -258,6 +258,16 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/git/objects.zig"),
     });
 
+    // Pack git ground truth tests (real git creates packs, ziggit reads them)
+    const pack_git_groundtruth_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_git_groundtruth_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_git_groundtruth_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+
     // Pack network reception tests (clone/fetch infrastructure)
     const pack_network_reception_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_network_reception_test.zig"),
@@ -541,6 +551,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(pack_network_reception_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_network_e2e_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_clone_flow_tests).step);
+    test_step.dependOn(&b.addRunArtifact(pack_git_groundtruth_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_thin_public_api_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_object_read_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_ref_delta_thin_tests).step);
