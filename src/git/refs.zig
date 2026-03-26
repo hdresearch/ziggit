@@ -645,18 +645,16 @@ fn readFromPackedRefs(git_dir: []const u8, ref_name: []const u8, platform_impl: 
     if (packed_refs_cache) |cache| {
         if (std.mem.eql(u8, cache.git_dir, git_dir)) {
             // Check if file has been modified since cache
-            const file_stat = std.fs.cwd().statFile(packed_refs_path) catch {
-                // If we can't stat the file but have cache, use cache
-                content = cache.content;
-                should_free_content = false;
-            };
-            
-            if (should_free_content) {
+            if (std.fs.cwd().statFile(packed_refs_path)) |file_stat| {
                 const file_mtime = @divTrunc(file_stat.mtime, std.time.ns_per_s);
                 if (file_mtime <= cache.last_modified) {
                     content = cache.content;
                     should_free_content = false;
                 }
+            } else |_| {
+                // If we can't stat the file but have cache, use cache
+                content = cache.content;
+                should_free_content = false;
             }
         }
     }

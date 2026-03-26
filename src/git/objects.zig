@@ -1106,7 +1106,7 @@ pub fn getPackFileInfo(pack_path: []const u8, platform_impl: anytype, allocator:
         
         if (full_data.len < 32) return error.PackFileTooSmall;
         
-        var header = try allocator.alloc(u8, 32);
+        const header = try allocator.alloc(u8, 32);
         @memcpy(header, full_data[0..32]);
         break :blk header;
     };
