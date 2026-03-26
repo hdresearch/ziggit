@@ -467,8 +467,38 @@ fn cmdInit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     try initRepository(target_dir, bare, template_dir, allocator, platform_impl);
 }
 
+fn copyTemplateDir(git_dir: []const u8, template_path: []const u8, allocator: std.mem.Allocator) !void {
+    // Recursively copy template directory contents to git_dir
+    var dir = std.fs.cwd().openDir(template_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+
+    var walker = dir.walk(allocator) catch return;
+    defer walker.deinit();
+
+    while (walker.next() catch null) |entry| {
+        const dest_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, entry.path });
+        defer allocator.free(dest_path);
+
+        switch (entry.kind) {
+            .directory => {
+                std.fs.cwd().makePath(dest_path) catch {};
+            },
+            .file => {
+                // Only copy if destination doesn't exist
+                if (std.fs.cwd().access(dest_path, .{})) |_| {
+                    continue; // Don't overwrite existing files
+                } else |_| {}
+
+                const src_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ template_path, entry.path });
+                defer allocator.free(src_path);
+                std.fs.cwd().copyFile(src_path, std.fs.cwd(), dest_path, .{}) catch {};
+            },
+            else => {},
+        }
+    }
+}
+
 fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
-    _ = template_dir; // TODO: implement template support
     
     const git_dir = if (bare) 
         try allocator.dupe(u8, path)
@@ -547,6 +577,21 @@ fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8, alloc
     const desc_path = try std.fmt.allocPrint(allocator, "{s}/description", .{git_dir});
     defer allocator.free(desc_path);
     try platform_impl.fs.writeFile(desc_path, "Unnamed repository; edit this file 'description' to name the repository.\n");
+
+    // Copy template directory contents
+    const effective_template = template_dir orelse
+        (std.process.getEnvVarOwned(allocator, "GIT_TEMPLATE_DIR") catch null);
+    if (effective_template) |tmpl_dir| {
+        defer if (template_dir == null) allocator.free(tmpl_dir);
+        copyTemplateDir(git_dir, tmpl_dir, allocator) catch {};
+    }
+
+    // Create info/exclude if not provided by template
+    const exclude_path = try std.fmt.allocPrint(allocator, "{s}/info/exclude", .{git_dir});
+    defer allocator.free(exclude_path);
+    if (!(std.fs.cwd().access(exclude_path, .{}) catch null != null)) {
+        platform_impl.fs.writeFile(exclude_path, "# git ls-files --others --exclude-from=.git/info/exclude\n# Lines that start with '#' are comments.\n") catch {};
+    }
 
     const success_msg = if (bare)
         try std.fmt.allocPrint(allocator, "Initialized empty Git repository in {s}/\n", .{git_dir})
