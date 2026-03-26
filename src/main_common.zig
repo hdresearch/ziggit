@@ -678,10 +678,36 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 try status_args.append(path_arg);
             }
             break;
+        } else if (std.mem.eql(u8, arg, "-z") or
+            std.mem.eql(u8, arg, "--column") or
+            std.mem.startsWith(u8, arg, "--column=") or
+            std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose") or
+            std.mem.eql(u8, arg, "--ignored") or
+            std.mem.eql(u8, arg, "--renames") or std.mem.eql(u8, arg, "--no-renames") or
+            std.mem.eql(u8, arg, "--find-renames") or
+            std.mem.eql(u8, arg, "--ahead-behind") or std.mem.eql(u8, arg, "--no-ahead-behind"))
+        {
+            // These flags are not supported natively - fall back to real git
+            if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
+                // Reconstruct all original args and forward
+                var all_args = std.ArrayList([]const u8).init(allocator);
+                defer all_args.deinit();
+                try all_args.append("status");
+                // Re-add already-consumed args
+                if (porcelain) try all_args.append("--porcelain");
+                if (show_branch) try all_args.append("--branch");
+                if (short_format and !porcelain) try all_args.append("--short");
+                if (!show_untracked) try all_args.append("-uno");
+                // Add current arg and remaining args
+                try all_args.append(arg);
+                while (args.next()) |remaining| try all_args.append(remaining);
+                try forwardToGit(allocator, all_args.items, platform_impl);
+                return;
+            }
         } else if (arg.len > 0 and arg[0] != '-') {
             try status_args.append(arg);
         }
-        // Silently ignore other flags like --long, -u, etc.
+        // Silently ignore other unrecognized flags
     }
     
     // Find .git directory by traversing up
