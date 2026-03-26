@@ -39,14 +39,19 @@
 
 ## Bun Fork Integration Status
 - Branch: `hdresearch/bun:ziggit-integration`
-- Commit: `f87ea5c` — polish: expand error categorization, retry logging, checkout cleanup
+- Commit: `be7ae7e` — polish: expand error matching (SSH agent/key, DNS, TLS, BrokenPipe, data integrity aliases)
 - `repository.zig`: ziggit used for clone, fetch, findCommit, checkout
 - Fallback: automatic to git CLI on any ziggit failure
 - Debug logging: `BUN_DEBUG_GitRepository=1` to see ziggit vs CLI decisions
-- Error categorization: SSH auth, network (9 variants), protocol, data integrity errors get distinct log messages
+- Error categorization:
+  - SSH: `SshAuthFailed`, `SshKeyNotFound`, `SshAgentFailure` (with error name in message)
+  - Network (12 variants): `HttpError`, `ConnectionRefused`, `ConnectionTimedOut`, `ConnectionResetByPeer`, `ConnectionAborted`, `HostUnreachable`, `NetworkUnreachable`, `UnknownHostName`, `TemporaryNameResolutionFailure`, `TlsError`, `TlsFailure`, `BrokenPipe`
+  - Protocol: `NetworkRemoteNotSupported`, `UnsupportedUrlScheme`
+  - Data integrity: `InvalidPackFile`, `CorruptedData`, `BadChecksum`, `ChecksumMismatch`, `CorruptObject`
 - Retry logging: attempt number logged on download retries
-- Checkout cleanup: partial directories cleaned on git CLI checkout failure
+- Checkout cleanup: partial directories cleaned on both ziggit and git CLI checkout failure
 - Partial clone cleanup: failed ziggit clones are cleaned up before git CLI fallback
+- URL transform logging: shows original vs HTTPS-transformed URL
 
 ## Pending
 - [ ] idx_writer.zig rewrite (NET-SMART agent) — expected to improve pack indexing speed
