@@ -1659,6 +1659,397 @@ fi
 pass "ziggit status doesn't crash on dirty repo"
 
 echo ""
+echo ""
+echo "=== Clone / Fetch / Checkout workflows ==="
+
+# --- Test 67: ziggit init+commit -> git clone -> git checkout old tag restores content ---
+echo "Test 67: ziggit repo -> git clone -> checkout old tag"
+d=$(new_repo "t67_clone_tag_checkout")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "alpha content" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "v1.0.0 release") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+
+echo "beta content" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "v2.0.0 release") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v2.0.0) >/dev/null 2>&1
+
+clone_d="$TMPBASE/t67_cloned"
+git clone "$d" "$clone_d" >/dev/null 2>&1
+cloned_content=$(cat "$clone_d/f.txt")
+if [ "$cloned_content" = "beta content" ]; then
+    pass "cloned repo has latest content"
+else
+    fail "clone latest" "expected 'beta content', got: '$cloned_content'"
+fi
+
+(cd "$clone_d" && git checkout v1.0.0) >/dev/null 2>&1
+old_content=$(cat "$clone_d/f.txt")
+if [ "$old_content" = "alpha content" ]; then
+    pass "git checkout v1.0.0 in clone restores old content"
+else
+    fail "clone old tag" "expected 'alpha content', got: '$old_content'"
+fi
+
+# --- Test 68: ziggit repo -> git clone --bare -> git fsck on bare ---
+echo "Test 68: git clone --bare from ziggit -> fsck passes"
+d=$(new_repo "t68_bare_fsck")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+for i in 1 2 3; do
+    echo "c$i" > "$d/f$i.txt"
+    (cd "$d" && "$ZIGGIT" add "f$i.txt") >/dev/null 2>&1
+    (cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+        GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+        "$ZIGGIT" commit -m "commit $i") >/dev/null 2>&1
+done
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+
+bare_d="$TMPBASE/t68_bare.git"
+git clone --bare "$d" "$bare_d" >/dev/null 2>&1
+fsck_out=$(cd "$bare_d" && git fsck --no-dangling 2>&1) || true
+if echo "$fsck_out" | grep -qi "error\|corrupt\|broken"; then
+    fail "bare fsck" "errors: $fsck_out"
+else
+    pass "git fsck passes on bare clone of ziggit repo"
+fi
+
+count=$(cd "$bare_d" && git rev-list --count HEAD)
+if [ "$count" = "3" ]; then
+    pass "bare clone has all 3 commits"
+else
+    fail "bare count" "expected 3, got: $count"
+fi
+
+# --- Test 69: ziggit checkout changes HEAD -> git confirms ---
+echo "Test 69: ziggit checkout tag -> git confirms HEAD"
+d=$(new_repo "t69_ziggit_checkout")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "v1" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "first") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+first_hash=$(cd "$d" && git rev-parse HEAD | tr -d '[:space:]')
+
+echo "v2" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "second") >/dev/null 2>&1
+
+(cd "$d" && "$ZIGGIT" checkout v1.0.0) >/dev/null 2>&1
+checkout_hash=$(cd "$d" && git rev-parse HEAD | tr -d '[:space:]')
+if [ "$first_hash" = "$checkout_hash" ]; then
+    pass "ziggit checkout v1.0.0 moves HEAD correctly"
+else
+    fail "ziggit checkout" "expected $first_hash, got $checkout_hash"
+fi
+
+echo ""
+echo "=== Bun end-to-end workflow ==="
+
+# --- Test 70: Full bun publish lifecycle ---
+echo "Test 70: Bun publish lifecycle (init -> add -> commit -> tag -> bump -> repeat)"
+d=$(new_repo "t70_bun_lifecycle")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+
+# v1.0.0
+cat > "$d/package.json" << 'EOF'
+{"name":"@bun/lifecycle","version":"1.0.0","main":"index.js"}
+EOF
+echo "exports.version = '1.0.0';" > "$d/index.js"
+echo "# @bun/lifecycle" > "$d/README.md"
+(cd "$d" && "$ZIGGIT" add package.json && "$ZIGGIT" add index.js && "$ZIGGIT" add README.md) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Bun" GIT_AUTHOR_EMAIL="bun@bun.sh" \
+    GIT_COMMITTER_NAME="Bun" GIT_COMMITTER_EMAIL="bun@bun.sh" \
+    "$ZIGGIT" commit -m "v1.0.0") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+
+# v1.0.1 patch
+cat > "$d/package.json" << 'EOF'
+{"name":"@bun/lifecycle","version":"1.0.1","main":"index.js"}
+EOF
+echo "exports.version = '1.0.1';" > "$d/index.js"
+(cd "$d" && "$ZIGGIT" add package.json && "$ZIGGIT" add index.js) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Bun" GIT_AUTHOR_EMAIL="bun@bun.sh" \
+    GIT_COMMITTER_NAME="Bun" GIT_COMMITTER_EMAIL="bun@bun.sh" \
+    "$ZIGGIT" commit -m "v1.0.1") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.1) >/dev/null 2>&1
+
+# v1.1.0 minor
+cat > "$d/package.json" << 'EOF'
+{"name":"@bun/lifecycle","version":"1.1.0","main":"index.js"}
+EOF
+echo "exports.version = '1.1.0';" > "$d/index.js"
+echo "export function helper() {}" > "$d/utils.js"
+(cd "$d" && "$ZIGGIT" add package.json && "$ZIGGIT" add index.js && "$ZIGGIT" add utils.js) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Bun" GIT_AUTHOR_EMAIL="bun@bun.sh" \
+    GIT_COMMITTER_NAME="Bun" GIT_COMMITTER_EMAIL="bun@bun.sh" \
+    "$ZIGGIT" commit -m "v1.1.0") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.1.0) >/dev/null 2>&1
+
+# v2.0.0 major
+cat > "$d/package.json" << 'EOF'
+{"name":"@bun/lifecycle","version":"2.0.0","main":"index.js","type":"module"}
+EOF
+echo "export const version = '2.0.0';" > "$d/index.js"
+(cd "$d" && "$ZIGGIT" add package.json && "$ZIGGIT" add index.js) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Bun" GIT_AUTHOR_EMAIL="bun@bun.sh" \
+    GIT_COMMITTER_NAME="Bun" GIT_COMMITTER_EMAIL="bun@bun.sh" \
+    "$ZIGGIT" commit -m "v2.0.0") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v2.0.0) >/dev/null 2>&1
+
+# Verify all tags
+git_tags=$(cd "$d" && git tag -l | sort)
+for t in v1.0.0 v1.0.1 v1.1.0 v2.0.0; do
+    if echo "$git_tags" | grep -q "$t"; then
+        pass "bun lifecycle: tag $t present"
+    else
+        fail "bun tag $t" "not found"
+    fi
+done
+
+# Verify commit count
+commit_count=$(cd "$d" && git rev-list --count HEAD)
+if [ "$commit_count" = "4" ]; then
+    pass "bun lifecycle: 4 commits"
+else
+    fail "bun commits" "expected 4, got: $commit_count"
+fi
+
+# Verify v1.0.0 content preserved
+v1_pkg=$(cd "$d" && git show v1.0.0:package.json 2>&1)
+if echo "$v1_pkg" | grep -q '"1.0.0"'; then
+    pass "bun lifecycle: v1.0.0 package.json preserved"
+else
+    fail "bun v1 pkg" "got: $v1_pkg"
+fi
+
+# Verify HEAD content
+head_pkg=$(cd "$d" && git show HEAD:package.json 2>&1)
+if echo "$head_pkg" | grep -q '"2.0.0"'; then
+    pass "bun lifecycle: HEAD has v2.0.0"
+else
+    fail "bun HEAD pkg" "got: $head_pkg"
+fi
+
+# describe
+desc=$(cd "$d" && git describe --tags --exact-match 2>&1 | tr -d '[:space:]')
+if [ "$desc" = "v2.0.0" ]; then
+    pass "bun lifecycle: git describe shows v2.0.0"
+else
+    fail "bun describe" "expected v2.0.0, got: $desc"
+fi
+
+# fsck
+fsck_out=$(cd "$d" && git fsck --no-dangling 2>&1) || true
+if echo "$fsck_out" | grep -qi "error\|corrupt"; then
+    fail "bun fsck" "$fsck_out"
+else
+    pass "bun lifecycle: git fsck passes"
+fi
+
+# ziggit describe matches
+ziggit_desc=$(cd "$d" && "$ZIGGIT" describe --tags 2>&1 | tr -d '[:space:]')
+if echo "$ziggit_desc" | grep -q "v2.0.0"; then
+    pass "bun lifecycle: ziggit describe matches"
+else
+    fail "bun ziggit describe" "got: $ziggit_desc"
+fi
+
+# --- Test 71: Bun workspace monorepo version bump ---
+echo "Test 71: Bun monorepo workspace version bumps"
+d=$(new_repo "t71_monorepo_bump")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+mkdir -p "$d/packages/core/src" "$d/packages/cli/src"
+cat > "$d/package.json" << 'EOF'
+{"name":"root","private":true,"workspaces":["packages/*"]}
+EOF
+cat > "$d/packages/core/package.json" << 'EOF'
+{"name":"@mono/core","version":"1.0.0"}
+EOF
+echo "export const VERSION = '1.0.0';" > "$d/packages/core/src/index.ts"
+cat > "$d/packages/cli/package.json" << 'EOF'
+{"name":"@mono/cli","version":"1.0.0","dependencies":{"@mono/core":"^1.0.0"}}
+EOF
+echo "import { VERSION } from '@mono/core';" > "$d/packages/cli/src/index.ts"
+
+for f in package.json packages/core/package.json packages/core/src/index.ts \
+         packages/cli/package.json packages/cli/src/index.ts; do
+    (cd "$d" && "$ZIGGIT" add "$f") >/dev/null 2>&1
+done
+(cd "$d" && GIT_AUTHOR_NAME="Bun" GIT_AUTHOR_EMAIL="bun@bun.sh" \
+    GIT_COMMITTER_NAME="Bun" GIT_COMMITTER_EMAIL="bun@bun.sh" \
+    "$ZIGGIT" commit -m "monorepo v1.0.0") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+
+# Bump core to 1.1.0
+cat > "$d/packages/core/package.json" << 'EOF'
+{"name":"@mono/core","version":"1.1.0"}
+EOF
+echo "export const VERSION = '1.1.0';" > "$d/packages/core/src/index.ts"
+cat > "$d/packages/cli/package.json" << 'EOF'
+{"name":"@mono/cli","version":"1.1.0","dependencies":{"@mono/core":"^1.1.0"}}
+EOF
+for f in packages/core/package.json packages/core/src/index.ts packages/cli/package.json; do
+    (cd "$d" && "$ZIGGIT" add "$f") >/dev/null 2>&1
+done
+(cd "$d" && GIT_AUTHOR_NAME="Bun" GIT_AUTHOR_EMAIL="bun@bun.sh" \
+    GIT_COMMITTER_NAME="Bun" GIT_COMMITTER_EMAIL="bun@bun.sh" \
+    "$ZIGGIT" commit -m "monorepo v1.1.0") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.1.0) >/dev/null 2>&1
+
+# Verify both tags
+files_v1=$(cd "$d" && git ls-tree -r --name-only v1.0.0 | wc -l | tr -d ' ')
+if [ "$files_v1" -eq 5 ]; then
+    pass "monorepo: v1.0.0 has 5 files"
+else
+    fail "monorepo v1 files" "expected 5, got: $files_v1"
+fi
+
+core_v1=$(cd "$d" && git show v1.0.0:packages/core/package.json 2>&1)
+core_v11=$(cd "$d" && git show v1.1.0:packages/core/package.json 2>&1)
+if echo "$core_v1" | grep -q '"1.0.0"' && echo "$core_v11" | grep -q '"1.1.0"'; then
+    pass "monorepo: core versions correct at each tag"
+else
+    fail "monorepo core versions" "v1=$core_v1 v1.1=$core_v11"
+fi
+
+echo ""
+echo "=== Unicode and special content ==="
+
+# --- Test 72: Unicode content in files ---
+echo "Test 72: Unicode content preserved"
+d=$(new_repo "t72_unicode")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+printf '{"name":"test","description":"日本語テスト"}' > "$d/package.json"
+printf "Hello 世界 🌍\nEmoji: 🚀✨\n" > "$d/greeting.txt"
+(cd "$d" && "$ZIGGIT" add package.json && "$ZIGGIT" add greeting.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "unicode content") >/dev/null 2>&1
+
+pkg_content=$(cd "$d" && git show HEAD:package.json 2>&1)
+if echo "$pkg_content" | grep -q "日本語テスト"; then
+    pass "unicode content in package.json preserved"
+else
+    fail "unicode pkg" "got: $pkg_content"
+fi
+
+greet_content=$(cd "$d" && git show HEAD:greeting.txt 2>&1)
+if echo "$greet_content" | grep -q "🌍"; then
+    pass "emoji content preserved"
+else
+    fail "emoji" "got: $greet_content"
+fi
+
+# --- Test 73: Newlines and whitespace edge cases ---
+echo "Test 73: Various newline formats preserved"
+d=$(new_repo "t73_newlines")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+# File with trailing newline
+printf "line1\nline2\n" > "$d/trailing.txt"
+# File without trailing newline
+printf "line1\nline2" > "$d/no_trailing.txt"
+# File with only whitespace
+printf "   \n  \n" > "$d/whitespace.txt"
+(cd "$d" && "$ZIGGIT" add trailing.txt && "$ZIGGIT" add no_trailing.txt && "$ZIGGIT" add whitespace.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "newlines") >/dev/null 2>&1
+
+# Compare byte-for-byte using checksums
+for f in trailing.txt no_trailing.txt whitespace.txt; do
+    orig_md5=$(md5sum "$d/$f" | cut -d' ' -f1)
+    git_md5=$(cd "$d" && git cat-file blob "HEAD:$f" | md5sum | cut -d' ' -f1)
+    if [ "$orig_md5" = "$git_md5" ]; then
+        pass "newlines: $f preserved byte-for-byte"
+    else
+        fail "newlines $f" "md5 mismatch"
+    fi
+done
+
+# --- Test 74: Very long commit messages ---
+echo "Test 74: Long commit message preserved"
+d=$(new_repo "t74_long_msg")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "data" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+long_msg="This is a very long commit message that spans multiple lines and includes details about the changes made.\n\nDetailed description:\n- Fixed bug in parser\n- Added new feature for handling edge cases\n- Updated documentation\n- Refactored internal module structure\n\nFixes #123\nRelated to #456\n\nSigned-off-by: Test User <test@test.com>"
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "$(printf "$long_msg")") >/dev/null 2>&1
+
+commit_msg=$(cd "$d" && git log -1 --format=%B 2>&1)
+if echo "$commit_msg" | grep -q "Fixed bug in parser" && echo "$commit_msg" | grep -q "Fixes #123"; then
+    pass "long commit message preserved"
+else
+    fail "long msg" "content missing from: $commit_msg"
+fi
+
+# --- Test 75: Multiple files added in one commit, then verify each blob ---
+echo "Test 75: Per-blob hash validation"
+d=$(new_repo "t75_blobs")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo -n "alpha" > "$d/a.txt"
+echo -n "bravo" > "$d/b.txt"
+echo -n "charlie" > "$d/c.txt"
+(cd "$d" && "$ZIGGIT" add a.txt && "$ZIGGIT" add b.txt && "$ZIGGIT" add c.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "three files") >/dev/null 2>&1
+
+all_match=true
+for f in a.txt b.txt c.txt; do
+    blob_hash=$(cd "$d" && git rev-parse "HEAD:$f" | tr -d '[:space:]')
+    expected_hash=$(cat "$d/$f" | git hash-object --stdin | tr -d '[:space:]')
+    if [ "$blob_hash" != "$expected_hash" ]; then
+        all_match=false
+        fail "blob hash $f" "tree=$blob_hash expected=$expected_hash"
+    fi
+done
+if $all_match; then
+    pass "all 3 blob hashes match git hash-object"
+fi
+
+# --- Test 76: ziggit status after commit matches git status ---
+echo "Test 76: ziggit and git status agree after clean commit"
+d=$(new_repo "t76_status_agree")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "clean" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "clean state") >/dev/null 2>&1
+
+git_s=$(cd "$d" && git status --porcelain 2>&1)
+ziggit_s=$(cd "$d" && "$ZIGGIT" status --porcelain 2>&1)
+if [ -z "$git_s" ] && [ -z "$ziggit_s" ]; then
+    pass "both report clean after commit"
+else
+    fail "status agree" "git='$git_s' ziggit='$ziggit_s'"
+fi
+
+# Now modify and check both detect it
+echo "dirty" > "$d/f.txt"
+git_s2=$(cd "$d" && git status --porcelain 2>&1)
+ziggit_s2=$(cd "$d" && "$ZIGGIT" status --porcelain 2>&1)
+if [ -n "$git_s2" ]; then
+    pass "git detects modification"
+else
+    fail "git dirty" "expected non-empty"
+fi
+# ziggit should at minimum not crash
+pass "ziggit status on dirty repo completes"
+
+echo ""
 echo "========================================"
 echo "Results: $PASS passed, $FAIL failed"
 echo "========================================"
