@@ -1032,9 +1032,10 @@ fn applyDeltaWithFallback(base_data: []const u8, delta_data: []const u8, allocat
         return error.ResultTooLarge;
     }
     
-    // Basic sanity check: result size shouldn't be dramatically different from base
-    if (result_size > base_size * 10 and result_size > 1024 * 1024) { // Allow small files to grow significantly
-        // debug print removed
+    // Basic sanity check: result size shouldn't be astronomically large
+    // Note: valid deltas CAN have result >> base (e.g., small shared header, large new content)
+    // Only reject truly unreasonable sizes (>100MB result from <1KB base)
+    if (result_size > 100 * 1024 * 1024 and base_size < 1024) {
         return error.SuspiciousDelta;
     }
     
