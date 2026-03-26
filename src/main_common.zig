@@ -430,11 +430,13 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     };
     defer gitignore.deinit();
 
-    // Detect staged files vs modified files vs clean files
+    // Detect staged files vs modified files vs deleted files vs clean files
     var staged_files = std.ArrayList(index_mod.IndexEntry).init(allocator);
     var modified_files = std.ArrayList(index_mod.IndexEntry).init(allocator);
+    var deleted_files = std.ArrayList(index_mod.IndexEntry).init(allocator);
     defer staged_files.deinit();
     defer modified_files.deinit();
+    defer deleted_files.deinit();
 
     for (index.entries.items) |entry| {
         // Check if working directory version is different from index version
@@ -444,38 +446,46 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path });
         defer allocator.free(full_path);
         
-        const working_modified = blk: {
-            const current_content = platform_impl.fs.readFile(allocator, full_path) catch break :blk false;
-            defer allocator.free(current_content);
-            
-            // Create blob object to get hash
-            const blob = objects.createBlobObject(current_content, allocator) catch break :blk false;
-            defer blob.deinit(allocator);
-            
-            const current_hash = blob.hash(allocator) catch break :blk false;
-            defer allocator.free(current_hash);
-            
-            // Compare with index hash
-            const index_hash = std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch break :blk false;
-            defer allocator.free(index_hash);
-            
-            break :blk !std.mem.eql(u8, current_hash, index_hash);
-        };
+        // Check if file exists in working directory
+        const file_exists = platform_impl.fs.exists(full_path) catch false;
         
-        if (working_modified) {
-            try modified_files.append(entry);
-        } else if (current_commit == null) {
-            // No commits yet, so anything in index is staged
-            try staged_files.append(entry);
+        if (!file_exists) {
+            // File is in index but not in working directory - it's deleted
+            try deleted_files.append(entry);
         } else {
-            // File is in index and matches working directory.
-            // Check if it's different from what's in HEAD tree (i.e., staged)
-            const is_different_from_head = checkIfDifferentFromHEAD(entry, git_path, platform_impl, allocator) catch false;
+            const working_modified = blk: {
+                const current_content = platform_impl.fs.readFile(allocator, full_path) catch break :blk false;
+                defer allocator.free(current_content);
+                
+                // Create blob object to get hash
+                const blob = objects.createBlobObject(current_content, allocator) catch break :blk false;
+                defer blob.deinit(allocator);
+                
+                const current_hash = blob.hash(allocator) catch break :blk false;
+                defer allocator.free(current_hash);
+                
+                // Compare with index hash
+                const index_hash = std.fmt.allocPrint(allocator, "{x}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch break :blk false;
+                defer allocator.free(index_hash);
+                
+                break :blk !std.mem.eql(u8, current_hash, index_hash);
+            };
             
-            if (is_different_from_head) {
+            if (working_modified) {
+                try modified_files.append(entry);
+            } else if (current_commit == null) {
+                // No commits yet, so anything in index is staged
                 try staged_files.append(entry);
+            } else {
+                // File is in index and matches working directory.
+                // Check if it's different from what's in HEAD tree (i.e., staged)
+                const is_different_from_head = checkIfDifferentFromHEAD(entry, git_path, platform_impl, allocator) catch false;
+                
+                if (is_different_from_head) {
+                    try staged_files.append(entry);
+                }
+                // If same as HEAD, file is clean (don't show it)
             }
-            // If same as HEAD, file is clean (don't show it)
         }
     }
 
@@ -534,6 +544,30 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         }
     }
 
+    // Show deleted files
+    if (deleted_files.items.len > 0) {
+        if (porcelain) {
+            for (deleted_files.items) |entry| {
+                const msg = try std.fmt.allocPrint(allocator, " D {s}\n", .{entry.path});
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+            }
+        } else {
+            if (modified_files.items.len == 0) {
+                try platform_impl.writeStdout("\nChanges not staged for commit:\n");
+                try platform_impl.writeStdout("  (use \"git add <file>...\" to update what will be committed)\n");
+                try platform_impl.writeStdout("  (use \"git restore <file>...\" to discard changes in working directory)\n\n");
+            }
+            
+            for (deleted_files.items) |entry| {
+                const msg = try std.fmt.allocPrint(allocator, "        deleted:    {s}\n", .{entry.path});
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+            }
+            try platform_impl.writeStdout("\n");
+        }
+    }
+
     // Find untracked files
     var untracked_files = findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.ArrayList([]u8).init(allocator);
     defer {
@@ -565,15 +599,15 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 
     // Final summary message (only in non-porcelain mode)
     if (!porcelain) {
-        if (staged_files.items.len == 0 and modified_files.items.len == 0 and untracked_files.items.len == 0) {
+        if (staged_files.items.len == 0 and modified_files.items.len == 0 and deleted_files.items.len == 0 and untracked_files.items.len == 0) {
             if (current_commit == null) {
                 try platform_impl.writeStdout("\nnothing to commit (create/copy files and use \"git add\" to track)\n");
             } else {
                 try platform_impl.writeStdout("\nnothing to commit, working tree clean\n");
             }
-        } else if (staged_files.items.len == 0 and modified_files.items.len == 0 and untracked_files.items.len > 0) {
+        } else if (staged_files.items.len == 0 and modified_files.items.len == 0 and deleted_files.items.len == 0 and untracked_files.items.len > 0) {
             try platform_impl.writeStdout("nothing added to commit but untracked files present (use \"git add\" to track)\n");
-        } else if (staged_files.items.len == 0 and modified_files.items.len > 0) {
+        } else if (staged_files.items.len == 0 and (modified_files.items.len > 0 or deleted_files.items.len > 0)) {
             try platform_impl.writeStdout("no changes added to commit (use \"git add\" and/or \"git commit -a\")\n");
         }
     }
