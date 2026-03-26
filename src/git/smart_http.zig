@@ -368,7 +368,7 @@ fn httpPostWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.h
     req.connection.?.flush() catch return error.HttpError;
 
     var redirect_buf: [8192]u8 = undefined;
-    var response = req.receiveHead(&redirect_buf) catch return error.HttpError;
+    const response = req.receiveHead(&redirect_buf) catch return error.HttpError;
 
     if (response.head.status != .ok) return error.HttpError;
 

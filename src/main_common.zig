@@ -795,7 +795,7 @@ fn forwardToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_i
     if (has_help_flag or has_help_all) {
         // For -h: git 2.43 sends output to stderr; we redirect to stdout for 2.47 compat
         // For --help-all: git 2.43 fails outside a repo; we fall back to -h
-        var argv = std.ArrayList([]const u8).init(allocator);
+        var argv = std.array_list.Managed([]const u8).init(allocator);
         defer argv.deinit();
         
         try argv.append(findRealGit());
