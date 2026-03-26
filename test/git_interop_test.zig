@@ -1000,10 +1000,10 @@ fn testRemoteOperations(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
 
     // Verify clone worked
     clone_path.access("README.md", .{}) catch {
-        print("  ✓ Local remote operations work correctly\n", .{});
+        print("  ⚠ Local remote operations may have issues\n", .{});
         return;
     };
-    print("  ⚠ Local remote operations may have issues\n", .{});
+    print("  ✓ Local remote operations work correctly\n", .{});
 
     print("  ✓ Test 16 completed\n", .{});
 }
@@ -1044,7 +1044,7 @@ fn testBrokenPipeHandling(allocator: std.mem.Allocator, test_dir: fs.Dir) !void 
 
     for (commands) |test_cmd| {
         // Test with git first (should handle BrokenPipe)
-        const git_cmd = try std.ArrayList([]const u8).initCapacity(allocator, test_cmd.cmd.len + 1);
+        var git_cmd = try std.ArrayList([]const u8).initCapacity(allocator, test_cmd.cmd.len + 1);
         defer git_cmd.deinit();
         git_cmd.appendAssumeCapacity("git");
         git_cmd.appendSliceAssumeCapacity(test_cmd.cmd);
