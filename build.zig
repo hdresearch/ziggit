@@ -1103,6 +1103,17 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(validation_module_tests).step);
 
+    // Gitignore module tests
+    const gitignore_module_tests = b.addTest(.{
+        .root_source_file = b.path("test/gitignore_module_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gitignore_module_tests.root_module.addAnonymousImport("gitignore", .{
+        .root_source_file = b.path("src/git/gitignore.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(gitignore_module_tests).step);
+
     // ========== BENCHMARKS ==========
     
     // CLI benchmark (ziggit vs git performance)
