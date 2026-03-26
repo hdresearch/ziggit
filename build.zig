@@ -286,6 +286,16 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/git/objects.zig"),
     });
 
+    // Pack network end-to-end tests (saveReceivedPack → load, fixThinPack, git cross-validation)
+    const pack_network_e2e_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_network_e2e_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_network_e2e_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+
     // Pack exact compatibility tests (git ↔ ziggit byte-level verification)
     const pack_git_exact_compat_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_git_exact_compat_test.zig"),
@@ -512,6 +522,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(pack_object_read_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_ref_delta_thin_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_readback_thin_tests).step);
+    test_step.dependOn(&b.addRunArtifact(pack_network_e2e_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_infrastructure_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_git_exact_compat_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_end_to_end_tests).step);
