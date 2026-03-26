@@ -2,7 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 const objects = @import("../src/git/objects.zig");
 
-/// Test pack file implementation details
+// Test pack file implementation details
 test "pack file delta application" {
     const allocator = testing.allocator;
     

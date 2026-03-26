@@ -20,24 +20,40 @@ pub fn main() !void {
     std.debug.print("Running Git Interoperability Tests...\n", .{});
 
     // Set up global git config for tests
-    _ = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{"git", "config", "--global", "user.name", "Test User"},
-    }) catch {};
-    _ = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{"git", "config", "--global", "user.email", "test@example.com"},
-    }) catch {};
+    {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"git", "config", "--global", "user.name", "Test User"},
+        }) catch return;
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+    {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"git", "config", "--global", "user.email", "test@example.com"},
+        }) catch return;
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
     
     // Also set system-wide for safety
-    _ = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{"git", "config", "--system", "user.name", "Test User"},
-    }) catch {};
-    _ = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{"git", "config", "--system", "user.email", "test@example.com"},
-    }) catch {};
+    {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"git", "config", "--system", "user.name", "Test User"},
+        }) catch return;
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+    {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"git", "config", "--system", "user.email", "test@example.com"},
+        }) catch return;
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
 
     // Create temporary test directory
     const test_dir = try fs.cwd().makeOpenPath("test_tmp", .{});
@@ -106,8 +122,8 @@ fn testGitInitZiggitStatus(allocator: std.mem.Allocator, test_dir: fs.Dir) !void
     defer allocator.free(git_init_result);
     
     // Configure git user for this repo
-    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
     
     // Create a test file
     try repo_path.writeFile(.{.sub_path = "test.txt", .data = "Hello World\n"});
@@ -167,8 +183,8 @@ fn testGitCommitZiggitLog(allocator: std.mem.Allocator, test_dir: fs.Dir) !void 
     defer allocator.free(git_init_result);
 
     // Configure git user for commit
-    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
 
     // Create and add file
     try repo_path.writeFile(.{.sub_path = "test.txt", .data = "Hello World\n"});
@@ -238,9 +254,9 @@ fn testGitIndexZiggitRead(allocator: std.mem.Allocator, test_dir: fs.Dir) !void 
     defer test_dir.deleteTree("git_index_test") catch {};
 
     // Initialize with git and create index entries
-    _ = try runCommand(allocator, &.{"git", "init"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "init"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
 
     // Create multiple files to test index format
     try repo_path.writeFile(.{.sub_path = "file1.txt", .data = "Content 1\n"});
@@ -248,7 +264,7 @@ fn testGitIndexZiggitRead(allocator: std.mem.Allocator, test_dir: fs.Dir) !void 
     const subdir = try repo_path.makeOpenPath("subdir", .{});
     try subdir.writeFile(.{.sub_path = "file3.txt", .data = "Content 3\n"});
 
-    _ = try runCommand(allocator, &.{"git", "add", "."}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "add", "."}, repo_path);
 
     // Now try to read the index with ziggit's status command
     const ziggit_status_result = try runZiggitCommand(allocator, &.{"status"}, repo_path);
@@ -267,13 +283,13 @@ fn testObjectFormatCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir)
     defer test_dir.deleteTree("object_format_test") catch {};
 
     // Initialize and create objects with git
-    _ = try runCommand(allocator, &.{"git", "init"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "init"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
 
     try repo_path.writeFile(.{.sub_path = "test.txt", .data = "This is a test file for object compatibility\n"});
-    _ = try runCommand(allocator, &.{"git", "add", "test.txt"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "commit", "-m", "Object test commit"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "add", "test.txt"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "commit", "-m", "Object test commit"}, repo_path);
 
     // Test that ziggit can read git objects
     const ziggit_log_result = try runZiggitCommand(allocator, &.{"log"}, repo_path);
@@ -337,6 +353,12 @@ fn runZiggitCommand(allocator: std.mem.Allocator, args: []const []const u8, cwd:
     return runCommand(allocator, full_args.items, cwd);
 }
 
+// Helper function for running commands when output is not needed
+fn runCommandNoOutput(allocator: std.mem.Allocator, args: []const []const u8, cwd: fs.Dir) !void {
+    const result = try runCommand(allocator, args, cwd);
+    defer allocator.free(result);
+}
+
 fn testStatusPorcelainCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
     std.debug.print("Test 7: Status --porcelain output compatibility\n", .{});
     
@@ -346,8 +368,8 @@ fn testStatusPorcelainCompatibility(allocator: std.mem.Allocator, test_dir: fs.D
     // Initialize with git
     const git_init_result = try runCommand(allocator, &.{"git", "init"}, repo_path);
     defer allocator.free(git_init_result);
-    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
 
     // Create files in different states
     try repo_path.writeFile(.{.sub_path = "staged.txt", .data = "staged content\n"});
@@ -355,9 +377,9 @@ fn testStatusPorcelainCompatibility(allocator: std.mem.Allocator, test_dir: fs.D
     try repo_path.writeFile(.{.sub_path = "untracked.txt", .data = "untracked content\n"});
 
     // Stage some files
-    _ = try runCommand(allocator, &.{"git", "add", "staged.txt"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "add", "modified.txt"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "commit", "-m", "Initial commit"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "add", "staged.txt"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "add", "modified.txt"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "commit", "-m", "Initial commit"}, repo_path);
 
     // Modify a tracked file
     try repo_path.writeFile(.{.sub_path = "modified.txt", .data = "modified content\n"});
@@ -395,9 +417,9 @@ fn testLogOnelineCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) !
     defer test_dir.deleteTree("oneline_log_test") catch {};
 
     // Initialize with git and create commits
-    _ = try runCommand(allocator, &.{"git", "init"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "init"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
 
     // Create multiple commits
     const commits = [_][]const u8{ "First commit", "Second commit", "Third commit" };
@@ -406,8 +428,8 @@ fn testLogOnelineCompatibility(allocator: std.mem.Allocator, test_dir: fs.Dir) !
         defer allocator.free(filename);
         
         try repo_path.writeFile(.{.sub_path = filename, .data = "content\n"});
-        _ = try runCommand(allocator, &.{"git", "add", filename}, repo_path);
-        _ = try runCommand(allocator, &.{"git", "commit", "-m", msg}, repo_path);
+        try runCommandNoOutput(allocator, &.{"git", "add", filename}, repo_path);
+        try runCommandNoOutput(allocator, &.{"git", "commit", "-m", msg}, repo_path);
     }
 
     // Compare log --oneline output format
@@ -450,14 +472,14 @@ fn testPackedObjectHandling(allocator: std.mem.Allocator, test_dir: fs.Dir) !voi
     defer test_dir.deleteTree("packed_object_test") catch {};
 
     // Initialize and create many commits to encourage packing
-    _ = try runCommand(allocator, &.{"git", "init"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "init"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
 
     // Create initial commit (required for gc)
     try repo_path.writeFile(.{.sub_path = "initial.txt", .data = "initial\n"});
-    _ = try runCommand(allocator, &.{"git", "add", "initial.txt"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "commit", "-m", "Initial commit"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "add", "initial.txt"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "commit", "-m", "Initial commit"}, repo_path);
 
     // Create many small commits
     var i: u32 = 0;
@@ -470,8 +492,8 @@ fn testPackedObjectHandling(allocator: std.mem.Allocator, test_dir: fs.Dir) !voi
         defer allocator.free(commit_msg);
 
         try repo_path.writeFile(.{.sub_path = filename, .data = content});
-        _ = try runCommand(allocator, &.{"git", "add", filename}, repo_path);
-        _ = try runCommand(allocator, &.{"git", "commit", "-m", commit_msg}, repo_path);
+        try runCommandNoOutput(allocator, &.{"git", "add", filename}, repo_path);
+        try runCommandNoOutput(allocator, &.{"git", "commit", "-m", commit_msg}, repo_path);
     }
 
     // Try to pack objects (may not always work in test environment)
@@ -504,18 +526,18 @@ fn testBranchOperations(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
     defer test_dir.deleteTree("branch_ops_test") catch {};
 
     // Initialize with git
-    _ = try runCommand(allocator, &.{"git", "init"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "init"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
 
     // Create initial commit (needed for branching)
     try repo_path.writeFile(.{.sub_path = "initial.txt", .data = "initial content\n"});
-    _ = try runCommand(allocator, &.{"git", "add", "initial.txt"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "commit", "-m", "Initial commit"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "add", "initial.txt"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "commit", "-m", "Initial commit"}, repo_path);
 
     // Create branches with git
-    _ = try runCommand(allocator, &.{"git", "branch", "feature-branch"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "branch", "test-branch"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "branch", "feature-branch"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "branch", "test-branch"}, repo_path);
 
     // Test that ziggit can list branches
     const ziggit_branch_result = runZiggitCommand(allocator, &.{"branch"}, repo_path) catch |err| {
@@ -544,14 +566,14 @@ fn testDiffOperations(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
     defer test_dir.deleteTree("diff_ops_test") catch {};
 
     // Initialize with git
-    _ = try runCommand(allocator, &.{"git", "init"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "init"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
 
     // Create initial commit
     try repo_path.writeFile(.{.sub_path = "test.txt", .data = "original content\n"});
-    _ = try runCommand(allocator, &.{"git", "add", "test.txt"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "commit", "-m", "Initial commit"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "add", "test.txt"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "commit", "-m", "Initial commit"}, repo_path);
 
     // Modify the file
     try repo_path.writeFile(.{.sub_path = "test.txt", .data = "modified content\n"});
@@ -583,25 +605,25 @@ fn testCheckoutOperations(allocator: std.mem.Allocator, test_dir: fs.Dir) !void 
     defer test_dir.deleteTree("checkout_ops_test") catch {};
 
     // Initialize with git
-    _ = try runCommand(allocator, &.{"git", "init"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "init"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
 
     // Create initial commit
     try repo_path.writeFile(.{.sub_path = "test.txt", .data = "version 1\n"});
-    _ = try runCommand(allocator, &.{"git", "add", "test.txt"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "commit", "-m", "Version 1"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "add", "test.txt"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "commit", "-m", "Version 1"}, repo_path);
 
     // Create a branch and checkout
-    _ = try runCommand(allocator, &.{"git", "checkout", "-b", "test-branch"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "checkout", "-b", "test-branch"}, repo_path);
     
     // Modify file on branch
     try repo_path.writeFile(.{.sub_path = "test.txt", .data = "version 2\n"});
-    _ = try runCommand(allocator, &.{"git", "add", "test.txt"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "commit", "-m", "Version 2"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "add", "test.txt"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "commit", "-m", "Version 2"}, repo_path);
 
     // Checkout back to master with git
-    _ = try runCommand(allocator, &.{"git", "checkout", "master"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "checkout", "master"}, repo_path);
 
     // Verify file content is back to version 1
     const content = try repo_path.readFileAlloc(allocator, "test.txt", 1024);
@@ -613,11 +635,12 @@ fn testCheckoutOperations(allocator: std.mem.Allocator, test_dir: fs.Dir) !void 
     }
 
     // Test ziggit checkout (if implemented)
-    _ = runZiggitCommand(allocator, &.{"checkout", "test-branch"}, repo_path) catch |err| {
+    const ziggit_checkout_result = runZiggitCommand(allocator, &.{"checkout", "test-branch"}, repo_path) catch |err| {
         std.debug.print("  ziggit checkout not implemented: {}\n", .{err});
         std.debug.print("  ✓ Test 12 skipped (checkout not implemented)\n", .{});
         return;
     };
+    defer allocator.free(ziggit_checkout_result);
 
     // If ziggit checkout worked, verify the file content changed
     const content2 = try repo_path.readFileAlloc(allocator, "test.txt", 1024);
@@ -639,9 +662,9 @@ fn testMultiFileStaging(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
     defer test_dir.deleteTree("multi_file_staging_test") catch {};
 
     // Initialize with git
-    _ = try runCommand(allocator, &.{"git", "init"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "init"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
 
     // Create several files
     const files = [_][]const u8{ "file1.txt", "file2.txt", "file3.txt", "file4.txt" };
@@ -652,8 +675,8 @@ fn testMultiFileStaging(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
     }
 
     // Stage files with git one by one
-    _ = try runCommand(allocator, &.{"git", "add", "file1.txt"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "add", "file2.txt"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "add", "file1.txt"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "add", "file2.txt"}, repo_path);
     
     // Test ziggit can see partially staged state
     const ziggit_status = runZiggitCommand(allocator, &.{"status"}, repo_path) catch |err| {
@@ -674,9 +697,9 @@ fn testSubdirectoryOperations(allocator: std.mem.Allocator, test_dir: fs.Dir) !v
     defer test_dir.deleteTree("subdir_ops_test") catch {};
 
     // Initialize with git
-    _ = try runCommand(allocator, &.{"git", "init"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "init"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
 
     // Create nested directory structure
     const subdir1 = try repo_path.makeOpenPath("src", .{});
@@ -689,8 +712,8 @@ fn testSubdirectoryOperations(allocator: std.mem.Allocator, test_dir: fs.Dir) !v
     try subdir3.writeFile(.{.sub_path = "test.zig", .data = "test \"example\" {}\n"});
 
     // Add all files with git
-    _ = try runCommand(allocator, &.{"git", "add", "."}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "commit", "-m", "Add all files"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "add", "."}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "commit", "-m", "Add all files"}, repo_path);
 
     // Test ziggit can read nested structure
     const ziggit_status = runZiggitCommand(allocator, &.{"status"}, repo_path) catch |err| {
@@ -710,9 +733,9 @@ fn testLargeFileHandling(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
     defer test_dir.deleteTree("large_file_test") catch {};
 
     // Initialize with git
-    _ = try runCommand(allocator, &.{"git", "init"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "init"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
 
     // Create a moderately large file (10KB to avoid overwhelming test environment)
     var large_content = std.ArrayList(u8).init(allocator);
@@ -726,8 +749,8 @@ fn testLargeFileHandling(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
     try repo_path.writeFile(.{.sub_path = "large_file.txt", .data = large_content.items});
 
     // Add with git
-    _ = try runCommand(allocator, &.{"git", "add", "large_file.txt"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "commit", "-m", "Add large file"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "add", "large_file.txt"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "commit", "-m", "Add large file"}, repo_path);
 
     // Test ziggit can handle the large file
     const ziggit_status = runZiggitCommand(allocator, &.{"status"}, repo_path) catch |err| {
@@ -754,9 +777,9 @@ fn testEmptyRepositoryEdgeCases(allocator: std.mem.Allocator, test_dir: fs.Dir) 
     defer test_dir.deleteTree("empty_repo_test") catch {};
 
     // Initialize empty repository with git
-    _ = try runCommand(allocator, &.{"git", "init"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
-    _ = try runCommand(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "init"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
 
     // Test ziggit commands on empty repository
     const ziggit_status = runZiggitCommand(allocator, &.{"status"}, repo_path) catch |err| {

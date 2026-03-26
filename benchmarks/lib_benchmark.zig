@@ -112,9 +112,21 @@ pub fn main() !void {
     try std.fs.makeDirAbsolute(test_dir);
     
     // Initialize git repo
-    _ = try runCommand(allocator, &.{"git", "init"}, test_dir);
-    _ = try runCommand(allocator, &.{"git", "config", "user.name", "Benchmark"}, test_dir);
-    _ = try runCommand(allocator, &.{"git", "config", "user.email", "bench@test.com"}, test_dir);
+    {
+        const result = try runCommand(allocator, &.{"git", "init"}, test_dir);
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+    {
+        const result = try runCommand(allocator, &.{"git", "config", "user.name", "Benchmark"}, test_dir);
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+    {
+        const result = try runCommand(allocator, &.{"git", "config", "user.email", "bench@test.com"}, test_dir);
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
     
     // Create some files
     var i: usize = 0;
@@ -129,11 +141,23 @@ pub fn main() !void {
     }
     
     // Add files and create commits
-    _ = try runCommand(allocator, &.{"git", "add", "."}, test_dir);
-    _ = try runCommand(allocator, &.{"git", "commit", "-m", "Initial commit with 20 files"}, test_dir);
+    {
+        const result = try runCommand(allocator, &.{"git", "add", "."}, test_dir);
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+    {
+        const result = try runCommand(allocator, &.{"git", "commit", "-m", "Initial commit with 20 files"}, test_dir);
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
     
     // Create a tag
-    _ = try runCommand(allocator, &.{"git", "tag", "v1.0.0"}, test_dir);
+    {
+        const result = try runCommand(allocator, &.{"git", "tag", "v1.0.0"}, test_dir);
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
     
     // Create more commits
     var commit_num: usize = 2;
@@ -150,10 +174,18 @@ pub fn main() !void {
             try file.writeAll(content);
         }
         
-        _ = try runCommand(allocator, &.{"git", "add", "."}, test_dir);
+        {
+            const result = try runCommand(allocator, &.{"git", "add", "."}, test_dir);
+            allocator.free(result.stdout);
+            allocator.free(result.stderr);
+        }
         const commit_msg = try std.fmt.allocPrint(allocator, "Commit number {d}", .{commit_num});
         defer allocator.free(commit_msg);
-        _ = try runCommand(allocator, &.{"git", "commit", "-m", commit_msg}, test_dir);
+        {
+            const result = try runCommand(allocator, &.{"git", "commit", "-m", commit_msg}, test_dir);
+            allocator.free(result.stdout);
+            allocator.free(result.stderr);
+        }
     }
     
     print("{s}\n\n", .{"Test repository created with 20 files and 3 commits"});

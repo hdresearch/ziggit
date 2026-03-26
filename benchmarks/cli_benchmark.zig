@@ -125,34 +125,54 @@ pub fn main() !void {
     const test_dir = "/tmp/bench_test";
     
     // Clean up any existing directory
-    _ = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{"rm", "-rf", test_dir},
-    }) catch {};
+    {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"rm", "-rf", test_dir},
+        }) catch return; // If cleanup fails, exit early
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
     
     // Create and initialize repo
-    _ = try std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{"mkdir", "-p", test_dir},
-    });
+    {
+        const result = try std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"mkdir", "-p", test_dir},
+        });
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
     
-    _ = try std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{"git", "init"},
-        .cwd = test_dir,
-    });
+    {
+        const result = try std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"git", "init"},
+            .cwd = test_dir,
+        });
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
     
-    _ = try std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{"git", "config", "user.name", "Benchmark"},
-        .cwd = test_dir,
-    });
+    {
+        const result = try std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"git", "config", "user.name", "Benchmark"},
+            .cwd = test_dir,
+        });
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
     
-    _ = try std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{"git", "config", "user.email", "bench@test.com"},
-        .cwd = test_dir,
-    });
+    {
+        const result = try std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"git", "config", "user.email", "bench@test.com"},
+            .cwd = test_dir,
+        });
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
     
     // Create test files
     var i: usize = 0;
@@ -169,17 +189,25 @@ pub fn main() !void {
     }
     
     // Add and commit files
-    _ = try std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{"git", "add", "."},
-        .cwd = test_dir,
-    });
+    {
+        const result = try std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"git", "add", "."},
+            .cwd = test_dir,
+        });
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
     
-    _ = try std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{"git", "commit", "-m", "Initial commit"},
-        .cwd = test_dir,
-    });
+    {
+        const result = try std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"git", "commit", "-m", "Initial commit"},
+            .cwd = test_dir,
+        });
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
     
     var results = std.ArrayList(BenchmarkResult).init(allocator);
     defer results.deinit();
@@ -303,10 +331,14 @@ pub fn main() !void {
     
     // Cleanup
     print("\nCleaning up...\n", .{});
-    _ = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{"rm", "-rf", test_dir},
-    }) catch {};
+    {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{"rm", "-rf", test_dir},
+        }) catch return;
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
     
     print("CLI benchmark complete!\n", .{});
 }
