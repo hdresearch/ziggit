@@ -569,6 +569,17 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(pack_codec_correctness_tests).step);
 
+    // Deep pack codec tests (chain depth 3+, 4-byte offsets, fixThinPack, mixed types, git cross-validation)
+    const pack_deep_codec_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_deep_codec_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_deep_codec_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(pack_deep_codec_tests).step);
+
     // Pack format unit tests (byte-level pack construction, all object types, delta chains)
     const pack_format_unit_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_format_unit_test.zig"),
