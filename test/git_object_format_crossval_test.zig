@@ -677,7 +677,7 @@ test "large file round-trips correctly" {
     _ = try exec(&.{ "git", "-C", path, "config", "user.name", "T" }, "/tmp");
 
     // Create 64KB file with known pattern
-    var large_content = try testing.allocator.alloc(u8, 65536);
+    const large_content = try testing.allocator.alloc(u8, 65536);
     defer testing.allocator.free(large_content);
     for (large_content, 0..) |*b, i| {
         b.* = @intCast(i % 256);

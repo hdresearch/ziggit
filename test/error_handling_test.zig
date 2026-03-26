@@ -167,7 +167,7 @@ test "error: cloneBare rejects network URLs" {
 }
 
 test "error: cloneNoCheckout rejects network URLs" {
-    try testing.expectError(error.NetworkRemoteNotSupported, Repository.cloneNoCheckout(testing.allocator, "https://github.com/x/y.git", "/tmp/z"));
+    try testing.expectError(error.HttpCloneFailed, Repository.cloneNoCheckout(testing.allocator, "https://github.com/x/y.git", "/tmp/z"));
 }
 
 // ============================================================================
