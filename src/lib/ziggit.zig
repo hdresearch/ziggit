@@ -1510,21 +1510,28 @@ fn isFileTracked(git_dir: []const u8, file_path: []const u8) !bool {
 
 // Simple check if file is modified compared to index
 fn isFileModified(git_dir: []const u8, work_tree: []const u8, file_path: []const u8) !bool {
-    _ = git_dir; // Will be used for reading index entry
+    // Load the git index to get file info
+    const index_path = try std.fmt.allocPrint(global_allocator, "{s}/index", .{git_dir});
+    defer global_allocator.free(index_path);
     
-    // For now, just check if file exists in working tree
-    const full_path = try std.fmt.allocPrint(global_allocator, "{s}/{s}", .{ work_tree, file_path });
-    defer global_allocator.free(full_path);
-    
-    const file = std.fs.openFileAbsolute(full_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return true, // File deleted
+    var git_index = index_parser.GitIndex.readFromFile(global_allocator, index_path) catch |err| switch (err) {
+        error.FileNotFound => return false, // No index, can't be modified relative to index
         else => return err,
     };
-    defer file.close();
+    defer git_index.deinit();
     
-    // For now, assume files are not modified for performance
-    // This gives us the fast path for clean repos that bun typically deals with
-    return false;
+    // Find the file in the index
+    const index_entry = git_index.findEntry(file_path) orelse return false; // Not in index, so can't be modified relative to index
+    
+    // Create IndexFileInfo for the isFileModifiedAgainstIndex call
+    const index_info = IndexFileInfo{
+        .hash = index_entry.sha1,
+        .size = index_entry.size,
+        .mtime_sec = index_entry.mtime_seconds,
+    };
+    
+    // Use the existing isFileModifiedAgainstIndex function
+    return isFileModifiedAgainstIndex(work_tree, file_path, index_info);
 }
 
 // Real file modification check that compares SHA1 hashes
