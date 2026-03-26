@@ -2750,3 +2750,135 @@ test "git bun install workflow -> ziggit reads all state" {
     const v1 = try repo.findCommit("v1.0.0");
     try std.testing.expect(!std.mem.eql(u8, &v1, &head));
 }
+
+test "git merge commit -> ziggit findCommit by merge parent" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    try initGitRepo(allocator, tmp);
+    try writeFile(tmp, "base.txt", "base", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "base.txt" });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "base" });
+
+    try execGitNoOutput(allocator, tmp, &.{ "checkout", "-b", "feat" });
+    try writeFile(tmp, "feat.txt", "feature", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "feat.txt" });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "feature" });
+
+    try execGitNoOutput(allocator, tmp, &.{ "checkout", "master" });
+    try writeFile(tmp, "main.txt", "main", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "main.txt" });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "main" });
+
+    try execGitNoOutput(allocator, tmp, &.{ "merge", "feat", "-m", "merge" });
+
+    var repo = try ziggit.Repository.open(allocator, tmp);
+    defer repo.close();
+
+    const head = try repo.revParseHead();
+    const git_head_out = try execGit(allocator, tmp, &.{ "rev-parse", "HEAD" });
+    defer allocator.free(git_head_out);
+    try std.testing.expectEqualStrings(trimRight(git_head_out), &head);
+
+    // Verify the merge commit has 2 parents (via git)
+    const cat_out = try execGit(allocator, tmp, &.{ "cat-file", "-p", "HEAD" });
+    defer allocator.free(cat_out);
+    var parent_count: usize = 0;
+    var iter = std.mem.splitScalar(u8, cat_out, '\n');
+    while (iter.next()) |line| {
+        if (std.mem.startsWith(u8, line, "parent ")) parent_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), parent_count);
+}
+
+test "git writes -> ziggit describeTagsFast matches git describe --abbrev=0" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    try initGitRepo(allocator, tmp);
+    try writeFile(tmp, "f.txt", "tagged", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "f.txt" });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "tagged" });
+    try execGitNoOutput(allocator, tmp, &.{ "tag", "v3.5.0" });
+
+    // Extra commit past tag
+    try writeFile(tmp, "f.txt", "post-tag", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "f.txt" });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "post tag" });
+
+    var repo = try ziggit.Repository.open(allocator, tmp);
+    defer repo.close();
+
+    const fast_desc = try repo.describeTagsFast(allocator);
+    defer allocator.free(fast_desc);
+
+    // describeTagsFast should return v3.5.0 (nearest tag, no distance info)
+    try std.testing.expectEqualStrings("v3.5.0", fast_desc);
+}
+
+test "git bun workflow full cycle -> ziggit all APIs" {
+    const allocator = std.testing.allocator;
+    const tmp = try makeTmpDir(allocator);
+    defer {
+        cleanupTmpDir(tmp);
+        allocator.free(tmp);
+    }
+
+    try initGitRepo(allocator, tmp);
+
+    // Simulate full bun publish: init, add, commit, tag, bump, repeat
+    try writeFile(tmp, "package.json", "{\"name\":\"@bun/full\",\"version\":\"1.0.0\"}", allocator);
+    try writeFile(tmp, "index.ts", "export const v = '1.0.0';", allocator);
+    try writeFile(tmp, "README.md", "# Full Test", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "." });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "v1.0.0" });
+    try execGitNoOutput(allocator, tmp, &.{ "tag", "v1.0.0" });
+
+    try writeFile(tmp, "package.json", "{\"name\":\"@bun/full\",\"version\":\"2.0.0\"}", allocator);
+    try writeFile(tmp, "index.ts", "export const v = '2.0.0';", allocator);
+    try execGitNoOutput(allocator, tmp, &.{ "add", "." });
+    try execGitNoOutput(allocator, tmp, &.{ "commit", "-m", "v2.0.0" });
+    try execGitNoOutput(allocator, tmp, &.{ "tag", "v2.0.0" });
+
+    var repo = try ziggit.Repository.open(allocator, tmp);
+    defer repo.close();
+
+    // revParseHead
+    const head = try repo.revParseHead();
+    const git_head_out = try execGit(allocator, tmp, &.{ "rev-parse", "HEAD" });
+    defer allocator.free(git_head_out);
+    try std.testing.expectEqualStrings(trimRight(git_head_out), &head);
+
+    // isClean
+    try std.testing.expect(try repo.isClean());
+
+    // describeTags
+    const desc = try repo.describeTags(allocator);
+    defer allocator.free(desc);
+    try std.testing.expect(std.mem.indexOf(u8, desc, "v2.0.0") != null);
+
+    // findCommit v1.0.0 differs from HEAD
+    const v1 = try repo.findCommit("v1.0.0");
+    try std.testing.expect(!std.mem.eql(u8, &v1, &head));
+
+    // statusPorcelain empty
+    const status = try repo.statusPorcelain(allocator);
+    defer allocator.free(status);
+    try std.testing.expectEqualStrings("", trimRight(status));
+
+    // branchList has master/main
+    const branches = try repo.branchList(allocator);
+    defer {
+        for (branches) |b| allocator.free(b);
+        allocator.free(branches);
+    }
+    try std.testing.expect(branches.len >= 1);
+}
