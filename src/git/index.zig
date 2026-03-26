@@ -254,12 +254,12 @@ pub const Index = struct {
         };
     }
 
-    /// Read and skip index extensions with better error handling
+    /// Read and skip index extensions with better error handling  
     fn readExtensions(self: *Index, reader: anytype, data: []const u8) !void {
         _ = self; // Not used currently
         
         var extensions_found: u32 = 0;
-        const max_extensions = 20; // Reasonable limit to prevent infinite loops
+        const max_extensions = 50; // Increased limit for repositories with many extensions
         
         while (extensions_found < max_extensions) {
             // Check if we have enough bytes left for checksum (20 bytes) plus extension header (8 bytes)
@@ -271,13 +271,29 @@ pub const Index = struct {
             _ = reader.readAll(&sig) catch break; // EOF or not enough data
             
             // Check if this is actually the start of the SHA-1 checksum
-            // Extensions have printable ASCII signatures, checksum starts with hash bytes
+            // Extensions have specific signature patterns:
+            // - TREE: tree cache extension
+            // - REUC: resolve undo extension  
+            // - link: split index extension
+            // - UNTR: untracked cache extension
+            // - FSMN: file system monitor extension
+            const known_extensions = [_][]const u8{ "TREE", "REUC", "link", "UNTR", "FSMN", "IEOT", "EOIE" };
+            
+            var is_known_extension = false;
+            for (known_extensions) |ext| {
+                if (std.mem.eql(u8, &sig, ext)) {
+                    is_known_extension = true;
+                    break;
+                }
+            }
+            
+            // Check if this looks like an extension signature (printable ASCII)
             const is_printable = for (sig) |c| {
                 if (c < 32 or c > 126) break false;
             } else true;
             
-            if (!is_printable) {
-                // Likely the start of checksum, rewind
+            // If it's not a known extension and not printable ASCII, assume it's the checksum
+            if (!is_known_extension and !is_printable) {
                 try reader.context.seekTo(current_pos);
                 break;
             }
@@ -289,25 +305,41 @@ pub const Index = struct {
                 break;
             };
             
-            // Sanity check extension size
-            if (ext_size > data.len or current_pos + 8 + ext_size > data.len) {
+            // Enhanced sanity check extension size
+            const max_reasonable_ext_size = 10 * 1024 * 1024; // 10MB max per extension
+            if (ext_size > max_reasonable_ext_size or ext_size > data.len or current_pos + 8 + ext_size > data.len - 20) {
                 // Extension size is invalid, probably hit the checksum
+                std.debug.print("Suspicious extension size {} at pos {}, treating as checksum\n", .{ ext_size, current_pos });
                 try reader.context.seekTo(current_pos);
                 break;
             }
             
-            // Log known extensions for debugging
-            const ext_name = std.fmt.bytesToHex(&sig, .lower);
-            std.debug.print("Skipping index extension: {s} (size: {} bytes)\n", .{ &ext_name, ext_size });
+            // Log extensions for debugging (only show first few chars to avoid binary data)
+            const safe_sig = if (is_printable) sig else [_]u8{ '?', '?', '?', '?' };
+            std.debug.print("Skipping index extension: {s} (size: {} bytes)\n", .{ &safe_sig, ext_size });
+            
+            // Handle special extensions that we might want to parse in the future
+            if (std.mem.eql(u8, &sig, "TREE")) {
+                // Tree cache extension - could be useful for performance
+                std.debug.print("  Found tree cache extension\n", .{});
+            } else if (std.mem.eql(u8, &sig, "REUC")) {
+                // Resolve undo extension - tracks conflicts  
+                std.debug.print("  Found resolve undo extension\n", .{});
+            }
             
             // Skip extension data
             reader.skipBytes(ext_size, .{}) catch {
                 // If we can't skip the extension, we're probably at the checksum
+                std.debug.print("Failed to skip extension data, assuming checksum\n", .{});
                 try reader.context.seekTo(current_pos);
                 break;
             };
             
             extensions_found += 1;
+        }
+        
+        if (extensions_found >= max_extensions) {
+            std.debug.print("Warning: stopped processing extensions after {} (max limit reached)\n", .{max_extensions});
         }
     }
 

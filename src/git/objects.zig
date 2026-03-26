@@ -260,6 +260,12 @@ const PackObjectType = enum(u3) {
 
 /// Find object in a specific pack file
 fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_str: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
+    // Validate input hash format
+    if (hash_str.len != 40) return error.InvalidHash;
+    for (hash_str) |c| {
+        if (!std.ascii.isHex(c)) return error.InvalidHash;
+    }
+    
     // Convert hash string to bytes for searching
     var target_hash: [20]u8 = undefined;
     _ = try std.fmt.hexToBytes(&target_hash, hash_str);
@@ -271,8 +277,8 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     const idx_data = platform_impl.fs.readFile(allocator, idx_path) catch return error.ObjectNotFound;
     defer allocator.free(idx_data);
     
-    // Parse pack index v2 format
-    if (idx_data.len < 8) return error.ObjectNotFound;
+    // Minimum size check for any pack index format
+    if (idx_data.len < 8) return error.CorruptedPackIndex;
     
     // Check for pack index magic and version
     const magic = std.mem.readInt(u32, @ptrCast(idx_data[0..4]), .big);
@@ -280,15 +286,21 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     
     if (magic != 0xff744f63) {
         // No magic header, might be version 1 format
-        if (idx_data.len < 256 * 4) return error.ObjectNotFound;
+        if (idx_data.len < 256 * 4) return error.CorruptedPackIndex;
         return findObjectInPackV1(idx_data, target_hash, pack_dir_path, idx_filename, platform_impl, allocator);
     }
     if (version != 2) {
-        // Unsupported version, but try v1 fallback just in case
-        if (idx_data.len < 256 * 4) return error.ObjectNotFound;
-        return findObjectInPackV1(idx_data, target_hash, pack_dir_path, idx_filename, platform_impl, allocator) catch {
-            return error.ObjectNotFound; // Neither v2 nor v1 worked
-        };
+        // Unsupported version
+        if (version == 1) {
+            // Explicit v1 format (rare but valid)
+            return findObjectInPackV1(idx_data[8..], target_hash, pack_dir_path, idx_filename, platform_impl, allocator);
+        } else if (version > 2) {
+            // Future version - be strict about not supporting it
+            std.debug.print("Warning: pack index version {} not supported\n", .{version});
+            return error.UnsupportedPackIndexVersion;
+        } else {
+            return error.CorruptedPackIndex;
+        }
     }
     
     // Use fanout table for efficient searching
@@ -437,8 +449,21 @@ fn readObjectFromPack(pack_path: []const u8, offset: u64, platform_impl: anytype
         return error.EmptyPackFile;
     }
     
+    // Sanity check object count (prevent malicious/corrupted pack files)
+    const max_reasonable_objects = 10_000_000; // 10 million objects max
+    if (object_count > max_reasonable_objects) {
+        std.debug.print("Pack file {s} claims {} objects, which seems excessive\n", .{ pack_path, object_count });
+        return error.SuspiciousPackFile;
+    }
+    
     if (offset >= pack_data.len) {
         std.debug.print("Offset {} beyond pack file size {} in {s}\n", .{ offset, pack_data.len, pack_path });
+        return error.OffsetOutOfBounds;
+    }
+    
+    // Ensure we're not too close to the end (need at least a few bytes for object header)
+    if (offset > pack_data.len - 4) {
+        std.debug.print("Offset {} too close to end of pack file {s}\n", .{ offset, pack_path });
         return error.OffsetOutOfBounds;
     }
     
@@ -653,6 +678,12 @@ fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.
         base_size |= @as(usize, @intCast(b & 0x7F)) << shift;
         if (b & 0x80 == 0) break;
         shift += 7;
+        
+        // Prevent unreasonably large base sizes
+        if (shift > 32) { // Max 4GB base size
+            std.debug.print("Delta base size encoding too long\n", .{});
+            return error.DeltaCorrupted;
+        }
     }
     
     if (pos >= delta_data.len) return error.DeltaTruncated;
@@ -666,6 +697,12 @@ fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.
         result_size |= @as(usize, @intCast(b & 0x7F)) << shift;
         if (b & 0x80 == 0) break;
         shift += 7;
+        
+        // Prevent unreasonably large result sizes  
+        if (shift > 32) { // Max 4GB result size
+            std.debug.print("Delta result size encoding too long\n", .{});
+            return error.DeltaCorrupted;
+        }
     }
     
     // Verify base size matches actual base data
@@ -674,10 +711,16 @@ fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.
         return error.BaseSizeMismatch;
     }
     
-    // Sanity check result size (100MB max)
+    // Sanity check result size (100MB max for regular use)
     if (result_size > 100 * 1024 * 1024) {
         std.debug.print("Delta result size too large: {} bytes\n", .{result_size});
         return error.ResultTooLarge;
+    }
+    
+    // Basic sanity check: result size shouldn't be dramatically different from base
+    if (result_size > base_size * 10) {
+        std.debug.print("Delta result size {} seems suspicious compared to base size {}\n", .{ result_size, base_size });
+        return error.SuspiciousDelta;
     }
     
     // Apply delta commands
