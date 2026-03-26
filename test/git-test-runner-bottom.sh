@@ -74,6 +74,10 @@ for test_script in \
     t0070-fundamental.sh \
     t0060-path-utils.sh \
     t0050-filesystem.sh \
+    t0002-gitfile.sh \
+    t0003-attributes.sh \
+    t0010-racy-git.sh \
+    t0020-crlf.sh \
     t0001-init.sh \
     t0000-basic.sh \
 ; do
