@@ -1297,6 +1297,55 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(e2e_edge_cases_validation_tests).step);
     e2e_step.dependOn(&b.addRunArtifact(e2e_edge_cases_validation_tests).step);
 
+    // Cache and status correctness tests
+    const cache_status_correctness_tests = b.addTest(.{
+        .root_source_file = b.path("test/cache_and_status_correctness_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cache_status_correctness_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(cache_status_correctness_tests).step);
+
+    // Object format git cross-validation tests
+    const object_format_crossval_tests = b.addTest(.{
+        .root_source_file = b.path("test/object_format_git_crossval_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    object_format_crossval_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(object_format_crossval_tests).step);
+
+    // Checkout, clone, fetch tests
+    const checkout_clone_fetch_tests = b.addTest(.{
+        .root_source_file = b.path("test/checkout_clone_fetch_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    checkout_clone_fetch_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(checkout_clone_fetch_tests).step);
+
+    // Index binary cross-validation tests (internal git module)
+    const index_binary_crossval_tests = b.addTest(.{
+        .root_source_file = b.path("test/index_binary_crossval_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    index_binary_crossval_tests.root_module.addAnonymousImport("git", .{
+        .root_source_file = b.path("src/git/git.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(index_binary_crossval_tests).step);
+
+    // Refs, config, object hash cross-validation tests (internal git module)
+    const refs_config_crossval_tests = b.addTest(.{
+        .root_source_file = b.path("test/refs_config_crossval_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    refs_config_crossval_tests.root_module.addAnonymousImport("git", .{
+        .root_source_file = b.path("src/git/git.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(refs_config_crossval_tests).step);
+
     // API coverage tests (comprehensive Repository API tests with git cross-validation)
     const api_coverage_tests = b.addTest(.{
         .root_source_file = b.path("test/api_coverage_test.zig"),
