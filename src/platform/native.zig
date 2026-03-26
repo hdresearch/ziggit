@@ -35,11 +35,17 @@ fn getArgsImpl(allocator: std.mem.Allocator) !interface.ArgIterator {
 }
 
 fn writeStdoutImpl(data: []const u8) !void {
-    try getStdoutWriter().writeAll(data);
+    getStdoutWriter().writeAll(data) catch |err| switch (err) {
+        error.BrokenPipe => return, // Ignore broken pipe (e.g., piped to head/less)
+        else => return err,
+    };
 }
 
 fn writeStderrImpl(data: []const u8) !void {
-    try getStderrWriter().writeAll(data);
+    getStderrWriter().writeAll(data) catch |err| switch (err) {
+        error.BrokenPipe => return, // Ignore broken pipe (e.g., piped to head/less)
+        else => return err,
+    };
 }
 
 fn existsImpl(path: []const u8) !bool {
