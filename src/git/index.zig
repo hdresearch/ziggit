@@ -310,28 +310,28 @@ pub const Index = struct {
             const max_reasonable_ext_size = 10 * 1024 * 1024; // 10MB max per extension
             if (ext_size > max_reasonable_ext_size or ext_size > data.len or current_pos + 8 + ext_size > data.len - 20) {
                 // Extension size is invalid, probably hit the checksum
-                std.debug.print("Suspicious extension size {} at pos {}, treating as checksum\n", .{ ext_size, current_pos });
+                // Suspicious extension size, treating as checksum
                 try reader.context.seekTo(current_pos);
                 break;
             }
             
             // Log extensions for debugging (only show first few chars to avoid binary data)
             const safe_sig = if (is_printable) sig else [_]u8{ '?', '?', '?', '?' };
-            std.debug.print("Skipping index extension: {s} (size: {} bytes)\n", .{ &safe_sig, ext_size });
+            // Silently skip unknown index extensions
             
             // Handle special extensions that we might want to parse in the future
             if (std.mem.eql(u8, &sig, "TREE")) {
                 // Tree cache extension - could be useful for performance
-                std.debug.print("  Found tree cache extension\n", .{});
+                // Tree cache extension found
             } else if (std.mem.eql(u8, &sig, "REUC")) {
                 // Resolve undo extension - tracks conflicts  
-                std.debug.print("  Found resolve undo extension\n", .{});
+                    // Resolve undo extension found
             }
             
             // Skip extension data
             reader.skipBytes(ext_size, .{}) catch {
                 // If we can't skip the extension, we're probably at the checksum
-                std.debug.print("Failed to skip extension data, assuming checksum\n", .{});
+                // Failed to skip extension, assuming checksum
                 try reader.context.seekTo(current_pos);
                 break;
             };
@@ -340,7 +340,7 @@ pub const Index = struct {
         }
         
         if (extensions_found >= max_extensions) {
-            std.debug.print("Warning: stopped processing extensions after {} (max limit reached)\n", .{max_extensions});
+            // Stopped processing extensions (max limit reached)
         }
     }
 

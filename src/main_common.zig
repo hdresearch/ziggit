@@ -1849,7 +1849,7 @@ fn updateIndexFromTree(git_path: []const u8, tree_hash: []const u8, allocator: s
     
     // Load the tree object
     const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch |err| {
-        std.debug.print("Warning: failed to load tree for index update: {}\n", .{err});
+            // Failed to load tree for index update
         return;
     };
     defer tree_obj.deinit(allocator);
