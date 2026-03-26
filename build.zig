@@ -9,6 +9,11 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/lib/ziggit.zig"),
     });
 
+    // Create the ziggit module for importing
+    const ziggit_module = b.addModule("ziggit", .{
+        .root_source_file = b.path("src/lib/ziggit.zig"),
+    });
+
     const exe = b.addExecutable(.{
         .name = "ziggit",
         .root_source_file = b.path("src/main.zig"),
@@ -93,6 +98,19 @@ pub fn build(b: *std.Build) void {
     const run_comprehensive_test = b.addRunArtifact(comprehensive_test);
     run_comprehensive_test.step.dependOn(b.getInstallStep());
 
+    // Status porcelain test (focused test for status functionality)
+    const status_porcelain_test = b.addExecutable(.{
+        .name = "status_porcelain_test",
+        .root_source_file = b.path("test/status_porcelain_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    status_porcelain_test.root_module.addImport("ziggit", ziggit_module);
+
+    const run_status_porcelain_test = b.addRunArtifact(status_porcelain_test);
+    run_status_porcelain_test.step.dependOn(b.getInstallStep());
+
     // Individual test steps
     const git_interop_test_step = b.step("test-git-interop", "Run git interoperability tests");
     git_interop_test_step.dependOn(&run_git_interop_test.step);
@@ -108,6 +126,25 @@ pub fn build(b: *std.Build) void {
 
     const comprehensive_test_step = b.step("test-comprehensive", "Run comprehensive integration tests");
     comprehensive_test_step.dependOn(&run_comprehensive_test.step);
+
+    const status_porcelain_test_step = b.step("test-status-porcelain", "Run status porcelain functionality tests");
+    status_porcelain_test_step.dependOn(&run_status_porcelain_test.step);
+
+    // Debug status test (focused debug test for status functionality)
+    const debug_status_test = b.addExecutable(.{
+        .name = "debug_status_test",
+        .root_source_file = b.path("test/debug_status.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    debug_status_test.root_module.addImport("ziggit", ziggit_module);
+
+    const run_debug_status_test = b.addRunArtifact(debug_status_test);
+    run_debug_status_test.step.dependOn(b.getInstallStep());
+
+    const debug_status_test_step = b.step("debug-status", "Run debug status test");
+    debug_status_test_step.dependOn(&run_debug_status_test.step);
 
     // Main test step runs all tests
     const test_step = b.step("test", "Run all tests");
