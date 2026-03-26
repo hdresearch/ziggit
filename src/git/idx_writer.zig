@@ -55,6 +55,9 @@ pub fn generateIdx(allocator: std.mem.Allocator, pack_path: []const u8) !void {
 ///   - REF_DELTA: resolved if base known, otherwise deferred
 ///   - Deferred REF_DELTAs resolved in multi-pass convergence loop
 pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) ![]u8 {
+    const trace_timing = std.posix.getenv("ZIGGIT_TRACE_TIMING") != null;
+    var phase_timer = std.time.Timer.start() catch null;
+
     if (pack_data.len < 32) return error.PackFileTooSmall;
     if (!std.mem.eql(u8, pack_data[0..4], "PACK")) return error.InvalidPackSignature;
 
@@ -209,6 +212,13 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
     }
     const total_objects = obj_idx;
 
+    if (trace_timing) {
+        if (phase_timer) |*t| {
+            std.debug.print("[timing]   idx pass1 (scan+hash): {}ms, objects={}\n", .{ t.read() / std.time.ns_per_ms, total_objects });
+            t.reset();
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════
     // Pass 2: Resolve deltas using bounded LRU cache
     // ═══════════════════════════════════════════════════════════════════
@@ -274,6 +284,13 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
         unresolved_count = new_unresolved;
     }
 
+    if (trace_timing) {
+        if (phase_timer) |*t| {
+            std.debug.print("[timing]   idx pass2 (resolve deltas): {}ms, unresolved_remaining={}\n", .{ t.read() / std.time.ns_per_ms, countUnresolved(records[0..total_objects]) });
+            t.reset();
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════
     // Build sorted entries from resolved records
     // ═══════════════════════════════════════════════════════════════════
@@ -298,6 +315,13 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
     // ═══════════════════════════════════════════════════════════════════
     // Build v2 .idx file
     // ═══════════════════════════════════════════════════════════════════
+    if (trace_timing) {
+        if (phase_timer) |*t| {
+            std.debug.print("[timing]   idx build file: {}ms\n", .{t.read() / std.time.ns_per_ms});
+            t.reset();
+        }
+    }
+
     return buildIdxFile(allocator, entries.items, pack_checksum);
 }
 
