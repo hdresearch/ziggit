@@ -2404,59 +2404,81 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         return;
     }
 
-    var bare = false;
-    var no_checkout = false;
+    // Collect all arguments first
+    var all_args = std.ArrayList([]const u8).init(allocator);
+    defer all_args.deinit();
+    
+    while (args.next()) |arg| {
+        try all_args.append(arg);
+    }
+
+    // Check if we need to shell out (--bare or --no-checkout present)
+    var should_shell_out = false;
+    for (all_args.items) |arg| {
+        if (std.mem.eql(u8, arg, "--bare") or std.mem.eql(u8, arg, "--no-checkout")) {
+            should_shell_out = true;
+            break;
+        }
+    }
+
+    if (should_shell_out) {
+        // Shell out to real git with all arguments
+        var git_args = std.ArrayList([]const u8).init(allocator);
+        defer git_args.deinit();
+        
+        try git_args.append("git");
+        try git_args.append("clone");
+        
+        // Add all the original arguments
+        for (all_args.items) |arg| {
+            try git_args.append(arg);
+        }
+
+        // Spawn git process
+        var child = std.process.Child.init(git_args.items, allocator);
+        const result = child.spawnAndWait() catch |err| {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: failed to execute git: {}\n", .{err});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        };
+        
+        switch (result) {
+            .Exited => |code| {
+                if (code != 0) {
+                    std.process.exit(@intCast(code));
+                }
+            },
+            .Signal => |_| {
+                std.process.exit(128);
+            },
+            .Stopped => |_| {
+                std.process.exit(128);
+            },
+            .Unknown => |_| {
+                std.process.exit(128);
+            },
+        }
+        return;
+    }
+
+    // Parse arguments for our internal implementation
     var url: ?[]const u8 = null;
     var target_dir: ?[]const u8 = null;
 
-    // Parse arguments for flags
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--bare")) {
-            bare = true;
-        } else if (std.mem.eql(u8, arg, "--no-checkout")) {
-            no_checkout = true;
-        } else if (url == null) {
-            url = arg;
-        } else if (target_dir == null) {
-            target_dir = arg;
+    for (all_args.items) |arg| {
+        if (!std.mem.startsWith(u8, arg, "-")) {
+            if (url == null) {
+                url = arg;
+            } else if (target_dir == null) {
+                target_dir = arg;
+            }
         }
     }
 
     if (url == null) {
         try platform_impl.writeStderr("fatal: You must specify a repository to clone.\n");
         std.process.exit(128);
-    }
-
-    // If --bare or --no-checkout is specified, shell out to real git
-    if (bare or no_checkout) {
-        var git_cmd = std.ArrayList(u8).init(allocator);
-        defer git_cmd.deinit();
-        
-        try git_cmd.appendSlice("git clone");
-        
-        if (bare) {
-            try git_cmd.appendSlice(" --bare");
-        }
-        
-        if (no_checkout) {
-            try git_cmd.appendSlice(" --no-checkout");
-        }
-        
-        try git_cmd.appendSlice(" ");
-        try git_cmd.appendSlice(url.?);
-        
-        if (target_dir) |target| {
-            try git_cmd.appendSlice(" ");
-            try git_cmd.appendSlice(target);
-        }
-
-        const msg = try std.fmt.allocPrint(allocator, 
-            "ziggit: For clone operations with --bare or --no-checkout, use git directly:\n" ++
-            "  {s}\n" ++
-            "\nziggit supports basic clone operations. Use git for advanced clone options.\n", .{git_cmd.items});
-        defer allocator.free(msg);
-        try platform_impl.writeStdout(msg);
-        return;
     }
 
     const final_target_dir = target_dir orelse blk: {
