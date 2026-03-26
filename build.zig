@@ -280,6 +280,30 @@ pub fn build(b: *std.Build) void {
     });
     status_detection_tests.root_module.addImport("ziggit", ziggit_module);
 
+    // Commit graph tests
+    const commit_graph_tests = b.addTest(.{
+        .root_source_file = b.path("test/commit_graph_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    commit_graph_tests.root_module.addImport("ziggit", ziggit_module);
+
+    // Index binary format tests
+    const index_binary_format_tests = b.addTest(.{
+        .root_source_file = b.path("test/index_binary_format_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    index_binary_format_tests.root_module.addImport("ziggit", ziggit_module);
+
+    // Dirty detection tests
+    const dirty_detection_tests = b.addTest(.{
+        .root_source_file = b.path("test/dirty_detection_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    dirty_detection_tests.root_module.addImport("ziggit", ziggit_module);
+
     // Test step - runs all unit tests and integration tests
     const test_step = b.step("test", "Run all unit tests and integration tests");
     test_step.dependOn(&b.addRunArtifact(platform_unit_tests).step);
@@ -318,6 +342,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(edge_cases_tests).step);
     test_step.dependOn(&b.addRunArtifact(index_parser_unit_tests).step);
     test_step.dependOn(&b.addRunArtifact(status_detection_tests).step);
+    test_step.dependOn(&b.addRunArtifact(commit_graph_tests).step);
+    test_step.dependOn(&b.addRunArtifact(index_binary_format_tests).step);
+    test_step.dependOn(&b.addRunArtifact(dirty_detection_tests).step);
 
     // E2E validation: ziggit writes, git reads
     const ziggit_writes_test = b.addTest(.{
