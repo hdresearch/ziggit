@@ -211,10 +211,24 @@ pub fn build(b: *std.Build) void {
     bun_scenario_benchmark.root_module.addImport("ziggit", ziggit_module);
     const run_bun_scenario_benchmark = b.addRunArtifact(bun_scenario_benchmark);
 
+    // Zig API vs Git CLI benchmark (ITEM 7)
+    const zig_api_benchmark = b.addExecutable(.{
+        .name = "zig_api_benchmark",
+        .root_source_file = b.path("benchmarks/zig_api_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    zig_api_benchmark.root_module.addImport("ziggit", ziggit_module);
+    const run_zig_api_benchmark = b.addRunArtifact(zig_api_benchmark);
+
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&run_cli_benchmark.step);
     bench_step.dependOn(&run_lib_benchmark.step);
     bench_step.dependOn(&run_bun_scenario_benchmark.step);
+    bench_step.dependOn(&run_zig_api_benchmark.step);
+    
+    const zig_api_bench_step = b.step("zig-api-bench", "Run Zig API vs Git CLI benchmark");
+    zig_api_bench_step.dependOn(&run_zig_api_benchmark.step);
     
     // API vs CLI benchmark (minimal essential benchmark)
     const api_vs_cli_benchmark = b.addExecutable(.{
