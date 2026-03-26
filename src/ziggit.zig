@@ -2575,7 +2575,8 @@ pub const Repository = struct {
             }
         } else |_| {}
 
-        return error.RefNotFound;
+        // Fall back to packed-refs (bare repos store refs here after clone/fetch)
+        return self.resolveRefFromPackedRefs(ref_name);
     }
 
     /// Fast ref resolution using stack allocation - OPTIMIZED
@@ -2584,17 +2585,60 @@ pub const Repository = struct {
         var ref_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
         const ref_path = std.fmt.bufPrint(&ref_path_buf, "{s}/{s}", .{ self.git_dir, ref_name }) catch return error.PathTooLong;
 
-        const ref_file = std.fs.openFileAbsolute(ref_path, .{}) catch return error.RefNotFound;
-        defer ref_file.close();
+        if (std.fs.openFileAbsolute(ref_path, .{})) |ref_file| {
+            defer ref_file.close();
 
-        var ref_content_buf: [48]u8 = undefined; // SHA-1 is 40 chars + newline
-        const bytes_read = try ref_file.readAll(&ref_content_buf);
-        const ref_content = std.mem.trim(u8, ref_content_buf[0..bytes_read], " \n\r\t");
+            var ref_content_buf: [48]u8 = undefined; // SHA-1 is 40 chars + newline
+            const bytes_read = try ref_file.readAll(&ref_content_buf);
+            const ref_content = std.mem.trim(u8, ref_content_buf[0..bytes_read], " \n\r\t");
 
-        if (ref_content.len >= 40 and isValidHex(ref_content[0..40])) {
-            var result: [40]u8 = undefined;
-            @memcpy(&result, ref_content[0..40]);
-            return result;
+            if (ref_content.len >= 40 and isValidHex(ref_content[0..40])) {
+                var result: [40]u8 = undefined;
+                @memcpy(&result, ref_content[0..40]);
+                return result;
+            }
+        } else |_| {}
+
+        // Fall back to packed-refs (bare repos store refs here after clone/fetch)
+        return self.resolveRefFromPackedRefs(ref_name);
+    }
+
+    /// Resolve a ref by scanning the packed-refs file.
+    /// packed-refs format: "<hash> <refname>\n" per line, with comment lines starting with '#'.
+    fn resolveRefFromPackedRefs(self: *const Repository, ref_name: []const u8) ![40]u8 {
+        var packed_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const packed_path = std.fmt.bufPrint(&packed_path_buf, "{s}/packed-refs", .{self.git_dir}) catch return error.RefNotFound;
+
+        const packed_file = std.fs.openFileAbsolute(packed_path, .{}) catch return error.RefNotFound;
+        defer packed_file.close();
+
+        // packed-refs files are typically small (< 64KB even for large repos)
+        var buf: [65536]u8 = undefined;
+        const bytes_read = packed_file.readAll(&buf) catch return error.RefNotFound;
+        const content = buf[0..bytes_read];
+
+        var remaining: []const u8 = content;
+        while (remaining.len > 0) {
+            // Find end of line
+            const line_end = std.mem.indexOfScalar(u8, remaining, '\n') orelse remaining.len;
+            const line = remaining[0..line_end];
+            remaining = if (line_end < remaining.len) remaining[line_end + 1 ..] else remaining[remaining.len..];
+
+            // Skip comments and peeled entries (^hash)
+            if (line.len == 0 or line[0] == '#' or line[0] == '^') continue;
+
+            // Format: "<40-char-hash> <refname>"
+            if (line.len < 42) continue; // 40 hash + space + at least 1 char ref
+            if (line[40] != ' ') continue;
+
+            const line_ref = line[41..];
+            if (std.mem.eql(u8, line_ref, ref_name)) {
+                if (isValidHex(line[0..40])) {
+                    var result: [40]u8 = undefined;
+                    @memcpy(&result, line[0..40]);
+                    return result;
+                }
+            }
         }
 
         return error.RefNotFound;
