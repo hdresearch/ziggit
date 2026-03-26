@@ -113,8 +113,7 @@ pub const GitObject = struct {
         const compressed_content = platform_impl.fs.readFile(allocator, obj_file_path) catch |err| switch (err) {
             error.FileNotFound => {
                 // Try to find object in pack files
-                return loadFromPackFiles(hash_str, git_dir, platform_impl, allocator) catch |pack_err| {
-            // debug print removed
+                return loadFromPackFiles(hash_str, git_dir, platform_impl, allocator) catch {
                     return error.ObjectNotFound;
                 };
             },
@@ -234,8 +233,7 @@ fn loadFromPackFiles(hash_str: []const u8, git_dir: []const u8, platform_impl: a
     defer allocator.free(pack_dir_path);
     
     // Open pack directory
-    var pack_dir = std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true }) catch |err| {
-            // debug print removed
+    var pack_dir = std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true }) catch {
         return error.ObjectNotFound;
     };
     defer pack_dir.close();
@@ -253,7 +251,7 @@ fn loadFromPackFiles(hash_str: []const u8, git_dir: []const u8, platform_impl: a
             // debug print removed
         
         // Try to find object in this pack
-        const obj = findObjectInPack(pack_dir_path, entry.name, hash_str, platform_impl, allocator) catch |err| {
+        const obj = findObjectInPack(pack_dir_path, entry.name, hash_str, platform_impl, allocator) catch {
             // debug print removed
             continue;
         };
