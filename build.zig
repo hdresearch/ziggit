@@ -1125,6 +1125,33 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(gitignore_module_tests).step);
 
+    // Repository init and structure tests
+    const repo_init_structure_tests = b.addTest(.{
+        .root_source_file = b.path("test/repo_init_and_structure_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    repo_init_structure_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(repo_init_structure_tests).step);
+
+    // Blob/tree/commit/tag object tests
+    const blob_tree_commit_tests = b.addTest(.{
+        .root_source_file = b.path("test/blob_tree_commit_object_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    blob_tree_commit_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(blob_tree_commit_tests).step);
+
+    // Index format roundtrip tests
+    const index_format_roundtrip_tests = b.addTest(.{
+        .root_source_file = b.path("test/index_format_roundtrip_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    index_format_roundtrip_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(index_format_roundtrip_tests).step);
+
     // ========== BENCHMARKS ==========
     
     // CLI benchmark (ziggit vs git performance)
