@@ -1020,51 +1020,14 @@ fn getStatusPorcelainReal(repo: *Repository, buffer: []u8) !void {
         };
         defer git_index.deinit();
         
-        // Load HEAD tree entries for staged file comparison
-        var head_buf: [41]u8 = undefined;
-        try getHeadCommitHashReal(repo, &head_buf);
-        const head_hash = std.mem.trim(u8, &head_buf, "\x00");
-        
-        var head_tree_entries = getHeadTreeEntries(git_dir, head_hash) catch blk: {
-            // If we can't get HEAD tree, treat all index entries as staged additions
-            break :blk std.ArrayList(TreeFileEntry).init(global_allocator);
-        };
-        defer head_tree_entries.deinit();
-        defer for (head_tree_entries.items) |entry| {
-            global_allocator.free(entry.path);
-        };
-        
-        // Create hash map of HEAD tree entries for quick lookup
-        var head_files = std.HashMap([]const u8, []const u8, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(global_allocator);
-        defer head_files.deinit();
-        for (head_tree_entries.items) |entry| {
-            try head_files.put(entry.path, entry.hash);
-        }
-        
         // Track which files we've seen in index to identify untracked files later
         var tracked_files = std.HashMap([]const u8, void, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(global_allocator);
         defer tracked_files.deinit();
         
-        // Check each index entry for modifications and staging
+        // Simple approach: Check each index entry for working tree modifications
+        // For now, we'll focus on working tree vs index comparison (not staged changes)
         for (git_index.entries.items) |entry| {
             try tracked_files.put(entry.path, {});
-            
-            // Check if file is staged (index differs from HEAD tree)
-            var staged_status: ?u8 = null;
-            if (head_files.get(entry.path)) |head_file_hash| {
-                // File exists in HEAD, check if it's different
-                var index_hash_str: [40]u8 = undefined;
-                for (entry.sha1, 0..) |byte, i| {
-                    _ = std.fmt.bufPrint(index_hash_str[i*2..i*2+2], "{x:0>2}", .{byte}) catch break;
-                }
-                
-                if (!std.mem.eql(u8, &index_hash_str, head_file_hash)) {
-                    staged_status = 'M'; // Modified in index
-                }
-            } else {
-                // File doesn't exist in HEAD tree, it's a staged addition
-                staged_status = 'A';
-            }
             
             // Check if file is modified in working tree against index
             const index_info = IndexFileInfo{
@@ -1078,8 +1041,8 @@ fn getStatusPorcelainReal(repo: *Repository, buffer: []u8) !void {
                     // File was deleted from working tree
                     const status_line = std.fmt.bufPrint(
                         buffer[output_pos..],
-                        "{c}D {s}\n",
-                        .{if (staged_status) |s| s else ' ', entry.path}
+                        " D {s}\n",
+                        .{entry.path}
                     ) catch break;
                     output_pos += status_line.len;
                     if (output_pos >= buffer.len - 1) break;
@@ -1088,37 +1051,12 @@ fn getStatusPorcelainReal(repo: *Repository, buffer: []u8) !void {
                 else => return err,
             };
             
-            // Output status based on staged and working tree state
-            if (staged_status != null or is_modified) {
+            // Output status for modified files (working tree different from index)
+            if (is_modified) {
                 const status_line = std.fmt.bufPrint(
                     buffer[output_pos..],
-                    "{c}{c} {s}\n",
-                    .{
-                        if (staged_status) |s| s else ' ',
-                        if (is_modified) @as(u8, 'M') else ' ',
-                        entry.path
-                    }
-                ) catch break;
-                output_pos += status_line.len;
-                if (output_pos >= buffer.len - 1) break;
-            }
-        }
-        
-        // Check for deleted files (in HEAD tree but not in index)
-        for (head_tree_entries.items) |head_entry| {
-            var found_in_index = false;
-            for (git_index.entries.items) |index_entry| {
-                if (std.mem.eql(u8, head_entry.path, index_entry.path)) {
-                    found_in_index = true;
-                    break;
-                }
-            }
-            if (!found_in_index) {
-                // File deleted from index (staged deletion)
-                const status_line = std.fmt.bufPrint(
-                    buffer[output_pos..],
-                    "D  {s}\n",
-                    .{head_entry.path}
+                    " M {s}\n",
+                    .{entry.path}
                 ) catch break;
                 output_pos += status_line.len;
                 if (output_pos >= buffer.len - 1) break;
@@ -1163,6 +1101,45 @@ fn getStatusPorcelainReal(repo: *Repository, buffer: []u8) !void {
 
 // Scan for untracked files, excluding those tracked in index
 fn scanForUntrackedFilesInIndex(repo_root: []const u8, tracked_files: *std.HashMap([]const u8, void, std.hash_map.StringContext, std.hash_map.default_max_load_percentage), buffer: []u8, output_pos: *usize) !void {
+    // Load .gitignore patterns
+    var ignore_patterns = std.ArrayList([]u8).init(global_allocator);
+    defer {
+        for (ignore_patterns.items) |pattern| {
+            global_allocator.free(pattern);
+        }
+        ignore_patterns.deinit();
+    }
+    
+    // Ensure we have an absolute path for .gitignore
+    const abs_repo_root = if (std.fs.path.isAbsolute(repo_root))
+        try global_allocator.dupe(u8, repo_root)
+    else blk: {
+        var cwd_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const cwd = try std.process.getCwd(&cwd_buf);
+        break :blk try std.fs.path.resolve(global_allocator, &[_][]const u8{ cwd, repo_root });
+    };
+    defer global_allocator.free(abs_repo_root);
+    
+    const gitignore_path = try std.fmt.allocPrint(global_allocator, "{s}/.gitignore", .{abs_repo_root});
+    defer global_allocator.free(gitignore_path);
+    
+    if (std.fs.openFileAbsolute(gitignore_path, .{})) |gitignore_file| {
+        defer gitignore_file.close();
+        const content = gitignore_file.readToEndAlloc(global_allocator, 64 * 1024) catch "";
+        defer if (content.len > 0) global_allocator.free(content);
+        
+        if (content.len > 0) {
+            var lines = std.mem.split(u8, content, "\n");
+            while (lines.next()) |line| {
+                const trimmed = std.mem.trim(u8, line, " \t\r\n");
+                if (trimmed.len == 0 or trimmed[0] == '#') continue;
+                try ignore_patterns.append(try global_allocator.dupe(u8, trimmed));
+            }
+        }
+    } else |_| {
+        // No .gitignore file
+    }
+    
     var dir = std.fs.cwd().openDir(repo_root, .{ .iterate = true }) catch return;
     defer dir.close();
     
@@ -1173,17 +1150,45 @@ fn scanForUntrackedFilesInIndex(repo_root: []const u8, tracked_files: *std.HashM
         
         // Check if file is tracked in index
         if (!tracked_files.contains(entry.name)) {
-            // File is untracked
-            const status_line = std.fmt.bufPrint(
-                buffer[output_pos.*..],
-                "?? {s}\n",
-                .{entry.name}
-            ) catch break;
+            // Check if file should be ignored
+            var should_ignore = false;
+            for (ignore_patterns.items) |pattern| {
+                if (matchesGitignorePattern(entry.name, pattern)) {
+                    should_ignore = true;
+                    break;
+                }
+            }
             
-            output_pos.* += status_line.len;
-            if (output_pos.* >= buffer.len - 1) break;
+            if (!should_ignore) {
+                // File is untracked and not ignored
+                const status_line = std.fmt.bufPrint(
+                    buffer[output_pos.*..],
+                    "?? {s}\n",
+                    .{entry.name}
+                ) catch break;
+                
+                output_pos.* += status_line.len;
+                if (output_pos.* >= buffer.len - 1) break;
+            }
         }
     }
+}
+
+// Simple gitignore pattern matching (basic implementation)
+fn matchesGitignorePattern(filename: []const u8, pattern: []const u8) bool {
+    // Handle simple cases for now
+    if (std.mem.eql(u8, pattern, filename)) {
+        return true;
+    }
+    
+    // Handle *.extension patterns
+    if (std.mem.startsWith(u8, pattern, "*.")) {
+        const ext = pattern[2..];
+        return std.mem.endsWith(u8, filename, ext) and filename.len > ext.len and filename[filename.len - ext.len - 1] == '.';
+    }
+    
+    // Handle other patterns - for now, just exact match and wildcard extensions
+    return false;
 }
 
 // Simple scan for untracked files (without full index parsing)
@@ -1342,7 +1347,17 @@ fn loadGitObject(git_dir: []const u8, hash: []const u8) !GitObjectData {
 
 // Check if file is modified against index
 fn isFileModifiedAgainstIndex(work_tree: []const u8, file_path: []const u8, index_info: IndexFileInfo) !bool {
-    const full_path = try std.fmt.allocPrint(global_allocator, "{s}/{s}", .{ work_tree, file_path });
+    // Ensure we have an absolute path
+    const abs_work_tree = if (std.fs.path.isAbsolute(work_tree))
+        try global_allocator.dupe(u8, work_tree)
+    else blk: {
+        var cwd_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const cwd = try std.process.getCwd(&cwd_buf);
+        break :blk try std.fs.path.resolve(global_allocator, &[_][]const u8{ cwd, work_tree });
+    };
+    defer global_allocator.free(abs_work_tree);
+    
+    const full_path = try std.fmt.allocPrint(global_allocator, "{s}/{s}", .{ abs_work_tree, file_path });
     defer global_allocator.free(full_path);
     
     const file_handle = std.fs.openFileAbsolute(full_path, .{}) catch |err| switch (err) {

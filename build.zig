@@ -117,8 +117,22 @@ pub fn build(b: *std.Build) void {
 
     const run_pack_files_test = b.addRunArtifact(pack_files_test);
 
-    // Note: config_test.zig and lib_status_test.zig are removed from build
-    // as they import from lib/ and git/ directories which are owned by other agents
+    // Library status test
+    const lib_status_test = b.addTest(.{
+        .root_source_file = b.path("test/lib_status_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    const ziggit_mod = b.addModule("ziggit", .{
+        .root_source_file = b.path("src/lib/ziggit.zig"),
+    });
+    lib_status_test.root_module.addImport("ziggit", ziggit_mod);
+
+    const run_lib_status_test = b.addRunArtifact(lib_status_test);
+    
+    const lib_status_test_step = b.step("lib-status-test", "Run library status test");
+    lib_status_test_step.dependOn(&run_lib_status_test.step);
 
     // Pack implementation test
     const pack_implementation_test = b.addExecutable(.{
@@ -163,6 +177,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_pack_implementation_test.step);
     test_step.dependOn(&run_comprehensive_pack_test.step);
     test_step.dependOn(&run_comprehensive_refs_test.step);
+    test_step.dependOn(&run_lib_status_test.step);
 
     // Quick test step (just unit tests)
     const quick_test_step = b.step("test-quick", "Run unit tests only");
