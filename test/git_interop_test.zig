@@ -48,6 +48,12 @@ pub fn main() !void {
     // Comprehensive workflow compatibility test (added for completeness)
     try testCompleteGitZiggitWorkflow(allocator, test_dir);
 
+    // Edge case tests (these already exist with different names)
+    try testEmptyRepositoryEdgeCases(allocator, test_dir);
+    try testBinaryFileHandling(allocator, test_dir);
+    try testUnicodeFilenameSupport(allocator, test_dir);
+    try testLargeFileHandling(allocator, test_dir);
+
     print("All git interoperability tests passed!\n", .{});
 }
 
@@ -1416,6 +1422,38 @@ fn testCompleteGitZiggitWorkflow(allocator: std.mem.Allocator, test_dir: fs.Dir)
 test "git interoperability" {
     // This runs the main function as a test
     try main();
+}
+
+// Test edge case: Binary file handling
+fn testBinaryFileHandling(allocator: std.mem.Allocator, test_dir: fs.Dir) !void {
+    print("Test: Binary file handling\n", .{});
+    
+    const repo_path = try test_dir.makeOpenPath("binary_file_test", .{});
+    defer test_dir.deleteTree("binary_file_test") catch {};
+
+    // Initialize repo
+    const git_init = try runCommand(allocator, &.{"git", "init"}, repo_path);
+    defer allocator.free(git_init);
+    
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_path);
+    try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_path);
+
+    // Create a binary file (some random bytes)
+    const binary_data = [_]u8{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00}; // PNG header
+    try repo_path.writeFile(.{.sub_path = "test.png", .data = &binary_data});
+
+    // Add and commit with git
+    const git_add = try runCommand(allocator, &.{"git", "add", "test.png"}, repo_path);
+    defer allocator.free(git_add);
+    
+    const git_commit = try runCommand(allocator, &.{"git", "commit", "-m", "Add binary file"}, repo_path);
+    defer allocator.free(git_commit);
+
+    // Test ziggit can handle the repo with binary files
+    const ziggit_status = try runZiggitCommand(allocator, &.{"status", "--porcelain"}, repo_path);
+    defer allocator.free(ziggit_status);
+    
+    print("  ✓ Binary file handling test completed\n", .{});
 }
 
 test "comprehensive git-ziggit interoperability" {
