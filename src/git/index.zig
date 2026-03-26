@@ -1275,3 +1275,171 @@ pub fn verifyIndexIntegrity(data: []const u8) !bool {
     return std.mem.eql(u8, &computed_checksum, stored_checksum);
 }
 
+/// Enhanced index extension analysis
+pub fn analyzeIndexExtensions(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !IndexExtensionAnalysis {
+    const index_path = try std.fmt.allocPrint(allocator, "{s}/index", .{git_dir});
+    defer allocator.free(index_path);
+    
+    const data = platform_impl.fs.readFile(allocator, index_path) catch return IndexExtensionAnalysis{
+        .extensions_found = std.ArrayList(ExtensionInfo).init(allocator),
+        .total_extension_size = 0,
+        .has_tree_cache = false,
+        .has_resolve_undo = false,
+        .has_untracked_cache = false,
+        .has_fsmonitor = false,
+        .performance_optimizations = 0,
+    };
+    defer allocator.free(data);
+    
+    var analysis = IndexExtensionAnalysis{
+        .extensions_found = std.ArrayList(ExtensionInfo).init(allocator),
+        .total_extension_size = 0,
+        .has_tree_cache = false,
+        .has_resolve_undo = false,
+        .has_untracked_cache = false,
+        .has_fsmonitor = false,
+        .performance_optimizations = 0,
+    };
+    
+    if (data.len < 12) return analysis;
+    
+    // Parse basic header
+    const entry_count = std.mem.readInt(u32, @ptrCast(data[8..12]), .big);
+    
+    // Skip entries to find extensions
+    var pos: usize = 12;
+    var entries_processed: u32 = 0;
+    
+    // Rough estimate to skip entries
+    while (entries_processed < entry_count and pos < data.len - 20) {
+        const min_entry_size = 62; // Minimum entry size
+        if (pos + min_entry_size >= data.len - 20) break;
+        
+        // Skip to flags to determine path length
+        const flags_offset = pos + 60;
+        if (flags_offset + 2 >= data.len) break;
+        
+        const flags = std.mem.readInt(u16, @ptrCast(data[flags_offset..flags_offset + 2]), .big);
+        const path_len = flags & 0xFFF;
+        
+        // Estimate entry size
+        const estimated_entry_size = 62 + path_len;
+        const padded_size = ((estimated_entry_size + 7) / 8) * 8;
+        
+        pos += padded_size;
+        entries_processed += 1;
+        
+        if (pos >= data.len - 20) break;
+    }
+    
+    // Now analyze extensions
+    while (pos + 8 <= data.len - 20) {
+        const sig = data[pos..pos + 4];
+        const ext_size = std.mem.readInt(u32, @ptrCast(data[pos + 4..pos + 8]), .big);
+        
+        if (pos + 8 + ext_size > data.len - 20) break;
+        
+        // Create extension info
+        var sig_array: [4]u8 = undefined;
+        @memcpy(&sig_array, sig);
+        
+        const ext_info = ExtensionInfo{
+            .signature = sig_array,
+            .size = ext_size,
+            .description = getExtensionDescription(sig),
+        };
+        
+        try analysis.extensions_found.append(ext_info);
+        analysis.total_extension_size += ext_size;
+        
+        // Update specific extension flags
+        if (std.mem.eql(u8, sig, "TREE")) {
+            analysis.has_tree_cache = true;
+            analysis.performance_optimizations += 1;
+        } else if (std.mem.eql(u8, sig, "REUC")) {
+            analysis.has_resolve_undo = true;
+        } else if (std.mem.eql(u8, sig, "UNTR")) {
+            analysis.has_untracked_cache = true;
+            analysis.performance_optimizations += 1;
+        } else if (std.mem.eql(u8, sig, "FSMN")) {
+            analysis.has_fsmonitor = true;
+            analysis.performance_optimizations += 1;
+        }
+        
+        pos += 8 + ext_size;
+    }
+    
+    return analysis;
+}
+
+/// Information about a specific index extension
+pub const ExtensionInfo = struct {
+    signature: [4]u8,
+    size: u32,
+    description: []const u8,
+    
+    pub fn getSignatureString(self: ExtensionInfo, allocator: std.mem.Allocator) ![]u8 {
+        return try allocator.dupe(u8, self.signature[0..]);
+    }
+};
+
+/// Analysis of all extensions in an index file
+pub const IndexExtensionAnalysis = struct {
+    extensions_found: std.ArrayList(ExtensionInfo),
+    total_extension_size: u64,
+    has_tree_cache: bool,
+    has_resolve_undo: bool,
+    has_untracked_cache: bool,
+    has_fsmonitor: bool,
+    performance_optimizations: u32,
+    
+    pub fn deinit(self: IndexExtensionAnalysis) void {
+        self.extensions_found.deinit();
+    }
+    
+    pub fn print(self: IndexExtensionAnalysis) void {
+        std.debug.print("Index Extension Analysis:\n");
+        std.debug.print("  Extensions found: {}\n", .{self.extensions_found.items.len});
+        std.debug.print("  Total extension size: {} bytes\n", .{self.total_extension_size});
+        std.debug.print("  Performance optimizations: {}\n", .{self.performance_optimizations});
+        std.debug.print("\n");
+        std.debug.print("  Specific extensions:\n");
+        std.debug.print("    - Tree cache: {}\n", .{self.has_tree_cache});
+        std.debug.print("    - Resolve undo: {}\n", .{self.has_resolve_undo});
+        std.debug.print("    - Untracked cache: {}\n", .{self.has_untracked_cache});
+        std.debug.print("    - FS Monitor: {}\n", .{self.has_fsmonitor});
+        
+        if (self.extensions_found.items.len > 0) {
+            std.debug.print("\n  Extension details:\n");
+            for (self.extensions_found.items) |ext| {
+                std.debug.print("    {s} ({} bytes): {s}\n", .{ ext.signature, ext.size, ext.description });
+            }
+        }
+    }
+    
+    pub fn hasPerformanceOptimizations(self: IndexExtensionAnalysis) bool {
+        return self.performance_optimizations > 0;
+    }
+};
+
+/// Get human-readable description for an extension signature
+fn getExtensionDescription(signature: []const u8) []const u8 {
+    if (std.mem.eql(u8, signature, "TREE")) {
+        return "Tree cache - speeds up tree operations";
+    } else if (std.mem.eql(u8, signature, "REUC")) {
+        return "Resolve undo - tracks conflict resolution";
+    } else if (std.mem.eql(u8, signature, "UNTR")) {
+        return "Untracked cache - speeds up status operations";
+    } else if (std.mem.eql(u8, signature, "FSMN")) {
+        return "File system monitor - external monitoring integration";
+    } else if (std.mem.eql(u8, signature, "link")) {
+        return "Split index - large repository optimization";
+    } else if (std.mem.eql(u8, signature, "IEOT")) {
+        return "Index entry offset table - faster parsing";
+    } else if (std.mem.eql(u8, signature, "EOIE")) {
+        return "End of index entries - parsing optimization";
+    } else {
+        return "Unknown extension";
+    }
+}
+

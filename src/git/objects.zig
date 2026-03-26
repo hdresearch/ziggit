@@ -1945,3 +1945,153 @@ pub const PackObjectSummary = struct {
         std.debug.print("  Delta ratio: {d:.1}%\n", .{delta_ratio});
     }
 };
+
+/// Quick verification that pack file reading is working
+/// Returns true if at least one object can be successfully read from pack files
+pub fn verifyPackFileAccess(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !bool {
+    const pack_dir_path = try std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir});
+    defer allocator.free(pack_dir_path);
+    
+    var pack_dir = std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true }) catch return false;
+    defer pack_dir.close();
+    
+    var iterator = pack_dir.iterate();
+    while (try iterator.next()) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".idx")) continue;
+        
+        // Try to read at least one object from this pack file to verify functionality
+        const pack_name = entry.name[0..entry.name.len-4]; // Remove .idx
+        const pack_filename = try std.fmt.allocPrint(allocator, "{s}.pack", .{pack_name});
+        defer allocator.free(pack_filename);
+        
+        const full_pack_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{pack_dir_path, pack_filename});
+        defer allocator.free(full_pack_path);
+        
+        // Quick verification by analyzing pack file statistics
+        if (analyzePackFile(full_pack_path, platform_impl, allocator)) |stats| {
+            if (stats.checksum_valid and stats.total_objects > 0) {
+                return true; // At least one valid pack file found
+            }
+        } else |_| {
+            continue; // Try next pack file
+        }
+    }
+    
+    return false; // No valid pack files found
+}
+
+/// Enhanced pack file repository health check
+pub fn checkRepositoryPackHealth(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !RepositoryPackHealth {
+    var health = RepositoryPackHealth{
+        .total_pack_files = 0,
+        .healthy_pack_files = 0,
+        .corrupted_pack_files = 0,
+        .total_objects = 0,
+        .estimated_total_size = 0,
+        .compression_ratio = 0.0,
+        .has_delta_objects = false,
+        .issues = std.ArrayList([]const u8).init(allocator),
+    };
+    
+    const pack_dir_path = try std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir});
+    defer allocator.free(pack_dir_path);
+    
+    var pack_dir = std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true }) catch return health;
+    defer pack_dir.close();
+    
+    var iterator = pack_dir.iterate();
+    while (try iterator.next()) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".pack")) continue;
+        
+        health.total_pack_files += 1;
+        
+        const pack_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{pack_dir_path, entry.name});
+        defer allocator.free(pack_path);
+        
+        if (verifyPackFile(pack_path, platform_impl, allocator)) |verification| {
+            defer verification.deinit();
+            
+            if (verification.isHealthy()) {
+                health.healthy_pack_files += 1;
+                health.total_objects += verification.total_objects;
+                health.estimated_total_size += verification.file_size;
+            } else {
+                health.corrupted_pack_files += 1;
+                const issue = try std.fmt.allocPrint(allocator, "Pack file {s} has issues: {}/{} objects readable", 
+                    .{entry.name, verification.objects_readable, verification.total_objects});
+                try health.issues.append(issue);
+            }
+        } else |err| {
+            health.corrupted_pack_files += 1;
+            const issue = try std.fmt.allocPrint(allocator, "Failed to verify pack file {s}: {}", .{entry.name, err});
+            try health.issues.append(issue);
+        }
+        
+        // Get pack file summary for additional insights
+        if (getPackObjectTypeSummary(pack_path, platform_impl, allocator)) |summary| {
+            if (summary.deltas > 0) {
+                health.has_delta_objects = true;
+            }
+            // Estimate compression ratio
+            const avg_object_size = if (summary.total_objects > 0) 
+                @as(f32, @floatFromInt(summary.estimated_uncompressed_size)) / @as(f32, @floatFromInt(summary.total_objects))
+            else 0.0;
+            if (avg_object_size > 0) {
+                const file_stat = std.fs.cwd().statFile(pack_path) catch continue;
+                const actual_avg_size = @as(f32, @floatFromInt(file_stat.size)) / @as(f32, @floatFromInt(summary.total_objects));
+                if (actual_avg_size > 0) {
+                    health.compression_ratio = avg_object_size / actual_avg_size;
+                }
+            }
+        } else |_| {}
+    }
+    
+    return health;
+}
+
+/// Repository pack file health information
+pub const RepositoryPackHealth = struct {
+    total_pack_files: u32,
+    healthy_pack_files: u32,
+    corrupted_pack_files: u32,
+    total_objects: u32,
+    estimated_total_size: u64,
+    compression_ratio: f32,
+    has_delta_objects: bool,
+    issues: std.ArrayList([]const u8),
+    
+    pub fn deinit(self: RepositoryPackHealth) void {
+        for (self.issues.items) |issue| {
+            // Note: Issues are owned by the calling allocator
+        }
+        self.issues.deinit();
+    }
+    
+    pub fn print(self: RepositoryPackHealth) void {
+        std.debug.print("Repository Pack Health Report:\n");
+        std.debug.print("  Total pack files: {}\n", .{self.total_pack_files});
+        std.debug.print("  Healthy pack files: {}\n", .{self.healthy_pack_files});
+        std.debug.print("  Corrupted pack files: {}\n", .{self.corrupted_pack_files});
+        std.debug.print("  Total objects: {}\n", .{self.total_objects});
+        std.debug.print("  Estimated total size: {} MB\n", .{self.estimated_total_size / (1024 * 1024)});
+        std.debug.print("  Compression ratio: {d:.2f}x\n", .{self.compression_ratio});
+        std.debug.print("  Has delta objects: {}\n", .{self.has_delta_objects});
+        
+        if (self.issues.items.len > 0) {
+            std.debug.print("  Issues found:\n");
+            for (self.issues.items) |issue| {
+                std.debug.print("    - {s}\n", .{issue});
+            }
+        }
+        
+        const health_score = if (self.total_pack_files > 0)
+            (@as(f32, @floatFromInt(self.healthy_pack_files)) / @as(f32, @floatFromInt(self.total_pack_files))) * 100.0
+        else 
+            0.0;
+        std.debug.print("  Overall health score: {d:.1f}%\n", .{health_score});
+    }
+    
+    pub fn isHealthy(self: RepositoryPackHealth) bool {
+        return self.corrupted_pack_files == 0 and self.total_pack_files > 0;
+    }
+};
