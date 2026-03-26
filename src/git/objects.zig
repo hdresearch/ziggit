@@ -114,7 +114,7 @@ pub const GitObject = struct {
             error.FileNotFound => {
                 // Try to find object in pack files
                 return loadFromPackFiles(hash_str, git_dir, platform_impl, allocator) catch |pack_err| {
-                    std.debug.print("Object {} not found in loose objects or pack files: {}\n", .{ hash_str, pack_err });
+            // debug print removed
                     return error.ObjectNotFound;
                 };
             },
@@ -235,12 +235,12 @@ fn loadFromPackFiles(hash_str: []const u8, git_dir: []const u8, platform_impl: a
     
     // Open pack directory
     var pack_dir = std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true }) catch |err| {
-        std.debug.print("Failed to open pack directory {s}: {}\n", .{ pack_dir_path, err });
+            // debug print removed
         return error.ObjectNotFound;
     };
     defer pack_dir.close();
     
-    std.debug.print("Searching for object {} in pack files\n", .{hash_str});
+            // debug print removed
     
     // Look for .idx files (pack index files)
     var iterator = pack_dir.iterate();
@@ -250,21 +250,21 @@ fn loadFromPackFiles(hash_str: []const u8, git_dir: []const u8, platform_impl: a
         if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
         
         pack_files_found += 1;
-        std.debug.print("Checking pack index: {s}\n", .{entry.name});
+            // debug print removed
         
         // Try to find object in this pack
         const obj = findObjectInPack(pack_dir_path, entry.name, hash_str, platform_impl, allocator) catch |err| {
-            std.debug.print("Failed to find object in {s}: {}\n", .{ entry.name, err });
+            // debug print removed
             continue;
         };
-        std.debug.print("Found object {} in pack {s}\n", .{ hash_str, entry.name });
+            // debug print removed
         return obj;
     }
     
     if (pack_files_found == 0) {
-        std.debug.print("No pack index files found in {s}\n", .{pack_dir_path});
+            // debug print removed
     } else {
-        std.debug.print("Object {} not found in any of {} pack files\n", .{ hash_str, pack_files_found });
+            // debug print removed
     }
     
     return error.ObjectNotFound;
@@ -284,12 +284,12 @@ const PackObjectType = enum(u3) {
 fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_str: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
     // Validate input hash format
     if (hash_str.len != 40) {
-        std.debug.print("Invalid hash length: {} (expected 40)\n", .{hash_str.len});
+            // debug print removed
         return error.InvalidHash;
     }
     for (hash_str) |c| {
         if (!std.ascii.isHex(c)) {
-            std.debug.print("Invalid hex character in hash: {c}\n", .{c});
+            // debug print removed
             return error.InvalidHash;
         }
     }
@@ -302,32 +302,32 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     const idx_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{pack_dir_path, idx_filename});
     defer allocator.free(idx_path);
     
-    std.debug.print("Reading pack index: {s}\n", .{idx_path});
+            // debug print removed
     
     const idx_data = platform_impl.fs.readFile(allocator, idx_path) catch |err| switch (err) {
         error.FileNotFound => {
-            std.debug.print("Pack index file not found: {s}\n", .{idx_path});
+            // debug print removed
             return error.ObjectNotFound;
         },
         error.AccessDenied => {
-            std.debug.print("Access denied to pack index: {s}\n", .{idx_path});
+            // debug print removed
             return error.PackIndexAccessDenied;
         },
         else => {
-            std.debug.print("Failed to read pack index {s}: {}\n", .{ idx_path, err });
+            // debug print removed
             return error.PackIndexReadError;
         },
     };
     defer allocator.free(idx_data);
     
     // Enhanced size validation
-    std.debug.print("Pack index size: {} bytes\n", .{idx_data.len});
+            // debug print removed
     if (idx_data.len < 8) {
-        std.debug.print("Pack index too small: {} bytes (minimum 8)\n", .{idx_data.len});
+            // debug print removed
         return error.CorruptedPackIndex;
     }
     if (idx_data.len > 100 * 1024 * 1024) { // 100MB max for pack index
-        std.debug.print("Warning: pack index file {s} is very large ({} bytes)\n", .{idx_filename, idx_data.len});
+            // debug print removed
         return error.PackIndexTooLarge;
     }
     
@@ -335,13 +335,13 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     const magic = std.mem.readInt(u32, @ptrCast(idx_data[0..4]), .big);
     const version = std.mem.readInt(u32, @ptrCast(idx_data[4..8]), .big);
     
-    std.debug.print("Pack index magic: 0x{x}, version: {}\n", .{ magic, version });
+            // debug print removed
     
     if (magic != 0xff744f63) {
         // No magic header, might be version 1 format
-        std.debug.print("No v2 magic found, trying v1 format\n", .{});
+            // debug print removed
         if (idx_data.len < 256 * 4) {
-            std.debug.print("File too small for v1 index: {} bytes\n", .{idx_data.len});
+            // debug print removed
             return error.CorruptedPackIndex;
         }
         return findObjectInPackV1(idx_data, target_hash, pack_dir_path, idx_filename, platform_impl, allocator);
@@ -353,7 +353,7 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
             return findObjectInPackV1(idx_data[8..], target_hash, pack_dir_path, idx_filename, platform_impl, allocator);
         } else if (version > 2) {
             // Future version - be strict about not supporting it
-            std.debug.print("Warning: pack index version {} not supported\n", .{version});
+            // debug print removed
             return error.UnsupportedPackIndexVersion;
         } else {
             return error.CorruptedPackIndex;
@@ -364,13 +364,13 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     const fanout_start = 8;
     const fanout_end = fanout_start + 256 * 4;
     if (idx_data.len < fanout_end) {
-        std.debug.print("Index too small for fanout table: {} < {}\n", .{ idx_data.len, fanout_end });
+            // debug print removed
         return error.ObjectNotFound;
     }
     
     // Get search range from fanout table with enhanced bounds checking
     const first_byte = target_hash[0];
-    std.debug.print("Target hash first byte: 0x{x}\n", .{first_byte});
+            // debug print removed
     
     const start_index = if (first_byte == 0) 0 else blk: {
         const offset = fanout_start + (@as(usize, first_byte) - 1) * 4;
@@ -383,12 +383,12 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
         break :blk std.mem.readInt(u32, @ptrCast(idx_data[offset..offset + 4]), .big);
     };
     
-    std.debug.print("Search range: {} to {} (total {} objects to search)\n", .{ start_index, end_index, end_index - start_index });
+            // debug print removed
     
     // Validate fanout table consistency
     if (start_index > end_index) return error.CorruptedPackIndex;
     if (end_index > 50_000_000) { // Sanity check: 50M objects max
-        std.debug.print("Warning: pack index claims {} objects, which seems excessive\n", .{end_index});
+            // debug print removed
         return error.SuspiciousPackIndex;
     }
     
@@ -398,7 +398,7 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     const sha1_table_start = fanout_end;
     const sha1_table_end = sha1_table_start + end_index * 20;
     if (idx_data.len < sha1_table_end) {
-        std.debug.print("Pack index truncated: expected {} bytes, got {} bytes\n", .{sha1_table_end, idx_data.len});
+            // debug print removed
         return error.CorruptedPackIndex;
     }
     
@@ -515,37 +515,37 @@ fn readObjectFromPack(pack_path: []const u8, offset: u64, platform_impl: anytype
     
     // Check pack file header: "PACK" + version + object count
     if (!std.mem.eql(u8, pack_data[0..4], "PACK")) {
-        std.debug.print("Invalid pack file magic in {s}\n", .{pack_path});
+            // debug print removed
         return error.InvalidPackFile;
     }
     
     const version = std.mem.readInt(u32, @ptrCast(pack_data[4..8]), .big);
     if (version != 2 and version != 3) {
-        std.debug.print("Unsupported pack version {} in {s}\n", .{ version, pack_path });
+            // debug print removed
         return error.UnsupportedPackVersion;
     }
     
     const object_count = std.mem.readInt(u32, @ptrCast(pack_data[8..12]), .big);
     if (object_count == 0) {
-        std.debug.print("Pack file {s} contains no objects\n", .{pack_path});
+            // debug print removed
         return error.EmptyPackFile;
     }
     
     // Sanity check object count (prevent malicious/corrupted pack files)
     const max_reasonable_objects = 10_000_000; // 10 million objects max
     if (object_count > max_reasonable_objects) {
-        std.debug.print("Pack file {s} claims {} objects, which seems excessive\n", .{ pack_path, object_count });
+            // debug print removed
         return error.SuspiciousPackFile;
     }
     
     if (offset >= pack_data.len) {
-        std.debug.print("Offset {} beyond pack file size {} in {s}\n", .{ offset, pack_data.len, pack_path });
+            // debug print removed
         return error.OffsetOutOfBounds;
     }
     
     // Ensure we're not too close to the end (need at least a few bytes for object header)
     if (offset > pack_data.len - 4) {
-        std.debug.print("Offset {} too close to end of pack file {s}\n", .{ offset, pack_path });
+            // debug print removed
         return error.OffsetOutOfBounds;
     }
     
@@ -765,7 +765,7 @@ fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.
         
         // Prevent unreasonably large base sizes
         if (shift > 32) { // Max 4GB base size
-            std.debug.print("Delta base size encoding too long\n", .{});
+            // debug print removed
             return error.DeltaCorrupted;
         }
     }
@@ -784,26 +784,26 @@ fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.
         
         // Prevent unreasonably large result sizes  
         if (shift > 32) { // Max 4GB result size
-            std.debug.print("Delta result size encoding too long\n", .{});
+            // debug print removed
             return error.DeltaCorrupted;
         }
     }
     
     // Verify base size matches actual base data
     if (base_size != base_data.len) {
-        std.debug.print("Delta base size mismatch: expected {}, got {}\n", .{ base_size, base_data.len });
+            // debug print removed
         return error.BaseSizeMismatch;
     }
     
     // Sanity check result size (100MB max for regular use)
     if (result_size > 100 * 1024 * 1024) {
-        std.debug.print("Delta result size too large: {} bytes\n", .{result_size});
+            // debug print removed
         return error.ResultTooLarge;
     }
     
     // Basic sanity check: result size shouldn't be dramatically different from base
     if (result_size > base_size * 10) {
-        std.debug.print("Delta result size {} seems suspicious compared to base size {}\n", .{ result_size, base_size });
+            // debug print removed
         return error.SuspiciousDelta;
     }
     
