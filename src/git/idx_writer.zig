@@ -43,11 +43,16 @@ pub fn generateIdx(allocator: std.mem.Allocator, pack_path: []const u8) !void {
 
 /// Generate idx data from in-memory pack data. Returns owned slice.
 ///
-/// Two-pass architecture:
-///   Pass 1 — Scan: hash base objects with zero-alloc streaming, skip delta
-///            compressed data to find object boundaries.
-///   Pass 2 — Resolve: process deltas in dependency order using bounded LRU cache.
-///            Only base objects referenced by deltas are decompressed into memory.
+/// NOTE: Only resolves delta bases within the same pack file. For thin packs
+/// (where REF_DELTA bases live in other packs/loose objects), unresolvable
+/// deltas are silently skipped. Callers handling thin packs from fetch should
+/// fix the pack (prepend missing bases) BEFORE generating the idx.
+///
+/// Single-pass architecture with deferred REF_DELTA resolution:
+///   - Base objects: decompress+hash+cache in a single streaming pass
+///   - OFS_DELTA: resolved immediately (base always earlier in pack)
+///   - REF_DELTA: resolved if base known, otherwise deferred
+///   - Deferred REF_DELTAs resolved in multi-pass convergence loop
 pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) ![]u8 {
     if (pack_data.len < 32) return error.PackFileTooSmall;
     if (!std.mem.eql(u8, pack_data[0..4], "PACK")) return error.InvalidPackSignature;
