@@ -1160,15 +1160,10 @@ pub fn clonePackShallow(allocator: std.mem.Allocator, url: []const u8, depth: u3
     var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
 
-    // For shallow clones, use optimized v1 path:
-    // GET /info/refs (establishes TLS + gets all refs) → POST /git-upload-pack (fetch pack)
-    // This is faster than v2's 2-POST approach because the GET establishes TLS and the POST reuses it.
-    // V2 ls-refs filtering doesn't help since we filter client-side anyway for shallow clones.
-    if (depth > 0) {
-        return clonePackShallowV1(allocator, &client, url, depth);
-    }
-
-    // For full clones, try v2 (fewer refs transferred) with v1 fallback
+    // Try v2 first (ref-prefix filtering avoids downloading thousands of PR refs).
+    // For shallow clones of repos like express (3692 refs), v2 ls-refs with prefix
+    // filtering is dramatically faster than v1's GET /info/refs which returns all refs.
+    // Fall back to v1 if server doesn't support v2.
     return clonePackShallowV2(allocator, &client, url, depth) catch |e| {
         if (std.posix.getenv("ZIGGIT_TRACE_TIMING") != null)
             std.debug.print("[debug] v2 failed: {}, falling back to v1\n", .{e});
