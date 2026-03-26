@@ -1803,8 +1803,39 @@ pub fn build(b: *std.Build) void {
     wasm_exe.initial_memory = 16 * 1024 * 1024; // 16MB initial memory
     wasm_exe.max_memory = 32 * 1024 * 1024; // 32MB max memory
 
-    const wasm_step = b.step("wasm", "Build for WebAssembly");
+    const wasm_step = b.step("wasm", "Build for WebAssembly (WASI)");
     wasm_step.dependOn(&b.addInstallArtifact(wasm_exe, .{}).step);
+
+    // ========== WASM BROWSER TARGET (freestanding) ==========
+    const browser_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+    });
+
+    const browser_wasm = b.addExecutable(.{
+        .name = "ziggit-browser",
+        .root_source_file = b.path("src/wasm_exports.zig"),
+        .target = browser_target,
+        .optimize = .ReleaseSmall,
+        .strip = true,
+    });
+
+    // Browser WASM: no git fallback, no entry point (library only)
+    const browser_options = b.addOptions();
+    browser_options.addOption(bool, "enable_git_fallback", false);
+    browser_wasm.root_module.addOptions("build_options", browser_options);
+
+    // Export all ziggit API functions, no entry point
+    browser_wasm.entry = .disabled;
+    browser_wasm.rdynamic = true;
+
+    // Memory configuration for browser
+    browser_wasm.stack_size = 512 * 1024; // 512KB stack
+    browser_wasm.initial_memory = 16 * 1024 * 1024; // 16MB initial
+    browser_wasm.max_memory = 64 * 1024 * 1024; // 64MB max
+
+    const browser_step = b.step("wasm-browser", "Build for browser (freestanding, exports ziggit API)");
+    browser_step.dependOn(&b.addInstallArtifact(browser_wasm, .{}).step);
 
     // ========== UTILITY COMMANDS ==========
     
