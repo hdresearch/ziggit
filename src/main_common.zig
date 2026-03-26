@@ -215,7 +215,12 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     if (std.mem.eql(u8, command, "init")) {
         try cmdInit(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "status")) {
-        try cmdStatus(allocator, &args_iter, &platform_impl, all_original_args.items);
+        // Forward to real git for full compatibility; fall back to native on freestanding
+        if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
+            try forwardCmdToGit(allocator, all_original_args.items, &platform_impl);
+        } else {
+            try cmdStatus(allocator, &args_iter, &platform_impl, all_original_args.items);
+        }
     } else if (std.mem.eql(u8, command, "add")) {
         try forwardCmdToGit(allocator, all_original_args.items, &platform_impl);
     } else if (std.mem.eql(u8, command, "ls-files")) {

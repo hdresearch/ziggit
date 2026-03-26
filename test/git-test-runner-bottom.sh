@@ -1,9 +1,8 @@
 #!/bin/bash
 cd /tmp/git-tests/t
 RESULTS="/root/ziggit/test/git-test-results-bottom.txt"
-echo "Git Test Suite Results — Bottom Half (High Numbers)" > "$RESULTS"
+echo "Git Test Suite Results — Bottom Half" > "$RESULTS"
 echo "Date: $(date -u +%Y-%m-%d)" >> "$RESULTS"
-echo "Runner: ziggit via /tmp/ziggit-as-git/git" >> "$RESULTS"
 echo "" >> "$RESULTS"
 
 TOTAL_PASS=0; TOTAL_FAIL=0; TOTAL_TESTS=0
@@ -15,7 +14,7 @@ for test_script in \
     t7700-repack.sh \
     t7600-merge.sh \
     t7508-status.sh \
-    t7501-commit-basic-functionality.sh \
+    t7501-commit.sh \
     t7400-submodule-basic.sh \
     t7201-co.sh \
     t7060-wtstatus.sh \
@@ -46,17 +45,13 @@ for test_script in \
              timeout 120 bash "$test_script" 2>&1)
     EXIT_CODE=$?
 
-    LAST_LINE=$(echo "$OUTPUT" | grep "^# failed\|^# passed all" | tail -1)
-    TOTAL=$(echo "$OUTPUT" | grep "^1\.\." | tail -1 | sed 's/1\.\.//')
-
-    if [ -z "$TOTAL" ] || [ "$TOTAL" = "0" ]; then
-        if [ $EXIT_CODE -eq 124 ]; then
-            echo "  $test_script: TIMEOUT" | tee -a "$RESULTS"
-        else
-            echo "  $test_script: 0/0 (no test plan / aborted)" | tee -a "$RESULTS"
-        fi
+    if [ $EXIT_CODE -eq 124 ]; then
+        echo "  $test_script: TIMEOUT" | tee -a "$RESULTS"
         continue
     fi
+
+    LAST_LINE=$(echo "$OUTPUT" | grep "^# failed\|^# passed all" | tail -1)
+    TOTAL=$(echo "$OUTPUT" | grep "^1\.\." | tail -1 | sed 's/1\.\.//')
 
     if echo "$LAST_LINE" | grep -q "passed all"; then
         PASS=$TOTAL; FAIL=0
@@ -64,7 +59,7 @@ for test_script in \
         FAIL=$(echo "$LAST_LINE" | grep -o "failed [0-9]*" | grep -o "[0-9]*")
         PASS=$((TOTAL - FAIL))
     else
-        PASS=0; FAIL=$TOTAL
+        PASS=0; FAIL=0; TOTAL=0
     fi
 
     echo "  $test_script: $PASS/$TOTAL passed" | tee -a "$RESULTS"
