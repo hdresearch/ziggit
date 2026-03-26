@@ -1,4 +1,6 @@
 const std = @import("std");
+const index_parser = @import("index_parser.zig");
+const objects_parser = @import("objects_parser.zig");
 
 // Simple repository implementation for the library
 const Repository = struct {
@@ -26,10 +28,18 @@ const Repository = struct {
         const git_dir = try std.fmt.allocPrint(self.allocator, "{s}/.git", .{abs_path});
         defer self.allocator.free(git_dir);
         
-        std.fs.accessAbsolute(git_dir, .{}) catch |err| switch (err) {
-            error.FileNotFound => return false,
-            else => return err,
-        };
+        // Handle both absolute and relative paths
+        if (std.fs.path.isAbsolute(git_dir)) {
+            std.fs.accessAbsolute(git_dir, .{}) catch |err| switch (err) {
+                error.FileNotFound => return false,
+                else => return err,
+            };
+        } else {
+            std.fs.cwd().access(git_dir, .{}) catch |err| switch (err) {
+                error.FileNotFound => return false,
+                else => return err,
+            };
+        }
         return true;
     }
 };
@@ -513,19 +523,11 @@ fn getCurrentBranchReal(git_dir: []const u8) ![]u8 {
 }
 
 fn isValidHash(hash: []const u8) bool {
-    if (hash.len != 40) return false;
-    for (hash) |c| {
-        if (!std.ascii.isHex(c)) return false;
-    }
-    return true;
+    return hash.len == 40 and objects_parser.isValidHex(hash);
 }
 
 fn isValidHashPrefix(hash: []const u8) bool {
-    if (hash.len != 40) return false;
-    for (hash) |c| {
-        if (!std.ascii.isHex(c)) return false;
-    }
-    return true;
+    return hash.len == 40 and objects_parser.isValidHex(hash);
 }
 
 // Improved ref resolution that handles both loose refs and packed refs
@@ -704,7 +706,7 @@ fn getHeadCommitHashReal(repo: *Repository, buffer: []u8) !void {
         // HEAD points to a ref, resolve it
         const ref_name = head_content[5..]; // Skip "ref: "
         try resolveRefReal(git_dir, ref_name, buffer);
-    } else if (head_content.len >= 40 and isValidHashPrefix(head_content[0..40])) {
+    } else if (head_content.len >= 40 and objects_parser.isValidHex(head_content[0..40])) {
         // HEAD contains the hash directly (detached HEAD)
         @memcpy(buffer[0..40], head_content[0..40]);
         buffer[40] = 0;
@@ -804,9 +806,23 @@ fn getStatusPorcelainReal(repo: *Repository, buffer: []u8) !void {
         else => return err,
     };
     
+    // Read index if it exists
+    const index_path = try std.fmt.allocPrint(global_allocator, "{s}/index", .{git_dir});
+    defer global_allocator.free(index_path);
+    
+    var git_index = index_parser.GitIndex.readFromFile(global_allocator, index_path) catch |err| switch (err) {
+        error.FileNotFound => {
+            // No index file - all files are untracked
+            try getUntrackedFilesStatusReal(repo, buffer);
+            return;
+        },
+        else => return err,
+    };
+    defer git_index.deinit();
+    
     var output_pos: usize = 0;
     
-    // Check for untracked files in working directory
+    // Check working directory against index
     const cwd = std.fs.cwd();
     var work_dir = cwd.openDir(repo.path, .{ .iterate = true }) catch {
         buffer[0] = 0;
@@ -814,16 +830,23 @@ fn getStatusPorcelainReal(repo: *Repository, buffer: []u8) !void {
     };
     defer work_dir.close();
     
+    // Create a set of tracked files for quick lookup
+    var tracked_files = std.StringHashMap(void).init(global_allocator);
+    defer tracked_files.deinit();
+    
+    for (git_index.entries.items) |entry| {
+        try tracked_files.put(entry.path, {});
+    }
+    
+    // Scan working directory
     var iter = work_dir.iterate();
     while (iter.next() catch null) |entry| {
         if (entry.kind != .file) continue;
         
         // Skip .git directory and common ignored files
         if (std.mem.startsWith(u8, entry.name, ".git")) continue;
-        if (std.mem.eql(u8, entry.name, ".gitignore")) continue;
         
-        // Check if this file is tracked by reading index
-        const is_tracked = isFileTracked(git_dir, entry.name) catch false;
+        const is_tracked = tracked_files.contains(entry.name);
         
         if (!is_tracked) {
             // Untracked file - add to porcelain output
@@ -837,7 +860,7 @@ fn getStatusPorcelainReal(repo: *Repository, buffer: []u8) !void {
             if (output_pos >= buffer.len - 1) break;
         } else {
             // File is tracked, check if modified
-            const is_modified = isFileModified(git_dir, repo.path, entry.name) catch false;
+            const is_modified = try isFileModifiedReal(git_dir, repo.path, entry.name, &git_index);
             if (is_modified) {
                 const status_line = std.fmt.bufPrint(
                     buffer[output_pos..], 
@@ -851,14 +874,39 @@ fn getStatusPorcelainReal(repo: *Repository, buffer: []u8) !void {
         }
     }
     
+    // Check for deleted files (in index but not in working tree)
+    for (git_index.entries.items) |entry| {
+        const file_path = try std.fmt.allocPrint(global_allocator, "{s}/{s}", .{ repo.path, entry.path });
+        defer global_allocator.free(file_path);
+        
+        std.fs.accessAbsolute(file_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                // File deleted from working tree
+                const status_line = std.fmt.bufPrint(
+                    buffer[output_pos..], 
+                    " D {s}\n", 
+                    .{entry.path}
+                ) catch break;
+                output_pos += status_line.len;
+                
+                if (output_pos >= buffer.len - 1) break;
+            },
+            else => continue,
+        };
+    }
+    
     // Null terminate
     if (output_pos < buffer.len) {
         buffer[output_pos] = 0;
     }
 }
 
-// Check for untracked files in working directory
+// Check for untracked files in working directory (when no index exists)
 fn getUntrackedFilesStatus(repo: *Repository, buffer: []u8) !void {
+    try getUntrackedFilesStatusReal(repo, buffer);
+}
+
+fn getUntrackedFilesStatusReal(repo: *Repository, buffer: []u8) !void {
     if (buffer.len == 0) return;
     
     var output_pos: usize = 0;
@@ -961,14 +1009,61 @@ fn isFileModified(git_dir: []const u8, work_tree: []const u8, file_path: []const
     };
     defer file.close();
     
-    // In a real implementation, we would:
-    // 1. Read the file content and compute SHA1
-    // 2. Compare with the SHA1 stored in the index
-    // 3. Check modification time and other metadata
-    
     // For now, assume files are not modified for performance
     // This gives us the fast path for clean repos that bun typically deals with
     return false;
+}
+
+// Real file modification check that compares SHA1 hashes
+fn isFileModifiedReal(git_dir: []const u8, work_tree: []const u8, file_path: []const u8, git_index: *const index_parser.GitIndex) !bool {
+    _ = git_dir;
+    
+    // Find the file in the index
+    const index_entry = git_index.findEntry(file_path) orelse return false; // Not in index, so can't be modified
+    
+    // Read the working tree file
+    const full_path = try std.fmt.allocPrint(global_allocator, "{s}/{s}", .{ work_tree, file_path });
+    defer global_allocator.free(full_path);
+    
+    const file = std.fs.openFileAbsolute(full_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return true, // File deleted
+        else => return err,
+    };
+    defer file.close();
+    
+    // Quick check: compare file size first
+    const file_size = try file.getEndPos();
+    if (file_size != index_entry.size) {
+        return true; // Size changed, definitely modified
+    }
+    
+    // Check file modification time (quick check before computing SHA1)
+    const stat = try file.stat();
+    const mtime_sec = @as(u32, @intCast(@divFloor(stat.mtime, std.time.ns_per_s)));
+    const mtime_nsec = @as(u32, @intCast(@rem(stat.mtime, std.time.ns_per_s)));
+    
+    // If mtime matches exactly, assume file is not modified (optimization)
+    if (mtime_sec == index_entry.mtime_seconds and mtime_nsec == index_entry.mtime_nanoseconds) {
+        return false;
+    }
+    
+    // Mtime differs, need to compute SHA1 to be sure
+    const file_content = try file.readToEndAlloc(global_allocator, file_size);
+    defer global_allocator.free(file_content);
+    
+    // Compute SHA1 of file content as git does: "blob <size>\0<content>"
+    var hasher = std.crypto.hash.Sha1.init(.{});
+    const blob_header = try std.fmt.allocPrint(global_allocator, "blob {d}\x00", .{file_content.len});
+    defer global_allocator.free(blob_header);
+    
+    hasher.update(blob_header);
+    hasher.update(file_content);
+    
+    var computed_sha: [20]u8 = undefined;
+    hasher.final(&computed_sha);
+    
+    // Compare with index entry SHA1
+    return !std.mem.eql(u8, &computed_sha, &index_entry.sha1);
 }
 
 // Check if a path exists in the repository
@@ -1114,16 +1209,31 @@ fn findGitDirForRepo(repo: *Repository) ![]const u8 {
     defer global_allocator.free(git_file_path);
     
     // First check if .git exists at all
-    std.fs.accessAbsolute(git_file_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => {
-            // No .git directory/file, this is not a git repository
-            return error.NotAGitRepository;
-        },
-        else => return err,
-    };
+    if (std.fs.path.isAbsolute(git_file_path)) {
+        std.fs.accessAbsolute(git_file_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                // No .git directory/file, this is not a git repository
+                return error.NotAGitRepository;
+            },
+            else => return err,
+        };
+    } else {
+        std.fs.cwd().access(git_file_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                // No .git directory/file, this is not a git repository
+                return error.NotAGitRepository;
+            },
+            else => return err,
+        };
+    }
     
     // Try to open as file first (worktree case)
-    if (std.fs.openFileAbsolute(git_file_path, .{})) |file| {
+    const maybe_file = if (std.fs.path.isAbsolute(git_file_path)) 
+        std.fs.openFileAbsolute(git_file_path, .{}) 
+    else 
+        std.fs.cwd().openFile(git_file_path, .{});
+    
+    if (maybe_file) |file| {
         defer file.close();
         
         // Try to read the file - if it fails with IsDir, it's actually a directory
