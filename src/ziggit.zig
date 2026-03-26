@@ -117,16 +117,16 @@ pub const Repository = struct {
         var tracked_files = std.HashMap([]const u8, void, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator);
         defer tracked_files.deinit();
 
-        // Check each indexed file for modifications using mtime/size fast path
+        // Check each indexed file for modifications using highly optimized fast path
         for (git_index.entries.items) |entry| {
             try tracked_files.put(entry.path, {});
             
-            // Get file path in working directory
+            // Get file path in working directory using stack buffer
             var file_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
             const file_path = std.fmt.bufPrint(&file_path_buf, "{s}/{s}", .{ self.path, entry.path }) catch continue;
             
-            // Stat the file in working directory
-            const work_file = std.fs.openFileAbsolute(file_path, .{}) catch |err| switch (err) {
+            // Use direct stat instead of opening file first - much faster
+            const work_stat = std.fs.cwd().statFile(file_path) catch |err| switch (err) {
                 error.FileNotFound => {
                     // File was deleted
                     try output.appendSlice(" D ");
@@ -136,36 +136,53 @@ pub const Repository = struct {
                 },
                 else => continue,
             };
-            defer work_file.close();
             
-            const work_stat = work_file.stat() catch continue;
-            
-            // Fast path: compare mtime and size
+            // Fast path: compare mtime and size first
             const work_mtime_sec = @as(u32, @intCast(@divTrunc(work_stat.mtime, 1_000_000_000)));
             const work_size = @as(u32, @intCast(work_stat.size));
             
             if (work_mtime_sec == entry.mtime_seconds and work_size == entry.size) {
-                // File appears unchanged (mtime/size match) - skip SHA-1 computation
+                // File appears unchanged (mtime/size match) - skip SHA-1 computation entirely
                 continue;
             }
             
-            // Slow path: file mtime/size differs, need to compute SHA-1 to check if content changed
+            // Slow path: mtime/size differs, need to compute SHA-1
+            // Optimize: only open file when we actually need to read content
+            const work_file = std.fs.cwd().openFile(file_path, .{}) catch continue;
+            defer work_file.close();
+            
             const work_content = work_file.readToEndAlloc(allocator, 100 * 1024 * 1024) catch continue;
             defer allocator.free(work_content);
             
-            // Create blob content for SHA-1: "blob <size>\0<content>"
-            var blob_content = std.ArrayList(u8).init(allocator);
-            defer blob_content.deinit();
+            // Optimized blob header creation using stack buffer when possible
+            var blob_header_buf: [32]u8 = undefined; // "blob 12345678\0" fits in 32 bytes
+            const blob_header = std.fmt.bufPrint(&blob_header_buf, "blob {}\x00", .{work_content.len}) catch {
+                // Fallback to allocator for very large files
+                const header = try std.fmt.allocPrint(allocator, "blob {}\x00", .{work_content.len});
+                defer allocator.free(header);
+                
+                // Direct hash computation without extra allocation
+                var hasher = std.crypto.hash.Sha1.init(.{});
+                hasher.update(header);
+                hasher.update(work_content);
+                var work_hash: [20]u8 = undefined;
+                hasher.final(&work_hash);
+                
+                // Compare with index SHA-1
+                if (!std.mem.eql(u8, &work_hash, &entry.sha1)) {
+                    try output.appendSlice(" M ");
+                    try output.appendSlice(entry.path);
+                    try output.append('\n');
+                }
+                continue;
+            };
             
-            const blob_header = try std.fmt.allocPrint(allocator, "blob {}\x00", .{work_content.len});
-            defer allocator.free(blob_header);
-            
-            try blob_content.appendSlice(blob_header);
-            try blob_content.appendSlice(work_content);
-            
-            // Compute SHA-1 of working file
+            // Streaming SHA-1 computation - no intermediate ArrayList allocation
+            var hasher = std.crypto.hash.Sha1.init(.{});
+            hasher.update(blob_header);
+            hasher.update(work_content);
             var work_hash: [20]u8 = undefined;
-            std.crypto.hash.Sha1.hash(blob_content.items, &work_hash, .{});
+            hasher.final(&work_hash);
             
             // Compare with index SHA-1
             if (!std.mem.eql(u8, &work_hash, &entry.sha1)) {
@@ -198,24 +215,130 @@ pub const Repository = struct {
 
     /// Check if working tree is clean
     pub fn isClean(self: *const Repository) !bool {
-        const status = try self.statusPorcelain(self.allocator);
-        defer self.allocator.free(status);
-        return status.len == 0;
+        return try self.isCleanFast();
+    }
+    
+    /// Optimized clean check that short-circuits on first change - much faster than full status
+    fn isCleanFast(self: *const Repository) !bool {
+        // Use stack buffer for index path
+        var index_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const index_path = std.fmt.bufPrint(&index_path_buf, "{s}/index", .{self.git_dir}) catch return error.PathTooLong;
+
+        var git_index = index_parser.GitIndex.readFromFile(self.allocator, index_path) catch {
+            // No index means check if any files exist (all would be untracked)
+            return try self.hasNoUntrackedFiles();
+        };
+        defer git_index.deinit();
+
+        // Build HashMap for O(1) tracked file lookups
+        var tracked_files = std.HashMap([]const u8, void, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(self.allocator);
+        defer tracked_files.deinit();
+
+        // Check each indexed file for modifications - SHORT CIRCUIT on first change
+        for (git_index.entries.items) |entry| {
+            try tracked_files.put(entry.path, {});
+            
+            // Get file path in working directory using stack buffer
+            var file_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            const file_path = std.fmt.bufPrint(&file_path_buf, "{s}/{s}", .{ self.path, entry.path }) catch continue;
+            
+            // Use direct stat - much faster than opening file
+            const work_stat = std.fs.cwd().statFile(file_path) catch |err| switch (err) {
+                error.FileNotFound => {
+                    // File was deleted - not clean!
+                    return false; // SHORT CIRCUIT
+                },
+                else => continue,
+            };
+            
+            // Fast path: compare mtime and size
+            const work_mtime_sec = @as(u32, @intCast(@divTrunc(work_stat.mtime, 1_000_000_000)));
+            const work_size = @as(u32, @intCast(work_stat.size));
+            
+            if (work_mtime_sec == entry.mtime_seconds and work_size == entry.size) {
+                // File appears unchanged - continue checking other files
+                continue;
+            }
+            
+            // Slow path: need to check content, but optimize for clean case
+            const work_file = std.fs.cwd().openFile(file_path, .{}) catch continue;
+            defer work_file.close();
+            
+            const work_content = work_file.readToEndAlloc(self.allocator, 100 * 1024 * 1024) catch continue;
+            defer self.allocator.free(work_content);
+            
+            // Optimized blob header creation
+            var blob_header_buf: [32]u8 = undefined;
+            const blob_header = std.fmt.bufPrint(&blob_header_buf, "blob {}\x00", .{work_content.len}) catch {
+                // Fallback for very large files
+                const header = try std.fmt.allocPrint(self.allocator, "blob {}\x00", .{work_content.len});
+                defer self.allocator.free(header);
+                
+                var hasher = std.crypto.hash.Sha1.init(.{});
+                hasher.update(header);
+                hasher.update(work_content);
+                var work_hash: [20]u8 = undefined;
+                hasher.final(&work_hash);
+                
+                if (!std.mem.eql(u8, &work_hash, &entry.sha1)) {
+                    return false; // SHORT CIRCUIT - file changed
+                }
+                continue;
+            };
+            
+            // Streaming SHA-1 computation
+            var hasher = std.crypto.hash.Sha1.init(.{});
+            hasher.update(blob_header);
+            hasher.update(work_content);
+            var work_hash: [20]u8 = undefined;
+            hasher.final(&work_hash);
+            
+            if (!std.mem.eql(u8, &work_hash, &entry.sha1)) {
+                return false; // SHORT CIRCUIT - file changed
+            }
+        }
+
+        // Check for untracked files - SHORT CIRCUIT on first untracked file
+        var dir = std.fs.cwd().openDir(self.path, .{ .iterate = true }) catch return true;
+        defer dir.close();
+
+        var iterator = dir.iterate();
+        while (try iterator.next()) |entry| {
+            if (entry.kind != .file) continue;
+            if (std.mem.startsWith(u8, entry.name, ".git")) continue;
+
+            // O(1) lookup to check if file is tracked
+            if (!tracked_files.contains(entry.name)) {
+                return false; // SHORT CIRCUIT - untracked file found
+            }
+        }
+
+        return true; // All files are clean
+    }
+    
+    /// Check if there are no untracked files (when no index exists)
+    fn hasNoUntrackedFiles(self: *const Repository) !bool {
+        var dir = std.fs.cwd().openDir(self.path, .{ .iterate = true }) catch return true;
+        defer dir.close();
+
+        var iterator = dir.iterate();
+        while (try iterator.next()) |entry| {
+            if (entry.kind != .file) continue;
+            if (std.mem.startsWith(u8, entry.name, ".git")) continue;
+            return false; // Found an untracked file
+        }
+        return true; // No files found
     }
 
-    /// Get latest tag (like `git describe --tags --abbrev=0`) - OPTIMIZED 
+    /// Get latest tag (like `git describe --tags --abbrev=0`) - ULTRA OPTIMIZED 
     pub fn describeTagsFast(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
         // Use stack buffer for tags directory path
         var tags_dir_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
         const tags_dir = std.fmt.bufPrint(&tags_dir_buf, "{s}/refs/tags", .{self.git_dir}) catch return error.PathTooLong;
 
-        var tags_list = std.ArrayList([]const u8).init(allocator);
-        defer {
-            for (tags_list.items) |tag| {
-                allocator.free(tag);
-            }
-            tags_list.deinit();
-        }
+        // Optimized approach: find the lexicographically largest tag without full sorting
+        var latest_tag: ?[]const u8 = null;
+        var latest_tag_owned: ?[]const u8 = null;
 
         if (std.fs.openDirAbsolute(tags_dir, .{ .iterate = true })) |mut_dir| {
             var dir = mut_dir;
@@ -224,24 +347,26 @@ pub const Repository = struct {
             var iterator = dir.iterate();
             while (try iterator.next()) |entry| {
                 if (entry.kind == .file) {
-                    try tags_list.append(try allocator.dupe(u8, entry.name));
+                    // Compare directly without storing all tags
+                    if (latest_tag == null or std.mem.order(u8, entry.name, latest_tag.?) == .gt) {
+                        // Free previous tag if we had one
+                        if (latest_tag_owned) |prev_tag| {
+                            allocator.free(prev_tag);
+                        }
+                        latest_tag_owned = try allocator.dupe(u8, entry.name);
+                        latest_tag = latest_tag_owned;
+                    }
                 }
             }
         } else |_| {
             return try allocator.dupe(u8, "");
         }
 
-        if (tags_list.items.len == 0) {
+        if (latest_tag_owned) |tag| {
+            return tag; // Ownership transferred to caller
+        } else {
             return try allocator.dupe(u8, "");
         }
-
-        std.mem.sort([]const u8, tags_list.items, {}, struct {
-            fn lessThan(_: void, lhs: []const u8, rhs: []const u8) bool {
-                return std.mem.order(u8, lhs, rhs) == .gt;
-            }
-        }.lessThan);
-
-        return try allocator.dupe(u8, tags_list.items[0]);
     }
 
     /// Get latest tag (like `git describe --tags --abbrev=0`)  
