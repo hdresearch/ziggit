@@ -2,10 +2,9 @@ const std = @import("std");
 const objects = @import("../src/git/objects.zig");
 const testing = std.testing;
 
-/// Test delta application functionality  
-/// Note: This uses the private applyDelta function through a test wrapper
+// Test delta application functionality  
+// Note: This uses the private applyDelta function through a test wrapper
 test "apply simple delta" {
-    const allocator = testing.allocator;
     
     // Base data: "Hello, world!"
     const base_data = "Hello, world!";
@@ -31,7 +30,6 @@ test "apply simple delta" {
 
 test "delta bounds checking" {
     // Test that we handle various edge cases properly
-    const allocator = testing.allocator;
     
     // Test empty delta data
     const empty_delta: [0]u8 = .{};
