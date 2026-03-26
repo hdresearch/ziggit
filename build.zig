@@ -1001,6 +1001,17 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(pack_fetch_pipeline_tests).step);
 
+    // Pack network infrastructure tests (readPackObjectAtOffset, fixThinPack, saveReceivedPack, git cross-validation)
+    const pack_network_infra_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_network_infra_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_network_infra_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(pack_network_infra_tests).step);
+
     // Objects store and hash tests (internal git module)
     const objects_store_hash_tests = b.addTest(.{
         .root_source_file = b.path("test/objects_store_and_hash_test.zig"),
