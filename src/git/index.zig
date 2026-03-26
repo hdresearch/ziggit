@@ -1018,3 +1018,90 @@ fn pathMatchesImpl(path: []const u8, pattern: []const u8, path_idx: usize, patte
         },
     }
 }
+
+/// Resolve merge conflicts in the index by selecting resolution strategy
+pub fn resolveConflicts(index: *Index, strategy: ConflictResolutionStrategy) !u32 {
+    var resolved_count: u32 = 0;
+    var i: usize = 0;
+    
+    while (i < index.entries.items.len) {
+        const entry = index.entries.items[i];
+        const stage = (entry.flags >> 12) & 0x3;
+        
+        if (stage > 0) {
+            // This is a conflict entry
+            const path = entry.path;
+            
+            // Find all stages for this path
+            var stages = [3]?usize{ null, null, null };
+            var j = i;
+            
+            // Collect all stages for this path
+            while (j < index.entries.items.len) {
+                const current_entry = index.entries.items[j];
+                if (!std.mem.eql(u8, current_entry.path, path)) break;
+                
+                const current_stage = (current_entry.flags >> 12) & 0x3;
+                if (current_stage > 0 and current_stage <= 3) {
+                    stages[current_stage - 1] = j;
+                }
+                j += 1;
+            }
+            
+            // Apply resolution strategy
+            const resolved_index = switch (strategy) {
+                .ours => stages[1], // Stage 2 (our version)
+                .theirs => stages[2], // Stage 3 (their version)  
+                .base => stages[0], // Stage 1 (common ancestor)
+                .first_parent => stages[1], // Same as ours
+            };
+            
+            if (resolved_index) |idx| {
+                // Keep the resolved version, clear stage
+                index.entries.items[idx].flags &= 0x0FFF;
+                
+                // Remove other conflict entries for this path
+                var k = i;
+                while (k < index.entries.items.len) {
+                    if (k == idx) {
+                        k += 1;
+                        continue;
+                    }
+                    
+                    const check_entry = index.entries.items[k];
+                    if (!std.mem.eql(u8, check_entry.path, path)) break;
+                    
+                    const check_stage = (check_entry.flags >> 12) & 0x3;
+                    if (check_stage > 0) {
+                        check_entry.deinit(index.allocator);
+                        _ = index.entries.swapRemove(k);
+                        // Adjust idx if necessary
+                        if (k < idx) {
+                            // The resolved index moved down
+                            idx -= 1;
+                        }
+                    } else {
+                        k += 1;
+                    }
+                }
+                
+                resolved_count += 1;
+            }
+            
+            // Move to next different path  
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    
+    return resolved_count;
+}
+
+/// Conflict resolution strategies
+pub const ConflictResolutionStrategy = enum {
+    ours,        // Use our version (stage 2)
+    theirs,      // Use their version (stage 3)  
+    base,        // Use base version (stage 1)
+    first_parent, // Alias for ours
+};

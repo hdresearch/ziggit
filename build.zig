@@ -109,6 +109,22 @@ pub fn build(b: *std.Build) void {
     });
     const run_pack_tests = b.addRunArtifact(pack_tests);
 
+    // Pack verification tests
+    const pack_verification_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_verification_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_pack_verification_tests = b.addRunArtifact(pack_verification_tests);
+
+    // Pack improvement tests
+    const pack_improvement_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_improvement_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_pack_improvement_tests = b.addRunArtifact(pack_improvement_tests);
+
     // Lib status test
     const lib_status_test = b.addTest(.{
         .root_source_file = b.path("test/lib_status_test.zig"),
@@ -134,6 +150,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_integration_test_suite.step);
     test_step.dependOn(&run_bun_api_test.step);
     test_step.dependOn(&run_pack_tests.step);
+    test_step.dependOn(&run_pack_verification_tests.step);
+    test_step.dependOn(&run_pack_improvement_tests.step);
     test_step.dependOn(&run_lib_status_test.step);
     test_step.dependOn(&run_build_system_test.step);
 
