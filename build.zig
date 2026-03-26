@@ -320,6 +320,32 @@ pub fn build(b: *std.Build) void {
     
     const debug_index_step = b.step("debug-index", "Debug index corruption");
     debug_index_step.dependOn(&run_debug_index_corruption.step);
+    
+    // Status bottleneck benchmark 
+    const status_bottleneck_bench = b.addExecutable(.{
+        .name = "status_bottleneck_bench",
+        .root_source_file = b.path("benchmarks/status_bottleneck_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    status_bottleneck_bench.root_module.addImport("ziggit", ziggit_module);
+    const run_status_bottleneck_bench = b.addRunArtifact(status_bottleneck_bench);
+    
+    const bottleneck_step = b.step("bottleneck", "Analyze status operation bottlenecks");
+    bottleneck_step.dependOn(&run_status_bottleneck_bench.step);
+    
+    // Index optimization benchmark
+    const index_optimization_bench = b.addExecutable(.{
+        .name = "index_optimization_bench",
+        .root_source_file = b.path("benchmarks/index_optimization_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    index_optimization_bench.root_module.addImport("ziggit", ziggit_module);
+    const run_index_optimization_bench = b.addRunArtifact(index_optimization_bench);
+    
+    const index_opt_step = b.step("index-opt", "Benchmark index parser optimizations");
+    index_opt_step.dependOn(&run_index_optimization_bench.step);
 
 
     // ========== WASM TARGET ==========

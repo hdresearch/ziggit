@@ -4,7 +4,12 @@ const std = @import("std");
 
 // Import existing implementations  
 const index_parser = @import("lib/index_parser.zig");
+const index_parser_fast = @import("lib/index_parser_fast.zig");
 const objects_parser = @import("lib/objects_parser.zig");
+
+// Export for benchmarking
+pub const IndexParser = index_parser;
+pub const IndexParserFast = index_parser_fast;
 
 pub const Repository = struct {
     path: []const u8,
@@ -116,7 +121,7 @@ pub const Repository = struct {
         var index_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
         const index_path = std.fmt.bufPrint(&index_path_buf, "{s}/index", .{self.git_dir}) catch return false;
 
-        var git_index = index_parser.GitIndex.readFromFile(self.allocator, index_path) catch {
+        var git_index = index_parser_fast.FastGitIndex.readFromFile(self.allocator, index_path) catch {
             // No index means definitely not clean (files would be untracked)
             return false;
         };
@@ -124,7 +129,7 @@ pub const Repository = struct {
 
         // ULTRA-FAST PATH: For clean repos, just check if any file mtime/size changed
         // If ALL files have matching mtime/size, repo is provably clean (skip SHA-1)
-        for (git_index.entries.items) |entry| {
+        for (git_index.entries) |entry| {
             // Get file path using stack buffer
             var file_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
             const file_path = std.fmt.bufPrint(&file_path_buf, "{s}/{s}", .{ self.path, entry.path }) catch return false;
@@ -163,7 +168,7 @@ pub const Repository = struct {
         }
         
         // If file count matches index count, we're definitely clean (no untracked files)
-        if (file_count == git_index.entries.items.len) {
+        if (file_count == git_index.entries.len) {
             return true;
         }
         
