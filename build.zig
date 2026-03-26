@@ -82,6 +82,8 @@ pub fn build(b: *std.Build) void {
     });
     const run_enhanced_git_interop_test = b.addRunArtifact(enhanced_git_interop_test);
 
+    // Note: comprehensive_git_interop_test exists but excluded for now due to execution issues
+
     // Tool compatibility test (critical for bun/npm workflows)
     const tool_compat_test = b.addExecutable(.{
         .name = "tool_compatibility_test", 
