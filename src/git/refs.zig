@@ -459,7 +459,36 @@ fn isValidHash(hash: []const u8) bool {
     return true;
 }
 
-
+fn isValidRefName(ref_name: []const u8) bool {
+    if (ref_name.len == 0) return false;
+    if (ref_name.len > 1024) return false; // Reasonable limit
+    
+    // Check for invalid characters and patterns
+    for (ref_name, 0..) |c, i| {
+        switch (c) {
+            ' ', '\t', '\n', '\r', '~', '^', ':', '?', '*', '[', '\\', 0x7F => return false,
+            '.' => {
+                // Cannot start with a dot or have consecutive dots
+                if (i == 0) return false;
+                if (i > 0 and ref_name[i-1] == '.') return false;
+            },
+            '/' => {
+                // Cannot start or end with slash, or have consecutive slashes
+                if (i == 0 or i == ref_name.len - 1) return false;
+                if (i > 0 and ref_name[i-1] == '/') return false;
+            },
+            else => {
+                // Control characters are not allowed
+                if (c < 0x20 or c > 0x7E) return false;
+            },
+        }
+    }
+    
+    // Cannot end with .lock
+    if (std.mem.endsWith(u8, ref_name, ".lock")) return false;
+    
+    return true;
+}
 
 /// Resolve annotated tag to commit (if the hash points to a tag object)
 fn resolveAnnotatedTag(git_dir: []const u8, hash: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![]u8 {
