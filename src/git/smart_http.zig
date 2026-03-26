@@ -267,6 +267,14 @@ fn httpGet(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
 }
 
 fn httpGetWithClient(allocator: std.mem.Allocator, existing_client: ?*std.http.Client, url: []const u8) ![]u8 {
+    return httpGetWithClientOpts(allocator, existing_client, url, false);
+}
+
+fn httpGetWithClientV2(allocator: std.mem.Allocator, existing_client: ?*std.http.Client, url: []const u8) ![]u8 {
+    return httpGetWithClientOpts(allocator, existing_client, url, true);
+}
+
+fn httpGetWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.http.Client, url: []const u8, v2: bool) ![]u8 {
     const auth = try extractAuth(allocator, url);
     defer if (auth.needs_free) allocator.free(@constCast(auth.clean_url));
 
@@ -278,10 +286,14 @@ fn httpGetWithClient(allocator: std.mem.Allocator, existing_client: ?*std.http.C
     const uri = std.Uri.parse(auth.clean_url) catch return error.InvalidUrl;
 
     // Build extra headers
-    var headers_buf: [3]std.http.Header = undefined;
+    var headers_buf: [4]std.http.Header = undefined;
     var n_headers: usize = 0;
     headers_buf[n_headers] = .{ .name = "User-Agent", .value = "ziggit/0.1" };
     n_headers += 1;
+    if (v2) {
+        headers_buf[n_headers] = .{ .name = "Git-Protocol", .value = "version=2" };
+        n_headers += 1;
+    }
     if (auth.token) |token| {
         var bearer_buf: [512]u8 = undefined;
         const bearer = std.fmt.bufPrint(&bearer_buf, "Bearer {s}", .{token}) catch return error.Overflow;
@@ -308,6 +320,14 @@ fn httpPost(allocator: std.mem.Allocator, url: []const u8, body: []const u8, con
 }
 
 fn httpPostWithClient(allocator: std.mem.Allocator, existing_client: ?*std.http.Client, url: []const u8, body: []const u8, content_type: []const u8) ![]u8 {
+    return httpPostWithClientOpts(allocator, existing_client, url, body, content_type, false);
+}
+
+fn httpPostWithClientV2(allocator: std.mem.Allocator, existing_client: ?*std.http.Client, url: []const u8, body: []const u8, content_type: []const u8) ![]u8 {
+    return httpPostWithClientOpts(allocator, existing_client, url, body, content_type, true);
+}
+
+fn httpPostWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.http.Client, url: []const u8, body: []const u8, content_type: []const u8, v2: bool) ![]u8 {
     const auth = try extractAuth(allocator, url);
     defer if (auth.needs_free) allocator.free(@constCast(auth.clean_url));
 
@@ -318,12 +338,16 @@ fn httpPostWithClient(allocator: std.mem.Allocator, existing_client: ?*std.http.
     var server_header_buffer: [16384]u8 = undefined;
     const uri = std.Uri.parse(auth.clean_url) catch return error.InvalidUrl;
 
-    var headers_buf: [4]std.http.Header = undefined;
+    var headers_buf: [5]std.http.Header = undefined;
     var n_headers: usize = 0;
     headers_buf[n_headers] = .{ .name = "User-Agent", .value = "ziggit/0.1" };
     n_headers += 1;
     headers_buf[n_headers] = .{ .name = "Content-Type", .value = content_type };
     n_headers += 1;
+    if (v2) {
+        headers_buf[n_headers] = .{ .name = "Git-Protocol", .value = "version=2" };
+        n_headers += 1;
+    }
     if (auth.token) |token| {
         var bearer_buf: [512]u8 = undefined;
         const bearer = std.fmt.bufPrint(&bearer_buf, "Bearer {s}", .{token}) catch return error.Overflow;
@@ -488,6 +512,9 @@ pub fn fetchPackShallow(allocator: std.mem.Allocator, url: []const u8, wants: []
 }
 
 fn fetchPackShallowWithClient(allocator: std.mem.Allocator, client: ?*std.http.Client, url: []const u8, wants: []const Oid, haves: []const Oid, depth: u32) !ShallowFetchResult {
+    const trace_timing = std.posix.getenv("ZIGGIT_TRACE_TIMING") != null;
+    var fetch_timer = std.time.Timer.start() catch null;
+
     var base = url;
     while (base.len > 0 and base[base.len - 1] == '/') {
         base = base[0 .. base.len - 1];
@@ -502,7 +529,23 @@ fn fetchPackShallowWithClient(allocator: std.mem.Allocator, client: ?*std.http.C
     const response = try httpPostWithClient(allocator, client, post_url, request_body, "application/x-git-upload-pack-request");
     defer allocator.free(response);
 
-    return parseShallowFetchPackResponse(allocator, response);
+    if (trace_timing) {
+        if (fetch_timer) |*t| {
+            std.debug.print("[timing]     HTTP POST+response: {}ms, response_size={}\n", .{ t.read() / std.time.ns_per_ms, response.len });
+            t.reset();
+        }
+    }
+
+    const result = try parseShallowFetchPackResponse(allocator, response);
+
+    if (trace_timing) {
+        if (fetch_timer) |*t| {
+            std.debug.print("[timing]     parse response: {}ms\n", .{t.read() / std.time.ns_per_ms});
+            t.reset();
+        }
+    }
+
+    return result;
 }
 
 /// Parse the response from POST /git-upload-pack.
@@ -722,6 +765,391 @@ fn isShallowCloneRelevantRef(name: []const u8) bool {
     return false;
 }
 
+// ============================================================================
+// Protocol v2 support
+// ============================================================================
+
+/// Check if server supports protocol v2 by examining the capability advertisement response.
+fn checkV2Support(data: []const u8) bool {
+    // v2 response has "version 2" as a pkt-line after the service announcement
+    var offset: usize = 0;
+    while (offset < data.len) {
+        const result = parsePktLine(data[offset..]) catch break;
+        offset += result.consumed;
+        if (result.pkt.line_type != .data) continue;
+        var line = result.pkt.data;
+        if (line.len > 0 and line[line.len - 1] == '\n') line = line[0 .. line.len - 1];
+        if (std.mem.eql(u8, line, "version 2")) return true;
+    }
+    return false;
+}
+
+/// Build a v2 ls-refs request body with ref-prefix filtering.
+fn buildV2LsRefsRequest(allocator: std.mem.Allocator, ref_prefixes: []const []const u8, symrefs: bool) ![]u8 {
+    var body = std.ArrayList(u8).init(allocator);
+    errdefer body.deinit();
+
+    // Command header section
+    const cmd_lines = [_][]const u8{
+        "command=ls-refs\n",
+        "agent=ziggit/0.1\n",
+        "object-format=sha1\n",
+    };
+    for (cmd_lines) |line| {
+        const pkt_len = line.len + 4;
+        var hdr: [4]u8 = undefined;
+        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
+        try body.appendSlice(&hdr);
+        try body.appendSlice(line);
+    }
+
+    // Delimiter
+    try body.appendSlice("0001");
+
+    // Arguments
+    if (symrefs) {
+        const line = "symrefs\n";
+        const pkt_len = line.len + 4;
+        var hdr: [4]u8 = undefined;
+        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
+        try body.appendSlice(&hdr);
+        try body.appendSlice(line);
+    }
+
+    for (ref_prefixes) |prefix| {
+        var line_buf: [256]u8 = undefined;
+        const line = std.fmt.bufPrint(&line_buf, "ref-prefix {s}\n", .{prefix}) catch unreachable;
+        const pkt_len = line.len + 4;
+        var hdr: [4]u8 = undefined;
+        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
+        try body.appendSlice(&hdr);
+        try body.appendSlice(line);
+    }
+
+    // Flush
+    try body.appendSlice("0000");
+
+    return body.toOwnedSlice();
+}
+
+/// Parse v2 ls-refs response into RefDiscovery.
+fn parseV2LsRefsResponse(allocator: std.mem.Allocator, data: []const u8) !RefDiscovery {
+    var refs = std.ArrayList(Ref).init(allocator);
+    errdefer {
+        for (refs.items) |ref| allocator.free(ref.name);
+        refs.deinit();
+    }
+
+    var offset: usize = 0;
+    while (offset < data.len) {
+        const result = parsePktLine(data[offset..]) catch break;
+        offset += result.consumed;
+        if (result.pkt.line_type != .data) continue;
+
+        var line = result.pkt.data;
+        if (line.len > 0 and line[line.len - 1] == '\n') line = line[0 .. line.len - 1];
+        if (line.len < 41) continue;
+
+        const hash = line[0..40];
+        const rest = line[41..];
+
+        // rest may be "refname symref-target:refs/heads/xxx" etc.
+        // Split on space to get ref name
+        var ref_name = rest;
+        if (std.mem.indexOfScalar(u8, rest, ' ')) |sp| {
+            ref_name = rest[0..sp];
+        }
+
+        try refs.append(.{
+            .hash = hash[0..40].*,
+            .name = try allocator.dupe(u8, ref_name),
+        });
+    }
+
+    return .{
+        .refs = try refs.toOwnedSlice(),
+        .capabilities = try allocator.dupe(u8, ""),
+        .allocator = allocator,
+    };
+}
+
+/// Build a v2 fetch command request body for shallow clone.
+fn buildV2FetchRequest(allocator: std.mem.Allocator, wants: []const Oid, haves: []const Oid, depth: u32) ![]u8 {
+    var body = std.ArrayList(u8).init(allocator);
+    errdefer body.deinit();
+
+    // Command header
+    const cmd_lines = [_][]const u8{
+        "command=fetch\n",
+        "agent=ziggit/0.1\n",
+        "object-format=sha1\n",
+    };
+    for (cmd_lines) |line| {
+        const pkt_len = line.len + 4;
+        var hdr: [4]u8 = undefined;
+        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
+        try body.appendSlice(&hdr);
+        try body.appendSlice(line);
+    }
+
+    // Delimiter
+    try body.appendSlice("0001");
+
+    // Arguments: thin-pack, no-progress, ofs-delta
+    const args = [_][]const u8{
+        "thin-pack\n",
+        "no-progress\n",
+        "ofs-delta\n",
+    };
+    for (args) |arg| {
+        const pkt_len = arg.len + 4;
+        var hdr: [4]u8 = undefined;
+        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
+        try body.appendSlice(&hdr);
+        try body.appendSlice(arg);
+    }
+
+    // Depth
+    if (depth > 0) {
+        var deepen_buf: [64]u8 = undefined;
+        const deepen_line = std.fmt.bufPrint(&deepen_buf, "deepen {d}\n", .{depth}) catch unreachable;
+        const pkt_len = deepen_line.len + 4;
+        var hdr: [4]u8 = undefined;
+        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
+        try body.appendSlice(&hdr);
+        try body.appendSlice(deepen_line);
+    }
+
+    // Wants
+    for (wants) |want| {
+        var line_buf: [128]u8 = undefined;
+        const line = std.fmt.bufPrint(&line_buf, "want {s}\n", .{want}) catch unreachable;
+        const pkt_len = line.len + 4;
+        var hdr: [4]u8 = undefined;
+        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
+        try body.appendSlice(&hdr);
+        try body.appendSlice(line);
+    }
+
+    // Haves
+    for (haves) |have| {
+        var line_buf: [128]u8 = undefined;
+        const line = std.fmt.bufPrint(&line_buf, "have {s}\n", .{have}) catch unreachable;
+        const pkt_len = line.len + 4;
+        var hdr: [4]u8 = undefined;
+        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
+        try body.appendSlice(&hdr);
+        try body.appendSlice(line);
+    }
+
+    // done
+    {
+        const line = "done\n";
+        const pkt_len = line.len + 4;
+        var hdr: [4]u8 = undefined;
+        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
+        try body.appendSlice(&hdr);
+        try body.appendSlice(line);
+    }
+
+    // Flush
+    try body.appendSlice("0000");
+
+    return body.toOwnedSlice();
+}
+
+/// Parse v2 fetch response. The v2 fetch response has sections delimited by
+/// delimiters (0001) and contains: shallow-info, packfile-uris, then packfile section.
+fn parseV2FetchResponse(allocator: std.mem.Allocator, data: []const u8) !ShallowFetchResult {
+    var pack_data = std.ArrayList(u8).init(allocator);
+    errdefer pack_data.deinit();
+    var shallow_commits = std.ArrayList(Oid).init(allocator);
+    errdefer shallow_commits.deinit();
+
+    var offset: usize = 0;
+    var in_packfile = false;
+
+    while (offset < data.len) {
+        const result = parsePktLine(data[offset..]) catch break;
+        offset += result.consumed;
+
+        if (result.pkt.line_type == .flush) continue;
+        if (result.pkt.line_type == .delim) continue;
+
+        const payload = result.pkt.data;
+        if (payload.len == 0) continue;
+
+        // Check for section markers and metadata
+        if (std.mem.startsWith(u8, payload, "shallow-info")) continue;
+        if (std.mem.startsWith(u8, payload, "acknowledgments")) continue;
+        if (std.mem.startsWith(u8, payload, "packfile\n") or std.mem.eql(u8, payload, "packfile")) {
+            in_packfile = true;
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, payload, "shallow ")) {
+            const rest = payload["shallow ".len..];
+            const hash_str = if (rest.len > 0 and rest[rest.len - 1] == '\n')
+                rest[0 .. rest.len - 1]
+            else
+                rest;
+            if (hash_str.len >= 40) {
+                try shallow_commits.append(hash_str[0..40].*);
+            }
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, payload, "NAK")) continue;
+        if (std.mem.startsWith(u8, payload, "ACK")) continue;
+        if (std.mem.startsWith(u8, payload, "ready")) continue;
+
+        if (in_packfile) {
+            // Side-band demuxing
+            const channel = payload[0];
+            if (channel == 1) {
+                try pack_data.appendSlice(payload[1..]);
+            } else if (channel == 2) {
+                continue; // progress
+            } else if (channel == 3) {
+                return error.SideBandError;
+            }
+        }
+    }
+
+    const pack_result = try pack_data.toOwnedSlice();
+    if (pack_result.len == 0) {
+        allocator.free(pack_result);
+        return error.NoPackData;
+    }
+
+    // Verify PACK magic
+    var final_pack = pack_result;
+    if (pack_result.len < 4 or !std.mem.eql(u8, pack_result[0..4], "PACK")) {
+        if (std.mem.indexOf(u8, pack_result, "PACK")) |pack_start| {
+            if (pack_start > 0) {
+                final_pack = try allocator.dupe(u8, pack_result[pack_start..]);
+                allocator.free(pack_result);
+            }
+        }
+    }
+
+    return .{
+        .pack_data = final_pack,
+        .shallow_commits = try shallow_commits.toOwnedSlice(),
+        .allocator = allocator,
+    };
+}
+
+/// Perform a shallow clone using protocol v2 with ls-refs filtering.
+/// This avoids downloading all refs (including PRs) and only fetches relevant ones.
+fn clonePackShallowV2(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, depth: u32) !CloneResult {
+    const trace_timing = std.posix.getenv("ZIGGIT_TRACE_TIMING") != null;
+    var net_timer = std.time.Timer.start() catch null;
+
+    var base = url;
+    while (base.len > 0 and base[base.len - 1] == '/') {
+        base = base[0 .. base.len - 1];
+    }
+
+    const post_url = try std.fmt.allocPrint(allocator, "{s}/git-upload-pack", .{base});
+    defer allocator.free(post_url);
+
+    // Step 1: ls-refs with prefix filtering (HEAD + branches + tags)
+    const ref_prefixes = [_][]const u8{ "HEAD", "refs/heads/", "refs/tags/" };
+    const ls_refs_body = try buildV2LsRefsRequest(allocator, &ref_prefixes, true);
+    defer allocator.free(ls_refs_body);
+
+    const ls_refs_response = try httpPostWithClientV2(allocator, client, post_url, ls_refs_body, "application/x-git-upload-pack-request");
+    defer allocator.free(ls_refs_response);
+
+    const discovery = try parseV2LsRefsResponse(allocator, ls_refs_response);
+
+    if (trace_timing) {
+        if (net_timer) |*t| {
+            std.debug.print("[timing]   v2 ls-refs: {}ms, refs_count={}\n", .{ t.read() / std.time.ns_per_ms, discovery.refs.len });
+            t.reset();
+        }
+    }
+
+    // Step 2: Build want list (single-branch for shallow)
+    var head_hash: ?Oid = null;
+    var head_branch: ?[]const u8 = null;
+    if (depth > 0) {
+        for (discovery.refs) |ref| {
+            if (std.mem.eql(u8, ref.name, "HEAD")) {
+                head_hash = ref.hash;
+                break;
+            }
+        }
+        if (head_hash) |hh| {
+            for (discovery.refs) |ref| {
+                if (std.mem.startsWith(u8, ref.name, "refs/heads/") and
+                    std.mem.eql(u8, &ref.hash, &hh))
+                {
+                    head_branch = ref.name;
+                    break;
+                }
+            }
+        }
+    }
+
+    var want_set = std.StringHashMap(void).init(allocator);
+    defer want_set.deinit();
+    var wants = std.ArrayList(Oid).init(allocator);
+    defer wants.deinit();
+
+    for (discovery.refs) |ref| {
+        const relevant = if (depth > 0) blk: {
+            if (std.mem.eql(u8, ref.name, "HEAD")) break :blk true;
+            if (head_branch) |hb| {
+                if (std.mem.eql(u8, ref.name, hb)) break :blk true;
+            }
+            break :blk false;
+        } else isCloneRelevantRef(ref.name);
+        if (!relevant) continue;
+        const hash_str = ref.hash;
+        if (!want_set.contains(&hash_str)) {
+            try want_set.put(try allocator.dupe(u8, &hash_str), {});
+            try wants.append(hash_str);
+        }
+    }
+    defer {
+        var it = want_set.keyIterator();
+        while (it.next()) |key| allocator.free(@constCast(key.*));
+    }
+
+    if (trace_timing) {
+        if (net_timer) |*t| {
+            std.debug.print("[timing]   v2 want list: {}ms, wants={}\n", .{ t.read() / std.time.ns_per_ms, wants.items.len });
+            t.reset();
+        }
+    }
+
+    // Step 3: Fetch pack using v2 fetch command
+    const fetch_body = try buildV2FetchRequest(allocator, wants.items, &.{}, depth);
+    defer allocator.free(fetch_body);
+
+    const fetch_response = try httpPostWithClientV2(allocator, client, post_url, fetch_body, "application/x-git-upload-pack-request");
+    defer allocator.free(fetch_response);
+
+    const shallow_result = try parseV2FetchResponse(allocator, fetch_response);
+
+    if (trace_timing) {
+        if (net_timer) |*t| {
+            std.debug.print("[timing]   v2 fetch: {}ms, pack_size={}\n", .{ t.read() / std.time.ns_per_ms, shallow_result.pack_data.len });
+            t.reset();
+        }
+    }
+
+    return .{
+        .refs = discovery.refs,
+        .capabilities = discovery.capabilities,
+        .pack_data = shallow_result.pack_data,
+        .shallow_commits = shallow_result.shallow_commits,
+        .allocator = allocator,
+    };
+}
+
 /// Clone a repository with shallow depth support.
 /// When depth > 0, sends "deepen N" to the server for a shallow clone.
 /// Implements --single-branch behavior by default for shallow clones (like git does):
@@ -730,7 +1158,25 @@ pub fn clonePackShallow(allocator: std.mem.Allocator, url: []const u8, depth: u3
     var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
 
-    const discovery = try discoverRefsWithClient(allocator, &client, url);
+    // Try protocol v2 directly (skip probe - most servers support v2).
+    // Fall back to v1 on any v2 error.
+    return clonePackShallowV2(allocator, &client, url, depth) catch {
+        return clonePackShallowV1(allocator, &client, url, depth);
+    };
+}
+
+fn clonePackShallowV1(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, depth: u32) !CloneResult {
+    const trace_timing = std.posix.getenv("ZIGGIT_TRACE_TIMING") != null;
+    var net_timer = std.time.Timer.start() catch null;
+
+    const discovery = try discoverRefsWithClient(allocator, client, url);
+
+    if (trace_timing) {
+        if (net_timer) |*t| {
+            std.debug.print("[timing]   ref discovery: {}ms, refs_count={}\n", .{ t.read() / std.time.ns_per_ms, discovery.refs.len });
+            t.reset();
+        }
+    }
 
     // For shallow clones with depth > 0, use single-branch behavior (like git --depth implies --single-branch).
     // Find what HEAD points to and only fetch that branch's hash.
@@ -785,11 +1231,25 @@ pub fn clonePackShallow(allocator: std.mem.Allocator, url: []const u8, depth: u3
         while (it.next()) |key| allocator.free(@constCast(key.*));
     }
 
+    if (trace_timing) {
+        if (net_timer) |*t| {
+            std.debug.print("[timing]   want list build: {}ms, wants={}\n", .{ t.read() / std.time.ns_per_ms, wants.items.len });
+            t.reset();
+        }
+    }
+
     if (depth > 0) {
         // Use shallow fetch
-        const shallow_result = try fetchPackShallowWithClient(allocator, &client, url, wants.items, &.{}, depth);
-        // Transfer ownership - don't deinit shallow_result
+        const shallow_result = try fetchPackShallowWithClient(allocator, client, url, wants.items, &.{}, depth);
 
+        if (trace_timing) {
+            if (net_timer) |*t| {
+                std.debug.print("[timing]   pack fetch+parse: {}ms, pack_size={}\n", .{ t.read() / std.time.ns_per_ms, shallow_result.pack_data.len });
+                t.reset();
+            }
+        }
+
+        // Transfer ownership - don't deinit shallow_result
         return .{
             .refs = discovery.refs,
             .capabilities = discovery.capabilities,
@@ -798,7 +1258,7 @@ pub fn clonePackShallow(allocator: std.mem.Allocator, url: []const u8, depth: u3
             .allocator = allocator,
         };
     } else {
-        const pack_data = try fetchPackWithClient(allocator, &client, url, wants.items, &.{});
+        const pack_data = try fetchPackWithClient(allocator, client, url, wants.items, &.{});
 
         return .{
             .refs = discovery.refs,
