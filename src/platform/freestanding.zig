@@ -138,6 +138,12 @@ fn readDirImpl(allocator: std.mem.Allocator, path: []const u8) ![][]u8 {
     return error.FileNotFound;
 }
 
+fn statImpl(path: []const u8) !std.fs.File.Stat {
+    // Basic implementation for freestanding mode
+    _ = path;
+    return error.NotSupported;
+}
+
 pub const freestanding_platform = interface.Platform{
     .getArgs = getArgsImpl,
     .writeStdout = writeStdoutImpl,
@@ -151,5 +157,6 @@ pub const freestanding_platform = interface.Platform{
         .getCwd = getCwdImpl,
         .chdir = chdirImpl,
         .readDir = readDirImpl,
+        .stat = statImpl,
     },
 };
