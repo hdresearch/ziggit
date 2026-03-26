@@ -149,6 +149,22 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/git/objects.zig"),
     });
 
+    // Stream utils + delta cache tests
+    const stream_utils_tests = b.addTest(.{
+        .root_source_file = b.path("test/stream_utils_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    stream_utils_tests.root_module.addAnonymousImport("stream_utils", .{
+        .root_source_file = b.path("src/git/stream_utils.zig"),
+    });
+    stream_utils_tests.root_module.addAnonymousImport("delta_cache", .{
+        .root_source_file = b.path("src/git/delta_cache.zig"),
+    });
+    stream_utils_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+
     // Pack round-trip tests (create pack + idx with git, read with ziggit)
     const pack_roundtrip_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_roundtrip_test.zig"),
@@ -544,6 +560,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(core_git_format_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_comprehensive_tests).step);
     test_step.dependOn(&b.addRunArtifact(delta_apply_tests).step);
+    test_step.dependOn(&b.addRunArtifact(stream_utils_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_roundtrip_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_write_read_tests).step);
     test_step.dependOn(&b.addRunArtifact(delta_edge_cases_tests).step);
