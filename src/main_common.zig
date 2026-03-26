@@ -59,6 +59,12 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmdClone(allocator, &args, &platform_impl);
     } else if (std.mem.eql(u8, command, "config")) {
         try cmdConfig(allocator, &args, &platform_impl);
+    } else if (std.mem.eql(u8, command, "rev-parse")) {
+        try cmdRevParse(allocator, &args, &platform_impl);
+    } else if (std.mem.eql(u8, command, "describe")) {
+        try cmdDescribe(allocator, &args, &platform_impl);
+    } else if (std.mem.eql(u8, command, "tag")) {
+        try cmdTag(allocator, &args, &platform_impl);
     } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
         if (version_mod.getVersionString(allocator)) |version_msg| {
             defer allocator.free(version_msg);
@@ -2887,5 +2893,438 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             },
             else => return err,
         };
+    }
+}
+
+fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    if (@import("builtin").target.os.tag == .freestanding) {
+        try platform_impl.writeStderr("rev-parse: not supported in freestanding mode\n");
+        return;
+    }
+
+    // Find .git directory first
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+
+    const first_arg = args.next() orelse {
+        try platform_impl.writeStderr("fatal: arguments required\n");
+        std.process.exit(128);
+    };
+
+    if (std.mem.eql(u8, first_arg, "HEAD")) {
+        // rev-parse HEAD: read .git/HEAD, if it starts with "ref: ", read that ref file, print the 40-char hash
+        const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+        defer allocator.free(head_path);
+        
+        const head_content = platform_impl.fs.readFile(allocator, head_path) catch |err| {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: unable to read HEAD: {}\n", .{err});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        };
+        defer allocator.free(head_content);
+        
+        const head_trimmed = std.mem.trim(u8, head_content, " \t\n\r");
+        
+        if (std.mem.startsWith(u8, head_trimmed, "ref: ")) {
+            // It's a symbolic ref, read the actual ref file
+            const ref_path = head_trimmed[5..]; // Skip "ref: "
+            const ref_file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{git_path, ref_path});
+            defer allocator.free(ref_file_path);
+            
+            const ref_content = platform_impl.fs.readFile(allocator, ref_file_path) catch |err| {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: unable to read ref '{s}': {}\n", .{ref_path, err});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            };
+            defer allocator.free(ref_content);
+            
+            const hash = std.mem.trim(u8, ref_content, " \t\n\r");
+            if (hash.len == 40) {
+                const output = try std.fmt.allocPrint(allocator, "{s}\n", .{hash});
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            } else {
+                try platform_impl.writeStderr("fatal: bad object HEAD\n");
+                std.process.exit(128);
+            }
+        } else if (head_trimmed.len == 40) {
+            // It's a direct hash
+            const output = try std.fmt.allocPrint(allocator, "{s}\n", .{head_trimmed});
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+        } else {
+            try platform_impl.writeStderr("fatal: bad object HEAD\n");
+            std.process.exit(128);
+        }
+    } else if (std.mem.eql(u8, first_arg, "--show-toplevel")) {
+        // rev-parse --show-toplevel: walk up from cwd looking for .git dir, print that path
+        const repo_root = std.fs.path.dirname(git_path) orelse git_path;
+        const output = try std.fmt.allocPrint(allocator, "{s}\n", .{repo_root});
+        defer allocator.free(output);
+        try platform_impl.writeStdout(output);
+    } else if (std.mem.eql(u8, first_arg, "--git-dir")) {
+        // rev-parse --git-dir: print the .git dir path relative to current working directory
+        const cwd = try platform_impl.fs.getCwd(allocator);
+        defer allocator.free(cwd);
+        
+        // Check if git_path is in the current working directory
+        if (std.mem.startsWith(u8, git_path, cwd)) {
+            const relative_path = git_path[cwd.len..];
+            const trimmed_path = if (relative_path.len > 0 and relative_path[0] == '/') 
+                relative_path[1..] 
+            else 
+                relative_path;
+            
+            if (trimmed_path.len > 0) {
+                const output = try std.fmt.allocPrint(allocator, "{s}\n", .{trimmed_path});
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            } else {
+                try platform_impl.writeStdout(".git\n");
+            }
+        } else {
+            // Not in current dir, use absolute path
+            const output = try std.fmt.allocPrint(allocator, "{s}\n", .{git_path});
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+        }
+    } else {
+        const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\n", .{first_arg});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        std.process.exit(128);
+    }
+}
+
+fn cmdDescribe(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    if (@import("builtin").target.os.tag == .freestanding) {
+        try platform_impl.writeStderr("describe: not supported in freestanding mode\n");
+        return;
+    }
+
+    // Parse arguments
+    var tags = false;
+    var abbrev_zero = false;
+    
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--tags")) {
+            tags = true;
+        } else if (std.mem.eql(u8, arg, "--abbrev=0")) {
+            abbrev_zero = true;
+        }
+    }
+
+    // Find .git directory first
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+
+    // Get current HEAD commit
+    const head_hash = refs.getCurrentCommit(git_path, platform_impl, allocator) catch |err| switch (err) {
+        else => {
+            try platform_impl.writeStderr("fatal: no commits yet\n");
+            std.process.exit(128);
+        }
+    };
+    defer if (head_hash) |hash| allocator.free(hash);
+    
+    if (head_hash == null) {
+        try platform_impl.writeStderr("fatal: no commits yet\n");
+        std.process.exit(128);
+    }
+
+    // Read all tags from refs/tags/*
+    const tags_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags", .{git_path});
+    defer allocator.free(tags_path);
+    
+    var tag_map = std.StringHashMap([]u8).init(allocator);
+    defer {
+        var iterator = tag_map.iterator();
+        while (iterator.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.*);
+        }
+        tag_map.deinit();
+    }
+    
+    // Read tags directory if it exists
+    var tags_dir = std.fs.cwd().openDir(tags_path, .{ .iterate = true }) catch {
+        try platform_impl.writeStderr("fatal: No names found, cannot describe anything.\n");
+        std.process.exit(128);
+    };
+    defer tags_dir.close();
+    
+    var iterator = tags_dir.iterate();
+    while (iterator.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        
+        // Read tag file to get the commit hash it points to
+        const tag_file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{tags_path, entry.name});
+        defer allocator.free(tag_file_path);
+        
+        const tag_content = platform_impl.fs.readFile(allocator, tag_file_path) catch continue;
+        defer allocator.free(tag_content);
+        
+        const tag_hash = std.mem.trim(u8, tag_content, " \t\n\r");
+        
+        // Check if this is an annotated tag (tag object) or lightweight tag (direct commit reference)
+        const commit_hash = blk: {
+            if (tag_hash.len == 40) {
+                // Try to load as object to see what type it is
+                const tag_obj = objects.GitObject.load(tag_hash, git_path, platform_impl, allocator) catch {
+                    break :blk try allocator.dupe(u8, tag_hash);
+                };
+                defer tag_obj.deinit(allocator);
+                
+                if (tag_obj.type == .tag) {
+                    // It's an annotated tag, parse it to get the object it points to
+                    const object_hash = parseTagObject(tag_obj.data, allocator) catch {
+                        break :blk try allocator.dupe(u8, tag_hash);
+                    };
+                    break :blk object_hash;
+                } else if (tag_obj.type == .commit) {
+                    // It's a lightweight tag pointing directly to a commit
+                    break :blk try allocator.dupe(u8, tag_hash);
+                } else {
+                    continue; // Skip tags pointing to non-commit objects for now
+                }
+            } else {
+                continue; // Invalid hash
+            }
+        };
+        
+        try tag_map.put(try allocator.dupe(u8, entry.name), commit_hash);
+    }
+    
+    if (tag_map.count() == 0) {
+        try platform_impl.writeStderr("fatal: No names found, cannot describe anything.\n");
+        std.process.exit(128);
+    }
+    
+    // Walk HEAD commit chain backward looking for a match with any tag
+    const found_tag = findTagInHistory(git_path, head_hash.?, &tag_map, allocator, platform_impl) catch null;
+    
+    if (found_tag) |tag_name| {
+        defer allocator.free(tag_name);
+        
+        if (abbrev_zero) {
+            const output = try std.fmt.allocPrint(allocator, "{s}\n", .{tag_name});
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+        } else {
+            // For simplicity, just output the tag name (full implementation would include distance and commit hash)
+            const output = try std.fmt.allocPrint(allocator, "{s}\n", .{tag_name});
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+        }
+    } else {
+        try platform_impl.writeStderr("fatal: No names found, cannot describe anything.\n");
+        std.process.exit(128);
+    }
+}
+
+fn parseTagObject(tag_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    var lines = std.mem.split(u8, tag_data, "\n");
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "object ")) {
+            const object_hash = line["object ".len..];
+            if (object_hash.len >= 40) {
+                return try allocator.dupe(u8, object_hash[0..40]);
+            }
+        } else if (line.len == 0) {
+            break; // End of headers
+        }
+    }
+    return error.NoObjectInTag;
+}
+
+fn findTagInHistory(git_path: []const u8, start_hash: []const u8, tag_map: *const std.StringHashMap([]u8), allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !?[]u8 {
+    var visited = std.StringHashMap(void).init(allocator);
+    defer {
+        var iterator = visited.iterator();
+        while (iterator.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+        }
+        visited.deinit();
+    }
+    
+    var commit_stack = std.ArrayList([]u8).init(allocator);
+    defer {
+        for (commit_stack.items) |hash| {
+            allocator.free(hash);
+        }
+        commit_stack.deinit();
+    }
+    
+    try commit_stack.append(try allocator.dupe(u8, start_hash));
+    
+    while (commit_stack.items.len > 0) {
+        const current_hash = commit_stack.pop();
+        defer allocator.free(current_hash);
+        
+        // Avoid infinite loops
+        if (visited.contains(current_hash)) continue;
+        try visited.put(try allocator.dupe(u8, current_hash), {});
+        
+        // Check if this commit matches any tag
+        var tag_iterator = tag_map.iterator();
+        while (tag_iterator.next()) |entry| {
+            const tag_name = entry.key_ptr.*;
+            const tag_commit = entry.value_ptr.*;
+            
+            if (std.mem.eql(u8, current_hash, tag_commit)) {
+                return try allocator.dupe(u8, tag_name);
+            }
+        }
+        
+        // Load commit object to get parents
+        const commit_obj = objects.GitObject.load(current_hash, git_path, platform_impl, allocator) catch continue;
+        defer commit_obj.deinit(allocator);
+        
+        if (commit_obj.type != .commit) continue;
+        
+        // Parse commit data to find parents
+        var lines = std.mem.split(u8, commit_obj.data, "\n");
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "parent ")) {
+                const parent_hash = line["parent ".len..];
+                if (parent_hash.len >= 40 and !visited.contains(parent_hash[0..40])) {
+                    try commit_stack.append(try allocator.dupe(u8, parent_hash[0..40]));
+                }
+            } else if (line.len == 0) {
+                break; // End of headers
+            }
+        }
+    }
+    
+    return null; // No tag found in history
+}
+
+fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    if (@import("builtin").target.os.tag == .freestanding) {
+        try platform_impl.writeStderr("tag: not supported in freestanding mode\n");
+        return;
+    }
+
+    // Find .git directory first
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+
+    var annotated = false;
+    var message: ?[]const u8 = null;
+    var tag_name: ?[]const u8 = null;
+
+    // Parse arguments
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-a")) {
+            annotated = true;
+        } else if (std.mem.eql(u8, arg, "-m")) {
+            message = args.next() orelse {
+                try platform_impl.writeStderr("error: option '-m' requires a value\n");
+                std.process.exit(129);
+            };
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            tag_name = arg;
+        }
+    }
+
+    if (tag_name == null) {
+        // No tag name specified, list all tags
+        const tags_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags", .{git_path});
+        defer allocator.free(tags_path);
+        
+        var tags_dir = std.fs.cwd().openDir(tags_path, .{ .iterate = true }) catch {
+            // No tags directory means no tags
+            return;
+        };
+        defer tags_dir.close();
+        
+        var tag_list = std.ArrayList([]u8).init(allocator);
+        defer {
+            for (tag_list.items) |tag| {
+                allocator.free(tag);
+            }
+            tag_list.deinit();
+        }
+        
+        var iterator = tags_dir.iterate();
+        while (iterator.next() catch null) |entry| {
+            if (entry.kind == .file) {
+                try tag_list.append(try allocator.dupe(u8, entry.name));
+            }
+        }
+        
+        // Sort tags alphabetically
+        std.sort.pdq([]u8, tag_list.items, {}, struct {
+            fn lessThan(_: void, a: []u8, b: []u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.lessThan);
+        
+        for (tag_list.items) |tag| {
+            const output = try std.fmt.allocPrint(allocator, "{s}\n", .{tag});
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+        }
+        
+        return;
+    }
+
+    // Get current HEAD commit
+    const head_hash = refs.getCurrentCommit(git_path, platform_impl, allocator) catch {
+        try platform_impl.writeStderr("fatal: no commits yet\n");
+        std.process.exit(128);
+    };
+    defer if (head_hash) |hash| allocator.free(hash);
+    
+    if (head_hash == null) {
+        try platform_impl.writeStderr("fatal: no commits yet\n");
+        std.process.exit(128);
+    }
+
+    // Create tags directory if it doesn't exist
+    const tags_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags", .{git_path});
+    defer allocator.free(tags_path);
+    
+    platform_impl.fs.makeDir(tags_path) catch |err| switch (err) {
+        error.AlreadyExists => {},
+        else => return err,
+    };
+
+    if (annotated) {
+        // For now, just create a lightweight tag and ignore the annotation
+        // A full implementation would create a proper tag object
+        if (message == null) {
+            try platform_impl.writeStderr("error: annotated tag requires a message (use -m)\n");
+            std.process.exit(1);
+        }
+        
+        // Create lightweight tag (direct reference to commit)
+        const tag_ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{tags_path, tag_name.?});
+        defer allocator.free(tag_ref_path);
+        
+        const ref_content = try std.fmt.allocPrint(allocator, "{s}\n", .{head_hash.?});
+        defer allocator.free(ref_content);
+        
+        try platform_impl.fs.writeFile(tag_ref_path, ref_content);
+    } else {
+        // Create lightweight tag (direct reference to commit)
+        const tag_ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{tags_path, tag_name.?});
+        defer allocator.free(tag_ref_path);
+        
+        const ref_content = try std.fmt.allocPrint(allocator, "{s}\n", .{head_hash.?});
+        defer allocator.free(ref_content);
+        
+        try platform_impl.fs.writeFile(tag_ref_path, ref_content);
     }
 }
