@@ -8320,6 +8320,421 @@ else
 fi
 
 echo ""
+echo "=== Advanced cross-validation: clone, fetch, checkout ==="
+
+# --- Test 500: ziggit init + commit -> git clone -> files present ---
+echo "Test 500: ziggit init + commit -> git clone -> files present"
+d=$(new_repo "t500")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "readme content" > "$d/README.md"
+echo '{"name":"test","version":"1.0.0"}' > "$d/package.json"
+(cd "$d" && "$ZIGGIT" add README.md && "$ZIGGIT" add package.json) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "initial") >/dev/null 2>&1
+clone_d="$TMPBASE/t500_clone"
+git clone "$d" "$clone_d" 2>/dev/null
+if [ -f "$clone_d/README.md" ] && [ -f "$clone_d/package.json" ]; then
+    pass "git clone from ziggit repo has all files"
+else
+    fail "git clone files" "missing files in clone"
+fi
+readme_content=$(cat "$clone_d/README.md")
+if [ "$readme_content" = "readme content" ]; then
+    pass "git clone preserves file content"
+else
+    fail "clone content" "expected 'readme content', got: $readme_content"
+fi
+
+# --- Test 501: ziggit multiple commits -> git clone -> full history ---
+echo "Test 501: ziggit multiple commits -> git clone -> full history"
+d=$(new_repo "t501")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+for i in 1 2 3 4 5; do
+    echo "content $i" > "$d/file.txt"
+    (cd "$d" && "$ZIGGIT" add file.txt) >/dev/null 2>&1
+    (cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+        GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+        "$ZIGGIT" commit -m "commit $i") >/dev/null 2>&1
+done
+clone_d="$TMPBASE/t501_clone"
+git clone "$d" "$clone_d" 2>/dev/null
+commit_count=$(cd "$clone_d" && git rev-list --count HEAD 2>&1)
+if [ "$commit_count" = "5" ]; then
+    pass "git clone from ziggit has full 5-commit history"
+else
+    fail "clone history count" "expected 5, got: $commit_count"
+fi
+
+# --- Test 502: ziggit tags survive git clone ---
+echo "Test 502: ziggit tags survive git clone"
+d=$(new_repo "t502")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "v1" > "$d/file.txt"
+(cd "$d" && "$ZIGGIT" add file.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "release v1") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+echo "v2" > "$d/file.txt"
+(cd "$d" && "$ZIGGIT" add file.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "release v2") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v2.0.0) >/dev/null 2>&1
+clone_d="$TMPBASE/t502_clone"
+git clone "$d" "$clone_d" 2>/dev/null
+tags=$(cd "$clone_d" && git tag -l 2>&1 | sort)
+if echo "$tags" | grep -q "v1.0.0" && echo "$tags" | grep -q "v2.0.0"; then
+    pass "tags survive git clone from ziggit repo"
+else
+    fail "clone tags" "tags: $tags"
+fi
+
+# --- Test 503: empty file commit -> git reads ---
+echo "Test 503: empty file commit -> git reads"
+d=$(new_repo "t503")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+touch "$d/empty.txt"
+(cd "$d" && "$ZIGGIT" add empty.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "empty file") >/dev/null 2>&1
+blob_size=$(cd "$d" && git cat-file -s HEAD:empty.txt 2>&1)
+if [ "$blob_size" = "0" ]; then
+    pass "empty file: git cat-file -s shows 0 bytes"
+else
+    fail "empty file size" "expected 0, got: $blob_size"
+fi
+
+# --- Test 504: ziggit commit -> git log --format=%H matches rev-parse ---
+echo "Test 504: ziggit commit -> git log --format=%H matches rev-parse"
+d=$(new_repo "t504")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "data" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "test") >/dev/null 2>&1
+log_hash=$(cd "$d" && git log --format=%H -1 2>&1 | tr -d '[:space:]')
+rp_hash=$(cd "$d" && git rev-parse HEAD 2>&1 | tr -d '[:space:]')
+if [ "$log_hash" = "$rp_hash" ] && [ ${#log_hash} -eq 40 ]; then
+    pass "git log hash matches git rev-parse HEAD"
+else
+    fail "hash match" "log=$log_hash rev-parse=$rp_hash"
+fi
+
+# --- Test 505: ziggit commit -> git show --stat shows file ---
+echo "Test 505: ziggit commit -> git show --stat shows file"
+d=$(new_repo "t505")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "hello" > "$d/main.js"
+echo "world" > "$d/util.js"
+(cd "$d" && "$ZIGGIT" add main.js && "$ZIGGIT" add util.js) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "two files") >/dev/null 2>&1
+show_stat=$(cd "$d" && git show --stat HEAD 2>&1)
+if echo "$show_stat" | grep -q "main.js" && echo "$show_stat" | grep -q "util.js"; then
+    pass "git show --stat lists both committed files"
+else
+    fail "show stat" "output: $show_stat"
+fi
+
+# --- Test 506: ziggit commit -> git ls-tree -r shows files in subdirectory ---
+echo "Test 506: ziggit commit -> git ls-tree -r shows subdirectory files"
+d=$(new_repo "t506")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+mkdir -p "$d/src"
+echo "fn main(){}" > "$d/src/main.zig"
+echo "pub fn add(){}" > "$d/src/lib.zig"
+(cd "$d" && "$ZIGGIT" add src/main.zig && "$ZIGGIT" add src/lib.zig) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "zig src") >/dev/null 2>&1
+tree_out=$(cd "$d" && git ls-tree -r HEAD 2>&1)
+if echo "$tree_out" | grep -q "src/main.zig" && echo "$tree_out" | grep -q "src/lib.zig"; then
+    pass "git ls-tree -r shows files in subdirectory"
+else
+    fail "ls-tree subdir" "output: $tree_out"
+fi
+
+# --- Test 507: ziggit commit with long message -> git log preserves it ---
+echo "Test 507: ziggit long commit message -> git log preserves it"
+d=$(new_repo "t507")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "x" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+long_msg="This is a very long commit message that spans several sentences. It describes a complex change across multiple components. The refactoring touched the parser, the AST builder, and the code generator."
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "$long_msg") >/dev/null 2>&1
+got_msg=$(cd "$d" && git log --format=%B -1 2>&1 | head -1)
+if [ "$got_msg" = "$long_msg" ]; then
+    pass "long commit message preserved by git log"
+else
+    fail "long msg" "got: $got_msg"
+fi
+
+# --- Test 508: ziggit -> git describe --tags --long format ---
+echo "Test 508: ziggit -> git describe --tags --long"
+d=$(new_repo "t508")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "a" > "$d/a.txt"
+(cd "$d" && "$ZIGGIT" add a.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "first") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v0.1.0) >/dev/null 2>&1
+echo "b" > "$d/b.txt"
+(cd "$d" && "$ZIGGIT" add b.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "second") >/dev/null 2>&1
+describe=$(cd "$d" && git describe --tags --long 2>&1)
+if echo "$describe" | grep -qE "^v0\.1\.0-1-g[0-9a-f]{7}$"; then
+    pass "git describe --tags --long shows v0.1.0-1-g<hash>"
+else
+    fail "describe long" "got: $describe"
+fi
+
+# --- Test 509: ziggit commit with tab and newline in filename ---
+echo "Test 509: ziggit file with special chars"
+d=$(new_repo "t509")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "data" > "$d/file with spaces.txt"
+(cd "$d" && "$ZIGGIT" add "file with spaces.txt") >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "special") >/dev/null 2>&1
+git_content=$(cd "$d" && git show "HEAD:file with spaces.txt" 2>&1)
+if [ "$git_content" = "data" ]; then
+    pass "file with spaces: git reads content correctly"
+else
+    fail "spaces file" "got: $git_content"
+fi
+
+# --- Test 510: git init+commit+tag -> ziggit status -> ziggit describe ---
+echo "Test 510: git writes -> ziggit reads describe"
+d=$(new_repo "t510")
+(cd "$d" && git init && git config user.email "t@t" && git config user.name "T") >/dev/null 2>&1
+echo "data" > "$d/f.txt"
+(cd "$d" && git add f.txt && git commit -m "init") >/dev/null 2>&1
+(cd "$d" && git tag v3.0.0) >/dev/null 2>&1
+ziggit_desc=$(cd "$d" && "$ZIGGIT" describe --tags 2>&1) || true
+if echo "$ziggit_desc" | grep -q "v3.0.0"; then
+    pass "ziggit describe --tags finds git-created tag"
+else
+    fail "ziggit describe" "got: $ziggit_desc"
+fi
+
+# --- Test 511: git 5 commits -> ziggit rev-parse HEAD matches ---
+echo "Test 511: git 5 commits -> ziggit rev-parse HEAD"
+d=$(new_repo "t511")
+(cd "$d" && git init && git config user.email "t@t" && git config user.name "T") >/dev/null 2>&1
+for i in 1 2 3 4 5; do
+    echo "$i" > "$d/f.txt"
+    (cd "$d" && git add f.txt && git commit -m "c$i") >/dev/null 2>&1
+done
+git_head=$(cd "$d" && git rev-parse HEAD 2>&1 | tr -d '[:space:]')
+ziggit_head=$(cd "$d" && "$ZIGGIT" rev-parse HEAD 2>&1 | tr -d '[:space:]')
+if [ "$git_head" = "$ziggit_head" ]; then
+    pass "ziggit rev-parse HEAD matches git after 5 commits"
+else
+    fail "rev-parse match" "git=$git_head ziggit=$ziggit_head"
+fi
+
+# --- Test 512: git merge -> ziggit reads merge commit ---
+echo "Test 512: git merge -> ziggit rev-parse HEAD"
+d=$(new_repo "t512")
+(cd "$d" && git init && git config user.email "t@t" && git config user.name "T") >/dev/null 2>&1
+echo "base" > "$d/f.txt"
+(cd "$d" && git add f.txt && git commit -m "base") >/dev/null 2>&1
+(cd "$d" && git checkout -b feature) >/dev/null 2>&1
+echo "feature" > "$d/g.txt"
+(cd "$d" && git add g.txt && git commit -m "feature") >/dev/null 2>&1
+(cd "$d" && git checkout master) >/dev/null 2>&1
+echo "master" > "$d/h.txt"
+(cd "$d" && git add h.txt && git commit -m "master work") >/dev/null 2>&1
+(cd "$d" && git merge feature -m "merge feature" --no-edit) >/dev/null 2>&1
+git_head=$(cd "$d" && git rev-parse HEAD 2>&1 | tr -d '[:space:]')
+ziggit_head=$(cd "$d" && "$ZIGGIT" rev-parse HEAD 2>&1 | tr -d '[:space:]')
+if [ "$git_head" = "$ziggit_head" ]; then
+    pass "ziggit reads merge commit HEAD correctly"
+else
+    fail "merge HEAD" "git=$git_head ziggit=$ziggit_head"
+fi
+
+# --- Test 513: ziggit commit -> git cherry-pick into new branch ---
+echo "Test 513: ziggit commit -> git cherry-pick"
+d=$(new_repo "t513")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "base" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "base commit") >/dev/null 2>&1
+(cd "$d" && git config user.email "t@t" && git config user.name "T") >/dev/null 2>&1
+(cd "$d" && git checkout -b other) >/dev/null 2>&1
+echo "other" > "$d/g.txt"
+(cd "$d" && git add g.txt && git commit -m "other branch") >/dev/null 2>&1
+(cd "$d" && git checkout master) >/dev/null 2>&1
+echo "new" > "$d/new.txt"
+(cd "$d" && "$ZIGGIT" add new.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "to cherry-pick") >/dev/null 2>&1
+pick_hash=$(cd "$d" && git rev-parse HEAD 2>&1 | tr -d '[:space:]')
+(cd "$d" && git checkout other && git cherry-pick "$pick_hash") >/dev/null 2>&1
+cherry_content=$(cd "$d" && cat new.txt)
+if [ "$cherry_content" = "new" ]; then
+    pass "git cherry-pick from ziggit commit works"
+else
+    fail "cherry-pick" "content: $cherry_content"
+fi
+
+# --- Test 514: large number of subdirectories -> git ls-tree -r matches count ---
+echo "Test 514: 20 subdirs with 3 files each -> git ls-tree -r"
+d=$(new_repo "t514")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+for i in $(seq 1 20); do
+    dir="$d/dir_$(printf '%02d' $i)"
+    mkdir -p "$dir"
+    for j in 1 2 3; do
+        echo "file $i-$j" > "$dir/f$j.txt"
+        (cd "$d" && "$ZIGGIT" add "dir_$(printf '%02d' $i)/f$j.txt") >/dev/null 2>&1
+    done
+done
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "many dirs") >/dev/null 2>&1
+file_count=$(cd "$d" && git ls-tree -r HEAD 2>&1 | wc -l | tr -d '[:space:]')
+if [ "$file_count" = "60" ]; then
+    pass "git ls-tree -r counts 60 files across 20 subdirs"
+else
+    fail "file count" "expected 60, got: $file_count"
+fi
+
+# --- Test 515: ziggit commit -> git archive produces tarball ---
+echo "Test 515: ziggit commit -> git archive"
+d=$(new_repo "t515")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "archive me" > "$d/a.txt"
+(cd "$d" && "$ZIGGIT" add a.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "archivable") >/dev/null 2>&1
+archive_out="$TMPBASE/t515.tar"
+(cd "$d" && git archive --format=tar HEAD -o "$archive_out") 2>/dev/null
+if [ -f "$archive_out" ]; then
+    extracted=$(tar -xf "$archive_out" -O a.txt 2>&1)
+    if [ "$extracted" = "archive me" ]; then
+        pass "git archive from ziggit repo extracts correct content"
+    else
+        fail "archive content" "got: $extracted"
+    fi
+else
+    fail "archive" "tar file not created"
+fi
+
+# --- Test 516: ziggit status on clean repo matches git status ---
+echo "Test 516: ziggit status --porcelain matches git on clean repo"
+d=$(new_repo "t516")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "data" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "clean") >/dev/null 2>&1
+git_status=$(cd "$d" && git status --porcelain 2>&1)
+ziggit_status=$(cd "$d" && "$ZIGGIT" status --porcelain 2>&1)
+if [ -z "$git_status" ] && [ -z "$ziggit_status" ]; then
+    pass "both git and ziggit show clean status"
+elif [ "$git_status" = "$ziggit_status" ]; then
+    pass "git and ziggit status --porcelain match"
+else
+    fail "status match" "git='$git_status' ziggit='$ziggit_status'"
+fi
+
+# --- Test 517: git rebase scenario -> ziggit reads result ---
+echo "Test 517: git rebase -> ziggit rev-parse HEAD"
+d=$(new_repo "t517")
+(cd "$d" && git init && git config user.email "t@t" && git config user.name "T") >/dev/null 2>&1
+echo "a" > "$d/a.txt"
+(cd "$d" && git add a.txt && git commit -m "a") >/dev/null 2>&1
+(cd "$d" && git checkout -b feat) >/dev/null 2>&1
+echo "b" > "$d/b.txt"
+(cd "$d" && git add b.txt && git commit -m "b") >/dev/null 2>&1
+(cd "$d" && git checkout master) >/dev/null 2>&1
+echo "c" > "$d/c.txt"
+(cd "$d" && git add c.txt && git commit -m "c") >/dev/null 2>&1
+(cd "$d" && git checkout feat && git rebase master) >/dev/null 2>&1
+git_head=$(cd "$d" && git rev-parse HEAD 2>&1 | tr -d '[:space:]')
+ziggit_head=$(cd "$d" && "$ZIGGIT" rev-parse HEAD 2>&1 | tr -d '[:space:]')
+if [ "$git_head" = "$ziggit_head" ]; then
+    pass "ziggit reads HEAD correctly after git rebase"
+else
+    fail "rebase HEAD" "git=$git_head ziggit=$ziggit_head"
+fi
+
+# --- Test 518: ziggit commit -> git format-patch produces valid patch ---
+echo "Test 518: ziggit commit -> git format-patch"
+d=$(new_repo "t518")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "initial" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "first") >/dev/null 2>&1
+echo "updated" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "update f") >/dev/null 2>&1
+patch_file=$(cd "$d" && git format-patch -1 HEAD --stdout 2>&1)
+if echo "$patch_file" | grep -q "update f" && echo "$patch_file" | grep -q "updated"; then
+    pass "git format-patch from ziggit commits produces valid patch"
+else
+    fail "format-patch" "patch output doesn't contain expected content"
+fi
+
+# --- Test 519: ziggit commit -> git gc -> objects still valid ---
+echo "Test 519: ziggit commit -> git gc -> git fsck"
+d=$(new_repo "t519")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+for i in 1 2 3; do
+    echo "data $i" > "$d/f$i.txt"
+    (cd "$d" && "$ZIGGIT" add "f$i.txt") >/dev/null 2>&1
+    (cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+        GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+        "$ZIGGIT" commit -m "commit $i") >/dev/null 2>&1
+done
+(cd "$d" && git gc --aggressive) >/dev/null 2>&1
+fsck=$(cd "$d" && git fsck 2>&1) || true
+if ! echo "$fsck" | grep -q "^error"; then
+    pass "git fsck passes after git gc on ziggit repo"
+else
+    fail "gc fsck" "errors: $fsck"
+fi
+
+# --- Test 520: ziggit commit -> git blame works ---
+echo "Test 520: ziggit commit -> git blame"
+d=$(new_repo "t520")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+printf "line1\nline2\nline3\n" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Test" GIT_AUTHOR_EMAIL="test@test.com" \
+    GIT_COMMITTER_NAME="Test" GIT_COMMITTER_EMAIL="test@test.com" \
+    "$ZIGGIT" commit -m "blameable") >/dev/null 2>&1
+blame=$(cd "$d" && git blame f.txt 2>&1)
+blame_lines=$(echo "$blame" | wc -l | tr -d '[:space:]')
+if [ "$blame_lines" = "3" ]; then
+    pass "git blame shows 3 lines for ziggit commit"
+else
+    fail "blame" "expected 3 lines, got: $blame_lines"
+fi
+
+echo ""
 echo "========================================"
 echo "Results: $PASS passed, $FAIL failed"
 echo "========================================"
