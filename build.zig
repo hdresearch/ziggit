@@ -582,6 +582,17 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(pack_git_crossvalidation_tests).step);
 
+    // Pack format correctness tests (byte-exact pack construction, all object types, delta, idx generation)
+    const pack_format_correctness_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_format_correctness_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_format_correctness_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+    test_step.dependOn(&b.addRunArtifact(pack_format_correctness_tests).step);
+
     // Pack internals ground-truth tests (readPackObjectAtOffset, applyDelta, generatePackIndex, git cross-validation)
     const pack_internals_groundtruth_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_internals_groundtruth_test.zig"),
