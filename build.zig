@@ -80,6 +80,15 @@ pub fn build(b: *std.Build) void {
     });
     const run_git_interop_test = b.addRunArtifact(git_interop_test);
 
+    // Improved git interop test
+    const improved_git_interop_test = b.addExecutable(.{
+        .name = "improved_git_interop_test", 
+        .root_source_file = b.path("test/improved_git_interop_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_improved_git_interop_test = b.addRunArtifact(improved_git_interop_test);
+
     // Platform unit tests
     const platform_tests = b.addTest(.{
         .root_source_file = b.path("src/platform/platform.zig"),
@@ -165,6 +174,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_core_test.step);
     test_step.dependOn(&run_integration_test.step);
     test_step.dependOn(&run_git_interop_test.step);
+    test_step.dependOn(&run_improved_git_interop_test.step);
     test_step.dependOn(&run_broken_pipe_test.step);
     test_step.dependOn(&run_core_interop_test.step);
     test_step.dependOn(&run_pack_comprehensive_test.step);

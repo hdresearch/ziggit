@@ -1348,13 +1348,22 @@ fn testCompleteGitZiggitWorkflow(allocator: std.mem.Allocator, test_dir: fs.Dir)
         defer test_dir.deleteTree("workflow_git_first") catch {};
         
         // Git: init, config, add, commit  
-        _ = try runCommand(allocator, &.{"git", "init"}, repo_dir);
+        {
+            const init_result = try runCommand(allocator, &.{"git", "init"}, repo_dir);
+            allocator.free(init_result);
+        }
         try runCommandNoOutput(allocator, &.{"git", "config", "user.name", "Test User"}, repo_dir);
         try runCommandNoOutput(allocator, &.{"git", "config", "user.email", "test@example.com"}, repo_dir);
         
         try repo_dir.writeFile(.{.sub_path = "file1.txt", .data = "Initial content\n"});
-        _ = try runCommand(allocator, &.{"git", "add", "file1.txt"}, repo_dir);
-        _ = try runCommand(allocator, &.{"git", "commit", "-m", "Initial commit"}, repo_dir);
+        {
+            const add_result = try runCommand(allocator, &.{"git", "add", "file1.txt"}, repo_dir);
+            allocator.free(add_result);
+        }
+        {
+            const commit_result = try runCommand(allocator, &.{"git", "commit", "-m", "Initial commit"}, repo_dir);
+            allocator.free(commit_result);
+        }
         
         // Ziggit: verify it can read the repo correctly
         const ziggit_status = try runZiggitCommand(allocator, &.{"status", "--porcelain"}, repo_dir);
