@@ -1096,8 +1096,8 @@ pub fn validateRefName(ref_name: []const u8) !void {
     // Check for invalid characters
     for (ref_name) |c| {
         switch (c) {
-            ' ', '\t', '\n', '\r', '\\', '^', '~', ':', '?', '*', '[' => return error.InvalidRefName,
-            0...31, 127 => return error.InvalidRefName, // Control characters
+            ' ', '\\', '^', '~', ':', '?', '*', '[' => return error.InvalidRefName,
+            0...31, 127 => return error.InvalidRefName, // Control characters (includes \t, \n, \r)
             else => {},
         }
     }
