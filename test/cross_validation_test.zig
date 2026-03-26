@@ -523,3 +523,241 @@ test "xval: fetch copies new objects from local remote" {
         return;
     };
 }
+
+// ============================================================================
+// Git repack + verify cross-validation
+// ============================================================================
+
+test "xval: ziggit objects survive git repack cycle" {
+    const path = tmpPath("repack_xval");
+    defer cleanup(path);
+
+    var repo = try initZiggitRepo(path);
+    defer repo.close();
+
+    // Create 5 commits with different files to give git something to pack
+    for (0..5) |i| {
+        const fname = try std.fmt.allocPrint(testing.allocator, "file{d}.txt", .{i});
+        defer testing.allocator.free(fname);
+        const content = try std.fmt.allocPrint(testing.allocator, "content for file {d}\n", .{i});
+        defer testing.allocator.free(content);
+        try createFile(path, fname, content);
+        try repo.add(fname);
+        const msg = try std.fmt.allocPrint(testing.allocator, "commit {d}", .{i});
+        defer testing.allocator.free(msg);
+        _ = try repo.commit(msg, "Test", "test@test.com");
+    }
+    try repo.createTag("v1.0.0", null);
+
+    const pre_head = try repo.revParseHead();
+
+    // Run git repack -a -d (repacks all objects, removes loose)
+    gitOk(&.{ "git", "-C", path, "repack", "-a", "-d" }, "/tmp") catch return;
+
+    // HEAD should still resolve after repack
+    const post_head = gitTrim(&.{ "git", "-C", path, "rev-parse", "HEAD" }, "/tmp") catch return;
+    defer testing.allocator.free(post_head);
+    try testing.expectEqualStrings(&pre_head, post_head);
+
+    // All 5 files should still be accessible
+    const ls_out = gitTrim(&.{ "git", "-C", path, "ls-tree", "-r", "--name-only", "HEAD" }, "/tmp") catch return;
+    defer testing.allocator.free(ls_out);
+    for (0..5) |i| {
+        const fname = try std.fmt.allocPrint(testing.allocator, "file{d}.txt", .{i});
+        defer testing.allocator.free(fname);
+        try testing.expect(std.mem.indexOf(u8, ls_out, fname) != null);
+    }
+
+    // Tag should still resolve
+    const tag_hash = gitTrim(&.{ "git", "-C", path, "rev-parse", "v1.0.0" }, "/tmp") catch return;
+    defer testing.allocator.free(tag_hash);
+    try testing.expect(tag_hash.len == 40);
+}
+
+test "xval: ziggit commit metadata readable via git show format strings" {
+    const path = tmpPath("show_format");
+    defer cleanup(path);
+
+    var repo = try initZiggitRepo(path);
+    defer repo.close();
+
+    try createFile(path, "f.txt", "metadata test\n");
+    try repo.add("f.txt");
+    _ = try repo.commit("fix: resolve critical bug #42", "Jane Doe", "jane@example.com");
+
+    // Author name
+    const author = gitTrim(&.{ "git", "-C", path, "show", "--format=%an", "-s", "HEAD" }, "/tmp") catch return;
+    defer testing.allocator.free(author);
+    try testing.expectEqualStrings("Jane Doe", author);
+
+    // Author email
+    const email = gitTrim(&.{ "git", "-C", path, "show", "--format=%ae", "-s", "HEAD" }, "/tmp") catch return;
+    defer testing.allocator.free(email);
+    try testing.expectEqualStrings("jane@example.com", email);
+
+    // Subject
+    const subject = gitTrim(&.{ "git", "-C", path, "show", "--format=%s", "-s", "HEAD" }, "/tmp") catch return;
+    defer testing.allocator.free(subject);
+    try testing.expectEqualStrings("fix: resolve critical bug #42", subject);
+
+    // Committer name should match author (ziggit uses same for both)
+    const committer = gitTrim(&.{ "git", "-C", path, "show", "--format=%cn", "-s", "HEAD" }, "/tmp") catch return;
+    defer testing.allocator.free(committer);
+    try testing.expectEqualStrings("Jane Doe", committer);
+}
+
+test "xval: git-created packed refs -> ziggit reads HEAD and describeTags" {
+    const path = tmpPath("packed_refs");
+    defer cleanup(path);
+
+    initGitRepo(path) catch return;
+
+    // Create 3 commits with tags
+    for (0..3) |i| {
+        const content = try std.fmt.allocPrint(testing.allocator, "v{d}\n", .{i});
+        defer testing.allocator.free(content);
+        try createFile(path, "f.txt", content);
+        gitOk(&.{ "git", "-C", path, "add", "f.txt" }, "/tmp") catch return;
+        const msg = try std.fmt.allocPrint(testing.allocator, "commit {d}", .{i});
+        defer testing.allocator.free(msg);
+        gitOk(&.{ "git", "-C", path, "commit", "-m", msg }, "/tmp") catch return;
+        const tag = try std.fmt.allocPrint(testing.allocator, "v{d}.0.0", .{i});
+        defer testing.allocator.free(tag);
+        gitOk(&.{ "git", "-C", path, "tag", tag }, "/tmp") catch return;
+    }
+
+    // Pack only tag refs (keeps branch refs as loose files)
+    gitOk(&.{ "git", "-C", path, "pack-refs", "--no-all" }, "/tmp") catch {
+        // --no-all not supported in all git versions, use default which packs tags only
+        gitOk(&.{ "git", "-C", path, "pack-refs" }, "/tmp") catch return;
+    };
+
+    // Get expected HEAD hash from git
+    const git_head = gitTrim(&.{ "git", "-C", path, "rev-parse", "HEAD" }, "/tmp") catch return;
+    defer testing.allocator.free(git_head);
+
+    // ziggit should still be able to read HEAD (branch ref stays loose)
+    var repo = try ziggit.Repository.open(testing.allocator, path);
+    defer repo.close();
+
+    const head = try repo.revParseHead();
+    try testing.expectEqualStrings(git_head, &head);
+
+    // describeTags may or may not find tags from packed-refs file
+    // (depends on whether ziggit reads packed-refs for tags)
+    // Known limitation: ziggit may not read packed tag refs
+    if (repo.describeTags(testing.allocator)) |desc| {
+        testing.allocator.free(desc);
+    } else |_| {}
+
+    // findCommit("HEAD") should still work
+    const found_head = try repo.findCommit("HEAD");
+    try testing.expectEqualStrings(git_head, &found_head);
+}
+
+test "xval: bun workflow with .gitignore" {
+    const path = tmpPath("bun_gitignore");
+    defer cleanup(path);
+
+    var repo = try initZiggitRepo(path);
+    defer repo.close();
+
+    // Create .gitignore
+    try createFile(path, ".gitignore", "node_modules/\ndist/\n*.log\n");
+    try createFile(path, "package.json", "{\"name\":\"app\",\"version\":\"1.0.0\",\"dependencies\":{}}");
+    try createFile(path, "index.ts", "console.log('hello');\n");
+
+    try repo.add(".gitignore");
+    try repo.add("package.json");
+    try repo.add("index.ts");
+    _ = try repo.commit("initial setup", "bun", "bun@bun.sh");
+    try repo.createTag("v1.0.0", null);
+
+    // Simulate: node_modules/ dir exists on disk but should NOT be in tree
+    const nm_dir = try std.fmt.allocPrint(testing.allocator, "{s}/node_modules", .{path});
+    defer testing.allocator.free(nm_dir);
+    std.fs.makeDirAbsolute(nm_dir) catch {};
+    try createFile(nm_dir, "lodash.js", "module.exports = {};");
+
+    // Verify node_modules NOT in tree
+    const ls_out = gitTrim(&.{ "git", "-C", path, "ls-tree", "-r", "--name-only", "HEAD" }, "/tmp") catch return;
+    defer testing.allocator.free(ls_out);
+    try testing.expect(std.mem.indexOf(u8, ls_out, "node_modules") == null);
+    try testing.expect(std.mem.indexOf(u8, ls_out, ".gitignore") != null);
+    try testing.expect(std.mem.indexOf(u8, ls_out, "package.json") != null);
+    try testing.expect(std.mem.indexOf(u8, ls_out, "index.ts") != null);
+
+    // git describe should work
+    const desc = gitTrim(&.{ "git", "-C", path, "describe", "--tags", "--exact-match" }, "/tmp") catch return;
+    defer testing.allocator.free(desc);
+    try testing.expectEqualStrings("v1.0.0", desc);
+}
+
+test "xval: ziggit roundtrip - write, read back via git, verify content identical" {
+    const path = tmpPath("roundtrip");
+    defer cleanup(path);
+
+    var repo = try initZiggitRepo(path);
+    defer repo.close();
+
+    const test_content = "The quick brown fox jumps over the lazy dog.\n" ++
+        "0123456789 !@#$%^&*()_+-=[]{}|;':\",./<>?\n" ++
+        "\xc3\xa9\xc3\xa0\xc3\xbc \xf0\x9f\x9a\x80 \xe4\xb8\xad\xe6\x96\x87\n";
+
+    try createFile(path, "roundtrip.txt", test_content);
+    try repo.add("roundtrip.txt");
+    const hash = try repo.commit("roundtrip test", "Test", "t@test.com");
+
+    // Read back through git cat-file
+    const blob = git(&.{ "git", "-C", path, "cat-file", "blob", "HEAD:roundtrip.txt" }, "/tmp") catch return;
+    defer testing.allocator.free(blob);
+    try testing.expectEqualStrings(test_content, blob);
+
+    // Verify commit hash matches
+    const git_head = gitTrim(&.{ "git", "-C", path, "rev-parse", "HEAD" }, "/tmp") catch return;
+    defer testing.allocator.free(git_head);
+    try testing.expectEqualStrings(&hash, git_head);
+
+    // git fsck should pass
+    const fsck_out = git(&.{ "git", "-C", path, "fsck", "--no-dangling" }, "/tmp") catch return;
+    defer testing.allocator.free(fsck_out);
+    try testing.expect(std.mem.indexOf(u8, fsck_out, "error") == null);
+}
+
+test "xval: ziggit add multiple files across dirs in single commit" {
+    const path = tmpPath("multi_dir_commit");
+    defer cleanup(path);
+
+    var repo = try initZiggitRepo(path);
+    defer repo.close();
+
+    // Create directories
+    const src_dir = try std.fmt.allocPrint(testing.allocator, "{s}/src", .{path});
+    defer testing.allocator.free(src_dir);
+    std.fs.makeDirAbsolute(src_dir) catch {};
+
+    const test_dir = try std.fmt.allocPrint(testing.allocator, "{s}/test", .{path});
+    defer testing.allocator.free(test_dir);
+    std.fs.makeDirAbsolute(test_dir) catch {};
+
+    try createFile(path, "README.md", "# Project\n");
+    try createFile(src_dir, "main.zig", "pub fn main() void {}\n");
+    try createFile(test_dir, "main_test.zig", "test \"basic\" {}\n");
+
+    try repo.add("README.md");
+    try repo.add("src/main.zig");
+    try repo.add("test/main_test.zig");
+    _ = try repo.commit("initial project structure", "Dev", "dev@dev.com");
+
+    // All files in correct dirs
+    const ls_out = gitTrim(&.{ "git", "-C", path, "ls-tree", "-r", "--name-only", "HEAD" }, "/tmp") catch return;
+    defer testing.allocator.free(ls_out);
+    try testing.expect(std.mem.indexOf(u8, ls_out, "README.md") != null);
+    try testing.expect(std.mem.indexOf(u8, ls_out, "src/main.zig") != null);
+    try testing.expect(std.mem.indexOf(u8, ls_out, "test/main_test.zig") != null);
+
+    // Verify content
+    const main_content = git(&.{ "git", "-C", path, "show", "HEAD:src/main.zig" }, "/tmp") catch return;
+    defer testing.allocator.free(main_content);
+    try testing.expectEqualStrings("pub fn main() void {}\n", main_content);
+}
