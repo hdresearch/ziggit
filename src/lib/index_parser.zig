@@ -88,7 +88,78 @@ pub const GitIndex = struct {
         }
         return null;
     }
+    
+    pub fn writeToFile(self: *const GitIndex, index_path: []const u8) !void {
+        const file = try std.fs.createFileAbsolute(index_path, .{ .truncate = true });
+        defer file.close();
+        
+        try file.writeAll("DIRC");
+        const version: u32 = 2;
+        const version_bytes = [_]u8{
+            @intCast((version >> 24) & 0xFF),
+            @intCast((version >> 16) & 0xFF),
+            @intCast((version >> 8) & 0xFF),
+            @intCast(version & 0xFF),
+        };
+        try file.writeAll(&version_bytes);
+        
+        const entry_count: u32 = @intCast(self.entries.items.len);
+        const count_bytes = [_]u8{
+            @intCast((entry_count >> 24) & 0xFF),
+            @intCast((entry_count >> 16) & 0xFF),
+            @intCast((entry_count >> 8) & 0xFF),
+            @intCast(entry_count & 0xFF),
+        };
+        try file.writeAll(&count_bytes);
+        
+        for (self.entries.items) |entry| {
+            try writeIndexEntry(file, entry);
+        }
+        
+        const dummy_hash = [_]u8{0} ** 20;
+        try file.writeAll(&dummy_hash);
+    }
 };
+
+fn writeIndexEntry(file: std.fs.File, entry: IndexEntry) !void {
+    try writeU32BigEndian(file, entry.ctime_seconds);
+    try writeU32BigEndian(file, entry.ctime_nanoseconds);
+    try writeU32BigEndian(file, entry.mtime_seconds);
+    try writeU32BigEndian(file, entry.mtime_nanoseconds);
+    try writeU32BigEndian(file, entry.dev);
+    try writeU32BigEndian(file, entry.ino);
+    try writeU32BigEndian(file, entry.mode);
+    try writeU32BigEndian(file, entry.uid);
+    try writeU32BigEndian(file, entry.gid);
+    try writeU32BigEndian(file, entry.size);
+    try file.writeAll(&entry.sha1);
+    try writeU16BigEndian(file, entry.flags);
+    try file.writeAll(entry.path);
+    const entry_size = 62 + entry.path.len;
+    const padding_needed = (8 - (entry_size % 8)) % 8;
+    if (padding_needed > 0) {
+        const padding = [_]u8{0} ** 8;
+        try file.writeAll(padding[0..padding_needed]);
+    }
+}
+
+fn writeU32BigEndian(file: std.fs.File, value: u32) !void {
+    const bytes = [_]u8{
+        @intCast((value >> 24) & 0xFF),
+        @intCast((value >> 16) & 0xFF),
+        @intCast((value >> 8) & 0xFF),
+        @intCast(value & 0xFF),
+    };
+    try file.writeAll(&bytes);
+}
+
+fn writeU16BigEndian(file: std.fs.File, value: u16) !void {
+    const bytes = [_]u8{
+        @intCast((value >> 8) & 0xFF),
+        @intCast(value & 0xFF),
+    };
+    try file.writeAll(&bytes);
+}
 
 fn parseIndexEntry(allocator: std.mem.Allocator, data: []const u8, pos: *usize) !IndexEntry {
     if (data.len < pos.* + 62) return error.InvalidIndexEntry;

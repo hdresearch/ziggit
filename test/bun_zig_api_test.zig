@@ -111,7 +111,7 @@ test "bun workflow - git CLI verification" {
     defer allocator.free(result.stderr);
     
     if (result.term.Exited != 0) {
-        std.debug.print("Git CLI not working, skipping verification\n");
+        std.debug.print("Git CLI not working, skipping verification\n", .{});
         std.fs.deleteDirAbsolute(test_dir) catch {};
         return;
     }
@@ -120,7 +120,7 @@ test "bun workflow - git CLI verification" {
         .allocator = allocator,
         .argv = &.{ "git", "-C", test_dir, "log", "--oneline" },
     }) catch {
-        std.debug.print("Failed to run git log, but continuing...\n");
+        std.debug.print("Failed to run git log, but continuing...\n", .{});
         std.fs.deleteDirAbsolute(test_dir) catch {};
         return;
     };
@@ -132,7 +132,7 @@ test "bun workflow - git CLI verification" {
         const log_contains_hash = std.mem.indexOf(u8, log_result.stdout, commit_short) != null;
         
         if (log_contains_hash) {
-            std.debug.print("✅ Git CLI can read ziggit-created commit!\n");
+            std.debug.print("✅ Git CLI can read ziggit-created commit!\n", .{});
         } else {
             std.debug.print("⚠️  Git log output: {s}\n", .{log_result.stdout});
             std.debug.print("Expected to find: {s}\n", .{commit_short});
