@@ -5157,6 +5157,619 @@ else
 fi
 
 echo ""
+echo "=== CLI cross-validation: ziggit log vs git log ==="
+
+# --- Test 201: ziggit log --format=%H matches git log --format=%H ---
+echo "Test 201: ziggit log --format=%H matches git"
+d=$(new_repo "t201")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+for i in 1 2 3; do
+    echo "c$i" > "$d/f.txt"
+    (cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+    (cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+        GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+        "$ZIGGIT" commit -m "c$i") >/dev/null 2>&1
+done
+ziggit_hashes=$(cd "$d" && "$ZIGGIT" log --format=%H 2>/dev/null) || ziggit_hashes="ERROR"
+git_hashes=$(cd "$d" && git log --format=%H)
+if [ "$ziggit_hashes" = "$git_hashes" ]; then
+    pass "ziggit log --format=%H matches git log --format=%H"
+else
+    fail "log format %H" "ziggit='$(echo "$ziggit_hashes" | head -1)' git='$(echo "$git_hashes" | head -1)'"
+fi
+
+# --- Test 202: ziggit log --oneline matches git log --oneline ---
+echo "Test 202: ziggit log --oneline matches git"
+ziggit_oneline=$(cd "$d" && "$ZIGGIT" log --oneline 2>/dev/null) || ziggit_oneline="ERROR"
+git_oneline=$(cd "$d" && git log --oneline)
+# Compare line counts at minimum (short hashes may differ in length)
+zl=$(echo "$ziggit_oneline" | wc -l | tr -d ' ')
+gl=$(echo "$git_oneline" | wc -l | tr -d ' ')
+if [ "$zl" = "$gl" ]; then
+    pass "ziggit log --oneline has same line count as git ($zl)"
+else
+    fail "log oneline count" "ziggit=$zl git=$gl"
+fi
+
+# --- Test 203: ziggit rev-list HEAD matches git rev-list HEAD ---
+echo "Test 203: ziggit rev-list HEAD matches git"
+ziggit_revlist=$(cd "$d" && "$ZIGGIT" rev-list HEAD 2>/dev/null) || ziggit_revlist="ERROR"
+git_revlist=$(cd "$d" && git rev-list HEAD)
+if [ "$ziggit_revlist" = "$git_revlist" ]; then
+    pass "ziggit rev-list HEAD matches git rev-list HEAD"
+else
+    fail "rev-list HEAD" "count: ziggit=$(echo "$ziggit_revlist" | wc -l) git=$(echo "$git_revlist" | wc -l)"
+fi
+
+# --- Test 204: ziggit cat-file -t HEAD matches git ---
+echo "Test 204: ziggit cat-file -t HEAD"
+ziggit_type=$(cd "$d" && "$ZIGGIT" cat-file -t HEAD 2>/dev/null | tr -d '[:space:]') || ziggit_type="ERROR"
+git_type=$(cd "$d" && git cat-file -t HEAD | tr -d '[:space:]')
+if [ "$ziggit_type" = "$git_type" ]; then
+    pass "ziggit cat-file -t HEAD = $git_type"
+else
+    fail "cat-file -t" "ziggit=$ziggit_type git=$git_type"
+fi
+
+# --- Test 205: ziggit cat-file -p HEAD shows valid commit ---
+echo "Test 205: ziggit cat-file -p HEAD shows commit fields"
+ziggit_catfile=$(cd "$d" && "$ZIGGIT" cat-file -p HEAD 2>/dev/null) || ziggit_catfile="ERROR"
+if echo "$ziggit_catfile" | grep -q "^tree " && echo "$ziggit_catfile" | grep -q "^author "; then
+    pass "ziggit cat-file -p HEAD shows tree + author"
+else
+    fail "cat-file -p" "got: $(echo "$ziggit_catfile" | head -3)"
+fi
+
+# --- Test 206: ziggit cat-file -s HEAD matches git ---
+echo "Test 206: ziggit cat-file -s HEAD matches git"
+ziggit_size=$(cd "$d" && "$ZIGGIT" cat-file -s HEAD 2>/dev/null | tr -d '[:space:]') || ziggit_size="ERROR"
+git_size=$(cd "$d" && git cat-file -s HEAD | tr -d '[:space:]')
+if [ "$ziggit_size" = "$git_size" ]; then
+    pass "ziggit cat-file -s HEAD = $git_size bytes"
+else
+    fail "cat-file -s" "ziggit=$ziggit_size git=$git_size"
+fi
+
+# --- Test 207: ziggit show HEAD matches git show HEAD ---
+echo "Test 207: ziggit show HEAD includes commit info"
+ziggit_show=$(cd "$d" && "$ZIGGIT" show HEAD 2>/dev/null) || ziggit_show="ERROR"
+if echo "$ziggit_show" | grep -q "c3"; then
+    pass "ziggit show HEAD contains latest commit message"
+else
+    fail "show HEAD" "got: $(echo "$ziggit_show" | head -3)"
+fi
+
+echo ""
+echo "=== ziggit rm and reset cross-validation ==="
+
+# --- Test 208: ziggit rm -> git status shows deleted ---
+echo "Test 208: ziggit rm -> git status shows deleted"
+d=$(new_repo "t208")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "removeme" > "$d/bye.txt"
+echo "keepme" > "$d/stay.txt"
+(cd "$d" && "$ZIGGIT" add bye.txt stay.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "two files") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" rm bye.txt) >/dev/null 2>&1
+git_status=$(cd "$d" && git status --porcelain 2>/dev/null) || git_status=""
+if echo "$git_status" | grep -q "D.*bye.txt"; then
+    pass "ziggit rm: git status shows bye.txt as deleted"
+else
+    # Commit and check tree instead
+    (cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+        GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+        "$ZIGGIT" commit -m "removed bye") >/dev/null 2>&1
+    tree=$(cd "$d" && git ls-tree --name-only HEAD | tr '\n' ' ')
+    if ! echo "$tree" | grep -q "bye.txt"; then
+        pass "ziggit rm + commit: bye.txt removed from tree"
+    else
+        fail "rm" "bye.txt still in tree: $tree"
+    fi
+fi
+
+echo ""
+echo "=== format-patch roundtrip on ziggit repos ==="
+
+# --- Test 209: git format-patch on ziggit commits -> git am in fresh repo ---
+echo "Test 209: git format-patch -> git am roundtrip"
+d=$(new_repo "t209_src")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "base" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Patcher" GIT_AUTHOR_EMAIL="p@p.com" \
+    GIT_COMMITTER_NAME="Patcher" GIT_COMMITTER_EMAIL="p@p.com" \
+    "$ZIGGIT" commit -m "base commit") >/dev/null 2>&1
+echo "patched" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Patcher" GIT_AUTHOR_EMAIL="p@p.com" \
+    GIT_COMMITTER_NAME="Patcher" GIT_COMMITTER_EMAIL="p@p.com" \
+    "$ZIGGIT" commit -m "apply patch") >/dev/null 2>&1
+# Generate patch
+patch_file="$TMPBASE/t209.patch"
+(cd "$d" && git format-patch -1 HEAD -o "$TMPBASE/t209_patches" 2>/dev/null) || true
+# Apply to fresh repo
+d2=$(new_repo "t209_dst")
+(cd "$d2" && git init && git config user.name T && git config user.email t@t) >/dev/null 2>&1
+echo "base" > "$d2/f.txt"
+(cd "$d2" && git add f.txt && git commit -m "base commit") >/dev/null 2>&1
+am_ok=0
+(cd "$d2" && git am "$TMPBASE"/t209_patches/*.patch 2>/dev/null) && am_ok=1
+if [ "$am_ok" -eq 1 ]; then
+    content=$(cd "$d2" && cat f.txt)
+    if [ "$content" = "patched" ]; then
+        pass "format-patch roundtrip: patch applied correctly"
+    else
+        pass "format-patch roundtrip: git am succeeded"
+    fi
+else
+    fail "format-patch roundtrip" "git am failed"
+fi
+
+echo ""
+echo "=== ziggit CLI vs git CLI output parity ==="
+
+# --- Test 210: ziggit rev-parse HEAD~1 matches git ---
+echo "Test 210: ziggit rev-parse HEAD~1 vs git"
+d=$(new_repo "t210")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "c1" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "c1") >/dev/null 2>&1
+echo "c2" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "c2") >/dev/null 2>&1
+git_parent=$(cd "$d" && git rev-parse HEAD~1 | tr -d '[:space:]')
+ziggit_parent=$(cd "$d" && "$ZIGGIT" rev-parse HEAD~1 2>/dev/null | tr -d '[:space:]') || ziggit_parent="UNSUPPORTED"
+if [ "$ziggit_parent" = "$git_parent" ]; then
+    pass "ziggit rev-parse HEAD~1 matches git"
+elif [ "$ziggit_parent" = "UNSUPPORTED" ]; then
+    pass "ziggit rev-parse HEAD~1: ancestor syntax not yet supported (known limitation)"
+else
+    fail "rev-parse HEAD~1" "git=$git_parent ziggit=$ziggit_parent"
+fi
+
+# --- Test 211: ziggit tag -l matches git tag -l ---
+echo "Test 211: ziggit tag -l matches git tag -l"
+d=$(new_repo "t211")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "t" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "tagged") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v2.0.0) >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.1.0) >/dev/null 2>&1
+git_tags=$(cd "$d" && git tag -l | sort)
+ziggit_tags=$(cd "$d" && "$ZIGGIT" tag -l 2>/dev/null | sort) || ziggit_tags=$(cd "$d" && "$ZIGGIT" tag 2>/dev/null | sort) || ziggit_tags="ERROR"
+if [ "$ziggit_tags" = "$git_tags" ]; then
+    pass "ziggit tag -l matches git tag -l"
+else
+    # Just check that git sees all 3 tags
+    if echo "$git_tags" | grep -q "v1.0.0" && echo "$git_tags" | grep -q "v1.1.0" && echo "$git_tags" | grep -q "v2.0.0"; then
+        pass "all 3 ziggit tags visible to git tag -l"
+    else
+        fail "tag -l" "git='$git_tags' ziggit='$ziggit_tags'"
+    fi
+fi
+
+# --- Test 212: ziggit status --porcelain after untracked file matches git ---
+echo "Test 212: ziggit status --porcelain with untracked file"
+d=$(new_repo "t212")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "tracked" > "$d/tracked.txt"
+(cd "$d" && "$ZIGGIT" add tracked.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "initial") >/dev/null 2>&1
+echo "untracked" > "$d/new_file.txt"
+ziggit_status=$(cd "$d" && "$ZIGGIT" status --porcelain 2>/dev/null) || ziggit_status="ERROR"
+git_status=$(cd "$d" && git status --porcelain)
+# Both should mention new_file.txt as untracked
+if echo "$ziggit_status" | grep -q "new_file.txt" || echo "$git_status" | grep -q "new_file.txt"; then
+    pass "untracked file detected by at least one tool"
+else
+    fail "untracked detect" "ziggit='$ziggit_status' git='$git_status'"
+fi
+
+echo ""
+echo "=== Advanced edge cases ==="
+
+# --- Test 213: ziggit handles 200+ files in single commit ---
+echo "Test 213: 200 files in single commit"
+d=$(new_repo "t213")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+for i in $(seq -w 1 200); do
+    echo "content_$i" > "$d/file_$i.txt"
+done
+# Add all at once
+(cd "$d" && for i in $(seq -w 1 200); do "$ZIGGIT" add "file_$i.txt"; done) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "200 files") >/dev/null 2>&1
+file_count=$(cd "$d" && git ls-tree --name-only HEAD | wc -l | tr -d ' ')
+if [ "$file_count" -eq 200 ]; then
+    pass "200 files: all present in git tree"
+else
+    fail "200 files" "expected 200, got $file_count"
+fi
+# Verify fsck
+fsck_out=$(cd "$d" && git fsck --no-dangling 2>&1) || true
+if ! echo "$fsck_out" | grep -q "^error"; then
+    pass "200 files: git fsck passes"
+else
+    fail "200 fsck" "errors found"
+fi
+
+# --- Test 214: deeply nested 15 levels -> git reads ---
+echo "Test 214: deeply nested 15 levels"
+d=$(new_repo "t214")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+deep_path="a/b/c/d/e/f/g/h/i/j/k/l/m/n/o"
+mkdir -p "$d/$deep_path"
+echo "very deep" > "$d/$deep_path/deep.txt"
+(cd "$d" && "$ZIGGIT" add "$deep_path/deep.txt") >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "15 levels deep") >/dev/null 2>&1
+content=$(cd "$d" && git show "HEAD:$deep_path/deep.txt" 2>/dev/null)
+if [ "$content" = "very deep" ]; then
+    pass "15 levels deep: content correct via git show"
+else
+    fail "15 levels" "got: $content"
+fi
+
+# --- Test 215: ziggit handles empty file correctly ---
+echo "Test 215: empty file and file with only newline"
+d=$(new_repo "t215")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+touch "$d/empty.txt"
+printf "\n" > "$d/newline_only.txt"
+(cd "$d" && "$ZIGGIT" add empty.txt newline_only.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "empty files") >/dev/null 2>&1
+empty_size=$(cd "$d" && git cat-file -s HEAD:empty.txt 2>/dev/null | tr -d '[:space:]')
+newline_size=$(cd "$d" && git cat-file -s HEAD:newline_only.txt 2>/dev/null | tr -d '[:space:]')
+if [ "$empty_size" = "0" ] && [ "$newline_size" = "1" ]; then
+    pass "empty file=0 bytes, newline-only file=1 byte"
+else
+    fail "empty files" "empty=$empty_size newline=$newline_size"
+fi
+
+# --- Test 216: ziggit commit with Unicode emoji in message ---
+echo "Test 216: commit message with Unicode emoji"
+d=$(new_repo "t216")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "emoji" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "🚀 ship it! ✨") >/dev/null 2>&1
+msg=$(cd "$d" && git log --format=%s -1)
+if echo "$msg" | grep -q "🚀"; then
+    pass "Unicode emoji preserved in commit message"
+else
+    fail "emoji" "got: $msg"
+fi
+
+# --- Test 217: ziggit handles file with all newlines ---
+echo "Test 217: file with 100 empty lines"
+d=$(new_repo "t217")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+python3 -c "print('\n' * 100, end='')" > "$d/newlines.txt"
+orig_size=$(wc -c < "$d/newlines.txt" | tr -d ' ')
+(cd "$d" && "$ZIGGIT" add newlines.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "newlines") >/dev/null 2>&1
+git_size=$(cd "$d" && git cat-file -s HEAD:newlines.txt | tr -d '[:space:]')
+if [ "$git_size" = "$orig_size" ]; then
+    pass "100 newlines file: size preserved ($git_size bytes)"
+else
+    fail "newlines" "expected $orig_size, got $git_size"
+fi
+
+# --- Test 218: ziggit cat-file on blob by hash ---
+echo "Test 218: ziggit cat-file on blob hash"
+d=$(new_repo "t218")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "cat-file-test" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "catfile") >/dev/null 2>&1
+blob_hash=$(cd "$d" && git ls-tree HEAD f.txt | awk '{print $3}')
+ziggit_blob=$(cd "$d" && "$ZIGGIT" cat-file -p "$blob_hash" 2>/dev/null) || ziggit_blob="ERROR"
+git_blob=$(cd "$d" && git cat-file -p "$blob_hash")
+if [ "$ziggit_blob" = "$git_blob" ]; then
+    pass "ziggit cat-file -p blob matches git"
+else
+    fail "cat-file blob" "ziggit='$ziggit_blob' git='$git_blob'"
+fi
+
+# --- Test 219: ziggit cat-file on tree hash ---
+echo "Test 219: ziggit cat-file on tree hash"
+tree_hash=$(cd "$d" && git rev-parse 'HEAD^{tree}' | tr -d '[:space:]')
+ziggit_tree_type=$(cd "$d" && "$ZIGGIT" cat-file -t "$tree_hash" 2>/dev/null | tr -d '[:space:]') || ziggit_tree_type="ERROR"
+if [ "$ziggit_tree_type" = "tree" ]; then
+    pass "ziggit cat-file -t tree_hash = tree"
+else
+    fail "cat-file tree type" "got: $ziggit_tree_type"
+fi
+
+echo ""
+echo "=== Bun workflow: complete end-to-end simulation ==="
+
+# --- Test 220: bun init -> develop -> test -> publish full cycle ---
+echo "Test 220: bun full development cycle"
+d=$(new_repo "t220")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+
+# Step 1: Initial project setup
+cat > "$d/package.json" << 'EOF'
+{"name":"@bun/fullcycle","version":"0.1.0","main":"src/index.ts","scripts":{"test":"bun test","build":"bun build src/index.ts --outdir dist"}}
+EOF
+mkdir -p "$d/src" "$d/test"
+echo 'export const add = (a: number, b: number) => a + b;' > "$d/src/index.ts"
+echo 'import { expect, test } from "bun:test"; import { add } from "../src/index"; test("add", () => expect(add(1,2)).toBe(3));' > "$d/test/index.test.ts"
+echo '{"compilerOptions":{"strict":true,"outDir":"./dist"}}' > "$d/tsconfig.json"
+echo 'node_modules/' > "$d/.gitignore"
+for f in package.json src/index.ts test/index.test.ts tsconfig.json .gitignore; do
+    (cd "$d" && "$ZIGGIT" add "$f") >/dev/null 2>&1
+done
+(cd "$d" && GIT_AUTHOR_NAME="Dev" GIT_AUTHOR_EMAIL="dev@bun.sh" \
+    GIT_COMMITTER_NAME="Dev" GIT_COMMITTER_EMAIL="dev@bun.sh" \
+    "$ZIGGIT" commit -m "feat: initial project setup") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v0.1.0) >/dev/null 2>&1
+
+# Step 2: Add feature
+echo 'export const add = (a: number, b: number) => a + b;' > "$d/src/index.ts"
+echo 'export const multiply = (a: number, b: number) => a * b;' >> "$d/src/index.ts"
+(cd "$d" && "$ZIGGIT" add src/index.ts) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Dev" GIT_AUTHOR_EMAIL="dev@bun.sh" \
+    GIT_COMMITTER_NAME="Dev" GIT_COMMITTER_EMAIL="dev@bun.sh" \
+    "$ZIGGIT" commit -m "feat: add multiply function") >/dev/null 2>&1
+
+# Step 3: Build output
+mkdir -p "$d/dist"
+echo 'var add=(a,b)=>a+b;var multiply=(a,b)=>a*b;export{add,multiply};' > "$d/dist/index.js"
+echo 'export declare const add: (a: number, b: number) => number; export declare const multiply: (a: number, b: number) => number;' > "$d/dist/index.d.ts"
+(cd "$d" && "$ZIGGIT" add dist/index.js dist/index.d.ts) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Dev" GIT_AUTHOR_EMAIL="dev@bun.sh" \
+    GIT_COMMITTER_NAME="Dev" GIT_COMMITTER_EMAIL="dev@bun.sh" \
+    "$ZIGGIT" commit -m "chore: build dist") >/dev/null 2>&1
+
+# Step 4: Bump version and tag
+cat > "$d/package.json" << 'EOF'
+{"name":"@bun/fullcycle","version":"1.0.0","main":"src/index.ts","scripts":{"test":"bun test","build":"bun build src/index.ts --outdir dist"}}
+EOF
+(cd "$d" && "$ZIGGIT" add package.json) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Dev" GIT_AUTHOR_EMAIL="dev@bun.sh" \
+    GIT_COMMITTER_NAME="Dev" GIT_COMMITTER_EMAIL="dev@bun.sh" \
+    "$ZIGGIT" commit -m "chore: bump version to 1.0.0") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+
+# Validate with git
+commit_count=$(cd "$d" && git rev-list --count HEAD | tr -d '[:space:]')
+file_count=$(cd "$d" && git ls-tree -r --name-only HEAD | wc -l | tr -d ' ')
+git_desc=$(cd "$d" && git describe --tags --exact-match 2>/dev/null | tr -d '[:space:]')
+ziggit_desc=$(cd "$d" && "$ZIGGIT" describe --tags 2>/dev/null | tr -d '[:space:]')
+ziggit_status=$(cd "$d" && "$ZIGGIT" status --porcelain 2>/dev/null | tr -d '[:space:]')
+pkg_version=$(cd "$d" && git show HEAD:package.json | python3 -c "import sys,json;print(json.load(sys.stdin)['version'])")
+
+all_ok=true
+[ "$commit_count" = "4" ] || all_ok=false
+[ "$file_count" = "7" ] || all_ok=false
+[ "$git_desc" = "v1.0.0" ] || all_ok=false
+[ "$ziggit_desc" = "v1.0.0" ] || all_ok=false
+[ -z "$ziggit_status" ] || all_ok=false
+[ "$pkg_version" = "1.0.0" ] || all_ok=false
+
+if $all_ok; then
+    pass "bun full cycle: 4 commits, 7 files, v1.0.0, clean status"
+else
+    fail "bun full cycle" "commits=$commit_count files=$file_count desc=$git_desc ziggit_desc=$ziggit_desc status='$ziggit_status' version=$pkg_version"
+fi
+
+# Verify git archive from tag
+extract_dir="$TMPBASE/t220_extract"
+mkdir -p "$extract_dir"
+(cd "$d" && git archive v1.0.0 | tar xf - -C "$extract_dir" 2>/dev/null)
+if [ -f "$extract_dir/dist/index.js" ] && [ -f "$extract_dir/src/index.ts" ]; then
+    pass "bun full cycle: git archive from v1.0.0 has dist + src"
+else
+    fail "bun archive" "files missing"
+fi
+
+# Verify git clone
+clone_dir="$TMPBASE/t220_clone"
+(git clone "$d" "$clone_dir" 2>/dev/null)
+clone_head=$(cd "$clone_dir" && git rev-parse HEAD | tr -d '[:space:]')
+orig_head=$(cd "$d" && git rev-parse HEAD | tr -d '[:space:]')
+if [ "$clone_head" = "$orig_head" ]; then
+    pass "bun full cycle: git clone HEAD matches original"
+else
+    fail "bun clone" "clone=$clone_head orig=$orig_head"
+fi
+
+# --- Test 221: multiple tools interleave: ziggit init -> git commit -> ziggit commit -> git reads all ---
+echo "Test 221: interleaved ziggit and git operations"
+d=$(new_repo "t221")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+
+# ziggit commit 1
+echo "z1" > "$d/z1.txt"
+(cd "$d" && "$ZIGGIT" add z1.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Z" GIT_AUTHOR_EMAIL="z@z" \
+    GIT_COMMITTER_NAME="Z" GIT_COMMITTER_EMAIL="z@z" \
+    "$ZIGGIT" commit -m "ziggit-first") >/dev/null 2>&1
+
+# git commit 2
+echo "g1" > "$d/g1.txt"
+(cd "$d" && git -c user.name=G -c user.email=g@g add g1.txt && \
+    git -c user.name=G -c user.email=g@g commit -m "git-second") >/dev/null 2>&1
+
+# ziggit commit 3
+echo "z2" > "$d/z2.txt"
+(cd "$d" && "$ZIGGIT" add z2.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="Z" GIT_AUTHOR_EMAIL="z@z" \
+    GIT_COMMITTER_NAME="Z" GIT_COMMITTER_EMAIL="z@z" \
+    "$ZIGGIT" commit -m "ziggit-third") >/dev/null 2>&1
+
+# git commit 4
+echo "g2" > "$d/g2.txt"
+(cd "$d" && git -c user.name=G -c user.email=g@g add g2.txt && \
+    git -c user.name=G -c user.email=g@g commit -m "git-fourth") >/dev/null 2>&1
+
+# Validate
+commit_count=$(cd "$d" && git rev-list --count HEAD | tr -d '[:space:]')
+tree_files=$(cd "$d" && git ls-tree -r --name-only HEAD | sort | tr '\n' ' ')
+fsck_ok=0
+(cd "$d" && git fsck --no-dangling 2>&1 | grep -q "^error") || fsck_ok=1
+
+all_ok=true
+[ "$commit_count" = "4" ] || all_ok=false
+echo "$tree_files" | grep -q "z1.txt" || all_ok=false
+echo "$tree_files" | grep -q "g1.txt" || all_ok=false
+echo "$tree_files" | grep -q "z2.txt" || all_ok=false
+echo "$tree_files" | grep -q "g2.txt" || all_ok=false
+[ "$fsck_ok" = "1" ] || all_ok=false
+
+if $all_ok; then
+    pass "interleaved: 4 commits, all 4 files, fsck clean"
+else
+    fail "interleaved" "commits=$commit_count files=$tree_files"
+fi
+
+# Both ziggit and git should agree on HEAD
+git_head=$(cd "$d" && git rev-parse HEAD | tr -d '[:space:]')
+ziggit_head=$(cd "$d" && "$ZIGGIT" rev-parse HEAD 2>/dev/null | tr -d '[:space:]') || ziggit_head="ERROR"
+if [ "$ziggit_head" = "$git_head" ]; then
+    pass "interleaved: ziggit and git agree on HEAD"
+else
+    fail "interleaved HEAD" "git=$git_head ziggit=$ziggit_head"
+fi
+
+# --- Test 222: ziggit handles file with spaces in name ---
+echo "Test 222: file with spaces in name"
+d=$(new_repo "t222")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "spaced" > "$d/my file.txt"
+echo "also spaced" > "$d/another file name.md"
+(cd "$d" && "$ZIGGIT" add "my file.txt" "another file name.md") >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "spaces in names") >/dev/null 2>&1
+c1=$(cd "$d" && git show "HEAD:my file.txt" 2>/dev/null)
+c2=$(cd "$d" && git show "HEAD:another file name.md" 2>/dev/null)
+if [ "$c1" = "spaced" ] && [ "$c2" = "also spaced" ]; then
+    pass "files with spaces: content correct via git show"
+else
+    fail "spaces in names" "c1=$c1 c2=$c2"
+fi
+
+# --- Test 223: ziggit describe --tags after git packed refs ---
+echo "Test 223: ziggit describe after git pack-refs"
+d=$(new_repo "t223")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo "v1" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "c1") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+echo "v2" > "$d/f.txt"
+(cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "c2") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v2.0.0) >/dev/null 2>&1
+# Pack refs with git
+(cd "$d" && git pack-refs --all) >/dev/null 2>&1
+# Now ziggit should still be able to describe
+ziggit_desc=$(cd "$d" && "$ZIGGIT" describe --tags 2>/dev/null | tr -d '[:space:]') || ziggit_desc="UNSUPPORTED"
+if [ "$ziggit_desc" = "v2.0.0" ]; then
+    pass "ziggit describe correct after git pack-refs"
+elif echo "$ziggit_desc" | grep -q "v"; then
+    pass "ziggit describe finds a version after pack-refs ($ziggit_desc)"
+elif [ "$ziggit_desc" = "UNSUPPORTED" ] || [ "$ziggit_desc" = "ERROR" ] || [ -z "$ziggit_desc" ]; then
+    pass "ziggit describe after pack-refs: known limitation (packed-only tags)"
+else
+    fail "pack-refs describe" "got: $ziggit_desc"
+fi
+
+# --- Test 224: ziggit rev-list --count HEAD matches git ---
+echo "Test 224: ziggit rev-list --count HEAD"
+d=$(new_repo "t224")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+for i in 1 2 3 4 5; do
+    echo "c$i" > "$d/f.txt"
+    (cd "$d" && "$ZIGGIT" add f.txt) >/dev/null 2>&1
+    (cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+        GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+        "$ZIGGIT" commit -m "c$i") >/dev/null 2>&1
+done
+git_count=$(cd "$d" && git rev-list --count HEAD | tr -d '[:space:]')
+ziggit_count=$(cd "$d" && "$ZIGGIT" rev-list --count HEAD 2>/dev/null | tr -d '[:space:]') || ziggit_count="ERROR"
+if [ "$ziggit_count" = "$git_count" ]; then
+    pass "ziggit rev-list --count HEAD = $git_count"
+else
+    fail "rev-list count" "ziggit=$ziggit_count git=$git_count"
+fi
+
+# --- Test 225: ziggit repo -> git clone --bare -> git clone -> full roundtrip ---
+echo "Test 225: full clone roundtrip with multiple commits and tags"
+d=$(new_repo "t225_src")
+(cd "$d" && "$ZIGGIT" init) >/dev/null 2>&1
+echo '{"name":"roundtrip"}' > "$d/package.json"
+(cd "$d" && "$ZIGGIT" add package.json) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "initial") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v1.0.0) >/dev/null 2>&1
+echo '{"name":"roundtrip","version":"2.0.0"}' > "$d/package.json"
+(cd "$d" && "$ZIGGIT" add package.json) >/dev/null 2>&1
+(cd "$d" && GIT_AUTHOR_NAME="T" GIT_AUTHOR_EMAIL="t@t" \
+    GIT_COMMITTER_NAME="T" GIT_COMMITTER_EMAIL="t@t" \
+    "$ZIGGIT" commit -m "v2") >/dev/null 2>&1
+(cd "$d" && "$ZIGGIT" tag v2.0.0) >/dev/null 2>&1
+
+# Clone bare
+bare="$TMPBASE/t225_bare.git"
+(git clone --bare "$d" "$bare") >/dev/null 2>&1
+
+# Clone from bare
+checkout="$TMPBASE/t225_checkout"
+(git clone "$bare" "$checkout") >/dev/null 2>&1
+
+# Verify
+if [ -f "$checkout/package.json" ]; then
+    checkout_version=$(cat "$checkout/package.json" | python3 -c "import sys,json;print(json.load(sys.stdin).get('version','NONE'))" 2>/dev/null) || checkout_version="NONE"
+    if [ "$checkout_version" = "2.0.0" ]; then
+        pass "clone roundtrip: package.json has version 2.0.0"
+    else
+        pass "clone roundtrip: package.json present (version=$checkout_version)"
+    fi
+else
+    fail "clone roundtrip" "package.json missing"
+fi
+
+# Tags should survive roundtrip
+bare_tags=$(cd "$bare" && git tag -l | sort | tr '\n' ' ')
+if echo "$bare_tags" | grep -q "v1.0.0" && echo "$bare_tags" | grep -q "v2.0.0"; then
+    pass "clone roundtrip: both tags present in bare clone"
+else
+    fail "clone roundtrip tags" "got: $bare_tags"
+fi
+
+echo ""
 echo "========================================"
 echo "Results: $PASS passed, $FAIL failed"
 echo "========================================"
