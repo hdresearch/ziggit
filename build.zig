@@ -1537,6 +1537,16 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(cache_crossval_tests).step);
     e2e_step.dependOn(&b.addRunArtifact(cache_crossval_tests).step);
 
+    // E2E round-trip integrity tests (ziggit writes -> git manipulates -> ziggit reads back)
+    const e2e_roundtrip_integrity_tests = b.addTest(.{
+        .root_source_file = b.path("test/e2e_roundtrip_integrity_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    e2e_roundtrip_integrity_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(e2e_roundtrip_integrity_tests).step);
+    e2e_step.dependOn(&b.addRunArtifact(e2e_roundtrip_integrity_tests).step);
+
     // Refs internal resolution tests
     const refs_internal_resolution_tests = b.addTest(.{
         .root_source_file = b.path("test/refs_internal_resolution_test.zig"),
