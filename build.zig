@@ -851,6 +851,15 @@ pub fn build(b: *std.Build) void {
     api_git_crosscheck_tests.root_module.addImport("ziggit", ziggit_module);
     test_step.dependOn(&b.addRunArtifact(api_git_crosscheck_tests).step);
 
+    // Git format correctness tests (blob/tree/commit/tag cross-validated with git CLI)
+    const git_format_correctness_tests = b.addTest(.{
+        .root_source_file = b.path("test/git_format_correctness_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    git_format_correctness_tests.root_module.addImport("ziggit", ziggit_module);
+    test_step.dependOn(&b.addRunArtifact(git_format_correctness_tests).step);
+
     // Strict pack delta tests (format correctness, git compat, clone flow)
     const pack_delta_strict_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_delta_strict_test.zig"),
