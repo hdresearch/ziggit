@@ -296,6 +296,16 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/git/objects.zig"),
     });
 
+    // Pack end-to-end tests (full flow: git creates → ziggit reads/indexes → git verifies)
+    const pack_end_to_end_tests = b.addTest(.{
+        .root_source_file = b.path("test/pack_end_to_end_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack_end_to_end_tests.root_module.addAnonymousImport("git_objects", .{
+        .root_source_file = b.path("src/git/objects.zig"),
+    });
+
     // Pack infrastructure tests for HTTPS clone/fetch support
     const pack_infrastructure_tests = b.addTest(.{
         .root_source_file = b.path("test/pack_infrastructure_test.zig"),
@@ -492,6 +502,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(pack_readback_thin_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_infrastructure_tests).step);
     test_step.dependOn(&b.addRunArtifact(pack_git_exact_compat_tests).step);
+    test_step.dependOn(&b.addRunArtifact(pack_end_to_end_tests).step);
     // New tests from other agents (may be slow, included for completeness)
     test_step.dependOn(&b.addRunArtifact(repo_api_tests).step);
     test_step.dependOn(&b.addRunArtifact(object_integrity_tests).step);
