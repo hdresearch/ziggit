@@ -594,7 +594,7 @@ pub fn validateConfig(self: GitConfig, allocator: std.mem.Allocator) ![][]const 
     }
     
     // Validate push.default setting
-    if (self.getPushDefault()) |push_default| {
+    if (getPushDefault(self)) |push_default| {
         const valid_values = [_][]const u8{ "nothing", "current", "upstream", "simple", "matching" };
         var is_valid = false;
         for (valid_values) |valid_value| {

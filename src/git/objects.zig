@@ -229,7 +229,7 @@ pub fn createCommitObject(tree_hash: []const u8, parent_hashes: []const []const 
 
 /// Try to load object from pack files when loose object is not found
 /// Enhanced with better error handling, caching, and performance optimizations
-fn loadFromPackFiles(hash_str: []const u8, git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
+pub fn loadFromPackFiles(hash_str: []const u8, git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
     // Validate hash string early
     if (hash_str.len != 40) {
         return error.InvalidHashLength;
@@ -548,11 +548,17 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     
     if (start_index >= end_index) return error.ObjectNotFound;
     
+    // Get total number of objects from fanout[255] (last entry)
+    const total_objects = blk: {
+        const total_offset = fanout_start + 255 * 4;
+        if (total_offset + 4 > idx_data.len) return error.CorruptedPackIndex;
+        break :blk std.mem.readInt(u32, @ptrCast(idx_data[total_offset..total_offset + 4]), .big);
+    };
+    
     // Binary search in the SHA-1 table within the range with better bounds checking
     const sha1_table_start = fanout_end;
-    const sha1_table_end = sha1_table_start + end_index * 20;
+    const sha1_table_end = sha1_table_start + @as(usize, total_objects) * 20;
     if (idx_data.len < sha1_table_end) {
-            // debug print removed
         return error.CorruptedPackIndex;
     }
     
@@ -579,9 +585,10 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     if (object_index == null) return error.ObjectNotFound;
     
     // Get offset from offset table - handle both 32-bit and 64-bit offsets
+    // Pack idx v2 layout after fanout: SHA1 table (N*20) + CRC table (N*4) + Offset table (N*4)
     const crc_table_start = sha1_table_end;
-    const offset_table_start = crc_table_start + end_index * 4; // Skip CRC table
-    const offset_table_offset = offset_table_start + object_index.? * 4;
+    const offset_table_start = crc_table_start + @as(usize, total_objects) * 4; // Skip CRC table
+    const offset_table_offset = offset_table_start + @as(usize, object_index.?) * 4;
     if (idx_data.len < offset_table_offset + 4) return error.ObjectNotFound;
     
     var object_offset: u64 = std.mem.readInt(u32, @ptrCast(idx_data[offset_table_offset..offset_table_offset + 4]), .big);
@@ -661,7 +668,9 @@ fn findObjectInPackV1(idx_data: []const u8, target_hash: [20]u8, pack_dir_path: 
 
 /// Read object from pack file at given offset with validation
 fn readObjectFromPack(pack_path: []const u8, offset: u64, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
-    const pack_data = platform_impl.fs.readFile(allocator, pack_path) catch return error.PackFileNotFound;
+    const pack_data = platform_impl.fs.readFile(allocator, pack_path) catch {
+        return error.PackFileNotFound;
+    };
     defer allocator.free(pack_data);
     
     // Enhanced pack file validation
@@ -942,7 +951,7 @@ fn findOffsetInIdx(idx_data: []const u8, target_hash: [20]u8) ?usize {
 }
 
 /// Apply delta to base data to reconstruct object with enhanced error handling and validation
-fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
+pub fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
     // First try strict delta application
     return applyDeltaWithFallback(base_data, delta_data, allocator) catch |err| {
         // If standard delta application fails, try recovery strategies
