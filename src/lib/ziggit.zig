@@ -1172,54 +1172,61 @@ fn scanForUntrackedFilesInIndex(repo_root: []const u8, tracked_files: *std.HashM
         // No .gitignore file
     }
     
+    // Use recursive directory scanning instead of just scanning root directory
     var dir = std.fs.cwd().openDir(repo_root, .{ .iterate = true }) catch return;
     defer dir.close();
     
-    var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
-        if (entry.kind != .file) continue;
-        if (std.mem.startsWith(u8, entry.name, ".git")) continue;
-        
-        // Check if file is tracked in index
-        if (!tracked_files.contains(entry.name)) {
-            // Check if file should be ignored
-            var should_ignore = false;
-            for (ignore_patterns.items) |pattern| {
-                if (matchesGitignorePattern(entry.name, pattern)) {
-                    should_ignore = true;
-                    break;
-                }
-            }
-            
-            if (!should_ignore) {
-                // File is untracked and not ignored
-                const status_line = std.fmt.bufPrint(
-                    buffer[output_pos.*..],
-                    "?? {s}\n",
-                    .{entry.name}
-                ) catch break;
-                
-                output_pos.* += status_line.len;
-                if (output_pos.* >= buffer.len - 1) break;
-            }
-        }
-    }
+    try scanDirectoryForUntrackedWithIgnore(dir, "", tracked_files, &ignore_patterns, buffer, output_pos);
 }
 
-// Simple gitignore pattern matching (basic implementation)
-fn matchesGitignorePattern(filename: []const u8, pattern: []const u8) bool {
-    // Handle simple cases for now
-    if (std.mem.eql(u8, pattern, filename)) {
+// Improved gitignore pattern matching
+fn matchesGitignorePattern(filepath: []const u8, pattern: []const u8) bool {
+    // Skip empty patterns and comments
+    if (pattern.len == 0 or pattern[0] == '#') {
+        return false;
+    }
+    
+    // Handle exact match
+    if (std.mem.eql(u8, pattern, filepath)) {
         return true;
+    }
+    
+    // Handle directory patterns (ending with /)
+    if (std.mem.endsWith(u8, pattern, "/")) {
+        const dir_pattern = pattern[0..pattern.len - 1];
+        // Check if filepath starts with the directory pattern
+        return std.mem.startsWith(u8, filepath, dir_pattern) and 
+               (filepath.len == dir_pattern.len or filepath[dir_pattern.len] == '/');
     }
     
     // Handle *.extension patterns
     if (std.mem.startsWith(u8, pattern, "*.")) {
-        const ext = pattern[2..];
-        return std.mem.endsWith(u8, filename, ext) and filename.len > ext.len and filename[filename.len - ext.len - 1] == '.';
+        const ext = pattern[1..]; // Include the dot
+        return std.mem.endsWith(u8, filepath, ext);
     }
     
-    // Handle other patterns - for now, just exact match and wildcard extensions
+    // Handle patterns that match file names anywhere in the path
+    // Check if the filename (last component) matches the pattern
+    const last_slash = std.mem.lastIndexOf(u8, filepath, "/");
+    const filename = if (last_slash) |pos| filepath[pos + 1..] else filepath;
+    
+    if (std.mem.eql(u8, pattern, filename)) {
+        return true;
+    }
+    
+    // Handle simple glob patterns (basic)
+    if (std.mem.indexOf(u8, pattern, "*") != null) {
+        // For now, handle simple prefix/suffix patterns
+        if (std.mem.startsWith(u8, pattern, "*")) {
+            const suffix = pattern[1..];
+            return std.mem.endsWith(u8, filepath, suffix);
+        }
+        if (std.mem.endsWith(u8, pattern, "*")) {
+            const prefix = pattern[0..pattern.len - 1];
+            return std.mem.startsWith(u8, filepath, prefix);
+        }
+    }
+    
     return false;
 }
 
@@ -1490,6 +1497,56 @@ fn scanDirectoryForUntracked(
                 
                 output_pos.* += status_line.len;
                 if (output_pos.* >= buffer.len - 1) return;
+            }
+        }
+    }
+}
+
+// Recursively scan directory for untracked files with gitignore support
+fn scanDirectoryForUntrackedWithIgnore(
+    dir: std.fs.Dir,
+    rel_path: []const u8,
+    tracked_files: *std.HashMap([]const u8, void, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
+    ignore_patterns: *std.ArrayList([]u8),
+    buffer: []u8,
+    output_pos: *usize
+) !void {
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (std.mem.startsWith(u8, entry.name, ".git")) continue;
+        
+        const full_path = if (rel_path.len == 0) 
+            try global_allocator.dupe(u8, entry.name)
+        else 
+            try std.fmt.allocPrint(global_allocator, "{s}/{s}", .{ rel_path, entry.name });
+        defer global_allocator.free(full_path);
+        
+        if (entry.kind == .directory) {
+            var subdir = dir.openDir(entry.name, .{ .iterate = true }) catch continue;
+            defer subdir.close();
+            try scanDirectoryForUntrackedWithIgnore(subdir, full_path, tracked_files, ignore_patterns, buffer, output_pos);
+        } else if (entry.kind == .file) {
+            if (!tracked_files.contains(full_path)) {
+                // Check if file should be ignored
+                var should_ignore = false;
+                for (ignore_patterns.items) |pattern| {
+                    if (matchesGitignorePattern(full_path, pattern)) {
+                        should_ignore = true;
+                        break;
+                    }
+                }
+                
+                if (!should_ignore) {
+                    // File is untracked and not ignored
+                    const status_line = std.fmt.bufPrint(
+                        buffer[output_pos.*..],
+                        "?? {s}\n",
+                        .{full_path}
+                    ) catch return; // Buffer full
+                    
+                    output_pos.* += status_line.len;
+                    if (output_pos.* >= buffer.len - 1) return;
+                }
             }
         }
     }
