@@ -205,14 +205,14 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     
     // Determine if this command is handled natively (NOT forwarded to real git)
     // Commands forwarded to git should NOT be here — git handles -C itself
+    // "help" is NOT native — it's forwarded to real git for full compatibility
     const is_native_handler = 
         std.mem.eql(u8, command, "--exec-path") or
         std.mem.eql(u8, command, "--version") or
         std.mem.eql(u8, command, "-v") or
         std.mem.eql(u8, command, "--version-info") or
         std.mem.eql(u8, command, "--help") or
-        std.mem.eql(u8, command, "-h") or
-        std.mem.eql(u8, command, "help");
+        std.mem.eql(u8, command, "-h");
 
     // Process global flags and execute
     var arg_index: usize = 0;
