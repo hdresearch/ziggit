@@ -2360,6 +2360,9 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     var quiet = false;
     var signoff = false;
     var msg_source: enum { none, m_flag, f_flag, c_flag } = .none;
+    var commit_files = std.array_list.Managed([]const u8).init(allocator);
+    defer commit_files.deinit();
+    var seen_dashdash = false;
 
     // Parse arguments
     while (args.next()) |arg| {
@@ -2476,6 +2479,13 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             // No edit
         } else if (std.mem.eql(u8, arg, "--allow-empty-message")) {
             allow_empty = true; // Close enough
+        } else if (std.mem.eql(u8, arg, "--")) {
+            seen_dashdash = true;
+            while (args.next()) |farg| try commit_files.append(farg);
+            break;
+        } else if (arg.len > 0 and arg[0] != '-') {
+            // Positional argument - could be a file path
+            try commit_files.append(arg);
         }
     }
 
@@ -2529,6 +2539,27 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         const repo_root = std.fs.path.dirname(git_path) orelse ".";
         try stageTrackedChanges(allocator, &index, git_path, repo_root, platform_impl);
     }
+
+    // If file paths were specified, stage those files before committing
+    if (commit_files.items.len > 0) {
+        const cwd = try platform_impl.fs.getCwd(allocator);
+        defer allocator.free(cwd);
+        for (commit_files.items) |file_arg| {
+            const full_path = if (std.fs.path.isAbsolute(file_arg))
+                try allocator.dupe(u8, file_arg)
+            else
+                try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd, file_arg });
+            defer allocator.free(full_path);
+            
+            const metadata = std.fs.cwd().statFile(full_path) catch continue;
+            if (metadata.kind == .directory) {
+                try addDirectoryRecursively(allocator, cwd, file_arg, &index, git_path, platform_impl);
+            } else {
+                try addSingleFile(allocator, file_arg, full_path, &index, git_path, platform_impl, cwd);
+            }
+        }
+    }
+    // seen_dashdash used above
     defer index.deinit();
 
     // Check if there's anything to commit - compare index tree to HEAD tree
@@ -10309,12 +10340,24 @@ fn cmdDescribe(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     // Parse arguments
     var tags = false;
     var abbrev_zero = false;
+    var exact_match = false;
+    var target_rev: ?[]const u8 = null;
     
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--tags")) {
             tags = true;
         } else if (std.mem.eql(u8, arg, "--abbrev=0")) {
             abbrev_zero = true;
+        } else if (std.mem.eql(u8, arg, "--exact-match")) {
+            exact_match = true;
+        } else if (std.mem.eql(u8, arg, "--contains") or std.mem.eql(u8, arg, "--all") or 
+            std.mem.eql(u8, arg, "--long") or std.mem.eql(u8, arg, "--always") or
+            std.mem.eql(u8, arg, "--dirty")) {
+            // accept silently
+        } else if (std.mem.startsWith(u8, arg, "--abbrev=")) {
+            if (std.mem.eql(u8, arg, "--abbrev=0")) abbrev_zero = true;
+        } else if (arg.len > 0 and arg[0] != '-') {
+            target_rev = arg;
         }
     }
 
@@ -10325,19 +10368,33 @@ fn cmdDescribe(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     };
     defer allocator.free(git_path);
 
-    // Get current HEAD commit
-    const head_hash = refs.getCurrentCommit(git_path, platform_impl, allocator) catch |err| switch (err) {
-        else => {
-            try platform_impl.writeStderr("fatal: no commits yet\n");
-            std.process.exit(128);
+    // Get target commit
+    const head_hash: []u8 = blk: {
+        if (target_rev) |r| {
+            const resolved = refs.resolveRef(git_path, r, platform_impl, allocator) catch {
+                try platform_impl.writeStderr("fatal: not a valid object name\n");
+                std.process.exit(128);
+                unreachable;
+            };
+            break :blk resolved orelse {
+                try platform_impl.writeStderr("fatal: not a valid object name\n");
+                std.process.exit(128);
+                unreachable;
+            };
+        } else {
+            const h = refs.getCurrentCommit(git_path, platform_impl, allocator) catch {
+                try platform_impl.writeStderr("fatal: no commits yet\n");
+                std.process.exit(128);
+                unreachable;
+            };
+            break :blk h orelse {
+                try platform_impl.writeStderr("fatal: no commits yet\n");
+                std.process.exit(128);
+                unreachable;
+            };
         }
     };
-    defer if (head_hash) |hash| allocator.free(hash);
-    
-    if (head_hash == null) {
-        try platform_impl.writeStderr("fatal: no commits yet\n");
-        std.process.exit(128);
-    }
+    defer allocator.free(head_hash);
 
     // Read all tags from refs/tags/*
     const tags_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags", .{git_path});
@@ -10409,10 +10466,43 @@ fn cmdDescribe(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     }
     
     // Walk HEAD commit chain backward looking for a match with any tag
-    const result = findTagInHistoryWithDistance(git_path, head_hash.?, &tag_map, tags, allocator, platform_impl) catch null;
+    // Also check packed-refs for tags
+    const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_path});
+    defer allocator.free(packed_refs_path);
+    if (platform_impl.fs.readFile(allocator, packed_refs_path)) |packed_content| {
+        defer allocator.free(packed_content);
+        var plines = std.mem.splitScalar(u8, packed_content, '\n');
+        while (plines.next()) |pline| {
+            if (pline.len == 0 or pline[0] == '#' or pline[0] == '^') continue;
+            if (pline.len >= 41 and pline[40] == ' ') {
+                const ref_name = pline[41..];
+                if (std.mem.startsWith(u8, ref_name, "refs/tags/")) {
+                    const tag_name = ref_name["refs/tags/".len..];
+                    if (tag_map.contains(tag_name)) continue;
+                    const tag_hash = pline[0..40];
+                    const commit_hash2 = resolve_blk: {
+                        const tag_obj = objects.GitObject.load(tag_hash, git_path, platform_impl, allocator) catch { break :resolve_blk allocator.dupe(u8, tag_hash) catch continue; };
+                        defer tag_obj.deinit(allocator);
+                        if (tag_obj.type == .tag) { break :resolve_blk parseTagObject(tag_obj.data, allocator) catch { break :resolve_blk allocator.dupe(u8, tag_hash) catch continue; }; }
+                        else if (tag_obj.type == .commit) { if (!tags) continue; break :resolve_blk allocator.dupe(u8, tag_hash) catch continue; }
+                        else continue;
+                    };
+                    tag_map.put(allocator.dupe(u8, tag_name) catch continue, commit_hash2) catch continue;
+                }
+            }
+        }
+    } else |_| {}
+
+    const result = findTagInHistoryWithDistance(git_path, head_hash, &tag_map, tags, allocator, platform_impl) catch null;
 
     if (result) |r| {
         defer allocator.free(r.tag_name);
+        if (exact_match and r.distance != 0) {
+            try platform_impl.writeStderr("fatal: no tag exactly matches '");
+            try platform_impl.writeStderr(head_hash[0..@min(7, head_hash.len)]);
+            try platform_impl.writeStderr("'\n");
+            std.process.exit(128);
+        }
         if (r.distance == 0) {
             const output = try std.fmt.allocPrint(allocator, "{s}\n", .{r.tag_name});
             defer allocator.free(output);
@@ -10422,12 +10512,18 @@ fn cmdDescribe(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
         } else {
-            const short_hash = head_hash.?[0..@min(7, head_hash.?.len)];
+            const short_hash = head_hash[0..@min(7, head_hash.len)];
             const output = try std.fmt.allocPrint(allocator, "{s}-{d}-g{s}\n", .{ r.tag_name, r.distance, short_hash });
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
         }
     } else {
+        if (exact_match) {
+            try platform_impl.writeStderr("fatal: no tag exactly matches '");
+            try platform_impl.writeStderr(head_hash[0..@min(7, head_hash.len)]);
+            try platform_impl.writeStderr("'\n");
+            std.process.exit(128);
+        }
         try platform_impl.writeStderr("fatal: No names found, cannot describe anything.\n");
         std.process.exit(128);
     }
@@ -12194,6 +12290,48 @@ fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             std.process.exit(1);
         };
         return; // exists - exit 0
+    }
+
+    // For --textconv and --filters, handle rev:path format with better error messages
+    if ((textconv or filters) and object_ref != null) {
+        if (std.mem.indexOf(u8, object_ref.?, ":")) |colon_pos| {
+            const rev_part = object_ref.?[0..colon_pos];
+            const path_part = object_ref.?[colon_pos + 1 ..];
+            if (rev_part.len == 0) {
+                // :path - read from HEAD tree
+                const head_hash = refs.getCurrentCommit(git_path, platform_impl, allocator) catch { try platform_impl.writeStderr("fatal: no commits\n"); std.process.exit(128); unreachable; };
+                if (head_hash) |hh| {
+                    defer allocator.free(hh);
+                    const blob_hash = getTreeEntryHashFromCommit(git_path, hh, path_part, allocator) catch { const msg = try std.fmt.allocPrint(allocator, "fatal: path '{s}' does not exist in the index\n", .{path_part}); defer allocator.free(msg); try platform_impl.writeStderr(msg); std.process.exit(128); unreachable; };
+                    defer allocator.free(blob_hash);
+                    const blob_obj = objects.GitObject.load(blob_hash, git_path, platform_impl, allocator) catch { try platform_impl.writeStderr("fatal: bad object\n"); std.process.exit(128); unreachable; };
+                    defer blob_obj.deinit(allocator);
+                    try platform_impl.writeStdout(blob_obj.data);
+                    return;
+                }
+            }
+            const rev_hash = resolveRevision(git_path, rev_part, platform_impl, allocator) catch { const msg = try std.fmt.allocPrint(allocator, "fatal: invalid object name '{s}'.\n", .{rev_part}); defer allocator.free(msg); try platform_impl.writeStderr(msg); std.process.exit(128); unreachable; };
+            defer allocator.free(rev_hash);
+            const blob_hash = getTreeEntryHashFromCommit(git_path, rev_hash, path_part, allocator) catch { const msg = try std.fmt.allocPrint(allocator, "fatal: path '{s}' does not exist in '{s}'\n", .{ path_part, rev_part }); defer allocator.free(msg); try platform_impl.writeStderr(msg); std.process.exit(128); unreachable; };
+            defer allocator.free(blob_hash);
+            const blob_obj = objects.GitObject.load(blob_hash, git_path, platform_impl, allocator) catch { try platform_impl.writeStderr("fatal: bad object\n"); std.process.exit(128); unreachable; };
+            defer blob_obj.deinit(allocator);
+            try platform_impl.writeStdout(blob_obj.data);
+            return;
+        } else if (textconv) {
+            const rev_valid = resolveRevision(git_path, object_ref.?, platform_impl, allocator) catch null;
+            if (rev_valid) |v| {
+                allocator.free(v);
+                const msg = try std.fmt.allocPrint(allocator, "fatal: <object>:<path> required, only <object> '{s}' given\n", .{object_ref.?});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+            } else {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: Not a valid object name {s}\n", .{object_ref.?});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+            }
+            std.process.exit(128);
+        }
     }
 
     // Resolve the object reference to a hash
