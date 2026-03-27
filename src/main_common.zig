@@ -4999,7 +4999,7 @@ fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     // Parse arguments for flags, remote, and refspecs
     var quiet = false;
     var remote_name: []const u8 = "origin";
-    var cmd_refspecs = std.array_list.Managed([]const u8).init(allocator);
+    var cmd_refspecs = std.ArrayList([]const u8).init(allocator);
     defer cmd_refspecs.deinit();
     var got_remote = false;
     while (args.next()) |arg| {
@@ -16413,7 +16413,7 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                 if (df_patch) {
                     const indexed_content = getIndexedFileContent(entry, allocator) catch "";
                     defer if (indexed_content.len > 0) allocator.free(indexed_content);
-                    var out = std.array_list.Managed(u8).init(allocator);
+                    var out = std.ArrayList(u8).init(allocator);
                     defer out.deinit();
                     try out.appendSlice("diff --git a/");
                     try out.appendSlice(entry.path);
@@ -16428,7 +16428,7 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                     try out.appendSlice("\n+++ /dev/null\n");
                     if (indexed_content.len > 0) {
                         var liter = std.mem.splitScalar(u8, indexed_content, '\n');
-                        var lines_arr = std.array_list.Managed([]const u8).init(allocator);
+                        var lines_arr = std.ArrayList([]const u8).init(allocator);
                         defer lines_arr.deinit();
                         while (liter.next()) |ln| try lines_arr.append(ln);
                         if (lines_arr.items.len > 0 and indexed_content[indexed_content.len - 1] == '\n') _ = lines_arr.pop();
@@ -16533,7 +16533,7 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                         break :blk platform_impl.fs.readFile(allocator, full_path) catch try allocator.dupe(u8, "");
                     };
                     defer allocator.free(wt_content);
-                    var out = std.array_list.Managed(u8).init(allocator);
+                    var out = std.ArrayList(u8).init(allocator);
                     defer out.deinit();
                     try out.appendSlice("diff --git a/");
                     try out.appendSlice(entry.path);
@@ -22199,7 +22199,7 @@ fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_index: u
     var patch_mode = false;
     var suppress_output = false;
     var tree_ish: ?[]const u8 = null;
-    var pathspecs = std.array_list.Managed([]const u8).init(allocator);
+    var pathspecs = std.ArrayList([]const u8).init(allocator);
     defer pathspecs.deinit();
     var seen_dashdash = false;
 
@@ -24969,7 +24969,7 @@ fn performLocalFetch(allocator: std.mem.Allocator, git_path: []const u8, source_
     const fkey = try std.fmt.allocPrint(allocator, "remote.{s}.fetch", .{remote_name}); defer allocator.free(fkey);
     const cfgp = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path}); defer allocator.free(cfgp);
     const cfgc = platform_impl.fs.readFile(allocator, cfgp) catch ""; defer if (cfgc.len > 0) allocator.free(cfgc);
-    var rspecs = std.array_list.Managed([]const u8).init(allocator);
+    var rspecs = std.ArrayList([]const u8).init(allocator);
     defer { for (rspecs.items) |rs| allocator.free(rs); rspecs.deinit(); }
     if (cmd_refspecs.len > 0) { for (cmd_refspecs) |rs| try rspecs.append(try allocator.dupe(u8, rs)); }
     else { var fr: ?[]const u8 = null; if (cfgc.len > 0) fr = (parseConfigValue(cfgc, fkey, allocator) catch null) orelse null;
@@ -24980,7 +24980,7 @@ fn performLocalFetch(allocator: std.mem.Allocator, git_path: []const u8, source_
     const sp2 = try std.fmt.allocPrint(allocator, "{s}/pack", .{so}); defer allocator.free(sp2);
     const dp2 = try std.fmt.allocPrint(allocator, "{s}/pack", .{do2}); defer allocator.free(dp2);
     std.fs.cwd().makePath(dp2) catch {}; t5CopyMissingPackFiles(sp2, dp2) catch {};
-    var srl = std.array_list.Managed(RefEntry).init(allocator);
+    var srl = std.ArrayList(RefEntry).init(allocator);
     defer { for (srl.items) |e| { allocator.free(e.name); allocator.free(e.hash); } srl.deinit(); }
     const srp = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{src_git_dir}); defer allocator.free(srp);
     if (std.fs.cwd().readFileAlloc(allocator, srp, 10*1024*1024)) |pc| { defer allocator.free(pc);
@@ -25056,7 +25056,7 @@ fn t5CopyMissingPackFiles(src: []const u8, dst: []const u8) !void {
 fn nativeCmdLsRemote(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
     var show_tags = false; var show_heads = false; var symref_flag = false;
     var quiet = false; var ecf = false; var get_url = false;
-    var patterns = std.array_list.Managed([]const u8).init(allocator); defer patterns.deinit();
+    var patterns = std.ArrayList([]const u8).init(allocator); defer patterns.deinit();
     var remote_arg: ?[]const u8 = null; var saw_dd = false;
     var ii = command_index + 1;
     while (ii < args.len) : (ii += 1) { const arg = args[ii];
@@ -25088,7 +25088,7 @@ fn nativeCmdLsRemote(allocator: std.mem.Allocator, args: [][]const u8, command_i
     { var du: []const u8 = rn; var duo: ?[]u8 = null; defer if (duo) |u| allocator.free(u);
       if (findGitDir() catch null) |gd| { if (getRemoteUrl(gd, rn, platform_impl, allocator)) |u| { duo = u; du = u; } else |_| {} }
       const fm = try std.fmt.allocPrint(allocator, "From {s}\n", .{du}); defer allocator.free(fm); try platform_impl.writeStderr(fm); }
-    var rl = std.array_list.Managed(RefEntry).init(allocator);
+    var rl = std.ArrayList(RefEntry).init(allocator);
     defer { for (rl.items) |e| { allocator.free(e.name); allocator.free(e.hash); } rl.deinit(); }
     var pm = std.StringHashMap([]const u8).init(allocator);
     defer { var pit = pm.iterator(); while (pit.next()) |e| { allocator.free(e.key_ptr.*); allocator.free(e.value_ptr.*); } pm.deinit(); }
