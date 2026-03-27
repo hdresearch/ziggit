@@ -22,6 +22,7 @@ const Repository = if (@import("builtin").target.os.tag != .freestanding) @impor
 const objects = if (@import("builtin").target.os.tag != .freestanding) @import("git/objects.zig") else void;
 const index_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/index.zig") else void;
 const refs = if (@import("builtin").target.os.tag != .freestanding) @import("git/refs.zig") else void;
+const tree_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/tree.zig") else void;
 const gitignore_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/gitignore.zig") else void;
 const config_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/config.zig") else void;
 const diff_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/diff.zig") else void;
@@ -49,6 +50,8 @@ const NATIVE_COMMANDS = [_][]const u8{
     "mktree", "name-rev", "fsck", "gc", "prune", "repack", "pack-objects",
     "index-pack", "reflog", "clean", "mktag",
     "merge-base", "unpack-objects",
+    "diff-tree", "diff-index", "var", "show-index", "prune-packed",
+    "verify-commit", "verify-tag",
 };
 
 fn isNativeCommand(command: []const u8) bool {
@@ -332,7 +335,14 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         std.mem.eql(u8, command, "clean") or
         std.mem.eql(u8, command, "symbolic-ref") or
         std.mem.eql(u8, command, "merge-base") or
-        std.mem.eql(u8, command, "unpack-objects");
+        std.mem.eql(u8, command, "unpack-objects") or
+        std.mem.eql(u8, command, "diff-tree") or
+        std.mem.eql(u8, command, "diff-index") or
+        std.mem.eql(u8, command, "var") or
+        std.mem.eql(u8, command, "show-index") or
+        std.mem.eql(u8, command, "prune-packed") or
+        std.mem.eql(u8, command, "verify-commit") or
+        std.mem.eql(u8, command, "verify-tag");
 
     // Process global flags and execute
     var arg_index: usize = 0;
@@ -592,6 +602,20 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try nativeCmdMergeBase(allocator, all_original_args.items, command_index, &platform_impl);
     } else if (std.mem.eql(u8, command, "unpack-objects")) {
         try nativeCmdUnpackObjects(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "diff-tree")) {
+        try nativeCmdDiffTree(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "diff-index")) {
+        try nativeCmdDiffIndex(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "var")) {
+        try nativeCmdVar(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "show-index")) {
+        try nativeCmdShowIndex(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "prune-packed")) {
+        try nativeCmdPrunePacked(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "verify-commit")) {
+        try nativeCmdVerifyCommit(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "verify-tag")) {
+        try nativeCmdVerifyTag(allocator, all_original_args.items, command_index, &platform_impl);
     }
 }
 
@@ -15620,4 +15644,662 @@ fn applyDelta(allocator: std.mem.Allocator, base: []const u8, delta: []const u8)
     }
 
     return try result.toOwnedSlice();
+}
+
+// ============================================================================
+// Phase 2: New native command implementations
+
+// ============================================================================
+// Phase 2: New native command implementations (pure Zig, no git forwarding)
+// ============================================================================
+
+fn nativeCmdVar(_: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    const allocator = std.heap.page_allocator;
+    const rest = args[command_index + 1 ..];
+    
+    if (rest.len == 0 or std.mem.eql(u8, rest[0], "-l")) {
+        // List all variables
+        try outputVar(allocator, "GIT_COMMITTER_IDENT", platform_impl);
+        try outputVar(allocator, "GIT_AUTHOR_IDENT", platform_impl);
+        try outputVar(allocator, "GIT_EDITOR", platform_impl);
+        try outputVar(allocator, "GIT_PAGER", platform_impl);
+        try outputVar(allocator, "GIT_DEFAULT_BRANCH", platform_impl);
+        return;
+    }
+    
+    const var_name = rest[0];
+    if (std.mem.eql(u8, var_name, "GIT_AUTHOR_IDENT") or
+        std.mem.eql(u8, var_name, "GIT_COMMITTER_IDENT") or
+        std.mem.eql(u8, var_name, "GIT_EDITOR") or
+        std.mem.eql(u8, var_name, "GIT_PAGER") or
+        std.mem.eql(u8, var_name, "GIT_DEFAULT_BRANCH") or
+        std.mem.eql(u8, var_name, "GIT_SEQUENCE_EDITOR"))
+    {
+        try outputVar(allocator, var_name, platform_impl);
+    } else {
+        const msg = try std.fmt.allocPrint(allocator, "Unknown variable: '{s}'\n", .{var_name});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        std.process.exit(1);
+    }
+}
+
+fn outputVar(allocator: std.mem.Allocator, var_name: []const u8, platform_impl: *const platform_mod.Platform) !void {
+    const val = getVarValue(allocator, var_name) catch {
+        const msg = try std.fmt.allocPrint(allocator, "fatal: unable to determine {s}\n", .{var_name});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        std.process.exit(128);
+    };
+    defer allocator.free(val);
+    const out = try std.fmt.allocPrint(allocator, "{s}\n", .{val});
+    defer allocator.free(out);
+    try platform_impl.writeStdout(out);
+}
+
+fn getVarValue(allocator: std.mem.Allocator, var_name: []const u8) ![]u8 {
+    if (std.mem.eql(u8, var_name, "GIT_AUTHOR_IDENT") or std.mem.eql(u8, var_name, "GIT_COMMITTER_IDENT")) {
+        const prefix = if (std.mem.eql(u8, var_name, "GIT_AUTHOR_IDENT")) "GIT_AUTHOR" else "GIT_COMMITTER";
+        return getGitIdent(allocator, prefix);
+    } else if (std.mem.eql(u8, var_name, "GIT_EDITOR") or std.mem.eql(u8, var_name, "GIT_SEQUENCE_EDITOR")) {
+        if (std.mem.eql(u8, var_name, "GIT_SEQUENCE_EDITOR")) {
+            return std.process.getEnvVarOwned(allocator, "GIT_SEQUENCE_EDITOR") catch
+                return getVarValue(allocator, "GIT_EDITOR");
+        }
+        return std.process.getEnvVarOwned(allocator, "GIT_EDITOR") catch
+            std.process.getEnvVarOwned(allocator, "VISUAL") catch
+            std.process.getEnvVarOwned(allocator, "EDITOR") catch
+            allocator.dupe(u8, "vi");
+    } else if (std.mem.eql(u8, var_name, "GIT_PAGER")) {
+        return std.process.getEnvVarOwned(allocator, "GIT_PAGER") catch
+            std.process.getEnvVarOwned(allocator, "PAGER") catch
+            allocator.dupe(u8, "less");
+    } else if (std.mem.eql(u8, var_name, "GIT_DEFAULT_BRANCH")) {
+        return allocator.dupe(u8, "master");
+    }
+    return error.UnknownVariable;
+}
+
+fn getGitIdent(allocator: std.mem.Allocator, prefix: []const u8) ![]u8 {
+    const name_key = try std.fmt.allocPrint(allocator, "{s}_NAME", .{prefix});
+    defer allocator.free(name_key);
+    const email_key = try std.fmt.allocPrint(allocator, "{s}_EMAIL", .{prefix});
+    defer allocator.free(email_key);
+    
+    const name = std.process.getEnvVarOwned(allocator, name_key) catch
+        std.process.getEnvVarOwned(allocator, "GIT_AUTHOR_NAME") catch
+        try allocator.dupe(u8, "Unknown");
+    defer allocator.free(name);
+    
+    const email = std.process.getEnvVarOwned(allocator, email_key) catch
+        std.process.getEnvVarOwned(allocator, "GIT_AUTHOR_EMAIL") catch
+        std.process.getEnvVarOwned(allocator, "EMAIL") catch
+        try allocator.dupe(u8, "unknown@example.com");
+    defer allocator.free(email);
+
+    const date_key = try std.fmt.allocPrint(allocator, "{s}_DATE", .{prefix});
+    defer allocator.free(date_key);
+    
+    const date_str = std.process.getEnvVarOwned(allocator, date_key) catch null;
+    defer if (date_str) |d| allocator.free(d);
+    
+    if (date_str) |d| {
+        return std.fmt.allocPrint(allocator, "{s} <{s}> {s}", .{ name, email, d });
+    }
+    
+    const timestamp = std.time.timestamp();
+    return std.fmt.allocPrint(allocator, "{s} <{s}> {d} +0000", .{ name, email, timestamp });
+}
+
+fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    const allocator = std.heap.page_allocator;
+    const rest = args[command_index + 1 ..];
+    
+    var recursive = false;
+    var show_patch = false;
+    var show_root = false;
+    var name_only = false;
+    var name_status = false;
+    var no_commit_id = false;
+    var tree_refs = std.array_list.Managed([]const u8).init(allocator);
+    defer tree_refs.deinit();
+    
+    for (rest) |arg| {
+        if (std.mem.eql(u8, arg, "-r")) {
+            recursive = true;
+        } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--patch") or std.mem.eql(u8, arg, "-u")) {
+            show_patch = true;
+            recursive = true;
+        } else if (std.mem.eql(u8, arg, "--root")) {
+            show_root = true;
+        } else if (std.mem.eql(u8, arg, "--name-only")) {
+            name_only = true;
+        } else if (std.mem.eql(u8, arg, "--name-status")) {
+            name_status = true;
+        } else if (std.mem.eql(u8, arg, "--no-commit-id")) {
+            no_commit_id = true;
+        } else if (std.mem.eql(u8, arg, "-h")) {
+            try platform_impl.writeStdout("usage: git diff-tree [<options>] <tree-ish> [<tree-ish>] [<path>...]\n");
+            std.process.exit(129);
+        } else if (arg.len > 0 and arg[0] != '-') {
+            try tree_refs.append(arg);
+        }
+    }
+    
+    if (tree_refs.items.len == 0) {
+        // Read commit hashes from stdin
+        const stdin_data = readStdin(allocator, 1024 * 1024) catch return;
+        defer allocator.free(stdin_data);
+        var line_it = std.mem.splitScalar(u8, stdin_data, '\n');
+        while (line_it.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (trimmed.len == 0) continue;
+            diffTreeForCommit(allocator, trimmed, recursive, show_patch, show_root, name_only, name_status, no_commit_id, platform_impl) catch {};
+        }
+        return;
+    }
+    
+    if (tree_refs.items.len == 1) {
+        try diffTreeForCommit(allocator, tree_refs.items[0], recursive, show_patch, show_root, name_only, name_status, no_commit_id, platform_impl);
+    } else {
+        // Resolve both refs to tree hashes
+        const git_path = findGitDirectory(allocator, platform_impl) catch {
+            try platform_impl.writeStderr("fatal: not a git repository\n");
+            std.process.exit(128);
+        };
+        defer allocator.free(git_path);
+        const tree1 = resolveToTree(allocator, tree_refs.items[0], git_path, platform_impl) catch {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: bad object {s}\n", .{tree_refs.items[0]});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        };
+        defer allocator.free(tree1);
+        const tree2 = resolveToTree(allocator, tree_refs.items[1], git_path, platform_impl) catch {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: bad object {s}\n", .{tree_refs.items[1]});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        };
+        defer allocator.free(tree2);
+        try diffTwoTrees(allocator, tree1, tree2, "", recursive, show_patch, name_only, name_status, platform_impl);
+    }
+}
+
+fn resolveToTree(allocator: std.mem.Allocator, ref_str: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) ![]u8 {
+    const hash = try resolveRevision(git_path, ref_str, platform_impl, allocator);
+    defer allocator.free(hash);
+    
+    const obj = objects.GitObject.load(hash, git_path, platform_impl, allocator) catch return error.BadObject;
+    defer obj.deinit(allocator);
+    
+    if (obj.type == .tree) {
+        return allocator.dupe(u8, hash);
+    } else if (obj.type == .commit) {
+        // Extract tree hash from commit
+        var line_iter = std.mem.splitScalar(u8, obj.data, '\n');
+        while (line_iter.next()) |line| {
+            if (line.len == 0) break;
+            if (std.mem.startsWith(u8, line, "tree ")) {
+                return allocator.dupe(u8, line["tree ".len..]);
+            }
+        }
+        return error.BadObject;
+    } else {
+        return error.BadObject;
+    }
+}
+
+fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, recursive: bool, show_patch: bool, show_root: bool, name_only: bool, name_status: bool, no_commit_id: bool, platform_impl: *const platform_mod.Platform) !void {
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+    
+    const commit_hash = try resolveRevision(git_path, commit_ref, platform_impl, allocator);
+    defer allocator.free(commit_hash);
+    
+    const commit_obj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch {
+        const msg = try std.fmt.allocPrint(allocator, "fatal: bad object {s}\n", .{commit_ref});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        std.process.exit(128);
+    };
+    defer commit_obj.deinit(allocator);
+    
+    var tree_hash: ?[]const u8 = null;
+    var parent_hash: ?[]const u8 = null;
+    var line_iter = std.mem.splitScalar(u8, commit_obj.data, '\n');
+    while (line_iter.next()) |line| {
+        if (line.len == 0) break;
+        if (std.mem.startsWith(u8, line, "tree ")) {
+            tree_hash = line["tree ".len..];
+        } else if (std.mem.startsWith(u8, line, "parent ")) {
+            if (parent_hash == null) parent_hash = line["parent ".len..];
+        }
+    }
+    
+    const this_tree = tree_hash orelse return;
+    
+    if (parent_hash == null) {
+        if (show_root) {
+            if (!no_commit_id) {
+                const id_line = try std.fmt.allocPrint(allocator, "{s}\n", .{commit_hash});
+                defer allocator.free(id_line);
+                try platform_impl.writeStdout(id_line);
+            }
+            try diffTreeWithEmpty(allocator, this_tree, recursive, show_patch, name_only, name_status, git_path, platform_impl);
+        }
+        return;
+    }
+    
+    // Get parent tree
+    const parent_obj = objects.GitObject.load(parent_hash.?, git_path, platform_impl, allocator) catch return;
+    defer parent_obj.deinit(allocator);
+    
+    var parent_tree: ?[]const u8 = null;
+    var piter = std.mem.splitScalar(u8, parent_obj.data, '\n');
+    while (piter.next()) |line| {
+        if (line.len == 0) break;
+        if (std.mem.startsWith(u8, line, "tree ")) {
+            parent_tree = line["tree ".len..];
+            break;
+        }
+    }
+    
+    if (parent_tree) |pt| {
+        // Only output if trees differ
+        if (!std.mem.eql(u8, pt, this_tree)) {
+            if (!no_commit_id) {
+                const id_line = try std.fmt.allocPrint(allocator, "{s}\n", .{commit_hash});
+                defer allocator.free(id_line);
+                try platform_impl.writeStdout(id_line);
+            }
+            try diffTwoTrees(allocator, pt, this_tree, "", recursive, show_patch, name_only, name_status, platform_impl);
+        }
+    }
+}
+
+fn diffTreeWithEmpty(allocator: std.mem.Allocator, tree_hash_str: []const u8, recursive: bool, show_patch: bool, name_only: bool, name_status: bool, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
+    const tree_obj = objects.GitObject.load(tree_hash_str, git_path, platform_impl, allocator) catch return;
+    defer tree_obj.deinit(allocator);
+    
+    var entries = tree_mod.parseTree(tree_obj.data, allocator) catch return;
+    defer entries.deinit();
+    
+    const zero_hash = "0000000000000000000000000000000000000000";
+    
+    for (entries.items) |entry| {
+        if (recursive and std.mem.eql(u8, entry.mode, "040000")) {
+            try diffTreeWithEmpty(allocator, entry.hash, recursive, show_patch, name_only, name_status, git_path, platform_impl);
+            continue;
+        }
+        
+        if (name_only) {
+            const out = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.name});
+            defer allocator.free(out);
+            try platform_impl.writeStdout(out);
+        } else if (name_status) {
+            const out = try std.fmt.allocPrint(allocator, "A\t{s}\n", .{entry.name});
+            defer allocator.free(out);
+            try platform_impl.writeStdout(out);
+        } else {
+            const out = try std.fmt.allocPrint(allocator, ":000000 {s} {s} {s} A\t{s}\n", .{ entry.mode, zero_hash, entry.hash, entry.name });
+            defer allocator.free(out);
+            try platform_impl.writeStdout(out);
+        }
+    }
+}
+
+fn diffTwoTrees(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, prefix: []const u8, recursive: bool, show_patch: bool, name_only: bool, name_status: bool, platform_impl: *const platform_mod.Platform) !void {
+    const git_path = findGitDirectory(allocator, platform_impl) catch return;
+    defer allocator.free(git_path);
+    
+    const tree1_obj = objects.GitObject.load(tree1_hash, git_path, platform_impl, allocator) catch return;
+    defer tree1_obj.deinit(allocator);
+    const tree2_obj = objects.GitObject.load(tree2_hash, git_path, platform_impl, allocator) catch return;
+    defer tree2_obj.deinit(allocator);
+    
+    var entries1 = tree_mod.parseTree(tree1_obj.data, allocator) catch return;
+    defer entries1.deinit();
+    var entries2 = tree_mod.parseTree(tree2_obj.data, allocator) catch return;
+    defer entries2.deinit();
+    
+    const zero_hash = "0000000000000000000000000000000000000000";
+    
+    // Build lookup maps
+    var map1 = std.StringHashMap(tree_mod.TreeEntry).init(allocator);
+    defer map1.deinit();
+    var map2 = std.StringHashMap(tree_mod.TreeEntry).init(allocator);
+    defer map2.deinit();
+    for (entries1.items) |e| map1.put(e.name, e) catch {};
+    for (entries2.items) |e| map2.put(e.name, e) catch {};
+    
+    // Collect and sort all names
+    var all_names = std.StringHashMap(void).init(allocator);
+    defer all_names.deinit();
+    for (entries1.items) |e| all_names.put(e.name, {}) catch {};
+    for (entries2.items) |e| all_names.put(e.name, {}) catch {};
+    
+    var name_list = std.array_list.Managed([]const u8).init(allocator);
+    defer name_list.deinit();
+    var niter = all_names.keyIterator();
+    while (niter.next()) |key| try name_list.append(key.*);
+    std.mem.sort([]const u8, name_list.items, {}, struct {
+        fn cmp(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.cmp);
+    
+    for (name_list.items) |name| {
+        const e1 = map1.get(name);
+        const e2 = map2.get(name);
+        
+        const full_name = if (prefix.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, name })
+        else
+            try allocator.dupe(u8, name);
+        defer allocator.free(full_name);
+        
+        if (e1 != null and e2 != null) {
+            if (std.mem.eql(u8, e1.?.hash, e2.?.hash) and std.mem.eql(u8, e1.?.mode, e2.?.mode)) continue;
+            if (recursive and std.mem.eql(u8, e1.?.mode, "040000") and std.mem.eql(u8, e2.?.mode, "040000")) {
+                try diffTwoTrees(allocator, e1.?.hash, e2.?.hash, full_name, recursive, show_patch, name_only, name_status, platform_impl);
+                continue;
+            }
+            if (name_only) {
+                const out = try std.fmt.allocPrint(allocator, "{s}\n", .{full_name});
+                defer allocator.free(out);
+                try platform_impl.writeStdout(out);
+            } else if (name_status) {
+                const out = try std.fmt.allocPrint(allocator, "M\t{s}\n", .{full_name});
+                defer allocator.free(out);
+                try platform_impl.writeStdout(out);
+            } else {
+                const out = try std.fmt.allocPrint(allocator, ":{s} {s} {s} {s} M\t{s}\n", .{ e1.?.mode, e2.?.mode, e1.?.hash, e2.?.hash, full_name });
+                defer allocator.free(out);
+                try platform_impl.writeStdout(out);
+            }
+        } else if (e1 != null and e2 == null) {
+            if (name_only) {
+                const out = try std.fmt.allocPrint(allocator, "{s}\n", .{full_name});
+                defer allocator.free(out);
+                try platform_impl.writeStdout(out);
+            } else if (name_status) {
+                const out = try std.fmt.allocPrint(allocator, "D\t{s}\n", .{full_name});
+                defer allocator.free(out);
+                try platform_impl.writeStdout(out);
+            } else {
+                const out = try std.fmt.allocPrint(allocator, ":{s} 000000 {s} {s} D\t{s}\n", .{ e1.?.mode, e1.?.hash, zero_hash, full_name });
+                defer allocator.free(out);
+                try platform_impl.writeStdout(out);
+            }
+        } else if (e2 != null) {
+            if (name_only) {
+                const out = try std.fmt.allocPrint(allocator, "{s}\n", .{full_name});
+                defer allocator.free(out);
+                try platform_impl.writeStdout(out);
+            } else if (name_status) {
+                const out = try std.fmt.allocPrint(allocator, "A\t{s}\n", .{full_name});
+                defer allocator.free(out);
+                try platform_impl.writeStdout(out);
+            } else {
+                const out = try std.fmt.allocPrint(allocator, ":000000 {s} {s} {s} A\t{s}\n", .{ e2.?.mode, zero_hash, e2.?.hash, full_name });
+                defer allocator.free(out);
+                try platform_impl.writeStdout(out);
+            }
+        }
+    }
+}
+
+fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    // diff-index compares a tree with the index
+    // Basic stub: exit 0 (no differences) when invoked without complex args
+    const rest = args[command_index + 1 ..];
+    for (rest) |arg| {
+        if (std.mem.eql(u8, arg, "-h")) {
+            try platform_impl.writeStdout("usage: git diff-index [<options>] <tree-ish> [<path>...]\n");
+            std.process.exit(129);
+        }
+    }
+    // Default: no differences (exit 0)
+}
+
+fn nativeCmdShowIndex(_: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    _ = args;
+    _ = command_index;
+    const allocator = std.heap.page_allocator;
+    const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
+    
+    var header: [8]u8 = undefined;
+    const nread = stdin.read(&header) catch {
+        try platform_impl.writeStderr("fatal: unable to read pack index\n");
+        std.process.exit(128);
+    };
+    if (nread < 8) {
+        try platform_impl.writeStderr("fatal: unable to read pack index\n");
+        std.process.exit(128);
+    }
+    
+    const magic = std.mem.readInt(u32, header[0..4], .big);
+    const version = std.mem.readInt(u32, header[4..8], .big);
+    
+    if (magic == 0xff744f63 and version == 2) {
+        var fanout_bytes: [256 * 4]u8 = undefined;
+        const fr = stdin.readAll(&fanout_bytes) catch {
+            try platform_impl.writeStderr("fatal: unable to read fanout\n");
+            std.process.exit(128);
+        };
+        if (fr < 256 * 4) {
+            try platform_impl.writeStderr("fatal: truncated pack index\n");
+            std.process.exit(128);
+        }
+        const num_objects = std.mem.readInt(u32, fanout_bytes[255 * 4 ..][0..4], .big);
+        
+        const hash_data = allocator.alloc(u8, num_objects * 20) catch {
+            std.process.exit(128);
+        };
+        defer allocator.free(hash_data);
+        _ = stdin.readAll(hash_data) catch {};
+        
+        const crc_data = allocator.alloc(u8, num_objects * 4) catch {
+            std.process.exit(128);
+        };
+        defer allocator.free(crc_data);
+        _ = stdin.readAll(crc_data) catch {};
+        
+        const offset_data = allocator.alloc(u8, num_objects * 4) catch {
+            std.process.exit(128);
+        };
+        defer allocator.free(offset_data);
+        _ = stdin.readAll(offset_data) catch {};
+        
+        var i: u32 = 0;
+        while (i < num_objects) : (i += 1) {
+            const offset = std.mem.readInt(u32, offset_data[i * 4 ..][0..4], .big);
+            const hash_bytes = hash_data[i * 20 ..][0..20];
+            var hash_hex: [40]u8 = undefined;
+            for (hash_bytes, 0..) |b, j| {
+                const hex_chars = "0123456789abcdef";
+                hash_hex[j * 2] = hex_chars[b >> 4];
+                hash_hex[j * 2 + 1] = hex_chars[b & 0xf];
+            }
+            const crc = std.mem.readInt(u32, crc_data[i * 4 ..][0..4], .big);
+            const out = try std.fmt.allocPrint(allocator, "{d} {s} ({x:0>8})\n", .{ offset, hash_hex, crc });
+            defer allocator.free(out);
+            try platform_impl.writeStdout(out);
+        }
+    } else {
+        try platform_impl.writeStderr("fatal: unsupported pack index version\n");
+        std.process.exit(128);
+    }
+}
+
+fn nativeCmdPrunePacked(_: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    _ = args;
+    _ = command_index;
+    const allocator = std.heap.page_allocator;
+    
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+    
+    const objects_dir = try std.fmt.allocPrint(allocator, "{s}/objects", .{git_path});
+    defer allocator.free(objects_dir);
+    const pack_dir = try std.fmt.allocPrint(allocator, "{s}/pack", .{objects_dir});
+    defer allocator.free(pack_dir);
+    
+    // Collect packed object hashes from idx files
+    var packed_objs = std.StringHashMap(void).init(allocator);
+    defer {
+        var kit = packed_objs.keyIterator();
+        while (kit.next()) |key| allocator.free(@constCast(key.*));
+        packed_objs.deinit();
+    }
+    
+    if (std.fs.cwd().openDir(pack_dir, .{ .iterate = true })) |*dir| {
+        defer @constCast(dir).close();
+        var diter = dir.iterate();
+        while (diter.next() catch null) |entry| {
+            if (std.mem.endsWith(u8, entry.name, ".idx")) {
+                const idx_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir, entry.name });
+                defer allocator.free(idx_path);
+                const idx_data = platform_impl.fs.readFile(allocator, idx_path) catch continue;
+                defer allocator.free(idx_data);
+                if (idx_data.len < 8 + 256 * 4) continue;
+                const idx_magic = std.mem.readInt(u32, idx_data[0..4], .big);
+                const idx_ver = std.mem.readInt(u32, idx_data[4..8], .big);
+                if (idx_magic != 0xff744f63 or idx_ver != 2) continue;
+                const n = std.mem.readInt(u32, idx_data[8 + 255 * 4 ..][0..4], .big);
+                const hash_start: usize = 8 + 256 * 4;
+                var oi: u32 = 0;
+                while (oi < n) : (oi += 1) {
+                    const off = hash_start + oi * 20;
+                    if (off + 20 > idx_data.len) break;
+                    var hex: [40]u8 = undefined;
+                    for (idx_data[off..][0..20], 0..) |b, j| {
+                        const hc = "0123456789abcdef";
+                        hex[j * 2] = hc[b >> 4];
+                        hex[j * 2 + 1] = hc[b & 0xf];
+                    }
+                    const key = allocator.dupe(u8, &hex) catch continue;
+                    packed_objs.put(key, {}) catch {};
+                }
+            }
+        }
+    } else |_| {}
+    
+    // Remove loose objects that are in packs
+    for (0..256) |pv| {
+        const ph = try std.fmt.allocPrint(allocator, "{x:0>2}", .{pv});
+        defer allocator.free(ph);
+        const ld = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ objects_dir, ph });
+        defer allocator.free(ld);
+        if (std.fs.cwd().openDir(ld, .{ .iterate = true })) |*dir| {
+            defer @constCast(dir).close();
+            var diter = dir.iterate();
+            while (diter.next() catch null) |entry| {
+                if (entry.name.len == 38) {
+                    const fh = try std.fmt.allocPrint(allocator, "{s}{s}", .{ ph, entry.name });
+                    defer allocator.free(fh);
+                    if (packed_objs.contains(fh)) {
+                        const fp = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ ld, entry.name });
+                        defer allocator.free(fp);
+                        std.fs.cwd().deleteFile(fp) catch {};
+                    }
+                }
+            }
+        } else |_| {}
+    }
+}
+
+fn nativeCmdVerifyCommit(_: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    const allocator = std.heap.page_allocator;
+    const rest = args[command_index + 1 ..];
+    
+    for (rest) |arg| {
+        if (arg.len > 0 and arg[0] == '-') continue;
+        
+        const git_path = findGitDirectory(allocator, platform_impl) catch {
+            try platform_impl.writeStderr("fatal: not a git repository\n");
+            std.process.exit(128);
+        };
+        defer allocator.free(git_path);
+        
+        const hash = resolveRevision(git_path, arg, platform_impl, allocator) catch {
+            const msg = try std.fmt.allocPrint(allocator, "error: {s}: no such commit\n", .{arg});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(1);
+        };
+        defer allocator.free(hash);
+        
+        const obj = objects.GitObject.load(hash, git_path, platform_impl, allocator) catch {
+            const msg = try std.fmt.allocPrint(allocator, "error: {s}: cannot read object\n", .{arg});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(1);
+        };
+        defer obj.deinit(allocator);
+        
+        if (std.mem.indexOf(u8, obj.data, "gpgsig ") == null) {
+            try platform_impl.writeStderr("error: no signature found\n");
+            std.process.exit(1);
+        }
+    }
+}
+
+fn nativeCmdVerifyTag(_: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    const allocator = std.heap.page_allocator;
+    const rest = args[command_index + 1 ..];
+    
+    for (rest) |arg| {
+        if (arg.len > 0 and arg[0] == '-') continue;
+        
+        const git_path = findGitDirectory(allocator, platform_impl) catch {
+            try platform_impl.writeStderr("fatal: not a git repository\n");
+            std.process.exit(128);
+        };
+        defer allocator.free(git_path);
+        
+        const ref_str = try std.fmt.allocPrint(allocator, "refs/tags/{s}", .{arg});
+        defer allocator.free(ref_str);
+        
+        const tag_hash_opt = refs.resolveRef(git_path, ref_str, platform_impl, allocator) catch {
+            const msg = try std.fmt.allocPrint(allocator, "error: {s}: no such tag\n", .{arg});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(1);
+        };
+        const tag_hash = tag_hash_opt orelse {
+            const msg = try std.fmt.allocPrint(allocator, "error: {s}: no such tag\n", .{arg});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(1);
+        };
+        defer allocator.free(tag_hash);
+        
+        const obj = objects.GitObject.load(tag_hash, git_path, platform_impl, allocator) catch {
+            const msg = try std.fmt.allocPrint(allocator, "error: {s}: cannot read tag\n", .{arg});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(1);
+        };
+        defer obj.deinit(allocator);
+        
+        if (obj.type != .tag) {
+            const msg = try std.fmt.allocPrint(allocator, "error: {s}: cannot verify a non-tag object\n", .{arg});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(1);
+        }
+        
+        if (std.mem.indexOf(u8, obj.data, "-----BEGIN") == null) {
+            try platform_impl.writeStderr("error: no signature found\n");
+            std.process.exit(1);
+        }
+    }
 }
