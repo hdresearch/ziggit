@@ -2,6 +2,87 @@ const zlib_compat = @import("zlib_compat.zig");
 const std = @import("std");
 const crypto = std.crypto;
 
+// Simple pack file cache to avoid repeated file I/O
+const CachedPackFile = struct {
+    idx_path: []const u8,
+    idx_data: []const u8,
+    pack_path: []const u8,
+    pack_data: []const u8,
+    allocator: std.mem.Allocator,
+    
+    fn deinit(self: *CachedPackFile) void {
+        self.allocator.free(self.idx_path);
+        self.allocator.free(self.idx_data);
+        self.allocator.free(self.pack_path);
+        self.allocator.free(self.pack_data);
+    }
+};
+
+var cached_packs: [8]?CachedPackFile = .{null} ** 8;
+var cached_pack_count: usize = 0;
+var cache_initialized: bool = false;
+
+fn getCachedIdx(idx_path: []const u8) ?[]const u8 {
+    for (cached_packs[0..cached_pack_count]) |maybe_entry| {
+        if (maybe_entry) |entry| {
+            if (std.mem.eql(u8, entry.idx_path, idx_path)) {
+                return entry.idx_data;
+            }
+        }
+    }
+    return null;
+}
+
+fn getCachedPack(pack_path: []const u8) ?[]const u8 {
+    for (cached_packs[0..cached_pack_count]) |maybe_entry| {
+        if (maybe_entry) |entry| {
+            if (std.mem.eql(u8, entry.pack_path, pack_path)) {
+                return entry.pack_data;
+            }
+        }
+    }
+    return null;
+}
+
+fn addToCache(allocator: std.mem.Allocator, idx_path: []const u8, idx_data: []const u8, pack_path: []const u8, pack_data: []const u8) void {
+    // Don't cache huge packs (>100MB)
+    if (pack_data.len > 100 * 1024 * 1024) return;
+    if (cached_pack_count >= 8) return; // Cache is full
+    
+    cached_packs[cached_pack_count] = CachedPackFile{
+        .idx_path = allocator.dupe(u8, idx_path) catch return,
+        .idx_data = allocator.dupe(u8, idx_data) catch return,
+        .pack_path = allocator.dupe(u8, pack_path) catch return,
+        .pack_data = allocator.dupe(u8, pack_data) catch return,
+        .allocator = allocator,
+    };
+    cached_pack_count += 1;
+}
+
+// Cache for pack directory listing
+var cached_pack_dir: ?[]const u8 = null;
+var cached_idx_names: [64]?[]const u8 = .{null} ** 64;
+var cached_idx_names_count: usize = 0;
+
+fn getCachedPackDir(pack_dir_path: []const u8) ?[]const ?[]const u8 {
+    if (cached_pack_dir) |cpd| {
+        if (std.mem.eql(u8, cpd, pack_dir_path)) {
+            return cached_idx_names[0..cached_idx_names_count];
+        }
+    }
+    return null;
+}
+
+fn cachePackDir(allocator: std.mem.Allocator, pack_dir_path: []const u8, names: []const []const u8) void {
+    if (cached_pack_dir != null) return; // Already cached
+    cached_pack_dir = allocator.dupe(u8, pack_dir_path) catch return;
+    for (names, 0..) |name, i| {
+        if (i >= 64) break;
+        cached_idx_names[i] = allocator.dupe(u8, name) catch return;
+        cached_idx_names_count = i + 1;
+    }
+}
+
 pub const ObjectType = enum {
     blob,
     tree,
@@ -225,144 +306,71 @@ pub fn createCommitObject(tree_hash: []const u8, parent_hashes: []const []const 
 /// Try to load object from pack files when loose object is not found
 /// Enhanced with better error handling, caching, and performance optimizations
 pub fn loadFromPackFiles(hash_str: []const u8, git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
-    // Validate hash string early
-    if (hash_str.len != 40) {
-        return error.InvalidHashLength;
-    }
-    
+    if (hash_str.len != 40) return error.InvalidHashLength;
     for (hash_str) |c| {
-        if (!std.ascii.isHex(c)) {
-            return error.InvalidHashCharacter;
-        }
+        if (!std.ascii.isHex(c)) return error.InvalidHashCharacter;
     }
-    
-    // Performance optimization: Use hash prefix for quick filtering
-    const hash_prefix = hash_str[0..2];
-    _ = std.fmt.parseInt(u8, hash_prefix, 16) catch 0;
     
     const pack_dir_path = try std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir});
     defer allocator.free(pack_dir_path);
     
-    // Open pack directory with better error handling
-    var pack_dir = std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true }) catch |err| switch (err) {
-        error.FileNotFound => return error.ObjectNotFound,
-        error.AccessDenied => return error.PackDirectoryAccessDenied,
-        error.SymLinkLoop => return error.PackDirectorySymlinkLoop,
-        error.ProcessFdQuotaExceeded => return error.SystemResourcesExhausted,
-        error.SystemFdQuotaExceeded => return error.SystemResourcesExhausted,
-        error.NoDevice => return error.PackDirectoryOnUnmountedDevice,
-        else => return error.PackDirectoryError,
-    };
-    defer pack_dir.close();
-    
-    // Look for .idx files (pack index files) - optimize by collecting all first
-    var pack_files = std.array_list.Managed(PackFileInfo).init(allocator);
-    defer {
-        for (pack_files.items) |*pack_file| {
-            allocator.free(pack_file.name);
-        }
-        pack_files.deinit();
-    }
-    
-    // Iterate through directory with better error handling
-    var iterator = pack_dir.iterate();
-    var valid_idx_count: usize = 0;
-    
-    while (true) {
-        const entry = iterator.next() catch |err| switch (err) {
-            error.AccessDenied => break, // Stop iteration but don't fail
-            error.SystemResources => return error.SystemResourcesExhausted,
-            else => return err,
-        } orelse break;
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
-        
-        // Validate idx file name format (pack-{40-char-hash}.idx)
-        if (entry.name.len != 49) continue; // "pack-" + 40 chars + ".idx" = 49
-        if (!std.mem.startsWith(u8, entry.name, "pack-")) continue;
-        
-        // Validate that the middle part is a valid hex hash
-        const hash_part = entry.name[5..45]; // Skip "pack-" and ".idx"
-        var valid_hash = true;
-        for (hash_part) |c| {
-            if (!std.ascii.isHex(c)) {
-                valid_hash = false;
-                break;
-            }
-        }
-        if (!valid_hash) continue;
-        
-        const file_stat = pack_dir.statFile(entry.name) catch |err| switch (err) {
-            error.FileNotFound => continue, // File might have been deleted
-            error.AccessDenied => continue, // Skip inaccessible files
-            else => return err,
-        };
-        
-        // Validate file size (idx files should be at least 8 + 256*4 = 1032 bytes)
-        if (file_stat.size < 1032) continue;
-        
-        try pack_files.append(PackFileInfo{
-            .name = try allocator.dupe(u8, entry.name),
-            .mtime = file_stat.mtime,
-            .size = file_stat.size,
-        });
-        valid_idx_count += 1;
-        
-        // Reasonable limit to prevent excessive memory usage
-        if (valid_idx_count > 1000) {
-            break;
-        }
-    }
-    
-    if (pack_files.items.len == 0) {
-        return error.ObjectNotFound;
-    }
-    
-    // Sort pack files by modification time (newest first) and size (larger first) for better search efficiency
-    // Newer and larger packs are more likely to contain recently accessed objects
-    std.sort.block(PackFileInfo, pack_files.items, {}, struct {
-        fn lessThan(context: void, lhs: PackFileInfo, rhs: PackFileInfo) bool {
-            _ = context;
-            // First sort by modification time (newer first)
-            if (lhs.mtime != rhs.mtime) {
-                return lhs.mtime > rhs.mtime;
-            }
-            // Then by size (larger first) as larger packs likely contain more objects
-            return lhs.size > rhs.size;
-        }
-    }.lessThan);
-    
-    // Try each pack file - prioritize newer and larger pack files first
-    var last_error: ?anyerror = null;
-    for (pack_files.items) |pack_file| {
-        // Try to find object in this pack
-        if (findObjectInPack(pack_dir_path, pack_file.name, hash_str, platform_impl, allocator)) |obj| {
-            return obj;
-        } else |err| {
-            // Store the last meaningful error for better diagnostics
-            switch (err) {
-                error.ObjectNotFound => continue,
-                error.CorruptedPackIndex, 
-                error.PackIndexReadError, 
-                error.PackIndexTooSmall,
-                error.PackIndexTooLarge,
-                error.PackIndexCorrupted => {
-                    last_error = err;
-                    continue;
-                },
-                // Serious errors that indicate system issues - fail fast
-                error.OutOfMemory,
-                error.SystemResourcesExhausted => return err,
-                else => {
-                    last_error = err;
-                    continue; // Try other packs even on unexpected errors
+    // Use cached directory listing if available
+    if (getCachedPackDir(pack_dir_path)) |idx_names| {
+        for (idx_names) |maybe_name| {
+            const name = maybe_name orelse continue;
+            if (findObjectInPack(pack_dir_path, name, hash_str, platform_impl, allocator)) |obj| {
+                return obj;
+            } else |err| {
+                switch (err) {
+                    error.ObjectNotFound => continue,
+                    error.OutOfMemory, error.SystemResourcesExhausted => return err,
+                    else => continue,
                 }
             }
         }
+        return error.ObjectNotFound;
     }
     
-    // If we tried all packs and didn't find the object, return the most relevant error
-    return last_error orelse error.ObjectNotFound;
+    // Scan pack directory (first time only)
+    var pack_dir = std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true }) catch {
+        return error.ObjectNotFound;
+    };
+    defer pack_dir.close();
+    
+    var idx_names_buf: [64][]const u8 = undefined;
+    var idx_count: usize = 0;
+    
+    var iterator = pack_dir.iterate();
+    while (iterator.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
+        if (entry.name.len != 49) continue;
+        if (!std.mem.startsWith(u8, entry.name, "pack-")) continue;
+        if (idx_count >= 64) break;
+        idx_names_buf[idx_count] = allocator.dupe(u8, entry.name) catch continue;
+        idx_count += 1;
+    }
+    
+    if (idx_count == 0) return error.ObjectNotFound;
+    
+    // Cache the directory listing for future calls
+    cachePackDir(allocator, pack_dir_path, idx_names_buf[0..idx_count]);
+    
+    // Try each pack file
+    for (idx_names_buf[0..idx_count]) |idx_name| {
+        if (findObjectInPack(pack_dir_path, idx_name, hash_str, platform_impl, allocator)) |obj| {
+            // Don't free idx_names since they're now in cache
+            return obj;
+        } else |err| {
+            switch (err) {
+                error.ObjectNotFound => continue,
+                error.OutOfMemory, error.SystemResourcesExhausted => return err,
+                else => continue,
+            }
+        }
+    }
+    
+    return error.ObjectNotFound;
 }
 
 /// Pack file metadata for sorting and caching
@@ -421,31 +429,40 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     
             // debug print removed
     
-    const idx_data = platform_impl.fs.readFile(allocator, idx_path) catch |err| switch (err) {
-        error.FileNotFound => {
-            return error.ObjectNotFound;
-        },
-        error.AccessDenied => {
-            return error.PackIndexAccessDenied;
-        },
-        error.IsDir => {
-            return error.PackIndexIsDirectory;
-        },
-        error.SystemResources => {
-            return error.SystemResourcesExhausted;
-        },
-        error.OutOfMemory => {
-            return error.OutOfMemory;
-        },
-        error.FileBusy => {
-            // File might be being written to - retry logic could be added here
-            return error.PackIndexBusy;
-        },
-        else => {
-            return error.PackIndexReadError;
-        },
+    // Try cache first
+    var idx_data_owned = false;
+    const idx_data = getCachedIdx(idx_path) orelse blk: {
+        idx_data_owned = true;
+        break :blk platform_impl.fs.readFile(allocator, idx_path) catch |err| switch (err) {
+            error.FileNotFound => {
+                return error.ObjectNotFound;
+            },
+            error.AccessDenied => {
+                return error.PackIndexAccessDenied;
+            },
+            error.IsDir => {
+                return error.PackIndexIsDirectory;
+            },
+            error.SystemResources => {
+                return error.SystemResourcesExhausted;
+            },
+            error.OutOfMemory => {
+                return error.OutOfMemory;
+            },
+            error.FileBusy => {
+                return error.PackIndexBusy;
+            },
+            else => {
+                return error.PackIndexReadError;
+            },
+        };
     };
-    defer allocator.free(idx_data);
+    defer if (idx_data_owned) allocator.free(idx_data);
+
+    // Cache the idx data for future lookups (idx is small, worth caching)
+    if (idx_data_owned and getCachedIdx(idx_path) == null) {
+        addToCache(allocator, idx_path, idx_data, "", "");
+    }
     
     // Enhanced size validation with better error messages
     if (idx_data.len < 8) {
@@ -664,10 +681,19 @@ fn findObjectInPackV1(idx_data: []const u8, target_hash: [20]u8, pack_dir_path: 
 
 /// Read object from pack file at given offset with validation
 fn readObjectFromPack(pack_path: []const u8, offset: u64, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
-    const pack_data = platform_impl.fs.readFile(allocator, pack_path) catch {
-        return error.PackFileNotFound;
+    var pack_data_owned = false;
+    const pack_data = getCachedPack(pack_path) orelse blk: {
+        pack_data_owned = true;
+        const data = platform_impl.fs.readFile(allocator, pack_path) catch {
+            return error.PackFileNotFound;
+        };
+        // Cache for future lookups within this process
+        if (getCachedPack(pack_path) == null) {
+            addToCache(allocator, "", "", pack_path, data);
+        }
+        break :blk data;
     };
-    defer allocator.free(pack_data);
+    defer if (pack_data_owned) allocator.free(pack_data);
     
     // Enhanced pack file validation
     if (pack_data.len < 28) return error.PackFileTooSmall; // Header (12) + minimum object (4) + checksum (20)
