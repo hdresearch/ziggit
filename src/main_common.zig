@@ -3482,18 +3482,94 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     } else {
         // Parse checkout arguments
         var quiet = std.mem.eql(u8, first_arg, "--quiet") or std.mem.eql(u8, first_arg, "-q");
-        const target = if (quiet) 
-            args.next() orelse {
-                try platform_impl.writeStderr("error: pathspec '' did not match any file(s) known to git\n");
-                std.process.exit(128);
+        var detach = std.mem.eql(u8, first_arg, "--detach");
+        var force = std.mem.eql(u8, first_arg, "-f") or std.mem.eql(u8, first_arg, "--force");
+        var target: []const u8 = first_arg;
+        
+        // If the first arg was a flag, consume flags and find the target
+        if (quiet or detach or force) {
+            var found_target = false;
+            while (args.next()) |arg| {
+                if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
+                    quiet = true;
+                } else if (std.mem.eql(u8, arg, "--detach")) {
+                    detach = true;
+                } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
+                    force = true;
+                } else {
+                    target = arg;
+                    found_target = true;
+                    break;
+                }
             }
-        else 
-            first_arg;
+            if (!found_target) {
+                if (detach) {
+                    // --detach with no target means detach at HEAD
+                    target = "HEAD";
+                } else {
+                    try platform_impl.writeStderr("error: pathspec '' did not match any file(s) known to git\n");
+                    std.process.exit(128);
+                }
+            }
+        }
 
-        // Check for additional --quiet flag
+        // Check for additional flags
         while (args.next()) |arg| {
-            if (std.mem.eql(u8, arg, "--quiet")) {
+            if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
                 quiet = true;
+            } else if (std.mem.eql(u8, arg, "--detach")) {
+                detach = true;
+            }
+        }
+
+        // Handle --detach: resolve target to commit hash and write directly to HEAD
+        if (detach) {
+            // Resolve the target to a commit hash
+            var detach_hash: ?[]const u8 = null;
+            
+            if (std.mem.eql(u8, target, "HEAD")) {
+                // Resolve HEAD to its commit hash
+                if (refs.resolveRef(git_path, "HEAD", platform_impl, allocator) catch null) |h| {
+                    detach_hash = h;
+                }
+            } else if (target.len == 40 and isValidHash(target)) {
+                detach_hash = try allocator.dupe(u8, target);
+            } else {
+                // Try as branch name
+                const ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, target });
+                defer allocator.free(ref_path);
+                if (std.fs.cwd().readFileAlloc(allocator, ref_path, 1024)) |content| {
+                    defer allocator.free(content);
+                    const trimmed = std.mem.trim(u8, content, " \t\n\r");
+                    if (trimmed.len >= 40) {
+                        detach_hash = try allocator.dupe(u8, trimmed[0..40]);
+                    }
+                } else |_| {
+                    // Try resolving as revision expression
+                    detach_hash = resolveRevision(git_path, target, platform_impl, allocator) catch null;
+                }
+            }
+            
+            if (detach_hash) |hash| {
+                defer allocator.free(hash);
+                // Write detached HEAD
+                const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+                defer allocator.free(head_path);
+                const head_content = try std.fmt.allocPrint(allocator, "{s}\n", .{hash});
+                defer allocator.free(head_content);
+                platform_impl.fs.writeFile(head_path, head_content) catch {};
+                
+                if (!quiet) {
+                    const det_msg = try std.fmt.allocPrint(allocator, "HEAD is now at {s}...\n", .{hash[0..7]});
+                    defer allocator.free(det_msg);
+                    try platform_impl.writeStderr(det_msg);
+                }
+                return;
+            } else {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: not a valid object name: '{s}'\n", .{target});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
             }
         }
 
