@@ -11182,6 +11182,8 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var all_refs = false;
     var graph = false;
     var no_walk = false;
+    var format_str: ?[]const u8 = null;
+    var no_commit_header = false;
     var include_refs = std.array_list.Managed([]const u8).init(allocator);
     defer include_refs.deinit();
     var exclude_refs = std.array_list.Managed([]const u8).init(allocator);
@@ -11278,6 +11280,24 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             try platform_impl.writeStderr(msg);
             std.process.exit(128);
             unreachable;
+        } else if (std.mem.startsWith(u8, arg, "--format=")) {
+            format_str = arg["--format=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--pretty=format:")) {
+            format_str = arg["--pretty=format:".len..];
+        } else if (std.mem.startsWith(u8, arg, "--pretty=tformat:")) {
+            format_str = arg["--pretty=tformat:".len..];
+        } else if (std.mem.eql(u8, arg, "--pretty=oneline") or std.mem.eql(u8, arg, "--oneline")) {
+            format_str = "%H %s";
+            if (std.mem.eql(u8, arg, "--oneline")) {
+                format_str = "%h %s";
+                no_commit_header = true;
+            }
+        } else if (std.mem.eql(u8, arg, "--no-commit-header")) {
+            no_commit_header = true;
+        } else if (std.mem.startsWith(u8, arg, "--pretty=")) {
+            // Other pretty formats - ignore for now
+        } else if (std.mem.eql(u8, arg, "--header")) {
+            // Show raw header - ignore for now
         } else if (std.mem.startsWith(u8, arg, "--")) {
             // Skip unknown flags
         } else if (std.mem.indexOf(u8, arg, "..") != null) {
@@ -11467,10 +11487,26 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         defer if (reverse) allocator.free(items);
 
         for (items) |h| {
-            // Output the commit hash
-            const out = try std.fmt.allocPrint(allocator, "{s}\n", .{h});
-            defer allocator.free(out);
-            try platform_impl.writeStdout(out);
+            // Output the commit
+            if (format_str) |fmt| {
+                // Format mode: output "commit HASH\n" header then formatted line
+                if (!no_commit_header) {
+                    const hdr = try std.fmt.allocPrint(allocator, "commit {s}\n", .{h});
+                    defer allocator.free(hdr);
+                    try platform_impl.writeStdout(hdr);
+                }
+                const commit_obj = objects.GitObject.load(h, git_path, platform_impl, allocator) catch null;
+                const commit_data = if (commit_obj) |co| co.data else "";
+                const formatted = formatCommitLine(allocator, fmt, h, commit_data) catch "";
+                defer if (formatted.len > 0 and commit_obj != null) allocator.free(@constCast(formatted));
+                try platform_impl.writeStdout(formatted);
+                try platform_impl.writeStdout("\n");
+                if (commit_obj) |co| co.deinit(allocator);
+            } else {
+                const out = try std.fmt.allocPrint(allocator, "{s}\n", .{h});
+                defer allocator.free(out);
+                try platform_impl.writeStdout(out);
+            }
             try emitted_objects.put(h, {});
 
             // If --objects, walk the tree
@@ -11501,6 +11537,276 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
 }
 
 /// Walk a tree recursively and output all tree/blob objects (inline for --in-commit-order)
+/// Format a commit according to a format string (like --pretty=format:...)
+fn formatCommitLine(allocator: std.mem.Allocator, fmt: []const u8, hash: []const u8, data: []const u8) ![]const u8 {
+    var result = std.array_list.Managed(u8).init(allocator);
+    errdefer result.deinit();
+
+    // Parse commit data fields
+    const tree_hash = extractHeaderField(data, "tree");
+    const author_line = extractHeaderField(data, "author");
+    const committer_line = extractHeaderField(data, "committer");
+    const message = extractObjectMessage(data);
+    const subject = extractSubject(message);
+    const body = extractBody(message);
+
+    var i: usize = 0;
+    while (i < fmt.len) {
+        if (fmt[i] == '%' and i + 1 < fmt.len) {
+            const c = fmt[i + 1];
+            switch (c) {
+                '%' => { try result.append('%'); i += 2; },
+                'H' => { try result.appendSlice(hash); i += 2; },
+                'h' => { try result.appendSlice(if (hash.len >= 7) hash[0..7] else hash); i += 2; },
+                'T' => { try result.appendSlice(tree_hash); i += 2; },
+                't' => { try result.appendSlice(if (tree_hash.len >= 7) tree_hash[0..7] else tree_hash); i += 2; },
+                'P' => {
+                    // All parent hashes space-separated
+                    var first = true;
+                    var lines = std.mem.splitScalar(u8, data, '\n');
+                    while (lines.next()) |line| {
+                        if (line.len == 0) break;
+                        if (std.mem.startsWith(u8, line, "parent ")) {
+                            if (!first) try result.append(' ');
+                            try result.appendSlice(line["parent ".len..]);
+                            first = false;
+                        }
+                    }
+                    i += 2;
+                },
+                'p' => {
+                    // Short parent hashes
+                    var first = true;
+                    var lines = std.mem.splitScalar(u8, data, '\n');
+                    while (lines.next()) |line| {
+                        if (line.len == 0) break;
+                        if (std.mem.startsWith(u8, line, "parent ")) {
+                            if (!first) try result.append(' ');
+                            const ph = line["parent ".len..];
+                            try result.appendSlice(if (ph.len >= 7) ph[0..7] else ph);
+                            first = false;
+                        }
+                    }
+                    i += 2;
+                },
+                'a' => {
+                    // %an, %ae, %ad, %aD, %aI, %ai, %at, %al
+                    if (i + 2 < fmt.len) {
+                        const sc = fmt[i + 2];
+                        switch (sc) {
+                            'n' => { try result.appendSlice(getPersonName(author_line)); i += 3; },
+                            'e' => { try result.appendSlice(getPersonEmail(author_line)); i += 3; },
+                            'd' => { try result.appendSlice(formatPersonDate(author_line, allocator)); i += 3; },
+                            'D' => { try result.appendSlice(formatPersonDateRFC2822(author_line, allocator)); i += 3; },
+                            't' => { try result.appendSlice(getPersonTimestamp(author_line)); i += 3; },
+                            'i' => { try result.appendSlice(formatPersonDateISO(author_line, allocator)); i += 3; },
+                            'I' => { try result.appendSlice(formatPersonDateISO(author_line, allocator)); i += 3; },
+                            'l' => { try result.appendSlice(getPersonLocalpart(author_line)); i += 3; },
+                            else => { try result.appendSlice(author_line); i += 2; },
+                        }
+                    } else {
+                        try result.appendSlice(author_line);
+                        i += 2;
+                    }
+                },
+                'c' => {
+                    // %cn, %ce, %cd, %cD, %ct, etc.
+                    if (i + 2 < fmt.len) {
+                        const sc = fmt[i + 2];
+                        switch (sc) {
+                            'n' => { try result.appendSlice(getPersonName(committer_line)); i += 3; },
+                            'e' => { try result.appendSlice(getPersonEmail(committer_line)); i += 3; },
+                            'd' => { try result.appendSlice(formatPersonDate(committer_line, allocator)); i += 3; },
+                            'D' => { try result.appendSlice(formatPersonDateRFC2822(committer_line, allocator)); i += 3; },
+                            't' => { try result.appendSlice(getPersonTimestamp(committer_line)); i += 3; },
+                            'i' => { try result.appendSlice(formatPersonDateISO(committer_line, allocator)); i += 3; },
+                            'I' => { try result.appendSlice(formatPersonDateISO(committer_line, allocator)); i += 3; },
+                            'l' => { try result.appendSlice(getPersonLocalpart(committer_line)); i += 3; },
+                            else => { try result.appendSlice(committer_line); i += 2; },
+                        }
+                    } else {
+                        try result.appendSlice(committer_line);
+                        i += 2;
+                    }
+                },
+                's' => { try result.appendSlice(std.mem.trimRight(u8, subject, "\n\r")); i += 2; },
+                'b' => { try result.appendSlice(body); i += 2; },
+                'B' => { try result.appendSlice(message); i += 2; },
+                'e' => { try result.appendSlice(extractHeaderField(data, "encoding")); i += 2; },
+                'n' => { try result.append('\n'); i += 2; },
+                'x' => {
+                    // %x00 - hex byte
+                    if (i + 3 < fmt.len) {
+                        const hex = fmt[i + 2 .. i + 4];
+                        const byte = std.fmt.parseInt(u8, hex, 16) catch 0;
+                        try result.append(byte);
+                        i += 4;
+                    } else {
+                        try result.append('%');
+                        i += 1;
+                    }
+                },
+                'w' => {
+                    // %w() - wrap, skip
+                    if (i + 2 < fmt.len and fmt[i + 2] == '(') {
+                        if (std.mem.indexOfScalar(u8, fmt[i + 2 ..], ')')) |close| {
+                            i += 3 + close;
+                        } else {
+                            i += 2;
+                        }
+                    } else {
+                        i += 2;
+                    }
+                },
+                'C' => {
+                    // %C(...) - color
+                    if (i + 2 < fmt.len and fmt[i + 2] == '(') {
+                        if (std.mem.indexOfScalar(u8, fmt[i + 2 ..], ')')) |close| {
+                            i += 3 + close;
+                        } else {
+                            i += 2;
+                        }
+                    } else {
+                        i += 2;
+                    }
+                },
+                'd' => {
+                    // %d - ref names (like " (HEAD -> main, tag: v1)")
+                    try result.appendSlice("");
+                    i += 2;
+                },
+                'D' => {
+                    // %D - ref names without wrapping
+                    try result.appendSlice("");
+                    i += 2;
+                },
+                else => { try result.append('%'); try result.append(c); i += 2; },
+            }
+        } else {
+            try result.append(fmt[i]);
+            i += 1;
+        }
+    }
+    return result.toOwnedSlice();
+}
+
+fn getPersonName(person_line: []const u8) []const u8 {
+    if (person_line.len == 0) return "";
+    const lt = std.mem.indexOfScalar(u8, person_line, '<') orelse return person_line;
+    return std.mem.trimRight(u8, person_line[0..lt], " ");
+}
+
+fn getPersonEmail(person_line: []const u8) []const u8 {
+    if (person_line.len == 0) return "";
+    const lt = std.mem.indexOfScalar(u8, person_line, '<') orelse return "";
+    const gt = std.mem.indexOfScalar(u8, person_line, '>') orelse return "";
+    return person_line[lt + 1 .. gt];
+}
+
+fn getPersonTimestamp(person_line: []const u8) []const u8 {
+    if (person_line.len == 0) return "";
+    const gt = std.mem.indexOfScalar(u8, person_line, '>') orelse return "";
+    const after = std.mem.trimLeft(u8, if (gt + 1 < person_line.len) person_line[gt + 1 ..] else "", " ");
+    const space = std.mem.indexOfScalar(u8, after, ' ');
+    return if (space) |s| after[0..s] else after;
+}
+
+fn getPersonLocalpart(person_line: []const u8) []const u8 {
+    const email = getPersonEmail(person_line);
+    if (std.mem.indexOfScalar(u8, email, '@')) |at| return email[0..at];
+    return email;
+}
+
+fn formatPersonDateISO(person_line: []const u8, allocator: std.mem.Allocator) []const u8 {
+    const gt = std.mem.indexOfScalar(u8, person_line, '>') orelse return "";
+    const after = std.mem.trimLeft(u8, if (gt + 1 < person_line.len) person_line[gt + 1 ..] else "", " ");
+    const space = std.mem.indexOfScalar(u8, after, ' ');
+    const ts_str = if (space) |s| after[0..s] else after;
+    const tz_str = if (space) |s| after[s + 1 ..] else "+0000";
+    const timestamp = std.fmt.parseInt(i64, ts_str, 10) catch return "";
+    return formatTimestampISO(timestamp, tz_str, allocator) catch return "";
+}
+
+fn formatPersonDateRFC2822(person_line: []const u8, allocator: std.mem.Allocator) []const u8 {
+    const gt = std.mem.indexOfScalar(u8, person_line, '>') orelse return "";
+    const after = std.mem.trimLeft(u8, if (gt + 1 < person_line.len) person_line[gt + 1 ..] else "", " ");
+    const space = std.mem.indexOfScalar(u8, after, ' ');
+    const ts_str = if (space) |s| after[0..s] else after;
+    const tz_str = if (space) |s| after[s + 1 ..] else "+0000";
+    const timestamp = std.fmt.parseInt(i64, ts_str, 10) catch return "";
+    return formatTimestampRFC2822(timestamp, tz_str, allocator) catch return "";
+}
+
+fn formatTimestampRFC2822(timestamp: i64, tz_str: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+    var tz_off: i32 = 0;
+    if (tz_str.len >= 5) {
+        const sign: i32 = if (tz_str[0] == '-') @as(i32, -1) else 1;
+        const h = std.fmt.parseInt(i32, tz_str[1..3], 10) catch 0;
+        const m = std.fmt.parseInt(i32, tz_str[3..5], 10) catch 0;
+        tz_off = sign * (h * 60 + m);
+    }
+    const adj = timestamp + @as(i64, tz_off) * 60;
+    const SPD: i64 = 86400;
+    var days = @divFloor(adj, SPD);
+    var rem = @mod(adj, SPD);
+    if (rem < 0) { rem += SPD; days -= 1; }
+    const hour = @as(u32, @intCast(@divFloor(rem, 3600)));
+    const minute = @as(u32, @intCast(@divFloor(@mod(rem, 3600), 60)));
+    const second = @as(u32, @intCast(@mod(rem, 60)));
+    const wday = @mod(days + 4, 7);
+    const wday_u: usize = if (wday >= 0) @intCast(wday) else @intCast(wday + 7);
+    var y: i64 = 1970;
+    var d = days;
+    while (true) {
+        const yd: i64 = if (@mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0)) 366 else 365;
+        if (d < yd) break;
+        d -= yd; y += 1;
+    }
+    const leap = (@mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0));
+    const mdays_arr = [12]u32{ 31, if (leap) 29 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    var mon: usize = 0;
+    while (mon < 12) : (mon += 1) { if (d < mdays_arr[mon]) break; d -= mdays_arr[mon]; }
+    const day = @as(u32, @intCast(d)) + 1;
+    const wn = [7][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    const mn = [12][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    // RFC 2822: Thu, 7 Apr 2005 15:13:13 -0700
+    return std.fmt.allocPrint(allocator, "{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} {s}", .{ wn[wday_u], day, mn[mon], y, hour, minute, second, tz_str });
+}
+
+fn formatTimestampISO(timestamp: i64, tz_str: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+    var tz_off: i32 = 0;
+    if (tz_str.len >= 5) {
+        const sign: i32 = if (tz_str[0] == '-') @as(i32, -1) else 1;
+        const h = std.fmt.parseInt(i32, tz_str[1..3], 10) catch 0;
+        const m = std.fmt.parseInt(i32, tz_str[3..5], 10) catch 0;
+        tz_off = sign * (h * 60 + m);
+    }
+    const adj = timestamp + @as(i64, tz_off) * 60;
+    const SPD: i64 = 86400;
+    var days = @divFloor(adj, SPD);
+    var rem = @mod(adj, SPD);
+    if (rem < 0) { rem += SPD; days -= 1; }
+    const hour = @as(u32, @intCast(@divFloor(rem, 3600)));
+    const minute = @as(u32, @intCast(@divFloor(@mod(rem, 3600), 60)));
+    const second = @as(u32, @intCast(@mod(rem, 60)));
+    var y: i64 = 1970;
+    var d = days;
+    while (true) {
+        const yd: i64 = if (@mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0)) 366 else 365;
+        if (d < yd) break;
+        d -= yd; y += 1;
+    }
+    const leap = (@mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0));
+    const mdays = [12]u32{ 31, if (leap) 29 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    var mon: usize = 0;
+    while (mon < 12) : (mon += 1) { if (d < mdays[mon]) break; d -= mdays[mon]; }
+    const day = @as(u32, @intCast(d)) + 1;
+    const tz_sign: u8 = if (tz_str.len > 0 and tz_str[0] == '-') '-' else '+';
+    const tz_h = if (tz_str.len >= 3) (std.fmt.parseInt(u32, tz_str[1..3], 10) catch 0) else 0;
+    const tz_m = if (tz_str.len >= 5) (std.fmt.parseInt(u32, tz_str[3..5], 10) catch 0) else 0;
+    return std.fmt.allocPrint(allocator, "{d}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} {c}{d:0>2}{d:0>2}", .{ y, mon + 1, day, hour, minute, second, tz_sign, tz_h, tz_m });
+}
+
 fn revListWalkTree(allocator: std.mem.Allocator, git_path: []const u8, tree_hash: []const u8, prefix: []const u8, no_names: bool, emitted: *std.StringHashMap(void), platform_impl: *const platform_mod.Platform) !void {
     if (emitted.contains(tree_hash)) return;
     try emitted.put(try allocator.dupe(u8, tree_hash), {});
