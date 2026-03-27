@@ -31242,13 +31242,7 @@ fn cmdNotes(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             try refs.updateRef(git_path, "refs/notes/commits", notes_hash, platform_impl, allocator);
         }
     } else if (std.mem.eql(u8, subcmd, "show")) {
-        const target = args.next() orelse "HEAD";
-        const target_hash = resolveRevision(git_path, target, platform_impl, allocator) catch {
-            try platform_impl.writeStderr("error: no note found\n");
-            std.process.exit(1);
-        };
-        defer if (target_hash) |th| allocator.free(th);
-        _ = target_hash;
+        while (args.next()) |_| {}
         try platform_impl.writeStderr("error: no note found\n");
         std.process.exit(1);
     } else if (std.mem.eql(u8, subcmd, "remove")) {
