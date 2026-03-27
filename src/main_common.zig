@@ -13081,6 +13081,8 @@ fn cmdDescribe(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     var abbrev_zero = false;
     var exact_match = false;
     var target_rev: ?[]const u8 = null;
+    var contains_mode = false;
+    var all_mode = false;
     
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--tags")) {
@@ -13090,9 +13092,12 @@ fn cmdDescribe(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         } else if (std.mem.eql(u8, arg, "--exact-match")) {
             exact_match = true;
         } else if (std.mem.eql(u8, arg, "--contains")) {
-            tags = true; // --contains implies tags
-        } else if (std.mem.eql(u8, arg, "--all") or 
-            std.mem.eql(u8, arg, "--long") or std.mem.eql(u8, arg, "--always") or
+            tags = true;
+            contains_mode = true;
+        } else if (std.mem.eql(u8, arg, "--all")) {
+            all_mode = true;
+            tags = true;
+        } else if (std.mem.eql(u8, arg, "--long") or std.mem.eql(u8, arg, "--always") or
             std.mem.eql(u8, arg, "--dirty")) {
             // accept silently
         } else if (std.mem.startsWith(u8, arg, "--abbrev=")) {
@@ -13237,7 +13242,39 @@ fn cmdDescribe(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         }
     } else |_| {}
 
-    const result = findTagInHistoryWithDistance(git_path, head_hash, &tag_map, tags, allocator, platform_impl) catch null;
+    var result: ?TagWithDistance = null;
+    
+    if (contains_mode) {
+        // --contains mode: find the nearest tag that has HEAD as ancestor
+        var tag_iter = tag_map.iterator();
+        while (tag_iter.next()) |entry| {
+            const tag_name = entry.key_ptr.*;
+            const tag_commit = entry.value_ptr.*;
+            // Check if head_hash is an ancestor of tag_commit
+            if (std.mem.eql(u8, tag_commit, head_hash)) {
+                // Exact match
+                const n = try allocator.dupe(u8, tag_name);
+                if (result == null or 0 < result.?.distance) {
+                    if (result) |old| allocator.free(old.tag_name);
+                    result = TagWithDistance{ .tag_name = n, .distance = 0 };
+                } else {
+                    allocator.free(n);
+                }
+            } else if (isAncestor(git_path, head_hash, tag_commit, allocator, platform_impl) catch false) {
+                // head_hash is ancestor of tag_commit - compute distance
+                const dist = computeDistance(git_path, head_hash, tag_commit, allocator, platform_impl) catch continue;
+                const n = try allocator.dupe(u8, tag_name);
+                if (result == null or dist < result.?.distance) {
+                    if (result) |old| allocator.free(old.tag_name);
+                    result = TagWithDistance{ .tag_name = n, .distance = dist };
+                } else {
+                    allocator.free(n);
+                }
+            }
+        }
+    } else {
+        result = findTagInHistoryWithDistance(git_path, head_hash, &tag_map, tags, allocator, platform_impl) catch null;
+    }
 
     if (result) |r| {
         defer allocator.free(r.tag_name);
@@ -13247,7 +13284,19 @@ fn cmdDescribe(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             try platform_impl.writeStderr("'\n");
             std.process.exit(128);
         }
-        if (r.distance == 0) {
+        if (contains_mode) {
+            // --contains output: tag~N or tags/tag~N (with --all)
+            const prefix = if (all_mode) "tags/" else "";
+            if (r.distance == 0) {
+                const output = try std.fmt.allocPrint(allocator, "{s}{s}\n", .{prefix, r.tag_name});
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            } else {
+                const output = try std.fmt.allocPrint(allocator, "{s}{s}~{d}\n", .{prefix, r.tag_name, r.distance});
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            }
+        } else if (r.distance == 0) {
             const output = try std.fmt.allocPrint(allocator, "{s}\n", .{r.tag_name});
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
@@ -13292,6 +13341,53 @@ const TagWithDistance = struct {
     tag_name: []u8,
     distance: u32,
 };
+
+/// Compute the commit distance from ancestor to descendant (number of commits between them)
+fn computeDistance(git_path: []const u8, ancestor: []const u8, descendant: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !u32 {
+    if (std.mem.eql(u8, ancestor, descendant)) return 0;
+    
+    // BFS from descendant backward to ancestor
+    const QE = struct { hash: []u8, depth: u32 };
+    var queue = std.array_list.Managed(QE).init(allocator);
+    defer {
+        for (queue.items) |item| allocator.free(item.hash);
+        queue.deinit();
+    }
+    var visited = std.StringHashMap(void).init(allocator);
+    defer {
+        var it = visited.iterator();
+        while (it.next()) |entry| allocator.free(entry.key_ptr.*);
+        visited.deinit();
+    }
+    
+    try queue.append(.{ .hash = try allocator.dupe(u8, descendant), .depth = 0 });
+    try visited.put(try allocator.dupe(u8, descendant), {});
+    
+    while (queue.items.len > 0) {
+        const current = queue.orderedRemove(0);
+        defer allocator.free(current.hash);
+        
+        if (current.depth > 1000) return error.TooDeep;
+        
+        const obj = objects.GitObject.load(current.hash, git_path, platform_impl, allocator) catch continue;
+        defer obj.deinit(allocator);
+        if (obj.type != .commit) continue;
+        
+        var lines = std.mem.splitSequence(u8, obj.data, "\n");
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "parent ")) {
+                const parent = line["parent ".len..];
+                if (std.mem.eql(u8, parent, ancestor)) return current.depth + 1;
+                if (!visited.contains(parent)) {
+                    try visited.put(try allocator.dupe(u8, parent), {});
+                    try queue.append(.{ .hash = try allocator.dupe(u8, parent), .depth = current.depth + 1 });
+                }
+            } else if (line.len == 0) break;
+        }
+    }
+    
+    return error.NotAncestor;
+}
 
 fn findTagInHistoryWithDistance(git_path: []const u8, start_hash: []const u8, tag_map: *const std.StringHashMap([]u8), include_lightweight: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !?TagWithDistance {
     // BFS to find closest tagged ancestor
