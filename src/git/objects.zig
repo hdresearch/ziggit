@@ -254,7 +254,12 @@ pub fn createTreeObject(entries: []const TreeEntry, allocator: std.mem.Allocator
     defer content.deinit();
 
     for (entries) |entry| {
-        try content.writer().print("{s} {s}\x00", .{ entry.mode, entry.name });
+        // Git stores modes without leading zeros (e.g. "40000" not "040000")
+        var mode = entry.mode;
+        while (mode.len > 1 and mode[0] == '0') {
+            mode = mode[1..];
+        }
+        try content.writer().print("{s} {s}\x00", .{ mode, entry.name });
         // Write hash bytes directly
         var hash_bytes: [20]u8 = undefined;
         _ = try std.fmt.hexToBytes(&hash_bytes, entry.hash);
