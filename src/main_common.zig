@@ -27711,6 +27711,25 @@ fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
     }
 
     // Save index if stat info was updated
+    // Check that all explicitly requested paths were found in the index
+    if (!all and paths.items.len > 0) {
+        for (paths.items) |p| {
+            var found = false;
+            for (idx.entries.items) |entry| {
+                if (std.mem.eql(u8, entry.path, p)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                const emsg2 = std.fmt.allocPrint(allocator, "git checkout-index: {s} is not in the cache\n", .{p}) catch continue;
+                defer allocator.free(emsg2);
+                platform_impl.writeStderr(emsg2) catch {};
+                has_errors = true;
+            }
+        }
+    }
+
     if (did_update_stat) {
         idx.save(git_dir, platform_impl) catch {};
     }
