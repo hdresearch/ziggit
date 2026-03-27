@@ -12881,6 +12881,11 @@ fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, comman
             std.process.exit(128);
         };
 
+        // Generate idx file alongside the pack file
+        const idx_filename = std.fmt.allocPrint(allocator, "{s}-{s}.idx", .{ name, hash_hex }) catch unreachable;
+        defer allocator.free(idx_filename);
+        generatePackIdxToFile(allocator, pack_data.items, idx_filename) catch {};
+
         const output = std.fmt.allocPrint(allocator, "{s}\n", .{hash_hex}) catch unreachable;
         defer allocator.free(output);
         try platform_impl.writeStdout(output);
@@ -12992,22 +12997,13 @@ fn nativeCmdIndexPack(allocator: std.mem.Allocator, args: [][]const u8, command_
         // Generate index file
         const idx_path = if (output_path) |op| op else blk: {
             if (std.mem.endsWith(u8, pf, ".pack")) {
-                break :blk std.fmt.allocPrint(allocator, "{s}.idx", .{pf[0 .. pf.len - 5]}) catch unreachable;
+                break :blk try std.fmt.allocPrint(allocator, "{s}idx", .{pf[0 .. pf.len - 4]});
             }
-            break :blk std.fmt.allocPrint(allocator, "{s}.idx", .{pf}) catch unreachable;
+            break :blk try std.fmt.allocPrint(allocator, "{s}.idx", .{pf});
         };
-        _ = idx_path;
+        defer if (output_path == null) allocator.free(idx_path);
 
-        if (pack_data.len >= 20) {
-            const trailing_sha = pack_data[pack_data.len - 20..];
-            var hash_hex: [40]u8 = undefined;
-            for (trailing_sha, 0..) |b, bi| {
-                _ = std.fmt.bufPrint(hash_hex[bi * 2 .. bi * 2 + 2], "{x:0>2}", .{b}) catch continue;
-            }
-
-            const dir = std.fs.path.dirname(pf) orelse ".";
-            try generatePackIdx(allocator, pack_data, dir, &hash_hex);
-        }
+        try generatePackIdxToFile(allocator, pack_data, idx_path);
     }
 
     if (should_free_pack) {
@@ -13215,6 +13211,170 @@ fn generatePackIdx(allocator: std.mem.Allocator, pack_data: []const u8, output_d
     const idx_filename = std.fmt.allocPrint(allocator, "{s}/pack-{s}.idx", .{ output_dir, hash_hex }) catch return;
     defer allocator.free(idx_filename);
     std.fs.cwd().writeFile(.{ .sub_path = idx_filename, .data = idx.items }) catch {};
+}
+
+fn generatePackIdxToFile(allocator: std.mem.Allocator, pack_data: []const u8, output_path: []const u8) !void {
+    // Parse pack file to extract object SHAs
+    if (pack_data.len < 12) return;
+    if (!std.mem.eql(u8, pack_data[0..4], "PACK")) return;
+
+    const num_objects = std.mem.readInt(u32, pack_data[8..12], .big);
+
+    // Collect object hashes by parsing pack entries
+    var object_shas = std.array_list.Managed([20]u8).init(allocator);
+    defer object_shas.deinit();
+    var offsets_list = std.array_list.Managed(u32).init(allocator);
+    defer offsets_list.deinit();
+    var crcs_list = std.array_list.Managed(u32).init(allocator);
+    defer crcs_list.deinit();
+
+    var pos: usize = 12;
+    var obj_count: usize = 0;
+    while (obj_count < num_objects and pos < pack_data.len -| 20) : (obj_count += 1) {
+        const entry_offset = pos;
+        try offsets_list.append(@intCast(entry_offset));
+
+        // Parse object header
+        var c = pack_data[pos];
+        pos += 1;
+        const obj_type = (pack_data[entry_offset] >> 4) & 0x07;
+        var obj_size: u64 = c & 0x0F;
+        var shift: u6 = 4;
+        while (c & 0x80 != 0 and pos < pack_data.len) {
+            c = pack_data[pos];
+            pos += 1;
+            obj_size |= @as(u64, c & 0x7F) << shift;
+            shift +|= 7;
+        }
+
+        // Skip delta base ref if needed
+        if (obj_type == 6) {
+            // OFS_DELTA: skip base offset encoding
+            c = pack_data[pos];
+            pos += 1;
+            while (c & 0x80 != 0 and pos < pack_data.len) {
+                c = pack_data[pos];
+                pos += 1;
+            }
+        } else if (obj_type == 7) {
+            // REF_DELTA: skip 20-byte base SHA
+            pos += 20;
+        }
+
+        // Decompress to find end of compressed data
+        const compressed_start = pos;
+        const compressed = pack_data[pos..@min(pack_data.len -| 20, pack_data.len)];
+        var fbs = std.io.fixedBufferStream(compressed);
+        var decompressor = zlib_compat_mod.decompressor(fbs.reader());
+
+        // Read decompressed content for hashing
+        var content = std.array_list.Managed(u8).init(allocator);
+        defer content.deinit();
+        var skip_buf: [4096]u8 = undefined;
+        while (true) {
+            const n = decompressor.read(&skip_buf) catch break;
+            if (n == 0) break;
+            try content.appendSlice(skip_buf[0..n]);
+        }
+        pos = compressed_start + fbs.pos;
+
+        // Compute CRC32 for the entry
+        const entry_data = pack_data[entry_offset..pos];
+        const crc = std.hash.crc.Crc32.hash(entry_data);
+        try crcs_list.append(crc);
+
+        // Compute SHA of the object content (only for non-delta objects)
+        var sha: [20]u8 = std.mem.zeroes([20]u8);
+        if (obj_type >= 1 and obj_type <= 4) {
+            const type_str: []const u8 = switch (obj_type) {
+                1 => "commit",
+                2 => "tree",
+                3 => "blob",
+                4 => "tag",
+                else => "blob",
+            };
+            const header = std.fmt.allocPrint(allocator, "{s} {d}\x00", .{ type_str, content.items.len }) catch continue;
+            defer allocator.free(header);
+            var hasher = std.crypto.hash.Sha1.init(.{});
+            hasher.update(header);
+            hasher.update(content.items);
+            sha = hasher.finalResult();
+        }
+        try object_shas.append(sha);
+    }
+
+    // Write v2 idx file
+    var idx = std.array_list.Managed(u8).init(allocator);
+    defer idx.deinit();
+
+    // Magic + version
+    try idx.appendSlice("\xfftOc");
+    try idx.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, 2)));
+
+    // Sort objects by SHA for fanout
+    const indices = try allocator.alloc(usize, object_shas.items.len);
+    defer allocator.free(indices);
+    for (indices, 0..) |*idx_val, j| idx_val.* = j;
+
+    const SortCtx2 = struct {
+        shas: [][20]u8,
+    };
+    const ctx = SortCtx2{ .shas = object_shas.items };
+    std.mem.sort(usize, indices, ctx, struct {
+        fn lessThan(c2: SortCtx2, a: usize, b: usize) bool {
+            return std.mem.order(u8, &c2.shas[a], &c2.shas[b]).compare(.lt);
+        }
+    }.lessThan);
+
+    // Build fanout table
+    var fanout: [256]u32 = std.mem.zeroes([256]u32);
+    for (indices) |idx_val| {
+        const first_byte = object_shas.items[idx_val][0];
+        var fb: usize = first_byte;
+        while (fb < 256) : (fb += 1) {
+            fanout[fb] += 1;
+        }
+    }
+    for (fanout) |f| {
+        try idx.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, f)));
+    }
+
+    // SHA-1 table (sorted)
+    for (indices) |idx_val| {
+        try idx.appendSlice(&object_shas.items[idx_val]);
+    }
+
+    // CRC32 table
+    for (indices) |idx_val| {
+        if (idx_val < crcs_list.items.len) {
+            try idx.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, crcs_list.items[idx_val])));
+        } else {
+            try idx.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, 0)));
+        }
+    }
+
+    // Offset table
+    for (indices) |idx_val| {
+        if (idx_val < offsets_list.items.len) {
+            try idx.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, offsets_list.items[idx_val])));
+        } else {
+            try idx.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, 0)));
+        }
+    }
+
+    // Pack SHA-1
+    if (pack_data.len >= 20) {
+        try idx.appendSlice(pack_data[pack_data.len - 20..]);
+    }
+
+    // Idx SHA-1
+    var idx_sha = std.crypto.hash.Sha1.init(.{});
+    idx_sha.update(idx.items);
+    const idx_checksum = idx_sha.finalResult();
+    try idx.appendSlice(&idx_checksum);
+
+    // Write idx file
+    std.fs.cwd().writeFile(.{ .sub_path = output_path, .data = idx.items }) catch {};
 }
 
 fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
