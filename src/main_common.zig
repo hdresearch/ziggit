@@ -111,6 +111,7 @@ const NATIVE_COMMANDS = [_][]const u8{
     "column", "check-ignore", "check-attr",
     "switch", "restore", "worktree", "stripspace", "checkout-index",
     "show-branch", "blame", "annotate", "ls-remote", "upload-pack", "receive-pack", "send-pack", "check-ref-format", "last-modified", "refs",
+    "rebase", "cherry-pick",
 };
 
 fn isNativeCommand(command: []const u8) bool {
@@ -758,6 +759,10 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmdCheckRefFormat(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "refs")) {
         try cmdRefs(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "rebase")) {
+        try nativeCmdRebase(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "cherry-pick")) {
+        try nativeCmdCherryPick(allocator, all_original_args.items, command_index, &platform_impl);
     }
 }
 
