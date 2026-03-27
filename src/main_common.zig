@@ -8587,7 +8587,36 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     };
     defer allocator.free(git_path);
 
-    const first_arg = args.next();
+    // Pre-scan for flags to find the real first positional argument
+    var show_all = false;
+    var verbose_branch = false;
+    var first_arg: ?[]const u8 = null;
+    while (args.next()) |arg_raw| {
+        if (std.mem.eql(u8, arg_raw, "--color") or std.mem.startsWith(u8, arg_raw, "--color=") or
+            std.mem.eql(u8, arg_raw, "--no-color"))
+        {
+            // Color options - accept and ignore
+            continue;
+        } else if (std.mem.eql(u8, arg_raw, "-a") or std.mem.eql(u8, arg_raw, "--all")) {
+            show_all = true;
+            continue;
+        } else if (std.mem.eql(u8, arg_raw, "-v") or std.mem.eql(u8, arg_raw, "--verbose")) {
+            verbose_branch = true;
+            continue;
+        } else if (std.mem.eql(u8, arg_raw, "-vv")) {
+            verbose_branch = true;
+            continue;
+        } else if (std.mem.eql(u8, arg_raw, "-q") or std.mem.eql(u8, arg_raw, "--quiet")) {
+            continue;
+        } else if (std.mem.eql(u8, arg_raw, "--abbrev") or std.mem.startsWith(u8, arg_raw, "--abbrev=")) {
+            continue;
+        } else if (std.mem.eql(u8, arg_raw, "--no-abbrev")) {
+            continue;
+        } else {
+            first_arg = arg_raw;
+            break;
+        }
+    }
 
     if (first_arg == null) {
         // List branches
@@ -8607,6 +8636,28 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             const msg = try std.fmt.allocPrint(allocator, "{s}{s}\n", .{ prefix, branch });
             defer allocator.free(msg);
             try platform_impl.writeStdout(msg);
+        }
+        if (show_all) {
+            // Also list remote branches
+            const remote_refs_path = try std.fmt.allocPrint(allocator, "{s}/refs/remotes", .{git_path});
+            defer allocator.free(remote_refs_path);
+            var remote_branches = std.array_list.Managed([]u8).init(allocator);
+            defer {
+                for (remote_branches.items) |rb| allocator.free(rb);
+                remote_branches.deinit();
+            }
+            collectRemoteBranches(allocator, remote_refs_path, "", &remote_branches) catch {};
+            // Sort remote branches
+            std.mem.sort([]u8, remote_branches.items, {}, struct {
+                fn lessThan(_: void, a: []u8, b: []u8) bool {
+                    return std.mem.lessThan(u8, a, b);
+                }
+            }.lessThan);
+            for (remote_branches.items) |rb| {
+                const rmsg = try std.fmt.allocPrint(allocator, "  remotes/{s}\n", .{rb});
+                defer allocator.free(rmsg);
+                try platform_impl.writeStdout(rmsg);
+            }
         }
     } else if (std.mem.eql(u8, first_arg.?, "-d") or std.mem.eql(u8, first_arg.?, "-D")) {
         // Delete branch
@@ -15742,6 +15793,26 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             try platform_impl.writeStderr("fatal: unable to write index file\n");
             std.process.exit(128);
         };
+    }
+}
+
+fn collectRemoteBranches(allocator: std.mem.Allocator, dir_path: []const u8, prefix: []const u8, result: *std.array_list.Managed([]u8)) !void {
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        const full_name = if (prefix.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, entry.name })
+        else
+            try allocator.dupe(u8, entry.name);
+        if (entry.kind == .directory) {
+            const sub_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
+            defer allocator.free(sub_path);
+            collectRemoteBranches(allocator, sub_path, full_name, result) catch {};
+            allocator.free(full_name);
+        } else {
+            try result.append(full_name);
+        }
     }
 }
 
