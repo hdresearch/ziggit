@@ -20297,6 +20297,9 @@ fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, command
     var quoting_style: enum { none, shell, perl, python, tcl } = .none;
     var patterns = std.array_list.Managed([]const u8).init(allocator);
     defer patterns.deinit();
+    var exclude_patterns = std.array_list.Managed([]const u8).init(allocator);
+    defer exclude_patterns.deinit();
+    var omit_empty = false;
 
     var i = command_index + 1;
     while (i < args.len) : (i += 1) {
@@ -20359,9 +20362,38 @@ fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, command
                 std.process.exit(1);
             }
             quoting_style = .tcl;
-        } else if (std.mem.startsWith(u8, arg, "--exclude=") or std.mem.eql(u8, arg, "--exclude")) {
-            // Exclude pattern - skip for now
-            if (std.mem.eql(u8, arg, "--exclude")) { i += 1; }
+        } else if (std.mem.startsWith(u8, arg, "--exclude=")) {
+            try exclude_patterns.append(arg["--exclude=".len..]);
+        } else if (std.mem.eql(u8, arg, "--exclude")) {
+            i += 1;
+            if (i < args.len) try exclude_patterns.append(args[i]);
+        } else if (std.mem.eql(u8, arg, "--ignore-case")) {
+            // Accept silently for now
+        } else if (std.mem.eql(u8, arg, "--omit-empty")) {
+            omit_empty = true;
+        } else if (std.mem.eql(u8, arg, "--no-sort")) {
+            sort_key = null;
+            sort_reverse = false;
+        } else if (std.mem.eql(u8, arg, "--color") or std.mem.startsWith(u8, arg, "--color=")) {
+            // Accept silently
+        } else if (std.mem.eql(u8, arg, "--stdin")) {
+            // Read patterns from stdin
+            const stdin_data = read_stdin_blk: {
+                var buf2 = std.array_list.Managed(u8).init(allocator);
+                var tmp2: [4096]u8 = undefined;
+                while (true) {
+                    const n2 = std.posix.read(0, &tmp2) catch break;
+                    if (n2 == 0) break;
+                    buf2.appendSlice(tmp2[0..n2]) catch break;
+                }
+                break :read_stdin_blk buf2.toOwnedSlice() catch "";
+            };
+            defer if (stdin_data.len > 0) allocator.free(stdin_data);
+            var stdin_lines = std.mem.splitScalar(u8, stdin_data, '\n');
+            while (stdin_lines.next()) |line| {
+                const trimmed2 = std.mem.trim(u8, line, " \t\r");
+                if (trimmed2.len > 0) try patterns.append(trimmed2);
+            }
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             try patterns.append(arg);
         }
@@ -20492,6 +20524,18 @@ fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, command
                 }
             }
             if (!matches) continue;
+        }
+
+        // Check exclude patterns
+        if (exclude_patterns.items.len > 0) {
+            var excluded = false;
+            for (exclude_patterns.items) |excl_pattern| {
+                if (refPatternMatch(entry.name, excl_pattern)) {
+                    excluded = true;
+                    break;
+                }
+            }
+            if (excluded) continue;
         }
 
         // Determine object type
