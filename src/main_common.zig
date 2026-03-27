@@ -7238,7 +7238,7 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             defer allocator.free(msg);
             try platform_impl.writeStdout(msg);
         }
-    } else if (std.mem.eql(u8, first_arg.?, "-d")) {
+    } else if (std.mem.eql(u8, first_arg.?, "-d") or std.mem.eql(u8, first_arg.?, "-D")) {
         // Delete branch
         const branch_name = args.next() orelse {
             try platform_impl.writeStderr("fatal: branch name required\n");
@@ -7268,6 +7268,91 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         const success_msg = try std.fmt.allocPrint(allocator, "Deleted branch {s}.\n", .{branch_name});
         defer allocator.free(success_msg);
         try platform_impl.writeStdout(success_msg);
+    } else if (std.mem.eql(u8, first_arg.?, "-m") or std.mem.eql(u8, first_arg.?, "-M")) {
+        // Rename branch
+        const arg1 = args.next() orelse {
+            try platform_impl.writeStderr("fatal: branch name required\n");
+            std.process.exit(128);
+        };
+        const arg2 = args.next();
+
+        // If only one argument: rename current branch to arg1
+        // If two arguments: rename arg1 to arg2
+        const old_name = if (arg2 != null) arg1 else blk: {
+            break :blk refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
+                try platform_impl.writeStderr("fatal: no branch to rename\n");
+                std.process.exit(128);
+                unreachable;
+            };
+        };
+        defer if (arg2 == null) allocator.free(old_name);
+        const new_name = arg2 orelse arg1;
+
+        // Read old branch hash
+        const old_ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, old_name });
+        defer allocator.free(old_ref_path);
+        const old_hash = std.fs.cwd().readFileAlloc(allocator, old_ref_path, 4096) catch {
+            const msg = try std.fmt.allocPrint(allocator, "error: refname refs/heads/{s} not found\n", .{old_name});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+            unreachable;
+        };
+        defer allocator.free(old_hash);
+
+        // Write new branch ref
+        const new_ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, new_name });
+        defer allocator.free(new_ref_path);
+        try std.fs.cwd().writeFile(.{ .sub_path = new_ref_path, .data = old_hash });
+
+        // Delete old branch ref (if different name)
+        if (!std.mem.eql(u8, old_name, new_name)) {
+            std.fs.cwd().deleteFile(old_ref_path) catch {};
+        }
+
+        // Update HEAD if it pointed to the old branch
+        const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+        defer allocator.free(head_path);
+        const head_content = std.fs.cwd().readFileAlloc(allocator, head_path, 4096) catch "";
+        defer if (head_content.len > 0) allocator.free(head_content);
+        const head_trimmed = std.mem.trimRight(u8, head_content, "\r\n");
+        const expected_old = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}", .{old_name});
+        defer allocator.free(expected_old);
+        if (std.mem.eql(u8, head_trimmed, expected_old)) {
+            const new_head = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{new_name});
+            defer allocator.free(new_head);
+            try std.fs.cwd().writeFile(.{ .sub_path = head_path, .data = new_head });
+        }
+    } else if (std.mem.eql(u8, first_arg.?, "-c") or std.mem.eql(u8, first_arg.?, "-C")) {
+        // Copy branch
+        const arg1 = args.next() orelse {
+            try platform_impl.writeStderr("fatal: branch name required\n");
+            std.process.exit(128);
+        };
+        const arg2 = args.next();
+        const src_name = if (arg2 != null) arg1 else blk: {
+            break :blk refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
+                try platform_impl.writeStderr("fatal: no branch to copy\n");
+                std.process.exit(128);
+                unreachable;
+            };
+        };
+        defer if (arg2 == null) allocator.free(src_name);
+        const dst_name = arg2 orelse arg1;
+
+        const src_ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, src_name });
+        defer allocator.free(src_ref_path);
+        const src_hash = std.fs.cwd().readFileAlloc(allocator, src_ref_path, 4096) catch {
+            const msg = try std.fmt.allocPrint(allocator, "error: refname refs/heads/{s} not found\n", .{src_name});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+            unreachable;
+        };
+        defer allocator.free(src_hash);
+        const dst_ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, dst_name });
+        defer allocator.free(dst_ref_path);
+        try std.fs.cwd().writeFile(.{ .sub_path = dst_ref_path, .data = src_hash });
     } else {
         // Create new branch
         const branch_name = first_arg.?;
