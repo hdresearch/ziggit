@@ -616,3 +616,20 @@ Improved test:
 t1006-cat-file: ok=249 fail=41 (85%) — was ok=243 fail=47 (83%), +6 subtests fixed (cmdmode error format)
 
 No regressions detected across all other tests.
+
+=== Wrapper rebase message translation fix (2026-03-27) ===
+Added "No rebase in progress?" → "no rebase in progress" stderr translation.
+
+Improved tests:
+t3400-rebase: ok=37 fail=2 (94%) — was ok=35 fail=4 (89%), +2 subtests fixed
+t3413-rebase-hook: ok=15 fail=0 (100%) — was ok=14 fail=1 (93%), NOW 100%!
+t3420-rebase-autostash: ok=45 fail=7 (86%) — was ok=42 fail=10 (80%), +3 subtests fixed
+
+Updated totals: ~332 test scripts at 100% pass rate (was 331, +t3413).
+
+Remaining failures analysis:
+- git 2.43 vs 2.46+ behavioral differences (e.g., rebase --quit exit code, new flags)
+- Test-tool version incompatibilities
+- Reftable features not in 2.43
+- New git commands (history, replay, refs) not in 2.43
+- No further easy message translation wins identified
