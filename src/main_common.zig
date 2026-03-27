@@ -459,7 +459,14 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         } else |_| {
             try platform_impl.writeStdout("ziggit version 0.1.2\nError retrieving version details.\n");
         }
-    } else if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "help")) {
+    } else if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
+        try showUsage(&platform_impl);
+    } else if (std.mem.eql(u8, command, "help")) {
+        // Forward 'git help' to real git for full compatibility (guides, -a, -g, -c flags, etc.)
+        if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
+            try forwardToGit(allocator, all_original_args.items, &platform_impl);
+            return;
+        }
         try showUsage(&platform_impl);
     }
 }
