@@ -2480,7 +2480,17 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         if (std.mem.eql(u8, arg, "--oneline")) {
             oneline = true;
         } else if (std.mem.startsWith(u8, arg, "--format=")) {
-            format_string = arg[9..]; // Skip "--format="
+            format_string = arg["--format=".len..]; 
+        } else if (std.mem.startsWith(u8, arg, "--pretty=format:")) {
+            format_string = arg["--pretty=format:".len..];
+        } else if (std.mem.startsWith(u8, arg, "--pretty=tformat:")) {
+            format_string = arg["--pretty=tformat:".len..];
+        } else if (std.mem.eql(u8, arg, "--pretty=oneline") or std.mem.eql(u8, arg, "--pretty=short")) {
+            oneline = true;
+        } else if (std.mem.startsWith(u8, arg, "--pretty=")) {
+            // Other pretty formats - just use default for now
+        } else if (std.mem.eql(u8, arg, "--first-parent")) {
+            // first-parent flag - already the default behavior (we only follow first parent)
         } else if (std.mem.startsWith(u8, arg, "-") and arg.len > 1 and std.ascii.isDigit(arg[1])) {
             // Parse -n format like -1, -5, etc.
             const count_str = arg[1..];
@@ -2700,33 +2710,167 @@ fn resolveCommittish(git_path: []const u8, committish: []const u8, platform_impl
 }
 
 fn outputFormattedCommit(format: []const u8, commit_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    // We need access to the full commit object for format specifiers
+    const git_path = findGitDirectory(allocator, platform_impl) catch return;
+    defer allocator.free(git_path);
+    
+    const commit_obj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch return;
+    defer commit_obj.deinit(allocator);
+    
+    // Parse commit fields
+    var tree_hash: []const u8 = "";
+    var parent_hashes = std.array_list.Managed([]const u8).init(allocator);
+    defer parent_hashes.deinit();
+    var author_full: []const u8 = "";
+    var committer_full: []const u8 = "";
+    var subject: []const u8 = "";
+    var body = std.array_list.Managed(u8).init(allocator);
+    defer body.deinit();
+    
+    var lines_iter = std.mem.splitSequence(u8, commit_obj.data, "\n");
+    var in_body = false;
+    var first_body_line = true;
+    while (lines_iter.next()) |line| {
+        if (in_body) {
+            if (first_body_line) {
+                subject = line;
+                first_body_line = false;
+            } else {
+                if (body.items.len > 0) body.append('\n') catch {};
+                body.appendSlice(line) catch {};
+            }
+        } else if (line.len == 0) {
+            in_body = true;
+        } else if (std.mem.startsWith(u8, line, "tree ")) {
+            tree_hash = line["tree ".len..];
+        } else if (std.mem.startsWith(u8, line, "parent ")) {
+            parent_hashes.append(line["parent ".len..]) catch {};
+        } else if (std.mem.startsWith(u8, line, "author ")) {
+            author_full = line["author ".len..];
+        } else if (std.mem.startsWith(u8, line, "committer ")) {
+            committer_full = line["committer ".len..];
+        }
+    }
+    
     var output = std.array_list.Managed(u8).init(allocator);
     defer output.deinit();
     
     var i: usize = 0;
     while (i < format.len) {
         if (format[i] == '%' and i + 1 < format.len) {
-            switch (format[i + 1]) {
-                'H' => {
-                    // Full commit hash
-                    try output.appendSlice(commit_hash);
-                },
-                'h' => {
-                    // Short commit hash
-                    const short_hash = if (commit_hash.len >= 7) commit_hash[0..7] else commit_hash;
-                    try output.appendSlice(short_hash);
-                },
-                '%' => {
-                    // Literal %
-                    try output.append('%');
-                },
-                else => {
-                    // Unknown format specifier, output as-is
-                    try output.append(format[i]);
-                    try output.append(format[i + 1]);
-                },
+            const c = format[i + 1];
+            if (c == 'H') {
+                try output.appendSlice(commit_hash);
+                i += 2;
+            } else if (c == 'h') {
+                try output.appendSlice(if (commit_hash.len >= 7) commit_hash[0..7] else commit_hash);
+                i += 2;
+            } else if (c == 'T') {
+                try output.appendSlice(tree_hash);
+                i += 2;
+            } else if (c == 't') {
+                try output.appendSlice(if (tree_hash.len >= 7) tree_hash[0..7] else tree_hash);
+                i += 2;
+            } else if (c == 'P') {
+                for (parent_hashes.items, 0..) |ph, pi| {
+                    if (pi > 0) try output.append(' ');
+                    try output.appendSlice(ph);
+                }
+                i += 2;
+            } else if (c == 'p') {
+                for (parent_hashes.items, 0..) |ph, pi| {
+                    if (pi > 0) try output.append(' ');
+                    try output.appendSlice(if (ph.len >= 7) ph[0..7] else ph);
+                }
+                i += 2;
+            } else if (c == 's') {
+                try output.appendSlice(subject);
+                i += 2;
+            } else if (c == 'b') {
+                try output.appendSlice(std.mem.trimRight(u8, body.items, "\n"));
+                i += 2;
+            } else if (c == 'B') {
+                try output.appendSlice(subject);
+                if (body.items.len > 0) {
+                    try output.append('\n');
+                    try output.appendSlice(body.items);
+                }
+                i += 2;
+            } else if (c == 'n') {
+                try output.append('\n');
+                i += 2;
+            } else if (c == '%') {
+                try output.append('%');
+                i += 2;
+            } else if (c == 'a' and i + 2 < format.len) {
+                // %an = author name, %ae = author email, %ad = author date, %aI = ISO date
+                const spec = format[i + 2];
+                const parsed = parseIdentField(author_full);
+                if (spec == 'n') {
+                    try output.appendSlice(parsed.name);
+                } else if (spec == 'e') {
+                    try output.appendSlice(parsed.email);
+                } else if (spec == 'd' or spec == 'D' or spec == 'i' or spec == 'I') {
+                    try output.appendSlice(parsed.date);
+                } else {
+                    try output.appendSlice(author_full);
+                }
+                i += 3;
+            } else if (c == 'c' and i + 2 < format.len) {
+                // %cn, %ce, %cd, %cI
+                const spec = format[i + 2];
+                const parsed = parseIdentField(committer_full);
+                if (spec == 'n') {
+                    try output.appendSlice(parsed.name);
+                } else if (spec == 'e') {
+                    try output.appendSlice(parsed.email);
+                } else if (spec == 'd' or spec == 'D' or spec == 'i' or spec == 'I') {
+                    try output.appendSlice(parsed.date);
+                } else {
+                    try output.appendSlice(committer_full);
+                }
+                i += 3;
+            } else if (c == 'd') {
+                // %d = decorations (simplified - just empty for now)
+                i += 2;
+            } else if (c == 'D') {
+                // %D = decorations without wrapping
+                i += 2;
+            } else if (c == 'G' and i + 2 < format.len) {
+                // %G? = GPG signature placeholders
+                i += 3;
+            } else if (c == 'C' and i + 2 < format.len) {
+                // %C(...) = color codes - skip
+                if (i + 2 < format.len and format[i + 2] == '(') {
+                    // Find closing paren
+                    var j = i + 3;
+                    while (j < format.len and format[j] != ')') : (j += 1) {}
+                    i = if (j < format.len) j + 1 else j;
+                } else {
+                    i += 3;
+                }
+            } else if (c == 'x' and i + 3 < format.len) {
+                // %x00 = hex byte
+                const hex_str = format[i + 2 .. i + 4];
+                const byte_val = std.fmt.parseInt(u8, hex_str, 16) catch 0;
+                try output.append(byte_val);
+                i += 4;
+            } else {
+                try output.append(format[i]);
+                try output.append(format[i + 1]);
+                i += 2;
             }
-            i += 2;
+        } else if (format[i] == '\\' and i + 1 < format.len) {
+            if (format[i + 1] == 'n') {
+                try output.append('\n');
+                i += 2;
+            } else if (format[i + 1] == 't') {
+                try output.append('\t');
+                i += 2;
+            } else {
+                try output.append(format[i]);
+                i += 1;
+            }
         } else {
             try output.append(format[i]);
             i += 1;
@@ -2735,6 +2879,26 @@ fn outputFormattedCommit(format: []const u8, commit_hash: []const u8, allocator:
     
     try output.append('\n');
     try platform_impl.writeStdout(output.items);
+}
+
+const ParsedIdent = struct {
+    name: []const u8,
+    email: []const u8,
+    date: []const u8,
+};
+
+fn parseIdentField(ident: []const u8) ParsedIdent {
+    // Parse "Name <email> timestamp timezone"
+    if (std.mem.indexOf(u8, ident, " <")) |lt_pos| {
+        const name = ident[0..lt_pos];
+        if (std.mem.indexOf(u8, ident[lt_pos..], "> ")) |gt_pos| {
+            const email = ident[lt_pos + 2 .. lt_pos + gt_pos];
+            const date = ident[lt_pos + gt_pos + 2 ..];
+            return .{ .name = name, .email = email, .date = date };
+        }
+        return .{ .name = name, .email = ident[lt_pos + 2 ..], .date = "" };
+    }
+    return .{ .name = ident, .email = "", .date = "" };
 }
 
 fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
