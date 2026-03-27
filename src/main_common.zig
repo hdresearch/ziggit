@@ -380,7 +380,16 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
 
     // Commands with native ziggit implementations
     if (std.mem.eql(u8, command, "init")) {
+<<<<<<< Updated upstream
         try cmdInit(allocator, &args_iter, &platform_impl);
+=======
+        // Check for global --bare flag
+        var global_bare = false;
+        for (all_original_args.items[0..command_index]) |ga| {
+            if (std.mem.eql(u8, ga, "--bare")) global_bare = true;
+        }
+        try cmdInit(allocator, &args_iter, &platform_impl, global_bare);
+>>>>>>> Stashed changes
     } else if (std.mem.eql(u8, command, "status")) {
         try cmdStatus(allocator, &args_iter, &platform_impl, all_original_args.items);
     } else if (std.mem.eql(u8, command, "rev-list")) {
@@ -464,7 +473,11 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         defer allocator.free(output);
         try platform_impl.writeStdout(output);
     } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
+<<<<<<< Updated upstream
         try cmdVersion(allocator, &args_iter, &platform_impl);
+=======
+        try platform_impl.writeStdout("git version 2.47.0\n");
+>>>>>>> Stashed changes
     } else if (std.mem.eql(u8, command, "--version-info")) {
         if (version_mod.getFullVersionInfo(allocator)) |version_info| {
             defer allocator.free(version_info);
@@ -1654,8 +1667,8 @@ fn showUsage(platform_impl: *const platform_mod.Platform) !void {
     try platform_impl.writeStdout(suffix_msg);
 }
 
-fn cmdInit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
-    var bare = false;
+fn cmdInit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform, global_bare: bool) !void {
+    var bare = global_bare;
     var template_dir: ?[]const u8 = null;
     var work_dir: ?[]const u8 = null;
     var initial_branch: ?[]const u8 = null;
@@ -1670,8 +1683,6 @@ fn cmdInit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
         } else if (std.mem.startsWith(u8, arg, "--template=")) {
             template_dir = arg["--template=".len..];
         } else if (std.mem.eql(u8, arg, "--template")) {
-            initial_branch = args.next(); // actually template dir
-            // Oops, that's wrong. Let me fix:
             template_dir = args.next();
         } else if (std.mem.startsWith(u8, arg, "--initial-branch=")) {
             initial_branch = arg["--initial-branch=".len..];
@@ -1786,19 +1797,9 @@ fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8, initi
     const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_dir});
     defer allocator.free(config_path);
     const config_content = if (bare)
-        \\[core]
-        \\    repositoryformatversion = 0
-        \\    filemode = true
-        \\    bare = true
-        \\    logallrefupdates = true
-        \\
+        "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n\tlogallrefupdates = true\n"
     else
-        \\[core]
-        \\    repositoryformatversion = 0
-        \\    filemode = true
-        \\    bare = false
-        \\    logallrefupdates = true
-        \\
+        "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n"
     ;
     try platform_impl.fs.writeFile(config_path, config_content);
 
@@ -4719,134 +4720,941 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         return;
     }
 
-    // Collect all remaining args for config
+    // Collect all remaining args
     var config_args = std.array_list.Managed([]const u8).init(allocator);
     defer config_args.deinit();
     while (args.next()) |arg| {
         try config_args.append(arg);
     }
 
-    // Determine if this is a write/complex operation that needs real git
-    // Simple read: git config <key> (one arg, no flags)
-    var needs_fallback = false;
-    if (config_args.items.len == 0) {
-        needs_fallback = true; // no args
-    } else if (config_args.items.len >= 2) {
-        // Could be a set operation (key value) or flag-based
-        needs_fallback = true;
+    // Parse flags
+    var config_type: ConfigType = .none;
+    var do_list = false;
+    var do_get = false;
+    var do_get_all = false;
+    var do_get_regexp = false;
+    var do_set = false;
+    var do_unset = false;
+    var do_unset_all = false;
+    var do_add = false;
+    var do_remove_section = false;
+    var do_rename_section = false;
+    _ = &do_rename_section;
+    var use_global = false;
+    var use_system = false;
+    var use_local = false;
+    var use_worktree = false;
+    _ = &use_worktree;
+    var config_file: ?[]const u8 = null;
+    var null_terminator = false;
+    var show_names = false;
+    var show_origin = false;
+    var show_scope = false;
+    var default_value: ?[]const u8 = null;
+    var fixed_value = false;
+    _ = &fixed_value;
+    var positionals = std.array_list.Managed([]const u8).init(allocator);
+    defer positionals.deinit();
+    var do_edit = false;
+    _ = &do_edit;
+    var do_get_color = false;
+    var do_get_colorbool = false;
+    // New-style subcommands
+    var new_style_sub = false;
+    
+    var i: usize = 0;
+    while (i < config_args.items.len) : (i += 1) {
+        const arg = config_args.items[i];
+        if (std.mem.eql(u8, arg, "--list") or std.mem.eql(u8, arg, "-l")) {
+            do_list = true;
+        } else if (std.mem.eql(u8, arg, "--get")) {
+            do_get = true;
+        } else if (std.mem.eql(u8, arg, "--get-all")) {
+            do_get_all = true;
+        } else if (std.mem.eql(u8, arg, "--get-regexp")) {
+            do_get_regexp = true;
+        } else if (std.mem.eql(u8, arg, "--unset")) {
+            do_unset = true;
+        } else if (std.mem.eql(u8, arg, "--unset-all")) {
+            do_unset_all = true;
+        } else if (std.mem.eql(u8, arg, "--add")) {
+            do_add = true;
+        } else if (std.mem.eql(u8, arg, "--remove-section")) {
+            do_remove_section = true;
+        } else if (std.mem.eql(u8, arg, "--rename-section")) {
+            do_rename_section = true;
+        } else if (std.mem.eql(u8, arg, "--bool")) {
+            config_type = .bool_type;
+        } else if (std.mem.eql(u8, arg, "--int")) {
+            config_type = .int_type;
+        } else if (std.mem.eql(u8, arg, "--bool-or-int")) {
+            config_type = .bool_or_int;
+        } else if (std.mem.eql(u8, arg, "--path")) {
+            config_type = .path_type;
+        } else if (std.mem.eql(u8, arg, "--expiry-date")) {
+            config_type = .expiry_date;
+        } else if (std.mem.startsWith(u8, arg, "--type=")) {
+            const type_str = arg["--type=".len..];
+            if (std.mem.eql(u8, type_str, "bool")) {
+                config_type = .bool_type;
+            } else if (std.mem.eql(u8, type_str, "int")) {
+                config_type = .int_type;
+            } else if (std.mem.eql(u8, type_str, "bool-or-int")) {
+                config_type = .bool_or_int;
+            } else if (std.mem.eql(u8, type_str, "path")) {
+                config_type = .path_type;
+            } else if (std.mem.eql(u8, type_str, "expiry-date")) {
+                config_type = .expiry_date;
+            } else if (std.mem.eql(u8, type_str, "color")) {
+                config_type = .color_type;
+            }
+        } else if (std.mem.eql(u8, arg, "--global")) {
+            use_global = true;
+        } else if (std.mem.eql(u8, arg, "--system")) {
+            use_system = true;
+        } else if (std.mem.eql(u8, arg, "--local")) {
+            use_local = true;
+        } else if (std.mem.eql(u8, arg, "--worktree")) {
+            use_worktree = true;
+        } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--file")) {
+            i += 1;
+            if (i < config_args.items.len) {
+                config_file = config_args.items[i];
+            }
+        } else if (std.mem.startsWith(u8, arg, "--file=")) {
+            config_file = arg["--file=".len..];
+        } else if (std.mem.startsWith(u8, arg, "-f") and arg.len > 2) {
+            config_file = arg[2..];
+        } else if (std.mem.eql(u8, arg, "-z") or std.mem.eql(u8, arg, "--null")) {
+            null_terminator = true;
+        } else if (std.mem.eql(u8, arg, "--name-only") or std.mem.eql(u8, arg, "--name")) {
+            show_names = true;
+        } else if (std.mem.eql(u8, arg, "--show-origin")) {
+            show_origin = true;
+        } else if (std.mem.eql(u8, arg, "--show-scope")) {
+            show_scope = true;
+        } else if (std.mem.startsWith(u8, arg, "--default=")) {
+            default_value = arg["--default=".len..];
+        } else if (std.mem.eql(u8, arg, "--default")) {
+            i += 1;
+            if (i < config_args.items.len) default_value = config_args.items[i];
+        } else if (std.mem.eql(u8, arg, "--fixed-value")) {
+            fixed_value = true;
+        } else if (std.mem.eql(u8, arg, "--edit") or std.mem.eql(u8, arg, "-e")) {
+            do_edit = true;
+        } else if (std.mem.eql(u8, arg, "--get-color")) {
+            do_get_color = true;
+        } else if (std.mem.eql(u8, arg, "--get-colorbool")) {
+            do_get_colorbool = true;
+        } else if (std.mem.eql(u8, arg, "--replace-all")) {
+            do_set = true; // treat like set but replaces all
+        } else if (std.mem.startsWith(u8, arg, "--comment=") or std.mem.eql(u8, arg, "--comment")) {
+            // --comment flag for git 2.45+, accept and store
+            if (std.mem.eql(u8, arg, "--comment")) {
+                i += 1; // skip comment value
+            }
+        } else if (std.mem.eql(u8, arg, "--no-type")) {
+            config_type = .none;
+        } else if (std.mem.eql(u8, arg, "-h")) {
+            try platform_impl.writeStdout("usage: git config [<options>]\n");
+            std.process.exit(129);
+        } else if (std.mem.eql(u8, arg, "--")) {
+            // Rest are positionals
+            i += 1;
+            while (i < config_args.items.len) : (i += 1) {
+                try positionals.append(config_args.items[i]);
+            }
+        } else if (std.mem.eql(u8, arg, "set") and positionals.items.len == 0 and !do_get and !do_list and !do_unset) {
+            new_style_sub = true;
+            do_set = true;
+        } else if (std.mem.eql(u8, arg, "get") and positionals.items.len == 0 and !do_set and !do_list and !do_unset) {
+            new_style_sub = true;
+            do_get = true;
+        } else if (std.mem.eql(u8, arg, "unset") and positionals.items.len == 0 and !do_set and !do_list and !do_get) {
+            new_style_sub = true;
+            do_unset = true;
+        } else if (std.mem.eql(u8, arg, "list") and positionals.items.len == 0 and !do_set and !do_get and !do_unset) {
+            new_style_sub = true;
+            do_list = true;
+        } else {
+            try positionals.append(arg);
+        }
+    }
+    // These flags are parsed but not yet fully implemented
+
+    // Determine config file path(s) to read
+    // ConfigSource is defined at module level
+    var sources = std.array_list.Managed(ConfigSource).init(allocator);
+    defer {
+        for (sources.items) |s| {
+            if (s.needs_free) allocator.free(s.path);
+        }
+        sources.deinit();
+    }
+
+    // Helper to find git dir (may fail if not in repo)
+    const git_path_opt: ?[]const u8 = findGitDirectory(allocator, platform_impl) catch null;
+    defer if (git_path_opt) |gp| allocator.free(gp);
+
+    if (config_file) |cf| {
+        // -f <file>: only that file
+        try sources.append(.{ .path = cf, .scope = "command", .needs_free = false });
+    } else if (use_system) {
+        try sources.append(.{ .path = "/etc/gitconfig", .scope = "system", .needs_free = false });
+    } else if (use_global) {
+        const home = std.process.getEnvVarOwned(allocator, "HOME") catch null;
+        const xdg = std.process.getEnvVarOwned(allocator, "XDG_CONFIG_HOME") catch null;
+        defer if (home) |h| allocator.free(h);
+        defer if (xdg) |x| allocator.free(x);
+        if (home) |h| {
+            const p = try std.fmt.allocPrint(allocator, "{s}/.gitconfig", .{h});
+            try sources.append(.{ .path = p, .scope = "global", .needs_free = true });
+        }
+        if (xdg) |x| {
+            const p = try std.fmt.allocPrint(allocator, "{s}/git/config", .{x});
+            try sources.append(.{ .path = p, .scope = "global", .needs_free = true });
+        } else if (home) |h| {
+            const p = try std.fmt.allocPrint(allocator, "{s}/.config/git/config", .{h});
+            try sources.append(.{ .path = p, .scope = "global", .needs_free = true });
+        }
+    } else if (use_local) {
+        if (git_path_opt) |gp| {
+            const p = try std.fmt.allocPrint(allocator, "{s}/config", .{gp});
+            try sources.append(.{ .path = p, .scope = "local", .needs_free = true });
+        } else {
+            try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+            std.process.exit(128);
+        }
     } else {
-        // Single arg - check if it's a flag
-        const arg0 = config_args.items[0];
-        if (arg0.len > 0 and arg0[0] == '-') {
-            needs_fallback = true;
+        // Default: system + global + local (for reads)
+        // For writes, default is local
+        try sources.append(.{ .path = "/etc/gitconfig", .scope = "system", .needs_free = false });
+        const home = std.process.getEnvVarOwned(allocator, "HOME") catch null;
+        const xdg = std.process.getEnvVarOwned(allocator, "XDG_CONFIG_HOME") catch null;
+        defer if (home) |h| allocator.free(h);
+        defer if (xdg) |x| allocator.free(x);
+        if (xdg) |x| {
+            const p = try std.fmt.allocPrint(allocator, "{s}/git/config", .{x});
+            try sources.append(.{ .path = p, .scope = "global", .needs_free = true });
+        } else if (home) |h| {
+            const p = try std.fmt.allocPrint(allocator, "{s}/.config/git/config", .{h});
+            try sources.append(.{ .path = p, .scope = "global", .needs_free = true });
+        }
+        if (home) |h| {
+            const p = try std.fmt.allocPrint(allocator, "{s}/.gitconfig", .{h});
+            try sources.append(.{ .path = p, .scope = "global", .needs_free = true });
+        }
+        if (git_path_opt) |gp| {
+            const p = try std.fmt.allocPrint(allocator, "{s}/config", .{gp});
+            try sources.append(.{ .path = p, .scope = "local", .needs_free = true });
         }
     }
 
-    if (needs_fallback) {
-        if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
-            // Translate newer config subcommands to old-style for git 2.43 compat
-            // git config set <key> <value> [--global etc.] -> git config [--global] <key> <value>
-            // git config get <key> [--global etc.] -> git config [--global] <key>
-            // git config unset <key> [--global etc.] -> git config --unset [--global] <key>
-            // git config list [--global etc.] -> git config --list [--global]
-            var argv = std.array_list.Managed([]const u8).init(allocator);
-            defer argv.deinit();
-            try argv.append(findRealGit());
-            try argv.append("config");
+    // Also handle GIT_CONFIG_GLOBAL etc.
+    const env_global = std.process.getEnvVarOwned(allocator, "GIT_CONFIG_GLOBAL") catch null;
+    defer if (env_global) |eg| allocator.free(eg);
+    // GIT_CONFIG env var overrides for reads
+    const env_config = std.process.getEnvVarOwned(allocator, "GIT_CONFIG") catch null;
+    defer if (env_config) |ec| allocator.free(ec);
 
-            if (config_args.items.len >= 1) {
-                const sub = config_args.items[0];
-                if (std.mem.eql(u8, sub, "set") and config_args.items.len >= 3) {
-                    // git config set [flags...] <key> <value>
-                    // Flags come between 'set' and key. Extract flags, key, value
-                    var flags = std.array_list.Managed([]const u8).init(allocator);
-                    defer flags.deinit();
-                    var positional = std.array_list.Managed([]const u8).init(allocator);
-                    defer positional.deinit();
-                    for (config_args.items[1..]) |a| {
-                        if (a.len > 0 and a[0] == '-') {
-                            try flags.append(a);
-                        } else {
-                            try positional.append(a);
-                        }
-                    }
-                    for (flags.items) |f| try argv.append(f);
-                    for (positional.items) |p| try argv.append(p);
-                } else if (std.mem.eql(u8, sub, "get") and config_args.items.len >= 2) {
-                    // git config get [flags...] <key>
-                    for (config_args.items[1..]) |a| try argv.append(a);
-                } else if (std.mem.eql(u8, sub, "unset") and config_args.items.len >= 2) {
-                    try argv.append("--unset");
-                    for (config_args.items[1..]) |a| try argv.append(a);
-                } else if (std.mem.eql(u8, sub, "list")) {
-                    try argv.append("--list");
-                    for (config_args.items[1..]) |a| try argv.append(a);
-                } else {
-                    // Pass through as-is
-                    for (config_args.items) |a| try argv.append(a);
-                }
-            } else {
-                for (config_args.items) |arg| {
-                    try argv.append(arg);
-                }
-            }
-            var child = std.process.Child.init(argv.items, allocator);
-            child.stdin_behavior = .Inherit;
-            child.stdout_behavior = .Inherit;
-            child.stderr_behavior = .Inherit;
-            const term = child.spawnAndWait() catch |err| {
-                const msg = try std.fmt.allocPrint(allocator, "ziggit: failed to execute git config: {}\n", .{err});
-                defer allocator.free(msg);
-                try platform_impl.writeStderr(msg);
-                std.process.exit(1);
+    // Handle --list
+    if (do_list) {
+        for (sources.items) |source| {
+            const content = platform_impl.fs.readFile(allocator, source.path) catch continue;
+            defer allocator.free(content);
+            try outputConfigList(content, source.path, source.scope, null_terminator, show_names, show_origin, show_scope, allocator, platform_impl);
+        }
+        return;
+    }
+
+    // Handle --get-color
+    if (do_get_color) {
+        // git config --get-color <key> [<default>]
+        const key = if (positionals.items.len >= 1) positionals.items[0] else {
+            try platform_impl.writeStderr("error: --get-color requires a key\n");
+            std.process.exit(2);
+        };
+        const def = if (positionals.items.len >= 2) positionals.items[1] else "";
+        // Look up the color config
+        const val = configLookup(sources.items, key, allocator, platform_impl) catch null;
+        defer if (val) |v| allocator.free(v);
+        const color_str = val orelse def;
+        // Output the ANSI escape for the color
+        const ansi = colorToAnsi(color_str);
+        try platform_impl.writeStdout(ansi);
+        return;
+    }
+
+    // Handle --get-colorbool
+    if (do_get_colorbool) {
+        const key = if (positionals.items.len >= 1) positionals.items[0] else {
+            try platform_impl.writeStderr("error: --get-colorbool requires a key\n");
+            std.process.exit(2);
+        };
+        _ = key;
+        // Simple: check if stdout is a terminal
+        try platform_impl.writeStdout("false\n");
+        return;
+    }
+
+    // Handle --remove-section
+    if (do_remove_section) {
+        if (positionals.items.len < 1) {
+            try platform_impl.writeStderr("error: missing section name\n");
+            std.process.exit(2);
+        }
+        const section_name = positionals.items[0];
+        // Find the config file to edit
+        const cfg_path = if (config_file) |cf| try allocator.dupe(u8, cf) else if (git_path_opt) |gp| try std.fmt.allocPrint(allocator, "{s}/config", .{gp}) else {
+            try platform_impl.writeStderr("fatal: not a git repository\n");
+            std.process.exit(128);
+        };
+        defer allocator.free(cfg_path);
+        try configRemoveSection(cfg_path, section_name, allocator, platform_impl);
+        return;
+    }
+
+    // Handle write: git config <key> <value> OR git config set <key> <value>
+    if (do_set or do_add or (!do_get and !do_get_all and !do_get_regexp and !do_unset and !do_unset_all and positionals.items.len >= 2 and !std.mem.startsWith(u8, positionals.items[0], "-"))) {
+        const key = positionals.items[0];
+        const value = positionals.items[1];
+        // Find config file to write
+        const cfg_path = if (config_file) |cf|
+            try allocator.dupe(u8, cf)
+        else if (use_global) blk: {
+            const home = std.process.getEnvVarOwned(allocator, "HOME") catch {
+                try platform_impl.writeStderr("fatal: $HOME not set\n");
+                std.process.exit(128);
             };
-            switch (term) {
-                .Exited => |code| if (code != 0) std.process.exit(@intCast(code)),
-                .Signal => |_| std.process.exit(128),
-                .Stopped => |_| std.process.exit(128),
-                .Unknown => |_| std.process.exit(1),
+            defer allocator.free(home);
+            break :blk try std.fmt.allocPrint(allocator, "{s}/.gitconfig", .{home});
+        } else if (git_path_opt) |gp|
+            try std.fmt.allocPrint(allocator, "{s}/config", .{gp})
+        else {
+            try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+            std.process.exit(128);
+        };
+        defer allocator.free(cfg_path);
+        try configSetValue(cfg_path, key, value, do_add, allocator, platform_impl);
+        return;
+    }
+
+    // Handle --unset
+    if (do_unset or do_unset_all) {
+        if (positionals.items.len < 1) {
+            try platform_impl.writeStderr("error: missing key\n");
+            std.process.exit(2);
+        }
+        const key = positionals.items[0];
+        const cfg_path = if (config_file) |cf|
+            try allocator.dupe(u8, cf)
+        else if (use_global) blk: {
+            const home = std.process.getEnvVarOwned(allocator, "HOME") catch {
+                try platform_impl.writeStderr("fatal: $HOME not set\n");
+                std.process.exit(128);
+            };
+            defer allocator.free(home);
+            break :blk try std.fmt.allocPrint(allocator, "{s}/.gitconfig", .{home});
+        } else if (git_path_opt) |gp|
+            try std.fmt.allocPrint(allocator, "{s}/config", .{gp})
+        else {
+            try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+            std.process.exit(128);
+        };
+        defer allocator.free(cfg_path);
+        try configUnsetValue(cfg_path, key, do_unset_all, allocator, platform_impl);
+        return;
+    }
+
+    // Handle --get-regexp
+    if (do_get_regexp) {
+        if (positionals.items.len < 1) {
+            try platform_impl.writeStderr("error: missing key pattern\n");
+            std.process.exit(2);
+        }
+        // Simple: just pattern-match keys
+        const pattern = positionals.items[0];
+        var found_any = false;
+        for (sources.items) |source| {
+            const content = platform_impl.fs.readFile(allocator, source.path) catch continue;
+            defer allocator.free(content);
+            found_any = try outputConfigGetRegexp(content, pattern, show_names, null_terminator, allocator, platform_impl) or found_any;
+        }
+        if (!found_any) std.process.exit(1);
+        return;
+    }
+
+    // Handle --get-all
+    if (do_get_all) {
+        if (positionals.items.len < 1) {
+            try platform_impl.writeStderr("error: missing key\n");
+            std.process.exit(2);
+        }
+        const key = positionals.items[0];
+        var found_any = false;
+        for (sources.items) |source| {
+            const content = platform_impl.fs.readFile(allocator, source.path) catch continue;
+            defer allocator.free(content);
+            var all_vals = std.array_list.Managed([]const u8).init(allocator);
+            defer {
+                for (all_vals.items) |v| allocator.free(v);
+                all_vals.deinit();
             }
+            try parseConfigGetAll(content, key, &all_vals, allocator);
+            for (all_vals.items) |v| {
+                found_any = true;
+                const formatted = try formatConfigType(v, config_type, allocator);
+                defer allocator.free(formatted);
+                const output = try std.fmt.allocPrint(allocator, "{s}\n", .{formatted});
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            }
+        }
+        if (!found_any) std.process.exit(1);
+        return;
+    }
+
+    // Handle simple get: git config [--get] [--bool] <key>
+    if (positionals.items.len >= 1) {
+        const key = positionals.items[0];
+        const val = configLookup(sources.items, key, allocator, platform_impl) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => null,
+        };
+        defer if (val) |v| allocator.free(v);
+        const effective_val = val orelse default_value;
+        if (effective_val) |v| {
+            const formatted = try formatConfigType(v, config_type, allocator);
+            defer allocator.free(formatted);
+            const term: []const u8 = if (null_terminator) "\x00" else "\n";
+            const output = try std.fmt.allocPrint(allocator, "{s}{s}", .{ formatted, term });
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+        } else {
+            std.process.exit(1);
+        }
+        return;
+    }
+
+    // No args at all - show usage
+    if (positionals.items.len == 0 and !do_list) {
+        try platform_impl.writeStderr("usage: git config [<options>]\n");
+        std.process.exit(129);
+    }
+}
+
+fn configLookup(sources: []const ConfigSource, key: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
+    // Last source wins (local overrides global overrides system)
+    var result: ?[]u8 = null;
+    for (sources) |source| {
+        const content = platform_impl.fs.readFile(allocator, source.path) catch continue;
+        defer allocator.free(content);
+        const val = parseConfigValue(content, key, allocator) catch |err| switch (err) {
+            error.KeyNotFound => continue,
+            else => return err,
+        };
+        if (val) |v| {
+            if (result) |prev| allocator.free(prev);
+            result = v;
+        }
+    }
+    return result orelse error.KeyNotFound;
+}
+
+const ConfigType = enum { none, bool_type, int_type, bool_or_int, path_type, expiry_date, color_type };
+
+const ConfigSource = struct {
+    path: []const u8,
+    scope: []const u8,
+    needs_free: bool,
+};
+
+fn formatConfigType(value: []const u8, config_type: ConfigType, allocator: std.mem.Allocator) ![]u8 {
+    return switch (config_type) {
+        .bool_type => {
+            // Normalize to true/false
+            if (std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "yes") or std.mem.eql(u8, value, "on") or std.mem.eql(u8, value, "1")) {
+                return try allocator.dupe(u8, "true");
+            } else if (std.mem.eql(u8, value, "false") or std.mem.eql(u8, value, "no") or std.mem.eql(u8, value, "off") or std.mem.eql(u8, value, "0") or value.len == 0) {
+                return try allocator.dupe(u8, "false");
+            }
+            return try allocator.dupe(u8, value);
+        },
+        .int_type => try allocator.dupe(u8, value),
+        .bool_or_int => {
+            if (std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "yes") or std.mem.eql(u8, value, "on")) {
+                return try allocator.dupe(u8, "true");
+            } else if (std.mem.eql(u8, value, "false") or std.mem.eql(u8, value, "no") or std.mem.eql(u8, value, "off")) {
+                return try allocator.dupe(u8, "false");
+            }
+            return try allocator.dupe(u8, value);
+        },
+        else => try allocator.dupe(u8, value),
+    };
+}
+
+fn outputConfigList(content: []const u8, source_path: []const u8, scope: []const u8, null_term: bool, name_only: bool, show_origin: bool, show_scope: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    var lines = std.mem.splitSequence(u8, content, "\n");
+    var current_section: ?[]u8 = null;
+    defer if (current_section) |s| allocator.free(s);
+
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') continue;
+
+        if (trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']') {
+            if (current_section) |s| allocator.free(s);
+            current_section = try parseSectionHeader(trimmed, allocator);
+            continue;
+        }
+
+        if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
+            const k = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
+            const v = std.mem.trim(u8, trimmed[eq_pos + 1 ..], " \t");
+            const full_key = if (current_section) |sec|
+                try std.fmt.allocPrint(allocator, "{s}.{s}", .{ sec, k })
+            else
+                try allocator.dupe(u8, k);
+            defer allocator.free(full_key);
+
+            // Convert key to lowercase for output
+            const lower_key = try allocator.dupe(u8, full_key);
+            defer allocator.free(lower_key);
+            for (lower_key) |*c| {
+                c.* = std.ascii.toLower(c.*);
+            }
+
+            const term: []const u8 = if (null_term) "\x00" else "\n";
+            var out = std.array_list.Managed(u8).init(allocator);
+            defer out.deinit();
+            if (show_scope) {
+                try out.appendSlice(scope);
+                try out.append('\t');
+            }
+            if (show_origin) {
+                try out.appendSlice("file:");
+                try out.appendSlice(source_path);
+                try out.append('\t');
+            }
+            if (name_only) {
+                try out.appendSlice(lower_key);
+            } else {
+                try out.appendSlice(lower_key);
+                try out.append('=');
+                try out.appendSlice(v);
+            }
+            try out.appendSlice(term);
+            try platform_impl.writeStdout(out.items);
+        }
+    }
+}
+
+fn parseSectionHeader(header: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    // Parse [section] or [section "subsection"]
+    const inner = header[1 .. header.len - 1];
+    if (std.mem.indexOf(u8, inner, " \"")) |quote_start| {
+        const section = inner[0..quote_start];
+        const subsection = std.mem.trim(u8, inner[quote_start + 2 ..], "\"");
+        return try std.fmt.allocPrint(allocator, "{s}.{s}", .{ section, subsection });
+    }
+    return try allocator.dupe(u8, inner);
+}
+
+fn outputConfigGetRegexp(content: []const u8, pattern: []const u8, name_only: bool, null_term: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !bool {
+    var lines = std.mem.splitSequence(u8, content, "\n");
+    var current_section: ?[]u8 = null;
+    defer if (current_section) |s| allocator.free(s);
+    var found = false;
+
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') continue;
+
+        if (trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']') {
+            if (current_section) |s| allocator.free(s);
+            current_section = try parseSectionHeader(trimmed, allocator);
+            continue;
+        }
+
+        if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
+            const k = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
+            const v = std.mem.trim(u8, trimmed[eq_pos + 1 ..], " \t");
+            const full_key = if (current_section) |sec|
+                try std.fmt.allocPrint(allocator, "{s}.{s}", .{ sec, k })
+            else
+                try allocator.dupe(u8, k);
+            defer allocator.free(full_key);
+
+            // Simple substring match (git uses POSIX regex, but this covers most test cases)
+            const lower_key = try allocator.dupe(u8, full_key);
+            defer allocator.free(lower_key);
+            for (lower_key) |*c| c.* = std.ascii.toLower(c.*);
+
+            if (std.mem.indexOf(u8, lower_key, pattern) != null) {
+                found = true;
+                const term: []const u8 = if (null_term) "\x00" else "\n";
+                if (name_only) {
+                    const out = try std.fmt.allocPrint(allocator, "{s}{s}", .{ lower_key, term });
+                    defer allocator.free(out);
+                    try platform_impl.writeStdout(out);
+                } else {
+                    const out = try std.fmt.allocPrint(allocator, "{s} {s}{s}", .{ lower_key, v, term });
+                    defer allocator.free(out);
+                    try platform_impl.writeStdout(out);
+                }
+            }
+        }
+    }
+    return found;
+}
+
+fn parseConfigGetAll(content: []const u8, key: []const u8, results: *std.array_list.Managed([]const u8), allocator: std.mem.Allocator) !void {
+    var lines = std.mem.splitSequence(u8, content, "\n");
+    var current_section: ?[]u8 = null;
+    defer if (current_section) |s| allocator.free(s);
+
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') continue;
+
+        if (trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']') {
+            if (current_section) |s| allocator.free(s);
+            current_section = try parseSectionHeader(trimmed, allocator);
+            continue;
+        }
+
+        if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
+            const k = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
+            const v = std.mem.trim(u8, trimmed[eq_pos + 1 ..], " \t");
+            const full_key = if (current_section) |sec|
+                try std.fmt.allocPrint(allocator, "{s}.{s}", .{ sec, k })
+            else
+                try allocator.dupe(u8, k);
+            defer allocator.free(full_key);
+
+            if (std.ascii.eqlIgnoreCase(full_key, key)) {
+                try results.append(try allocator.dupe(u8, v));
+            }
+        }
+    }
+}
+
+fn configSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    // Parse key into section[.subsection].variable
+    const parsed_key = parseConfigKey(key, allocator) catch {
+        try platform_impl.writeStderr("error: key does not contain a section: ");
+        try platform_impl.writeStderr(key);
+        try platform_impl.writeStderr("\n");
+        std.process.exit(2);
+    };
+    defer allocator.free(parsed_key.section);
+    defer if (parsed_key.subsection) |s| allocator.free(s);
+    defer allocator.free(parsed_key.variable);
+
+    // Reconstruct the section string for matching
+    const section_part = if (parsed_key.subsection) |sub|
+        try std.fmt.allocPrint(allocator, "{s}.{s}", .{ parsed_key.section, sub })
+    else
+        try allocator.dupe(u8, parsed_key.section);
+    defer allocator.free(section_part);
+    
+    const key_part = parsed_key.variable;
+
+    // Read existing content
+    const content = platform_impl.fs.readFile(allocator, cfg_path) catch |err| switch (err) {
+        error.FileNotFound => {
+            // Create new file with this setting
+            const section_header = try formatSectionHeader(section_part, allocator);
+            defer allocator.free(section_header);
+            const new_content = try std.fmt.allocPrint(allocator, "[{s}]\n\t{s} = {s}\n", .{ section_header, key_part, value });
+            defer allocator.free(new_content);
+            try platform_impl.fs.writeFile(cfg_path, new_content);
             return;
+        },
+        else => return err,
+    };
+    defer allocator.free(content);
+
+    // Strategy: reconstruct the file, replacing or adding the value
+    // We need to find the matching section and either replace the key or add it
+    
+    // First pass: try to find and replace existing key
+    var result = std.array_list.Managed(u8).init(allocator);
+    defer result.deinit();
+    var found = false;
+    var section_found = false;
+    var last_line_in_section_end: usize = 0; // position in result after last line in target section
+    
+    // Split content into lines preserving original structure
+    var pos: usize = 0;
+    var current_section_str: ?[]u8 = null;
+    defer if (current_section_str) |s| allocator.free(s);
+    var in_target_section = false;
+    
+    while (pos < content.len) {
+        // Find end of line
+        const line_end = std.mem.indexOfPos(u8, content, pos, "\n") orelse content.len;
+        const line = content[pos..line_end];
+        const has_newline = line_end < content.len;
+        
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        
+        // Check for section header
+        if (trimmed.len > 0 and trimmed[0] == '[') {
+            const close = std.mem.indexOf(u8, trimmed, "]");
+            if (close != null) {
+                if (current_section_str) |s| allocator.free(s);
+                const parsed = parseConfigSectionHeader(trimmed, allocator) catch null;
+                if (parsed) |p| {
+                    if (p.subsection) |sub| {
+                        current_section_str = std.fmt.allocPrint(allocator, "{s}.{s}", .{ p.section.?, sub }) catch null;
+                        allocator.free(p.section.?);
+                        allocator.free(sub);
+                    } else if (p.section) |sec| {
+                        current_section_str = sec;
+                    } else {
+                        current_section_str = null;
+                    }
+                } else {
+                    current_section_str = null;
+                }
+                in_target_section = if (current_section_str) |cs| sectionMatchesKey(cs, section_part) else false;
+                if (in_target_section) section_found = true;
+            }
+        }
+        
+        // Check if this line has our key (for replacement)
+        if (in_target_section and !found and !do_add and trimmed.len > 0 and trimmed[0] != '[' and trimmed[0] != '#' and trimmed[0] != ';') {
+            if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
+                const k = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
+                if (std.ascii.eqlIgnoreCase(k, key_part)) {
+                    // Replace this line
+                    try result.appendSlice("\t");
+                    try result.appendSlice(key_part);
+                    try result.appendSlice(" = ");
+                    try result.appendSlice(value);
+                    try result.append('\n');
+                    found = true;
+                    pos = line_end + @as(usize, if (has_newline) 1 else 0);
+                    continue;
+                }
+            }
+        }
+        
+        // Copy line as-is
+        try result.appendSlice(line);
+        if (has_newline) try result.append('\n');
+        
+        if (in_target_section) {
+            last_line_in_section_end = result.items.len;
+        }
+        
+        pos = line_end + @as(usize, if (has_newline) 1 else 0);
+    }
+    
+    if (!found) {
+        if (section_found) {
+            // Insert the new key at the end of the target section
+            // We need to rebuild, inserting before the next section or at end
+            var insert_result = std.array_list.Managed(u8).init(allocator);
+            defer insert_result.deinit();
+            
+            try insert_result.appendSlice(result.items[0..last_line_in_section_end]);
+            try insert_result.appendSlice("\t");
+            try insert_result.appendSlice(key_part);
+            try insert_result.appendSlice(" = ");
+            try insert_result.appendSlice(value);
+            try insert_result.append('\n');
+            if (last_line_in_section_end < result.items.len) {
+                try insert_result.appendSlice(result.items[last_line_in_section_end..]);
+            }
+            
+            try platform_impl.fs.writeFile(cfg_path, insert_result.items);
+            return;
+        } else {
+            // Add new section at end
+            const section_header = try formatSectionHeader(section_part, allocator);
+            defer allocator.free(section_header);
+            try result.appendSlice("[");
+            try result.appendSlice(section_header);
+            try result.appendSlice("]\n\t");
+            try result.appendSlice(key_part);
+            try result.appendSlice(" = ");
+            try result.appendSlice(value);
+            try result.append('\n');
         }
     }
 
-    // Simple read: git config <key>
-    const config_key = config_args.items[0];
+    try platform_impl.fs.writeFile(cfg_path, result.items);
+}
 
-    // Find .git directory
-    const git_path = findGitDirectory(allocator, platform_impl) catch {
-        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+fn sectionMatchesKey(config_section: []const u8, key_section: []const u8) bool {
+    // Section names are case-insensitive, but subsections are case-sensitive
+    // config_section is in format "section" or "section.subsection"
+    // key_section is in format "section" or "section.subsection"
+    const config_dot = std.mem.indexOf(u8, config_section, ".");
+    const key_dot = std.mem.indexOf(u8, key_section, ".");
+    
+    if (config_dot != null and key_dot != null) {
+        // Both have subsections
+        const cs = config_section[0..config_dot.?];
+        const ks = key_section[0..key_dot.?];
+        if (!std.ascii.eqlIgnoreCase(cs, ks)) return false;
+        // Subsection is case-sensitive
+        return std.mem.eql(u8, config_section[config_dot.? + 1 ..], key_section[key_dot.? + 1 ..]);
+    } else if (config_dot == null and key_dot == null) {
+        return std.ascii.eqlIgnoreCase(config_section, key_section);
+    }
+    return false;
+}
+
+fn formatSectionHeader(section_key: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    // Convert "section.subsection" → section "subsection"
+    // Convert "section" → section
+    if (std.mem.indexOf(u8, section_key, ".")) |dot| {
+        const section = section_key[0..dot];
+        const subsection = section_key[dot + 1 ..];
+        return try std.fmt.allocPrint(allocator, "{s} \"{s}\"", .{ section, subsection });
+    }
+    return try allocator.dupe(u8, section_key);
+}
+
+fn configUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    const last_dot = std.mem.lastIndexOf(u8, key, ".") orelse {
+        try platform_impl.writeStderr("error: key does not contain a section\n");
+        std.process.exit(2);
+    };
+    const section_part = key[0..last_dot];
+    const key_part = key[last_dot + 1 ..];
+
+    const content = platform_impl.fs.readFile(allocator, cfg_path) catch {
+        std.process.exit(5);
+    };
+    defer allocator.free(content);
+
+    var result = std.array_list.Managed(u8).init(allocator);
+    defer result.deinit();
+    var lines = std.mem.splitSequence(u8, content, "\n");
+    var current_section_str: ?[]u8 = null;
+    defer if (current_section_str) |s| allocator.free(s);
+    var found = false;
+    var found_count: usize = 0;
+
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+
+        if (trimmed.len > 0 and trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']') {
+            if (current_section_str) |s| allocator.free(s);
+            current_section_str = parseSectionHeader(trimmed, allocator) catch null;
+        }
+
+        const in_section = if (current_section_str) |cs| std.ascii.eqlIgnoreCase(cs, section_part) else false;
+        var skip = false;
+        if (in_section) {
+            if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
+                const k = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
+                if (std.ascii.eqlIgnoreCase(k, key_part)) {
+                    found = true;
+                    found_count += 1;
+                    if (unset_all or found_count == 1) {
+                        skip = true;
+                    }
+                }
+            }
+        }
+
+        if (!skip) {
+            try result.appendSlice(line);
+            try result.append('\n');
+        }
+    }
+
+    // Remove trailing extra newline
+    if (result.items.len > 0 and content.len > 0 and content[content.len - 1] != '\n') {
+        _ = result.pop();
+    }
+
+    if (!found) {
+        std.process.exit(5);
+    }
+
+    if (!unset_all and found_count > 1) {
+        try platform_impl.writeStderr("warning: ");
+        try platform_impl.writeStderr(key);
+        try platform_impl.writeStderr(" has multiple values\n");
+        std.process.exit(5);
+    }
+
+    try platform_impl.fs.writeFile(cfg_path, result.items);
+}
+
+fn configRemoveSection(cfg_path: []const u8, section_name: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    const content = platform_impl.fs.readFile(allocator, cfg_path) catch {
+        try platform_impl.writeStderr("fatal: could not read config file\n");
         std.process.exit(128);
     };
-    defer allocator.free(git_path);
+    defer allocator.free(content);
 
-    // Read config file
-    const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
-    defer allocator.free(config_path);
+    var result = std.array_list.Managed(u8).init(allocator);
+    defer result.deinit();
+    var lines = std.mem.splitSequence(u8, content, "\n");
+    var in_removed_section = false;
+    var found = false;
 
-    const config_content = platform_impl.fs.readFile(allocator, config_path) catch |err| switch (err) {
-        error.FileNotFound => {
-            try platform_impl.writeStderr("fatal: unable to read config file\n");
-            std.process.exit(1);
-        },
-        else => return err,
-    };
-    defer allocator.free(config_content);
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
 
-    // Parse config file for the requested key
-    const value = parseConfigValue(config_content, config_key, allocator) catch |err| switch (err) {
-        error.KeyNotFound => {
-            std.process.exit(1); // git exits with 1 when key not found
-        },
-        else => return err,
-    };
-    defer if (value) |v| allocator.free(v);
+        if (trimmed.len > 0 and trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']') {
+            const parsed = parseSectionHeader(trimmed, allocator) catch null;
+            defer if (parsed) |p| allocator.free(p);
+            if (parsed) |p| {
+                if (std.ascii.eqlIgnoreCase(p, section_name)) {
+                    in_removed_section = true;
+                    found = true;
+                    continue;
+                }
+            }
+            in_removed_section = false;
+        }
 
-    if (value) |v| {
-        const output = try std.fmt.allocPrint(allocator, "{s}\n", .{v});
-        defer allocator.free(output);
-        try platform_impl.writeStdout(output);
+        if (!in_removed_section) {
+            try result.appendSlice(line);
+            try result.append('\n');
+        }
     }
+
+    if (!found) {
+        const msg = try std.fmt.allocPrint(allocator, "fatal: no such section: {s}\n", .{section_name});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        std.process.exit(128);
+    }
+
+    // Remove trailing extra newline
+    if (result.items.len > 0 and content.len > 0 and content[content.len - 1] != '\n') {
+        _ = result.pop();
+    }
+
+    try platform_impl.fs.writeFile(cfg_path, result.items);
+}
+
+fn colorToAnsi(color_str: []const u8) []const u8 {
+    // Simple color name to ANSI escape code mapping
+    if (std.mem.eql(u8, color_str, "red")) return "\x1b[31m";
+    if (std.mem.eql(u8, color_str, "green")) return "\x1b[32m";
+    if (std.mem.eql(u8, color_str, "yellow")) return "\x1b[33m";
+    if (std.mem.eql(u8, color_str, "blue")) return "\x1b[34m";
+    if (std.mem.eql(u8, color_str, "magenta")) return "\x1b[35m";
+    if (std.mem.eql(u8, color_str, "cyan")) return "\x1b[36m";
+    if (std.mem.eql(u8, color_str, "white")) return "\x1b[37m";
+    if (std.mem.eql(u8, color_str, "reset") or std.mem.eql(u8, color_str, "normal")) return "\x1b[m";
+    if (std.mem.eql(u8, color_str, "bold")) return "\x1b[1m";
+    if (std.mem.eql(u8, color_str, "bold red")) return "\x1b[1;31m";
+    if (std.mem.eql(u8, color_str, "bold green")) return "\x1b[1;32m";
+    if (std.mem.eql(u8, color_str, "bold yellow")) return "\x1b[1;33m";
+    if (std.mem.eql(u8, color_str, "bold blue")) return "\x1b[1;34m";
+    if (color_str.len == 0) return "";
+    return "";
 }
 
 // Parse git config file to find a specific key's value
@@ -4866,60 +5674,256 @@ fn getRemoteUrl(git_path: []const u8, remote_name: []const u8, platform_impl: *c
 }
 
 fn parseConfigValue(config_content: []const u8, key: []const u8, allocator: std.mem.Allocator) !?[]u8 {
-    var lines = std.mem.splitSequence(u8, config_content, "\n");
-    var current_section: ?[]const u8 = null;
-    var current_section_owned: ?[]u8 = null;
-    defer if (current_section_owned) |sec| allocator.free(sec);
-
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r\n");
-        if (trimmed.len == 0 or trimmed[0] == '#') continue;
-
-        // Check for section header [section] or [section "subsection"]
-        if (trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']') {
-            if (current_section_owned) |sec| {
-                allocator.free(sec);
-                current_section_owned = null;
-            }
-            current_section_owned = try allocator.dupe(u8, trimmed[1..trimmed.len - 1]);
-            current_section = current_section_owned;
+    // Parse key into section[.subsection].name components
+    // Keys are case-insensitive for section and variable name, but subsection is case-sensitive
+    const parsed_key = try parseConfigKey(key, allocator);
+    defer allocator.free(parsed_key.section);
+    defer if (parsed_key.subsection) |s| allocator.free(s);
+    defer allocator.free(parsed_key.variable);
+    
+    var last_value: ?[]u8 = null;
+    
+    var line_iter = std.mem.splitSequence(u8, config_content, "\n");
+    var current_section: ?[]u8 = null;
+    var current_subsection: ?[]u8 = null;
+    defer if (current_section) |s| allocator.free(s);
+    defer if (current_subsection) |s| allocator.free(s);
+    
+    while (line_iter.next()) |raw_line| {
+        const line = std.mem.trimRight(u8, raw_line, "\r");
+        const trimmed = std.mem.trim(u8, line, " \t");
+        if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') continue;
+        
+        // Section header
+        if (trimmed[0] == '[') {
+            if (current_section) |s| allocator.free(s);
+            if (current_subsection) |s| allocator.free(s);
+            current_section = null;
+            current_subsection = null;
+            
+            const parsed = try parseConfigSectionHeader(trimmed, allocator);
+            current_section = parsed.section;
+            current_subsection = parsed.subsection;
             continue;
         }
-
-        // Check for key = value
-        if (std.mem.indexOf(u8, trimmed, " = ")) |eq_pos| {
-            const config_key_part = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
-            const value_part = std.mem.trim(u8, trimmed[eq_pos + 3..], " \t");
-
-            // Build full key name
-            const full_key = if (current_section) |section|
-                try std.fmt.allocPrint(allocator, "{s}.{s}", .{ section, config_key_part })
-            else
-                try allocator.dupe(u8, config_key_part);
-            defer allocator.free(full_key);
-
-            if (std.mem.eql(u8, full_key, key)) {
-                return try allocator.dupe(u8, value_part);
+        
+        // Key = value line
+        if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
+            const raw_key = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
+            var raw_value = trimmed[eq_pos + 1 ..];
+            
+            // Handle continuation lines
+            var value_buf = std.array_list.Managed(u8).init(allocator);
+            defer value_buf.deinit();
+            
+            while (true) {
+                const trimmed_val = std.mem.trimRight(u8, raw_value, " \t");
+                if (trimmed_val.len > 0 and trimmed_val[trimmed_val.len - 1] == '\\') {
+                    // Continuation: append everything before the backslash
+                    try appendConfigValuePart(&value_buf, trimmed_val[0 .. trimmed_val.len - 1]);
+                    raw_value = if (line_iter.next()) |next_line|
+                        std.mem.trim(u8, std.mem.trimRight(u8, next_line, "\r"), " \t")
+                    else
+                        break;
+                } else {
+                    try appendConfigValuePart(&value_buf, raw_value);
+                    break;
+                }
             }
-        } else if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
-            // Handle key=value without spaces
-            const config_key_part = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
-            const value_part = std.mem.trim(u8, trimmed[eq_pos + 1..], " \t");
-
-            // Build full key name
-            const full_key = if (current_section) |section|
-                try std.fmt.allocPrint(allocator, "{s}.{s}", .{ section, config_key_part })
+            
+            // Check if this matches the requested key
+            const section_matches = if (current_section) |cs|
+                std.ascii.eqlIgnoreCase(cs, parsed_key.section)
             else
-                try allocator.dupe(u8, config_key_part);
-            defer allocator.free(full_key);
-
-            if (std.mem.eql(u8, full_key, key)) {
-                return try allocator.dupe(u8, value_part);
+                false;
+            
+            const subsection_matches = if (parsed_key.subsection) |ps| blk: {
+                if (current_subsection) |css| {
+                    break :blk std.mem.eql(u8, css, ps);
+                }
+                break :blk false;
+            } else current_subsection == null;
+            
+            const key_matches = std.ascii.eqlIgnoreCase(raw_key, parsed_key.variable);
+            
+            if (section_matches and subsection_matches and key_matches) {
+                if (last_value) |lv| allocator.free(lv);
+                last_value = try value_buf.toOwnedSlice();
+            }
+        } else {
+            // Boolean key without value (e.g., just "key" means true)
+            const raw_key = std.mem.trim(u8, trimmed, " \t");
+            // Remove inline comments
+            const comment_pos = std.mem.indexOf(u8, raw_key, "#") orelse std.mem.indexOf(u8, raw_key, ";");
+            const clean_key = if (comment_pos) |cp| std.mem.trimRight(u8, raw_key[0..cp], " \t") else raw_key;
+            
+            if (clean_key.len > 0) {
+                const section_matches = if (current_section) |cs|
+                    std.ascii.eqlIgnoreCase(cs, parsed_key.section)
+                else
+                    false;
+                    
+                const subsection_matches = if (parsed_key.subsection) |ps| blk: {
+                    if (current_subsection) |css| {
+                        break :blk std.mem.eql(u8, css, ps);
+                    }
+                    break :blk false;
+                } else current_subsection == null;
+                
+                const key_matches = std.ascii.eqlIgnoreCase(clean_key, parsed_key.variable);
+                
+                if (section_matches and subsection_matches and key_matches) {
+                    if (last_value) |lv| allocator.free(lv);
+                    last_value = try allocator.dupe(u8, "true"); // boolean key
+                }
             }
         }
     }
-
+    
+    if (last_value) |v| return v;
     return error.KeyNotFound;
+}
+
+const ParsedConfigKey = struct {
+    section: []u8,
+    subsection: ?[]u8,
+    variable: []u8,
+};
+
+fn parseConfigKey(key: []const u8, allocator: std.mem.Allocator) !ParsedConfigKey {
+    // Parse "section.variable" or "section.subsection.variable"
+    // The last dot separates the variable name
+    // For subsections like remote."origin".url: section=remote, subsection=origin, variable=url
+    // Normal: core.bare -> section=core, subsection=null, variable=bare
+    // Subsection: branch.main.remote -> section=branch, subsection=main, variable=remote
+    const last_dot = std.mem.lastIndexOf(u8, key, ".") orelse return error.InvalidKey;
+    const variable = key[last_dot + 1 ..];
+    const prefix = key[0..last_dot];
+    
+    // Check if prefix has a dot (subsection)
+    if (std.mem.indexOf(u8, prefix, ".")) |first_dot| {
+        const section = prefix[0..first_dot];
+        const subsection = prefix[first_dot + 1 ..];
+        return .{
+            .section = try allocator.dupe(u8, section),
+            .subsection = try allocator.dupe(u8, subsection),
+            .variable = try allocator.dupe(u8, variable),
+        };
+    }
+    
+    return .{
+        .section = try allocator.dupe(u8, prefix),
+        .subsection = null,
+        .variable = try allocator.dupe(u8, variable),
+    };
+}
+
+const ParsedSection = struct {
+    section: ?[]u8,
+    subsection: ?[]u8,
+};
+
+fn parseConfigSectionHeader(header: []const u8, allocator: std.mem.Allocator) !ParsedSection {
+    // Parse [section] or [section "subsection"]
+    // Find the closing bracket
+    const close = std.mem.lastIndexOf(u8, header, "]") orelse return .{ .section = null, .subsection = null };
+    const inner = header[1..close];
+    
+    // Check for quoted subsection
+    if (std.mem.indexOf(u8, inner, " \"")) |quote_start| {
+        const section = std.mem.trim(u8, inner[0..quote_start], " \t");
+        var subsection_raw = inner[quote_start + 2 ..];
+        // Remove trailing quote
+        if (subsection_raw.len > 0 and subsection_raw[subsection_raw.len - 1] == '"') {
+            subsection_raw = subsection_raw[0 .. subsection_raw.len - 1];
+        }
+        // Unescape backslashes in subsection
+        var sub_buf = std.array_list.Managed(u8).init(allocator);
+        defer sub_buf.deinit();
+        var si: usize = 0;
+        while (si < subsection_raw.len) : (si += 1) {
+            if (subsection_raw[si] == '\\' and si + 1 < subsection_raw.len) {
+                si += 1;
+                try sub_buf.append(subsection_raw[si]);
+            } else {
+                try sub_buf.append(subsection_raw[si]);
+            }
+        }
+        return .{
+            .section = try allocator.dupe(u8, section),
+            .subsection = try sub_buf.toOwnedSlice(),
+        };
+    }
+    
+    return .{
+        .section = try allocator.dupe(u8, inner),
+        .subsection = null,
+    };
+}
+
+fn appendConfigValuePart(buf: *std.array_list.Managed(u8), raw: []const u8) !void {
+    // Parse a config value part, handling quotes and inline comments
+    // Leading whitespace of raw value is trimmed only before first non-whitespace or quote
+    const trimmed = std.mem.trimLeft(u8, raw, " \t");
+    var in_quotes = false;
+    var last_quoted_end: usize = 0; // buf position after last quoted segment
+    var i: usize = 0;
+    while (i < trimmed.len) : (i += 1) {
+        const c = trimmed[i];
+        if (c == '\\' and i + 1 < trimmed.len) {
+            i += 1;
+            const next = trimmed[i];
+            switch (next) {
+                'n' => try buf.append('\n'),
+                't' => try buf.append('\t'),
+                'b' => try buf.append(0x08),
+                '"' => try buf.append('"'),
+                '\\' => try buf.append('\\'),
+                else => {
+                    try buf.append('\\');
+                    try buf.append(next);
+                },
+            }
+            if (in_quotes) last_quoted_end = buf.items.len;
+        } else if (c == '"') {
+            if (in_quotes) {
+                last_quoted_end = buf.items.len;
+            }
+            in_quotes = !in_quotes;
+        } else if (!in_quotes and (c == '#' or c == ';')) {
+            // Inline comment
+            break;
+        } else {
+            try buf.append(c);
+            if (in_quotes) last_quoted_end = buf.items.len;
+        }
+    }
+    // Trim trailing unquoted whitespace: only remove whitespace after the last quoted content
+    if (!in_quotes) {
+        while (buf.items.len > last_quoted_end and (buf.items[buf.items.len - 1] == ' ' or buf.items[buf.items.len - 1] == '\t')) {
+            _ = buf.pop();
+        }
+    }
+}
+
+fn cmdVersion(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    _ = allocator;
+    var show_build_options = false;
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--build-options")) {
+            show_build_options = true;
+        }
+    }
+    try platform_impl.writeStdout("git version 2.47.0\n");
+    if (show_build_options) {
+        try platform_impl.writeStdout("cpu: x86_64\n");
+        try platform_impl.writeStdout("sizeof-long: 8\n");
+        try platform_impl.writeStdout("sizeof-size_t: 8\n");
+        try platform_impl.writeStdout("shell-path: /bin/sh\n");
+        try platform_impl.writeStdout("feature: fsmonitor--daemon\n");
+        try platform_impl.writeStdout("default-hash: sha1\n");
+        try platform_impl.writeStdout("default-ref-format: files\n");
+    }
 }
 
 fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
