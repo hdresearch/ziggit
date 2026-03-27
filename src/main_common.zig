@@ -8777,7 +8777,8 @@ fn pushRefspecInner(allocator: std.mem.Allocator, local_git_dir: []const u8, rem
                         } else |_| {}
                     }
                     if (deny) {
-                        const msg = try std.fmt.allocPrint(allocator, "remote: error: refusing to update checked out branch: {s}\nremote: error: By default, updating the current branch in a non-bare repository\nremote: is denied.\n", .{full_dst});
+                        const branch_short = if (std.mem.startsWith(u8, full_dst, "refs/heads/")) full_dst["refs/heads/".len..] else full_dst;
+                        const msg = try std.fmt.allocPrint(allocator, " ! [remote rejected] {s} -> {s} (branch is currently checked out)\nremote: error: refusing to update checked out branch: {s}\nremote: error: By default, updating the current branch in a non-bare repository\nremote: is denied.\nerror: failed to push some refs\n", .{branch_short, branch_short, full_dst});
                         defer allocator.free(msg);
                         try platform_impl.writeStderr(msg);
                         std.process.exit(1);
