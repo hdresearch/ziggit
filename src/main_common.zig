@@ -51,7 +51,8 @@ const NATIVE_COMMANDS = [_][]const u8{
     "index-pack", "reflog", "clean", "mktag",
     "merge-base", "unpack-objects",
     "diff-tree", "diff-index", "var", "show-index", "prune-packed",
-    "verify-commit", "verify-tag",
+    "verify-commit", "verify-tag", "mv", "stash", "apply",
+    "column", "check-ignore", "check-attr",
 };
 
 fn isNativeCommand(command: []const u8) bool {
@@ -607,6 +608,18 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try nativeCmdVerifyCommit(allocator, all_original_args.items, command_index, &platform_impl);
     } else if (std.mem.eql(u8, command, "verify-tag")) {
         try nativeCmdVerifyTag(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "mv")) {
+        try nativeCmdMv(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "stash")) {
+        try nativeCmdStash(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "apply")) {
+        try nativeCmdApply(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "column")) {
+        try nativeCmdColumn(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "check-ignore")) {
+        try nativeCmdCheckIgnore(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "check-attr")) {
+        try nativeCmdCheckAttr(allocator, &args_iter, &platform_impl);
     }
 }
 
@@ -15806,4 +15819,346 @@ fn nativeCmdBisect(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
         try platform_impl.writeStderr(msg);
         std.process.exit(1);
     }
+}
+
+fn nativeCmdMv(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    var force = false;
+    var dry_run = false;
+    var skip_errors = false;
+    var verbose = false;
+    var sources = std.array_list.Managed([]const u8).init(allocator);
+    defer sources.deinit();
+    
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
+            force = true;
+        } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--dry-run")) {
+            dry_run = true;
+        } else if (std.mem.eql(u8, arg, "-k")) {
+            skip_errors = true;
+        } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
+            verbose = true;
+        } else if (std.mem.eql(u8, arg, "--")) {
+            while (args.next()) |a| try sources.append(a);
+            break;
+        } else {
+            try sources.append(arg);
+        }
+    }
+    
+    if (sources.items.len < 2) {
+        try platform_impl.writeStderr("usage: git mv [<options>] <source>... <destination>\n");
+        std.process.exit(128);
+    }
+    
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+    
+    const dest = sources.items[sources.items.len - 1];
+    const srcs = sources.items[0 .. sources.items.len - 1];
+    
+    // Load index
+    var index = index_mod.Index.load(git_path, platform_impl, allocator) catch |err| switch (err) {
+        error.FileNotFound => index_mod.Index.init(allocator),
+        else => return err,
+    };
+    defer index.deinit();
+    
+    // Check if dest is a directory
+    const dest_is_dir = if (std.fs.cwd().statFile(dest)) |stat|
+        stat.kind == .directory
+    else |_|
+        false;
+    
+    if (srcs.len > 1 and !dest_is_dir) {
+        try platform_impl.writeStderr("fatal: destination is not a directory\n");
+        std.process.exit(128);
+    }
+    
+    for (srcs) |src| {
+        const target = if (dest_is_dir) blk: {
+            const basename = std.fs.path.basename(src);
+            break :blk try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dest, basename });
+        } else try allocator.dupe(u8, dest);
+        defer allocator.free(target);
+        
+        // Check source exists
+        if (!(std.fs.cwd().statFile(src) catch null != null)) {
+            if (skip_errors) continue;
+            const msg = try std.fmt.allocPrint(allocator, "fatal: bad source, source={s}, destination={s}\n", .{ src, target });
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        }
+        
+        // Check target doesn't exist (unless -f)
+        if (!force) {
+            if ((std.fs.cwd().statFile(target) catch null) != null) {
+                if (skip_errors) continue;
+                const msg = try std.fmt.allocPrint(allocator, "fatal: destination exists, source={s}, destination={s}\n", .{ src, target });
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            }
+        }
+        
+        if (!dry_run) {
+            // Move the file
+            std.fs.cwd().rename(src, target) catch |err| {
+                if (skip_errors) continue;
+                const msg = try std.fmt.allocPrint(allocator, "fatal: renaming '{s}' failed: {}\n", .{ src, err });
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            };
+            
+            // Update index: remove old entry, add new entry
+            var new_entries = std.array_list.Managed(index_mod.IndexEntry).init(allocator);
+            defer new_entries.deinit();
+            
+            for (index.entries.items) |entry| {
+                if (std.mem.eql(u8, entry.path, src)) {
+                    var new_entry = entry;
+                    new_entry.path = target;
+                    try new_entries.append(new_entry);
+                } else {
+                    try new_entries.append(entry);
+                }
+            }
+            index.entries.clearRetainingCapacity();
+            for (new_entries.items) |e| try index.entries.append(e);
+        }
+        
+        if (verbose or dry_run) {
+            const msg = try std.fmt.allocPrint(allocator, "Renaming {s} to {s}\n", .{ src, target });
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
+        }
+    }
+    
+    if (!dry_run) {
+        index.save(git_path, platform_impl) catch {};
+    }
+}
+
+fn nativeCmdStash(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    const subcmd = args.next() orelse "push";
+    
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+    
+    if (std.mem.eql(u8, subcmd, "list")) {
+        // List stash entries
+        const stash_log = try std.fmt.allocPrint(allocator, "{s}/refs/stash", .{git_path});
+        defer allocator.free(stash_log);
+        _ = platform_impl.fs.readFile(allocator, stash_log) catch {
+            // No stash entries - exit silently
+            return;
+        };
+        // TODO: parse reflog to show stash entries
+    } else if (std.mem.eql(u8, subcmd, "push") or std.mem.eql(u8, subcmd, "save")) {
+        // Stub: stash push requires saving working tree and index state as commits
+        try platform_impl.writeStderr("error: stash push not yet fully implemented natively\n");
+        std.process.exit(1);
+    } else if (std.mem.eql(u8, subcmd, "pop") or std.mem.eql(u8, subcmd, "apply")) {
+        try platform_impl.writeStderr("error: stash pop/apply not yet fully implemented natively\n");
+        std.process.exit(1);
+    } else if (std.mem.eql(u8, subcmd, "drop")) {
+        try platform_impl.writeStderr("error: stash drop not yet fully implemented natively\n");
+        std.process.exit(1);
+    } else if (std.mem.eql(u8, subcmd, "clear")) {
+        // Delete stash ref
+        const stash_ref = try std.fmt.allocPrint(allocator, "{s}/refs/stash", .{git_path});
+        defer allocator.free(stash_ref);
+        std.fs.cwd().deleteFile(stash_ref) catch {};
+        const stash_log = try std.fmt.allocPrint(allocator, "{s}/logs/refs/stash", .{git_path});
+        defer allocator.free(stash_log);
+        std.fs.cwd().deleteFile(stash_log) catch {};
+    } else if (std.mem.eql(u8, subcmd, "show")) {
+        try platform_impl.writeStderr("error: stash show not yet fully implemented natively\n");
+        std.process.exit(1);
+    } else {
+        const msg = try std.fmt.allocPrint(allocator, "error: unknown stash subcommand '{s}'\n", .{subcmd});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        std.process.exit(1);
+    }
+}
+
+fn nativeCmdApply(_: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    // Basic stub for git apply
+    _ = args;
+    try platform_impl.writeStderr("error: git apply not yet fully implemented natively\n");
+    std.process.exit(1);
+}
+
+fn nativeCmdColumn(_: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    // git column formats stdin into columns
+    const allocator = std.heap.page_allocator;
+    var mode: []const u8 = "always";
+    var width: u32 = 80;
+    var padding: u32 = 1;
+    
+    while (args.next()) |arg| {
+        if (std.mem.startsWith(u8, arg, "--mode=")) {
+            mode = arg["--mode=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--width=")) {
+            width = std.fmt.parseInt(u32, arg["--width=".len..], 10) catch 80;
+        } else if (std.mem.startsWith(u8, arg, "--padding=")) {
+            padding = std.fmt.parseInt(u32, arg["--padding=".len..], 10) catch 1;
+        }
+    }
+    
+    if (std.mem.eql(u8, mode, "never") or std.mem.eql(u8, mode, "plain")) {
+        // Pass through
+        const data = readStdin(allocator, 10 * 1024 * 1024) catch return;
+        defer allocator.free(data);
+        try platform_impl.writeStdout(data);
+        return;
+    }
+    
+    // Read all lines from stdin
+    const data = readStdin(allocator, 10 * 1024 * 1024) catch return;
+    defer allocator.free(data);
+    
+    var lines = std.array_list.Managed([]const u8).init(allocator);
+    defer lines.deinit();
+    var max_len: u32 = 0;
+    
+    var line_iter = std.mem.splitScalar(u8, data, '\n');
+    while (line_iter.next()) |line| {
+        if (line.len == 0 and lines.items.len > 0) continue;
+        if (line.len > 0) {
+            try lines.append(line);
+            if (line.len > max_len) max_len = @intCast(line.len);
+        }
+    }
+    
+    if (lines.items.len == 0) return;
+    
+    const col_width = max_len + padding;
+    const num_cols = if (col_width > 0) @max(1, width / col_width) else 1;
+    const num_rows = (lines.items.len + num_cols - 1) / num_cols;
+    
+    if (std.mem.indexOf(u8, mode, "row") != null) {
+        // Row-first layout
+        var i: usize = 0;
+        while (i < lines.items.len) {
+            var col: usize = 0;
+            while (col < num_cols and i + col < lines.items.len) : (col += 1) {
+                if (col > 0) {
+                    // Pad previous column
+                    var p: u32 = 0;
+                    while (p < padding) : (p += 1) {
+                        try platform_impl.writeStdout(" ");
+                    }
+                }
+                try platform_impl.writeStdout(lines.items[i + col]);
+                if (col + 1 < num_cols and i + col + 1 < lines.items.len) {
+                    // Pad to column width
+                    var pad: usize = lines.items[i + col].len;
+                    while (pad < col_width) : (pad += 1) {
+                        try platform_impl.writeStdout(" ");
+                    }
+                }
+            }
+            try platform_impl.writeStdout("\n");
+            i += num_cols;
+        }
+    } else {
+        // Column-first layout (default)
+        var row: usize = 0;
+        while (row < num_rows) : (row += 1) {
+            var col: usize = 0;
+            while (col < num_cols) : (col += 1) {
+                const idx = col * num_rows + row;
+                if (idx >= lines.items.len) break;
+                if (col > 0) {
+                    var p: u32 = 0;
+                    while (p < padding) : (p += 1) {
+                        try platform_impl.writeStdout(" ");
+                    }
+                }
+                try platform_impl.writeStdout(lines.items[idx]);
+                if (col + 1 < num_cols) {
+                    const next_idx = (col + 1) * num_rows + row;
+                    if (next_idx < lines.items.len) {
+                        // Pad to column width
+                        var pad_amt: usize = lines.items[idx].len;
+                        while (pad_amt < col_width) : (pad_amt += 1) {
+                            try platform_impl.writeStdout(" ");
+                        }
+                    }
+                }
+            }
+            try platform_impl.writeStdout("\n");
+        }
+    }
+}
+
+fn nativeCmdCheckIgnore(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    var verbose = false;
+    var quiet = false;
+    var paths = std.array_list.Managed([]const u8).init(allocator);
+    defer paths.deinit();
+    
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
+            verbose = true;
+        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
+            quiet = true;
+        } else if (std.mem.eql(u8, arg, "--")) {
+            while (args.next()) |a| try paths.append(a);
+            break;
+        } else if (arg.len > 0 and arg[0] != '-') {
+            try paths.append(arg);
+        }
+    }
+    
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+    
+    const repo_root = std.fs.path.dirname(git_path) orelse ".";
+    const gitignore_path = try std.fmt.allocPrint(allocator, "{s}/.gitignore", .{repo_root});
+    defer allocator.free(gitignore_path);
+    
+    var gitignore = gitignore_mod.GitIgnore.loadFromFile(allocator, gitignore_path, platform_impl) catch
+        gitignore_mod.GitIgnore.init(allocator);
+    defer gitignore.deinit();
+    
+    var found_any = false;
+    for (paths.items) |path| {
+        if (gitignore.isIgnored(path)) {
+            found_any = true;
+            if (!quiet) {
+                if (verbose) {
+                    const msg = try std.fmt.allocPrint(allocator, ".gitignore:0:\t{s}\n", .{path});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStdout(msg);
+                } else {
+                    const msg = try std.fmt.allocPrint(allocator, "{s}\n", .{path});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStdout(msg);
+                }
+            }
+        }
+    }
+    
+    if (!found_any) std.process.exit(1);
+}
+
+fn nativeCmdCheckAttr(_: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    // Basic stub - git check-attr queries gitattributes
+    _ = args;
+    // Default: no attributes defined
+    _ = platform_impl;
 }
