@@ -29739,8 +29739,6 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     var force_rebase = false;
     var apply_mode = false;
     var merge_mode = false;
-    _ = args;
-    _ = exec_cmd;
     var positionals = std.array_list.Managed([]const u8).init(allocator);
     defer positionals.deinit();
 
