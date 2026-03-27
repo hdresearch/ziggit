@@ -31673,21 +31673,37 @@ fn cherryPickCommit(git_path: []const u8, commit_hash: []const u8, allocator: st
         try allocator.dupe(u8, current_tree); // root commit - use empty tree? Use current for simplicity
     defer allocator.free(base_tree);
 
-    // If the commit's tree is the same as base tree, it's an empty commit - skip or create
-    // If current_tree == commit_tree and current_tree == base_tree, nothing to do
-
-    // Perform 3-way merge: base=parent_tree, ours=current_tree, theirs=commit_tree
-    const conflicts = try mergeTreesWithConflicts(git_path, base_tree, current_tree, commit_tree, allocator, platform_impl);
-
-    if (conflicts) {
-        return error.MergeConflict;
+    // Compute the merged tree
+    var new_tree: []u8 = undefined;
+    if (std.mem.eql(u8, base_tree, current_tree)) {
+        // Simple case: base == ours, so result is just theirs (the commit's tree)
+        new_tree = try allocator.dupe(u8, commit_tree);
+        // Update working dir and index to match
+        updateIndexFromTree(git_path, commit_tree, allocator, platform_impl) catch {};
+        const repo_root2 = std.fs.path.dirname(git_path) orelse ".";
+        clearWorkingDirectory(repo_root2, allocator, platform_impl) catch {};
+        const tree_obj = objects.GitObject.load(commit_tree, git_path, platform_impl, allocator) catch |err| return err;
+        defer tree_obj.deinit(allocator);
+        if (tree_obj.type == .tree) {
+            checkoutTreeRecursive(git_path, tree_obj.data, repo_root2, "", allocator, platform_impl) catch {};
+        }
+    } else if (std.mem.eql(u8, base_tree, commit_tree)) {
+        // Theirs == base, no changes from the commit, keep ours
+        new_tree = try allocator.dupe(u8, current_tree);
+    } else if (std.mem.eql(u8, current_tree, commit_tree)) {
+        // Both sides have the same tree, keep it
+        new_tree = try allocator.dupe(u8, current_tree);
+    } else {
+        // Real 3-way merge needed
+        const conflicts = try mergeTreesWithConflicts(git_path, base_tree, current_tree, commit_tree, allocator, platform_impl);
+        if (conflicts) {
+            return error.MergeConflict;
+        }
+        // Update index after merge
+        var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch return error.IndexError;
+        defer idx.deinit();
+        new_tree = try writeTreeFromIndex(allocator, &idx, git_path, platform_impl);
     }
-
-    // Create new commit with current index
-    var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch return error.IndexError;
-    defer idx.deinit();
-
-    const new_tree = try writeTreeFromIndex(allocator, &idx, git_path, platform_impl);
     defer allocator.free(new_tree);
 
     // If the new tree is the same as the current tree and we're not force-rebasing, skip
