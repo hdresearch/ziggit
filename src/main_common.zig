@@ -21913,66 +21913,34 @@ fn applyDelta(allocator: std.mem.Allocator, base: []const u8, delta: []const u8)
 fn nativeCmdVar(_: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
     const allocator = std.heap.page_allocator;
     const rest = args[command_index + 1 ..];
-    
-    if (rest.len == 0 or std.mem.eql(u8, rest[0], "-l")) {
-        // List all variables with name=value format
-        const var_names = [_][]const u8{
-            "GIT_COMMITTER_IDENT", "GIT_AUTHOR_IDENT", "GIT_EDITOR",
-            "GIT_SEQUENCE_EDITOR", "GIT_PAGER", "GIT_DEFAULT_BRANCH",
-            "GIT_SHELL_PATH",
-        };
-        for (var_names) |vn| {
-            if (getVarValue(allocator, vn)) |val| {
-                defer allocator.free(val);
-                const line = try std.fmt.allocPrint(allocator, "{s}={s}\n", .{ vn, val });
-                defer allocator.free(line);
-                try platform_impl.writeStdout(line);
-            } else |_| {}
+    if (rest.len == 0) { try platform_impl.writeStderr("usage: git var (-l | <variable>)\n"); std.process.exit(1); }
+    var list_mode = false; var vna: ?[]const u8 = null;
+    for (rest) |a| { if (std.mem.eql(u8, a, "-l")) list_mode = true else if (!std.mem.startsWith(u8, a, "-")) vna = a; }
+    if (list_mode and vna != null) { try platform_impl.writeStderr("error: The argument '-l' cannot be used with '<variable>'\n\nusage: git var (-l | <variable>)\n"); std.process.exit(129); }
+    if (list_mode) {
+        const vns = [_][]const u8{ "GIT_COMMITTER_IDENT", "GIT_AUTHOR_IDENT", "GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_PAGER", "GIT_DEFAULT_BRANCH", "GIT_SHELL_PATH", "GIT_ATTR_SYSTEM", "GIT_ATTR_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL" };
+        for (vns) |vn| {
+            if (std.mem.eql(u8, vn, "GIT_CONFIG_GLOBAL")) { const vals = getVMH(allocator, vn) catch continue; defer { for (vals) |v| allocator.free(v); allocator.free(vals); } for (vals) |val| { const l = std.fmt.allocPrint(allocator, "{s}={s}\n", .{ vn, val }) catch continue; defer allocator.free(l); platform_impl.writeStdout(l) catch {}; } continue; }
+            if (getVarValueP(allocator, vn, platform_impl)) |val| { defer allocator.free(val); const l = std.fmt.allocPrint(allocator, "{s}={s}\n", .{ vn, val }) catch continue; defer allocator.free(l); platform_impl.writeStdout(l) catch {}; } else |_| {}
         }
-        // Also list config entries
-        const git_path_opt2 = findGitDirectory(allocator, platform_impl) catch null;
-        defer if (git_path_opt2) |gp| allocator.free(gp);
-        if (git_path_opt2) |gp| {
-            const cfg_path = try std.fmt.allocPrint(allocator, "{s}/config", .{gp});
-            defer allocator.free(cfg_path);
-            if (platform_impl.fs.readFile(allocator, cfg_path)) |cfg_data| {
-                defer allocator.free(cfg_data);
-                try listConfigEntries(cfg_data, platform_impl, allocator);
-            } else |_| {}
-        }
+        const gpo = findGitDirectory(allocator, platform_impl) catch null; defer if (gpo) |gp| allocator.free(gp);
+        if (gpo) |gp| { const cp = std.fmt.allocPrint(allocator, "{s}/config", .{gp}) catch return; defer allocator.free(cp); if (platform_impl.fs.readFile(allocator, cp)) |cd| { defer allocator.free(cd); listConfigEntries(cd, platform_impl, allocator) catch {}; } else |_| {} }
         return;
     }
-    
-    const var_name = rest[0];
-    if (std.mem.eql(u8, var_name, "GIT_AUTHOR_IDENT") or
-        std.mem.eql(u8, var_name, "GIT_COMMITTER_IDENT") or
-        std.mem.eql(u8, var_name, "GIT_EDITOR") or
-        std.mem.eql(u8, var_name, "GIT_PAGER") or
-        std.mem.eql(u8, var_name, "GIT_DEFAULT_BRANCH") or
-        std.mem.eql(u8, var_name, "GIT_SEQUENCE_EDITOR"))
-    {
-        try outputVar(allocator, var_name, platform_impl);
-    } else {
-        const msg = try std.fmt.allocPrint(allocator, "Unknown variable: '{s}'\n", .{var_name});
-        defer allocator.free(msg);
-        try platform_impl.writeStderr(msg);
-        std.process.exit(1);
-    }
+    const var_name = vna orelse { try platform_impl.writeStderr("usage: git var (-l | <variable>)\n"); std.process.exit(1); };
+    const kn = [_][]const u8{ "GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT", "GIT_EDITOR", "GIT_PAGER", "GIT_DEFAULT_BRANCH", "GIT_SEQUENCE_EDITOR", "GIT_SHELL_PATH", "GIT_ATTR_SYSTEM", "GIT_ATTR_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL" };
+    var ik = false; for (kn) |k| { if (std.mem.eql(u8, var_name, k)) { ik = true; break; } }
+    if (!ik) { const msg = std.fmt.allocPrint(allocator, "Unknown variable: '{s}'\n", .{var_name}) catch return; defer allocator.free(msg); try platform_impl.writeStderr(msg); std.process.exit(1); }
+    if (std.mem.eql(u8, var_name, "GIT_CONFIG_GLOBAL")) { if (std.process.getEnvVarOwned(allocator, "GIT_CONFIG_GLOBAL")) |ev| { defer allocator.free(ev); const o = std.fmt.allocPrint(allocator, "{s}\n", .{ev}) catch return; defer allocator.free(o); try platform_impl.writeStdout(o); return; } else |_| {} const vals = getVMH(allocator, var_name) catch { try outputVar(allocator, var_name, platform_impl); return; }; defer { for (vals) |v| allocator.free(v); allocator.free(vals); } for (vals) |val| { const l = std.fmt.allocPrint(allocator, "{s}\n", .{val}) catch continue; defer allocator.free(l); platform_impl.writeStdout(l) catch {}; } return; }
+    try outputVar(allocator, var_name, platform_impl);
 }
-
 fn outputVar(allocator: std.mem.Allocator, var_name: []const u8, platform_impl: *const platform_mod.Platform) !void {
-    const val = getVarValue(allocator, var_name) catch {
-        const msg = try std.fmt.allocPrint(allocator, "fatal: unable to determine {s}\n", .{var_name});
-        defer allocator.free(msg);
-        try platform_impl.writeStderr(msg);
-        std.process.exit(128);
-    };
+    const val = getVarValueP(allocator, var_name, platform_impl) catch { const msg = std.fmt.allocPrint(allocator, "fatal: unable to determine {s}\n", .{var_name}) catch return; defer allocator.free(msg); try platform_impl.writeStderr(msg); std.process.exit(1); };
     defer allocator.free(val);
     const out = try std.fmt.allocPrint(allocator, "{s}\n", .{val});
     defer allocator.free(out);
     try platform_impl.writeStdout(out);
 }
-
 fn listConfigEntries(config_data: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
     // Parse INI-style config and output key=value pairs
     var current_section: ?[]const u8 = null;
@@ -22035,34 +22003,42 @@ fn listConfigEntries(config_data: []const u8, platform_impl: *const platform_mod
     }
 }
 
-fn getVarValue(allocator: std.mem.Allocator, var_name: []const u8) ![]u8 {
-    if (std.mem.eql(u8, var_name, "GIT_AUTHOR_IDENT") or std.mem.eql(u8, var_name, "GIT_COMMITTER_IDENT")) {
-        const prefix = if (std.mem.eql(u8, var_name, "GIT_AUTHOR_IDENT")) "GIT_AUTHOR" else "GIT_COMMITTER";
-        return getGitIdent(allocator, prefix);
-    } else if (std.mem.eql(u8, var_name, "GIT_EDITOR") or std.mem.eql(u8, var_name, "GIT_SEQUENCE_EDITOR")) {
-        if (std.mem.eql(u8, var_name, "GIT_SEQUENCE_EDITOR")) {
-            return std.process.getEnvVarOwned(allocator, "GIT_SEQUENCE_EDITOR") catch
-                return getVarValue(allocator, "GIT_EDITOR");
-        }
-        return std.process.getEnvVarOwned(allocator, "GIT_EDITOR") catch
-            std.process.getEnvVarOwned(allocator, "VISUAL") catch
-            std.process.getEnvVarOwned(allocator, "EDITOR") catch
-            allocator.dupe(u8, "vi");
-    } else if (std.mem.eql(u8, var_name, "GIT_PAGER")) {
-        return std.process.getEnvVarOwned(allocator, "GIT_PAGER") catch
-            std.process.getEnvVarOwned(allocator, "PAGER") catch
-            allocator.dupe(u8, "less");
-    } else if (std.mem.eql(u8, var_name, "GIT_DEFAULT_BRANCH")) {
-        // Check GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
-        if (std.process.getEnvVarOwned(allocator, "GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME") catch null) |env_val| {
-            if (env_val.len > 0) return env_val;
-            allocator.free(env_val);
-        }
-        return allocator.dupe(u8, "master");
-    } else if (std.mem.eql(u8, var_name, "GIT_SHELL_PATH")) {
-        return allocator.dupe(u8, "/bin/sh");
+fn getVarValue(allocator: std.mem.Allocator, var_name: []const u8) ![]u8 { return getVarValueP(allocator, var_name, null); }
+fn getVarValueP(allocator: std.mem.Allocator, var_name: []const u8, pi: ?*const platform_mod.Platform) ![]u8 {
+    if (std.mem.eql(u8, var_name, "GIT_AUTHOR_IDENT") or std.mem.eql(u8, var_name, "GIT_COMMITTER_IDENT")) return getGitIdent(allocator, if (std.mem.eql(u8, var_name, "GIT_AUTHOR_IDENT")) "GIT_AUTHOR" else "GIT_COMMITTER");
+    if (std.mem.eql(u8, var_name, "GIT_EDITOR") or std.mem.eql(u8, var_name, "GIT_SEQUENCE_EDITOR")) {
+        if (std.mem.eql(u8, var_name, "GIT_SEQUENCE_EDITOR")) { if (std.process.getEnvVarOwned(allocator, "GIT_SEQUENCE_EDITOR")) |v| return v else |_| {} if (pi) |p| { if (readCfgH(allocator, "sequence.editor", p)) |v| return v; } return getVarValueP(allocator, "GIT_EDITOR", pi); }
+        if (std.process.getEnvVarOwned(allocator, "GIT_EDITOR")) |v| return v else |_| {} if (pi) |p| { if (readCfgH(allocator, "core.editor", p)) |v| return v; } if (std.process.getEnvVarOwned(allocator, "VISUAL")) |v| return v else |_| {} if (std.process.getEnvVarOwned(allocator, "EDITOR")) |v| return v else |_| {} return error.UnknownVariable;
     }
+    if (std.mem.eql(u8, var_name, "GIT_PAGER")) { if (std.process.getEnvVarOwned(allocator, "GIT_PAGER")) |v| return v else |_| {} if (pi) |p| { if (readCfgH(allocator, "core.pager", p)) |v| return v; } if (std.process.getEnvVarOwned(allocator, "PAGER")) |v| return v else |_| {} return allocator.dupe(u8, "less"); }
+    if (std.mem.eql(u8, var_name, "GIT_DEFAULT_BRANCH")) { if (std.process.getEnvVarOwned(allocator, "GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME") catch null) |ev| { if (ev.len > 0) return ev; allocator.free(ev); } if (pi) |p| { if (readCfgH(allocator, "init.defaultbranch", p)) |v| return v; } return allocator.dupe(u8, "master"); }
+    if (std.mem.eql(u8, var_name, "GIT_SHELL_PATH")) return allocator.dupe(u8, "/bin/sh");
+    if (std.mem.eql(u8, var_name, "GIT_ATTR_SYSTEM")) { if (std.process.getEnvVarOwned(allocator, "GIT_ATTR_NOSYSTEM") catch null) |v| { defer allocator.free(v); if (v.len > 0 and !std.mem.eql(u8, v, "0")) return error.UnknownVariable; } return allocator.dupe(u8, "/etc/gitattributes"); }
+    if (std.mem.eql(u8, var_name, "GIT_ATTR_GLOBAL")) { const xdg = std.process.getEnvVarOwned(allocator, "XDG_CONFIG_HOME") catch null; if (xdg) |xh| { defer allocator.free(xh); if (xh.len > 0) return std.fmt.allocPrint(allocator, "{s}/git/attributes", .{xh}); } const h = std.process.getEnvVarOwned(allocator, "HOME") catch return error.UnknownVariable; defer allocator.free(h); return std.fmt.allocPrint(allocator, "{s}/.config/git/attributes", .{h}); }
+    if (std.mem.eql(u8, var_name, "GIT_CONFIG_SYSTEM")) { if (std.process.getEnvVarOwned(allocator, "GIT_CONFIG_NOSYSTEM") catch null) |v| { defer allocator.free(v); if (v.len > 0 and !std.mem.eql(u8, v, "0")) return error.UnknownVariable; } if (std.process.getEnvVarOwned(allocator, "GIT_CONFIG_SYSTEM")) |v| return v else |_| {} return allocator.dupe(u8, "/etc/gitconfig"); }
+    if (std.mem.eql(u8, var_name, "GIT_CONFIG_GLOBAL")) { const xdg = std.process.getEnvVarOwned(allocator, "XDG_CONFIG_HOME") catch null; if (xdg) |xh| { defer allocator.free(xh); if (xh.len > 0) return std.fmt.allocPrint(allocator, "{s}/git/config", .{xh}); } const h = std.process.getEnvVarOwned(allocator, "HOME") catch return error.UnknownVariable; defer allocator.free(h); return std.fmt.allocPrint(allocator, "{s}/.config/git/config", .{h}); }
     return error.UnknownVariable;
+}
+fn readCfgH(allocator: std.mem.Allocator, key: []const u8, p: *const platform_mod.Platform) ?[]u8 {
+    const gp = findGitDirectory(allocator, p) catch return null; defer allocator.free(gp);
+    const cp = std.fmt.allocPrint(allocator, "{s}/config", .{gp}) catch return null; defer allocator.free(cp);
+    const cd = p.fs.readFile(allocator, cp) catch return null; defer allocator.free(cd);
+    var pi2 = std.mem.splitScalar(u8, key, '.'); const sw = pi2.next() orelse return null; const kw = pi2.next() orelse return null;
+    var cs2: ?[]const u8 = null; var sb2: [256]u8 = undefined; var result2: ?[]u8 = null;
+    var ls = std.mem.splitScalar(u8, cd, '\n');
+    while (ls.next()) |line| { const tr = std.mem.trim(u8, line, " \t\r"); if (tr.len == 0 or tr[0] == '#' or tr[0] == ';') continue; if (tr[0] == '[') { const e = std.mem.indexOf(u8, tr, "]") orelse continue; const s = std.mem.trim(u8, tr[1..e], " \t"); const ll = @min(s.len, 255); for (s[0..ll], 0..) |ch, ci| sb2[ci] = std.ascii.toLower(ch); cs2 = sb2[0..ll]; } else if (cs2) |sect| { if (std.mem.indexOf(u8, tr, "=")) |eq| { const k = std.mem.trim(u8, tr[0..eq], " \t"); const v = std.mem.trim(u8, tr[eq+1..], " \t"); if (asciiCaseInsensitiveEqual(sect, sw) and asciiCaseInsensitiveEqual(k, kw)) { if (result2) |o| allocator.free(o); result2 = allocator.dupe(u8, v) catch null; } } } }
+    return result2;
+}
+fn getVMH(allocator: std.mem.Allocator, var_name: []const u8) ![][]u8 {
+    if (std.mem.eql(u8, var_name, "GIT_CONFIG_GLOBAL")) {
+        var r = std.array_list.Managed([]u8).init(allocator);
+        const xdg = std.process.getEnvVarOwned(allocator, "XDG_CONFIG_HOME") catch null;
+        if (xdg) |xh| { defer allocator.free(xh); if (xh.len > 0) { if (std.fmt.allocPrint(allocator, "{s}/git/config", .{xh})) |pp| try r.append(@constCast(pp)) else |_| {} } } else { const h = std.process.getEnvVarOwned(allocator, "HOME") catch null; if (h) |hh| { defer allocator.free(hh); if (std.fmt.allocPrint(allocator, "{s}/.config/git/config", .{hh})) |pp| try r.append(@constCast(pp)) else |_| {} } }
+        const h2 = std.process.getEnvVarOwned(allocator, "HOME") catch null;
+        if (h2) |hh| { defer allocator.free(hh); if (std.fmt.allocPrint(allocator, "{s}/.gitconfig", .{hh})) |pp| try r.append(@constCast(pp)) else |_| {} }
+        return try r.toOwnedSlice();
+    }
+    return error.NotMultiValue;
 }
 
 fn getGitIdent(allocator: std.mem.Allocator, prefix: []const u8) ![]u8 {
@@ -25034,8 +25010,9 @@ fn cmdStripspace(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         cc = override_val;
     } else {
         // Check .git/config
-        const git_dir_result = findGitDir() catch null;
+        const git_dir_result = findGitDirectory(allocator, platform_impl) catch null;
         if (git_dir_result) |gd| {
+            defer allocator.free(gd);
             const config_path = std.fs.path.join(allocator, &.{ gd, "config" }) catch null;
             if (config_path) |cp| {
                 defer allocator.free(cp);
