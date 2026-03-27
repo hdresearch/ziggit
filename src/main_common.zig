@@ -3077,9 +3077,30 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
 
     // Check for flags
     var cached = false;
+    var quiet = false;
+    var exit_code = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--cached") or std.mem.eql(u8, arg, "--staged")) {
             cached = true;
+        } else if (std.mem.eql(u8, arg, "--quiet")) {
+            quiet = true;
+            exit_code = true;
+        } else if (std.mem.eql(u8, arg, "--exit-code")) {
+            exit_code = true;
+        } else if (std.mem.eql(u8, arg, "--no-ext-diff") or
+                   std.mem.eql(u8, arg, "--no-color") or
+                   std.mem.eql(u8, arg, "--ignore-submodules") or
+                   std.mem.startsWith(u8, arg, "--ignore-submodules=") or
+                   std.mem.startsWith(u8, arg, "--diff-filter=") or
+                   std.mem.eql(u8, arg, "--name-only") or
+                   std.mem.eql(u8, arg, "--name-status") or
+                   std.mem.eql(u8, arg, "--stat") or
+                   std.mem.eql(u8, arg, "--numstat") or
+                   std.mem.eql(u8, arg, "--shortstat") or
+                   std.mem.eql(u8, arg, "--raw") or
+                   std.mem.eql(u8, arg, "-z"))
+        {
+            // Accept but ignore for now
         }
     }
     
@@ -3093,16 +3114,22 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     const cwd = try platform_impl.fs.getCwd(allocator);
     defer allocator.free(cwd);
     
+    var has_diff = false;
     if (cached) {
         // Show differences between index and HEAD (staged changes)
-        try showStagedDiff(&index, git_path, platform_impl, allocator);
+        has_diff = showStagedDiff(&index, git_path, platform_impl, allocator, quiet) catch false;
     } else {
         // Show differences between working tree and index
-        try showWorkingTreeDiff(&index, cwd, platform_impl, allocator);
+        has_diff = showWorkingTreeDiff(&index, cwd, platform_impl, allocator, quiet) catch false;
+    }
+    
+    if (exit_code and has_diff) {
+        std.process.exit(1);
     }
 }
 
-fn showWorkingTreeDiff(index: *const index_mod.Index, cwd: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+fn showWorkingTreeDiff(index: *const index_mod.Index, cwd: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, quiet: bool) !bool {
+    var has_diff = false;
     for (index.entries.items) |entry| {
         const full_path = if (std.fs.path.isAbsolute(entry.path))
             try allocator.dupe(u8, entry.path)
@@ -3127,6 +3154,8 @@ fn showWorkingTreeDiff(index: *const index_mod.Index, cwd: []const u8, platform_
             defer allocator.free(index_hash);
             
             if (!std.mem.eql(u8, current_hash, index_hash)) {
+                has_diff = true;
+                if (quiet) continue;
                 // Get indexed content for diff
                 const indexed_content = getIndexedFileContent(entry, allocator) catch "";
                 defer if (indexed_content.len > 0) allocator.free(indexed_content);
@@ -3143,6 +3172,8 @@ fn showWorkingTreeDiff(index: *const index_mod.Index, cwd: []const u8, platform_
             }
         } else {
             // File was deleted
+            has_diff = true;
+            if (quiet) continue;
             const indexed_content = getIndexedFileContent(entry, allocator) catch continue;
             defer allocator.free(indexed_content);
             
@@ -3166,27 +3197,28 @@ fn showWorkingTreeDiff(index: *const index_mod.Index, cwd: []const u8, platform_
             try platform_impl.writeStdout(diff_output);
         }
     }
+    return has_diff;
 }
 
-fn showStagedDiff(index: *const index_mod.Index, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+fn showStagedDiff(index: *const index_mod.Index, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, quiet: bool) !bool {
     // For --cached diff, we need to compare index against HEAD
-    // This is a simplified implementation that shows what's staged
+    var has_diff = false;
     const current_commit = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
     defer if (current_commit) |hash| allocator.free(hash);
     
     if (current_commit == null) {
         // No HEAD commit yet, so all staged files are new
         for (index.entries.items) |entry| {
+            has_diff = true;
+            if (quiet) continue;
             const content = getIndexedFileContent(entry, allocator) catch continue;
             defer allocator.free(content);
             
-            // Calculate hash for empty content
             const empty_blob = try objects.createBlobObject("", allocator);
             defer empty_blob.deinit(allocator);
             const empty_hash = try empty_blob.hash(allocator);
             defer allocator.free(empty_hash);
             
-            // Get index hash
             const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
             defer allocator.free(index_hash);
             
@@ -3200,33 +3232,70 @@ fn showStagedDiff(index: *const index_mod.Index, git_path: []const u8, platform_
             try platform_impl.writeStdout(diff_output);
         }
     } else {
-        // Compare with HEAD commit (simplified - would need to walk the tree)
+        // Compare index entries against HEAD tree
+        // Get the tree from HEAD commit
+        const head_tree = getHeadTree(git_path, current_commit.?, platform_impl, allocator) catch null;
+        
         for (index.entries.items) |entry| {
-            const content = getIndexedFileContent(entry, allocator) catch continue;
-            defer allocator.free(content);
-            
-            // Calculate hash for empty content (simplified - should compare with HEAD tree)
-            const empty_blob = try objects.createBlobObject("", allocator);
-            defer empty_blob.deinit(allocator);
-            const empty_hash = try empty_blob.hash(allocator);
-            defer allocator.free(empty_hash);
-            
-            // Get index hash
             const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
             defer allocator.free(index_hash);
             
-            // For now, just show all staged files as additions
-            // A full implementation would compare against the HEAD tree
-            const short_empty_hash = empty_hash[0..7];
-            const short_index_hash = index_hash[0..7];
-            const diff_output = diff_mod.generateUnifiedDiffWithHashes("", content, entry.path, short_empty_hash, short_index_hash, allocator) catch |err| switch (err) {
-                error.OutOfMemory => return err,
-            };
-            defer allocator.free(diff_output);
+            // Check if this file exists in HEAD tree with same hash
+            const head_hash = if (head_tree) |ht| getTreeEntryHash(ht, entry.path, git_path, platform_impl, allocator) catch null else null;
+            defer if (head_hash) |hh| allocator.free(hh);
             
-            try platform_impl.writeStdout(diff_output);
+            const is_same = if (head_hash) |hh| std.mem.eql(u8, index_hash, hh) else false;
+            
+            if (!is_same) {
+                has_diff = true;
+                if (quiet) continue;
+                const content = getIndexedFileContent(entry, allocator) catch continue;
+                defer allocator.free(content);
+                
+                const empty_blob = try objects.createBlobObject("", allocator);
+                defer empty_blob.deinit(allocator);
+                const empty_hash = try empty_blob.hash(allocator);
+                defer allocator.free(empty_hash);
+                
+                const short_empty_hash = empty_hash[0..7];
+                const short_index_hash = index_hash[0..7];
+                const diff_output = diff_mod.generateUnifiedDiffWithHashes("", content, entry.path, short_empty_hash, short_index_hash, allocator) catch |err| switch (err) {
+                    error.OutOfMemory => return err,
+                };
+                defer allocator.free(diff_output);
+                
+                try platform_impl.writeStdout(diff_output);
+            }
         }
     }
+    return has_diff;
+}
+
+fn getHeadTree(git_path: []const u8, commit_hash: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]const u8 {
+    _ = platform_impl;
+    // Read commit object to get tree hash
+    const objects_dir = try std.fmt.allocPrint(allocator, "{s}/objects", .{git_path});
+    defer allocator.free(objects_dir);
+    // Convert hex hash to bytes
+    var hash_bytes: [20]u8 = undefined;
+    _ = std.fmt.hexToBytes(&hash_bytes, commit_hash) catch return error.InvalidHash;
+    const obj = objects.readObject(allocator, objects_dir, &hash_bytes) catch return error.ObjectNotFound;
+    defer allocator.free(obj);
+    // Parse "tree <hash>\n" from commit object
+    if (std.mem.startsWith(u8, obj, "tree ")) {
+        const newline = std.mem.indexOf(u8, obj, "\n") orelse return error.InvalidCommit;
+        return try allocator.dupe(u8, obj[5..newline]);
+    }
+    return error.InvalidCommit;
+}
+
+fn getTreeEntryHash(tree_hash: []const u8, path: []const u8, git_path: []const u8, _platform_impl: *const platform_mod.Platform, _allocator: std.mem.Allocator) ![]u8 {
+    _ = _platform_impl;
+    _ = _allocator;
+    _ = git_path;
+    _ = tree_hash;
+    _ = path;
+    return error.NotImplemented;
 }
 
 fn getIndexedFileContent(entry: index_mod.IndexEntry, allocator: std.mem.Allocator) ![]u8 {
@@ -8352,7 +8421,26 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             try platform_impl.writeStdout("true\n");
             return;
         } else if (std.mem.eql(u8, arg, "--is-inside-git-dir")) {
-            try platform_impl.writeStdout("false\n");
+            // Check if cwd is inside the .git directory
+            const git_path = findGitDirectory(allocator, platform_impl) catch {
+                try platform_impl.writeStdout("false\n");
+                return;
+            };
+            defer allocator.free(git_path);
+            const cwd = try platform_impl.fs.getCwd(allocator);
+            defer allocator.free(cwd);
+            // Resolve git_path to real path for comparison
+            const real_git = std.fs.cwd().realpathAlloc(allocator, git_path) catch git_path;
+            const should_free_real_git = real_git.ptr != git_path.ptr;
+            defer if (should_free_real_git) allocator.free(real_git);
+            const real_cwd = std.fs.cwd().realpathAlloc(allocator, cwd) catch cwd;
+            const should_free_real_cwd = real_cwd.ptr != cwd.ptr;
+            defer if (should_free_real_cwd) allocator.free(real_cwd);
+            if (std.mem.eql(u8, real_cwd, real_git) or std.mem.startsWith(u8, real_cwd, real_git) and real_cwd.len > real_git.len and real_cwd[real_git.len] == '/') {
+                try platform_impl.writeStdout("true\n");
+            } else {
+                try platform_impl.writeStdout("false\n");
+            }
             return;
         } else if (std.mem.eql(u8, arg, "--is-bare-repository")) {
             const git_path = findGitDirectory(allocator, platform_impl) catch {
