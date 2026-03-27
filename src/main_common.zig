@@ -10722,9 +10722,7 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
 
         const hash = resolveRevision(git_path, rev_arg.?, platform_impl, allocator) catch {
             if (!quiet) {
-                const msg = try std.fmt.allocPrint(allocator, "fatal: Needed a single revision\n", .{});
-                defer allocator.free(msg);
-                try platform_impl.writeStderr(msg);
+                try platform_impl.writeStderr("fatal: Needed a single revision\n");
             }
             std.process.exit(128);
         };
