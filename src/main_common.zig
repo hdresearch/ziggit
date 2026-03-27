@@ -11802,17 +11802,27 @@ fn resolveCommitByMessage(git_path: []const u8, pattern: []const u8, platform_im
 }
 
 fn resolveReflogEntry(git_path: []const u8, ref_name: []const u8, n: u32, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
-    const reflog_path = try std.fmt.allocPrint(allocator, "{s}/logs/{s}", .{ git_path, ref_name });
-    defer allocator.free(reflog_path);
-    const content = platform_impl.fs.readFile(allocator, reflog_path) catch return error.NotFound;
+    // Try multiple reflog paths: logs/<ref>, logs/refs/heads/<ref>
+    const paths_to_try = [_][]const u8{ ref_name, if (std.mem.startsWith(u8, ref_name, "refs/heads/")) ref_name["refs/heads/".len..] else ref_name };
+    var content: ?[]u8 = null;
+    for (paths_to_try) |p| {
+        const reflog_path = std.fmt.allocPrint(allocator, "{s}/logs/{s}", .{ git_path, p }) catch continue;
+        defer allocator.free(reflog_path);
+        if (platform_impl.fs.readFile(allocator, reflog_path)) |c| {
+            content = c;
+            break;
+        } else |_| {}
+    }
+    if (content == null) return error.NotFound;
+    defer allocator.free(content.?);
     defer allocator.free(content);
 
     // Collect all entries (each line has: old_hash new_hash ...)
     var entries = std.array_list.Managed([]const u8).init(allocator);
     defer entries.deinit();
 
-    var lines = std.mem.splitScalar(u8, content, '\n');
-    while (lines.next()) |line| {
+    var reflog_lines = std.mem.splitScalar(u8, content.?, '\n');
+    while (reflog_lines.next()) |line| {
         if (line.len >= 40) {
             entries.append(line) catch {};
         }
@@ -32020,8 +32030,22 @@ fn replayCommits(git_path: []const u8, repo_root: []const u8, commits: *std.arra
     defer allocator.free(head_hash);
 
     if (!std.mem.eql(u8, branch_name, "HEAD")) {
+        // Read the old branch hash for reflog
+        const old_branch_hash = blk: {
+            const orig_head_p = std.fmt.allocPrint(allocator, "{s}/ORIG_HEAD", .{git_path}) catch break :blk "0000000000000000000000000000000000000000";
+            defer allocator.free(orig_head_p);
+            const oh = platform_impl.fs.readFile(allocator, orig_head_p) catch break :blk "0000000000000000000000000000000000000000";
+            defer allocator.free(oh);
+            break :blk std.mem.trim(u8, oh, " \t\n\r");
+        };
         // Update the original branch to point to new HEAD
         try refs.updateRef(git_path, branch_name, head_hash, platform_impl, allocator);
+        // Write reflog for the branch
+        const branch_reflog_name = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name});
+        defer allocator.free(branch_reflog_name);
+        const rebase_msg = try std.fmt.allocPrint(allocator, "rebase finished: {s} onto {s}", .{ branch_reflog_name, head_hash });
+        defer allocator.free(rebase_msg);
+        writeReflogEntry(git_path, branch_name, old_branch_hash, head_hash, rebase_msg, allocator, platform_impl) catch {};
         // Restore HEAD to point to branch
         try refs.updateHEAD(git_path, branch_name, platform_impl, allocator);
         writeReflogEntry(git_path, "HEAD", head_hash, head_hash, "rebase finished", allocator, platform_impl) catch {};
