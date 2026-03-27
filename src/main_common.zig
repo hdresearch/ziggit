@@ -9635,6 +9635,25 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
 
             // Handle delete refspec  :branch
             if (rs.len > 0 and rs[0] == ':') {
+                // Empty `:` means push matching (all branches that exist on both sides)
+                if (rs.len == 1) {
+                    const heads_dir2 = try std.fmt.allocPrint(allocator, "{s}/refs/heads", .{git_path});
+                    defer allocator.free(heads_dir2);
+                    var dir2 = std.fs.cwd().openDir(heads_dir2, .{ .iterate = true }) catch continue;
+                    defer dir2.close();
+                    var iter2 = dir2.iterate();
+                    while (iter2.next() catch null) |entry2| {
+                        if (entry2.kind != .file) continue;
+                        const remote_ref_check = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ remote_git_dir, entry2.name });
+                        defer allocator.free(remote_ref_check);
+                        if (std.fs.cwd().access(remote_ref_check, .{})) {
+                            const rspec = try std.fmt.allocPrint(allocator, "refs/heads/{s}:refs/heads/{s}", .{ entry2.name, entry2.name });
+                            defer allocator.free(rspec);
+                            pushRefspec(allocator, git_path, remote_git_dir, rspec, force_this, dry_run, quiet, platform_impl) catch {};
+                        } else |_| {}
+                    }
+                    continue;
+                }
                 // Delete remote ref
                 const remote_ref_name = rs[1..];
                 const full_ref = if (std.mem.startsWith(u8, remote_ref_name, "refs/"))
