@@ -27896,8 +27896,28 @@ fn nativeCmdBisect(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
         // Clear bisect log
         try platform_impl.fs.writeFile(bisect_log_path, "# git bisect start\n");
         
-        // Check for optional bad/good refs
-        if (args.next()) |bad_ref| {
+        // Parse optional arguments: [--term-new=X] [--term-old=X] [bad [good...]] [--]
+        var positional_refs = std.array_list.Managed([]const u8).init(allocator);
+        defer positional_refs.deinit();
+        while (args.next()) |start_arg| {
+            if (std.mem.startsWith(u8, start_arg, "--term-new=") or std.mem.startsWith(u8, start_arg, "--term-old=") or
+                std.mem.eql(u8, start_arg, "--term-new") or std.mem.eql(u8, start_arg, "--term-old") or
+                std.mem.eql(u8, start_arg, "--no-checkout") or std.mem.eql(u8, start_arg, "--first-parent"))
+            {
+                // Skip term options (consume value if separate)
+                if (std.mem.eql(u8, start_arg, "--term-new") or std.mem.eql(u8, start_arg, "--term-old")) {
+                    _ = args.next();
+                }
+            } else if (std.mem.eql(u8, start_arg, "--")) {
+                break;
+            } else {
+                try positional_refs.append(start_arg);
+            }
+        }
+        
+        // Check for optional bad/good refs from positional args
+        if (positional_refs.items.len > 0) {
+            const bad_ref = positional_refs.items[0];
             const hash = resolveRevision(git_path, bad_ref, platform_impl, allocator) catch {
                 const msg = try std.fmt.allocPrint(allocator, "fatal: bad revision '{s}'\n", .{bad_ref});
                 defer allocator.free(msg);
@@ -27918,6 +27938,19 @@ fn nativeCmdBisect(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
             const hash_nl = try std.fmt.allocPrint(allocator, "{s}\n", .{hash});
             defer allocator.free(hash_nl);
             try platform_impl.fs.writeFile(bad_path, hash_nl);
+            
+            // Handle good refs (remaining positional args)
+            for (positional_refs.items[1..]) |good_ref| {
+                const good_hash = resolveRevision(git_path, good_ref, platform_impl, allocator) catch continue;
+                defer allocator.free(good_hash);
+                
+                // Write good ref
+                const good_path = try std.fmt.allocPrint(allocator, "{s}/refs/bisect/good-{s}", .{git_path, good_hash});
+                defer allocator.free(good_path);
+                const good_hash_nl = try std.fmt.allocPrint(allocator, "{s}\n", .{good_hash});
+                defer allocator.free(good_hash_nl);
+                try platform_impl.fs.writeFile(good_path, good_hash_nl);
+            }
         }
         
         try platform_impl.writeStderr("status: waiting for both good and bad commits\n");
@@ -31316,8 +31349,8 @@ fn setTrackingConfig(git_path: []const u8, branch_name: []const u8, remote: []co
     defer allocator.free(merge_key);
     const merge_value = std.fmt.allocPrint(allocator, "refs/heads/{s}", .{upstream_branch}) catch return;
     defer allocator.free(merge_value);
-    configSetValue(config_path, remote_key, remote, false, null, allocator, platform_impl) catch {};
-    configSetValue(config_path, merge_key, merge_value, false, null, allocator, platform_impl) catch {};
+    configSetValue(config_path, remote_key, remote, false, false, null, allocator, platform_impl) catch {};
+    configSetValue(config_path, merge_key, merge_value, false, false, null, allocator, platform_impl) catch {};
 }
 
 // git rebase implementation
