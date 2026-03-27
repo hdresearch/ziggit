@@ -3846,10 +3846,43 @@ fn cmdMerge(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     };
     defer allocator.free(git_path);
 
-    const branch_to_merge = args.next() orelse {
+    // Parse merge arguments
+    var merge_message: ?[]const u8 = null;
+    var allow_unrelated_histories = false;
+    var no_ff = false;
+    var ff_only = false;
+    var branch_to_merge: ?[]const u8 = null;
+    var squash = false;
+    var no_commit = false;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-m")) {
+            merge_message = args.next() orelse {
+                try platform_impl.writeStderr("fatal: option '-m' requires a value\n");
+                std.process.exit(128);
+            };
+        } else if (std.mem.startsWith(u8, arg, "-m")) {
+            // -mMESSAGE (no space)
+            merge_message = arg[2..];
+        } else if (std.mem.eql(u8, arg, "--allow-unrelated-histories")) {
+            allow_unrelated_histories = true;
+        } else if (std.mem.eql(u8, arg, "--no-ff")) {
+            no_ff = true;
+        } else if (std.mem.eql(u8, arg, "--ff-only")) {
+            ff_only = true;
+        } else if (std.mem.eql(u8, arg, "--squash")) {
+            squash = true;
+        } else if (std.mem.eql(u8, arg, "--no-commit")) {
+            no_commit = true;
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            branch_to_merge = arg;
+        }
+    }
+
+    if (branch_to_merge == null) {
         try platform_impl.writeStderr("fatal: no merge target specified\n");
         std.process.exit(128);
-    };
+    }
 
     // Get current branch
     const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
@@ -3858,16 +3891,29 @@ fn cmdMerge(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     };
     defer allocator.free(current_branch);
 
-    // Check if branch exists
-    if (!(refs.branchExists(git_path, branch_to_merge, platform_impl, allocator) catch false)) {
-        const msg = try std.fmt.allocPrint(allocator, "merge: '{s}' - not something we can merge\n", .{branch_to_merge});
-        defer allocator.free(msg);
-        try platform_impl.writeStderr(msg);
-        std.process.exit(1);
+    const merge_target = branch_to_merge.?;
+
+    // Try to resolve the merge target as a revision (could be branch name, tag, or hash)
+    const target_hash_resolved = resolveRevision(git_path, merge_target, platform_impl, allocator) catch blk: {
+        // Also try as branch
+        if (refs.branchExists(git_path, merge_target, platform_impl, allocator) catch false) {
+            break :blk refs.getBranchCommit(git_path, merge_target, platform_impl, allocator) catch null;
+        }
+        break :blk null;
+    };
+
+    if (target_hash_resolved == null) {
+        // Check if branch exists using the old logic
+        if (!(refs.branchExists(git_path, merge_target, platform_impl, allocator) catch false)) {
+            const msg = try std.fmt.allocPrint(allocator, "merge: '{s}' - not something we can merge\n", .{merge_target});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(1);
+        }
     }
 
     // Check if trying to merge with itself
-    if (std.mem.eql(u8, current_branch, branch_to_merge)) {
+    if (std.mem.eql(u8, current_branch, merge_target)) {
         try platform_impl.writeStdout("Already up to date.\n");
         return;
     }
@@ -3879,39 +3925,99 @@ fn cmdMerge(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     };
     defer if (current_commit_result) |hash| allocator.free(hash);
 
-    const target_commit_result = refs.getBranchCommit(git_path, branch_to_merge, platform_impl, allocator) catch {
-        try platform_impl.writeStderr("fatal: unable to get target branch commit\n");  
-        std.process.exit(1);
+    const target_hash = if (target_hash_resolved) |h| h else blk: {
+        const target_commit_result = refs.getBranchCommit(git_path, merge_target, platform_impl, allocator) catch {
+            try platform_impl.writeStderr("fatal: unable to get target branch commit\n");  
+            std.process.exit(1);
+        };
+        break :blk if (target_commit_result) |hash| hash else {
+            try platform_impl.writeStderr("fatal: no commits yet on target branch\n");
+            std.process.exit(1);
+        };
     };
-    defer if (target_commit_result) |hash| allocator.free(hash);
+    defer allocator.free(target_hash);
 
     const current_hash = if (current_commit_result) |hash| hash else {
+        // No current commits - if allow_unrelated_histories, just set the ref
+        if (allow_unrelated_histories) {
+            try refs.updateRef(git_path, current_branch, target_hash, platform_impl, allocator);
+            try checkoutCommitTree(git_path, target_hash, allocator, platform_impl);
+            try platform_impl.writeStdout("Fast-forward\n");
+            return;
+        }
         try platform_impl.writeStderr("fatal: no commits yet on current branch\n");
         std.process.exit(1);
     };
 
-    const target_hash = if (target_commit_result) |hash| hash else {
-        try platform_impl.writeStderr("fatal: no commits yet on target branch\n");
-        std.process.exit(1);
-    };
-
     // Check if this is a fast-forward merge
-    if (canFastForward(git_path, current_hash, target_hash, allocator, platform_impl)) {
+    if (!no_ff and canFastForward(git_path, current_hash, target_hash, allocator, platform_impl)) {
         // Fast-forward merge
         try refs.updateRef(git_path, current_branch, target_hash, platform_impl, allocator);
         try checkoutCommitTree(git_path, target_hash, allocator, platform_impl);
 
-        const msg = try std.fmt.allocPrint(allocator, "Fast-forward\n", .{});
-        defer allocator.free(msg);
-        try platform_impl.writeStdout(msg);
+        const msg2 = try std.fmt.allocPrint(allocator, "Fast-forward\n", .{});
+        defer allocator.free(msg2);
+        try platform_impl.writeStdout(msg2);
         
         const short_hash = target_hash[0..7];
         const success_msg = try std.fmt.allocPrint(allocator, "Updating {s}..{s}\n", .{ current_hash[0..7], short_hash });
         defer allocator.free(success_msg);
         try platform_impl.writeStdout(success_msg);
     } else {
-        // Perform 3-way merge
-        try performThreeWayMerge(git_path, current_hash, target_hash, current_branch, branch_to_merge, allocator, platform_impl);
+        // Perform 3-way merge (or merge commit for unrelated histories)
+        if (allow_unrelated_histories) {
+            // Create a merge commit with both parents
+            const actual_message = merge_message orelse blk: {
+                break :blk try std.fmt.allocPrint(allocator, "Merge branch '{s}'", .{merge_target});
+            };
+            const should_free_msg = merge_message == null;
+            defer if (should_free_msg) allocator.free(actual_message);
+
+            // Get tree from current HEAD commit
+            const current_obj = objects.GitObject.load(current_hash, git_path, platform_impl, allocator) catch {
+                try platform_impl.writeStderr("fatal: unable to read current commit\n");
+                std.process.exit(1);
+            };
+            defer current_obj.deinit(allocator);
+
+            var tree_hash: ?[]const u8 = null;
+            var clines = std.mem.splitSequence(u8, current_obj.data, "\n");
+            while (clines.next()) |line| {
+                if (std.mem.startsWith(u8, line, "tree ")) {
+                    tree_hash = line[5..];
+                    break;
+                }
+            }
+
+            if (tree_hash == null) {
+                try platform_impl.writeStderr("fatal: unable to find tree in current commit\n");
+                std.process.exit(1);
+            }
+
+            // Create merge commit with two parents
+            const author_str = getAuthorString(allocator) catch try allocator.dupe(u8, "Unknown <unknown@unknown>");
+            defer allocator.free(author_str);
+            const committer_str = getCommitterString(allocator) catch try allocator.dupe(u8, "Unknown <unknown@unknown>");
+            defer allocator.free(committer_str);
+            const commit_content = try std.fmt.allocPrint(allocator, "tree {s}\nparent {s}\nparent {s}\nauthor {s}\ncommitter {s}\n\n{s}\n", .{ tree_hash.?, current_hash, target_hash, author_str, committer_str, actual_message });
+            defer allocator.free(commit_content);
+
+            const commit_obj = objects.GitObject.init(.commit, commit_content);
+            const merge_commit_hash = commit_obj.store(git_path, platform_impl, allocator) catch {
+                try platform_impl.writeStderr("fatal: unable to write merge commit\n");
+                std.process.exit(1);
+            };
+            defer allocator.free(merge_commit_hash);
+
+            // Update the current branch to point to the merge commit
+            try refs.updateRef(git_path, current_branch, merge_commit_hash, platform_impl, allocator);
+
+            const success_msg = try std.fmt.allocPrint(allocator, "Merge made by the 'ort' strategy.\n", .{});
+            defer allocator.free(success_msg);
+            try platform_impl.writeStdout(success_msg);
+        } else {
+            try performThreeWayMerge(git_path, current_hash, target_hash, current_branch, merge_target, allocator, platform_impl);
+        }
     }
 }
 
