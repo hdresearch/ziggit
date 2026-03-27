@@ -11651,11 +11651,12 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         } else if (std.mem.startsWith(u8, arg, "--pretty=tformat:")) {
             format_str = arg["--pretty=tformat:".len..];
         } else if (std.mem.eql(u8, arg, "--pretty=oneline") or std.mem.eql(u8, arg, "--oneline")) {
-            format_str = "%H %s";
             if (std.mem.eql(u8, arg, "--oneline")) {
                 format_str = "%h %s";
-                no_commit_header = true;
+            } else {
+                format_str = "%H %s";
             }
+            no_commit_header = true;
         } else if (std.mem.eql(u8, arg, "--no-commit-header")) {
             no_commit_header = true;
         } else if (std.mem.startsWith(u8, arg, "--pretty=")) {
