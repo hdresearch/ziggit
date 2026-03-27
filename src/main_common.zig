@@ -9431,8 +9431,16 @@ fn nativeCmdPrune(allocator: std.mem.Allocator, args: [][]const u8, command_inde
         } else if (std.mem.eql(u8, arg, "--progress") or std.mem.eql(u8, arg, "--no-progress")) {
             // Accepted
         } else if (std.mem.eql(u8, arg, "-h")) {
-            try platform_impl.writeStdout("usage: git prune [-n] [-v] [--progress] [--expire <time>] [--] [<head>...]\n");
+            try platform_impl.writeStderr("usage: git prune [-n] [-v] [--progress] [--expire <time>] [--] [<head>...]\n");
             std.process.exit(129);
+        } else if (std.mem.eql(u8, arg, "--")) {
+            // Remaining args are heads
+            break;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            const msg = std.fmt.allocPrint(allocator, "error: unknown option '{s}'\nusage: git prune [-n] [-v] [--progress] [--expire <time>] [--] [<head>...]\n", .{arg}) catch unreachable;
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
         }
     }
 
@@ -9445,9 +9453,73 @@ fn nativeCmdPrune(allocator: std.mem.Allocator, args: [][]const u8, command_inde
     try doNativePrune(allocator, git_dir, platform_impl, expire);
 }
 
+fn parseExpireTime(expire: []const u8) i128 {
+    // Parse expire time strings like "1.day", "2.weeks.ago", "now", "never"
+    if (expire.len == 0 or std.mem.eql(u8, expire, "now")) return std.math.maxInt(i128); // prune everything
+    if (std.mem.eql(u8, expire, "never")) return 0; // prune nothing
+
+    // Try to parse as a relative time
+    const now = std.time.timestamp();
+    if (std.mem.indexOf(u8, expire, "day")) |_| {
+        // Extract number
+        var num: i64 = 1;
+        var digits_end: usize = 0;
+        while (digits_end < expire.len and std.ascii.isDigit(expire[digits_end])) digits_end += 1;
+        if (digits_end > 0) {
+            num = std.fmt.parseInt(i64, expire[0..digits_end], 10) catch 1;
+        }
+        return now - num * 86400;
+    }
+    if (std.mem.indexOf(u8, expire, "week")) |_| {
+        var num: i64 = 1;
+        var digits_end: usize = 0;
+        while (digits_end < expire.len and std.ascii.isDigit(expire[digits_end])) digits_end += 1;
+        if (digits_end > 0) {
+            num = std.fmt.parseInt(i64, expire[0..digits_end], 10) catch 1;
+        }
+        return now - num * 7 * 86400;
+    }
+    if (std.mem.indexOf(u8, expire, "hour")) |_| {
+        var num: i64 = 1;
+        var digits_end: usize = 0;
+        while (digits_end < expire.len and std.ascii.isDigit(expire[digits_end])) digits_end += 1;
+        if (digits_end > 0) {
+            num = std.fmt.parseInt(i64, expire[0..digits_end], 10) catch 1;
+        }
+        return now - num * 3600;
+    }
+    // Default: 2 weeks ago
+    return now - 14 * 86400;
+}
+
 fn doNativePrune(allocator: std.mem.Allocator, git_dir: []const u8, platform_impl: anytype, expire: []const u8) !void {
     _ = platform_impl;
-    _ = expire;
+
+    const expire_cutoff = parseExpireTime(expire);
+
+    // First, remove stale temporary files in objects/
+    const objects_dir_path_tmp = std.fmt.allocPrint(allocator, "{s}/objects", .{git_dir}) catch return;
+    defer allocator.free(objects_dir_path_tmp);
+    {
+        var obj_dir = std.fs.cwd().openDir(objects_dir_path_tmp, .{ .iterate = true }) catch {
+            // no objects dir
+            return;
+        };
+        defer obj_dir.close();
+        var iter = obj_dir.iterate();
+        while (iter.next() catch null) |entry| {
+            if (entry.kind == .file and std.mem.startsWith(u8, entry.name, "tmp_")) {
+                // Check mtime
+                const file_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ objects_dir_path_tmp, entry.name }) catch continue;
+                defer allocator.free(file_path);
+                const stat = std.fs.cwd().statFile(file_path) catch continue;
+                const mtime_sec: i128 = @divTrunc(stat.mtime, 1_000_000_000);
+                if (mtime_sec < expire_cutoff) {
+                    std.fs.cwd().deleteFile(file_path) catch {};
+                }
+            }
+        }
+    }
 
     // Collect all reachable objects
     var reachable = std.StringHashMap(void).init(allocator);
@@ -9550,7 +9622,6 @@ fn doNativePrune(allocator: std.mem.Allocator, git_dir: []const u8, platform_imp
 }
 
 fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platform_impl: anytype, quiet: bool) !void {
-    _ = platform_impl;
     _ = quiet;
 
     // Simple repack: collect all loose objects and write them into a pack file
@@ -9586,11 +9657,167 @@ fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platform_im
         }
     }
 
-    // If no objects, nothing to do
-    if (all_objects.items.len == 0) return;
+    // Also collect objects from existing packs
+    var object_hashes = std.array_list.Managed([]const u8).init(allocator);
+    defer {
+        for (object_hashes.items) |h| allocator.free(h);
+        object_hashes.deinit();
+    }
 
-    // For now, we don't create new pack files in the repack command
-    // This is a stub that at least doesn't crash
+    // Convert loose object SHAs to hex strings
+    for (all_objects.items) |sha| {
+        var hex: [40]u8 = undefined;
+        for (sha, 0..) |b, bi| {
+            _ = std.fmt.bufPrint(hex[bi * 2 .. bi * 2 + 2], "{x:0>2}", .{b}) catch continue;
+        }
+        try object_hashes.append(try allocator.dupe(u8, &hex));
+    }
+
+    // Also enumerate objects in existing pack files
+    const pack_dir = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir}) catch return;
+    defer allocator.free(pack_dir);
+    std.fs.cwd().makePath(pack_dir) catch {};
+
+    var existing_packs = std.array_list.Managed([]const u8).init(allocator);
+    defer {
+        for (existing_packs.items) |p| allocator.free(p);
+        existing_packs.deinit();
+    }
+
+    if (std.fs.cwd().openDir(pack_dir, .{ .iterate = true })) |pd| {
+        var pack_d = pd;
+        defer pack_d.close();
+        var pack_iter = pack_d.iterate();
+        while (pack_iter.next() catch null) |entry| {
+            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".idx")) {
+                try existing_packs.append(try allocator.dupe(u8, entry.name));
+                // Read idx to get object list
+                const idx_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir, entry.name }) catch continue;
+                defer allocator.free(idx_path);
+                const idx_data = std.fs.cwd().readFileAlloc(allocator, idx_path, 100 * 1024 * 1024) catch continue;
+                defer allocator.free(idx_data);
+
+                if (idx_data.len > 8 and std.mem.eql(u8, idx_data[0..4], "\xfftOc")) {
+                    const num_objects_packed = std.mem.readInt(u32, idx_data[8 + 255 * 4 ..][0..4], .big);
+                    const sha_offset: usize = 8 + 256 * 4;
+                    var obj_idx: usize = 0;
+                    while (obj_idx < num_objects_packed) : (obj_idx += 1) {
+                        const sha_start = sha_offset + obj_idx * 20;
+                        if (sha_start + 20 > idx_data.len) break;
+                        const sha_bytes = idx_data[sha_start .. sha_start + 20];
+                        var hex: [40]u8 = undefined;
+                        for (sha_bytes, 0..) |b, bi| {
+                            _ = std.fmt.bufPrint(hex[bi * 2 .. bi * 2 + 2], "{x:0>2}", .{b}) catch continue;
+                        }
+                        // Don't duplicate
+                        var already_have = false;
+                        for (object_hashes.items) |existing| {
+                            if (std.mem.eql(u8, existing, &hex)) {
+                                already_have = true;
+                                break;
+                            }
+                        }
+                        if (!already_have) {
+                            try object_hashes.append(try allocator.dupe(u8, &hex));
+                        }
+                    }
+                }
+            }
+        }
+    } else |_| {}
+
+    // If no objects at all, nothing to do
+    if (object_hashes.items.len == 0) return;
+
+    // Build pack data
+    var pack_data = std.array_list.Managed(u8).init(allocator);
+    defer pack_data.deinit();
+
+    // Pack header
+    try pack_data.appendSlice("PACK");
+    const version: u32 = 2;
+    try pack_data.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, version)));
+    const num_obj: u32 = @intCast(object_hashes.items.len);
+    try pack_data.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, num_obj)));
+
+    // Write each object
+    for (object_hashes.items) |hash| {
+        if (objects.GitObject.load(hash, git_dir, platform_impl, allocator)) |obj| {
+            defer obj.deinit(allocator);
+            const type_num: u8 = switch (obj.type) {
+                .commit => 1,
+                .tree => 2,
+                .blob => 3,
+                .tag => 4,
+            };
+            var obj_size = obj.data.len;
+            var first_byte: u8 = (type_num << 4) | @as(u8, @intCast(obj_size & 0x0F));
+            obj_size >>= 4;
+            if (obj_size > 0) first_byte |= 0x80;
+            try pack_data.append(first_byte);
+            while (obj_size > 0) {
+                var byte: u8 = @intCast(obj_size & 0x7F);
+                obj_size >>= 7;
+                if (obj_size > 0) byte |= 0x80;
+                try pack_data.append(byte);
+            }
+            // Compress data
+            var compressed = std.array_list.Managed(u8).init(allocator);
+            defer compressed.deinit();
+            {
+                var comp = zlib_compat_mod.compressorWriter(compressed.writer(), .{}) catch continue;
+                _ = comp.write(obj.data) catch continue;
+                comp.finish() catch continue;
+            }
+            try pack_data.appendSlice(compressed.items);
+        } else |_| {
+            continue;
+        }
+    }
+
+    // Compute SHA1 checksum
+    var sha1 = std.crypto.hash.Sha1.init(.{});
+    sha1.update(pack_data.items);
+    const checksum = sha1.finalResult();
+    try pack_data.appendSlice(&checksum);
+
+    // Write pack file
+    var hash_hex: [40]u8 = undefined;
+    for (checksum, 0..) |b, bi| {
+        _ = std.fmt.bufPrint(hash_hex[bi * 2 .. bi * 2 + 2], "{x:0>2}", .{b}) catch continue;
+    }
+
+    const pack_filename = std.fmt.allocPrint(allocator, "{s}/pack-{s}.pack", .{ pack_dir, hash_hex }) catch return;
+    defer allocator.free(pack_filename);
+    std.fs.cwd().writeFile(.{ .sub_path = pack_filename, .data = pack_data.items }) catch return;
+
+    // Generate idx
+    try generatePackIdx(allocator, pack_data.items, pack_dir, &hash_hex);
+
+    // Delete old pack files
+    for (existing_packs.items) |old_idx| {
+        const old_idx_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir, old_idx }) catch continue;
+        defer allocator.free(old_idx_path);
+        std.fs.cwd().deleteFile(old_idx_path) catch {};
+        // Also delete .pack
+        if (std.mem.endsWith(u8, old_idx, ".idx")) {
+            const base = old_idx[0 .. old_idx.len - 4];
+            const old_pack_path = std.fmt.allocPrint(allocator, "{s}/{s}.pack", .{ pack_dir, base }) catch continue;
+            defer allocator.free(old_pack_path);
+            std.fs.cwd().deleteFile(old_pack_path) catch {};
+        }
+    }
+
+    // Delete loose objects that are now in the pack
+    for (all_objects.items) |sha| {
+        var hex: [40]u8 = undefined;
+        for (sha, 0..) |b, bi| {
+            _ = std.fmt.bufPrint(hex[bi * 2 .. bi * 2 + 2], "{x:0>2}", .{b}) catch continue;
+        }
+        const loose_path = std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ objects_dir_path, hex[0..2], hex[2..] }) catch continue;
+        defer allocator.free(loose_path);
+        std.fs.cwd().deleteFile(loose_path) catch {};
+    }
 }
 
 fn packRefs(allocator: std.mem.Allocator, git_dir: []const u8) !void {
