@@ -10089,6 +10089,32 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             no_flags = true;
         } else if (std.mem.eql(u8, arg, "--sq")) {
             // Ignore for now (shell quoting)
+        } else if (std.mem.eql(u8, arg, "--sq-quote")) {
+            // Shell-quote remaining args
+            var output_buf = std.array_list.Managed(u8).init(allocator);
+            defer output_buf.deinit();
+            var first = true;
+            arg_i += 1;
+            while (arg_i < all_args.items.len) : (arg_i += 1) {
+                const a = all_args.items[arg_i];
+                if (!first) try output_buf.append(' ');
+                first = false;
+                try output_buf.append('\'');
+                for (a) |ch| {
+                    if (ch == '\'') {
+                        try output_buf.appendSlice("'\\''");
+                    } else {
+                        try output_buf.append(ch);
+                    }
+                }
+                try output_buf.append('\'');
+            }
+            try output_buf.append('\n');
+            try platform_impl.writeStdout(output_buf.items);
+            return;
+        } else if (std.mem.eql(u8, arg, "--local-env-vars")) {
+            try platform_impl.writeStdout("GIT_DIR\nGIT_WORK_TREE\nGIT_OBJECT_DIRECTORY\nGIT_INDEX_FILE\nGIT_GRAFT_FILE\nGIT_COMMON_DIR\n");
+            return;
         } else if (std.mem.eql(u8, arg, "--path-format=absolute")) {
             path_format_absolute = true;
         } else if (std.mem.eql(u8, arg, "--path-format=relative")) {
