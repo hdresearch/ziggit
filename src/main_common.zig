@@ -25938,11 +25938,11 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
         while (line_it.next()) |line| {
             const trimmed = std.mem.trim(u8, line, " \t\r");
             if (trimmed.len == 0) continue;
-            const d = diffTreeForCommit(allocator, trimmed, recursive, show_patch, show_root, name_only, name_status, no_commit_id, quiet, pathspecs.items, platform_impl) catch false;
+            const d = diffTreeForCommit(allocator, trimmed, &dt_opts, pathspecs.items, platform_impl) catch false;
             if (d) had_diff = true;
         }
     } else if (tree_refs.items.len == 1) {
-        had_diff = try diffTreeForCommit(allocator, tree_refs.items[0], recursive, show_patch, show_root, name_only, name_status, no_commit_id, quiet, pathspecs.items, platform_impl);
+        had_diff = try diffTreeForCommit(allocator, tree_refs.items[0], &dt_opts, pathspecs.items, platform_impl);
     } else {
         // Resolve both refs to tree hashes
         const git_path = findGitDirectory(allocator, platform_impl) catch {
