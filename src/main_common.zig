@@ -2,18 +2,14 @@ const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 
 fn readStdin(allocator: std.mem.Allocator, max_size: usize) ![]u8 {
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     errdefer result.deinit();
-    var buf: [4096]u8 = undefined;
     const f = std.fs.File{ .handle = std.posix.STDIN_FILENO };
-    const reader = f.reader(&buf);
+    var buf: [4096]u8 = undefined;
     while (true) {
-        const n = reader.readSome() catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => return err,
-        };
+        const n = f.read(&buf) catch break;
         if (n == 0) break;
-        try result.appendSlice(reader.last_chunk[0..n]);
+        try result.appendSlice(buf[0..n]);
         if (result.items.len > max_size) return error.StreamTooLong;
     }
     return result.toOwnedSlice();
@@ -9781,13 +9777,18 @@ fn hashData(allocator: std.mem.Allocator, data: []const u8, obj_type: []const u8
 
 fn cmdWriteTree(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     var prefix: ?[]const u8 = null;
+    var missing_ok = false;
     while (args.next()) |arg| {
         if (std.mem.startsWith(u8, arg, "--prefix=")) {
             prefix = arg["--prefix=".len..];
         } else if (std.mem.eql(u8, arg, "--prefix")) {
             prefix = args.next();
+        } else if (std.mem.eql(u8, arg, "--missing-ok")) {
+            missing_ok = true;
         }
     }
+    // TODO: implement --prefix support
+    if (prefix != null) {}
 
     const git_dir = findGitDirectory(allocator, platform_impl) catch {
         try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
@@ -9803,6 +9804,27 @@ fn cmdWriteTree(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         unreachable;
     };
     defer idx.deinit();
+
+    // Unless --missing-ok, validate that all objects referenced in the index exist
+    if (!missing_ok) {
+        for (idx.entries.items) |entry| {
+            var hash_hex: [40]u8 = undefined;
+            for (entry.sha1, 0..) |byte, j| {
+                const hex = std.fmt.bytesToHex([1]u8{byte}, .lower);
+                hash_hex[j * 2] = hex[0];
+                hash_hex[j * 2 + 1] = hex[1];
+            }
+            // Check if object exists (loose or packed)
+            const obj_exists = objectExistsCheck(git_dir, &hash_hex, platform_impl, allocator);
+            if (!obj_exists) {
+                const msg = try std.fmt.allocPrint(allocator, "error: invalid object {o:0>6} {s} for '{s}'\nfatal: git-write-tree: error building trees\n", .{ entry.mode, &hash_hex, entry.path });
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+                unreachable;
+            }
+        }
+    }
 
     // Build tree from index entries
     const tree_hash = writeTreeFromIndex(allocator, &idx, git_dir, platform_impl) catch {
@@ -10375,6 +10397,39 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             no_skip_worktree = true;
         } else if (std.mem.eql(u8, arg, "--stdin")) {
             stdin_mode = true;
+        } else if (std.mem.eql(u8, arg, "--index-info")) {
+            // Read index info from stdin: "<mode> <type> <sha1>\t<path>" or "<mode> <sha1> <stage>\t<path>"
+            const stdin_data = readStdin(allocator, 10 * 1024 * 1024) catch {
+                try platform_impl.writeStderr("fatal: unable to read from stdin\n");
+                std.process.exit(128);
+                unreachable;
+            };
+            defer allocator.free(stdin_data);
+            var lines = std.mem.splitScalar(u8, stdin_data, '\n');
+            while (lines.next()) |line| {
+                if (line.len == 0) continue;
+                // Format: "<mode> <sha1> <stage>\t<path>" or "<mode> <type> <sha1>\t<path>"
+                if (std.mem.indexOfScalar(u8, line, '\t')) |tab_pos| {
+                    const info_part = line[0..tab_pos];
+                    const path = line[tab_pos + 1 ..];
+                    if (path.len == 0) continue;
+                    // Parse info part - split by spaces
+                    var parts = std.mem.splitScalar(u8, info_part, ' ');
+                    const mode_str = parts.next() orelse continue;
+                    const second = parts.next() orelse continue;
+                    // Second field could be "blob"/"tree"/"commit" (type) or a sha1 hash
+                    var hash_str: []const u8 = undefined;
+                    if (second.len == 40) {
+                        // It's a hash directly: "<mode> <sha1> <stage>\t<path>"
+                        hash_str = second;
+                    } else {
+                        // It's a type: "<mode> <type> <sha1>\t<path>"
+                        hash_str = parts.next() orelse continue;
+                    }
+                    try addCacheInfo(&idx, mode_str, hash_str, path, allocator);
+                    modified = true;
+                }
+            }
         } else if (std.mem.eql(u8, arg, "-q")) {
             // quiet mode
         } else if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
@@ -11479,8 +11534,16 @@ fn readTreeIntoIndex(idx: *index_mod.Index, git_dir: []const u8, tree_hash: []co
 }
 
 fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
-    // Simple diff-files: compare index against working tree
-    _ = args;
+    // diff-files: compare index against working tree
+    var name_only = false;
+    var name_status = false;
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--name-only")) {
+            name_only = true;
+        } else if (std.mem.eql(u8, arg, "--name-status")) {
+            name_status = true;
+        }
+    }
     const git_dir = findGitDirectory(allocator, platform_impl) catch {
         try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
         std.process.exit(128);
@@ -11488,19 +11551,117 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     };
     defer allocator.free(git_dir);
 
+    const repo_root = std.fs.path.dirname(git_dir) orelse ".";
+
     var idx = index_mod.Index.load(git_dir, platform_impl, allocator) catch return;
     defer idx.deinit();
 
+    const zero_oid = "0000000000000000000000000000000000000000";
     var has_diff = false;
+
     for (idx.entries.items) |entry| {
-        const exists = std.fs.cwd().access(entry.path, .{});
-        if (exists) |_| {
-            // File exists, skip detailed comparison for now
-        } else |_| {
+        // Build full path from repo root
+        const full_path = if (repo_root.len > 0 and !std.mem.eql(u8, repo_root, "."))
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path })
+        else
+            try allocator.dupe(u8, entry.path);
+        defer allocator.free(full_path);
+
+        // Use lstat (no follow) to properly handle symlinks
+        const is_symlink_in_index = (entry.mode & 0o170000) == 0o120000;
+
+        // Check if path exists - for symlinks, check the link itself
+        var link_buf: [4096]u8 = undefined;
+        const is_symlink_on_disk = if (std.fs.cwd().readLink(full_path, &link_buf)) |_| true else |_| false;
+
+        // Try to get file info
+        const file_exists = if (is_symlink_on_disk) true else if (std.fs.cwd().access(full_path, .{})) |_| true else |_| false;
+
+        if (!file_exists) {
             // File deleted
-            const line = try std.fmt.allocPrint(allocator, ":{o} 000000 D\t{s}\n", .{ entry.mode, entry.path });
-            defer allocator.free(line);
-            try platform_impl.writeStdout(line);
+            var hash_buf: [40]u8 = undefined;
+            _ = std.fmt.bufPrint(&hash_buf, "{x}", .{entry.sha1}) catch unreachable;
+            if (name_only) {
+                const line = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path});
+                defer allocator.free(line);
+                try platform_impl.writeStdout(line);
+            } else if (name_status) {
+                const line = try std.fmt.allocPrint(allocator, "D\t{s}\n", .{entry.path});
+                defer allocator.free(line);
+                try platform_impl.writeStdout(line);
+            } else {
+                const line = try std.fmt.allocPrint(allocator, ":{o:0>6} 000000 {s} {s} D\t{s}\n", .{ entry.mode, &hash_buf, zero_oid, entry.path });
+                defer allocator.free(line);
+                try platform_impl.writeStdout(line);
+            }
+            has_diff = true;
+            continue;
+        }
+
+        // Determine working tree mode
+        const wt_mode: u32 = wt_blk: {
+            if (is_symlink_on_disk) break :wt_blk 0o120000;
+            if (std.fs.cwd().statFile(full_path)) |st| {
+                if ((st.mode & 0o111) != 0) break :wt_blk 0o100755;
+            } else |_| {}
+            break :wt_blk 0o100644;
+        };
+
+        // Compare to detect modifications
+        var modified = false;
+
+        if (is_symlink_in_index != is_symlink_on_disk) {
+            // Type changed (symlink <-> regular file)
+            modified = true;
+        } else if (is_symlink_on_disk) {
+            // Both are symlinks - compare target content
+            const link_target = std.fs.cwd().readLink(full_path, &link_buf) catch {
+                modified = true;
+                continue;
+            };
+            // Hash the symlink target to compare with index
+            const blob_content = try std.fmt.allocPrint(allocator, "blob {d}\x00{s}", .{ link_target.len, link_target });
+            defer allocator.free(blob_content);
+            var hash: [20]u8 = undefined;
+            std.crypto.hash.Sha1.hash(blob_content, &hash, .{});
+            if (!std.mem.eql(u8, &hash, &entry.sha1)) {
+                modified = true;
+            }
+        } else {
+            // Regular files - check stat
+            if (std.fs.cwd().statFile(full_path)) |stat_result| {
+                const file_size: u32 = @intCast(@min(stat_result.size, std.math.maxInt(u32)));
+                if (entry.size != file_size) {
+                    modified = true;
+                } else {
+                    // Compare mtime
+                    const mtime_s: u32 = @intCast(@max(0, @divTrunc(stat_result.mtime, std.time.ns_per_s)));
+                    const mtime_ns: u32 = @intCast(@max(0, @rem(stat_result.mtime, std.time.ns_per_s)));
+                    if (entry.mtime_sec != mtime_s or entry.mtime_nsec != mtime_ns) {
+                        modified = true;
+                    }
+                }
+            } else |_| {
+                modified = true;
+            }
+        }
+
+        if (modified) {
+            var hash_buf: [40]u8 = undefined;
+            _ = std.fmt.bufPrint(&hash_buf, "{x}", .{entry.sha1}) catch unreachable;
+            if (name_only) {
+                const line = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path});
+                defer allocator.free(line);
+                try platform_impl.writeStdout(line);
+            } else if (name_status) {
+                const line = try std.fmt.allocPrint(allocator, "M\t{s}\n", .{entry.path});
+                defer allocator.free(line);
+                try platform_impl.writeStdout(line);
+            } else {
+                const line = try std.fmt.allocPrint(allocator, ":{o:0>6} {o:0>6} {s} {s} M\t{s}\n", .{ entry.mode, wt_mode, &hash_buf, zero_oid, entry.path });
+                defer allocator.free(line);
+                try platform_impl.writeStdout(line);
+            }
             has_diff = true;
         }
     }
@@ -11513,6 +11674,39 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
 // =============================================================================
 // Phase 2: Pure Zig implementations of previously non-native commands
 // =============================================================================
+
+fn objectExistsCheck(git_dir: []const u8, hash_hex: *const [40]u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) bool {
+    // Check for loose object: objects/ab/cdef...
+    const obj_path = std.fmt.allocPrint(allocator, "{s}/objects/{s}/{s}", .{ git_dir, hash_hex[0..2], hash_hex[2..] }) catch return false;
+    defer allocator.free(obj_path);
+    if (platform_impl.fs.exists(obj_path) catch false) return true;
+
+    // Check packed objects
+    const pack_dir_path = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir}) catch return false;
+    defer allocator.free(pack_dir_path);
+    
+    // Convert hex to bytes
+    var hash_bytes: [20]u8 = undefined;
+    for (0..20) |i| {
+        hash_bytes[i] = std.fmt.parseInt(u8, hash_hex[i * 2 .. i * 2 + 2], 16) catch return false;
+    }
+    
+    // Scan .idx files
+    var dir = std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true }) catch return false;
+    defer dir.close();
+    var iter = dir.iterate();
+    while (iter.next() catch null) |dir_entry| {
+        if (std.mem.endsWith(u8, dir_entry.name, ".idx")) {
+            const idx_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir_path, dir_entry.name }) catch continue;
+            defer allocator.free(idx_path);
+            if (platform_impl.fs.readFile(allocator, idx_path)) |idx_data| {
+                defer allocator.free(idx_data);
+                if (objects.findOffsetInIdx(idx_data, hash_bytes) != null) return true;
+            } else |_| {}
+        }
+    }
+    return false;
+}
 
 fn findGitDir() ![]const u8 {
     // Check GIT_DIR env first
