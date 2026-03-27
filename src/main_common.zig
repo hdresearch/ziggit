@@ -26610,9 +26610,14 @@ fn outputPrettyCommitHeader(allocator: std.mem.Allocator, commit_hash: []const u
                 try platform_impl.writeStdout(indented);
             }
         }
-        // Ensure trailing newline
-        if (msg.len > 0 and msg[msg.len - 1] != '\n') {
-            try platform_impl.writeStdout("\n");
+        // For patch-with-stat, output --- instead of trailing blank line
+        if (opts.patch_with_stat or opts.patch_with_raw) {
+            try platform_impl.writeStdout("---\n");
+        } else {
+            // Ensure trailing newline
+            if (msg.len > 0 and msg[msg.len - 1] != '\n') {
+                try platform_impl.writeStdout("\n");
+            }
         }
     }
 }
