@@ -11811,6 +11811,100 @@ fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         return; // exists - exit 0
     }
 
+    // For --textconv and --filters, handle rev:path format with better error messages
+    if ((textconv or filters) and object_ref != null) {
+        if (std.mem.indexOf(u8, object_ref.?, ":")) |colon_pos| {
+            const rev_part = object_ref.?[0..colon_pos];
+            const path_part = object_ref.?[colon_pos + 1 ..];
+            
+            if (rev_part.len == 0) {
+                // :path format - read from index/staging area
+                // Try to resolve from HEAD as fallback
+                const head_hash = refs.getCurrentCommit(git_path, platform_impl, allocator) catch {
+                    const msg = try std.fmt.allocPrint(allocator, "fatal: path '{s}' does not exist (empty tree)\n", .{path_part});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(128);
+                    unreachable;
+                };
+                if (head_hash) |hh| {
+                    defer allocator.free(hh);
+                    
+                    // Try to get from index first, fall back to HEAD tree
+                    const blob_hash = getTreeEntryHashFromCommit(git_path, hh, path_part, allocator) catch {
+                        const msg = try std.fmt.allocPrint(allocator, "fatal: path '{s}' does not exist in the index\n", .{path_part});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                        std.process.exit(128);
+                        unreachable;
+                    };
+                    defer allocator.free(blob_hash);
+                    
+                    const blob_obj = objects.GitObject.load(blob_hash, git_path, platform_impl, allocator) catch {
+                        const msg = try std.fmt.allocPrint(allocator, "fatal: Not a valid object name {s}\n", .{object_ref.?});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                        std.process.exit(128);
+                        unreachable;
+                    };
+                    defer blob_obj.deinit(allocator);
+                    
+                    try platform_impl.writeStdout(blob_obj.data);
+                    return;
+                }
+            }
+            
+            // First verify the rev is valid (use resolveRevision for ^ and ~ support)
+            const rev_hash = resolveRevision(git_path, rev_part, platform_impl, allocator) catch {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: invalid object name '{s}'.\n", .{rev_part});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+                unreachable;
+            };
+            defer allocator.free(rev_hash);
+            
+            // Now try to get the tree entry for the path
+            const blob_hash = getTreeEntryHashFromCommit(git_path, rev_hash, path_part, allocator) catch {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: path '{s}' does not exist in '{s}'\n", .{ path_part, rev_part });
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+                unreachable;
+            };
+            defer allocator.free(blob_hash);
+            
+            // Load the blob and output it (textconv just outputs raw for now without actual conversion)
+            const blob_obj = objects.GitObject.load(blob_hash, git_path, platform_impl, allocator) catch {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: Not a valid object name {s}\n", .{object_ref.?});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+                unreachable;
+            };
+            defer blob_obj.deinit(allocator);
+            
+            try platform_impl.writeStdout(blob_obj.data);
+            return;
+        } else if (textconv) {
+            // --textconv requires rev:path format, but first check if the rev is valid
+            const rev_valid = resolveRevision(git_path, object_ref.?, platform_impl, allocator) catch null;
+            if (rev_valid) |v| {
+                allocator.free(v);
+                // Valid rev but no path
+                const msg = try std.fmt.allocPrint(allocator, "fatal: <object>:<path> required, only <object> '{s}' given\n", .{object_ref.?});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+            } else {
+                // Invalid rev
+                const msg = try std.fmt.allocPrint(allocator, "fatal: Not a valid object name {s}\n", .{object_ref.?});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+            }
+            std.process.exit(128);
+        }
+    }
+
     // Resolve the object reference to a hash
     var object_hash: []u8 = undefined;
     if (isValidHashPrefix(object_ref.?)) {
