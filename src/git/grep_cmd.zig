@@ -978,7 +978,7 @@ fn grepCached(allocator: Allocator, opts: *GrepOptions, git_dir: []const u8, _: 
 
         // Read from object store
         var hash_hex: [40]u8 = undefined;
-        _ = std.fmt.bufPrint(&hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&fi.sha1)}) catch continue;
+        _ = std.fmt.bufPrint(&hash_hex, "{s}", .{std.fmt.bytesToHex(fi.sha1, .lower)}) catch continue;
         const obj = objects.GitObject.load(&hash_hex, git_dir, platform_impl, allocator) catch continue;
         defer obj.deinit(allocator);
 
