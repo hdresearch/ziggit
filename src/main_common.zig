@@ -591,6 +591,8 @@ fn forwardConfigToGit(allocator: std.mem.Allocator, all_args: [][]const u8, comm
                 // → git config --get-urlmatch [--flags] <key> <url> (if --url=<url>)
                 var get_has_all = false;
                 var get_has_regexp = false;
+                var get_has_type_color = false;
+                var get_default_value: ?[]const u8 = null;
                 var get_url: ?[]const u8 = null;
                 var get_value_pattern: ?[]const u8 = null;
                 for (all_args[rest_start..]) |a| {
@@ -598,8 +600,26 @@ fn forwardConfigToGit(allocator: std.mem.Allocator, all_args: [][]const u8, comm
                     if (std.mem.eql(u8, a, "--regexp")) get_has_regexp = true;
                     if (std.mem.startsWith(u8, a, "--url=")) get_url = a[6..];
                     if (std.mem.startsWith(u8, a, "--value=")) get_value_pattern = a[8..];
+                    if (std.mem.eql(u8, a, "--type=color")) get_has_type_color = true;
+                    if (std.mem.startsWith(u8, a, "--default=")) get_default_value = a["--default=".len..];
                 }
-                if (get_url != null) {
+                if (get_has_type_color) {
+                    // Translate: git config get --type=color [--default=<val>] <key>
+                    //         →  git config --get-color <key> [<val>]
+                    try new_args.append("--get-color");
+                    // Pass through non-special flags and the key
+                    for (all_args[rest_start..]) |arg| {
+                        if (std.mem.eql(u8, arg, "--type=color")) continue;
+                        if (std.mem.startsWith(u8, arg, "--default=")) continue;
+                        if (std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "--regexp")) continue;
+                        if (std.mem.eql(u8, arg, "--show-names")) continue;
+                        try new_args.append(arg);
+                    }
+                    // Append default value as positional arg (--get-color <key> <default>)
+                    if (get_default_value) |dv| {
+                        try new_args.append(dv);
+                    }
+                } else if (get_url != null) {
                     try new_args.append("--get-urlmatch");
                 } else if (get_has_regexp) {
                     try new_args.append("--get-regexp");
@@ -608,20 +628,22 @@ fn forwardConfigToGit(allocator: std.mem.Allocator, all_args: [][]const u8, comm
                 } else {
                     try new_args.append("--get");
                 }
-                for (all_args[rest_start..]) |arg| {
-                    if (std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "--regexp")) continue;
-                    if (std.mem.startsWith(u8, arg, "--url=")) continue;
-                    if (std.mem.startsWith(u8, arg, "--value=")) continue;
-                    if (std.mem.eql(u8, arg, "--show-names")) continue; // git 2.46+
-                    try new_args.append(arg);
-                }
-                // Append value-pattern at end if present
-                if (get_value_pattern) |vp| {
-                    try new_args.append(vp);
-                }
-                // Append URL at end if present
-                if (get_url) |url| {
-                    try new_args.append(url);
+                if (!get_has_type_color) {
+                    for (all_args[rest_start..]) |arg| {
+                        if (std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "--regexp")) continue;
+                        if (std.mem.startsWith(u8, arg, "--url=")) continue;
+                        if (std.mem.startsWith(u8, arg, "--value=")) continue;
+                        if (std.mem.eql(u8, arg, "--show-names")) continue; // git 2.46+
+                        try new_args.append(arg);
+                    }
+                    // Append value-pattern at end if present
+                    if (get_value_pattern) |vp| {
+                        try new_args.append(vp);
+                    }
+                    // Append URL at end if present
+                    if (get_url) |url| {
+                        try new_args.append(url);
+                    }
                 }
             } else if (std.mem.eql(u8, subcmd, "unset")) {
                 // git config unset [--all] [--value=<pattern>] [--flags] <key>
@@ -683,7 +705,39 @@ fn forwardConfigToGit(allocator: std.mem.Allocator, all_args: [][]const u8, comm
         }
     }
     
-    // Not a new-style subcommand, forward as-is (with value translation)
+    // Not a new-style subcommand — check for legacy --get --type=color pattern
+    // In newer git, "git config --get --type=color --default=<val> <key>" works even with empty key.
+    // In git 2.43, we need to translate to: git config --get-color <key> <val>
+    {
+        var has_get = false;
+        var has_type_color = false;
+        var legacy_default_val: ?[]const u8 = null;
+        for (all_args[subcmd_index..]) |a| {
+            if (std.mem.eql(u8, a, "--get")) has_get = true;
+            if (std.mem.eql(u8, a, "--type=color")) has_type_color = true;
+            if (std.mem.startsWith(u8, a, "--default=")) legacy_default_val = a["--default=".len..];
+        }
+        if (has_get and has_type_color) {
+            var color_args = std.array_list.Managed([]const u8).init(allocator);
+            defer color_args.deinit();
+            // Copy args before config
+            for (all_args[0..command_index]) |a| try color_args.append(a);
+            try color_args.append("config");
+            try color_args.append("--get-color");
+            // Copy remaining flags (skip --get, --type=color, --default=)
+            for (all_args[subcmd_index..]) |a| {
+                if (std.mem.eql(u8, a, "--get")) continue;
+                if (std.mem.eql(u8, a, "--type=color")) continue;
+                if (std.mem.startsWith(u8, a, "--default=")) continue;
+                try color_args.append(a);
+            }
+            // Append default value as positional arg
+            if (legacy_default_val) |dv| try color_args.append(dv);
+            try forwardToGit(allocator, color_args.items, platform_impl);
+            return;
+        }
+    }
+    // Forward as-is (with value translation)
     try forwardCmdToGit(allocator, try translateConfigValues(allocator, all_args), platform_impl);
 }
 
