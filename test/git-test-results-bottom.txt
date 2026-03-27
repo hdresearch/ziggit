@@ -1,613 +1,541 @@
 === Git Test Suite Results (t5000-t9999) ===
-Date: Fri Mar 27 01:22:36 UTC 2026
+Date: Fri Mar 27 05:13:45 UTC 2026
 Range: t5000-t9999
-Git test suite version: 2.53.GIT
-Backend git version: 2.43.0
-Ziggit version: 0.2.0
 
-Legend:
-  PASS    = all tests in script passed
-  FAIL    = some tests failed (count shown)
-  SKIP    = skipped (missing deps: svn, httpd, cvs, platform-specific)
-  TIMEOUT = script exceeded 60s timeout or hung
-
-FAIL     t5000-tar-tree                                (failed 2 among 90)
-PASS     t5001-archive-attr                            (44 tests)
-PASS     t5002-archive-attr-pattern                    (19 tests)
-FAIL     t5003-archive-zip                             (failed 1 among 78)
-PASS     t5004-archive-corner-cases                    (14 tests)
-FAIL     t5100-mailinfo                                (failed 2 among 52)
-PASS     t5150-request-pull                            (10 tests)
-FAIL     t5200-update-server-info                      (failed 1 among 8)
-FAIL     t5300-pack-object                             (failed 14 among 63)
-PASS     t5301-sliding-window                          (6 tests)
-FAIL     t5302-pack-index                              (failed 8 among 36)
-FAIL     t5303-pack-corruption-resilience              (failed 19 among 36)
-FAIL     t5304-prune                                   (failed 9 among 32)
-PASS     t5305-include-tag                             (15 tests)
-PASS     t5306-pack-nobase                             (4 tests)
-PASS     t5307-pack-missing-commit                     (5 tests)
-FAIL     t5308-pack-detect-duplicates                  (failed 3 among 6)
-FAIL     t5309-pack-delta-cycles                       (failed 5 among 7)
-FAIL     t5310-pack-bitmaps                            (failed 21 among 236)
-PASS     t5311-pack-bitmaps-shallow                    (6 tests)
-FAIL     t5312-prune-corruption                        (failed 3 among 11)
-FAIL     t5313-pack-bounds-checks                      (failed 1 among 9)
-PASS     t5314-pack-cycle-detection                    (2 tests)
-FAIL     t5315-pack-objects-compression                (failed 8 among 9)
-FAIL     t5316-pack-delta-depth                        (failed 2 among 5)
-PASS     t5317-pack-objects-filter-objects             (33 tests)
-FAIL     t5318-commit-graph                            (failed 27 among 109)
-FAIL     t5319-multi-pack-index                        (failed 32 among 98)
-FAIL     t5320-delta-islands                           (failed 10 among 15)
-FAIL     t5321-pack-large-objects                      (failed 2 among 2)
-PASS     t5322-pack-objects-sparse                     (11 tests)
-FAIL     t5323-pack-redundant                          (failed 13 among 18)
-FAIL     t5324-split-commit-graph                      (failed 9 among 42)
-PASS     t5325-reverse-index                           (16 tests)
-FAIL     t5326-multi-pack-bitmaps                      (failed 24 among 357)
-FAIL     t5327-multi-pack-bitmaps-rev                  (failed 14 among 314)
-SKIP     t5328-commit-graph-64bit-time                 (skipping 64-bit timestamp tests)
-FAIL     t5329-pack-objects-cruft                      (failed 11 among 25)
-FAIL     t5330-no-lazy-fetch-with-commit-graph         (failed 1 among 4)
-FAIL     t5331-pack-objects-stdin                      (failed 7 among 16)
-FAIL     t5332-multi-pack-reuse                        (failed 13 among 14)
-FAIL     t5333-pseudo-merge-bitmaps                    (failed 13 among 18)
-FAIL     t5334-incremental-multi-pack-index            (failed 12 among 16)
-FAIL     t5335-compact-multi-pack-index                (failed 10 among 10)
-FAIL     t5351-unpack-large-objects                    (failed 1 among 7)
-FAIL     t5400-send-pack                               (failed 1 among 17)
-PASS     t5401-update-hooks                            (13 tests)
-PASS     t5402-post-merge-hook                         (7 tests)
-PASS     t5403-post-checkout-hook                      (14 tests)
-PASS     t5404-tracking-branches                       (7 tests)
-PASS     t5405-send-pack-rewind                        (3 tests)
-PASS     t5406-remote-rejects                          (3 tests)
-PASS     t5407-post-rewrite-hook                       (17 tests)
-FAIL     t5408-send-pack-stdin                         (failed 3 among 10)
-PASS     t5409-colorize-remote-messages                (11 tests)
-FAIL     t5410-receive-pack                            (failed 3 among 5)
-FAIL     t5411-proc-receive-hook                       (failed 65 among 178)
-FAIL     t5500-fetch-pack                              (failed 3 among 377)
-PASS     t5501-fetch-push-alternates                   (3 tests)
-PASS     t5502-quickfetch                              (7 tests)
-PASS     t5503-tagfollow                               (12 tests)
-FAIL     t5504-fetch-receive-strict                    (failed 3 among 29)
-FAIL     t5505-remote                                  (failed 23 among remaining 129)
-PASS     t5506-remote-groups                           (9 tests)
-PASS     t5507-remote-environment                      (5 tests)
-FAIL     t5509-fetch-push-namespaces                   (failed 2 among 15)
-FAIL     t5510-fetch                                   (failed 13 among 214)
-PASS     t5511-refspec                                 (47 tests)
-TIMEOUT  t5512-ls-remote
-PASS     t5513-fetch-track                             (2 tests)
-FAIL     t5514-fetch-multiple                          (failed 12 among 25)
-PASS     t5515-fetch-merge-logic                       (65 tests)
-FAIL     t5516-fetch-push                              (failed 7 among 124)
-PASS     t5517-push-mirror                             (13 tests)
-PASS     t5518-fetch-exit-status                       (3 tests)
-PASS     t5519-push-alternates                         (8 tests)
-FAIL     t5520-pull                                    (failed 5 among 80)
-PASS     t5521-pull-options                            (22 tests)
-PASS     t5522-pull-symlink                            (4 tests)
-PASS     t5523-push-upstream                           (17 tests)
-PASS     t5524-pull-msg                                (3 tests)
-PASS     t5525-fetch-tagopt                            (5 tests)
-FAIL     t5526-fetch-submodules                        (failed 3 among 56)
-PASS     t5527-fetch-odd-refs                          (5 tests)
-PASS     t5528-push-default                            ( tests)
-FAIL     t5529-push-errors                             (failed 2 among 8)
-FAIL     t5530-upload-pack-error                       (failed 2 among 11)
-PASS     t5531-deep-submodule-push                     (29 tests)
-PASS     t5532-fetch-proxy                             (5 tests)
-PASS     t5533-push-cas                                (23 tests)
-PASS     t5534-push-signed                             (13 tests)
-PASS     t5535-fetch-push-symref                       (3 tests)
-PASS     t5536-fetch-conflicts                         (7 tests)
-SKIP     t5537-fetch-shallow                           (Cannot run httpd tests as root)
-FAIL     t5538-push-shallow                            (failed 1 among 8)
-SKIP     t5539-fetch-http-shallow                      (Cannot run httpd tests as root)
-SKIP     t5540-http-push-webdav                        (Cannot run httpd tests as root)
-SKIP     t5541-http-push-smart                         (Cannot run httpd tests as root)
-SKIP     t5542-push-http-shallow                       (Cannot run httpd tests as root)
-FAIL     t5543-atomic-push                             (failed 2 among 13)
-PASS     t5544-pack-objects-hook                       (7 tests)
-SKIP     t5545-push-options                            (Cannot run httpd tests as root)
-FAIL     t5546-receive-limits                          (failed 2 among 17)
-PASS     t5547-push-quarantine                         (6 tests)
-SKIP     t5548-push-porcelain                          (Cannot run httpd tests as root)
-SKIP     t5549-fetch-push-http                         (Cannot run httpd tests as root)
-SKIP     t5550-http-fetch-dumb                         (Cannot run httpd tests as root)
-SKIP     t5551-http-fetch-smart                        (Cannot run httpd tests as root)
-PASS     t5552-skipping-fetch-negotiator               (6 tests)
-PASS     t5553-set-upstream                            (21 tests)
-PASS     t5554-noop-fetch-negotiator                   (1 tests)
-FAIL     t5555-http-smart-common                       (failed 7 among 10)
-SKIP     t5557-http-get                                (Cannot run httpd tests as root)
-FAIL     t5558-clone-bundle-uri                        (failed 14 among 21)
-SKIP     t5559-http-fetch-smart-http2                  (Cannot run httpd tests as root)
-PASS     t5560-http-backend-noserver                   (14 tests)
-SKIP     t5561-http-backend                            (Cannot run httpd tests as root)
-FAIL     t5562-http-backend-content-length             (failed 3 among 16)
-SKIP     t5563-simple-http-auth                        (Cannot run httpd tests as root)
-SKIP     t5564-http-proxy                              (Cannot run httpd tests as root)
-PASS     t5565-push-multiple                           (2 tests)
-TIMEOUT  t5570-git-daemon
-PASS     t5571-pre-push-hook                           (11 tests)
-FAIL     t5572-pull-submodule                          (failed 2 among remaining 61)
-PASS     t5573-pull-verify-signatures                  (16 tests)
-FAIL     t5574-fetch-output                            (failed 4 among 14)
-SKIP     t5580-unc-paths                               (skipping Windows-only path tests)
-SKIP     t5581-http-curl-verbose                       (Cannot run httpd tests as root)
-PASS     t5582-fetch-negative-refspec                  (16 tests)
-PASS     t5583-push-branches                           (8 tests)
-PASS     t5600-clone-fail-cleanup                      (14 tests)
-FAIL     t5601-clone                                   (failed 50 among 109)
-PASS     t5602-clone-remote-exec                       (3 tests)
-PASS     t5603-clone-dirname                           (47 tests)
-PASS     t5604-clone-reference                         (34 tests)
-FAIL     t5605-clone-local                             (failed 2 among 23)
-FAIL     t5606-clone-options                           (failed 1 among 21)
-FAIL     t5607-clone-bundle                            (failed 1 among 16)
-SKIP     t5608-clone-2gb                               (expensive 2GB clone test; enable with GIT_TEST_CLONE_2GB=true)
-PASS     t5609-clone-branch                            (7 tests)
-PASS     t5610-clone-detached                          ( tests)
-PASS     t5611-clone-config                            (13 tests)
-PASS     t5612-clone-refspec                           (13 tests)
-PASS     t5613-info-alternate                          (13 tests)
-PASS     t5614-clone-submodules-shallow                (9 tests)
-PASS     t5615-alternate-env                           (9 tests)
-FAIL     t5616-partial-clone                           (failed 2 among 44)
-PASS     t5617-clone-submodules-remote                 (9 tests)
-PASS     t5618-alternate-refs                          (6 tests)
-SKIP     t5619-clone-local-ambiguous-transport         (Cannot run httpd tests as root)
-FAIL     t5620-backfill                                (failed 6 among 8)
-FAIL     t5621-clone-revision                          (failed 8 among 12)
-FAIL     t5700-protocol-v1                             (failed 4 among 18)
-FAIL     t5701-git-serve                               (failed 21 among 25)
-FAIL     t5702-protocol-v2                             (failed 9 among 60)
-FAIL     t5703-upload-pack-ref-in-want                 (failed 12 among 20)
-FAIL     t5704-protocol-violations                     (failed 1 among 3)
-PASS     t5705-session-id-in-capabilities              (17 tests)
-FAIL     t5710-promisor-remote-capability              (failed 20 among 22)
-FAIL     t5730-protocol-v2-bundle-uri-file             (failed 3 among 8)
-FAIL     t5731-protocol-v2-bundle-uri-git              (failed 3 among 8)
-SKIP     t5732-protocol-v2-bundle-uri-http             (Cannot run httpd tests as root)
-FAIL     t5750-bundle-uri-parse                        (failed 13 among 13)
-FAIL     t5801-remote-helpers                          (failed 2 among remaining 34)
-PASS     t5802-connect-helper                          (8 tests)
-PASS     t5810-proto-disable-local                     (54 tests)
-PASS     t5811-proto-disable-git                       (26 tests)
-SKIP     t5812-proto-disable-http                      (Cannot run httpd tests as root)
-PASS     t5813-proto-disable-ssh                       (81 tests)
-PASS     t5814-proto-disable-ext                       (27 tests)
-PASS     t5815-submodule-protos                        (8 tests)
-PASS     t5900-repo-selection                          (8 tests)
-FAIL     t6000-rev-list-misc                           (failed 2 among 23)
-PASS     t6001-rev-list-graft                          (14 tests)
-PASS     t6002-rev-list-bisect                         (53 tests)
-PASS     t6003-rev-list-topo-order                     (36 tests)
-PASS     t6004-rev-list-path-optim                     (7 tests)
-FAIL     t6005-rev-list-count                          (failed 3 among 6)
-PASS     t6006-rev-list-format                         (80 tests)
-PASS     t6007-rev-list-cherry-pick-file               (23 tests)
-PASS     t6008-rev-list-submodule                      (2 tests)
-FAIL     t6009-rev-list-parent                         (failed 1 among 15)
-PASS     t6010-merge-base                              (12 tests)
-PASS     t6011-rev-list-with-bad-commit                (6 tests)
-PASS     t6012-rev-list-simplify                       (42 tests)
-PASS     t6013-rev-list-reverse-parents                (3 tests)
-PASS     t6014-rev-list-all                            (4 tests)
-PASS     t6016-rev-list-graph-simplify-history         (12 tests)
-PASS     t6017-rev-list-stdin                          (37 tests)
-FAIL     t6018-rev-list-glob                           (failed 18 among remaining 91)
-PASS     t6019-rev-list-ancestry-path                  (18 tests)
-FAIL     t6020-bundle-misc                             (failed 2 among 37)
-FAIL     t6021-rev-list-exclude-hidden                 (failed 18 among 62)
-FAIL     t6022-rev-list-missing                        (failed 30 among 40)
-FAIL     t6030-bisect-porcelain                        (failed 3 among 96)
-FAIL     t6040-tracking-info                           (failed 15 among 44)
-PASS     t6041-bisect-submodule                        ( tests)
-PASS     t6050-replace                                 (37 tests)
-PASS     t6060-merge-index                             (7 tests)
-PASS     t6100-rev-list-in-order                       (3 tests)
-PASS     t6101-rev-parse-parents                       (38 tests)
-PASS     t6102-rev-list-unexpected-objects             (22 tests)
-PASS     t6110-rev-list-sparse                         (2 tests)
-PASS     t6111-rev-list-treesame                       (65 tests)
-PASS     t6112-rev-list-filters-objects                (54 tests)
-PASS     t6113-rev-list-bitmap-filters                 (14 tests)
-PASS     t6114-keep-packs                              (3 tests)
-PASS     t6115-rev-list-du                             (17 tests)
-FAIL     t6120-describe                                (failed 6 among remaining 103)
-PASS     t6130-pathspec-noglob                         (21 tests)
-PASS     t6131-pathspec-icase                          (9 tests)
-PASS     t6132-pathspec-exclude                        (31 tests)
-PASS     t6133-pathspec-rev-dwim                       (6 tests)
-PASS     t6134-pathspec-in-submodule                   (3 tests)
-FAIL     t6135-pathspec-with-attrs                     (failed 11 among 37)
-PASS     t6136-pathspec-in-bare                        (3 tests)
-FAIL     t6137-pathspec-wildcards-literal              (failed 12 among 25)
-PASS     t6200-fmt-merge-msg                           (37 tests)
-FAIL     t6300-for-each-ref                            (failed 9 among 429)
-FAIL     t6301-for-each-ref-errors                     (failed 1 among 6)
-FAIL     t6302-for-each-ref-filter                     (failed 20 among 62)
-PASS     t6400-merge-df                                (7 tests)
-PASS     t6401-merge-criss-cross                       (4 tests)
-FAIL     t6402-merge-rename                            (failed 8 among 46)
-FAIL     t6403-merge-file                              (failed 3 among remaining 36)
-PASS     t6404-recursive-merge                         (6 tests)
-PASS     t6405-merge-symlinks                          (7 tests)
-FAIL     t6406-merge-attr                              (failed 4 among 13)
-PASS     t6407-merge-binary                            (3 tests)
-PASS     t6408-merge-up-to-date                        (7 tests)
-PASS     t6409-merge-subtree                           (12 tests)
-PASS     t6411-merge-filemode                          (19 tests)
-PASS     t6412-merge-large-rename                      (10 tests)
-PASS     t6413-merge-crlf                              (3 tests)
-PASS     t6414-merge-rename-nocruft                    (3 tests)
-PASS     t6415-merge-dir-to-symlink                    ( tests)
-FAIL     t6416-recursive-corner-cases                  (failed 10 among remaining 37)
-PASS     t6417-merge-ours-theirs                       (7 tests)
-PASS     t6418-merge-text-auto                         (11 tests)
-SKIP     t6419-merge-ignorecase                        (skipping case insensitive tests - case sensitive file system)
-PASS     t6421-merge-partial-clone                     (3 tests)
-FAIL     t6422-merge-rename-corner-cases               (failed 6 among remaining 19)
-FAIL     t6423-merge-rename-directories                (failed 30 among remaining 80)
-PASS     t6424-merge-unrelated-index-changes           (19 tests)
-PASS     t6425-merge-rename-delete                     (1 tests)
-FAIL     t6426-merge-skip-unneeded-updates             (failed 1 among 13)
-FAIL     t6427-diff3-conflict-markers                  (failed 1 among 9)
-PASS     t6428-merge-conflicts-sparse                  (2 tests)
-FAIL     t6429-merge-sequence-rename-caching           (failed 10 among 11)
-FAIL     t6430-merge-recursive                         (failed 4 among 36)
-PASS     t6431-merge-criscross                         (2 tests)
-PASS     t6432-merge-recursive-space-options           (11 tests)
-PASS     t6433-merge-toplevel                          (15 tests)
-FAIL     t6434-merge-recursive-rename-options          (failed 14 among 27)
-PASS     t6435-merge-sparse                            (6 tests)
-PASS     t6436-merge-overwrite                         (18 tests)
-FAIL     t6437-submodule-merge                         (failed 5 among remaining 20)
-PASS     t6438-submodule-directory-file-conflicts      ( tests)
-PASS     t6439-merge-co-error-msgs                     (6 tests)
-FAIL     t6500-gc                                      (failed 8 among 35)
-PASS     t6501-freshen-objects                         (42 tests)
-FAIL     t6600-test-reach                              (failed 29 among 47)
-FAIL     t6601-path-walk                               (failed 14 among 15)
-PASS     t6700-tree-depth                              (10 tests)
-FAIL     t7001-mv                                      (failed 2 among 54)
-FAIL     t7002-mv-sparse-checkout                      (failed 16 among 22)
-PASS     t7003-filter-branch                           (48 tests)
-FAIL     t7004-tag                                     (failed 11 among 231)
-PASS     t7005-editor                                  (12 tests)
-FAIL     t7006-pager                                   (failed 1 among 109)
-PASS     t7007-show                                    (18 tests)
-PASS     t7008-filter-branch-null-sha1                 (6 tests)
-PASS     t7010-setup                                   (16 tests)
-PASS     t7011-skip-worktree-reading                   (15 tests)
-PASS     t7012-skip-worktree-writing                   (11 tests)
-PASS     t7030-verify-tag                              (16 tests)
-PASS     t7031-verify-tag-signed-ssh                   (14 tests)
-PASS     t7060-wtstatus                                (17 tests)
-PASS     t7061-wtstatus-ignore                         (25 tests)
-PASS     t7062-wtstatus-ignorecase                     (1 tests)
-FAIL     t7063-status-untracked-cache                  (failed 33 among 58)
-PASS     t7064-wtstatus-pv2                            (28 tests)
-PASS     t7101-reset-empty-subdirs                     (10 tests)
-FAIL     t7102-reset                                   (failed 1 among 38)
-PASS     t7103-reset-bare                              (13 tests)
-PASS     t7104-reset-hard                              (3 tests)
-FAIL     t7105-reset-patch                             (failed 1 among 13)
-PASS     t7106-reset-unborn-branch                     (7 tests)
-PASS     t7107-reset-pathspec-file                     (11 tests)
-PASS     t7110-reset-merge                             (21 tests)
-PASS     t7111-reset-table                             (42 tests)
-PASS     t7112-reset-submodule                         ( tests)
-PASS     t7113-post-index-change-hook                  (4 tests)
-FAIL     t7201-co                                      (failed 3 among 46)
-PASS     t7300-clean                                   ( tests)
-PASS     t7301-clean-interactive                       (23 tests)
-FAIL     t7400-submodule-basic                         (failed 3 among 124)
-PASS     t7401-submodule-summary                       (25 tests)
-FAIL     t7402-submodule-rebase                        (failed 1 among 6)
-PASS     t7403-submodule-sync                          (18 tests)
-PASS     t7406-submodule-update                        (70 tests)
-PASS     t7407-submodule-foreach                       (23 tests)
-PASS     t7408-submodule-reference                     (16 tests)
-PASS     t7409-submodule-detached-work-tree            (3 tests)
-FAIL     t7411-submodule-config                        (failed 14 among 20)
-PASS     t7412-submodule-absorbgitdirs                 (12 tests)
-FAIL     t7413-submodule-is-active                     (failed 6 among 10)
-PASS     t7414-submodule-mistakes                      (5 tests)
-PASS     t7416-submodule-dash-url                      (18 tests)
-PASS     t7417-submodule-path-url                      (5 tests)
-FAIL     t7418-submodule-sparse-gitmodules             (failed 2 among 9)
-PASS     t7419-submodule-set-branch                    (9 tests)
-PASS     t7420-submodule-set-url                       (3 tests)
-PASS     t7421-submodule-summary-add                   (5 tests)
-FAIL     t7422-submodule-output                        (failed 1 among 18)
-FAIL     t7423-submodule-symlinks                      (failed 3 among 6)
-FAIL     t7424-submodule-mixed-ref-formats             (failed 6 among 7)
-FAIL     t7425-submodule-gitdir-path-extension         (failed 16 among 23)
-FAIL     t7426-submodule-get-default-remote            (failed 9 among 15)
-FAIL     t7450-bad-git-dotfiles                        (failed 4 among 50)
-FAIL     t7500-commit-template-squash-signoff          (failed 3 among 57)
-FAIL     t7501-commit-basic-functionality              (failed 1 among 77)
-FAIL     t7502-commit-porcelain                        (failed 3 among 82)
-PASS     t7503-pre-commit-and-pre-merge-commit-hooks   (22 tests)
-PASS     t7504-commit-msg-hook                         ( tests)
-PASS     t7505-prepare-commit-msg-hook                 (23 tests)
-PASS     t7506-status-submodule                        (40 tests)
-FAIL     t7507-commit-verbose                          (failed 1 among 45)
-FAIL     t7508-status                                  (failed 1 among 126)
-PASS     t7509-commit-authorship                       (12 tests)
-FAIL     t7510-signed-commit                           (failed 1 among 28)
-PASS     t7511-status-index                            (24 tests)
-FAIL     t7512-status-help                             (failed 18 among 47)
-TIMEOUT  t7513-interpret-trailers
-PASS     t7514-commit-patch                            (3 tests)
-PASS     t7515-status-symlinks                         (3 tests)
-PASS     t7516-commit-races                            (2 tests)
-PASS     t7517-per-repo-email                          (16 tests)
-PASS     t7518-ident-corner-cases                      (5 tests)
-FAIL     t7519-status-fsmonitor                        (failed 4 among 33)
-PASS     t7520-ignored-hook-warning                    (5 tests)
-PASS     t7521-ignored-mode                            (12 tests)
-PASS     t7524-commit-summary                          (2 tests)
-PASS     t7525-status-rename                           (15 tests)
-PASS     t7526-commit-pathspec-file                    (11 tests)
-SKIP     t7527-builtin-fsmonitor                       (fsmonitor--daemon is not supported on this platform)
-FAIL     t7528-signed-commit-ssh                       (failed 1 among remaining 26)
-FAIL     t7600-merge                                   (failed 5 among 83)
-PASS     t7601-merge-pull-config                       (65 tests)
-PASS     t7602-merge-octopus-many                      (5 tests)
-PASS     t7603-merge-reduce-heads                      (13 tests)
-PASS     t7604-merge-custom-message                    (8 tests)
-PASS     t7605-merge-resolve                           (4 tests)
-PASS     t7606-merge-custom                            (4 tests)
-PASS     t7607-merge-state                             (1 tests)
-PASS     t7608-merge-messages                          (5 tests)
-FAIL     t7609-mergetool--lib                          (failed 1 among 1)
-FAIL     t7610-mergetool                               (failed 1 among 31)
-PASS     t7611-merge-abort                             (19 tests)
-PASS     t7612-merge-verify-signatures                 (16 tests)
-PASS     t7614-merge-signoff                           (4 tests)
-FAIL     t7615-diff-algo-with-mergy-operations         (failed 2 among 7)
-FAIL     t7700-repack                                  (failed 16 among 47)
-FAIL     t7701-repack-unpack-unreachable               (failed 3 among 9)
-PASS     t7702-repack-cyclic-alternate                 (2 tests)
-FAIL     t7703-repack-geometric                        (failed 6 among 18)
-FAIL     t7704-repack-cruft                            (failed 14 among 25)
-FAIL     t7800-difftool                                (failed 4 among 95)
-FAIL     t7810-grep                                    (failed 7 among 263)
-PASS     t7811-grep-open                               (10 tests)
-PASS     t7812-grep-icase-non-ascii                    (18 tests)
-PASS     t7813-grep-icase-iso                          (2 tests)
-PASS     t7814-grep-recurse-submodules                 ( tests)
-PASS     t7815-grep-binary                             ( tests)
-PASS     t7816-grep-binary-pattern                     (145 tests)
-PASS     t7817-grep-sparse-checkout                    (8 tests)
-FAIL     t7900-maintenance                             (failed 39 among 72)
-PASS     t8001-annotate                                (117 tests)
-FAIL     t8002-blame                                   (failed 1 among 135)
-PASS     t8003-blame-corner-cases                      (30 tests)
-PASS     t8004-blame-with-conflicts                    (3 tests)
-PASS     t8005-blame-i18n                              (5 tests)
-PASS     t8006-blame-textconv                          (16 tests)
-PASS     t8007-cat-file-textconv                       (15 tests)
-PASS     t8008-blame-formats                           (5 tests)
-PASS     t8009-blame-vs-topicbranches                  (2 tests)
-PASS     t8010-cat-file-filters                        (9 tests)
-PASS     t8011-blame-split-file                        (10 tests)
-FAIL     t8012-blame-colors                            (failed 1 among 120)
-FAIL     t8013-blame-ignore-revs                       (failed 4 among 19)
-PASS     t8014-blame-ignore-fuzzy                      (16 tests)
-FAIL     t8015-blame-diff-algorithm                    (failed 4 among 7)
-FAIL     t8020-last-modified                           (failed 27 among 28)
-FAIL     t9001-send-email                              (failed 169 among remaining 215)
-FAIL     t9002-column                                  (failed 1 among 16)
-FAIL     t9003-help-autocorrect                        (failed 1 among 9)
-SKIP     t9100-git-svn-basic                           (svn/platform)
-SKIP     t9101-git-svn-props                           (svn/platform)
-SKIP     t9102-git-svn-deep-rmdir                      (svn/platform)
-SKIP     t9103-git-svn-tracked-directory-removed       (svn/platform)
-SKIP     t9104-git-svn-follow-parent                   (svn/platform)
-SKIP     t9105-git-svn-commit-diff                     (svn/platform)
-SKIP     t9106-git-svn-commit-diff-clobber             (svn/platform)
-SKIP     t9107-git-svn-migrate                         (svn/platform)
-SKIP     t9108-git-svn-glob                            (svn/platform)
-SKIP     t9109-git-svn-multi-glob                      (svn/platform)
-SKIP     t9110-git-svn-use-svm-props                   (svn/platform)
-SKIP     t9111-git-svn-use-svnsync-props               (svn/platform)
-SKIP     t9112-git-svn-md5less-file                    (svn/platform)
-SKIP     t9113-git-svn-dcommit-new-file                (svn/platform)
-SKIP     t9114-git-svn-dcommit-merge                   (svn/platform)
-SKIP     t9115-git-svn-dcommit-funky-renames           (svn/platform)
-SKIP     t9116-git-svn-log                             (svn/platform)
-SKIP     t9117-git-svn-init-clone                      (svn/platform)
-SKIP     t9118-git-svn-funky-branch-names              (svn/platform)
-SKIP     t9119-git-svn-info                            (svn/platform)
-SKIP     t9120-git-svn-clone-with-percent-escapes      (svn/platform)
-SKIP     t9121-git-svn-fetch-renamed-dir               (svn/platform)
-SKIP     t9122-git-svn-author                          (svn/platform)
-SKIP     t9123-git-svn-rebuild-with-rewriteroot        (svn/platform)
-SKIP     t9124-git-svn-dcommit-auto-props              (svn/platform)
-SKIP     t9125-git-svn-multi-glob-branch-names         (svn/platform)
-SKIP     t9126-git-svn-follow-deleted-readded-directory (svn/platform)
-SKIP     t9127-git-svn-partial-rebuild                 (svn/platform)
-SKIP     t9128-git-svn-cmd-branch                      (svn/platform)
-SKIP     t9129-git-svn-i18n-commitencoding             (svn/platform)
-SKIP     t9130-git-svn-authors-file                    (svn/platform)
-SKIP     t9131-git-svn-empty-symlink                   (svn/platform)
-SKIP     t9132-git-svn-broken-symlink                  (svn/platform)
-SKIP     t9133-git-svn-nested-git-repo                 (svn/platform)
-SKIP     t9134-git-svn-ignore-paths                    (svn/platform)
-SKIP     t9135-git-svn-moved-branch-empty-file         (svn/platform)
-SKIP     t9136-git-svn-recreated-branch-empty-file     (svn/platform)
-SKIP     t9137-git-svn-dcommit-clobber-series          (svn/platform)
-SKIP     t9138-git-svn-authors-prog                    (svn/platform)
-SKIP     t9139-git-svn-non-utf8-commitencoding         (svn/platform)
-SKIP     t9140-git-svn-reset                           (svn/platform)
-SKIP     t9141-git-svn-multiple-branches               (svn/platform)
-SKIP     t9142-git-svn-shallow-clone                   (svn/platform)
-SKIP     t9143-git-svn-gc                              (svn/platform)
-SKIP     t9144-git-svn-old-rev_map                     (svn/platform)
-SKIP     t9145-git-svn-master-branch                   (svn/platform)
-SKIP     t9146-git-svn-empty-dirs                      (svn/platform)
-SKIP     t9147-git-svn-include-paths                   (svn/platform)
-SKIP     t9148-git-svn-propset                         (svn/platform)
-SKIP     t9150-svk-mergetickets                        (skipping git svn tests, svn not found)
-SKIP     t9151-svn-mergeinfo                           (svn/platform)
-SKIP     t9152-svn-empty-dirs-after-gc                 (svn/platform)
-SKIP     t9153-git-svn-rewrite-uuid                    (svn/platform)
-SKIP     t9154-git-svn-fancy-glob                      (svn/platform)
-SKIP     t9155-git-svn-fetch-deleted-tag               (svn/platform)
-SKIP     t9156-git-svn-fetch-deleted-tag-2             (svn/platform)
-SKIP     t9157-git-svn-fetch-merge                     (svn/platform)
-SKIP     t9158-git-svn-mergeinfo                       (svn/platform)
-SKIP     t9159-git-svn-no-parent-mergeinfo             (svn/platform)
-SKIP     t9160-git-svn-preserve-empty-dirs             (svn/platform)
-SKIP     t9161-git-svn-mergeinfo-push                  (svn/platform)
-SKIP     t9162-git-svn-dcommit-interactive             (svn/platform)
-SKIP     t9163-git-svn-reset-clears-caches             (svn/platform)
-SKIP     t9164-git-svn-dcommit-concurrent              (svn/platform)
-SKIP     t9165-git-svn-fetch-merge-branch-of-branch    (svn/platform)
-SKIP     t9166-git-svn-fetch-merge-branch-of-branch2   (svn/platform)
-SKIP     t9167-git-svn-cmd-branch-subproject           (svn/platform)
-SKIP     t9168-git-svn-partially-globbed-names         (svn/platform)
-SKIP     t9169-git-svn-dcommit-crlf                    (svn/platform)
-SKIP     t9200-git-cvsexportcommit                     (skipping git cvsexportcommit tests, cvs not found)
-FAIL     t9210-scalar                                  (failed 7 among 22)
-FAIL     t9211-scalar-clone                            (failed 4 among 14)
-TIMEOUT  t9300-fast-import
-TIMEOUT  t9301-fast-import-notes
-TIMEOUT  t9302-fast-import-unpack-limit
-TIMEOUT  t9303-fast-import-compression
-TIMEOUT  t9304-fast-import-marks
-TIMEOUT  t9305-fast-import-signatures
-TIMEOUT  t9306-fast-import-signed-tags
-TIMEOUT  t9350-fast-export
-TIMEOUT  t9351-fast-export-anonymize
-TIMEOUT  t9400-git-cvsserver-server
-TIMEOUT  t9401-git-cvsserver-crlf
-TIMEOUT  t9402-git-cvsserver-refs
-TIMEOUT  t9500-gitweb-standalone-no-errors
-TIMEOUT  t9501-gitweb-standalone-http-status
-TIMEOUT  t9502-gitweb-standalone-parse-output
-TIMEOUT  t9600-cvsimport
-TIMEOUT  t9601-cvsimport-vendor-branch
-TIMEOUT  t9602-cvsimport-branches-tags
-TIMEOUT  t9603-cvsimport-patchsets
-TIMEOUT  t9604-cvsimport-timestamps
-TIMEOUT  t9700-perl-git
-TIMEOUT  t9800-git-p4-basic
-TIMEOUT  t9801-git-p4-branch
-TIMEOUT  t9802-git-p4-filetype
-TIMEOUT  t9803-git-p4-shell-metachars
-TIMEOUT  t9804-git-p4-label
-TIMEOUT  t9805-git-p4-skip-submit-edit
-TIMEOUT  t9806-git-p4-options
-TIMEOUT  t9807-git-p4-submit
-TIMEOUT  t9808-git-p4-chdir
-TIMEOUT  t9809-git-p4-client-view
-TIMEOUT  t9810-git-p4-rcs
-TIMEOUT  t9811-git-p4-label-import
-TIMEOUT  t9812-git-p4-wildcards
-TIMEOUT  t9813-git-p4-preserve-users
-TIMEOUT  t9814-git-p4-rename
-TIMEOUT  t9815-git-p4-submit-fail
-TIMEOUT  t9816-git-p4-locked
-TIMEOUT  t9817-git-p4-exclude
-TIMEOUT  t9818-git-p4-block
-TIMEOUT  t9819-git-p4-case-folding
-TIMEOUT  t9820-git-p4-editor-handling
-TIMEOUT  t9821-git-p4-path-variations
-TIMEOUT  t9822-git-p4-path-encoding
-TIMEOUT  t9823-git-p4-mock-lfs
-TIMEOUT  t9824-git-p4-git-lfs
-TIMEOUT  t9825-git-p4-handle-utf16-without-bom
-TIMEOUT  t9826-git-p4-keep-empty-commits
-TIMEOUT  t9827-git-p4-change-filetype
-TIMEOUT  t9828-git-p4-map-user
-TIMEOUT  t9829-git-p4-jobs
-TIMEOUT  t9830-git-p4-symlink-dir
-TIMEOUT  t9831-git-p4-triggers
-TIMEOUT  t9832-unshelve
-TIMEOUT  t9833-errors
-TIMEOUT  t9834-git-p4-file-dir-bug
-TIMEOUT  t9835-git-p4-metadata-encoding-python2
-TIMEOUT  t9836-git-p4-metadata-encoding-python3
-TIMEOUT  t9850-shell
-TIMEOUT  t9901-git-web--browse
-TIMEOUT  t9902-completion
-TIMEOUT  t9903-bash-prompt
+PARTIAL t5000-tar-tree: # failed 2 among 90 test(s)
+PASS t5001-archive-attr: # passed all 44 test(s)
+PASS t5002-archive-attr-pattern: # passed all 19 test(s)
+PARTIAL t5003-archive-zip: # failed 1 among 78 test(s)
+SKIP t5004-archive-corner-cases: skipped or timeout
+PARTIAL t5100-mailinfo: # failed 2 among 52 test(s)
+PASS t5150-request-pull: # passed all 10 test(s)
+PARTIAL t5200-update-server-info: # failed 1 among 8 test(s)
+PARTIAL t5300-pack-object: # failed 48 among 63 test(s)
+PARTIAL t5301-sliding-window: # failed 2 among 6 test(s)
+SKIP t5302-pack-index: skipped or timeout
+PARTIAL t5303-pack-corruption-resilience: # failed 28 among 36 test(s)
+SKIP t5304-prune: skipped or timeout
+SKIP t5305-include-tag: skipped or timeout
+PASS t5306-pack-nobase: # passed all 4 test(s)
+PARTIAL t5307-pack-missing-commit: # failed 1 among 5 test(s)
+PARTIAL t5308-pack-detect-duplicates: # failed 2 among 6 test(s)
+PARTIAL t5309-pack-delta-cycles: # failed 4 among 7 test(s)
+SKIP t5310-pack-bitmaps: skipped or timeout
+PASS t5311-pack-bitmaps-shallow: # passed all 6 test(s)
+PARTIAL t5312-prune-corruption: # failed 5 among 11 test(s)
+PARTIAL t5313-pack-bounds-checks: # failed 8 among 9 test(s)
+PASS t5314-pack-cycle-detection: # passed all 2 test(s)
+PARTIAL t5315-pack-objects-compression: # failed 8 among 9 test(s)
+PARTIAL t5316-pack-delta-depth: # failed 3 among 5 test(s)
+PARTIAL t5317-pack-objects-filter-objects: # failed 23 among 33 test(s)
+SKIP t5318-commit-graph: skipped or timeout
+PARTIAL t5319-multi-pack-index: # failed 69 among 98 test(s)
+SKIP t5320-delta-islands: skipped or timeout
+PASS t5321-pack-large-objects: # passed all 2 test(s)
+PARTIAL t5322-pack-objects-sparse: # failed 8 among 11 test(s)
+PARTIAL t5323-pack-redundant: # failed 14 among 18 test(s)
+PARTIAL t5324-split-commit-graph: # failed 9 among 42 test(s)
+PARTIAL t5325-reverse-index: # failed 15 among 16 test(s)
+PARTIAL t5326-multi-pack-bitmaps: # failed 90 among 357 test(s)
+PARTIAL t5327-multi-pack-bitmaps-rev: # failed 64 among 314 test(s)
+SKIP t5328-commit-graph-64bit-time: skipped or timeout
+PARTIAL t5329-pack-objects-cruft: # failed 19 among 25 test(s)
+PARTIAL t5330-no-lazy-fetch-with-commit-graph: # failed 2 among 4 test(s)
+PARTIAL t5331-pack-objects-stdin: # failed 12 among 16 test(s)
+PARTIAL t5332-multi-pack-reuse: # failed 13 among 14 test(s)
+PARTIAL t5333-pseudo-merge-bitmaps: # failed 13 among 18 test(s)
+PARTIAL t5334-incremental-multi-pack-index: # failed 12 among 16 test(s)
+PARTIAL t5335-compact-multi-pack-index: # failed 10 among 10 test(s)
+PARTIAL t5351-unpack-large-objects: # failed 3 among 7 test(s)
+PARTIAL t5400-send-pack: # failed 1 among 17 test(s)
+PASS t5401-update-hooks: # passed all 13 test(s)
+PASS t5402-post-merge-hook: # passed all 7 test(s)
+PASS t5403-post-checkout-hook: # passed all 14 test(s)
+PASS t5404-tracking-branches: # passed all 7 test(s)
+PASS t5405-send-pack-rewind: # passed all 3 test(s)
+PASS t5406-remote-rejects: # passed all 3 test(s)
+PASS t5407-post-rewrite-hook: # passed all 17 test(s)
+PARTIAL t5408-send-pack-stdin: # failed 3 among 10 test(s)
+PASS t5409-colorize-remote-messages: # passed all 11 test(s)
+PARTIAL t5410-receive-pack: # failed 3 among 5 test(s)
+PARTIAL t5411-proc-receive-hook: # failed 81 among 178 test(s)
+SKIP t5500-fetch-pack: skipped or timeout
+PASS t5501-fetch-push-alternates: # passed all 3 test(s)
+PARTIAL t5502-quickfetch: # failed 1 among 7 test(s)
+PASS t5503-tagfollow: # passed all 12 test(s)
+PARTIAL t5504-fetch-receive-strict: # failed 12 among 29 test(s)
+PARTIAL t5505-remote: # failed 24 among remaining 129 test(s)
+PASS t5506-remote-groups: # passed all 9 test(s)
+PASS t5507-remote-environment: # passed all 5 test(s)
+PARTIAL t5509-fetch-push-namespaces: # failed 3 among 15 test(s)
+PARTIAL t5510-fetch: # failed 20 among 214 test(s)
+PASS t5511-refspec: # passed all 47 test(s)
+SKIP t5512-ls-remote: skipped or timeout
+PASS t5513-fetch-track: # passed all 2 test(s)
+PARTIAL t5514-fetch-multiple: # failed 12 among 25 test(s)
+PARTIAL t5515-fetch-merge-logic: # failed 64 among 65 test(s)
+PARTIAL t5516-fetch-push: # failed 79 among 124 test(s)
+PASS t5517-push-mirror: # passed all 13 test(s)
+PASS t5518-fetch-exit-status: # passed all 3 test(s)
+PASS t5519-push-alternates: # passed all 8 test(s)
+PARTIAL t5520-pull: # failed 9 among 80 test(s)
+PARTIAL t5521-pull-options: # failed 2 among 22 test(s)
+PASS t5522-pull-symlink: # passed all 4 test(s)
+PASS t5523-push-upstream: # passed all 17 test(s)
+PASS t5524-pull-msg: # passed all 3 test(s)
+PASS t5525-fetch-tagopt: # passed all 5 test(s)
+PARTIAL t5526-fetch-submodules: # failed 3 among 56 test(s)
+PARTIAL t5527-fetch-odd-refs: # failed 2 among 5 test(s)
+PASS t5528-push-default: # passed all remaining 31 test(s)
+PARTIAL t5529-push-errors: # failed 2 among 8 test(s)
+PARTIAL t5530-upload-pack-error: # failed 2 among 11 test(s)
+PASS t5531-deep-submodule-push: # passed all 29 test(s)
+PASS t5532-fetch-proxy: # passed all 5 test(s)
+PASS t5533-push-cas: # passed all 23 test(s)
+PASS t5534-push-signed: # passed all 13 test(s)
+PASS t5535-fetch-push-symref: # passed all 3 test(s)
+PASS t5536-fetch-conflicts: # passed all 7 test(s)
+PARTIAL t5537-fetch-shallow: # failed 1 among 15 test(s)
+PARTIAL t5538-push-shallow: # failed 6 among 8 test(s)
+SKIP t5539-fetch-http-shallow: skipped or timeout
+SKIP t5540-http-push-webdav: skipped or timeout
+SKIP t5541-http-push-smart: skipped or timeout
+SKIP t5542-push-http-shallow: skipped or timeout
+PARTIAL t5543-atomic-push: # failed 2 among 13 test(s)
+PASS t5544-pack-objects-hook: # passed all 7 test(s)
+PASS t5545-push-options: # passed all 10 test(s)
+PARTIAL t5546-receive-limits: # failed 3 among 17 test(s)
+PARTIAL t5547-push-quarantine: # failed 1 among 6 test(s)
+PARTIAL t5548-push-porcelain: # failed 10 among 12 test(s)
+SKIP t5549-fetch-push-http: skipped or timeout
+SKIP t5550-http-fetch-dumb: skipped or timeout
+SKIP t5551-http-fetch-smart: skipped or timeout
+PASS t5552-skipping-fetch-negotiator: # passed all 6 test(s)
+PASS t5553-set-upstream: # passed all 21 test(s)
+PASS t5554-noop-fetch-negotiator: # passed all 1 test(s)
+PARTIAL t5555-http-smart-common: # failed 7 among 10 test(s)
+SKIP t5557-http-get: skipped or timeout
+PARTIAL t5558-clone-bundle-uri: # failed 13 among 21 test(s)
+SKIP t5559-http-fetch-smart-http2: skipped or timeout
+PARTIAL t5560-http-backend-noserver: # failed 5 among 14 test(s)
+SKIP t5561-http-backend: skipped or timeout
+PARTIAL t5562-http-backend-content-length: # failed 3 among 16 test(s)
+SKIP t5563-simple-http-auth: skipped or timeout
+SKIP t5564-http-proxy: skipped or timeout
+PASS t5565-push-multiple: # passed all 2 test(s)
+SKIP t5570-git-daemon: skipped or timeout
+PASS t5571-pre-push-hook: # passed all 11 test(s)
+PARTIAL t5572-pull-submodule: # failed 2 among remaining 61 test(s)
+PASS t5573-pull-verify-signatures: # passed all 16 test(s)
+PARTIAL t5574-fetch-output: # failed 4 among 14 test(s)
+SKIP t5580-unc-paths: skipped or timeout
+SKIP t5581-http-curl-verbose: skipped or timeout
+PARTIAL t5582-fetch-negative-refspec: # failed 3 among 16 test(s)
+PARTIAL t5583-push-branches: # failed 1 among 8 test(s)
+PASS t5600-clone-fail-cleanup: # passed all 14 test(s)
+PARTIAL t5601-clone: # failed 52 among 109 test(s)
+PASS t5602-clone-remote-exec: # passed all 3 test(s)
+PASS t5603-clone-dirname: # passed all 47 test(s)
+PARTIAL t5604-clone-reference: # failed 3 among 34 test(s)
+PARTIAL t5605-clone-local: # failed 3 among 23 test(s)
+PARTIAL t5606-clone-options: # failed 1 among 21 test(s)
+PARTIAL t5607-clone-bundle: # failed 1 among 16 test(s)
+SKIP t5608-clone-2gb: skipped or timeout
+PASS t5609-clone-branch: # passed all 7 test(s)
+PASS t5610-clone-detached: # passed all remaining 12 test(s)
+PARTIAL t5611-clone-config: # failed 3 among 13 test(s)
+PARTIAL t5612-clone-refspec: # failed 2 among 13 test(s)
+PARTIAL t5613-info-alternate: # failed 4 among 13 test(s)
+PASS t5614-clone-submodules-shallow: # passed all 9 test(s)
+PASS t5615-alternate-env: # passed all 9 test(s)
+PARTIAL t5616-partial-clone: # failed 4 among 44 test(s)
+PASS t5617-clone-submodules-remote: # passed all 9 test(s)
+PASS t5618-alternate-refs: # passed all 6 test(s)
+SKIP t5619-clone-local-ambiguous-transport: skipped or timeout
+PARTIAL t5620-backfill: # failed 6 among 8 test(s)
+PARTIAL t5621-clone-revision: # failed 8 among 12 test(s)
+PARTIAL t5700-protocol-v1: # failed 4 among 18 test(s)
+PARTIAL t5701-git-serve: # failed 21 among 25 test(s)
+PARTIAL t5702-protocol-v2: # failed 11 among 60 test(s)
+PARTIAL t5703-upload-pack-ref-in-want: # failed 12 among 20 test(s)
+PARTIAL t5704-protocol-violations: # failed 1 among 3 test(s)
+PASS t5705-session-id-in-capabilities: # passed all 17 test(s)
+PARTIAL t5710-promisor-remote-capability: # failed 20 among 22 test(s)
+PARTIAL t5730-protocol-v2-bundle-uri-file: # failed 3 among 8 test(s)
+PARTIAL t5731-protocol-v2-bundle-uri-git: # failed 3 among 8 test(s)
+SKIP t5732-protocol-v2-bundle-uri-http: skipped or timeout
+PARTIAL t5750-bundle-uri-parse: # failed 13 among 13 test(s)
+PARTIAL t5801-remote-helpers: # failed 2 among remaining 34 test(s)
+PASS t5802-connect-helper: # passed all 8 test(s)
+PASS t5810-proto-disable-local: # passed all 54 test(s)
+PASS t5811-proto-disable-git: # passed all 26 test(s)
+SKIP t5812-proto-disable-http: skipped or timeout
+PASS t5813-proto-disable-ssh: # passed all 81 test(s)
+PASS t5814-proto-disable-ext: # passed all 27 test(s)
+PASS t5815-submodule-protos: # passed all 8 test(s)
+PASS t5900-repo-selection: # passed all 8 test(s)
+PARTIAL t6000-rev-list-misc: # failed 3 among 23 test(s)
+PASS t6001-rev-list-graft: # passed all 14 test(s)
+PASS t6002-rev-list-bisect: # passed all 53 test(s)
+PASS t6003-rev-list-topo-order: # passed all 36 test(s)
+PASS t6004-rev-list-path-optim: # passed all 7 test(s)
+PARTIAL t6005-rev-list-count: # failed 3 among 6 test(s)
+PARTIAL t6006-rev-list-format: # failed 2 among 80 test(s)
+PARTIAL t6007-rev-list-cherry-pick-file: # failed 13 among 23 test(s)
+PASS t6008-rev-list-submodule: # passed all 2 test(s)
+PARTIAL t6009-rev-list-parent: # failed 1 among 15 test(s)
+SKIP t6010-merge-base: skipped or timeout
+PARTIAL t6011-rev-list-with-bad-commit: # failed 3 among 6 test(s)
+PARTIAL t6012-rev-list-simplify: # failed 37 among 42 test(s)
+PASS t6013-rev-list-reverse-parents: # passed all 3 test(s)
+PASS t6014-rev-list-all: # passed all 4 test(s)
+PASS t6016-rev-list-graph-simplify-history: # passed all 12 test(s)
+PASS t6017-rev-list-stdin: # passed all 37 test(s)
+PARTIAL t6018-rev-list-glob: # failed 18 among remaining 91 test(s)
+PASS t6019-rev-list-ancestry-path: # passed all 18 test(s)
+PARTIAL t6020-bundle-misc: # failed 11 among 37 test(s)
+PARTIAL t6021-rev-list-exclude-hidden: # failed 18 among 62 test(s)
+PARTIAL t6022-rev-list-missing: # failed 30 among 40 test(s)
+PARTIAL t6030-bisect-porcelain: # failed 2 among 96 test(s)
+PARTIAL t6040-tracking-info: # failed 15 among 44 test(s)
+PASS t6041-bisect-submodule: # passed all remaining 12 test(s)
+SKIP t6050-replace: skipped or timeout
+PASS t6060-merge-index: # passed all 7 test(s)
+PASS t6100-rev-list-in-order: # passed all 3 test(s)
+PASS t6101-rev-parse-parents: # passed all 38 test(s)
+SKIP t6102-rev-list-unexpected-objects: skipped or timeout
+PASS t6110-rev-list-sparse: # passed all 2 test(s)
+PARTIAL t6111-rev-list-treesame: # failed 64 among 65 test(s)
+PASS t6112-rev-list-filters-objects: # passed all 54 test(s)
+PARTIAL t6113-rev-list-bitmap-filters: # failed 11 among 14 test(s)
+PARTIAL t6114-keep-packs: # failed 2 among 3 test(s)
+PASS t6115-rev-list-du: # passed all 17 test(s)
+PARTIAL t6120-describe: # failed 18 among remaining 103 test(s)
+PASS t6130-pathspec-noglob: # passed all 21 test(s)
+PASS t6131-pathspec-icase: # passed all 9 test(s)
+PARTIAL t6132-pathspec-exclude: # failed 2 among 31 test(s)
+PASS t6133-pathspec-rev-dwim: # passed all 6 test(s)
+PASS t6134-pathspec-in-submodule: # passed all 3 test(s)
+PARTIAL t6135-pathspec-with-attrs: # failed 11 among 37 test(s)
+PASS t6136-pathspec-in-bare: # passed all 3 test(s)
+PARTIAL t6137-pathspec-wildcards-literal: # failed 12 among 25 test(s)
+PASS t6200-fmt-merge-msg: # passed all 37 test(s)
+SKIP t6300-for-each-ref: skipped or timeout
+PARTIAL t6301-for-each-ref-errors: # failed 5 among 6 test(s)
+PARTIAL t6302-for-each-ref-filter: # failed 57 among 62 test(s)
+PARTIAL t6400-merge-df: # failed 3 among 7 test(s)
+PASS t6401-merge-criss-cross: # passed all 4 test(s)
+PARTIAL t6402-merge-rename: # failed 31 among 46 test(s)
+PARTIAL t6403-merge-file: # failed 3 among remaining 36 test(s)
+PASS t6404-recursive-merge: # passed all 6 test(s)
+PASS t6405-merge-symlinks: # passed all 7 test(s)
+PARTIAL t6406-merge-attr: # failed 4 among 13 test(s)
+PASS t6407-merge-binary: # passed all 3 test(s)
+PASS t6408-merge-up-to-date: # passed all 7 test(s)
+PASS t6409-merge-subtree: # passed all 12 test(s)
+PASS t6411-merge-filemode: # passed all 19 test(s)
+PASS t6412-merge-large-rename: # passed all 10 test(s)
+PASS t6413-merge-crlf: # passed all 3 test(s)
+PASS t6414-merge-rename-nocruft: # passed all 3 test(s)
+PARTIAL t6415-merge-dir-to-symlink: # failed 2 among remaining 23 test(s)
+PARTIAL t6416-recursive-corner-cases: # failed 13 among remaining 37 test(s)
+PASS t6417-merge-ours-theirs: # passed all 7 test(s)
+PASS t6418-merge-text-auto: # passed all 11 test(s)
+SKIP t6419-merge-ignorecase: skipped or timeout
+PASS t6421-merge-partial-clone: # passed all 3 test(s)
+PARTIAL t6422-merge-rename-corner-cases: # failed 11 among remaining 19 test(s)
+PARTIAL t6423-merge-rename-directories: # failed 30 among remaining 80 test(s)
+PARTIAL t6424-merge-unrelated-index-changes: # failed 1 among 19 test(s)
+PASS t6425-merge-rename-delete: # passed all 1 test(s)
+PARTIAL t6426-merge-skip-unneeded-updates: # failed 1 among 13 test(s)
+PARTIAL t6427-diff3-conflict-markers: # failed 1 among 9 test(s)
+PASS t6428-merge-conflicts-sparse: # passed all 2 test(s)
+PARTIAL t6429-merge-sequence-rename-caching: # failed 10 among 11 test(s)
+PARTIAL t6430-merge-recursive: # failed 4 among 36 test(s)
+PASS t6431-merge-criscross: # passed all 2 test(s)
+PASS t6432-merge-recursive-space-options: # passed all 11 test(s)
+PASS t6433-merge-toplevel: # passed all 15 test(s)
+PARTIAL t6434-merge-recursive-rename-options: # failed 14 among 27 test(s)
+PASS t6435-merge-sparse: # passed all 6 test(s)
+PASS t6436-merge-overwrite: # passed all 18 test(s)
+PARTIAL t6437-submodule-merge: # failed 5 among remaining 20 test(s)
+PASS t6438-submodule-directory-file-conflicts: # passed all remaining 48 test(s)
+PASS t6439-merge-co-error-msgs: # passed all 6 test(s)
+PARTIAL t6500-gc: # failed 19 among 35 test(s)
+SKIP t6501-freshen-objects: skipped or timeout
+PARTIAL t6600-test-reach: # failed 39 among 47 test(s)
+PARTIAL t6601-path-walk: # failed 14 among 15 test(s)
+PASS t6700-tree-depth: # passed all 10 test(s)
+PARTIAL t7001-mv: # failed 2 among 54 test(s)
+PARTIAL t7002-mv-sparse-checkout: # failed 16 among 22 test(s)
+SKIP t7003-filter-branch: skipped or timeout
+SKIP t7004-tag: skipped or timeout
+PASS t7005-editor: # passed all 12 test(s)
+PARTIAL t7006-pager: # failed 1 among 109 test(s)
+PASS t7007-show: # passed all 18 test(s)
+SKIP t7008-filter-branch-null-sha1: skipped or timeout
+PASS t7010-setup: # passed all 16 test(s)
+PASS t7011-skip-worktree-reading: # passed all 15 test(s)
+PARTIAL t7012-skip-worktree-writing: # failed 2 among 11 test(s)
+PASS t7030-verify-tag: # passed all 16 test(s)
+PASS t7031-verify-tag-signed-ssh: # passed all 14 test(s)
+PASS t7060-wtstatus: # passed all 17 test(s)
+PASS t7061-wtstatus-ignore: # passed all 25 test(s)
+PASS t7062-wtstatus-ignorecase: # passed all 1 test(s)
+PARTIAL t7063-status-untracked-cache: # failed 33 among 58 test(s)
+PASS t7064-wtstatus-pv2: # passed all 28 test(s)
+PASS t7101-reset-empty-subdirs: # passed all 10 test(s)
+PARTIAL t7102-reset: # failed 1 among 38 test(s)
+PASS t7103-reset-bare: # passed all 13 test(s)
+PASS t7104-reset-hard: # passed all 3 test(s)
+PARTIAL t7105-reset-patch: # failed 1 among 13 test(s)
+PASS t7106-reset-unborn-branch: # passed all 7 test(s)
+PASS t7107-reset-pathspec-file: # passed all 11 test(s)
+PASS t7110-reset-merge: # passed all 21 test(s)
+PASS t7111-reset-table: # passed all 42 test(s)
+PASS t7112-reset-submodule: # passed all remaining 70 test(s)
+PASS t7113-post-index-change-hook: # passed all 4 test(s)
+PARTIAL t7201-co: # failed 3 among 46 test(s)
+PARTIAL t7300-clean: # failed 41 among remaining 53 test(s)
+PARTIAL t7301-clean-interactive: # failed 21 among 23 test(s)
+PARTIAL t7400-submodule-basic: # failed 11 among 124 test(s)
+PASS t7401-submodule-summary: # passed all 25 test(s)
+PARTIAL t7402-submodule-rebase: # failed 1 among 6 test(s)
+PASS t7403-submodule-sync: # passed all 18 test(s)
+PASS t7406-submodule-update: # passed all 70 test(s)
+PASS t7407-submodule-foreach: # passed all 23 test(s)
+PARTIAL t7408-submodule-reference: # failed 6 among 16 test(s)
+PASS t7409-submodule-detached-work-tree: # passed all 3 test(s)
+PARTIAL t7411-submodule-config: # failed 14 among 20 test(s)
+PARTIAL t7412-submodule-absorbgitdirs: # failed 2 among 12 test(s)
+PARTIAL t7413-submodule-is-active: # failed 6 among 10 test(s)
+PASS t7414-submodule-mistakes: # passed all 5 test(s)
+PASS t7416-submodule-dash-url: # passed all 18 test(s)
+PASS t7417-submodule-path-url: # passed all 5 test(s)
+PARTIAL t7418-submodule-sparse-gitmodules: ok 9 - init submodule still works even after the previous add failed
+# failed 2 among 9 test(s)
+PASS t7419-submodule-set-branch: # passed all 9 test(s)
+PASS t7420-submodule-set-url: # passed all 3 test(s)
+PASS t7421-submodule-summary-add: # passed all 5 test(s)
+SKIP t7422-submodule-output: skipped or timeout
+PARTIAL t7423-submodule-symlinks: # failed 3 among 6 test(s)
+PARTIAL t7424-submodule-mixed-ref-formats: # failed 6 among 7 test(s)
+PARTIAL t7425-submodule-gitdir-path-extension: # failed 16 among 23 test(s)
+PARTIAL t7426-submodule-get-default-remote: # failed 9 among 15 test(s)
+SKIP t7450-bad-git-dotfiles: skipped or timeout
+PARTIAL t7500-commit-template-squash-signoff: # failed 1 among 57 test(s)
+PARTIAL t7501-commit-basic-functionality: # failed 1 among 77 test(s)
+PARTIAL t7502-commit-porcelain: # failed 3 among 82 test(s)
+PASS t7503-pre-commit-and-pre-merge-commit-hooks: # passed all 22 test(s)
+PASS t7504-commit-msg-hook: # passed all remaining 29 test(s)
+PASS t7505-prepare-commit-msg-hook: # passed all 23 test(s)
+PARTIAL t7506-status-submodule: # failed 8 among 40 test(s)
+PARTIAL t7507-commit-verbose: # failed 1 among 45 test(s)
+PARTIAL t7508-status: # failed 1 among 126 test(s)
+PASS t7509-commit-authorship: # passed all 12 test(s)
+PARTIAL t7510-signed-commit: # failed 1 among 28 test(s)
+PASS t7511-status-index: # passed all 24 test(s)
+PARTIAL t7512-status-help: # failed 18 among 47 test(s)
+SKIP t7513-interpret-trailers: skipped or timeout
+PASS t7514-commit-patch: # passed all 3 test(s)
+PASS t7515-status-symlinks: # passed all 3 test(s)
+PASS t7516-commit-races: # passed all 2 test(s)
+PASS t7517-per-repo-email: # passed all 16 test(s)
+PASS t7518-ident-corner-cases: # passed all 5 test(s)
+PARTIAL t7519-status-fsmonitor: # failed 14 among 33 test(s)
+PASS t7520-ignored-hook-warning: # passed all 5 test(s)
+PARTIAL t7521-ignored-mode: # failed 11 among 12 test(s)
+PASS t7524-commit-summary: # passed all 2 test(s)
+PASS t7525-status-rename: # passed all 15 test(s)
+PASS t7526-commit-pathspec-file: # passed all 11 test(s)
+SKIP t7527-builtin-fsmonitor: skipped or timeout
+PARTIAL t7528-signed-commit-ssh: # failed 1 among remaining 26 test(s)
+PARTIAL t7600-merge: # failed 7 among 83 test(s)
+PASS t7601-merge-pull-config: # passed all 65 test(s)
+PASS t7602-merge-octopus-many: # passed all 5 test(s)
+PASS t7603-merge-reduce-heads: # passed all 13 test(s)
+PASS t7604-merge-custom-message: # passed all 8 test(s)
+PASS t7605-merge-resolve: # passed all 4 test(s)
+PASS t7606-merge-custom: # passed all 4 test(s)
+PASS t7607-merge-state: # passed all 1 test(s)
+PASS t7608-merge-messages: # passed all 5 test(s)
+PARTIAL t7609-mergetool--lib: # failed 1 among 1 test(s)
+PARTIAL t7610-mergetool: # failed 26 among 31 test(s)
+PASS t7611-merge-abort: # passed all 19 test(s)
+PASS t7612-merge-verify-signatures: # passed all 16 test(s)
+PASS t7614-merge-signoff: # passed all 4 test(s)
+PARTIAL t7615-diff-algo-with-mergy-operations: # failed 2 among 7 test(s)
+PARTIAL t7700-repack: # failed 34 among 47 test(s)
+SKIP t7701-repack-unpack-unreachable: skipped or timeout
+PARTIAL t7702-repack-cyclic-alternate: # failed 1 among 2 test(s)
+PARTIAL t7703-repack-geometric: # failed 15 among 18 test(s)
+PARTIAL t7704-repack-cruft: # failed 20 among 25 test(s)
+PARTIAL t7800-difftool: # failed 4 among 95 test(s)
+SKIP t7810-grep: skipped or timeout
+PASS t7811-grep-open: # passed all 10 test(s)
+PASS t7812-grep-icase-non-ascii: # passed all 18 test(s)
+PASS t7813-grep-icase-iso: # passed all 2 test(s)
+PARTIAL t7814-grep-recurse-submodules: # failed 2 among remaining 27 test(s)
+PASS t7815-grep-binary: # passed all remaining 21 test(s)
+PASS t7816-grep-binary-pattern: # passed all 145 test(s)
+PASS t7817-grep-sparse-checkout: # passed all 8 test(s)
+PARTIAL t7900-maintenance: # failed 42 among 72 test(s)
+PASS t8001-annotate: # passed all 117 test(s)
+PARTIAL t8002-blame: # failed 1 among 135 test(s)
+PASS t8003-blame-corner-cases: # passed all 30 test(s)
+PASS t8004-blame-with-conflicts: # passed all 3 test(s)
+PASS t8005-blame-i18n: # passed all 5 test(s)
+PASS t8006-blame-textconv: # passed all 16 test(s)
+PASS t8007-cat-file-textconv: # passed all 15 test(s)
+PASS t8008-blame-formats: # passed all 5 test(s)
+PASS t8009-blame-vs-topicbranches: # passed all 2 test(s)
+PASS t8010-cat-file-filters: # passed all 9 test(s)
+PASS t8011-blame-split-file: # passed all 10 test(s)
+PARTIAL t8012-blame-colors: # failed 1 among 120 test(s)
+PARTIAL t8013-blame-ignore-revs: # failed 4 among 19 test(s)
+PASS t8014-blame-ignore-fuzzy: # passed all 16 test(s)
+PARTIAL t8015-blame-diff-algorithm: # failed 4 among 7 test(s)
+PARTIAL t8020-last-modified: # failed 27 among 28 test(s)
+PARTIAL t9001-send-email: # failed 169 among remaining 215 test(s)
+PARTIAL t9002-column: # failed 1 among 16 test(s)
+SKIP t9003-help-autocorrect: skipped or timeout
+SKIP t9100-git-svn-basic: skipped or timeout
+SKIP t9101-git-svn-props: skipped or timeout
+SKIP t9102-git-svn-deep-rmdir: skipped or timeout
+SKIP t9103-git-svn-tracked-directory-removed: skipped or timeout
+SKIP t9104-git-svn-follow-parent: skipped or timeout
+SKIP t9105-git-svn-commit-diff: skipped or timeout
+SKIP t9106-git-svn-commit-diff-clobber: skipped or timeout
+SKIP t9107-git-svn-migrate: skipped or timeout
+SKIP t9108-git-svn-glob: skipped or timeout
+SKIP t9109-git-svn-multi-glob: skipped or timeout
+SKIP t9110-git-svn-use-svm-props: skipped or timeout
+SKIP t9111-git-svn-use-svnsync-props: skipped or timeout
+SKIP t9112-git-svn-md5less-file: skipped or timeout
+SKIP t9113-git-svn-dcommit-new-file: skipped or timeout
+SKIP t9114-git-svn-dcommit-merge: skipped or timeout
+SKIP t9115-git-svn-dcommit-funky-renames: skipped or timeout
+SKIP t9116-git-svn-log: skipped or timeout
+SKIP t9117-git-svn-init-clone: skipped or timeout
+SKIP t9118-git-svn-funky-branch-names: skipped or timeout
+SKIP t9119-git-svn-info: skipped or timeout
+SKIP t9120-git-svn-clone-with-percent-escapes: skipped or timeout
+SKIP t9121-git-svn-fetch-renamed-dir: skipped or timeout
+SKIP t9122-git-svn-author: skipped or timeout
+SKIP t9123-git-svn-rebuild-with-rewriteroot: skipped or timeout
+SKIP t9124-git-svn-dcommit-auto-props: skipped or timeout
+SKIP t9125-git-svn-multi-glob-branch-names: skipped or timeout
+SKIP t9126-git-svn-follow-deleted-readded-directory: skipped or timeout
+SKIP t9127-git-svn-partial-rebuild: skipped or timeout
+SKIP t9128-git-svn-cmd-branch: skipped or timeout
+SKIP t9129-git-svn-i18n-commitencoding: skipped or timeout
+SKIP t9130-git-svn-authors-file: skipped or timeout
+SKIP t9131-git-svn-empty-symlink: skipped or timeout
+SKIP t9132-git-svn-broken-symlink: skipped or timeout
+SKIP t9133-git-svn-nested-git-repo: skipped or timeout
+SKIP t9134-git-svn-ignore-paths: skipped or timeout
+SKIP t9135-git-svn-moved-branch-empty-file: skipped or timeout
+SKIP t9136-git-svn-recreated-branch-empty-file: skipped or timeout
+SKIP t9137-git-svn-dcommit-clobber-series: skipped or timeout
+SKIP t9138-git-svn-authors-prog: skipped or timeout
+SKIP t9139-git-svn-non-utf8-commitencoding: skipped or timeout
+SKIP t9140-git-svn-reset: skipped or timeout
+SKIP t9141-git-svn-multiple-branches: skipped or timeout
+SKIP t9142-git-svn-shallow-clone: skipped or timeout
+SKIP t9143-git-svn-gc: skipped or timeout
+SKIP t9144-git-svn-old-rev_map: skipped or timeout
+SKIP t9145-git-svn-master-branch: skipped or timeout
+SKIP t9146-git-svn-empty-dirs: skipped or timeout
+SKIP t9147-git-svn-include-paths: skipped or timeout
+SKIP t9148-git-svn-propset: skipped or timeout
+SKIP t9150-svk-mergetickets: skipped or timeout
+SKIP t9151-svn-mergeinfo: skipped or timeout
+SKIP t9152-svn-empty-dirs-after-gc: skipped or timeout
+SKIP t9153-git-svn-rewrite-uuid: skipped or timeout
+SKIP t9154-git-svn-fancy-glob: skipped or timeout
+SKIP t9155-git-svn-fetch-deleted-tag: skipped or timeout
+SKIP t9156-git-svn-fetch-deleted-tag-2: skipped or timeout
+SKIP t9157-git-svn-fetch-merge: skipped or timeout
+SKIP t9158-git-svn-mergeinfo: skipped or timeout
+SKIP t9159-git-svn-no-parent-mergeinfo: skipped or timeout
+SKIP t9160-git-svn-preserve-empty-dirs: skipped or timeout
+SKIP t9161-git-svn-mergeinfo-push: skipped or timeout
+SKIP t9162-git-svn-dcommit-interactive: skipped or timeout
+SKIP t9163-git-svn-reset-clears-caches: skipped or timeout
+SKIP t9164-git-svn-dcommit-concurrent: skipped or timeout
+SKIP t9165-git-svn-fetch-merge-branch-of-branch: skipped or timeout
+SKIP t9166-git-svn-fetch-merge-branch-of-branch2: skipped or timeout
+SKIP t9167-git-svn-cmd-branch-subproject: skipped or timeout
+SKIP t9168-git-svn-partially-globbed-names: skipped or timeout
+SKIP t9169-git-svn-dcommit-crlf: skipped or timeout
+SKIP t9200-git-cvsexportcommit: skipped or timeout
+PARTIAL t9210-scalar: # failed 7 among 22 test(s)
+PARTIAL t9211-scalar-clone: # failed 4 among 14 test(s)
+SKIP t9300-fast-import: skipped or timeout
+PASS t9301-fast-import-notes: # passed all 17 test(s)
+PARTIAL t9302-fast-import-unpack-limit: # failed 2 among 3 test(s)
+PARTIAL t9303-fast-import-compression: # failed 16 among 16 test(s)
+PASS t9304-fast-import-marks: # passed all 8 test(s)
+PARTIAL t9305-fast-import-signatures: # failed 15 among 21 test(s)
+PARTIAL t9306-fast-import-signed-tags: # failed 5 among 10 test(s)
+PARTIAL t9350-fast-export: # failed 11 among remaining 72 test(s)
+PARTIAL t9351-fast-export-anonymize: # failed 1 among 17 test(s)
+SKIP t9400-git-cvsserver-server: skipped or timeout
+SKIP t9401-git-cvsserver-crlf: skipped or timeout
+SKIP t9402-git-cvsserver-refs: skipped or timeout
+SKIP t9500-gitweb-standalone-no-errors: skipped or timeout
+SKIP t9501-gitweb-standalone-http-status: skipped or timeout
+SKIP t9502-gitweb-standalone-parse-output: skipped or timeout
+SKIP t9600-cvsimport: skipped or timeout
+SKIP t9601-cvsimport-vendor-branch: skipped or timeout
+SKIP t9602-cvsimport-branches-tags: skipped or timeout
+SKIP t9603-cvsimport-patchsets: skipped or timeout
+SKIP t9604-cvsimport-timestamps: skipped or timeout
+PARTIAL t9700-perl-git: # failed 1 among 3 test(s)
+SKIP t9800-git-p4-basic: skipped or timeout
+SKIP t9801-git-p4-branch: skipped or timeout
+SKIP t9802-git-p4-filetype: skipped or timeout
+SKIP t9803-git-p4-shell-metachars: skipped or timeout
+SKIP t9804-git-p4-label: skipped or timeout
+SKIP t9805-git-p4-skip-submit-edit: skipped or timeout
+SKIP t9806-git-p4-options: skipped or timeout
+SKIP t9807-git-p4-submit: skipped or timeout
+SKIP t9808-git-p4-chdir: skipped or timeout
+SKIP t9809-git-p4-client-view: skipped or timeout
+SKIP t9810-git-p4-rcs: skipped or timeout
+SKIP t9811-git-p4-label-import: skipped or timeout
+SKIP t9812-git-p4-wildcards: skipped or timeout
+SKIP t9813-git-p4-preserve-users: skipped or timeout
+SKIP t9814-git-p4-rename: skipped or timeout
+SKIP t9815-git-p4-submit-fail: skipped or timeout
+SKIP t9816-git-p4-locked: skipped or timeout
+SKIP t9817-git-p4-exclude: skipped or timeout
+SKIP t9818-git-p4-block: skipped or timeout
+SKIP t9819-git-p4-case-folding: skipped or timeout
+SKIP t9820-git-p4-editor-handling: skipped or timeout
+SKIP t9821-git-p4-path-variations: skipped or timeout
+SKIP t9822-git-p4-path-encoding: skipped or timeout
+SKIP t9823-git-p4-mock-lfs: skipped or timeout
+SKIP t9824-git-p4-git-lfs: skipped or timeout
+SKIP t9825-git-p4-handle-utf16-without-bom: skipped or timeout
+SKIP t9826-git-p4-keep-empty-commits: skipped or timeout
+SKIP t9827-git-p4-change-filetype: skipped or timeout
+SKIP t9828-git-p4-map-user: skipped or timeout
+SKIP t9829-git-p4-jobs: skipped or timeout
+SKIP t9830-git-p4-symlink-dir: skipped or timeout
+SKIP t9831-git-p4-triggers: skipped or timeout
+SKIP t9832-unshelve: skipped or timeout
+SKIP t9833-errors: skipped or timeout
+SKIP t9834-git-p4-file-dir-bug: skipped or timeout
+SKIP t9835-git-p4-metadata-encoding-python2: skipped or timeout
+SKIP t9836-git-p4-metadata-encoding-python3: skipped or timeout
+PARTIAL t9850-shell: # failed 1 among 5 test(s)
+PASS t9901-git-web--browse: # passed all 5 test(s)
+PARTIAL t9902-completion: # failed 125 among remaining 260 test(s)
+PARTIAL t9903-bash-prompt: # failed 66 among 67 test(s)
 
 === SUMMARY ===
-Total test scripts: 530
-Passed:             221  (59.6% of runnable)
-Failed:             150
-Skip (deps/platform): 94
-Timeout/Error:        65
-
-Runnable tests (excl. skip/timeout): 371
-Pass rate of runnable: 59.6% (221/371)
-
-=== BY RANGE ===
-t5xxx: 77 pass / 71 fail / 22 skip / 2 timeout  (172 total)
-t6xxx: 61 pass / 30 fail / 1 skip / 0 timeout   (92 total)
-t7xxx: 72 pass / 39 fail / 1 skip / 1 timeout   (113 total)
-t8xxx: 11 pass / 5 fail / 0 skip / 0 timeout    (16 total)
-t9xxx: 0 pass / 5 fail / 70 skip / 62 timeout   (137 total)
-
-=== TESTS FLIPPED FROM FAIL TO PASS (by our CLI fixes) ===
-  t5531-deep-submodule-push      (was 2 failures → PASS)  [clone global flags fix]
-  t5611-clone-config             (was 2 failures → PASS)  [clone global flags fix]
-  t5810-proto-disable-local      (was 2 failures → PASS)  [clone global flags fix]
-  t5811-proto-disable-git        (was 2 failures → PASS)  [clone global flags fix]
-  t5813-proto-disable-ssh        (was 6 failures → PASS)  [clone global flags fix]
-  t5814-proto-disable-ext        (was 8 failures → PASS)  [clone global flags fix]
-  t6132-pathspec-exclude         (was 1 failure → PASS)   [-h exit code fix]
-  t7506-status-submodule         (was 7 failures → PASS)  [-h exit code fix]
-
-=== TESTS WITH REDUCED FAILURES ===
-  t5526-fetch-submodules:    4 → 3 failures
-  t5601-clone:              51 → 50 failures
-  t5606-clone-options:       2 → 1 failure
-  t6300-for-each-ref:       11 → 9 failures
-  t7400-submodule-basic:     4 → 3 failures
-  t7610-mergetool:           3 → 1 failure
-  t7810-grep:                9 → 7 failures
-  t9003-help-autocorrect:    4 → 1 failure
-
-=== CLI FIXES APPLIED ===
-1. --ref-format=<val>: only strip --ref-format=files; error on unknown ref formats
-2. Clone fallback: pass all original args (including global -c flags) to git
-3. -h exit code: exit 129 for C builtins (redirect stderr→stdout), exit 0 for shell scripts
-4. ls-remote: translate --branches → --heads for git 2.43 compat
-5. help.autocorrect: translate string values (false/no/off/show/immediate/never/prompt)
-   to numeric equivalents (0/-1) for git 2.43 compat
-
-=== ROOT CAUSES OF REMAINING FAILURES ===
-Most failures are due to git 2.43 vs 2.53 feature differences (not CLI issues):
-
-Feature gaps (can't fix without upgrading git):
-- followRemoteHEAD (remote HEAD tracking on fetch/clone)
-- --compact-summary (merge)
-- --trailer for tag
-- --revision for clone
-- --include-root-refs, --start-after for for-each-ref
-- status.compareBranches config
-- core.commentString / commentChar=auto
-- maintenance.autoDetach, --detach for gc
-- --filter, --write-midx for repack
-- bundle-uri support
-- proc-receive hook v2 protocol changes
-- Stricter integer parsing in rev-list --max-count, --skip
-- PCRE compiled into git (tests expect it absent)
-- UTF-8 locale not available (en_US.UTF-8)
-
-Protocol/internal changes:
-- upload-pack/receive-pack advertisement format
-- pack-objects delta handling
-- commit-graph, multi-pack-index new features
-- --end-of-options support for some commands
+Total: 530
+Passed: 181
+Failed/Partial: 185
+Skip/Error: 164

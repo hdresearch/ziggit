@@ -9012,8 +9012,25 @@ fn nativeCmdGc(allocator: std.mem.Allocator, args: [][]const u8, command_index: 
             prune_option = "never";
         } else if (std.mem.eql(u8, arg, "--no-cruft")) {
             no_cruft = true;
+        } else if (std.mem.eql(u8, arg, "--no-quiet")) {
+            quiet = false;
+        } else if (std.mem.eql(u8, arg, "--cruft")) {
+            // accepted
+        } else if (std.mem.eql(u8, arg, "--force")) {
+            // accepted
+        } else if (std.mem.eql(u8, arg, "--detach") or std.mem.eql(u8, arg, "--no-detach")) {
+            // accepted
+        } else if (std.mem.eql(u8, arg, "--keep-largest-pack")) {
+            // accepted
+        } else if (std.mem.startsWith(u8, arg, "--max-cruft-size=") or
+            std.mem.startsWith(u8, arg, "--expire-to="))
+        {
+            // accepted
         } else if (std.mem.eql(u8, arg, "-h")) {
-            try platform_impl.writeStdout("usage: git gc [--aggressive] [--auto] [--quiet] [--prune=<date>]\n");
+            try platform_impl.writeStderr("usage: git gc [--aggressive] [--auto] [--quiet] [--prune=<date>]\n");
+            std.process.exit(129);
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            try platform_impl.writeStderr("usage: git gc [--aggressive] [--auto] [--quiet] [--prune=<date>]\n");
             std.process.exit(129);
         }
     }
