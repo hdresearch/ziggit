@@ -157,26 +157,20 @@ pub fn compressorWriter(old_writer: anytype, options: anytype) !Compressor(@Type
 }
 
 /// Compress a slice of data using zlib, returning allocated compressed bytes.
+const c = @cImport({
+    @cInclude("zlib.h");
+});
+
 pub fn compressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var output = std.array_list.Managed(u8).init(allocator);
-    errdefer output.deinit();
-
-    // Use a fixed buffer stream as writer
-    var writer_adapter_buf: [65536]u8 = undefined;
-    var writer_adapter = output.writer().adaptToNewApi(&writer_adapter_buf);
-
-    var compress_buf: [65536]u8 = undefined;
-    var comp = flate.Compress.init(&writer_adapter.new_interface, &compress_buf, .{
-        .container = .zlib,
-    });
-
-    comp.writer.writeAll(input) catch return error.CompressionFailed;
-    comp.end() catch return error.CompressionFailed;
-
-    // Flush adapter
-    writer_adapter.new_interface.flush() catch return error.CompressionFailed;
-
-    return output.toOwnedSlice();
+    const bound = c.compressBound(@intCast(input.len));
+    const output = try allocator.alloc(u8, @intCast(bound));
+    errdefer allocator.free(output);
+    var dest_len: c.uLongf = @intCast(output.len);
+    const ret = c.compress2(output.ptr, &dest_len, input.ptr, @intCast(input.len), 1);
+    if (ret != c.Z_OK) return error.CompressionFailed;
+    const result = try allocator.dupe(u8, output[0..@intCast(dest_len)]);
+    allocator.free(output);
+    return result;
 }
 
 /// Decompress a slice of zlib data, returning allocated decompressed bytes.
