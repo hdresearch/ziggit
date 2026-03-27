@@ -18852,11 +18852,827 @@ fn nativeCmdStash(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     }
 }
 
-fn nativeCmdApply(_: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
-    // Basic stub for git apply
-    _ = args;
-    try platform_impl.writeStderr("error: git apply not yet fully implemented natively\n");
-    std.process.exit(1);
+fn nativeCmdApply(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    var check_only = false;
+    var stat_only = false;
+    var summary_only = false;
+    var numstat_flag = false;
+    var reverse = false;
+    var cached = false;
+    var index_flag = false;
+    var apply_flag = true; // default is to apply
+    var recount = false;
+    var allow_empty = false;
+    var verbose = false;
+    var p_value: u32 = 1;
+    var patch_files = std.array_list.Managed([]const u8).init(allocator);
+    defer patch_files.deinit();
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--check")) {
+            check_only = true;
+        } else if (std.mem.eql(u8, arg, "--stat")) {
+            stat_only = true;
+            apply_flag = false;
+        } else if (std.mem.eql(u8, arg, "--summary")) {
+            summary_only = true;
+            apply_flag = false;
+        } else if (std.mem.eql(u8, arg, "--numstat")) {
+            numstat_flag = true;
+            apply_flag = false;
+        } else if (std.mem.eql(u8, arg, "-R") or std.mem.eql(u8, arg, "--reverse")) {
+            reverse = true;
+        } else if (std.mem.eql(u8, arg, "--cached")) {
+            cached = true;
+        } else if (std.mem.eql(u8, arg, "--index")) {
+            index_flag = true;
+        } else if (std.mem.eql(u8, arg, "--apply")) {
+            apply_flag = true;
+        } else if (std.mem.eql(u8, arg, "--recount")) {
+            recount = true;
+        } else if (std.mem.eql(u8, arg, "--allow-empty")) {
+            allow_empty = true;
+        } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
+            verbose = true;
+        } else if (std.mem.startsWith(u8, arg, "-p")) {
+            if (arg.len > 2) {
+                p_value = std.fmt.parseInt(u32, arg[2..], 10) catch 1;
+            } else if (args.next()) |next| {
+                p_value = std.fmt.parseInt(u32, next, 10) catch 1;
+            }
+        } else if (std.mem.eql(u8, arg, "--no-add") or
+            std.mem.eql(u8, arg, "--binary") or
+            std.mem.eql(u8, arg, "--3way") or std.mem.eql(u8, arg, "-3") or
+            std.mem.eql(u8, arg, "--reject") or
+            std.mem.eql(u8, arg, "--unidiff-zero") or
+            std.mem.eql(u8, arg, "--allow-overlap") or
+            std.mem.eql(u8, arg, "--inaccurate-eof") or
+            std.mem.eql(u8, arg, "--unsafe-paths"))
+        {
+            // Accept known flags
+        } else if (std.mem.startsWith(u8, arg, "--whitespace=") or
+            std.mem.startsWith(u8, arg, "--directory=") or
+            std.mem.startsWith(u8, arg, "--exclude=") or
+            std.mem.startsWith(u8, arg, "--include="))
+        {
+            // Accept known flags with values
+        } else if (std.mem.eql(u8, arg, "--whitespace") or
+            std.mem.eql(u8, arg, "--directory") or
+            std.mem.eql(u8, arg, "--exclude") or
+            std.mem.eql(u8, arg, "--include"))
+        {
+            _ = args.next();
+        } else if (std.mem.eql(u8, arg, "-")) {
+            // Read from stdin
+            try patch_files.append("-");
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            try patch_files.append(arg);
+        }
+    }
+
+    _ = &cached;
+    _ = &index_flag;
+    _ = &recount;
+    _ = &allow_empty;
+
+    // Read patch content
+    var all_patch_data = std.array_list.Managed(u8).init(allocator);
+    defer all_patch_data.deinit();
+
+    if (patch_files.items.len == 0) {
+        // Read from stdin
+        const stdin_data = readStdin(allocator, 100 * 1024 * 1024) catch |err| {
+            const msg = try std.fmt.allocPrint(allocator, "error: reading stdin: {}\n", .{err});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        };
+        defer allocator.free(stdin_data);
+        try all_patch_data.appendSlice(stdin_data);
+    } else {
+        for (patch_files.items) |pf| {
+            if (std.mem.eql(u8, pf, "-")) {
+                const stdin_data = readStdin(allocator, 100 * 1024 * 1024) catch continue;
+                defer allocator.free(stdin_data);
+                try all_patch_data.appendSlice(stdin_data);
+            } else {
+                const data = platform_impl.fs.readFile(allocator, pf) catch |err| {
+                    const msg = try std.fmt.allocPrint(allocator, "error: can't open patch '{s}': {}\n", .{ pf, err });
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(128);
+                };
+                defer allocator.free(data);
+                try all_patch_data.appendSlice(data);
+            }
+        }
+    }
+
+    // Parse patches
+    var patches = parsePatchSet(allocator, all_patch_data.items, p_value) catch |err| {
+        const msg = try std.fmt.allocPrint(allocator, "error: patch parsing failed: {}\n", .{err});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        std.process.exit(128);
+    };
+    defer {
+        for (patches.items) |*p| p.deinit(allocator);
+        patches.deinit();
+    }
+
+    if (patches.items.len == 0 and !stat_only and !numstat_flag and !summary_only) {
+        // No patches found - could be unrecognized input
+        try platform_impl.writeStderr("error: unrecognized input\n");
+        std.process.exit(128);
+    }
+
+    // Apply or check each patch
+    for (patches.items) |*patch| {
+        if (stat_only) {
+            try outputPatchStat(allocator, patch, platform_impl);
+            continue;
+        }
+        if (numstat_flag) {
+            try outputPatchNumstat(allocator, patch, platform_impl);
+            continue;
+        }
+        if (summary_only) {
+            try outputPatchSummary(allocator, patch, platform_impl);
+            continue;
+        }
+
+        if (check_only) {
+            // Just verify the patch can apply
+            _ = applyOnePatch(allocator, patch, reverse, true, platform_impl) catch |err| {
+                const msg = try std.fmt.allocPrint(allocator, "error: patch failed: {s}: {}\n", .{ patch.new_path orelse patch.old_path orelse "unknown", err });
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(1);
+            };
+        } else if (apply_flag) {
+            _ = applyOnePatch(allocator, patch, reverse, false, platform_impl) catch |err| {
+                const msg = try std.fmt.allocPrint(allocator, "error: patch failed: {s}: {}\n", .{ patch.new_path orelse patch.old_path orelse "unknown", err });
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(1);
+            };
+            if (verbose) {
+                const path = patch.new_path orelse patch.old_path orelse "unknown";
+                const msg = try std.fmt.allocPrint(allocator, "Applying: {s}\n", .{path});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+            }
+        }
+    }
+}
+
+const PatchHunk = struct {
+    old_start: u32,
+    old_count: u32,
+    new_start: u32,
+    new_count: u32,
+    lines: std.array_list.Managed(PatchLine),
+
+    fn deinit(self: *PatchHunk, alloc: std.mem.Allocator) void {
+        for (self.lines.items) |*l| l.deinit(alloc);
+        self.lines.deinit();
+    }
+};
+
+const PatchLineType = enum { context, add, remove };
+
+const PatchLine = struct {
+    line_type: PatchLineType,
+    content: []const u8,
+
+    fn deinit(self: *PatchLine, alloc: std.mem.Allocator) void {
+        alloc.free(self.content);
+    }
+};
+
+const Patch = struct {
+    old_path: ?[]const u8,
+    new_path: ?[]const u8,
+    is_new_file: bool,
+    is_delete: bool,
+    new_mode: ?u32,
+    old_mode: ?u32,
+    is_binary: bool,
+    hunks: std.array_list.Managed(PatchHunk),
+    added: u32,
+    removed: u32,
+
+    fn deinit(self: *Patch, alloc: std.mem.Allocator) void {
+        if (self.old_path) |p| alloc.free(p);
+        if (self.new_path) |p| alloc.free(p);
+        for (self.hunks.items) |*h| h.deinit(alloc);
+        self.hunks.deinit();
+    }
+};
+
+fn parsePatchSet(allocator: std.mem.Allocator, data: []const u8, p_value: u32) !std.array_list.Managed(Patch) {
+    var patches = std.array_list.Managed(Patch).init(allocator);
+    var lines_iter = std.mem.splitScalar(u8, data, '\n');
+    var lines = std.array_list.Managed([]const u8).init(allocator);
+    defer lines.deinit();
+    while (lines_iter.next()) |line| try lines.append(line);
+
+    var i: usize = 0;
+    while (i < lines.items.len) {
+        // Look for "diff --git" or "---" header
+        const line = lines.items[i];
+        if (std.mem.startsWith(u8, line, "diff --git ")) {
+            var patch = try parseSinglePatch(allocator, lines.items, &i, p_value);
+            _ = &patch;
+            try patches.append(patch);
+        } else if (std.mem.startsWith(u8, line, "--- ") and i + 1 < lines.items.len and std.mem.startsWith(u8, lines.items[i + 1], "+++ ")) {
+            // Traditional diff format without "diff --git" header
+            var patch = try parseTraditionalPatch(allocator, lines.items, &i, p_value);
+            _ = &patch;
+            try patches.append(patch);
+        } else {
+            i += 1;
+        }
+    }
+    return patches;
+}
+
+fn stripPath(path: []const u8, p_value: u32) []const u8 {
+    var result = path;
+    var strips: u32 = 0;
+    while (strips < p_value) {
+        if (std.mem.indexOf(u8, result, "/")) |slash| {
+            result = result[slash + 1 ..];
+            strips += 1;
+        } else break;
+    }
+    return result;
+}
+
+fn parseSinglePatch(allocator: std.mem.Allocator, lines: []const []const u8, pos: *usize, p_value: u32) !Patch {
+    var patch = Patch{
+        .old_path = null,
+        .new_path = null,
+        .is_new_file = false,
+        .is_delete = false,
+        .new_mode = null,
+        .old_mode = null,
+        .is_binary = false,
+        .hunks = std.array_list.Managed(PatchHunk).init(allocator),
+        .added = 0,
+        .removed = 0,
+    };
+
+    // Parse "diff --git a/path b/path"
+    const diff_line = lines[pos.*];
+    if (std.mem.startsWith(u8, diff_line, "diff --git ")) {
+        const rest = diff_line["diff --git ".len..];
+        // Find the separator " b/" - tricky because paths can have spaces
+        if (std.mem.indexOf(u8, rest, " b/")) |bpos| {
+            const a_path = rest[0..bpos];
+            const b_path = rest[bpos + 1 ..];
+            patch.old_path = try allocator.dupe(u8, stripPath(a_path, p_value));
+            patch.new_path = try allocator.dupe(u8, stripPath(b_path, p_value));
+        }
+    }
+    pos.* += 1;
+
+    // Parse extended header lines
+    while (pos.* < lines.len) {
+        const line = lines[pos.*];
+        if (std.mem.startsWith(u8, line, "new file mode ")) {
+            patch.is_new_file = true;
+            patch.new_mode = std.fmt.parseInt(u32, std.mem.trim(u8, line["new file mode ".len..], " \t\r"), 8) catch null;
+            pos.* += 1;
+        } else if (std.mem.startsWith(u8, line, "deleted file mode ")) {
+            patch.is_delete = true;
+            pos.* += 1;
+        } else if (std.mem.startsWith(u8, line, "old mode ")) {
+            patch.old_mode = std.fmt.parseInt(u32, std.mem.trim(u8, line["old mode ".len..], " \t\r"), 8) catch null;
+            pos.* += 1;
+        } else if (std.mem.startsWith(u8, line, "new mode ")) {
+            patch.new_mode = std.fmt.parseInt(u32, std.mem.trim(u8, line["new mode ".len..], " \t\r"), 8) catch null;
+            pos.* += 1;
+        } else if (std.mem.startsWith(u8, line, "index ")) {
+            pos.* += 1;
+        } else if (std.mem.startsWith(u8, line, "similarity index") or
+            std.mem.startsWith(u8, line, "dissimilarity index") or
+            std.mem.startsWith(u8, line, "rename from ") or
+            std.mem.startsWith(u8, line, "rename to ") or
+            std.mem.startsWith(u8, line, "copy from ") or
+            std.mem.startsWith(u8, line, "copy to "))
+        {
+            if (std.mem.startsWith(u8, line, "rename to ") or std.mem.startsWith(u8, line, "copy to ")) {
+                const new_name = std.mem.trim(u8, line[std.mem.indexOf(u8, line, " to ").? + 4 ..], " \t\r");
+                if (patch.new_path) |p| allocator.free(p);
+                patch.new_path = try allocator.dupe(u8, new_name);
+            }
+            pos.* += 1;
+        } else if (std.mem.startsWith(u8, line, "Binary files") or std.mem.startsWith(u8, line, "GIT binary patch")) {
+            patch.is_binary = true;
+            pos.* += 1;
+            // Skip binary content
+            while (pos.* < lines.len and !std.mem.startsWith(u8, lines[pos.*], "diff --git ")) {
+                pos.* += 1;
+            }
+            break;
+        } else if (std.mem.startsWith(u8, line, "--- ")) {
+            // Start of actual diff content
+            break;
+        } else if (std.mem.startsWith(u8, line, "diff --git ")) {
+            // Next patch
+            break;
+        } else {
+            pos.* += 1;
+        }
+    }
+
+    // Parse --- and +++ lines
+    if (pos.* < lines.len and std.mem.startsWith(u8, lines[pos.*], "--- ")) {
+        const old_line = lines[pos.*]["--- ".len..];
+        if (!std.mem.eql(u8, old_line, "/dev/null")) {
+            const stripped = stripPath(old_line, p_value);
+            if (patch.old_path == null) {
+                patch.old_path = try allocator.dupe(u8, stripped);
+            }
+        }
+        pos.* += 1;
+    }
+    if (pos.* < lines.len and std.mem.startsWith(u8, lines[pos.*], "+++ ")) {
+        const new_line = lines[pos.*]["+++ ".len..];
+        if (!std.mem.eql(u8, new_line, "/dev/null")) {
+            const stripped = stripPath(new_line, p_value);
+            if (patch.new_path) |p| allocator.free(p);
+            patch.new_path = try allocator.dupe(u8, stripped);
+        }
+        pos.* += 1;
+    }
+
+    // Parse hunks
+    while (pos.* < lines.len) {
+        const line = lines[pos.*];
+        if (std.mem.startsWith(u8, line, "@@ ")) {
+            const hunk = try parseHunk(allocator, lines, pos);
+            patch.added += hunk.new_count;
+            patch.removed += hunk.old_count;
+            try patch.hunks.append(hunk);
+        } else if (std.mem.startsWith(u8, line, "diff --git ")) {
+            break;
+        } else {
+            pos.* += 1;
+        }
+    }
+
+    return patch;
+}
+
+fn parseTraditionalPatch(allocator: std.mem.Allocator, lines: []const []const u8, pos: *usize, p_value: u32) !Patch {
+    var patch = Patch{
+        .old_path = null,
+        .new_path = null,
+        .is_new_file = false,
+        .is_delete = false,
+        .new_mode = null,
+        .old_mode = null,
+        .is_binary = false,
+        .hunks = std.array_list.Managed(PatchHunk).init(allocator),
+        .added = 0,
+        .removed = 0,
+    };
+
+    // Parse --- line
+    if (pos.* < lines.len and std.mem.startsWith(u8, lines[pos.*], "--- ")) {
+        const old_line = lines[pos.*]["--- ".len..];
+        if (!std.mem.eql(u8, old_line, "/dev/null")) {
+            patch.old_path = try allocator.dupe(u8, stripPath(old_line, p_value));
+        } else {
+            patch.is_new_file = true;
+        }
+        pos.* += 1;
+    }
+    if (pos.* < lines.len and std.mem.startsWith(u8, lines[pos.*], "+++ ")) {
+        const new_line = lines[pos.*]["+++ ".len..];
+        if (!std.mem.eql(u8, new_line, "/dev/null")) {
+            patch.new_path = try allocator.dupe(u8, stripPath(new_line, p_value));
+        } else {
+            patch.is_delete = true;
+        }
+        pos.* += 1;
+    }
+
+    // Parse hunks
+    while (pos.* < lines.len) {
+        const line = lines[pos.*];
+        if (std.mem.startsWith(u8, line, "@@ ")) {
+            const hunk = try parseHunk(allocator, lines, pos);
+            patch.added += hunk.new_count;
+            patch.removed += hunk.old_count;
+            try patch.hunks.append(hunk);
+        } else if (std.mem.startsWith(u8, line, "diff ") or
+            std.mem.startsWith(u8, line, "--- "))
+        {
+            break;
+        } else {
+            pos.* += 1;
+        }
+    }
+
+    return patch;
+}
+
+fn parseHunk(allocator: std.mem.Allocator, lines: []const []const u8, pos: *usize) !PatchHunk {
+    const header = lines[pos.*];
+    // Parse @@ -old_start,old_count +new_start,new_count @@
+    var old_start: u32 = 1;
+    var old_count: u32 = 1;
+    var new_start: u32 = 1;
+    var new_count: u32 = 1;
+
+    if (std.mem.indexOf(u8, header, "-")) |minus_pos| {
+        const after_minus = header[minus_pos + 1 ..];
+        if (std.mem.indexOf(u8, after_minus, " +")) |plus_pos| {
+            const old_part = after_minus[0..plus_pos];
+            if (std.mem.indexOf(u8, old_part, ",")) |comma| {
+                old_start = std.fmt.parseInt(u32, old_part[0..comma], 10) catch 1;
+                old_count = std.fmt.parseInt(u32, old_part[comma + 1 ..], 10) catch 1;
+            } else {
+                old_start = std.fmt.parseInt(u32, old_part, 10) catch 1;
+                old_count = 1;
+            }
+            const after_plus = after_minus[plus_pos + 2 ..];
+            const new_end = std.mem.indexOf(u8, after_plus, " ") orelse std.mem.indexOf(u8, after_plus, "@") orelse after_plus.len;
+            const new_part = after_plus[0..new_end];
+            if (std.mem.indexOf(u8, new_part, ",")) |comma| {
+                new_start = std.fmt.parseInt(u32, new_part[0..comma], 10) catch 1;
+                new_count = std.fmt.parseInt(u32, new_part[comma + 1 ..], 10) catch 1;
+            } else {
+                new_start = std.fmt.parseInt(u32, new_part, 10) catch 1;
+                new_count = 1;
+            }
+        }
+    }
+
+    pos.* += 1;
+
+    var hunk = PatchHunk{
+        .old_start = old_start,
+        .old_count = old_count,
+        .new_start = new_start,
+        .new_count = new_count,
+        .lines = std.array_list.Managed(PatchLine).init(allocator),
+    };
+
+    while (pos.* < lines.len) {
+        const line = lines[pos.*];
+        if (line.len == 0) {
+            // Empty line could be context (empty line in diff) or end of patch
+            // Check if there are more diff lines after this
+            var has_more_diff = false;
+            var look_ahead = pos.* + 1;
+            while (look_ahead < lines.len) : (look_ahead += 1) {
+                const la = lines[look_ahead];
+                if (la.len == 0) continue;
+                if (la[0] == '+' or la[0] == '-' or la[0] == ' ' or la[0] == '@') {
+                    has_more_diff = true;
+                    break;
+                }
+                if (std.mem.startsWith(u8, la, "diff ") or std.mem.startsWith(u8, la, "--- ")) {
+                    break;
+                }
+                break;
+            }
+            if (!has_more_diff) {
+                // End of patch/hunk
+                pos.* += 1;
+                break;
+            }
+            // Treat empty line as context (empty line in diff output)
+            try hunk.lines.append(.{ .line_type = .context, .content = try allocator.dupe(u8, "") });
+            pos.* += 1;
+        } else if (line[0] == '+') {
+            try hunk.lines.append(.{ .line_type = .add, .content = try allocator.dupe(u8, line[1..]) });
+            pos.* += 1;
+        } else if (line[0] == '-') {
+            try hunk.lines.append(.{ .line_type = .remove, .content = try allocator.dupe(u8, line[1..]) });
+            pos.* += 1;
+        } else if (line[0] == ' ') {
+            try hunk.lines.append(.{ .line_type = .context, .content = try allocator.dupe(u8, line[1..]) });
+            pos.* += 1;
+        } else if (std.mem.startsWith(u8, line, "\\ No newline at end of file")) {
+            // Mark last line as having no trailing newline (handled during apply)
+            pos.* += 1;
+        } else if (std.mem.startsWith(u8, line, "@@") or
+            std.mem.startsWith(u8, line, "diff ") or
+            std.mem.startsWith(u8, line, "--- "))
+        {
+            break;
+        } else {
+            pos.* += 1;
+        }
+    }
+
+    return hunk;
+}
+
+fn applyOnePatch(allocator: std.mem.Allocator, patch: *const Patch, reverse: bool, check_only: bool, platform_impl: anytype) !void {
+    const target_path = if (reverse)
+        patch.old_path orelse return error.NoPath
+    else
+        patch.new_path orelse patch.old_path orelse return error.NoPath;
+
+    const source_path = if (reverse)
+        patch.new_path orelse patch.old_path orelse return error.NoPath
+    else
+        patch.old_path;
+
+    // Handle new file creation
+    if ((patch.is_new_file and !reverse) or (patch.is_delete and reverse)) {
+        if (check_only) return;
+        var content = std.array_list.Managed(u8).init(allocator);
+        defer content.deinit();
+        for (patch.hunks.items) |hunk| {
+            for (hunk.lines.items) |line| {
+                const lt = if (reverse) reverseLineType(line.line_type) else line.line_type;
+                if (lt == .add) {
+                    try content.appendSlice(line.content);
+                    try content.append('\n');
+                }
+            }
+        }
+        // Create parent directories if needed
+        if (std.fs.path.dirname(target_path)) |dir| {
+            if (dir.len > 0) {
+                std.fs.cwd().makePath(dir) catch {};
+            }
+        }
+        platform_impl.fs.writeFile(target_path, content.items) catch return error.WriteError;
+        return;
+    }
+
+    // Handle file deletion
+    if ((patch.is_delete and !reverse) or (patch.is_new_file and reverse)) {
+        if (check_only) return;
+        std.fs.cwd().deleteFile(target_path) catch {};
+        return;
+    }
+
+    // Read existing file
+    const read_path = source_path orelse target_path;
+    const original = platform_impl.fs.readFile(allocator, read_path) catch {
+        // File doesn't exist - if all hunks are additions from line 0/1, create it
+        if (patch.hunks.items.len > 0) {
+            var content = std.array_list.Managed(u8).init(allocator);
+            defer content.deinit();
+            for (patch.hunks.items) |hunk| {
+                for (hunk.lines.items) |line| {
+                    const lt = if (reverse) reverseLineType(line.line_type) else line.line_type;
+                    if (lt == .add) {
+                        try content.appendSlice(line.content);
+                        try content.append('\n');
+                    }
+                }
+            }
+            if (!check_only) {
+                if (std.fs.path.dirname(target_path)) |dir| {
+                    if (dir.len > 0) std.fs.cwd().makePath(dir) catch {};
+                }
+                platform_impl.fs.writeFile(target_path, content.items) catch return error.WriteError;
+            }
+            return;
+        }
+        return error.FileNotFound;
+    };
+    defer allocator.free(original);
+
+    // Split into lines
+    var orig_lines = std.array_list.Managed([]const u8).init(allocator);
+    defer orig_lines.deinit();
+    var line_iter = std.mem.splitScalar(u8, original, '\n');
+    while (line_iter.next()) |line| try orig_lines.append(line);
+    // Remove trailing empty line from split if file ended with newline
+    if (orig_lines.items.len > 0 and orig_lines.items[orig_lines.items.len - 1].len == 0) {
+        _ = orig_lines.pop();
+    }
+
+    // Apply hunks using context matching
+    var result_lines = std.array_list.Managed([]const u8).init(allocator);
+    defer result_lines.deinit();
+
+    var orig_idx: usize = 0;
+
+    for (patch.hunks.items) |hunk| {
+        // Build the context/remove lines for matching
+        var match_lines = std.array_list.Managed([]const u8).init(allocator);
+        defer match_lines.deinit();
+        for (hunk.lines.items) |pline| {
+            const lt = if (reverse) reverseLineType(pline.line_type) else pline.line_type;
+            if (lt == .context or lt == .remove) {
+                try match_lines.append(pline.content);
+            }
+        }
+
+        // Find where the context matches in the original, starting from suggested position
+        const suggested: usize = if (reverse)
+            (if (hunk.new_start > 0) hunk.new_start - 1 else 0)
+        else
+            (if (hunk.old_start > 0) hunk.old_start - 1 else 0);
+
+        const match_pos = findContextMatch(orig_lines.items, match_lines.items, suggested, orig_idx);
+
+        if (match_pos == null and match_lines.items.len > 0) {
+            return error.PatchFailed;
+        }
+
+        const start_line = match_pos orelse (if (suggested < orig_lines.items.len) suggested else orig_idx);
+
+        // Validate: for hunks starting at line 1 (beginning of file) with no leading context,
+        // the match must be at position 0
+        if (match_pos != null and match_pos.? != suggested) {
+            // Check if hunk has leading context
+            var has_leading_context = false;
+            if (hunk.lines.items.len > 0) {
+                const first_lt = if (reverse) reverseLineType(hunk.lines.items[0].line_type) else hunk.lines.items[0].line_type;
+                has_leading_context = (first_lt == .context);
+            }
+            if (!has_leading_context) {
+                // No leading context and match position differs - verify it makes sense
+                const old_start_val: usize = if (reverse)
+                    (if (hunk.new_start > 0) hunk.new_start else 1)
+                else
+                    (if (hunk.old_start > 0) hunk.old_start else 1);
+                if (old_start_val == 1 and match_pos.? != 0) {
+                    // Hunk should start at beginning of file but doesn't match there
+                    return error.PatchFailed;
+                }
+            }
+        }
+
+        // Validate: if the hunk has no trailing context, it must go to end of file
+        if (hunk.lines.items.len > 0) {
+            const last_line_type = if (reverse) reverseLineType(hunk.lines.items[hunk.lines.items.len - 1].line_type) else hunk.lines.items[hunk.lines.items.len - 1].line_type;
+            if (last_line_type == .add or last_line_type == .remove) {
+                // No trailing context - hunk should cover to end of file
+                const old_count: usize = @intCast(if (reverse) hunk.new_count else hunk.old_count);
+                if (start_line + old_count < orig_lines.items.len) {
+                    // File has more lines than hunk accounts for and no trailing context
+                    return error.PatchFailed;
+                }
+            }
+        }
+
+        // Copy lines before this hunk
+        while (orig_idx < start_line and orig_idx < orig_lines.items.len) {
+            try result_lines.append(orig_lines.items[orig_idx]);
+            orig_idx += 1;
+        }
+
+        // Apply hunk lines
+        for (hunk.lines.items) |pline| {
+            const lt = if (reverse) reverseLineType(pline.line_type) else pline.line_type;
+            switch (lt) {
+                .context => {
+                    if (orig_idx < orig_lines.items.len) {
+                        try result_lines.append(orig_lines.items[orig_idx]);
+                        orig_idx += 1;
+                    }
+                },
+                .add => {
+                    try result_lines.append(pline.content);
+                },
+                .remove => {
+                    // Skip this line from original
+                    if (orig_idx < orig_lines.items.len) {
+                        orig_idx += 1;
+                    }
+                },
+            }
+        }
+    }
+
+    // Copy remaining lines
+    while (orig_idx < orig_lines.items.len) {
+        try result_lines.append(orig_lines.items[orig_idx]);
+        orig_idx += 1;
+    }
+
+    // Write result
+    var output = std.array_list.Managed(u8).init(allocator);
+    defer output.deinit();
+    for (result_lines.items, 0..) |line, idx| {
+        try output.appendSlice(line);
+        if (idx + 1 < result_lines.items.len or (original.len > 0 and original[original.len - 1] == '\n')) {
+            try output.append('\n');
+        }
+    }
+
+    // Check if patch resulted in no change (already applied)
+    if (std.mem.eql(u8, output.items, original)) {
+        return error.PatchAlreadyApplied;
+    }
+
+    if (check_only) return;
+
+    // Create parent directories if needed
+    if (std.fs.path.dirname(target_path)) |dir| {
+        if (dir.len > 0) std.fs.cwd().makePath(dir) catch {};
+    }
+    platform_impl.fs.writeFile(target_path, output.items) catch return error.WriteError;
+}
+
+fn findContextMatch(orig_lines: []const []const u8, match_lines: []const []const u8, suggested: usize, min_pos: usize) ?usize {
+    if (match_lines.len == 0) return suggested;
+
+    // Try exact position first
+    if (suggested >= min_pos and matchesAt(orig_lines, match_lines, suggested)) {
+        return suggested;
+    }
+
+    // Search with increasing fuzz around suggested position
+    var fuzz: usize = 1;
+    const max_fuzz = if (orig_lines.len > 0) orig_lines.len else 1;
+    while (fuzz <= max_fuzz) : (fuzz += 1) {
+        if (suggested >= fuzz + min_pos) {
+            const pos = suggested - fuzz;
+            if (pos >= min_pos and matchesAt(orig_lines, match_lines, pos)) return pos;
+        }
+        const pos = suggested + fuzz;
+        if (pos >= min_pos and matchesAt(orig_lines, match_lines, pos)) return pos;
+    }
+
+    return null;
+}
+
+fn matchesAt(orig_lines: []const []const u8, match_lines: []const []const u8, pos: usize) bool {
+    if (pos + match_lines.len > orig_lines.len) return false;
+    for (match_lines, 0..) |ml, i| {
+        if (!std.mem.eql(u8, orig_lines[pos + i], ml)) return false;
+    }
+    return true;
+}
+
+fn reverseLineType(lt: PatchLineType) PatchLineType {
+    return switch (lt) {
+        .add => .remove,
+        .remove => .add,
+        .context => .context,
+    };
+}
+
+fn outputPatchStat(allocator: std.mem.Allocator, patch: *const Patch, platform_impl: anytype) !void {
+    const path = patch.new_path orelse patch.old_path orelse "unknown";
+    var added: u32 = 0;
+    var removed: u32 = 0;
+    for (patch.hunks.items) |hunk| {
+        for (hunk.lines.items) |line| {
+            switch (line.line_type) {
+                .add => added += 1,
+                .remove => removed += 1,
+                .context => {},
+            }
+        }
+    }
+    const msg = try std.fmt.allocPrint(allocator, " {s} | {d} {s}\n", .{
+        path,
+        added + removed,
+        if (added > 0 and removed > 0) "+-" else if (added > 0) "+" else "-",
+    });
+    defer allocator.free(msg);
+    try platform_impl.writeStdout(msg);
+}
+
+fn outputPatchNumstat(allocator: std.mem.Allocator, patch: *const Patch, platform_impl: anytype) !void {
+    const path = patch.new_path orelse patch.old_path orelse "unknown";
+    var added: u32 = 0;
+    var removed: u32 = 0;
+    for (patch.hunks.items) |hunk| {
+        for (hunk.lines.items) |line| {
+            switch (line.line_type) {
+                .add => added += 1,
+                .remove => removed += 1,
+                .context => {},
+            }
+        }
+    }
+    const msg = try std.fmt.allocPrint(allocator, "{d}\t{d}\t{s}\n", .{ added, removed, path });
+    defer allocator.free(msg);
+    try platform_impl.writeStdout(msg);
+}
+
+fn outputPatchSummary(allocator: std.mem.Allocator, patch: *const Patch, platform_impl: anytype) !void {
+    if (patch.is_new_file) {
+        const path = patch.new_path orelse "unknown";
+        const mode_str = if (patch.new_mode) |m|
+            try std.fmt.allocPrint(allocator, " create mode {o} {s}\n", .{ m, path })
+        else
+            try std.fmt.allocPrint(allocator, " create {s}\n", .{path});
+        defer allocator.free(mode_str);
+        try platform_impl.writeStdout(mode_str);
+    } else if (patch.is_delete) {
+        const path = patch.old_path orelse "unknown";
+        const msg = try std.fmt.allocPrint(allocator, " delete {s}\n", .{path});
+        defer allocator.free(msg);
+        try platform_impl.writeStdout(msg);
+    }
 }
 
 fn nativeCmdColumn(_: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
