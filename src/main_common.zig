@@ -25788,27 +25788,31 @@ fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_index: u
                 _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&te.hash}) catch unreachable;
                 var new_hash_buf: [40]u8 = undefined;
                 _ = std.fmt.bufPrint(&new_hash_buf, "{x}", .{&entry.sha1}) catch unreachable;
-                const line = if (name_status)
-                    try std.fmt.allocPrint(allocator, "M\t{s}\n", .{entry.path})
-                else if (name_only)
-                    try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path})
-                else
-                    try std.fmt.allocPrint(allocator, ":{o:0>6} {o:0>6} {s} {s} M\t{s}\n", .{ te.mode, entry.mode, &old_hash_buf, &new_hash_buf, entry.path });
-                defer allocator.free(line);
-                try platform_impl.writeStdout(line);
+                if (!suppress_output) {
+                    const line = if (name_status)
+                        try std.fmt.allocPrint(allocator, "M\t{s}\n", .{entry.path})
+                    else if (name_only)
+                        try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path})
+                    else
+                        try std.fmt.allocPrint(allocator, ":{o:0>6} {o:0>6} {s} {s} M\t{s}\n", .{ te.mode, entry.mode, &old_hash_buf, &new_hash_buf, entry.path });
+                    defer allocator.free(line);
+                    try platform_impl.writeStdout(line);
+                }
             }
         } else {
             has_diffs = true;
-            var new_hash_buf: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&new_hash_buf, "{x}", .{&entry.sha1}) catch unreachable;
-            const line = if (name_status)
-                try std.fmt.allocPrint(allocator, "A\t{s}\n", .{entry.path})
-            else if (name_only)
-                try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path})
-            else
-                try std.fmt.allocPrint(allocator, ":000000 {o:0>6} {s} {s} A\t{s}\n", .{ entry.mode, zero_oid, &new_hash_buf, entry.path });
-            defer allocator.free(line);
-            try platform_impl.writeStdout(line);
+            if (!suppress_output) {
+                var new_hash_buf: [40]u8 = undefined;
+                _ = std.fmt.bufPrint(&new_hash_buf, "{x}", .{&entry.sha1}) catch unreachable;
+                const line = if (name_status)
+                    try std.fmt.allocPrint(allocator, "A\t{s}\n", .{entry.path})
+                else if (name_only)
+                    try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path})
+                else
+                    try std.fmt.allocPrint(allocator, ":000000 {o:0>6} {s} {s} A\t{s}\n", .{ entry.mode, zero_oid, &new_hash_buf, entry.path });
+                defer allocator.free(line);
+                try platform_impl.writeStdout(line);
+            }
         }
     }
 
@@ -25833,16 +25837,18 @@ fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_index: u
                 if (!matches) continue;
             }
             has_diffs = true;
-            var old_hash_buf: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&kv.value_ptr.hash}) catch unreachable;
-            const line = if (name_status)
-                try std.fmt.allocPrint(allocator, "D\t{s}\n", .{kv.key_ptr.*})
-            else if (name_only)
-                try std.fmt.allocPrint(allocator, "{s}\n", .{kv.key_ptr.*})
-            else
-                try std.fmt.allocPrint(allocator, ":{o:0>6} 000000 {s} {s} D\t{s}\n", .{ kv.value_ptr.mode, &old_hash_buf, zero_oid, kv.key_ptr.* });
-            defer allocator.free(line);
-            try platform_impl.writeStdout(line);
+            if (!suppress_output) {
+                var old_hash_buf: [40]u8 = undefined;
+                _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&kv.value_ptr.hash}) catch unreachable;
+                const line = if (name_status)
+                    try std.fmt.allocPrint(allocator, "D\t{s}\n", .{kv.key_ptr.*})
+                else if (name_only)
+                    try std.fmt.allocPrint(allocator, "{s}\n", .{kv.key_ptr.*})
+                else
+                    try std.fmt.allocPrint(allocator, ":{o:0>6} 000000 {s} {s} D\t{s}\n", .{ kv.value_ptr.mode, &old_hash_buf, zero_oid, kv.key_ptr.* });
+                defer allocator.free(line);
+                try platform_impl.writeStdout(line);
+            }
         }
     }
 
