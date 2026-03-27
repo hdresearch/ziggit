@@ -8904,6 +8904,10 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 
     // Handle --list
     if (do_list) {
+        if (default_value != null) {
+            try platform_impl.writeStderr("error: --default is only applicable to --get\n");
+            std.process.exit(129);
+        }
         // If --file specified with non-existing file, fail
         if (config_file) |cf| {
             const content = platform_impl.fs.readFile(allocator, cf) catch {
@@ -9067,6 +9071,10 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 
     // Handle --unset
     if (do_unset or do_unset_all) {
+        if (default_value != null) {
+            try platform_impl.writeStderr("error: --default is only applicable to --get\n");
+            std.process.exit(129);
+        }
         if (positionals.items.len < 1) {
             try platform_impl.writeStderr("error: missing key\n");
             std.process.exit(2);
@@ -9142,14 +9150,16 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 
     // Handle simple get: git config [--get] [--bool] <key>
     if (positionals.items.len >= 1) {
-        // If --file specified, check it exists
+        // If --file specified, check it exists (but allow missing if --default is set)
         if (config_file) |cf| {
             std.fs.cwd().access(cf, .{}) catch {
-                const msg = try std.fmt.allocPrint(allocator, "fatal: unable to read config file '{s}': No such file or directory\n", .{cf});
-                defer allocator.free(msg);
-                try platform_impl.writeStderr(msg);
-                std.process.exit(128);
-                unreachable;
+                if (default_value == null) {
+                    const msg = try std.fmt.allocPrint(allocator, "fatal: unable to read config file '{s}': No such file or directory\n", .{cf});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(128);
+                    unreachable;
+                }
             };
         }
         const key = positionals.items[0];
