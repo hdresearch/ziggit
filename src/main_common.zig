@@ -5728,26 +5728,64 @@ fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     };
     defer allocator.free(git_path);
 
-    const remote = args.next() orelse "origin";
-    const branch = args.next() orelse blk: {
-        // Try to get current branch
-        break :blk refs.getCurrentBranch(git_path, platform_impl, allocator) catch "master";
-    };
-    defer if (!std.mem.eql(u8, branch, "master")) allocator.free(branch);
+    var pull_flags = std.array_list.Managed([]const u8).init(allocator);
+    defer pull_flags.deinit();
+    var pull_positionals = std.array_list.Managed([]const u8).init(allocator);
+    defer pull_positionals.deinit();
+    var no_rebase = false;
+    var do_rebase = false;
     
-    // First, fetch from remote
-    try platform_impl.writeStdout("Fetching from remote...\n");
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--no-rebase")) {
+            no_rebase = true;
+        } else if (std.mem.eql(u8, arg, "--rebase")) {
+            do_rebase = true;
+        } else if (std.mem.eql(u8, arg, "--log") or std.mem.startsWith(u8, arg, "--log=") or 
+                   std.mem.eql(u8, arg, "--no-log") or std.mem.eql(u8, arg, "--ff-only") or
+                   std.mem.eql(u8, arg, "--no-ff") or std.mem.eql(u8, arg, "--ff") or
+                   std.mem.eql(u8, arg, "--squash") or std.mem.eql(u8, arg, "--no-squash") or
+                   std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet") or
+                   std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
+            try pull_flags.append(arg);
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            try pull_flags.append(arg);
+        } else {
+            try pull_positionals.append(arg);
+        }
+    }
     
-    const remote_url = getRemoteUrl(git_path, remote, platform_impl, allocator) catch |err| switch (err) {
-        error.RemoteNotFound => {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' does not appear to be a git repository\n", .{remote});
-            defer allocator.free(msg);
-            try platform_impl.writeStderr(msg);
-            std.process.exit(128);
-        },
-        else => return err,
-    };
-    defer allocator.free(remote_url);
+    const remote = if (pull_positionals.items.len > 0) pull_positionals.items[0] else "origin";
+    const branch = if (pull_positionals.items.len > 1)
+        pull_positionals.items[1]
+    else
+        refs.getCurrentBranch(git_path, platform_impl, allocator) catch try allocator.dupe(u8, "master");
+    defer if (pull_positionals.items.len <= 1) allocator.free(branch);
+    
+    // Resolve remote URL: if remote looks like a path, use directly
+    var remote_url: []const u8 = undefined;
+    var remote_url_owned = false;
+    var remote_is_path = false;
+    
+    if (std.mem.startsWith(u8, remote, "/") or std.mem.startsWith(u8, remote, "./") or std.mem.startsWith(u8, remote, "../") or std.mem.eql(u8, remote, ".") or std.mem.eql(u8, remote, "..") or std.mem.startsWith(u8, remote, "file://")) {
+        remote_url = remote;
+        remote_is_path = true;
+    } else if (resolveSourceGitDir(allocator, remote)) |sgd| {
+        allocator.free(sgd);
+        remote_url = remote;
+        remote_is_path = true;
+    } else |_| {
+        remote_url = getRemoteUrl(git_path, remote, platform_impl, allocator) catch |err| switch (err) {
+            error.RemoteNotFound => {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' does not appear to be a git repository\n", .{remote});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            },
+            else => return err,
+        };
+        remote_url_owned = true;
+    }
+    defer if (remote_url_owned) allocator.free(remote_url);
     
     // Try local fetch first
     var pull_is_local = false;
@@ -5784,16 +5822,61 @@ fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     }
     
     // Now try to merge the remote branch
-    const remote_branch = try std.fmt.allocPrint(allocator, "remotes/{s}/{s}", .{remote, branch});
-    defer allocator.free(remote_branch);
+    // For path-based remotes, use FETCH_HEAD; for named remotes, use tracking ref
+    var remote_commit: []const u8 = undefined;
+    var remote_commit_owned = false;
     
-    const remote_commit = refs.getRef(git_path, remote_branch, platform_impl, allocator) catch {
-        const msg = try std.fmt.allocPrint(allocator, "fatal: couldn't find remote ref {s}\n", .{remote_branch});
-        defer allocator.free(msg);
-        try platform_impl.writeStderr(msg);
-        std.process.exit(1);
-    };
-    defer allocator.free(remote_commit);
+    if (remote_is_path) {
+        // Read FETCH_HEAD
+        const fetch_head_path = try std.fmt.allocPrint(allocator, "{s}/FETCH_HEAD", .{git_path});
+        defer allocator.free(fetch_head_path);
+        if (std.fs.cwd().readFileAlloc(allocator, fetch_head_path, 4096)) |fh_content| {
+            defer allocator.free(fh_content);
+            // FETCH_HEAD format: <hash>\t\tbranch '<name>' of <url>
+            const first_line = if (std.mem.indexOf(u8, fh_content, "\n")) |nl| fh_content[0..nl] else fh_content;
+            if (first_line.len >= 40) {
+                remote_commit = try allocator.dupe(u8, first_line[0..40]);
+                remote_commit_owned = true;
+            } else {
+                try platform_impl.writeStderr("fatal: couldn't find remote ref\n");
+                std.process.exit(1);
+            }
+        } else |_| {
+            try platform_impl.writeStderr("fatal: couldn't find remote ref\n");
+            std.process.exit(1);
+        }
+    } else {
+        const remote_branch = try std.fmt.allocPrint(allocator, "remotes/{s}/{s}", .{remote, branch});
+        defer allocator.free(remote_branch);
+        if (refs.getRef(git_path, remote_branch, platform_impl, allocator)) |ref_val| {
+            remote_commit = try allocator.dupe(u8, ref_val);
+            remote_commit_owned = true;
+            allocator.free(ref_val);
+        } else |_| {
+            // Try FETCH_HEAD as fallback
+            const fetch_head_path = try std.fmt.allocPrint(allocator, "{s}/FETCH_HEAD", .{git_path});
+            defer allocator.free(fetch_head_path);
+            if (std.fs.cwd().readFileAlloc(allocator, fetch_head_path, 4096)) |fh_content| {
+                defer allocator.free(fh_content);
+                const first_line = if (std.mem.indexOf(u8, fh_content, "\n")) |nl| fh_content[0..nl] else fh_content;
+                if (first_line.len >= 40) {
+                    remote_commit = try allocator.dupe(u8, first_line[0..40]);
+                    remote_commit_owned = true;
+                } else {
+                    const msg = try std.fmt.allocPrint(allocator, "fatal: couldn't find remote ref {s}\n", .{branch});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(1);
+                }
+            } else |_| {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: couldn't find remote ref {s}\n", .{branch});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(1);
+            }
+        }
+    }
+    defer if (remote_commit_owned) allocator.free(remote_commit);
     
     // Get current commit
     const current_commit_opt = refs.getCurrentCommit(git_path, platform_impl, allocator) catch {
