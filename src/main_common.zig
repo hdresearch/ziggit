@@ -22550,6 +22550,35 @@ fn diffTreeWithEmpty(allocator: std.mem.Allocator, tree_hash_str: []const u8, re
             const out = try std.fmt.allocPrint(allocator, "A\t{s}\n", .{entry.name});
             defer allocator.free(out);
             try platform_impl.writeStdout(out);
+        } else if (show_patch) {
+            // Show unified diff for new files
+            const blob_obj = objects.GitObject.load(entry.hash, git_path, platform_impl, allocator) catch continue;
+            defer blob_obj.deinit(allocator);
+            
+            const header = try std.fmt.allocPrint(allocator, "diff --git a/{s} b/{s}\nnew file mode {s}\nindex {s}..{s}\n--- /dev/null\n+++ b/{s}\n", .{ entry.name, entry.name, entry.mode, zero_hash[0..7], entry.hash[0..7], entry.name });
+            defer allocator.free(header);
+            try platform_impl.writeStdout(header);
+            
+            // Count lines and output hunk
+            var line_count: usize = 0;
+            var lines_iter = std.mem.splitScalar(u8, blob_obj.data, '\n');
+            while (lines_iter.next()) |_| line_count += 1;
+            // If data ends with \n, don't count the trailing empty split
+            if (blob_obj.data.len > 0 and blob_obj.data[blob_obj.data.len - 1] == '\n') line_count -= 1;
+            
+            const hunk_header = try std.fmt.allocPrint(allocator, "@@ -0,0 +1,{d} @@\n", .{line_count});
+            defer allocator.free(hunk_header);
+            try platform_impl.writeStdout(hunk_header);
+            
+            var lines_iter2 = std.mem.splitScalar(u8, blob_obj.data, '\n');
+            var line_idx: usize = 0;
+            while (lines_iter2.next()) |l| {
+                line_idx += 1;
+                if (line_idx > line_count) break;
+                const diff_line = try std.fmt.allocPrint(allocator, "+{s}\n", .{l});
+                defer allocator.free(diff_line);
+                try platform_impl.writeStdout(diff_line);
+            }
         } else {
             const out = try std.fmt.allocPrint(allocator, ":000000 {s} {s} {s} A\t{s}\n", .{ entry.mode, zero_hash, entry.hash, entry.name });
             defer allocator.free(out);
