@@ -17596,6 +17596,9 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                     const mode_str = try std.fmt.allocPrint(allocator, "deleted file mode {o:0>6}\n", .{entry.mode});
                     defer allocator.free(mode_str);
                     try out.appendSlice(mode_str);
+                    const del_idx_line = try std.fmt.allocPrint(allocator, "index {s}..{s}\n", .{ hash_buf[0..7], zero_oid[0..7] });
+                    defer allocator.free(del_idx_line);
+                    try out.appendSlice(del_idx_line);
                     try out.appendSlice("--- a/");
                     try out.appendSlice(entry.path);
                     try out.appendSlice("\n+++ /dev/null\n");
@@ -17723,15 +17726,31 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                     }
                     if (!std.mem.eql(u8, indexed_content, wt_content)) {
                         if (diff_mod.isBinary(indexed_content) or diff_mod.isBinary(wt_content)) {
+                            // Add index line for binary
+                            if (entry.mode == wt_mode) {
+                                const idx_line = try std.fmt.allocPrint(allocator, "index {s}..{s} {o:0>6}\n", .{ hash_buf[0..7], zero_oid[0..7], entry.mode });
+                                defer allocator.free(idx_line);
+                                try out.appendSlice(idx_line);
+                            }
                             try out.appendSlice("Binary files differ\n");
                         } else {
+                            // Add index line
+                            if (entry.mode == wt_mode) {
+                                const idx_line = try std.fmt.allocPrint(allocator, "index {s}..{s} {o:0>6}\n", .{ hash_buf[0..7], zero_oid[0..7], entry.mode });
+                                defer allocator.free(idx_line);
+                                try out.appendSlice(idx_line);
+                            } else {
+                                const idx_line = try std.fmt.allocPrint(allocator, "index {s}..{s}\n", .{ hash_buf[0..7], zero_oid[0..7] });
+                                defer allocator.free(idx_line);
+                                try out.appendSlice(idx_line);
+                            }
                             try out.appendSlice("--- a/");
                             try out.appendSlice(entry.path);
                             try out.appendSlice("\n+++ b/");
                             try out.appendSlice(entry.path);
                             try out.appendSlice("\n");
                             const diff_output = diff_mod.generateUnifiedDiffWithHashes(indexed_content, wt_content, entry.path, hash_buf[0..7], zero_oid[0..7], allocator) catch {
-                                try platform_impl.writeStdout(out.items);
+                                if (df_patch_with_raw) { try pwr_patch_buf.appendSlice(out.items); } else { try platform_impl.writeStdout(out.items); }
                                 continue;
                             };
                             defer allocator.free(diff_output);
