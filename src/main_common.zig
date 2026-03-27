@@ -7581,19 +7581,10 @@ fn resolveSourceGitDir(allocator: std.mem.Allocator, source_path: []const u8) ![
     const refs_path = try std.fmt.allocPrint(allocator, "{s}/refs", .{abs_path});
     defer allocator.free(refs_path);
 
-    const has_objects = if (std.fs.cwd().access(objects_path, .{})) |_| true else |_| false;
-    const has_refs = if (std.fs.cwd().access(refs_path, .{})) |_| true else |_| false;
-
-    if (has_objects and has_refs) {
-        // This is a bare repo or .git directory
-        return abs_path;
-    }
-
-    // Check for .git subdirectory
+    // Check for .git subdirectory FIRST (prefer worktree .git over bare repo contents)
     const git_subdir = try std.fmt.allocPrint(allocator, "{s}/.git", .{abs_path});
     defer allocator.free(git_subdir);
 
-    // Check if .git is a directory first
     const git_objects = try std.fmt.allocPrint(allocator, "{s}/.git/objects", .{abs_path});
     defer allocator.free(git_objects);
     const git_objs_exist = if (std.fs.cwd().access(git_objects, .{})) |_| true else |_| false;
@@ -7601,6 +7592,15 @@ fn resolveSourceGitDir(allocator: std.mem.Allocator, source_path: []const u8) ![
         const result = try std.fmt.allocPrint(allocator, "{s}/.git", .{abs_path});
         allocator.free(abs_path);
         return result;
+    }
+
+    // Check if it's a bare repo (has objects/ and refs/ directly)
+    const has_objects = if (std.fs.cwd().access(objects_path, .{})) |_| true else |_| false;
+    const has_refs = if (std.fs.cwd().access(refs_path, .{})) |_| true else |_| false;
+
+    if (has_objects and has_refs) {
+        // This is a bare repo or .git directory
+        return abs_path;
     }
     
     // .git could be a file (gitlink)
