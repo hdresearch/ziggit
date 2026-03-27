@@ -2383,6 +2383,29 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         if (refs.getCurrentCommit(git_path, platform_impl, allocator) catch null) |current_hash| {
             try parent_hashes.append(current_hash);
         }
+        
+        // Check for MERGE_HEAD (merge parents)
+        const merge_head_path = try std.fmt.allocPrint(allocator, "{s}/MERGE_HEAD", .{git_path});
+        defer allocator.free(merge_head_path);
+        if (platform_impl.fs.readFile(allocator, merge_head_path)) |merge_data| {
+            defer allocator.free(merge_data);
+            var merge_lines = std.mem.splitScalar(u8, merge_data, '\n');
+            while (merge_lines.next()) |mline| {
+                const mhash = std.mem.trim(u8, mline, " \t\r");
+                if (mhash.len == 40 and isValidHexString(mhash)) {
+                    try parent_hashes.append(try allocator.dupe(u8, mhash));
+                }
+            }
+        } else |_| {}
+    }
+
+    // Check for MERGE_MSG as default message if no message provided
+    if (message == null) {
+        const merge_msg_path = try std.fmt.allocPrint(allocator, "{s}/MERGE_MSG", .{git_path});
+        defer allocator.free(merge_msg_path);
+        if (platform_impl.fs.readFile(allocator, merge_msg_path)) |mmsg| {
+            message = mmsg;
+        } else |_| {}
     }
 
     // Create commit object
@@ -2457,6 +2480,19 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         writeReflogEntry(git_path, "HEAD", old_h, commit_hash, full_reflog_msg, allocator, platform_impl) catch {};
     }
 
+    // Clean up merge state files after successful commit
+    {
+        const mh_path = try std.fmt.allocPrint(allocator, "{s}/MERGE_HEAD", .{git_path});
+        defer allocator.free(mh_path);
+        std.fs.cwd().deleteFile(mh_path) catch {};
+        const mm_path = try std.fmt.allocPrint(allocator, "{s}/MERGE_MSG", .{git_path});
+        defer allocator.free(mm_path);
+        std.fs.cwd().deleteFile(mm_path) catch {};
+        const mmode_path = try std.fmt.allocPrint(allocator, "{s}/MERGE_MODE", .{git_path});
+        defer allocator.free(mmode_path);
+        std.fs.cwd().deleteFile(mmode_path) catch {};
+    }
+    
     // After a successful commit, the index should remain but be consistent with the new commit
     // We don't clear the index, but we save it to ensure it's properly persisted
     try index.save(git_path, platform_impl);
@@ -4516,10 +4552,10 @@ fn resolveSourceGitDir(allocator: std.mem.Allocator, source_path: []const u8) ![
     const refs_path = try std.fmt.allocPrint(allocator, "{s}/refs", .{abs_path});
     defer allocator.free(refs_path);
 
-    const has_objects = std.fs.cwd().access(objects_path, .{});
-    const has_refs = std.fs.cwd().access(refs_path, .{});
+    const has_objects = if (std.fs.cwd().access(objects_path, .{})) |_| true else |_| false;
+    const has_refs = if (std.fs.cwd().access(refs_path, .{})) |_| true else |_| false;
 
-    if (has_objects != error.FileNotFound and has_refs != error.FileNotFound) {
+    if (has_objects and has_refs) {
         // This is a bare repo or .git directory
         return abs_path;
     }
@@ -4528,35 +4564,56 @@ fn resolveSourceGitDir(allocator: std.mem.Allocator, source_path: []const u8) ![
     const git_subdir = try std.fmt.allocPrint(allocator, "{s}/.git", .{abs_path});
     defer allocator.free(git_subdir);
 
-    // .git could be a file (gitlink) or directory
-    if (std.fs.cwd().openFile(git_subdir, .{})) |file| {
-        defer file.close();
-        // Read gitlink content
-        var buf: [4096]u8 = undefined;
-        const n = file.readAll(&buf) catch return error.RepositoryNotFound;
-        const content = std.mem.trim(u8, buf[0..n], " \t\r\n");
-        if (std.mem.startsWith(u8, content, "gitdir: ")) {
-            const gitdir_ref = content["gitdir: ".len..];
-            if (std.fs.path.isAbsolute(gitdir_ref)) {
-                allocator.free(abs_path);
-                return try allocator.dupe(u8, gitdir_ref);
-            } else {
-                const resolved = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ abs_path, gitdir_ref });
-                allocator.free(abs_path);
-                return resolved;
-            }
-        }
-        return error.RepositoryNotFound;
-    } else |_| {}
-
-    // Check if .git is a directory
+    // Check if .git is a directory first
     const git_objects = try std.fmt.allocPrint(allocator, "{s}/.git/objects", .{abs_path});
     defer allocator.free(git_objects);
-    if (std.fs.cwd().access(git_objects, .{}) != error.FileNotFound) {
+    const git_objs_exist = if (std.fs.cwd().access(git_objects, .{})) |_| true else |_| false;
+    if (git_objs_exist) {
         const result = try std.fmt.allocPrint(allocator, "{s}/.git", .{abs_path});
         allocator.free(abs_path);
         return result;
     }
+    
+    // .git could be a file (gitlink)
+    if (std.fs.cwd().openFile(git_subdir, .{})) |file| {
+        defer file.close();
+        // Check it's a regular file (not a directory)
+        const stat = file.stat() catch {
+            // Can't stat, try reading
+            var buf: [4096]u8 = undefined;
+            const n = file.readAll(&buf) catch return error.RepositoryNotFound;
+            const content = std.mem.trim(u8, buf[0..n], " \t\r\n");
+            if (std.mem.startsWith(u8, content, "gitdir: ")) {
+                const gitdir_ref = content["gitdir: ".len..];
+                if (std.fs.path.isAbsolute(gitdir_ref)) {
+                    allocator.free(abs_path);
+                    return try allocator.dupe(u8, gitdir_ref);
+                } else {
+                    const resolved = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ abs_path, gitdir_ref });
+                    allocator.free(abs_path);
+                    return resolved;
+                }
+            }
+            return error.RepositoryNotFound;
+        };
+        if (stat.kind != .directory) {
+            // It's a gitlink file
+            var buf: [4096]u8 = undefined;
+            const n = file.readAll(&buf) catch return error.RepositoryNotFound;
+            const content = std.mem.trim(u8, buf[0..n], " \t\r\n");
+            if (std.mem.startsWith(u8, content, "gitdir: ")) {
+                const gitdir_ref = content["gitdir: ".len..];
+                if (std.fs.path.isAbsolute(gitdir_ref)) {
+                    allocator.free(abs_path);
+                    return try allocator.dupe(u8, gitdir_ref);
+                } else {
+                    const resolved = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ abs_path, gitdir_ref });
+                    allocator.free(abs_path);
+                    return resolved;
+                }
+            }
+        }
+    } else |_| {}
 
     allocator.free(abs_path);
     return error.RepositoryNotFound;
