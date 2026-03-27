@@ -301,39 +301,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     // Determine if this command is handled natively (NOT forwarded to real git)
     // Commands forwarded to git should NOT be here — git handles -C itself
     // "help" is NOT native — it's forwarded to real git for full compatibility
-    const is_native_handler = 
-        std.mem.eql(u8, command, "--exec-path") or
-        std.mem.eql(u8, command, "--version") or
-        std.mem.eql(u8, command, "-v") or
-        std.mem.eql(u8, command, "--version-info") or
-        std.mem.eql(u8, command, "--help") or
-        std.mem.eql(u8, command, "-h") or
-        std.mem.eql(u8, command, "ls-tree") or
-        std.mem.eql(u8, command, "count-objects") or
-        std.mem.eql(u8, command, "show-ref") or
-        std.mem.eql(u8, command, "for-each-ref") or
-        std.mem.eql(u8, command, "verify-pack") or
-        std.mem.eql(u8, command, "mktree") or
-        std.mem.eql(u8, command, "mktag") or
-        std.mem.eql(u8, command, "name-rev") or
-        std.mem.eql(u8, command, "fsck") or
-        std.mem.eql(u8, command, "gc") or
-        std.mem.eql(u8, command, "prune") or
-        std.mem.eql(u8, command, "repack") or
-        std.mem.eql(u8, command, "pack-objects") or
-        std.mem.eql(u8, command, "index-pack") or
-        std.mem.eql(u8, command, "reflog") or
-        std.mem.eql(u8, command, "clean") or
-        std.mem.eql(u8, command, "symbolic-ref") or
-        std.mem.eql(u8, command, "merge-base") or
-        std.mem.eql(u8, command, "unpack-objects") or
-        std.mem.eql(u8, command, "diff-tree") or
-        std.mem.eql(u8, command, "diff-index") or
-        std.mem.eql(u8, command, "var") or
-        std.mem.eql(u8, command, "show-index") or
-        std.mem.eql(u8, command, "prune-packed") or
-        std.mem.eql(u8, command, "verify-commit") or
-        std.mem.eql(u8, command, "verify-tag");
+    // All commands are handled natively (pure Zig, no git forwarding)
+    const is_native_handler = true;
 
     // Process global flags and execute
     var arg_index: usize = 0;
