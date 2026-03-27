@@ -516,8 +516,35 @@ pub const Index = struct {
     }
 
     pub fn add(self: *Index, path: []const u8, file_path: []const u8, platform_impl: anytype, git_dir: []const u8) !void {
-        // Read file content
-        const content = try platform_impl.fs.readFile(self.allocator, file_path);
+        // Determine the repo root directory for relative path operations
+        const repo_root = std.fs.path.dirname(git_dir) orelse ".";
+        var repo_dir = std.fs.cwd().openDir(repo_root, .{}) catch return error.FileNotFound;
+        defer repo_dir.close();
+
+        // Check if the path is a symlink (try readLink first)
+        var link_buf: [4096]u8 = undefined;
+        const symlink_target = repo_dir.readLink(file_path, &link_buf) catch null;
+
+        var content: []const u8 = undefined;
+        var file_mode: u32 = 0o100644;
+
+        if (symlink_target) |link_target| {
+            // For symlinks, the blob content is the link target path
+            content = try self.allocator.dupe(u8, link_target);
+            file_mode = 0o120000;
+        } else {
+            // Regular file — read content
+            content = try platform_impl.fs.readFile(self.allocator, file_path);
+            // Check if file is executable
+            if (@import("builtin").target.os.tag != .windows) {
+                const stat = repo_dir.statFile(file_path) catch null;
+                if (stat) |s| {
+                    if (s.mode & 0o111 != 0) {
+                        file_mode = 0o100755;
+                    }
+                }
+            }
+        }
         defer self.allocator.free(content);
 
         // Create blob object and store it
@@ -529,12 +556,12 @@ pub const Index = struct {
         var hash_bytes: [20]u8 = undefined;
         _ = try std.fmt.hexToBytes(&hash_bytes, hash_str);
 
-        // Create a simple stat structure (we don't have real stat info from platform abstraction)
+        // Create a simple stat structure
         const fake_stat = std.fs.File.Stat{
             .inode = 0,
             .size = content.len,
-            .mode = 33188, // 100644 in octal
-            .kind = .file,
+            .mode = file_mode,
+            .kind = if (symlink_target != null) .sym_link else .file,
             .atime = 0,
             .mtime = 0,
             .ctime = 0,
