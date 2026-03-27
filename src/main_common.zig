@@ -8167,6 +8167,11 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     if (std.mem.startsWith(u8, remote, "/") or std.mem.startsWith(u8, remote, "./") or std.mem.startsWith(u8, remote, "../") or std.mem.eql(u8, remote, ".") or std.mem.eql(u8, remote, "..") or std.mem.startsWith(u8, remote, "file://")) {
         remote_url = remote;
     } else {
+        // First try resolving as local git repo path
+        if (resolveSourceGitDir(allocator, remote)) |rgd| {
+            allocator.free(rgd);
+            remote_url = remote;
+        } else |_| {
         // Look up remote URL from config
         const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
         defer allocator.free(config_path);
@@ -8201,7 +8206,7 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
             try platform_impl.writeStderr(msg);
             std.process.exit(128);
         }
-    }
+    } }
     defer if (remote_url_allocated) allocator.free(remote_url);
 
     // Resolve file:// URLs
@@ -8318,10 +8323,22 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
                 try pushRefspec(allocator, git_path, remote_git_dir, full_refspec, force_this, dry_run, quiet, platform_impl);
             } else {
                 // Just src - push to same-named ref on remote
-                const full_refspec = if (std.mem.startsWith(u8, rs, "refs/"))
-                    try std.fmt.allocPrint(allocator, "{s}:{s}", .{ rs, rs })
+                var push_src = rs;
+                var push_dst = rs;
+                var resolved_branch: ?[]u8 = null;
+                // If src is HEAD, resolve to current branch
+                if (std.mem.eql(u8, rs, "HEAD")) {
+                    if (refs.getCurrentBranch(git_path, platform_impl, allocator)) |branch| {
+                        resolved_branch = branch;
+                        push_src = branch;
+                        push_dst = branch;
+                    } else |_| {}
+                }
+                defer if (resolved_branch) |b| allocator.free(b);
+                const full_refspec = if (std.mem.startsWith(u8, push_src, "refs/"))
+                    try std.fmt.allocPrint(allocator, "{s}:{s}", .{ push_src, push_dst })
                 else
-                    try std.fmt.allocPrint(allocator, "refs/heads/{s}:refs/heads/{s}", .{ rs, rs });
+                    try std.fmt.allocPrint(allocator, "refs/heads/{s}:refs/heads/{s}", .{ push_src, push_dst });
                 defer allocator.free(full_refspec);
                 try pushRefspec(allocator, git_path, remote_git_dir, full_refspec, force_this, dry_run, quiet, platform_impl);
             }
