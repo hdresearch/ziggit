@@ -16106,6 +16106,7 @@ fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, comman
     var stdin_packs = false;
     var write_bitmap = false;
     var name_hash_version: i32 = 1;
+    var include_tag = false;
 
     var i = command_index + 1;
     while (i < args.len) : (i += 1) {
@@ -16130,8 +16131,10 @@ fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, comman
             use_all = true;
         } else if (std.mem.eql(u8, arg, "--no-reuse-delta") or std.mem.eql(u8, arg, "--no-reuse-object")) {
             // accepted
+        } else if (std.mem.eql(u8, arg, "--include-tag")) {
+            include_tag = true;
         } else if (std.mem.eql(u8, arg, "--thin") or
-            std.mem.eql(u8, arg, "--delta-base-offset") or std.mem.eql(u8, arg, "--include-tag") or
+            std.mem.eql(u8, arg, "--delta-base-offset") or
             std.mem.eql(u8, arg, "--keep-true-parents") or std.mem.eql(u8, arg, "--honor-pack-keep") or
             std.mem.eql(u8, arg, "--non-empty") or std.mem.eql(u8, arg, "--all") or
             std.mem.eql(u8, arg, "--local") or std.mem.eql(u8, arg, "--incremental") or
@@ -16408,6 +16411,86 @@ fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, comman
 
     if (use_all) {
         try packObjectsAddAllObjects(allocator, git_dir, &object_set, &object_hashes);
+    }
+
+    // --include-tag: find tags whose target is already in the object set
+    if (include_tag) {
+        // Scan refs/tags/ for tag objects
+        const tags_dir_path = std.fmt.allocPrint(allocator, "{s}/refs/tags", .{git_dir}) catch unreachable;
+        defer allocator.free(tags_dir_path);
+        if (std.fs.cwd().openDir(tags_dir_path, .{ .iterate = true })) |dir_val| {
+            var dir = dir_val;
+            defer dir.close();
+            var iter = dir.iterate();
+            while (iter.next() catch null) |entry| {
+                if (entry.kind == .directory) continue;
+                // Read the ref file directly to get the raw hash (don't peel)
+                const ref_file_path = std.fmt.allocPrint(allocator, "{s}/refs/tags/{s}", .{git_dir, entry.name}) catch continue;
+                defer allocator.free(ref_file_path);
+                const ref_content = std.fs.cwd().readFileAlloc(allocator, ref_file_path, 4096) catch continue;
+                defer allocator.free(ref_content);
+                const tag_hash = std.mem.trim(u8, ref_content, " \t\r\n");
+                if (tag_hash.len < 40) continue;
+                const tag_hash_40 = tag_hash[0..40];
+
+                // Check if it's a tag object
+                if (objects.GitObject.load(tag_hash_40, git_dir, platform_impl, allocator)) |tag_obj| {
+                    defer tag_obj.deinit(allocator);
+                    if (tag_obj.type == .tag) {
+                        // Parse target from tag object
+                        if (std.mem.indexOf(u8, tag_obj.data, "object ")) |obj_start| {
+                            const hash_start = obj_start + 7;
+                            if (hash_start + 40 <= tag_obj.data.len) {
+                                const target_hash = tag_obj.data[hash_start..hash_start + 40];
+                                // If target is in the pack, include the tag too
+                                if (object_set.contains(target_hash)) {
+                                    if (!object_set.contains(tag_hash_40)) {
+                                        const duped = allocator.dupe(u8, tag_hash_40) catch continue;
+                                        object_set.put(duped, {}) catch continue;
+                                        object_hashes.append(duped) catch continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else |_| {}
+            }
+        } else |_| {}
+
+        // Also check packed-refs for tags
+        const packed_refs_path = std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir}) catch unreachable;
+        defer allocator.free(packed_refs_path);
+        if (std.fs.cwd().readFileAlloc(allocator, packed_refs_path, 10 * 1024 * 1024)) |packed_data| {
+            defer allocator.free(packed_data);
+            var plines = std.mem.splitScalar(u8, packed_data, '\n');
+            while (plines.next()) |pline| {
+                if (pline.len == 0 or pline[0] == '#' or pline[0] == '^') continue;
+                if (pline.len < 41) continue;
+                const phash = pline[0..40];
+                const pref = std.mem.trim(u8, pline[41..], " \t\r");
+                if (!std.mem.startsWith(u8, pref, "refs/tags/")) continue;
+
+                // Check if it's a tag object
+                if (objects.GitObject.load(phash, git_dir, platform_impl, allocator)) |tag_obj| {
+                    defer tag_obj.deinit(allocator);
+                    if (tag_obj.type == .tag) {
+                        if (std.mem.indexOf(u8, tag_obj.data, "object ")) |obj_start| {
+                            const hash_start = obj_start + 7;
+                            if (hash_start + 40 <= tag_obj.data.len) {
+                                const target_hash = tag_obj.data[hash_start..hash_start + 40];
+                                if (object_set.contains(target_hash)) {
+                                    if (!object_set.contains(phash)) {
+                                        const duped = allocator.dupe(u8, phash) catch continue;
+                                        object_set.put(duped, {}) catch continue;
+                                        object_hashes.append(duped) catch continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else |_| {}
+            }
+        } else |_| {}
     }
 
     // Build the pack
