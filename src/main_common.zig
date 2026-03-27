@@ -2022,9 +2022,24 @@ fn findGitDirectory(allocator: std.mem.Allocator, platform_impl: *const platform
     var dir_to_check = try allocator.dupe(u8, current_dir);
     
     while (true) {
-        // First check for .git subdirectory (normal repository)
+        // First check for .git subdirectory (normal repository) or valid gitdir link
         const git_path = try std.fmt.allocPrint(allocator, "{s}/.git", .{dir_to_check});
-        if (platform_impl.fs.exists(git_path) catch false) {
+        const git_is_valid = blk: {
+            // Check if it's a directory
+            if (std.fs.cwd().openDir(git_path, .{})) |d| {
+                var dd = d;
+                dd.close();
+                break :blk true;
+            } else |_| {}
+            // Check if it's a valid gitdir link file (starts with "gitdir: ")
+            if (std.fs.cwd().readFileAlloc(allocator, git_path, 4096)) |content| {
+                defer allocator.free(content);
+                const trimmed = std.mem.trim(u8, content, " \t\r\n");
+                if (std.mem.startsWith(u8, trimmed, "gitdir: ")) break :blk true;
+            } else |_| {}
+            break :blk false;
+        };
+        if (git_is_valid) {
             allocator.free(dir_to_check);
             return git_path;
         }
@@ -13140,13 +13155,19 @@ fn findGitDir() ![]const u8 {
     if (std.posix.getenv("GIT_DIR")) |gd| return gd;
 
     // Check for .git in current directory (normal repo)
-    if (std.fs.cwd().statFile(".git")) |_| {
+    // .git can be a directory (normal) or a file (gitdir link like "gitdir: /path/to/real")
+    if (std.fs.cwd().openDir(".git", .{})) |d| {
+        var dd = d;
+        dd.close();
         return ".git";
     } else |_| {
-        if (std.fs.cwd().openDir(".git", .{})) |d| {
-            var dd = d;
-            dd.close();
-            return ".git";
+        // Check if .git is a gitdir link file
+        if (std.fs.cwd().readFileAlloc(std.heap.page_allocator, ".git", 4096)) |content| {
+            defer std.heap.page_allocator.free(content);
+            const trimmed = std.mem.trim(u8, content, " \t\r\n");
+            if (std.mem.startsWith(u8, trimmed, "gitdir: ")) {
+                return ".git";
+            }
         } else |_| {}
     }
 
