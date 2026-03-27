@@ -5324,13 +5324,18 @@ fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
 
     // Parse arguments for flags, remote, and refspecs
     var quiet = false;
+    var fetch_tags: enum { auto, yes, no } = .auto;
     var remote_name: []const u8 = "origin";
     var cmd_refspecs = std.array_list.Managed([]const u8).init(allocator);
     defer cmd_refspecs.deinit();
     var got_remote = false;
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "--tags") or std.mem.eql(u8, arg, "--no-tags") or std.mem.eql(u8, arg, "--prune") or std.mem.eql(u8, arg, "--force") or std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--update-head-ok") or std.mem.eql(u8, arg, "--append") or std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--dry-run")) {
+        if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "--prune") or std.mem.eql(u8, arg, "--force") or std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--update-head-ok") or std.mem.eql(u8, arg, "--append") or std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--dry-run")) {
             if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) quiet = true;
+        } else if (std.mem.eql(u8, arg, "--tags") or std.mem.eql(u8, arg, "-t")) {
+            fetch_tags = .yes;
+        } else if (std.mem.eql(u8, arg, "--no-tags") or std.mem.eql(u8, arg, "-n")) {
+            fetch_tags = .no;
         } else if (std.mem.eql(u8, arg, "--depth") or std.mem.eql(u8, arg, "--deepen") or std.mem.eql(u8, arg, "-j") or std.mem.eql(u8, arg, "--jobs") or std.mem.eql(u8, arg, "--upload-pack") or std.mem.eql(u8, arg, "--refmap") or std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--server-option") or std.mem.eql(u8, arg, "--recurse-submodules") or std.mem.eql(u8, arg, "--filter") or std.mem.eql(u8, arg, "--negotiation-tip")) {
             _ = args.next();
         } else if (std.mem.startsWith(u8, arg, "-")) {
@@ -5382,7 +5387,30 @@ fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     else if (!std.mem.startsWith(u8, remote_url, "git://") and !std.mem.startsWith(u8, remote_url, "ssh://")) {
         if (resolveSourceGitDir(allocator, remote_url)) |sgd| { allocator.free(sgd); is_local = true; } else |_| {}
     }
-    if (is_local) { try performLocalFetch(allocator, git_path, local_path, remote_name, quiet, cmd_refspecs.items, platform_impl); return; }
+    if (is_local) {
+        // Determine effective tag behavior: check remote.<name>.tagopt config
+        var effective_tags = fetch_tags;
+        if (effective_tags == .auto) {
+            const cfgp2 = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch "";
+            defer if (cfgp2.len > 0) allocator.free(cfgp2);
+            if (cfgp2.len > 0) {
+                if (std.fs.cwd().readFileAlloc(allocator, cfgp2, 1024 * 1024)) |cfgc2| {
+                    defer allocator.free(cfgc2);
+                    const tagopt_key = std.fmt.allocPrint(allocator, "remote.{s}.tagopt", .{remote_name}) catch "";
+                    defer if (tagopt_key.len > 0) allocator.free(tagopt_key);
+                    if (tagopt_key.len > 0) {
+                        if (parseConfigValue(cfgc2, tagopt_key, allocator) catch null) |tagopt_val| {
+                            defer allocator.free(tagopt_val);
+                            if (std.mem.eql(u8, tagopt_val, "--no-tags")) effective_tags = .no
+                            else if (std.mem.eql(u8, tagopt_val, "--tags")) effective_tags = .yes;
+                        }
+                    }
+                } else |_| {}
+            }
+        }
+        try performLocalFetch(allocator, git_path, local_path, remote_name, quiet, cmd_refspecs.items, platform_impl, effective_tags != .no);
+        return;
+    }
 
     try platform_impl.writeStderr("fatal: non-HTTPS/non-local fetch not supported natively yet\n");
     std.process.exit(128);
@@ -5432,7 +5460,7 @@ fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     if (pull_is_local) {
         const lp = if (std.mem.startsWith(u8, remote_url, "file://")) remote_url["file://".len..] else remote_url;
         const empty_refspecs: []const []const u8 = &.{};
-        performLocalFetch(allocator, git_path, lp, remote, false, empty_refspecs, platform_impl) catch |err| {
+        performLocalFetch(allocator, git_path, lp, remote, false, empty_refspecs, platform_impl, true) catch |err| {
             const emsg = try std.fmt.allocPrint(allocator, "fatal: fetch failed: {}\n", .{err});
             defer allocator.free(emsg);
             try platform_impl.writeStderr(emsg);
@@ -8063,6 +8091,11 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     }
 
     const remote = remote_name orelse "origin";
+
+    if (remote.len == 0) {
+        try platform_impl.writeStderr("fatal: bad repository ''\n");
+        std.process.exit(128);
+    }
 
     // Resolve remote URL
     var remote_url: []const u8 = undefined;
@@ -26440,7 +26473,7 @@ fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
 }
 
 // === T5 agent functions ===
-fn performLocalFetch(allocator: std.mem.Allocator, git_path: []const u8, source_path: []const u8, remote_name: []const u8, quiet: bool, cmd_refspecs: []const []const u8, platform_impl: *const platform_mod.Platform) !void {
+fn performLocalFetch(allocator: std.mem.Allocator, git_path: []const u8, source_path: []const u8, remote_name: []const u8, quiet: bool, cmd_refspecs: []const []const u8, platform_impl: *const platform_mod.Platform, copy_tags: bool) !void {
     const src_git_dir = resolveSourceGitDir(allocator, source_path) catch { const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' does not appear to be a git repository\n", .{source_path}); defer allocator.free(msg); try platform_impl.writeStderr(msg); std.process.exit(128); };
     defer allocator.free(src_git_dir);
     const fkey = try std.fmt.allocPrint(allocator, "remote.{s}.fetch", .{remote_name}); defer allocator.free(fkey);
@@ -26466,13 +26499,31 @@ fn performLocalFetch(allocator: std.mem.Allocator, git_path: []const u8, source_
             if (std.mem.indexOfScalar(u8, line, ' ')) |si| { const h = line[0..si]; const n = line[si+1..]; if (h.len >= 40) try srl.append(.{ .name = try allocator.dupe(u8, n), .hash = try allocator.dupe(u8, h[0..40]) }); } }
     } else |_| {}
     try collectLooseRefs(allocator, src_git_dir, "refs", &srl, platform_impl);
-    for (rspecs.items) |rs| { var cs = rs; var cd: ?[]const u8 = null;
-        if (cs.len > 0 and cs[0] == '+') cs = cs[1..];
+    var fetch_failed = false;
+    for (rspecs.items) |rs| { var cs = rs; var cd: ?[]const u8 = null; var force_ref = false;
+        if (cs.len > 0 and cs[0] == '+') { force_ref = true; cs = cs[1..]; }
         if (std.mem.indexOf(u8, cs, ":")) |c| { cd = cs[c+1..]; cs = cs[0..c]; }
         for (srl.items) |entry| { if (t5Match(entry.name, cs)) |suffix| { if (cd) |d| { if (d.len > 0) {
             const dn = t5Map(allocator, suffix, d) catch continue; defer allocator.free(dn);
             const drp = try std.fmt.allocPrint(allocator, "{s}/{s}", .{git_path, dn}); defer allocator.free(drp);
             if (std.mem.lastIndexOfScalar(u8, drp, '/')) |ls| std.fs.cwd().makePath(drp[0..ls]) catch {};
+            // Check fast-forward if not forced
+            if (!force_ref) {
+                if (std.fs.cwd().readFileAlloc(allocator, drp, 256)) |old_content| {
+                    defer allocator.free(old_content);
+                    const old_hash = std.mem.trim(u8, old_content, " \t\r\n");
+                    if (old_hash.len >= 40 and !std.mem.eql(u8, old_hash[0..40], entry.hash)) {
+                        const is_ff = isAncestor(git_path, old_hash[0..40], entry.hash, allocator, platform_impl) catch false;
+                        if (!is_ff) {
+                            const emsg = try std.fmt.allocPrint(allocator, " ! [rejected]        {s} -> {s}  (non-fast-forward)\n", .{entry.name, dn});
+                            defer allocator.free(emsg);
+                            try platform_impl.writeStderr(emsg);
+                            fetch_failed = true;
+                            continue;
+                        }
+                    }
+                } else |_| {}
+            }
             const hnl = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.hash}); defer allocator.free(hnl);
             std.fs.cwd().writeFile(.{ .sub_path = drp, .data = hnl }) catch {};
         } } } } }
@@ -26488,13 +26539,18 @@ fn performLocalFetch(allocator: std.mem.Allocator, git_path: []const u8, source_
             const fhc = try std.fmt.allocPrint(allocator, "{s}\t\tbranch '{s}' of {s}\n", .{h, bn, source_path}); defer allocator.free(fhc);
             std.fs.cwd().writeFile(.{ .sub_path = fhp, .data = fhc }) catch {};
             if (ho) allocator.free(h); } } else |_| {}
-    // Copy tags
-    for (srl.items) |entry| { if (std.mem.startsWith(u8, entry.name, "refs/tags/")) {
-        const dtp = try std.fmt.allocPrint(allocator, "{s}/{s}", .{git_path, entry.name}); defer allocator.free(dtp);
-        if (std.mem.lastIndexOfScalar(u8, dtp, '/')) |ls| std.fs.cwd().makePath(dtp[0..ls]) catch {};
-        const hnl = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.hash}); defer allocator.free(hnl);
-        std.fs.cwd().writeFile(.{ .sub_path = dtp, .data = hnl }) catch {}; } }
+    // Copy tags (unless --no-tags)
+    if (copy_tags) {
+        for (srl.items) |entry| { if (std.mem.startsWith(u8, entry.name, "refs/tags/")) {
+            const dtp = try std.fmt.allocPrint(allocator, "{s}/{s}", .{git_path, entry.name}); defer allocator.free(dtp);
+            if (std.mem.lastIndexOfScalar(u8, dtp, '/')) |ls| std.fs.cwd().makePath(dtp[0..ls]) catch {};
+            const hnl = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.hash}); defer allocator.free(hnl);
+            std.fs.cwd().writeFile(.{ .sub_path = dtp, .data = hnl }) catch {}; } }
+    }
     _ = quiet;
+    if (fetch_failed) {
+        std.process.exit(1);
+    }
 }
 fn t5Match(rn: []const u8, p: []const u8) ?[]const u8 {
     if (std.mem.endsWith(u8, p, "*")) { const pfx = p[0..p.len-1]; if (std.mem.startsWith(u8, rn, pfx)) return rn[pfx.len..]; }
