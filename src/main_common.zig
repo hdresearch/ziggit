@@ -26984,7 +26984,8 @@ fn outputPrettyCommitHeader(allocator: std.mem.Allocator, commit_hash: []const u
         try platform_impl.writeStdout("\n");
         
         // Output message with 4-space indent
-        var msg_iter = std.mem.splitScalar(u8, msg, '\n');
+        const trimmed_msg = std.mem.trimRight(u8, msg, "\n");
+        var msg_iter = std.mem.splitScalar(u8, trimmed_msg, '\n');
         while (msg_iter.next()) |line| {
             if (line.len == 0) {
                 try platform_impl.writeStdout("\n");
@@ -26994,14 +26995,11 @@ fn outputPrettyCommitHeader(allocator: std.mem.Allocator, commit_hash: []const u
                 try platform_impl.writeStdout(indented);
             }
         }
-        // For patch-with-stat, output --- instead of trailing blank line
+        // For patch-with-stat/raw, output --- separator
         if (opts.patch_with_stat or opts.patch_with_raw) {
             try platform_impl.writeStdout("---\n");
         } else {
-            // Ensure trailing newline
-            if (msg.len > 0 and msg[msg.len - 1] != '\n') {
-                try platform_impl.writeStdout("\n");
-            }
+            try platform_impl.writeStdout("\n");
         }
     }
 }
