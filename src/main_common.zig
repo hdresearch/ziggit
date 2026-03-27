@@ -3387,9 +3387,32 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         const reset_msg = try std.fmt.allocPrint(allocator, "Switched to and reset branch '{s}'\n", .{branch_name});
         defer allocator.free(reset_msg);
         try platform_impl.writeStderr(reset_msg);
+    } else if (std.mem.eql(u8, first_arg, "--")) {
+        // checkout -- <paths>: restore files from index
+        var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch return;
+        defer idx.deinit();
+        const repo_root = std.fs.path.dirname(git_path) orelse ".";
+        
+        while (args.next()) |path| {
+            for (idx.entries.items) |entry| {
+                if (std.mem.eql(u8, entry.path, path) or simpleGlobMatch(path, entry.path)) {
+                    // Load blob and write to working tree
+                    var hash_hex: [40]u8 = undefined;
+                    for (entry.sha1, 0..) |byte, bi| {
+                        hash_hex[bi * 2] = "0123456789abcdef"[byte >> 4];
+                        hash_hex[bi * 2 + 1] = "0123456789abcdef"[byte & 0xf];
+                    }
+                    const blob = objects.GitObject.load(&hash_hex, git_path, platform_impl, allocator) catch continue;
+                    defer blob.deinit(allocator);
+                    const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path });
+                    defer allocator.free(full_path);
+                    platform_impl.fs.writeFile(full_path, blob.data) catch {};
+                }
+            }
+        }
     } else {
         // Parse checkout arguments
-        var quiet = std.mem.eql(u8, first_arg, "--quiet");
+        var quiet = std.mem.eql(u8, first_arg, "--quiet") or std.mem.eql(u8, first_arg, "-q");
         const target = if (quiet) 
             args.next() orelse {
                 try platform_impl.writeStderr("error: pathspec '' did not match any file(s) known to git\n");
