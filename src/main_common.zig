@@ -19862,7 +19862,9 @@ fn objectExistsCheck(git_dir: []const u8, hash_hex: *const [40]u8, platform_impl
 }
 
 fn findGitDir() ![]const u8 {
-    // Check GIT_DIR env first
+    // Check --git-dir override first
+    if (global_git_dir_override) |gd| return gd;
+    // Check GIT_DIR env
     if (std.posix.getenv("GIT_DIR")) |gd| return gd;
 
     // Check for .git in current directory (normal repo)
