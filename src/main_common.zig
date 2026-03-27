@@ -11896,6 +11896,122 @@ fn formatPersonDateISO(person_line: []const u8, allocator: std.mem.Allocator) []
     return formatTimestampISO(timestamp, tz_str, allocator) catch return "";
 }
 
+fn formatPersonDateWithFormat(person_line: []const u8, date_fmt: []const u8, allocator: std.mem.Allocator) []const u8 {
+    const gt = std.mem.indexOfScalar(u8, person_line, '>') orelse return "";
+    const after = std.mem.trimLeft(u8, if (gt + 1 < person_line.len) person_line[gt + 1 ..] else "", " ");
+    const space = std.mem.indexOfScalar(u8, after, ' ');
+    const ts_str = if (space) |s| after[0..s] else after;
+    const tz_str = if (space) |s| after[s + 1 ..] else "+0000";
+    const timestamp = std.fmt.parseInt(i64, ts_str, 10) catch return "";
+
+    if (std.mem.eql(u8, date_fmt, "raw")) {
+        return std.fmt.allocPrint(allocator, "{s} {s}", .{ ts_str, tz_str }) catch return "";
+    }
+    if (std.mem.eql(u8, date_fmt, "default")) {
+        return formatTimestamp(timestamp, tz_str, allocator) catch return "";
+    }
+    if (std.mem.eql(u8, date_fmt, "iso8601") or std.mem.eql(u8, date_fmt, "iso")) {
+        return formatTimestampISO(timestamp, tz_str, allocator) catch return "";
+    }
+    if (std.mem.eql(u8, date_fmt, "iso8601-strict") or std.mem.eql(u8, date_fmt, "iso-strict")) {
+        return formatTimestampISOStrict(timestamp, tz_str, allocator) catch return "";
+    }
+    if (std.mem.eql(u8, date_fmt, "rfc2822") or std.mem.eql(u8, date_fmt, "rfc")) {
+        return formatTimestampRFC2822(timestamp, tz_str, allocator) catch return "";
+    }
+    if (std.mem.eql(u8, date_fmt, "short")) {
+        return formatTimestampShort(timestamp, tz_str, allocator) catch return "";
+    }
+    if (std.mem.eql(u8, date_fmt, "unix")) {
+        return ts_str;
+    }
+    // default-local, iso-local, etc: use UTC
+    if (std.mem.endsWith(u8, date_fmt, "-local")) {
+        const base_fmt = date_fmt[0 .. date_fmt.len - 6];
+        if (std.mem.eql(u8, base_fmt, "default")) {
+            return formatTimestamp(timestamp, "+0000", allocator) catch return "";
+        }
+        if (std.mem.eql(u8, base_fmt, "short")) {
+            return formatTimestampShort(timestamp, "+0000", allocator) catch return "";
+        }
+        if (std.mem.eql(u8, base_fmt, "iso8601") or std.mem.eql(u8, base_fmt, "iso")) {
+            return formatTimestampISO(timestamp, "+0000", allocator) catch return "";
+        }
+        if (std.mem.eql(u8, base_fmt, "rfc2822") or std.mem.eql(u8, base_fmt, "rfc")) {
+            return formatTimestampRFC2822(timestamp, "+0000", allocator) catch return "";
+        }
+        if (std.mem.eql(u8, base_fmt, "raw")) {
+            return std.fmt.allocPrint(allocator, "{s} +0000", .{ts_str}) catch return "";
+        }
+        if (std.mem.eql(u8, base_fmt, "relative")) {
+            // For relative-local, just show relative
+            return "unknown"; // TODO
+        }
+        return formatTimestamp(timestamp, "+0000", allocator) catch return "";
+    }
+    // Fallback
+    return formatTimestamp(timestamp, tz_str, allocator) catch return "";
+}
+
+fn formatTimestampShort(timestamp: i64, tz_str: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+    var tz_off: i32 = 0;
+    if (tz_str.len >= 5) {
+        const sign: i32 = if (tz_str[0] == '-') @as(i32, -1) else 1;
+        const h = std.fmt.parseInt(i32, tz_str[1..3], 10) catch 0;
+        const m = std.fmt.parseInt(i32, tz_str[3..5], 10) catch 0;
+        tz_off = sign * (h * 60 + m);
+    }
+    const adj = timestamp + @as(i64, tz_off) * 60;
+    const SPD: i64 = 86400;
+    const days = @divFloor(adj, SPD);
+    var d = days;
+    var y: i64 = 1970;
+    while (true) {
+        const yd: i64 = if (@mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0)) 366 else 365;
+        if (d < yd) break;
+        d -= yd; y += 1;
+    }
+    const leap = (@mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0));
+    const mdays_arr = [12]u32{ 31, if (leap) 29 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    var mon: usize = 0;
+    while (mon < 12) : (mon += 1) { if (d < mdays_arr[mon]) break; d -= mdays_arr[mon]; }
+    return std.fmt.allocPrint(allocator, "{d}-{d:0>2}-{d:0>2}", .{ y, mon + 1, @as(u32, @intCast(d)) + 1 });
+}
+
+fn formatTimestampISOStrict(timestamp: i64, tz_str: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+    var tz_off: i32 = 0;
+    if (tz_str.len >= 5) {
+        const sign: i32 = if (tz_str[0] == '-') @as(i32, -1) else 1;
+        const h = std.fmt.parseInt(i32, tz_str[1..3], 10) catch 0;
+        const m = std.fmt.parseInt(i32, tz_str[3..5], 10) catch 0;
+        tz_off = sign * (h * 60 + m);
+    }
+    const adj = timestamp + @as(i64, tz_off) * 60;
+    const SPD: i64 = 86400;
+    var days = @divFloor(adj, SPD);
+    var rem = @mod(adj, SPD);
+    if (rem < 0) { rem += SPD; days -= 1; }
+    const hour = @as(u32, @intCast(@divFloor(rem, 3600)));
+    const minute = @as(u32, @intCast(@divFloor(@mod(rem, 3600), 60)));
+    const second = @as(u32, @intCast(@mod(rem, 60)));
+    var y: i64 = 1970;
+    var d = days;
+    while (true) {
+        const yd: i64 = if (@mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0)) 366 else 365;
+        if (d < yd) break;
+        d -= yd; y += 1;
+    }
+    const leap = (@mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0));
+    const mdays_arr = [12]u32{ 31, if (leap) 29 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    var mon: usize = 0;
+    while (mon < 12) : (mon += 1) { if (d < mdays_arr[mon]) break; d -= mdays_arr[mon]; }
+    const day = @as(u32, @intCast(d)) + 1;
+    const tz_sign: u8 = if (tz_str.len > 0 and tz_str[0] == '-') '-' else '+';
+    const tz_h = if (tz_str.len >= 3) (std.fmt.parseInt(u32, tz_str[1..3], 10) catch 0) else 0;
+    const tz_m = if (tz_str.len >= 5) (std.fmt.parseInt(u32, tz_str[3..5], 10) catch 0) else 0;
+    return std.fmt.allocPrint(allocator, "{d}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}{c}{d:0>2}:{d:0>2}", .{ y, mon + 1, day, hour, minute, second, tz_sign, tz_h, tz_m });
+}
+
 fn formatPersonDateRFC2822(person_line: []const u8, allocator: std.mem.Allocator) []const u8 {
     const gt = std.mem.indexOfScalar(u8, person_line, '>') orelse return "";
     const after = std.mem.trimLeft(u8, if (gt + 1 < person_line.len) person_line[gt + 1 ..] else "", " ");
@@ -16650,7 +16766,9 @@ fn collectLooseRefs(allocator: std.mem.Allocator, git_dir: []const u8, prefix: [
 fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
     var format: []const u8 = "%(objectname) %(objecttype)\t%(refname)";
     var sort_key: ?[]const u8 = null;
+    var sort_reverse = false;
     var count_limit: ?usize = null;
+    var quoting_style: enum { none, shell, perl, python, tcl } = .none;
     var patterns = std.array_list.Managed([]const u8).init(allocator);
     defer patterns.deinit();
 
@@ -16666,15 +16784,39 @@ fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, command
             i += 1;
             if (i < args.len) format = args[i];
         } else if (std.mem.startsWith(u8, arg, "--sort=")) {
-            sort_key = arg["--sort=".len..];
+            const sk = arg["--sort=".len..];
+            if (sk.len > 0 and sk[0] == '-') {
+                sort_key = sk[1..];
+                sort_reverse = true;
+            } else {
+                sort_key = sk;
+                sort_reverse = false;
+            }
         } else if (std.mem.eql(u8, arg, "--sort")) {
             i += 1;
-            if (i < args.len) sort_key = args[i];
+            if (i < args.len) {
+                const sk = args[i];
+                if (sk.len > 0 and sk[0] == '-') {
+                    sort_key = sk[1..];
+                    sort_reverse = true;
+                } else {
+                    sort_key = sk;
+                    sort_reverse = false;
+                }
+            }
         } else if (std.mem.startsWith(u8, arg, "--count=")) {
             count_limit = std.fmt.parseInt(usize, arg["--count=".len..], 10) catch null;
         } else if (std.mem.eql(u8, arg, "--count")) {
             i += 1;
             if (i < args.len) count_limit = std.fmt.parseInt(usize, args[i], 10) catch null;
+        } else if (std.mem.eql(u8, arg, "--shell") or std.mem.eql(u8, arg, "-s")) {
+            quoting_style = .shell;
+        } else if (std.mem.eql(u8, arg, "--perl") or std.mem.eql(u8, arg, "-p")) {
+            quoting_style = .perl;
+        } else if (std.mem.eql(u8, arg, "--python")) {
+            quoting_style = .python;
+        } else if (std.mem.eql(u8, arg, "--tcl")) {
+            quoting_style = .tcl;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             try patterns.append(arg);
         }
@@ -16744,12 +16886,20 @@ fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, command
 
     try collectLooseRefs(allocator, git_dir, "refs", &ref_list, platform_impl);
 
-    // Sort by name
-    std.mem.sort(RefEntry, ref_list.items, {}, struct {
-        fn lessThan(_: void, a: RefEntry, b: RefEntry) bool {
-            return std.mem.order(u8, a.name, b.name).compare(.lt);
-        }
-    }.lessThan);
+    // Sort
+    if (sort_reverse) {
+        std.mem.sort(RefEntry, ref_list.items, {}, struct {
+            fn lessThan(_: void, a: RefEntry, b: RefEntry) bool {
+                return std.mem.order(u8, a.name, b.name).compare(.gt);
+            }
+        }.lessThan);
+    } else {
+        std.mem.sort(RefEntry, ref_list.items, {}, struct {
+            fn lessThan(_: void, a: RefEntry, b: RefEntry) bool {
+                return std.mem.order(u8, a.name, b.name).compare(.lt);
+            }
+        }.lessThan);
+    }
 
     // Filter and format output
     var output_count: usize = 0;
@@ -16784,13 +16934,13 @@ fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, command
             obj_type = obj.type.toString();
             defer obj.deinit(allocator);
 
-            const formatted = try formatRefOutput(allocator, format, entry.name, entry.hash, obj_type, obj.data);
+            const formatted = try formatRefOutput(allocator, format, entry.name, entry.hash, obj_type, obj.data, quoting_style);
             defer allocator.free(formatted);
             const output = std.fmt.allocPrint(allocator, "{s}\n", .{formatted}) catch continue;
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
         } else |_| {
-            const formatted = try formatRefOutput(allocator, format, entry.name, entry.hash, obj_type, "");
+            const formatted = try formatRefOutput(allocator, format, entry.name, entry.hash, obj_type, "", quoting_style);
             defer allocator.free(formatted);
             const output = std.fmt.allocPrint(allocator, "{s}\n", .{formatted}) catch continue;
             defer allocator.free(output);
@@ -16800,18 +16950,53 @@ fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, command
     }
 }
 
-fn formatRefOutput(allocator: std.mem.Allocator, format: []const u8, refname: []const u8, objectname: []const u8, objecttype: []const u8, data: []const u8) ![]u8 {
+fn formatRefOutput(allocator: std.mem.Allocator, format: []const u8, refname: []const u8, objectname: []const u8, objecttype: []const u8, data: []const u8, quoting: anytype) ![]u8 {
     var result = std.array_list.Managed(u8).init(allocator);
     defer result.deinit();
 
     var idx: usize = 0;
     while (idx < format.len) {
         if (format[idx] == '%' and idx + 1 < format.len and format[idx + 1] == '(') {
-            // Find closing )
             if (std.mem.indexOfScalar(u8, format[idx..], ')')) |close| {
                 const field = format[idx + 2 .. idx + close];
                 const value = getRefField(field, refname, objectname, objecttype, data, allocator);
-                try result.appendSlice(value);
+                // Apply quoting
+                switch (quoting) {
+                    .shell => {
+                        try result.append('\'');
+                        for (value) |c| {
+                            if (c == '\'') {
+                                try result.appendSlice("'\\''");
+                            } else {
+                                try result.append(c);
+                            }
+                        }
+                        try result.append('\'');
+                    },
+                    .perl, .python => {
+                        try result.append('"');
+                        for (value) |c| {
+                            if (c == '"' or c == '\\') {
+                                try result.append('\\');
+                            }
+                            try result.append(c);
+                        }
+                        try result.append('"');
+                    },
+                    .tcl => {
+                        try result.append('"');
+                        for (value) |c| {
+                            if (c == '"' or c == '\\' or c == '$' or c == '[' or c == ']' or c == '{' or c == '}') {
+                                try result.append('\\');
+                            }
+                            try result.append(c);
+                        }
+                        try result.append('"');
+                    },
+                    .none => {
+                        try result.appendSlice(value);
+                    },
+                }
                 idx += close + 1;
                 continue;
             }
@@ -17134,6 +17319,10 @@ fn extractPersonField(suffix: []const u8, person_line: []const u8, allocator: st
         return email_brk;
     }
     if (std.mem.eql(u8, suffix, "date")) return formatPersonDate(person_line, allocator);
+    if (std.mem.startsWith(u8, suffix, "date:")) {
+        const date_fmt = suffix["date:".len..];
+        return formatPersonDateWithFormat(person_line, date_fmt, allocator);
+    }
     return person_line;
 }
 
