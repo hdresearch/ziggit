@@ -1,10 +1,10 @@
 === Git Test Results (t0000-t4999) ===
-Date: Fri Mar 27 00:04:44 UTC 2026
+Date: Fri Mar 27 00:26:15 UTC 2026
 Git under test: ziggit wrapper -> git 2.43.0
 Test suite: git master (commit 41688c1)
 
 t0000-basic: ok=87 fail=5 (94%) OK
-t0001-init: ok=80 fail=22 (78%) OK
+t0001-init: ok=81 fail=21 (79%) OK
 t0002-gitfile: ok=14 fail=0 (100%) OK
 t0003-attributes: ok=45 fail=10 (81%) OK
 t0004-unwritable: ok=9 fail=0 (100%) OK
@@ -172,10 +172,10 @@ t1515-rev-parse-outside-repo: ok=4 fail=0 (100%) OK
 t1517-outside-repo: ok=299 fail=38 (88%) OK
 t1600-index: ok=6 fail=1 (85%) OK
 t1601-index-bogus: ok=4 fail=0 (100%) OK
-t1700-split-index: ok=10 fail=19 (34%) OK
+t1700-split-index: ok=11 fail=18 (37%) OK
 t1701-racy-split-index: ok=31 fail=0 (100%) OK
 t1800-hook: ok=28 fail=16 (63%) OK
-t1900-repo-info: ok=9 fail=28 (24%) OK
+t1900-repo-info: ok=8 fail=29 (21%) OK
 t1901-repo-structure: ok=0 fail=4 (0%) OK
 t2000-conflict-when-checking-files-out: ok=14 fail=0 (100%) OK
 t2002-checkout-cache-u: ok=3 fail=0 (100%) OK
@@ -380,7 +380,7 @@ t4010-diff-pathspec: ok=17 fail=0 (100%) OK
 t4011-diff-symlink: ok=8 fail=0 (100%) OK
 t4012-diff-binary: ok=13 fail=0 (100%) OK
 t4013-diff-various: ok=224 fail=6 (97%) OK
-t4014-format-patch: ok=197 fail=18 (91%) OK
+t4014-format-patch: ok=199 fail=16 (92%) OK
 t4015-diff-whitespace: ok=128 fail=8 (94%) OK
 t4016-diff-quote: ok=5 fail=0 (100%) OK
 t4017-diff-retval: ok=37 fail=1 (97%) OK
@@ -518,6 +518,6 @@ t4301-merge-tree-write-tree: ok=35 fail=8 (81%) OK
 === SUMMARY ===
 Total test scripts: 511
 Perfect (100%) scripts: 311
-Total subtests passed: 16775
-Total subtests failed: 2799
-Overall pass rate: 85% (16775/19574)
+Total subtests passed: 16778
+Total subtests failed: 2796
+Overall pass rate: 85% (16778/19574)
