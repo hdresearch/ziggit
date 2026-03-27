@@ -746,6 +746,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmdCheckoutIndex(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "blame") or std.mem.eql(u8, command, "annotate")) {
         try @import("git/blame_cmd.zig").cmdBlame(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "grep")) {
+        try @import("git/grep_cmd.zig").cmdGrep(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "ls-remote")) {
         try nativeCmdLsRemote(allocator, all_original_args.items, command_index, &platform_impl);
     } else if (std.mem.eql(u8, command, "last-modified")) {
@@ -11215,7 +11217,7 @@ fn resolveTreePath(git_path: []const u8, tree_hash: []const u8, path: []const u8
     return current_hash;
 }
 
-fn resolveRevision(git_path: []const u8, rev: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
+pub fn resolveRevision(git_path: []const u8, rev: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
     // Handle <rev>:<path> syntax
     if (findRevColonPath(rev)) |colon_pos| {
         const rev_part = rev[0..colon_pos];
