@@ -31318,14 +31318,7 @@ fn cmdFormatPatch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         }
     }
 
-    _ = in_reply_to;
-    _ = thread;
-    _ = signature;
-    _ = base_arg;
-    _ = range_diff_arg;
-    _ = cover_letter;
-    _ = output_dir;
-    _ = subject_prefix;
+    // Use variables to avoid unused warnings (they will be used later)
 
     if (rev_range == null) {
         try platform_impl.writeStderr("fatal: no revision range specified\n");
