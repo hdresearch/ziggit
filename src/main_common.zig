@@ -122,7 +122,7 @@ const NATIVE_COMMANDS = [_][]const u8{
     "switch", "restore", "worktree", "stripspace", "checkout-index",
     "show-branch", "blame", "annotate", "ls-remote", "upload-pack", "receive-pack", "send-pack", "check-ref-format", "last-modified", "refs",
     "rebase", "cherry-pick", "daemon", "bisect",
-    "notes", "format-patch", "whatchanged", "for-each-repo", "bugreport", "diagnose",
+    "grep", "notes", "format-patch", "whatchanged", "for-each-repo", "bugreport", "diagnose",
 };
 
 fn isNativeCommand(command: []const u8) bool {
