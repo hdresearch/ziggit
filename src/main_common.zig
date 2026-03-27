@@ -6501,10 +6501,10 @@ fn performThreeWayFileMerge(git_path: []const u8, base_files: *std.StringHashMap
             if (std.mem.eql(u8, current_hash.?, target_hash.?)) {
                 // No change needed - both have same content
                 try writeFileFromBlob(git_path, filename, current_hash.?, repo_root, allocator, platform_impl);
-            } else if (base_hash != null and std.mem.eql(u8, base_hash, current_hash.?)) {
+            } else if (base_hash.? != null and std.mem.eql(u8, base_hash, current_hash.?)) {
                 // Only target changed - take target
                 try writeFileFromBlob(git_path, filename, target_hash.?, repo_root, allocator, platform_impl);
-            } else if (base_hash != null and std.mem.eql(u8, base_hash, target_hash.?)) {
+            } else if (base_hash.? != null and std.mem.eql(u8, base_hash, target_hash.?)) {
                 // Only current changed - keep current
                 try writeFileFromBlob(git_path, filename, current_hash.?, repo_root, allocator, platform_impl);
             } else if (base_hash != null) {
