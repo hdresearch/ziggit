@@ -26680,6 +26680,18 @@ fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, opts:
                     var patch_opts = opts.*;
                     patch_opts.show_patch = true;
                     try diffTreeWithEmptyOpts(allocator, this_tree, &patch_opts, git_path, platform_impl);
+                } else if (opts.show_stat and !opts.show_patch) {
+                    // Only stat output
+                    try outputStatForEmptyTree(allocator, this_tree, git_path, platform_impl);
+                    if (opts.show_summary) {
+                        try outputSummaryForEmptyTree(allocator, this_tree, git_path, platform_impl);
+                    }
+                } else if (opts.show_summary and !opts.show_patch and !opts.show_stat) {
+                    // Only summary output (also show raw by default)
+                    if (opts.show_raw) {
+                        try diffTreeWithEmptyOpts(allocator, this_tree, opts, git_path, platform_impl);
+                    }
+                    try outputSummaryForEmptyTree(allocator, this_tree, git_path, platform_impl);
                 } else {
                     try diffTreeWithEmptyOpts(allocator, this_tree, opts, git_path, platform_impl);
                 }
@@ -26870,6 +26882,21 @@ fn collectFilesFromTree(allocator: std.mem.Allocator, tree_hash_str: []const u8,
             }
             try files.append(.{ .name = full_name, .lines = line_count });
         }
+    }
+}
+
+fn outputSummaryForEmptyTree(allocator: std.mem.Allocator, tree_hash_str: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
+    var files = std.array_list.Managed(FileStatEntry).init(allocator);
+    defer {
+        for (files.items) |f| allocator.free(f.name);
+        files.deinit();
+    }
+    try collectFilesFromTree(allocator, tree_hash_str, "", git_path, platform_impl, &files);
+    
+    for (files.items) |f| {
+        const out = try std.fmt.allocPrint(allocator, " create mode 100644 {s}\n", .{f.name});
+        defer allocator.free(out);
+        try platform_impl.writeStdout(out);
     }
 }
 
