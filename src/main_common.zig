@@ -4858,12 +4858,41 @@ fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
 
 /// Resolve a path to its .git directory. Handles bare repos, .git files (worktrees/submodules),
 /// and file:// URLs. Returns the path to the git directory (objects, refs, etc.).
+fn urlDecodePath(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var result = std.array_list.Managed(u8).init(allocator);
+    errdefer result.deinit();
+    var i: usize = 0;
+    while (i < input.len) {
+        if (input[i] == '%' and i + 2 < input.len) {
+            const high = std.fmt.charToDigit(input[i + 1], 16) catch {
+                try result.append(input[i]);
+                i += 1;
+                continue;
+            };
+            const low = std.fmt.charToDigit(input[i + 2], 16) catch {
+                try result.append(input[i]);
+                i += 1;
+                continue;
+            };
+            try result.append(@as(u8, high) * 16 + low);
+            i += 3;
+        } else {
+            try result.append(input[i]);
+            i += 1;
+        }
+    }
+    return try result.toOwnedSlice();
+}
+
 fn resolveSourceGitDir(allocator: std.mem.Allocator, source_path: []const u8) ![]const u8 {
-    // Strip file:// prefix if present
-    const path = if (std.mem.startsWith(u8, source_path, "file://"))
-        source_path["file://".len..]
-    else
-        source_path;
+    // Strip file:// prefix if present and URL-decode
+    const path = if (std.mem.startsWith(u8, source_path, "file://")) blk: {
+        const decoded = urlDecodePath(allocator, source_path["file://".len..]) catch
+            return error.RepositoryNotFound;
+        break :blk decoded;
+    } else
+        try allocator.dupe(u8, source_path);
+    defer allocator.free(path);
 
     // Resolve to absolute path
     const abs_path = std.fs.cwd().realpathAlloc(allocator, path) catch {
@@ -5632,6 +5661,11 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
                 url = arg;
             } else if (target_dir == null) {
                 target_dir = arg;
+            } else {
+                const emsg = try std.fmt.allocPrint(allocator, "fatal: Too many arguments.\n\nusage: git clone [<options>] [--] <repo> [<dir>]\n", .{});
+                defer allocator.free(emsg);
+                try platform_impl.writeStderr(emsg);
+                std.process.exit(128);
             }
         }
     }
@@ -5641,7 +5675,7 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         std.process.exit(128);
     }
 
-    const final_target_dir = target_dir orelse blk: {
+    const raw_target_dir = target_dir orelse blk: {
         // Extract directory name from URL
         if (std.mem.lastIndexOfScalar(u8, url.?, '/')) |last_slash| {
             const repo_name = url.?[last_slash + 1..];
@@ -5654,6 +5688,9 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             break :blk "repository";
         }
     };
+    
+    // Strip trailing slashes from target directory
+    const final_target_dir = std.mem.trimRight(u8, raw_target_dir, "/");
     
     // For non-HTTP URLs (local paths, ssh://, git://), handle local clone natively
     if (!(std.mem.startsWith(u8, url.?, "https://") or std.mem.startsWith(u8, url.?, "http://"))) {
@@ -5687,12 +5724,23 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             std.process.exit(128);
         }
 
-        // Check if target directory already exists
+        // Check if target directory already exists and is non-empty
         if (platform_impl.fs.exists(final_target_dir) catch false) {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: destination path '{s}' already exists and is not an empty directory.\n", .{final_target_dir});
-            defer allocator.free(msg);
-            try platform_impl.writeStderr(msg);
-            std.process.exit(128);
+            // Check if it's a directory
+            const is_dir = blk: {
+                var dir = std.fs.cwd().openDir(final_target_dir, .{ .iterate = true }) catch break :blk false;
+                defer dir.close();
+                // Check if empty
+                var iter = dir.iterate();
+                if (iter.next() catch null) |_| break :blk false; // has entries = not empty
+                break :blk true; // empty dir is OK
+            };
+            if (!is_dir) {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: destination path '{s}' already exists and is not an empty directory.\n", .{final_target_dir});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            }
         }
 
         const clone_msg = try std.fmt.allocPrint(allocator, "Cloning into '{s}'...\n", .{final_target_dir});
