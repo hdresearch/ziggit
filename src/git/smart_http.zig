@@ -862,13 +862,27 @@ fn buildV2LsRefsRequest(allocator: std.mem.Allocator, ref_prefixes: []const []co
     return body.toOwnedSlice();
 }
 
-/// Parse v2 ls-refs response into RefDiscovery.
+/// Result of v2 ls-refs parsing, includes symref info.
+const V2LsRefsResult = struct {
+    discovery: RefDiscovery,
+    /// If HEAD has a symref-target, this is the target ref name (e.g., "refs/heads/master").
+    /// Points into allocated memory owned by RefDiscovery.
+    head_symref_target: ?[]const u8,
+};
+
+/// Parse v2 ls-refs response into RefDiscovery, extracting symref info.
 fn parseV2LsRefsResponse(allocator: std.mem.Allocator, data: []const u8) !RefDiscovery {
+    const result = try parseV2LsRefsResponseFull(allocator, data);
+    return result.discovery;
+}
+
+fn parseV2LsRefsResponseFull(allocator: std.mem.Allocator, data: []const u8) !V2LsRefsResult {
     var refs = std.array_list.Managed(Ref).init(allocator);
     errdefer {
         for (refs.items) |ref| allocator.free(ref.name);
         refs.deinit();
     }
+    var head_symref_target: ?[]const u8 = null;
 
     var offset: usize = 0;
     while (offset < data.len) {
@@ -884,22 +898,52 @@ fn parseV2LsRefsResponse(allocator: std.mem.Allocator, data: []const u8) !RefDis
         const rest = line[41..];
 
         // rest may be "refname symref-target:refs/heads/xxx" etc.
-        // Split on space to get ref name
+        // Split on space to get ref name and symref info
         var ref_name = rest;
+        var symref_target: ?[]const u8 = null;
         if (std.mem.indexOfScalar(u8, rest, ' ')) |sp| {
             ref_name = rest[0..sp];
+            // Parse remaining attributes
+            var attrs = rest[sp + 1 ..];
+            while (attrs.len > 0) {
+                if (std.mem.startsWith(u8, attrs, "symref-target:")) {
+                    const target_start = "symref-target:".len;
+                    const target_end = std.mem.indexOfScalar(u8, attrs[target_start..], ' ') orelse (attrs.len - target_start);
+                    symref_target = attrs[target_start .. target_start + target_end];
+                }
+                // Skip to next attribute
+                if (std.mem.indexOfScalar(u8, attrs, ' ')) |next_sp| {
+                    attrs = attrs[next_sp + 1 ..];
+                } else break;
+            }
         }
 
+        const duped_name = try allocator.dupe(u8, ref_name);
         try refs.append(.{
             .hash = hash[0..40].*,
-            .name = try allocator.dupe(u8, ref_name),
+            .name = duped_name,
         });
+
+        // If this is HEAD and has a symref target, synthesize the branch ref too
+        if (std.mem.eql(u8, ref_name, "HEAD")) {
+            if (symref_target) |target| {
+                head_symref_target = try allocator.dupe(u8, target);
+                // Synthesize the branch ref so callers see it
+                try refs.append(.{
+                    .hash = hash[0..40].*,
+                    .name = try allocator.dupe(u8, target),
+                });
+            }
+        }
     }
 
     return .{
-        .refs = try refs.toOwnedSlice(),
-        .capabilities = try allocator.dupe(u8, ""),
-        .allocator = allocator,
+        .discovery = .{
+            .refs = try refs.toOwnedSlice(),
+            .capabilities = try allocator.dupe(u8, ""),
+            .allocator = allocator,
+        },
+        .head_symref_target = head_symref_target,
     };
 }
 
@@ -1088,8 +1132,9 @@ fn clonePackShallowV2(allocator: std.mem.Allocator, client: *std.http.Client, ur
     defer allocator.free(post_url);
 
     // Step 1: ls-refs with prefix filtering
-    // For shallow clones, skip tags (they point to historical commits not in shallow pack)
-    const shallow_prefixes = [_][]const u8{ "HEAD", "refs/heads/" };
+    // For shallow single-branch clones, only request HEAD (symrefs gives us the branch name).
+    // For full clones, request all relevant refs.
+    const shallow_prefixes = [_][]const u8{"HEAD"};
     const full_prefixes = [_][]const u8{ "HEAD", "refs/heads/", "refs/tags/" };
     const ref_prefixes: []const []const u8 = if (depth > 0) &shallow_prefixes else &full_prefixes;
     const ls_refs_body = try buildV2LsRefsRequest(allocator, ref_prefixes, true);
@@ -1098,7 +1143,8 @@ fn clonePackShallowV2(allocator: std.mem.Allocator, client: *std.http.Client, ur
     const ls_refs_response = try httpPostWithClientV2(allocator, client, post_url, ls_refs_body, "application/x-git-upload-pack-request");
     defer allocator.free(ls_refs_response);
 
-    const discovery = try parseV2LsRefsResponse(allocator, ls_refs_response);
+    const ls_refs_result = try parseV2LsRefsResponseFull(allocator, ls_refs_response);
+    const discovery = ls_refs_result.discovery;
 
     if (trace_timing) {
         if (net_timer) |*t| {
@@ -1107,62 +1153,51 @@ fn clonePackShallowV2(allocator: std.mem.Allocator, client: *std.http.Client, ur
         }
     }
 
-    // Step 2: Build want list (single-branch for shallow)
-    var head_hash: ?Oid = null;
-    var head_branch: ?[]const u8 = null;
+    // Step 2: Build want list — for shallow, just HEAD's hash (deduplicated)
+    var wants: [1]Oid = undefined;
+    var wants_len: usize = 0;
     if (depth > 0) {
         for (discovery.refs) |ref| {
             if (std.mem.eql(u8, ref.name, "HEAD")) {
-                head_hash = ref.hash;
+                wants[0] = ref.hash;
+                wants_len = 1;
                 break;
             }
         }
-        if (head_hash) |hh| {
-            for (discovery.refs) |ref| {
-                if (std.mem.startsWith(u8, ref.name, "refs/heads/") and
-                    std.mem.eql(u8, &ref.hash, &hh))
-                {
-                    head_branch = ref.name;
-                    break;
-                }
+    } else {
+        // Full clone: collect all unique wants
+        // (falls through to old path via wants_list below)
+    }
+
+    // For full clone, use dynamic want list
+    var wants_list = std.array_list.Managed(Oid).init(allocator);
+    defer wants_list.deinit();
+    if (depth == 0) {
+        var want_set = std.StringHashMap(void).init(allocator);
+        defer {
+            var it = want_set.keyIterator();
+            while (it.next()) |key| allocator.free(@constCast(key.*));
+            want_set.deinit();
+        }
+        for (discovery.refs) |ref| {
+            if (!isCloneRelevantRef(ref.name)) continue;
+            if (!want_set.contains(&ref.hash)) {
+                try want_set.put(try allocator.dupe(u8, &ref.hash), {});
+                try wants_list.append(ref.hash);
             }
         }
     }
-
-    var want_set = std.StringHashMap(void).init(allocator);
-    defer want_set.deinit();
-    var wants = std.array_list.Managed(Oid).init(allocator);
-    defer wants.deinit();
-
-    for (discovery.refs) |ref| {
-        const relevant = if (depth > 0) blk: {
-            if (std.mem.eql(u8, ref.name, "HEAD")) break :blk true;
-            if (head_branch) |hb| {
-                if (std.mem.eql(u8, ref.name, hb)) break :blk true;
-            }
-            break :blk false;
-        } else isCloneRelevantRef(ref.name);
-        if (!relevant) continue;
-        const hash_str = ref.hash;
-        if (!want_set.contains(&hash_str)) {
-            try want_set.put(try allocator.dupe(u8, &hash_str), {});
-            try wants.append(hash_str);
-        }
-    }
-    defer {
-        var it = want_set.keyIterator();
-        while (it.next()) |key| allocator.free(@constCast(key.*));
-    }
+    const effective_wants: []const Oid = if (depth > 0) wants[0..wants_len] else wants_list.items;
 
     if (trace_timing) {
         if (net_timer) |*t| {
-            std.debug.print("[timing]   v2 want list: {}ms, wants={}\n", .{ t.read() / std.time.ns_per_ms, wants.items.len });
+            std.debug.print("[timing]   v2 want list: {}ms, wants={}\n", .{ t.read() / std.time.ns_per_ms, effective_wants.len });
             t.reset();
         }
     }
 
     // Step 3: Fetch pack using v2 fetch command
-    const fetch_body = try buildV2FetchRequest(allocator, wants.items, &.{}, depth);
+    const fetch_body = try buildV2FetchRequest(allocator, effective_wants, &.{}, depth);
     defer allocator.free(fetch_body);
 
     const fetch_response = try httpPostWithClientV2(allocator, client, post_url, fetch_body, "application/x-git-upload-pack-request");
@@ -1175,6 +1210,11 @@ fn clonePackShallowV2(allocator: std.mem.Allocator, client: *std.http.Client, ur
             std.debug.print("[timing]   v2 fetch: {}ms, pack_size={}\n", .{ t.read() / std.time.ns_per_ms, shallow_result.pack_data.len });
             t.reset();
         }
+    }
+
+    // Free symref target if allocated (it was used internally for ref synthesis)
+    if (ls_refs_result.head_symref_target) |target| {
+        allocator.free(target);
     }
 
     return .{
