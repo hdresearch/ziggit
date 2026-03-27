@@ -8479,10 +8479,13 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     var flags_only = false;
     var no_flags = false;
     var path_format_absolute = false;
+    var default_rev: ?[]const u8 = null;
     var positional_args = std.array_list.Managed([]const u8).init(allocator);
     defer positional_args.deinit();
 
-    for (all_args.items) |arg| {
+    var arg_i: usize = 0;
+    while (arg_i < all_args.items.len) : (arg_i += 1) {
+        const arg = all_args.items[arg_i];
         if (std.mem.eql(u8, arg, "--verify")) {
             verify = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
@@ -8512,6 +8515,13 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         } else if (std.mem.eql(u8, arg, "--path-format")) {
             try platform_impl.writeStderr("fatal: --path-format requires a value\n");
             std.process.exit(129);
+        } else if (std.mem.eql(u8, arg, "--default")) {
+            arg_i += 1;
+            if (arg_i < all_args.items.len) {
+                default_rev = all_args.items[arg_i];
+            }
+        } else if (std.mem.startsWith(u8, arg, "--default=")) {
+            default_rev = arg["--default=".len..];
         } else {
             try positional_args.append(arg);
         }
@@ -8766,10 +8776,14 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             rev_arg = arg;
         }
         if (rev_arg == null) {
-            if (!quiet) {
-                try platform_impl.writeStderr("fatal: Needed a single revision\n");
+            if (default_rev) |def| {
+                rev_arg = def;
+            } else {
+                if (!quiet) {
+                    try platform_impl.writeStderr("fatal: Needed a single revision\n");
+                }
+                std.process.exit(128);
             }
-            std.process.exit(128);
         }
 
         const git_path = findGitDirectory(allocator, platform_impl) catch {
