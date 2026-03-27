@@ -7475,6 +7475,24 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     }.lessThan);
 
     // Output
+    // Read core.quotePath config (default true)
+    var quote_path = true;
+    {
+        const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch null;
+        if (config_path) |cp| {
+            defer allocator.free(cp);
+            if (std.fs.cwd().readFileAlloc(allocator, cp, 1024 * 1024)) |config_content| {
+                defer allocator.free(config_content);
+                // Simple search for quotepath = false
+                if (std.mem.indexOf(u8, config_content, "quotepath = false") != null or
+                    std.mem.indexOf(u8, config_content, "quotePath = false") != null)
+                {
+                    quote_path = false;
+                }
+            } else |_| {}
+        }
+    }
+
     const line_end: []const u8 = if (null_terminated) "\x00" else "\n";
     for (output_entries.items) |entry| {
         // Apply hash abbreviation
@@ -7491,7 +7509,7 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
             entry.full_path;
 
         // C-quote the path if it contains special characters
-        const quoted_path = try cQuotePath(allocator, raw_display_path);
+        const quoted_path = try cQuotePath(allocator, raw_display_path, quote_path);
         defer allocator.free(quoted_path);
         const display_path = quoted_path;
 
@@ -7748,10 +7766,15 @@ fn pathMatchesSpec(path: []const u8, spec: []const u8, is_tree: bool) bool {
 /// Check if pathspec starts with the given prefix (for tree recursion)
 /// Normalize a path by resolving . and .. components
 /// C-style quote a filename if it contains special characters
-fn cQuotePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+fn cQuotePath(allocator: std.mem.Allocator, path: []const u8, quote_high_bytes: bool) ![]u8 {
+    // Check if quoting is needed
     var needs_quoting = false;
     for (path) |c| {
-        if (c == '\t' or c == '\n' or c == '\\' or c == '"' or c >= 0x80 or c < 0x20) {
+        if (c < 0x20 or c == '\\' or c == '"') {
+            needs_quoting = true;
+            break;
+        }
+        if (quote_high_bytes and c >= 0x80) {
             needs_quoting = true;
             break;
         }
@@ -7767,7 +7790,7 @@ fn cQuotePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
             '\\' => try result.appendSlice("\\\\"),
             '"' => try result.appendSlice("\\\""),
             else => {
-                if (c < 0x20 or c >= 0x80) {
+                if (c < 0x20 or (quote_high_bytes and c >= 0x80)) {
                     var buf: [4]u8 = undefined;
                     _ = std.fmt.bufPrint(&buf, "\\{o:0>3}", .{c}) catch unreachable;
                     try result.appendSlice(&buf);
