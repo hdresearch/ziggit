@@ -936,16 +936,16 @@ fn grepCached(allocator: Allocator, opts: *GrepOptions, git_dir: []const u8, rep
     var found_match = false;
     var prev_file_had_output = false;
 
-    // Collect and sort file paths
-    var file_paths = std.array_list.Managed(FileInfo).init(allocator);
-    defer file_paths.deinit();
-
     const FileInfo = struct {
         path: []const u8,
         sha1: [20]u8,
         flags: u16,
         extended_flags: ?u16,
     };
+
+    // Collect and sort file paths
+    var file_paths = std.array_list.Managed(FileInfo).init(allocator);
+    defer file_paths.deinit();
 
     for (index.entries.items) |entry| {
         // Skip intent-to-add entries for --cached
