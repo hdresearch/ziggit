@@ -7563,6 +7563,60 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         const dst_ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, dst_name });
         defer allocator.free(dst_ref_path);
         try std.fs.cwd().writeFile(.{ .sub_path = dst_ref_path, .data = src_hash });
+    } else if (std.mem.eql(u8, first_arg.?, "--force") or std.mem.eql(u8, first_arg.?, "-f")) {
+        // Force create/reset branch
+        const branch_name = args.next() orelse {
+            try platform_impl.writeStderr("fatal: branch name required\n");
+            std.process.exit(128);
+        };
+        const start_point = args.next();
+        refs.createBranch(git_path, branch_name, start_point, platform_impl, allocator) catch |err| switch (err) {
+            error.NoCommitsYet => {
+                try platform_impl.writeStderr("fatal: not a valid object name: 'master'\n");
+                std.process.exit(128);
+            },
+            else => return err,
+        };
+    } else if (std.mem.eql(u8, first_arg.?, "--list") or std.mem.eql(u8, first_arg.?, "-l")) {
+        // List branches (with optional pattern)
+        const current_branch2 = refs.getCurrentBranch(git_path, platform_impl, allocator) catch "master";
+        defer allocator.free(current_branch2);
+        var branches2 = try refs.listBranches(git_path, platform_impl, allocator);
+        defer {
+            for (branches2.items) |branch| allocator.free(branch);
+            branches2.deinit();
+        }
+        const pattern = args.next();
+        for (branches2.items) |branch| {
+            if (pattern) |p| {
+                // Simple glob matching
+                if (!simpleGlobMatch(p, branch)) continue;
+            }
+            const prefix2 = if (std.mem.eql(u8, branch, current_branch2)) "* " else "  ";
+            const msg2 = try std.fmt.allocPrint(allocator, "{s}{s}\n", .{ prefix2, branch });
+            defer allocator.free(msg2);
+            try platform_impl.writeStdout(msg2);
+        }
+    } else if (std.mem.eql(u8, first_arg.?, "--create-reflog")) {
+        // Create branch with reflog
+        const branch_name = args.next() orelse {
+            try platform_impl.writeStderr("fatal: branch name required\n");
+            std.process.exit(128);
+        };
+        const start_point = args.next();
+        refs.createBranch(git_path, branch_name, start_point, platform_impl, allocator) catch |err| switch (err) {
+            error.NoCommitsYet => {
+                try platform_impl.writeStderr("fatal: not a valid object name: 'master'\n");
+                std.process.exit(128);
+            },
+            else => return err,
+        };
+        // Create reflog for the new branch
+        const new_hash = refs.resolveRef(git_path, std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name}) catch "", platform_impl, allocator) catch null;
+        defer if (new_hash) |h| allocator.free(h);
+        if (new_hash) |nh| {
+            writeReflogEntry(git_path, std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name}) catch "", "0000000000000000000000000000000000000000", nh, "branch: Created from HEAD", allocator, platform_impl) catch {};
+        }
     } else {
         // Create new branch
         const branch_name = first_arg.?;
@@ -7582,6 +7636,14 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         // Validate branch name
         if (std.mem.eql(u8, branch_name, "HEAD")) {
             try platform_impl.writeStderr("fatal: 'HEAD' is not a valid branch name\n");
+            std.process.exit(128);
+        }
+        
+        // Also check for names starting with -
+        if (std.mem.startsWith(u8, branch_name, "-")) {
+            const emsg = try std.fmt.allocPrint(allocator, "fatal: '{s}' is not a valid branch name\n", .{branch_name});
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
             std.process.exit(128);
         }
 
@@ -11949,6 +12011,33 @@ fn getCommitterString(allocator: std.mem.Allocator) ![]u8 {
     defer allocator.free(date);
 
     return try std.fmt.allocPrint(allocator, "{s} <{s}> {s}", .{ name, email, date });
+}
+
+fn simpleGlobMatch(pattern: []const u8, text: []const u8) bool {
+    // Simple glob matching supporting * and ?
+    var pi: usize = 0;
+    var ti: usize = 0;
+    var star_pi: ?usize = null;
+    var star_ti: usize = 0;
+    
+    while (ti < text.len) {
+        if (pi < pattern.len and (pattern[pi] == text[ti] or pattern[pi] == '?')) {
+            pi += 1;
+            ti += 1;
+        } else if (pi < pattern.len and pattern[pi] == '*') {
+            star_pi = pi;
+            star_ti = ti;
+            pi += 1;
+        } else if (star_pi) |sp| {
+            pi = sp + 1;
+            star_ti += 1;
+            ti = star_ti;
+        } else {
+            return false;
+        }
+    }
+    while (pi < pattern.len and pattern[pi] == '*') pi += 1;
+    return pi == pattern.len;
 }
 
 fn cleanEmptyRefDirs(git_dir: []const u8, ref_name: []const u8, allocator: std.mem.Allocator) void {
