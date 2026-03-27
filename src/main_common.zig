@@ -26166,6 +26166,83 @@ fn diffTreeWithEmpty(allocator: std.mem.Allocator, tree_hash_str: []const u8, re
     try diffTreeWithEmptyPrefix(allocator, tree_hash_str, "", &default_opts, git_path, platform_impl);
 }
 
+fn outputStatForEmptyTree(allocator: std.mem.Allocator, tree_hash_str: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
+    // Collect all files and their line counts
+    var files = std.array_list.Managed(struct { name: []const u8, lines: usize }).init(allocator);
+    defer {
+        for (files.items) |f| allocator.free(f.name);
+        files.deinit();
+    }
+    try collectFilesFromTree(allocator, tree_hash_str, "", git_path, platform_impl, &files);
+    
+    if (files.items.len == 0) return;
+    
+    // Find max filename width and max line count width
+    var max_name_len: usize = 0;
+    var total_insertions: usize = 0;
+    for (files.items) |f| {
+        if (f.name.len > max_name_len) max_name_len = f.name.len;
+        total_insertions += f.lines;
+    }
+    
+    // Output each file stat line
+    for (files.items) |f| {
+        const padding = max_name_len - f.name.len;
+        var pad_buf = try allocator.alloc(u8, padding);
+        defer allocator.free(pad_buf);
+        @memset(pad_buf, ' ');
+        
+        var plus_buf = try allocator.alloc(u8, f.lines);
+        defer allocator.free(plus_buf);
+        @memset(plus_buf, '+');
+        
+        const line = try std.fmt.allocPrint(allocator, " {s}{s} | {d} {s}\n", .{ f.name, pad_buf, f.lines, plus_buf });
+        defer allocator.free(line);
+        try platform_impl.writeStdout(line);
+    }
+    
+    // Summary line
+    const summary = try std.fmt.allocPrint(allocator, " {d} file{s} changed, {d} insertion{s}(+)\n", .{
+        files.items.len,
+        if (files.items.len != 1) "s" else "",
+        total_insertions,
+        if (total_insertions != 1) "s" else "",
+    });
+    defer allocator.free(summary);
+    try platform_impl.writeStdout(summary);
+}
+
+fn collectFilesFromTree(allocator: std.mem.Allocator, tree_hash_str: []const u8, prefix: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, files: *std.array_list.Managed(struct { name: []const u8, lines: usize })) !void {
+    const tree_obj = objects.GitObject.load(tree_hash_str, git_path, platform_impl, allocator) catch return;
+    defer tree_obj.deinit(allocator);
+    
+    var entries = tree_mod.parseTree(tree_obj.data, allocator) catch return;
+    defer entries.deinit();
+    
+    for (entries.items) |entry| {
+        const full_name = if (prefix.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, entry.name })
+        else
+            try allocator.dupe(u8, entry.name);
+        
+        if (isTreeMode(entry.mode)) {
+            defer allocator.free(full_name);
+            try collectFilesFromTree(allocator, entry.hash, full_name, git_path, platform_impl, files);
+        } else {
+            // Count lines in the blob
+            const content = loadBlobContent(allocator, entry.hash, git_path, platform_impl) catch "";
+            defer if (content.len > 0) allocator.free(content);
+            var line_count: usize = 0;
+            if (content.len > 0) {
+                var iter = std.mem.splitScalar(u8, content, '\n');
+                while (iter.next()) |_| line_count += 1;
+                if (content[content.len - 1] == '\n') line_count -= 1;
+            }
+            try files.append(.{ .name = full_name, .lines = line_count });
+        }
+    }
+}
+
 fn diffTreeWithEmptyOpts(allocator: std.mem.Allocator, tree_hash_str: []const u8, opts: *const DiffTreeOpts, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
     try diffTreeWithEmptyPrefix(allocator, tree_hash_str, "", opts, git_path, platform_impl);
 }
