@@ -742,50 +742,16 @@ fn isCloneRelevantRef(name: []const u8) bool {
 }
 
 pub fn clonePack(allocator: std.mem.Allocator, url: []const u8) !CloneResult {
-<<<<<<< Updated upstream
     // Use a single HTTP client for both requests (TLS connection reuse)
     var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
-=======
-    // Write trace using raw syscall to avoid any zig/bun interception
-    const rc = std.os.linux.open("/tmp/ziggit_net_trace.log", .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644);
-    if (rc < 4096) { // valid fd
-        const msg = "clonePack ENTER\n";
-        _ = std.os.linux.write(@intCast(rc), msg.ptr, msg.len);
-        _ = std.os.linux.close(@intCast(rc));
-    }
-    var clone_timer = std.time.Timer.start() catch null;
-    // Use global pool for implicit connection reuse across clonePack calls
-    const client = getOrCreateGlobalPool(allocator);
->>>>>>> Stashed changes
 
     const discovery = try discoverRefsWithClient(allocator, &client, url);
 
-<<<<<<< Updated upstream
     // Collect unique want hashes — only for relevant refs (HEAD, branches, tags)
     // Skip pull request refs (refs/pull/*) which can add thousands of unwanted objects
     var want_set = std.StringHashMap(void).init(allocator);
     defer want_set.deinit();
-=======
-    // Strategy: single-RT v2 (1 request) → 2-RT v2 (2 requests) → v1 (2 requests)
-    // Single-RT uses want-ref to eliminate the ls-refs round trip, saving ~50-100ms
-    if (clonePackV2SingleRTFull(allocator, client, url)) |result| {
-        if (clone_timer) |*t| std.debug.print("[NET] clonePack single-RT: {}ms {s}\n", .{ t.read() / std.time.ns_per_ms, url });
-        return result;
-    } else |err| {
-        if (clone_timer) |*t| std.debug.print("[NET] single-RT FAIL ({s}): {}ms, trying 2-RT: {s}\n", .{ @errorName(err), t.read() / std.time.ns_per_ms, url });
-        if (clonePackV2(allocator, client, url)) |result2| {
-            if (clone_timer) |*t| std.debug.print("[NET] clonePack 2-RT: {}ms {s}\n", .{ t.read() / std.time.ns_per_ms, url });
-            return result2;
-        } else |err2| {
-            if (clone_timer) |*t| std.debug.print("[NET] 2-RT FAIL ({s}): {}ms, trying v1: {s}\n", .{ @errorName(err2), t.read() / std.time.ns_per_ms, url });
-            const result3 = try clonePackV1(allocator, client, url);
-            if (clone_timer) |*t| std.debug.print("[NET] clonePack v1: {}ms {s}\n", .{ t.read() / std.time.ns_per_ms, url });
-            return result3;
-        }
-    }
-}
->>>>>>> Stashed changes
 
     var wants = std.array_list.Managed(Oid).init(allocator);
     defer wants.deinit();
@@ -804,58 +770,7 @@ pub fn clonePack(allocator: std.mem.Allocator, url: []const u8) !CloneResult {
         while (it.next()) |key| allocator.free(@constCast(key.*));
     }
 
-<<<<<<< Updated upstream
     const pack_data = try fetchPackWithClient(allocator, &client, url, wants.items, &.{});
-=======
-    return .{
-        .refs = discovery.refs,
-        .capabilities = discovery.capabilities,
-        .pack_data = shallow_result.pack_data,
-        .shallow_commits = shallow_result.shallow_commits,
-        .allocator = allocator,
-    };
-}
-
-fn writeTraceFile(msg: []const u8) void {
-    writeTraceLog(msg);
-}
-
-fn writeTraceLog(msg: []const u8) void {
-    // Use POSIX open directly to avoid std.fs CWD issues
-    const fd = std.posix.open("/tmp/ziggit_net_trace.log", .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644) catch return;
-    defer std.posix.close(fd);
-    _ = std.posix.write(fd, msg) catch return;
-}
-
-fn writeTimingLog(comptime fmt: []const u8, args: anytype) void {
-    var buf: [4096]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    writeTraceLog(msg);
-}
-
-fn clonePackV1(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8) !CloneResult {
-    const discovery = try discoverRefsWithClient(allocator, client, url);
-
-    // Deduplicate wants using simple linear scan (faster than HashMap for <100 refs,
-    // which is the common case after filtering to HEAD/branches/tags).
-    var wants = std.array_list.Managed(Oid).init(allocator);
-    defer wants.deinit();
-    try wants.ensureTotalCapacity(discovery.refs.len);
-
-    for (discovery.refs) |ref| {
-        // Refs are already filtered to clone-relevant in parseRefDiscoveryResponse
-        var dup = false;
-        for (wants.items) |existing| {
-            if (std.mem.eql(u8, &existing, &ref.hash)) {
-                dup = true;
-                break;
-            }
-        }
-        if (!dup) wants.appendAssumeCapacity(ref.hash);
-    }
-
-    const pack_data = try fetchPackWithClient(allocator, client, url, wants.items, &.{});
->>>>>>> Stashed changes
 
     return .{
         .refs = discovery.refs,
