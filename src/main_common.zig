@@ -31142,21 +31142,20 @@ fn cmdNotes(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
 
         // Resolve target (default to HEAD)
         const target_hash = if (target) |t|
-            (resolveRevision(git_path, t, platform_impl, allocator) catch {
-                try platform_impl.writeStderr("fatal: failed to resolve target\n");
-                std.process.exit(1);
-            }) orelse {
+            resolveRevision(git_path, t, platform_impl, allocator) catch {
                 try platform_impl.writeStderr("fatal: failed to resolve target\n");
                 std.process.exit(1);
             }
-        else
-            (refs.getCurrentCommit(git_path, platform_impl, allocator) catch {
-                try platform_impl.writeStderr("fatal: failed to resolve HEAD\n");
-                std.process.exit(1);
-            }) orelse {
+        else blk: {
+            const h = refs.getCurrentCommit(git_path, platform_impl, allocator) catch {
                 try platform_impl.writeStderr("fatal: failed to resolve HEAD\n");
                 std.process.exit(1);
             };
+            break :blk h orelse {
+                try platform_impl.writeStderr("fatal: failed to resolve HEAD\n");
+                std.process.exit(1);
+            };
+        };
         defer allocator.free(target_hash);
 
         // Create blob object with the note message
