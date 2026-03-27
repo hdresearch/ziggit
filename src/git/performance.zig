@@ -70,14 +70,14 @@ pub fn ObjectCache(comptime ValueType: type) type {
             last_used: u64,
         };
 
-        entries: std.array_list.Managed(CacheEntry),
+        entries: std.ArrayList(CacheEntry),
         allocator: std.mem.Allocator,
         max_size: usize,
         access_counter: u64,
 
         pub fn init(allocator: std.mem.Allocator, max_size: usize) Self {
             return Self{
-                .entries = std.array_list.Managed(CacheEntry).init(allocator),
+                .entries = std.ArrayList(CacheEntry).init(allocator),
                 .allocator = allocator,
                 .max_size = max_size,
                 .access_counter = 0,
@@ -186,7 +186,7 @@ pub const BatchObjectReader = struct {
     /// Read multiple objects efficiently with caching
     pub fn readObjects(self: *Self, hashes: []const []const u8) ![][]const u8 {
         const objects = @import("objects.zig");
-        var results = std.array_list.Managed([]const u8).init(self.allocator);
+        var results = std.ArrayList([]const u8).init(self.allocator);
         
         for (hashes) |hash| {
             // Check cache first
@@ -223,9 +223,9 @@ pub const BatchObjectReader = struct {
 /// Memory pool for efficient git object allocation
 pub const GitObjectPool = struct {
     allocator: std.mem.Allocator,
-    small_pool: std.array_list.Managed([]u8), // For objects < 4KB
-    medium_pool: std.array_list.Managed([]u8), // For objects < 64KB  
-    large_pool: std.array_list.Managed([]u8), // For objects < 1MB
+    small_pool: std.ArrayList([]u8), // For objects < 4KB
+    medium_pool: std.ArrayList([]u8), // For objects < 64KB  
+    large_pool: std.ArrayList([]u8), // For objects < 1MB
     
     const SMALL_SIZE = 4 * 1024;
     const MEDIUM_SIZE = 64 * 1024;
@@ -236,9 +236,9 @@ pub const GitObjectPool = struct {
     pub fn init(allocator: std.mem.Allocator) Self {
         return Self{
             .allocator = allocator,
-            .small_pool = std.array_list.Managed([]u8).init(allocator),
-            .medium_pool = std.array_list.Managed([]u8).init(allocator),
-            .large_pool = std.array_list.Managed([]u8).init(allocator),
+            .small_pool = std.ArrayList([]u8).init(allocator),
+            .medium_pool = std.ArrayList([]u8).init(allocator),
+            .large_pool = std.ArrayList([]u8).init(allocator),
         };
     }
     
@@ -252,7 +252,7 @@ pub const GitObjectPool = struct {
         self.large_pool.deinit();
     }
     
-    fn freePool(self: *Self, pool: *std.array_list.Managed([]u8)) void {
+    fn freePool(self: *Self, pool: *std.ArrayList([]u8)) void {
         for (pool.items) |buffer| {
             self.allocator.free(buffer);
         }
@@ -314,7 +314,7 @@ pub fn computeObjectHash(object_type: []const u8, data: []const u8, allocator: s
         var digest: [20]u8 = undefined;
         hasher.final(&digest);
         
-        return try std.fmt.allocPrint(allocator, "{x}", .{&digest});
+        return try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&digest)});
     } else {
         // Fall back to heap allocation for large objects
         const full_header = try std.fmt.allocPrint(allocator, "{s} {}\x00", .{ object_type, data.len });
@@ -328,7 +328,7 @@ pub fn computeObjectHash(object_type: []const u8, data: []const u8, allocator: s
         var digest: [20]u8 = undefined;
         hasher.final(&digest);
         
-        return try std.fmt.allocPrint(allocator, "{x}", .{&digest});
+        return try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&digest)});
     }
 }
 
