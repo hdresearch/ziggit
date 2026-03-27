@@ -9835,62 +9835,246 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     // Parse arguments
     var reset_mode: enum { soft, mixed, hard } = .mixed; // default is mixed
     var target_ref: ?[]const u8 = null;
+    var reset_paths = std.array_list.Managed([]const u8).init(allocator);
+    defer reset_paths.deinit();
+    var seen_separator = false;
 
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--soft")) {
+        if (seen_separator) {
+            try reset_paths.append(arg);
+        } else if (std.mem.eql(u8, arg, "--")) {
+            seen_separator = true;
+        } else if (std.mem.eql(u8, arg, "--soft")) {
             reset_mode = .soft;
         } else if (std.mem.eql(u8, arg, "--mixed")) {
             reset_mode = .mixed;
         } else if (std.mem.eql(u8, arg, "--hard")) {
             reset_mode = .hard;
-        } else if (target_ref == null and !std.mem.startsWith(u8, arg, "-")) {
-            target_ref = arg;
-        } else {
+        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
+            // Accepted
+        } else if (std.mem.eql(u8, arg, "-N") or std.mem.eql(u8, arg, "--no-refresh")) {
+            // Accepted
+        } else if (std.mem.startsWith(u8, arg, "-") and arg.len > 1) {
             const msg = try std.fmt.allocPrint(allocator, "fatal: unknown option '{s}'\n", .{arg});
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);
             std.process.exit(128);
             return;
+        } else if (target_ref == null and reset_paths.items.len == 0) {
+            target_ref = arg;
+        } else {
+            try reset_paths.append(arg);
         }
     }
 
+    // Track if user explicitly gave a target
+    const explicit_target = target_ref != null;
     // If no target ref specified, default to HEAD
     if (target_ref == null) {
         target_ref = "HEAD";
     }
 
     // Resolve the target commit - use resolveRevision for full expression support
-    const target_hash = resolveRevision(git_path, target_ref.?, platform_impl, allocator) catch {
+    const target_hash_or_null: ?[]const u8 = resolveRevision(git_path, target_ref.?, platform_impl, allocator) catch blk: {
+        // If the target_ref was explicitly provided and doesn't resolve, check if it's a path
+        if (explicit_target) {
+            // Check if it's a file/path that exists — treat as path reset
+            const repo_root = std.fs.path.dirname(git_path) orelse ".";
+            const check_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, target_ref.? }) catch break :blk null;
+            defer allocator.free(check_path);
+            std.fs.cwd().access(check_path, .{}) catch {
+                // Not a file either — error
+                const msg = std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\n", .{target_ref.?}) catch unreachable;
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+                unreachable;
+            };
+            // It's a path, add to reset_paths and treat as unborn reset
+            try reset_paths.append(target_ref.?);
+            break :blk null;
+        }
+        // On an unborn branch, HEAD doesn't resolve - only OK when user didn't explicitly pass target
+        if (!explicit_target and std.mem.eql(u8, target_ref.?, "HEAD")) {
+            // Check if we're on an unborn branch
+            const head_path = std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path}) catch {
+                break :blk null;
+            };
+            defer allocator.free(head_path);
+            const head_content = std.fs.cwd().readFileAlloc(allocator, head_path, 4096) catch break :blk null;
+            defer allocator.free(head_content);
+            const trimmed = std.mem.trimRight(u8, head_content, "\r\n");
+            if (std.mem.startsWith(u8, trimmed, "ref: ")) {
+                const ref_name = trimmed[5..];
+                const ref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, ref_name }) catch break :blk null;
+                defer allocator.free(ref_path);
+                // If the ref doesn't exist, we're on an unborn branch
+                std.fs.cwd().access(ref_path, .{}) catch {
+                    // Unborn branch - reset clears the index
+                    break :blk null;
+                };
+            }
+        }
         const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\n", .{target_ref.?});
         defer allocator.free(msg);
         try platform_impl.writeStderr(msg);
         std.process.exit(128);
-        return;
+        unreachable;
     };
-    defer allocator.free(target_hash);
+    defer if (target_hash_or_null) |th| allocator.free(th);
 
-    // Update HEAD to point to the target commit
-    try updateHead(git_path, target_hash, platform_impl, allocator);
+    if (target_hash_or_null) |target_hash| {
+        // Update HEAD to point to the target commit
+        try updateHead(git_path, target_hash, platform_impl, allocator);
 
-    // Handle different reset modes  
-    switch (reset_mode) {
-        .soft => {
-            // Only update HEAD, leave index and working tree unchanged
-        },
-        .mixed => {
-            // Update HEAD and index, leave working tree unchanged
-            // Reset the index to match the target commit
-            resetIndex(git_path, target_hash, platform_impl, allocator) catch {};
-        },
-        .hard => {
-            // Update HEAD, index, and working tree to match target commit
-            resetIndex(git_path, target_hash, platform_impl, allocator) catch {};
-            checkoutCommitTree(git_path, target_hash, allocator, platform_impl) catch {};
-        },
+        // Handle different reset modes  
+        switch (reset_mode) {
+            .soft => {
+                // Only update HEAD, leave index and working tree unchanged
+            },
+            .mixed => {
+                // Update HEAD and index, leave working tree unchanged
+                resetIndex(git_path, target_hash, platform_impl, allocator) catch {};
+            },
+            .hard => {
+                // Update HEAD, index, and working tree to match target commit
+                resetIndex(git_path, target_hash, platform_impl, allocator) catch {};
+                checkoutCommitTree(git_path, target_hash, allocator, platform_impl) catch {};
+            },
+        }
+    } else {
+        // Unborn branch: reset clears the index (and working tree for --hard)
+        const index_path = std.fmt.allocPrint(allocator, "{s}/index", .{git_path}) catch return;
+        defer allocator.free(index_path);
+
+        if (reset_paths.items.len > 0) {
+            // Reset specific paths: remove them from the index
+            removePathsFromIndex(allocator, index_path, reset_paths.items) catch {};
+        } else {
+            switch (reset_mode) {
+                .soft => {
+                    // No-op on unborn branch
+                },
+                .mixed => {
+                    // Write an empty index (not delete — git writes empty index)
+                    writeEmptyIndex(allocator, index_path) catch {};
+                },
+                .hard => {
+                    // Clear the index and remove tracked files
+                    const repo_root = std.fs.path.dirname(git_path) orelse ".";
+                    removeTrackedFiles(allocator, index_path, repo_root) catch {};
+                    writeEmptyIndex(allocator, index_path) catch {};
+                },
+            }
+        }
     }
 }
 
 /// Reset the index to match the tree of the given commit
+fn writeEmptyIndex(allocator: std.mem.Allocator, index_path: []const u8) !void {
+    var output = std.array_list.Managed(u8).init(allocator);
+    defer output.deinit();
+    try output.appendSlice("DIRC");
+    try output.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, 2))); // version 2
+    try output.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, 0))); // 0 entries
+    var hasher = std.crypto.hash.Sha1.init(.{});
+    hasher.update(output.items);
+    const checksum = hasher.finalResult();
+    try output.appendSlice(&checksum);
+    try std.fs.cwd().writeFile(.{ .sub_path = index_path, .data = output.items });
+}
+
+fn removePathsFromIndex(allocator: std.mem.Allocator, index_path: []const u8, paths: []const []const u8) !void {
+    // Read the index, remove entries matching paths, write it back
+    const idx_data = std.fs.cwd().readFileAlloc(allocator, index_path, 10 * 1024 * 1024) catch return;
+    defer allocator.free(idx_data);
+    if (idx_data.len < 12) return;
+
+    // Parse DIRC header
+    if (!std.mem.eql(u8, idx_data[0..4], "DIRC")) return;
+    const version = std.mem.readInt(u32, idx_data[4..8], .big);
+    _ = version;
+    const num_entries = std.mem.readInt(u32, idx_data[8..12], .big);
+
+    // Parse entries, keeping those not in paths
+    var new_entries = std.array_list.Managed(u8).init(allocator);
+    defer new_entries.deinit();
+    var kept_count: u32 = 0;
+
+    var pos: usize = 12;
+    var entry_idx: u32 = 0;
+    while (entry_idx < num_entries and pos + 62 <= idx_data.len) : (entry_idx += 1) {
+        const entry_start = pos;
+        // Skip fixed fields (62 bytes minimum)
+        pos += 62;
+        // Read name (null-terminated, padded to 8-byte boundary)
+        const name_start = pos;
+        while (pos < idx_data.len and idx_data[pos] != 0) pos += 1;
+        const name = idx_data[name_start..pos];
+        // Skip to next 8-byte boundary
+        pos += 1; // null terminator
+        const entry_len = pos - entry_start;
+        const padded_len = (entry_len + 7) & ~@as(usize, 7);
+        pos = entry_start + padded_len;
+
+        // Check if this path should be removed
+        var should_remove = false;
+        for (paths) |p| {
+            if (std.mem.eql(u8, name, p)) {
+                should_remove = true;
+                break;
+            }
+        }
+        if (!should_remove) {
+            try new_entries.appendSlice(idx_data[entry_start..pos]);
+            kept_count += 1;
+        }
+    }
+
+    // Write new index
+    var output = std.array_list.Managed(u8).init(allocator);
+    defer output.deinit();
+    try output.appendSlice("DIRC");
+    try output.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, 2)));
+    try output.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, kept_count)));
+    try output.appendSlice(new_entries.items);
+
+    // Compute and append SHA-1 checksum
+    var hasher = std.crypto.hash.Sha1.init(.{});
+    hasher.update(output.items);
+    const checksum = hasher.finalResult();
+    try output.appendSlice(&checksum);
+
+    std.fs.cwd().writeFile(.{ .sub_path = index_path, .data = output.items }) catch {};
+}
+
+fn removeTrackedFiles(allocator: std.mem.Allocator, index_path: []const u8, repo_root: []const u8) !void {
+    // Parse index, delete tracked files from working tree
+    const idx_data = std.fs.cwd().readFileAlloc(allocator, index_path, 10 * 1024 * 1024) catch return;
+    defer allocator.free(idx_data);
+    if (idx_data.len < 12 or !std.mem.eql(u8, idx_data[0..4], "DIRC")) return;
+    const num_entries = std.mem.readInt(u32, idx_data[8..12], .big);
+
+    var pos: usize = 12;
+    var entry_idx: u32 = 0;
+    while (entry_idx < num_entries and pos + 62 <= idx_data.len) : (entry_idx += 1) {
+        const entry_start = pos;
+        pos += 62;
+        const name_start = pos;
+        while (pos < idx_data.len and idx_data[pos] != 0) pos += 1;
+        const name = idx_data[name_start..pos];
+        pos += 1;
+        const entry_len = pos - entry_start;
+        const padded_len = (entry_len + 7) & ~@as(usize, 7);
+        pos = entry_start + padded_len;
+
+        // Delete the file
+        const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, name }) catch continue;
+        defer allocator.free(full_path);
+        std.fs.cwd().deleteFile(full_path) catch {};
+    }
+}
+
 fn resetIndex(git_path: []const u8, commit_hash: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
     // Load commit to get tree hash
     const commit_obj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch return error.InvalidCommitObject;
