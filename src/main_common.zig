@@ -4880,7 +4880,7 @@ fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
 /// Resolve a path to its .git directory. Handles bare repos, .git files (worktrees/submodules),
 /// and file:// URLs. Returns the path to the git directory (objects, refs, etc.).
 fn urlDecodePath(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     errdefer result.deinit();
     var i: usize = 0;
     while (i < input.len) {
