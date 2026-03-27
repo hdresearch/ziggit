@@ -965,7 +965,7 @@ fn forwardToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_i
                 .Stopped => 128,
                 .Unknown => 1,
             };
-            // Ensure exit 129 for help output
+            // In git 2.53, -h exits 129 for builtins with output on stdout
             if (exit_code == 0 or exit_code == 129) {
                 std.process.exit(129);
             }
@@ -973,7 +973,7 @@ fn forwardToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_i
         }
         
         // Output stdout first, then stderr content to stdout (for -h and --help-all compat)
-        // In git 2.47+, both -h and --help-all output to stdout. In git 2.43, they go to stderr.
+        // In git 2.53, -h outputs to stdout (in 2.43 it goes to stderr). Exit code is 129 for builtins.
         if (stdout_data.len > 0) try platform_impl.writeStdout(stdout_data);
         if (stderr_data.len > 0) {
             // For -h and --help-all: stderr contains usage info in git 2.43, redirect to stdout
@@ -984,8 +984,16 @@ fn forwardToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_i
             }
         }
         
-        // Ensure exit 129 for help output
-        if (has_help_flag and (exit_code == 0 or exit_code == 129)) {
+        // In git 2.53, -h outputs to stdout. For C builtins it exits 129,
+        // for shell scripts (like submodule) it exits 0.
+        // If git 2.43 already returned 0 (e.g. submodule), keep it.
+        // If git 2.43 returned 129 (C builtin), keep it (output now goes to stdout).
+        if (has_help_flag and exit_code == 0) {
+            // Shell script that already handles -h to stdout with exit 0
+            std.process.exit(0);
+        }
+        if (has_help_flag and exit_code == 129) {
+            // C builtin: stderr was redirected to stdout, keep exit 129
             std.process.exit(129);
         }
         if (has_help_all and (exit_code == 0 or exit_code == 129)) {
