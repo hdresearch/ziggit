@@ -8,3 +8,5 @@ test_git_creates/
 cache/
 ziggit_test_tmp/
 browser/*.wasm
+stderr.txt
+stdout.txt
