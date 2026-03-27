@@ -2703,6 +2703,12 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         }
     }
 
+    // Validate: -a and paths don't mix
+    if (add_all and commit_files.items.len > 0) {
+        try platform_impl.writeStderr("fatal: paths 'file ...' with -a does not make sense\n");
+        std.process.exit(128);
+    }
+
     // For --amend without -m, reuse the previous commit's message
     if (message == null and amend) {
         const gp = findGitDirectory(allocator, platform_impl) catch {
@@ -2912,7 +2918,20 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         if (message != null and std.mem.indexOf(u8, message.?, signoff_line) == null) {
             const old_msg = message.?;
             const trimmed_msg = std.mem.trimRight(u8, old_msg, "\n");
-            message = try std.fmt.allocPrint(allocator, "{s}\n\n{s}\n", .{trimmed_msg, signoff_line});
+            // Check if message already ends with a trailer (like another Signed-off-by)
+            const has_trailer = blk: {
+                // Look at the last line of the trimmed message
+                if (std.mem.lastIndexOf(u8, trimmed_msg, "\n")) |last_nl| {
+                    const last_line = trimmed_msg[last_nl + 1..];
+                    break :blk std.mem.indexOf(u8, last_line, ": ") != null;
+                }
+                break :blk false;
+            };
+            if (has_trailer) {
+                message = try std.fmt.allocPrint(allocator, "{s}\n{s}\n", .{trimmed_msg, signoff_line});
+            } else {
+                message = try std.fmt.allocPrint(allocator, "{s}\n\n{s}\n", .{trimmed_msg, signoff_line});
+            }
         }
     }
 
