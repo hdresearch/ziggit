@@ -2,6 +2,9 @@ const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 const wildmatch_mod = @import("wildmatch.zig");
 
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+const cSetenv = setenv;
+
 /// Global config overrides from -c key=value command line options
 pub var global_config_overrides: ?std.array_list.Managed(ConfigOverride) = null;
 
@@ -758,7 +761,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "checkout-index")) {
         try cmdCheckoutIndex(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "blame") or std.mem.eql(u8, command, "annotate")) {
-        try @import("git/blame_cmd.zig").cmdBlame(allocator, &args_iter, &platform_impl);
+        try @import("git/blame_cmd.zig").cmdBlame(allocator, &args_iter, &platform_impl, std.mem.eql(u8, command, "annotate"));
     } else if (std.mem.eql(u8, command, "grep")) {
         try @import("git/grep_cmd.zig").cmdGrep(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "ls-remote")) {
@@ -2871,6 +2874,21 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             signoff = true;
         } else if (std.mem.eql(u8, arg, "--no-edit")) {
             // No edit
+        } else if (std.mem.eql(u8, arg, "--date")) {
+            if (args.next()) |dv| {
+                const dv_z = try allocator.dupeZ(u8, dv);
+                defer allocator.free(dv_z);
+                _ = cSetenv("GIT_AUTHOR_DATE", dv_z, 1);
+            }
+        } else if (std.mem.startsWith(u8, arg, "--date=")) {
+            const dv = arg["--date=".len..];
+            const dv_z = try allocator.dupeZ(u8, dv);
+            defer allocator.free(dv_z);
+            _ = cSetenv("GIT_AUTHOR_DATE", dv_z, 1);
+        } else if (std.mem.eql(u8, arg, "--author")) {
+            _ = args.next(); // consume but ignore for now
+        } else if (std.mem.startsWith(u8, arg, "--author=")) {
+            // ignore for now
         } else if (std.mem.eql(u8, arg, "--allow-empty-message")) {
             allow_empty = true; // Close enough
         } else if (std.mem.eql(u8, arg, "--")) {
@@ -6395,6 +6413,43 @@ fn mergeTreesWithConflicts(git_path: []const u8, base_tree: []const u8, current_
 }
 
 /// Parse tree data into a map of filename -> blob hash
+/// Collect all file paths from a tree object recursively
+fn collectTreePaths(git_path: []const u8, tree_hash: []const u8, prefix: []const u8, paths: *std.StringHashMap(void), allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch return;
+    defer tree_obj.deinit(allocator);
+    if (tree_obj.type != .tree) return;
+
+    var i: usize = 0;
+    while (i < tree_obj.data.len) {
+        const space_pos = std.mem.indexOf(u8, tree_obj.data[i..], " ") orelse break;
+        const mode = tree_obj.data[i .. i + space_pos];
+        i = i + space_pos + 1;
+        const null_pos = std.mem.indexOf(u8, tree_obj.data[i..], "\x00") orelse break;
+        const name = tree_obj.data[i .. i + null_pos];
+        i = i + null_pos + 1;
+        if (i + 20 > tree_obj.data.len) break;
+        const hash_bytes = tree_obj.data[i .. i + 20];
+        i += 20;
+
+        const full_path = if (prefix.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, name })
+        else
+            try allocator.dupe(u8, name);
+
+        if (std.mem.eql(u8, mode, "40000")) {
+            var sub_hash: [40]u8 = undefined;
+            for (hash_bytes, 0..) |b, bi| {
+                sub_hash[bi * 2] = "0123456789abcdef"[b >> 4];
+                sub_hash[bi * 2 + 1] = "0123456789abcdef"[b & 0xf];
+            }
+            collectTreePaths(git_path, &sub_hash, full_path, paths, allocator, platform_impl) catch {};
+            allocator.free(full_path);
+        } else {
+            try paths.put(full_path, {});
+        }
+    }
+}
+
 fn parseTreeIntoMap(tree_data: []const u8, file_map: *std.StringHashMap([]const u8), allocator: std.mem.Allocator) !void {
     var i: usize = 0;
     
@@ -6797,8 +6852,69 @@ fn createMergeCommit(git_path: []const u8, current_hash: []const u8, target_hash
 }
 
 fn createMergeCommitWithMsg(git_path: []const u8, current_hash: []const u8, target_hash: []const u8, current_branch: []const u8, target_branch: []const u8, custom_message: ?[]const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
-    // Get current tree (after merge)
-    const current_tree = try getCommitTree(git_path, current_hash, allocator, platform_impl);
+    // Build tree from current working directory state (after merge)
+    const repo_root = std.fs.path.dirname(git_path) orelse ".";
+
+    // Re-add all tracked files to the index to capture merge results
+    var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch blk: {
+        break :blk index_mod.Index.init(allocator);
+    };
+    defer idx.deinit();
+
+    // Walk all files from old index and update them from the working tree
+    {
+        const target_tree_hash = getCommitTree(git_path, target_hash, allocator, platform_impl) catch null;
+        defer if (target_tree_hash) |h| allocator.free(h);
+
+        var all_paths = std.StringHashMap(void).init(allocator);
+        defer {
+            var it = all_paths.iterator();
+            while (it.next()) |entry| allocator.free(entry.key_ptr.*);
+            all_paths.deinit();
+        }
+
+        // Collect paths from existing index
+        for (idx.entries.items) |entry| {
+            if (!all_paths.contains(entry.path)) {
+                try all_paths.put(try allocator.dupe(u8, entry.path), {});
+            }
+        }
+
+        // Collect paths from target tree
+        if (target_tree_hash) |tt| {
+            var target_paths = std.StringHashMap(void).init(allocator);
+            defer {
+                var it2 = target_paths.iterator();
+                while (it2.next()) |entry| allocator.free(entry.key_ptr.*);
+                target_paths.deinit();
+            }
+            collectTreePaths(git_path, tt, "", &target_paths, allocator, platform_impl) catch {};
+            var tp_it = target_paths.iterator();
+            while (tp_it.next()) |entry| {
+                if (!all_paths.contains(entry.key_ptr.*)) {
+                    try all_paths.put(try allocator.dupe(u8, entry.key_ptr.*), {});
+                }
+            }
+        }
+
+        // Update index entries from working tree
+        var path_it = all_paths.iterator();
+        while (path_it.next()) |entry| {
+            const path = entry.key_ptr.*;
+            const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, path });
+            defer allocator.free(full_path);
+
+            if (std.fs.cwd().openFile(full_path, .{})) |file| {
+                file.close();
+                idx.add(path, path, platform_impl, git_path) catch {};
+            } else |_| {
+                idx.remove(path) catch {};
+            }
+        }
+        idx.save(git_path, platform_impl) catch {};
+    }
+
+    const current_tree = try writeTreeFromIndex(allocator, &idx, git_path, platform_impl);
     defer allocator.free(current_tree);
     
     // Create commit message

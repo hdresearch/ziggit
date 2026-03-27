@@ -4,8 +4,8 @@ const refs = @import("refs.zig");
 const B = @import("blame.zig");
 const mc = @import("../main_common.zig");
 
-pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platform) !void {
-    var col = false;
+pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platform, is_annotate: bool) !void {
+    var col = is_annotate;
     var se = false;
     var sp = false;
     var slp = false;
@@ -46,6 +46,9 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
                 if (std.fs.cwd().access(arg, .{})) |_| { fp = arg; } else |_| {
                     if (rv == null) rv = arg else fp = arg;
                 }
+            } else {
+                // fp already set; this must be a revision
+                if (rv == null) rv = arg;
             }
         }
     }
