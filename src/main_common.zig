@@ -9053,6 +9053,8 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var topo_order = false;
     var show_objects = false;
     var all_refs = false;
+    var graph = false;
+    var no_walk = false;
     var include_refs = std.array_list.Managed([]const u8).init(allocator);
     defer include_refs.deinit();
     var exclude_refs = std.array_list.Managed([]const u8).init(allocator);
@@ -9076,8 +9078,11 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             // Read refs from stdin
         } else if (std.mem.eql(u8, arg, "--quiet")) {
             // Suppress output (but still set exit code)
-        } else if (std.mem.eql(u8, arg, "--no-walk")) {
+        } else if (std.mem.eql(u8, arg, "--no-walk") or std.mem.startsWith(u8, arg, "--no-walk=")) {
+            no_walk = true;
             max_count = 1;
+        } else if (std.mem.eql(u8, arg, "--graph")) {
+            graph = true;
         } else if (std.mem.startsWith(u8, arg, "--max-count=")) {
             max_count = std.fmt.parseInt(u32, arg[12..], 10) catch null;
         } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--max-count")) {
@@ -9104,6 +9109,12 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         } else {
             try include_refs.append(arg);
         }
+    }
+
+    // --graph and --no-walk are mutually exclusive
+    if (graph and no_walk) {
+        try platform_impl.writeStderr("fatal: --graph and --no-walk are incompatible\n");
+        std.process.exit(1);
     }
 
     // If --all, add all refs
