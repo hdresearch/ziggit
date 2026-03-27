@@ -4,12 +4,12 @@ const index_mod = @import("index.zig");
 /// Git index extension handling and utilities
 pub const IndexExtensions = struct {
     allocator: std.mem.Allocator,
-    extensions: std.array_list.Managed(Extension),
+    extensions: std.ArrayList(Extension),
     
     pub fn init(allocator: std.mem.Allocator) IndexExtensions {
         return IndexExtensions{
             .allocator = allocator,
-            .extensions = std.array_list.Managed(Extension).init(allocator),
+            .extensions = std.ArrayList(Extension).init(allocator),
         };
     }
     
@@ -209,11 +209,11 @@ pub const Extension = struct {
 
 /// Parsed TREE extension (cached tree objects)
 pub const TreeCache = struct {
-    entries: std.array_list.Managed(TreeCacheEntry),
+    entries: std.ArrayList(TreeCacheEntry),
     
     pub fn init(allocator: std.mem.Allocator) TreeCache {
         return TreeCache{
-            .entries = std.array_list.Managed(TreeCacheEntry).init(allocator),
+            .entries = std.ArrayList(TreeCacheEntry).init(allocator),
         };
     }
     
@@ -252,11 +252,11 @@ pub const TreeCacheEntry = struct {
 
 /// Parsed REUC extension (resolve undo)
 pub const ResolveUndo = struct {
-    entries: std.array_list.Managed(ResolveUndoEntry),
+    entries: std.ArrayList(ResolveUndoEntry),
     
     pub fn init(allocator: std.mem.Allocator) ResolveUndo {
         return ResolveUndo{
-            .entries = std.array_list.Managed(ResolveUndoEntry).init(allocator),
+            .entries = std.ArrayList(ResolveUndoEntry).init(allocator),
         };
     }
     
@@ -351,16 +351,16 @@ pub const IndexValidator = struct {
 
 pub const ValidationResult = struct {
     allocator: std.mem.Allocator,
-    errors: std.array_list.Managed([]u8),
-    warnings: std.array_list.Managed([]u8),
-    info: std.array_list.Managed([]u8),
+    errors: std.ArrayList([]u8),
+    warnings: std.ArrayList([]u8),
+    info: std.ArrayList([]u8),
     
     pub fn init(allocator: std.mem.Allocator) ValidationResult {
         return ValidationResult{
             .allocator = allocator,
-            .errors = std.array_list.Managed([]u8).init(allocator),
-            .warnings = std.array_list.Managed([]u8).init(allocator),
-            .info = std.array_list.Managed([]u8).init(allocator),
+            .errors = std.ArrayList([]u8).init(allocator),
+            .warnings = std.ArrayList([]u8).init(allocator),
+            .info = std.ArrayList([]u8).init(allocator),
         };
     }
     
