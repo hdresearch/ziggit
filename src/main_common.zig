@@ -1398,14 +1398,33 @@ fn initRepositoryInDir(git_dir: []const u8, bare: bool, template_dir: ?[]const u
         return;
     }
     
-    // Create subdirectories
-    const subdirs = [_][]const u8{
-        "objects", "objects/info", "objects/pack", "refs", "refs/heads", "refs/tags", "hooks", "info",
+    // Determine effective template to decide which dirs to create
+    const env_template_dir = std.process.getEnvVarOwned(allocator, "GIT_TEMPLATE_DIR") catch null;
+    defer if (env_template_dir) |et| allocator.free(et);
+    const use_templates = if (template_dir_set)
+        (template_dir != null and template_dir.?.len > 0)
+    else if (env_template_dir) |et|
+        et.len > 0
+    else
+        true; // default: use templates
+
+    // Create core subdirectories (always created)
+    const core_subdirs = [_][]const u8{
+        "objects", "objects/info", "objects/pack", "refs", "refs/heads", "refs/tags",
     };
-    for (subdirs) |subdir| {
+    for (core_subdirs) |subdir| {
         const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, subdir });
         defer allocator.free(full_path);
         std.fs.cwd().makePath(full_path) catch {};
+    }
+    // Create template-dependent subdirectories only when templates are in use
+    if (use_templates) {
+        const template_subdirs = [_][]const u8{ "hooks", "info" };
+        for (template_subdirs) |subdir| {
+            const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, subdir });
+            defer allocator.free(full_path);
+            std.fs.cwd().makePath(full_path) catch {};
+        }
     }
     
     // Create HEAD
@@ -1478,10 +1497,12 @@ fn initRepositoryInDir(git_dir: []const u8, bare: bool, template_dir: ?[]const u
     }
     try platform_impl.fs.writeFile(config_path, config_buf.items);
     
-    // Create description
-    const desc_path = try std.fmt.allocPrint(allocator, "{s}/description", .{git_dir});
-    defer allocator.free(desc_path);
-    try platform_impl.fs.writeFile(desc_path, "Unnamed repository; edit this file 'description' to name the repository.\n");
+    // Create description (only when templates are in use, or as default)
+    if (use_templates) {
+        const desc_path = try std.fmt.allocPrint(allocator, "{s}/description", .{git_dir});
+        defer allocator.free(desc_path);
+        try platform_impl.fs.writeFile(desc_path, "Unnamed repository; edit this file 'description' to name the repository.\n");
+    }
     
     // Copy template directory contents (unless --template= was set to empty)
     if (!template_dir_set or (template_dir != null and template_dir.?.len > 0)) {
@@ -1528,10 +1549,10 @@ fn initRepositoryInDir(git_dir: []const u8, bare: bool, template_dir: ?[]const u
         }
     }
     
-    // Create info/exclude if not provided by template
-    const exclude_path = try std.fmt.allocPrint(allocator, "{s}/info/exclude", .{git_dir});
-    defer allocator.free(exclude_path);
-    if (!template_dir_set or (template_dir != null and template_dir.?.len > 0)) {
+    // Create info/exclude if not provided by template (only when templates are in use)
+    if (use_templates) {
+        const exclude_path = try std.fmt.allocPrint(allocator, "{s}/info/exclude", .{git_dir});
+        defer allocator.free(exclude_path);
         if (!(std.fs.cwd().access(exclude_path, .{}) catch null != null)) {
             platform_impl.fs.writeFile(exclude_path, "# git ls-files --others --exclude-from=.git/info/exclude\n# Lines that start with '#' are comments.\n") catch {};
         }
