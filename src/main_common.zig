@@ -8670,6 +8670,30 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             try platform_impl.writeStderr("fatal: 'HEAD' is not a valid tag name\n");
             std.process.exit(128);
         }
+        // Check for invalid ref names (git check-ref-format rules)
+        const is_invalid = tn.len == 0 or
+            tn[0] == '.' or tn[0] == '-' or
+            std.mem.endsWith(u8, tn, ".lock") or
+            std.mem.endsWith(u8, tn, ".") or
+            std.mem.indexOf(u8, tn, "..") != null or
+            std.mem.indexOf(u8, tn, " ") != null or
+            std.mem.indexOf(u8, tn, "~") != null or
+            std.mem.indexOf(u8, tn, "^") != null or
+            std.mem.indexOf(u8, tn, ":") != null or
+            std.mem.indexOf(u8, tn, "\\") != null or
+            std.mem.indexOf(u8, tn, "[") != null or
+            std.mem.indexOf(u8, tn, "?") != null or
+            std.mem.indexOf(u8, tn, "*") != null or
+            std.mem.indexOfScalar(u8, tn, 0x7f) != null or
+            (for (tn) |c| {
+                if (c < 0x20) break true;
+            } else false);
+        if (is_invalid) {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' is not a valid tag name.\n", .{tn});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        }
     }
 
     // Get current HEAD commit
