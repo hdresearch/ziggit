@@ -521,3 +521,27 @@ Perfect (100%) scripts: 311
 Total subtests passed: 16778
 Total subtests failed: 2796
 Overall pass rate: 85% (16778/19574)
+
+=== ANALYSIS ===
+
+Perfect (100%) test scripts by category:
+- t0xxx (basic/plumbing): 29/80
+- t1xxx (refs/config/index): 56/94
+- t2xxx (checkout/add/worktree): 54/89
+- t3xxx (branch/notes/rebase/stash): 78/113
+- t4xxx (diff/apply/am/log): 94/135
+
+Key failure categories (not fixable - git 2.43 vs newer):
+1. New commands not in 2.43: refs, repo, history, replay, diff-pairs, diff-max-depth
+2. Reftable backend (t0610-t0614, t1460-t1463): entirely 2.46+ feature
+3. test-tool dependent: t0006-date, t0040-parse-options, t0060-path-utils, etc.
+4. Trace2 changes: t0210-t0212
+5. Config subcommand error messages: different format in 2.43 vs newer
+6. Diff funcname patterns: updated in newer git
+7. Wildmatch algorithm: minor differences in edge cases
+
+Tests with best improvement potential (>90% but not 100%):
+- t0008-ignores: 397/398 (99%) - 1 wildmatch edge case
+- t3200-branch: 164/167 (98%) - worktree/advice formatting
+- t1300-config: 447/497 (89%) - mostly version differences
+- t4202-log: 146/149 (97%) - 3 version-specific features
