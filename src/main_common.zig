@@ -10651,8 +10651,28 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         defer allocator.free(git_path);
 
         const hash = resolveRevision(git_path, rev_arg.?, platform_impl, allocator) catch {
+            // If it's already a valid hex hash, use it directly (e.g., git hash-object output)
+            if (rev_arg.?.len == 40) {
+                var valid_hex = true;
+                for (rev_arg.?) |ch| {
+                    if (!((ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f'))) { valid_hex = false; break; }
+                }
+                if (valid_hex) {
+                    if (short) |n| {
+                        const s = if (n > 40) @as(u8, 40) else n;
+                        const out_s = try std.fmt.allocPrint(allocator, "{s}\n", .{rev_arg.?[0..s]});
+                        defer allocator.free(out_s);
+                        try platform_impl.writeStdout(out_s);
+                    } else {
+                        const out_s = try std.fmt.allocPrint(allocator, "{s}\n", .{rev_arg.?});
+                        defer allocator.free(out_s);
+                        try platform_impl.writeStdout(out_s);
+                    }
+                    return;
+                }
+            }
             if (!quiet) {
-                const msg = try std.fmt.allocPrint(allocator, "fatal: Needed a single revision\n", .{});
+                const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\nUse '--' to separate paths from revisions, like this:\n'git <command> [<revision>...] -- [<file>...]'\n", .{rev_arg.?});
                 defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
             }
@@ -10755,6 +10775,24 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                 try platform_impl.writeStdout(out);
             }
         } else |_| {
+            // If it's a valid 40-char hex hash, use it directly
+            if (arg.len == 40) {
+                var vhex = true;
+                for (arg) |ch| { if (!((ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f'))) { vhex = false; break; } }
+                if (vhex) {
+                    if (short) |n| {
+                        const s = if (n > 40) @as(u8, 40) else n;
+                        const o = try std.fmt.allocPrint(allocator, "{s}\n", .{arg[0..s]});
+                        defer allocator.free(o);
+                        try platform_impl.writeStdout(o);
+                    } else {
+                        const o = try std.fmt.allocPrint(allocator, "{s}\n", .{arg});
+                        defer allocator.free(o);
+                        try platform_impl.writeStdout(o);
+                    }
+                    continue;
+                }
+            }
             if (!quiet) {
                 const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\nUse '--' to separate paths from revisions, like this:\n'git <command> [<revision>...] -- [<file>...]'\n", .{arg});
                 defer allocator.free(msg);
