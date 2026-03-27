@@ -2237,9 +2237,68 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     // Output success message (unless --quiet was specified)
     if (!quiet) {
         const short_hash = commit_hash[0..7];
-        const success_msg = try std.fmt.allocPrint(allocator, "[{s} {s}] {s}\n", .{ current_branch, short_hash, message.? });
-        defer allocator.free(success_msg);
-        try platform_impl.writeStdout(success_msg);
+        // Check if this is the first commit (root commit)
+        const is_root = blk: {
+            const cobj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch break :blk false;
+            defer cobj.deinit(allocator);
+            break :blk std.mem.indexOf(u8, cobj.data, "parent ") == null;
+        };
+        
+        if (is_root) {
+            const success_msg = try std.fmt.allocPrint(allocator, "[{s} (root-commit) {s}] {s}\n", .{ current_branch, short_hash, std.mem.trimRight(u8, message.?, "\n") });
+            defer allocator.free(success_msg);
+            try platform_impl.writeStdout(success_msg);
+        } else {
+            const success_msg = try std.fmt.allocPrint(allocator, "[{s} {s}] {s}\n", .{ current_branch, short_hash, std.mem.trimRight(u8, message.?, "\n") });
+            defer allocator.free(success_msg);
+            try platform_impl.writeStdout(success_msg);
+        }
+        
+        // Add diffstat summary: count files changed
+        // Compare current tree with parent tree to get stats
+        const cobj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch null;
+        if (cobj) |co| {
+            defer co.deinit(allocator);
+            var commit_tree_h: ?[]const u8 = null;
+            var commit_parent_h: ?[]const u8 = null;
+            var clines2 = std.mem.splitSequence(u8, co.data, "\n");
+            while (clines2.next()) |line| {
+                if (line.len == 0) break;
+                if (std.mem.startsWith(u8, line, "tree ")) commit_tree_h = line["tree ".len..];
+                if (std.mem.startsWith(u8, line, "parent ") and commit_parent_h == null) commit_parent_h = line["parent ".len..];
+            }
+            
+            if (commit_tree_h) |_| {
+                // Count files that changed (simplified)
+                const file_count = index.entries.items.len;
+                if (is_root and file_count > 0) {
+                    // Root commit: all files are new
+                    var total_lines: usize = 0;
+                    for (index.entries.items) |entry| {
+                        const repo_root_path = std.fs.path.dirname(git_path) orelse ".";
+                        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root_path, entry.path });
+                        defer allocator.free(full_path);
+                        if (platform_impl.fs.readFile(allocator, full_path)) |content| {
+                            defer allocator.free(content);
+                            var line_count: usize = 0;
+                            for (content) |c| {
+                                if (c == '\n') line_count += 1;
+                            }
+                            if (content.len > 0 and content[content.len - 1] != '\n') line_count += 1;
+                            total_lines += line_count;
+                        } else |_| {}
+                    }
+                    const stat_msg = try std.fmt.allocPrint(allocator, " {d} file{s} changed, {d} insertion{s}(+)\n", .{
+                        file_count,
+                        if (file_count != 1) @as([]const u8, "s") else "",
+                        total_lines,
+                        if (total_lines != 1) @as([]const u8, "s") else "",
+                    });
+                    defer allocator.free(stat_msg);
+                    try platform_impl.writeStdout(stat_msg);
+                }
+            }
+        }
     }
 }
 
