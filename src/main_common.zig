@@ -7984,6 +7984,15 @@ fn configUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, allo
                     found_count += 1;
                     if (unset_all or found_count == 1) {
                         skip = true;
+                        // Also skip continuation lines (ending with \)
+                        if (line.len > 0 and line[line.len - 1] == '\\') {
+                            // skip continuation lines
+                            while (lines.next()) |cont_line| {
+                                const ct = std.mem.trim(u8, cont_line, " \t\r\n");
+                                _ = ct;
+                                if (cont_line.len == 0 or cont_line[cont_line.len - 1] != '\\') break;
+                            }
+                        }
                     }
                 }
             }
