@@ -930,7 +930,7 @@ fn grepWorkingTree(allocator: Allocator, opts: *GrepOptions, git_dir: []const u8
 }
 
 /// Search the index (cached)
-fn grepCached(allocator: Allocator, opts: *GrepOptions, git_dir: []const u8, repo_root: []const u8, prefix: []const u8, platform_impl: *const platform_mod.Platform) !void {
+fn grepCached(allocator: Allocator, opts: *GrepOptions, git_dir: []const u8, _: []const u8, prefix: []const u8, platform_impl: *const platform_mod.Platform) !void {
     var index = index_mod.Index.load(git_dir, platform_impl, allocator) catch index_mod.Index.init(allocator);
     defer index.deinit();
 

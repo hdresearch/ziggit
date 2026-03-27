@@ -2,7 +2,7 @@ const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 
 /// Global config overrides from -c key=value command line options
-var global_config_overrides: ?std.array_list.Managed(ConfigOverride) = null;
+pub var global_config_overrides: ?std.array_list.Managed(ConfigOverride) = null;
 
 /// Global --git-dir override
 var global_git_dir_override: ?[]const u8 = null;
