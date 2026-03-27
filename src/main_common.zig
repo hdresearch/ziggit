@@ -27930,6 +27930,28 @@ fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8, tr
                     const out = try std.fmt.allocPrint(allocator, "M\t{s}\n", .{full_name});
                     defer allocator.free(out);
                     try platform_impl.writeStdout(out);
+                } else if (opts.show_patch) {
+                    // Generate unified diff for modified file
+                    const old_content = loadBlobContent(allocator, e1.?.hash, git_path, platform_impl) catch "";
+                    defer if (old_content.len > 0) allocator.free(old_content);
+                    const new_content = loadBlobContent(allocator, e2.?.hash, git_path, platform_impl) catch "";
+                    defer if (new_content.len > 0) allocator.free(new_content);
+                    var mb1: [6]u8 = undefined;
+                    var mb2: [6]u8 = undefined;
+                    const pm1 = padMode6(&mb1, e1.?.mode);
+                    const pm2 = padMode6(&mb2, e2.?.mode);
+                    const idx_h1 = if (opts.full_index) e1.?.hash else e1.?.hash[0..@min(7, e1.?.hash.len)];
+                    const idx_h2 = if (opts.full_index) e2.?.hash else e2.?.hash[0..@min(7, e2.?.hash.len)];
+                    const mode_changed = !std.mem.eql(u8, pm1, pm2);
+                    const header = if (mode_changed)
+                        try std.fmt.allocPrint(allocator, "diff --git a/{s} b/{s}\nold mode {s}\nnew mode {s}\nindex {s}..{s}\n--- a/{s}\n+++ b/{s}\n", .{ full_name, full_name, pm1, pm2, idx_h1, idx_h2, full_name, full_name })
+                    else
+                        try std.fmt.allocPrint(allocator, "diff --git a/{s} b/{s}\nindex {s}..{s} {s}\n--- a/{s}\n+++ b/{s}\n", .{ full_name, full_name, idx_h1, idx_h2, pm1, full_name, full_name });
+                    defer allocator.free(header);
+                    try platform_impl.writeStdout(header);
+                    const diff_out = diff_mod.generateUnifiedDiff(old_content, new_content, full_name, allocator) catch "";
+                    defer if (diff_out.len > 0) allocator.free(diff_out);
+                    if (diff_out.len > 0) try platform_impl.writeStdout(diff_out);
                 } else {
                     var mb1: [6]u8 = undefined;
                     var mb2: [6]u8 = undefined;
@@ -27951,6 +27973,33 @@ fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8, tr
                     const out = try std.fmt.allocPrint(allocator, "D\t{s}\n", .{full_name});
                     defer allocator.free(out);
                     try platform_impl.writeStdout(out);
+                } else if (opts.show_patch) {
+                    // Generate diff for deleted file
+                    const old_content = loadBlobContent(allocator, e1.?.hash, git_path, platform_impl) catch "";
+                    defer if (old_content.len > 0) allocator.free(old_content);
+                    var mb1: [6]u8 = undefined;
+                    const idx_h1 = if (opts.full_index) e1.?.hash else e1.?.hash[0..@min(7, e1.?.hash.len)];
+                    const header = try std.fmt.allocPrint(allocator, "diff --git a/{s} b/{s}\ndeleted file mode {s}\nindex {s}..0000000\n--- a/{s}\n+++ /dev/null\n", .{ full_name, full_name, padMode6(&mb1, e1.?.mode), idx_h1, full_name });
+                    defer allocator.free(header);
+                    try platform_impl.writeStdout(header);
+                    if (old_content.len > 0) {
+                        var line_count: usize = 0;
+                        var citer = std.mem.splitScalar(u8, old_content, '\n');
+                        while (citer.next()) |_| line_count += 1;
+                        if (old_content[old_content.len - 1] == '\n') line_count -= 1;
+                        const hunk = try std.fmt.allocPrint(allocator, "@@ -1,{d} +0,0 @@\n", .{line_count});
+                        defer allocator.free(hunk);
+                        try platform_impl.writeStdout(hunk);
+                        var liter = std.mem.splitScalar(u8, old_content, '\n');
+                        var printed: usize = 0;
+                        while (liter.next()) |line| {
+                            if (printed >= line_count) break;
+                            const lo = try std.fmt.allocPrint(allocator, "-{s}\n", .{line});
+                            defer allocator.free(lo);
+                            try platform_impl.writeStdout(lo);
+                            printed += 1;
+                        }
+                    }
                 } else {
                     var mb1: [6]u8 = undefined;
                     const suf = opts.hashSuffix();
@@ -27971,6 +28020,33 @@ fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8, tr
                     const out = try std.fmt.allocPrint(allocator, "A\t{s}\n", .{full_name});
                     defer allocator.free(out);
                     try platform_impl.writeStdout(out);
+                } else if (opts.show_patch) {
+                    // Generate diff for new file
+                    const new_content = loadBlobContent(allocator, e2.?.hash, git_path, platform_impl) catch "";
+                    defer if (new_content.len > 0) allocator.free(new_content);
+                    var mb2: [6]u8 = undefined;
+                    const idx_h2 = if (opts.full_index) e2.?.hash else e2.?.hash[0..@min(7, e2.?.hash.len)];
+                    const header = try std.fmt.allocPrint(allocator, "diff --git a/{s} b/{s}\nnew file mode {s}\nindex 0000000..{s}\n--- /dev/null\n+++ b/{s}\n", .{ full_name, full_name, padMode6(&mb2, e2.?.mode), idx_h2, full_name });
+                    defer allocator.free(header);
+                    try platform_impl.writeStdout(header);
+                    if (new_content.len > 0) {
+                        var line_count: usize = 0;
+                        var citer = std.mem.splitScalar(u8, new_content, '\n');
+                        while (citer.next()) |_| line_count += 1;
+                        if (new_content[new_content.len - 1] == '\n') line_count -= 1;
+                        const hunk = try std.fmt.allocPrint(allocator, "@@ -0,0 +1,{d} @@\n", .{line_count});
+                        defer allocator.free(hunk);
+                        try platform_impl.writeStdout(hunk);
+                        var liter = std.mem.splitScalar(u8, new_content, '\n');
+                        var printed: usize = 0;
+                        while (liter.next()) |line| {
+                            if (printed >= line_count) break;
+                            const lo = try std.fmt.allocPrint(allocator, "+{s}\n", .{line});
+                            defer allocator.free(lo);
+                            try platform_impl.writeStdout(lo);
+                            printed += 1;
+                        }
+                    }
                 } else {
                     var mb2: [6]u8 = undefined;
                     const suf = opts.hashSuffix();
