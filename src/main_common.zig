@@ -16016,9 +16016,18 @@ fn nativeCmdColumn(_: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
         } else if (std.mem.startsWith(u8, arg, "--width=")) {
             width = std.fmt.parseInt(u32, arg["--width=".len..], 10) catch 80;
         } else if (std.mem.startsWith(u8, arg, "--padding=")) {
-            padding = std.fmt.parseInt(u32, arg["--padding=".len..], 10) catch 1;
+            const pad_str = arg["--padding=".len..];
+            if (pad_str.len > 0 and pad_str[0] == '-') {
+                try platform_impl.writeStdout("fatal: --padding must be non-negative\n");
+                std.process.exit(128);
+            }
+            padding = std.fmt.parseInt(u32, pad_str, 10) catch 1;
         } else if (std.mem.eql(u8, arg, "--padding")) {
             if (args.next()) |next| {
+                if (next.len > 0 and next[0] == '-') {
+                    try platform_impl.writeStdout("fatal: --padding must be non-negative\n");
+                    std.process.exit(128);
+                }
                 padding = std.fmt.parseInt(u32, next, 10) catch 1;
             }
         } else if (std.mem.startsWith(u8, arg, "--indent=")) {
