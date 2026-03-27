@@ -18,14 +18,14 @@ fn getArgsImpl(allocator: std.mem.Allocator) !interface.ArgIterator {
 }
 
 fn writeStdoutImpl(data: []const u8) !void {
-    std.fs.File.stdout().writeAll(data) catch |err| switch (err) {
+    (std.fs.File{ .handle = std.posix.STDOUT_FILENO }).writeAll(data) catch |err| switch (err) {
         error.BrokenPipe => return, // Ignore broken pipe (e.g., piped to head/less)
         else => return err,
     };
 }
 
 fn writeStderrImpl(data: []const u8) !void {
-    std.fs.File.stderr().writeAll(data) catch |err| switch (err) {
+    (std.fs.File{ .handle = std.posix.STDERR_FILENO }).writeAll(data) catch |err| switch (err) {
         error.BrokenPipe => return, // Ignore broken pipe (e.g., piped to head/less)
         else => return err,
     };

@@ -12,8 +12,8 @@ pub fn build(b: *std.Build) void {
         .optimize = exe_optimize,
     });
     mod.addOptions("build_options", options);
-    mod.link_libc = true;
     mod.linkSystemLibrary("z", .{});
+    mod.link_libc = true;
     const exe = b.addExecutable(.{
         .name = "ziggit",
         .root_module = mod,
