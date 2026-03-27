@@ -8861,22 +8861,31 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
 
     var cached = false;
     var deleted = false;
-    var modified = false;
+    var modified_flag = false;
     var others = false;
     var stage = false;
+    var pathspecs = std.array_list.Managed([]const u8).init(allocator);
+    defer pathspecs.deinit();
 
     // Parse arguments
+    var after_dd = false;
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--cached") or std.mem.eql(u8, arg, "-c")) {
+        if (after_dd) {
+            try pathspecs.append(arg);
+        } else if (std.mem.eql(u8, arg, "--")) {
+            after_dd = true;
+        } else if (std.mem.eql(u8, arg, "--cached") or std.mem.eql(u8, arg, "-c")) {
             cached = true;
         } else if (std.mem.eql(u8, arg, "--deleted") or std.mem.eql(u8, arg, "-d")) {
             deleted = true;
         } else if (std.mem.eql(u8, arg, "--modified") or std.mem.eql(u8, arg, "-m")) {
-            modified = true;
+            modified_flag = true;
         } else if (std.mem.eql(u8, arg, "--others") or std.mem.eql(u8, arg, "-o")) {
             others = true;
         } else if (std.mem.eql(u8, arg, "--stage") or std.mem.eql(u8, arg, "-s")) {
             stage = true;
+        } else if (arg.len > 0 and arg[0] != '-') {
+            try pathspecs.append(arg);
         }
     }
 
@@ -8888,13 +8897,29 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     defer index.deinit();
 
     // If no specific flags, default to showing cached files
-    if (!cached and !deleted and !modified and !others) {
+    if (!cached and !deleted and !modified_flag and !others) {
         cached = true;
     }
 
     if (cached) {
         // Show files in the index
         for (index.entries.items) |entry| {
+            // Filter by pathspec if given
+            if (pathspecs.items.len > 0) {
+                var matches = false;
+                for (pathspecs.items) |ps| {
+                    // Pathspec matches if entry path equals or starts with ps/
+                    if (std.mem.eql(u8, entry.path, ps)) {
+                        matches = true;
+                        break;
+                    }
+                    if (std.mem.startsWith(u8, entry.path, ps) and entry.path.len > ps.len and entry.path[ps.len] == '/') {
+                        matches = true;
+                        break;
+                    }
+                }
+                if (!matches) continue;
+            }
             if (stage) {
                 // Show stage information (mode, hash, stage, filename)
                 const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
@@ -8931,7 +8956,7 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         }
     }
 
-    if (modified) {
+    if (modified_flag) {
         // Show modified files (files in index but different in working tree)
         const repo_root = std.fs.path.dirname(git_path) orelse ".";
         
@@ -10684,11 +10709,14 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     var stdin_mode = false;
     var verbose = false;
 
+    var replace_mode = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--add")) {
             add_mode = true;
         } else if (std.mem.eql(u8, arg, "--remove")) {
             remove_mode = true;
+        } else if (std.mem.eql(u8, arg, "--replace")) {
+            replace_mode = true;
         } else if (std.mem.eql(u8, arg, "--force-remove")) {
             force_remove = true;
         } else if (std.mem.eql(u8, arg, "--refresh")) {
@@ -10813,6 +10841,33 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                     modified = true;
                 };
             } else if (add_mode) {
+                if (replace_mode) {
+                    // D/F conflict resolution:
+                    // 1. If adding file "X", remove all entries "X/*" (file replaces dir)
+                    const prefix_with_slash = std.fmt.allocPrint(allocator, "{s}/", .{arg}) catch arg;
+                    const needs_free_pws = !std.mem.eql(u8, prefix_with_slash, arg);
+                    var j: usize = 0;
+                    while (j < idx.entries.items.len) {
+                        if (std.mem.startsWith(u8, idx.entries.items[j].path, prefix_with_slash)) {
+                            idx.entries.items[j].deinit(allocator);
+                            _ = idx.entries.orderedRemove(j);
+                        } else {
+                            j += 1;
+                        }
+                    }
+                    if (needs_free_pws) allocator.free(@constCast(prefix_with_slash));
+                    // 2. If adding file "X/Y", remove entry "X" (dir replaces file)
+                    if (std.mem.indexOfScalar(u8, arg, '/')) |slash_idx| {
+                        const parent = arg[0..slash_idx];
+                        for (idx.entries.items, 0..) |entry, ei| {
+                            if (std.mem.eql(u8, entry.path, parent)) {
+                                idx.entries.items[ei].deinit(allocator);
+                                _ = idx.entries.orderedRemove(ei);
+                                break;
+                            }
+                        }
+                    }
+                }
                 idx.add(arg, arg, platform_impl, git_dir) catch {};
                 modified = true;
             } else {
