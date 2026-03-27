@@ -193,3 +193,34 @@ pub fn decompressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
 
     return output.toOwnedSlice();
 }
+
+/// Decompress zlib data from a slice, returning decompressed content and
+/// the number of compressed bytes consumed from input.
+pub fn decompressSliceWithConsumed(allocator: std.mem.Allocator, input: []const u8) !struct { data: []u8, consumed: usize } {
+    var stream: c.z_stream = std.mem.zeroes(c.z_stream);
+    stream.next_in = @constCast(input.ptr);
+    stream.avail_in = @intCast(input.len);
+
+    var ret = c.inflateInit(&stream);
+    if (ret != c.Z_OK) return error.InvalidInput;
+    defer _ = c.inflateEnd(&stream);
+
+    var output = std.array_list.Managed(u8).init(allocator);
+    errdefer output.deinit();
+
+    var buf: [16384]u8 = undefined;
+    while (true) {
+        stream.next_out = &buf;
+        stream.avail_out = buf.len;
+        ret = c.inflate(&stream, c.Z_NO_FLUSH);
+        const have = buf.len - @as(usize, @intCast(stream.avail_out));
+        if (have > 0) {
+            try output.appendSlice(buf[0..have]);
+        }
+        if (ret == c.Z_STREAM_END) break;
+        if (ret != c.Z_OK) return error.InvalidInput;
+    }
+
+    const consumed = @as(usize, @intCast(stream.total_in));
+    return .{ .data = try output.toOwnedSlice(), .consumed = consumed };
+}
