@@ -455,13 +455,25 @@ pub fn createBranch(git_dir: []const u8, branch_name: []const u8, start_point: ?
         if (sp.len == 40 and isValidHash(sp))
             try allocator.dupe(u8, sp)
         else blk: {
-            // Resolve branch name to hash
-            const commit_hash = try getBranchCommit(git_dir, sp, platform_impl, allocator);
-            if (commit_hash) |h| {
+            // Try branch first
+            if (getBranchCommit(git_dir, sp, platform_impl, allocator) catch null) |h| {
                 break :blk h;
-            } else {
-                return error.InvalidStartPoint;
             }
+            // Try tags
+            const tag_path = std.fmt.allocPrint(allocator, "{s}/refs/tags/{s}", .{ git_dir, sp }) catch return error.InvalidStartPoint;
+            defer allocator.free(tag_path);
+            if (platform_impl.fs.readFile(allocator, tag_path)) |content| {
+                defer allocator.free(content);
+                const trimmed = std.mem.trim(u8, content, " \t\n\r");
+                if (trimmed.len == 40 and isValidHash(trimmed)) {
+                    break :blk try allocator.dupe(u8, trimmed);
+                }
+            } else |_| {}
+            // Try resolveRef as last resort
+            if (resolveRef(git_dir, sp, platform_impl, allocator) catch null) |h| {
+                break :blk h;
+            }
+            return error.InvalidStartPoint;
         }
     else blk: {
         // Use current HEAD
