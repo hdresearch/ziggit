@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // Build options
-    const enable_git_fallback = b.option(bool, "git-fallback", "Enable git CLI fallback") orelse true;
+    const enable_git_fallback = b.option(bool, "git-fallback", "Enable git CLI fallback") orelse false;
 
     const options = b.addOptions();
     options.addOption(bool, "enable_git_fallback", enable_git_fallback);
