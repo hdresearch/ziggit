@@ -13595,12 +13595,8 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
         unreachable;
     };
 
-    // Sort by path (git ls-tree outputs sorted)
-    std.sort.block(OutputEntry, output_entries.items, {}, struct {
-        fn lessThan(_: void, a: OutputEntry, b: OutputEntry) bool {
-            return std.mem.order(u8, a.full_path, b.full_path) == .lt;
-        }
-    }.lessThan);
+    // Tree entries are already stored in sorted order in the tree object,
+    // so we don't re-sort (git's tree sorting uses implicit trailing / for directories)
 
     // Output
     // Read core.quotePath config (default true)
