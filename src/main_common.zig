@@ -13425,8 +13425,8 @@ fn cmdShow(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     }
 
     for (refs_to_show.items, 0..) |ref_to_show, ref_idx| {
-        // Add separator between multiple items
-        if (ref_idx > 0) {
+        // Add separator between multiple items (only for non-format output)
+        if (ref_idx > 0 and pretty_format == null) {
             try platform_impl.writeStdout("\n");
         }
         // Resolve the reference to a commit hash
