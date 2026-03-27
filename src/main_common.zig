@@ -9703,12 +9703,7 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     if (std.mem.startsWith(u8, remote, "/") or std.mem.startsWith(u8, remote, "./") or std.mem.startsWith(u8, remote, "../") or std.mem.eql(u8, remote, ".") or std.mem.eql(u8, remote, "..") or std.mem.startsWith(u8, remote, "file://")) {
         remote_url = remote;
     } else {
-        // First try resolving as local git repo path
-        if (resolveSourceGitDir(allocator, remote)) |rgd| {
-            allocator.free(rgd);
-            remote_url = remote;
-        } else |_| {
-        // Look up remote URL from config
+        // Look up remote URL from config first
         const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
         defer allocator.free(config_path);
         const config_content = std.fs.cwd().readFileAlloc(allocator, config_path, 1024 * 1024) catch {
@@ -9737,12 +9732,18 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
         }
 
         if (!remote_url_allocated) {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' does not appear to be a git repository\nfatal: Could not read from remote repository.\n", .{remote});
-            defer allocator.free(msg);
-            try platform_impl.writeStderr(msg);
-            std.process.exit(128);
+            // Fall back to trying as a local git repo path
+            if (resolveSourceGitDir(allocator, remote)) |rgd| {
+                allocator.free(rgd);
+                remote_url = remote;
+            } else |_| {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' does not appear to be a git repository\nfatal: Could not read from remote repository.\n", .{remote});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            }
         }
-    } }
+    }
     defer if (remote_url_allocated) allocator.free(remote_url);
 
     // Resolve file:// URLs
@@ -9773,6 +9774,7 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     defer allocator.free(remote_git_dir);
 
     // If no refspecs given, figure out what to push
+    var had_push_error = false;
     if (refspecs.items.len == 0 and !push_all and !push_tags) {
         // Default: push current branch with matching remote
         const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
@@ -9825,7 +9827,7 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
                         if (std.fs.cwd().access(remote_ref_check, .{})) {
                             const rspec = try std.fmt.allocPrint(allocator, "refs/heads/{s}:refs/heads/{s}", .{ entry2.name, entry2.name });
                             defer allocator.free(rspec);
-                            pushRefspec(allocator, git_path, remote_git_dir, rspec, force_this, dry_run, quiet, platform_impl) catch {};
+                            pushRefspec(allocator, git_path, remote_git_dir, rspec, force_this, dry_run, quiet, platform_impl) catch { had_push_error = true; };
                         } else |_| {}
                     }
                     continue;
@@ -9900,9 +9902,42 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
         }
     }
 
-    // Update remote tracking refs
+    // Update remote tracking refs - sync refs/remotes/<remote>/* with what remote has
+    if (!dry_run and remote_url_allocated) {
+        const remote_heads_dir = std.fmt.allocPrint(allocator, "{s}/refs/heads", .{remote_git_dir}) catch null;
+        defer if (remote_heads_dir) |d| allocator.free(d);
+        if (remote_heads_dir) |rhd| {
+            if (std.fs.cwd().openDir(rhd, .{ .iterate = true })) |rd_val| {
+                var rd = rd_val;
+                defer rd.close();
+                var riter = rd.iterate();
+                while (riter.next() catch null) |rentry| {
+                    if (rentry.kind != .file) continue;
+                    const rref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ rhd, rentry.name }) catch continue;
+                    defer allocator.free(rref_path);
+                    if (std.fs.cwd().readFileAlloc(allocator, rref_path, 256)) |rval| {
+                        defer allocator.free(rval);
+                        const rh = std.mem.trim(u8, rval, " \t\r\n");
+                        const tracking_path = std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}/{s}", .{ git_path, remote, rentry.name }) catch continue;
+                        defer allocator.free(tracking_path);
+                        if (std.fs.path.dirname(tracking_path)) |dir| std.fs.cwd().makePath(dir) catch {};
+                        const tf = std.fs.cwd().createFile(tracking_path, .{}) catch continue;
+                        defer tf.close();
+                        const thl = std.fmt.allocPrint(allocator, "{s}\n", .{rh}) catch continue;
+                        defer allocator.free(thl);
+                        tf.writeAll(thl) catch {};
+                    } else |_| {}
+                }
+            } else |_| {}
+        }
+    }
+
     if (set_upstream) {
         // TODO: update branch.<name>.remote and branch.<name>.merge
+    }
+    
+    if (had_push_error) {
+        std.process.exit(1);
     }
 }
 
@@ -9975,7 +10010,7 @@ fn pushRefspecInner(allocator: std.mem.Allocator, local_git_dir: []const u8, rem
                         const msg = try std.fmt.allocPrint(allocator, " ! [remote rejected] {s} -> {s} (branch is currently checked out)\nremote: error: refusing to update checked out branch: {s}\nremote: error: By default, updating the current branch in a non-bare repository\nremote: is denied.\nerror: failed to push some refs\n", .{ branch_short, branch_short, full_dst });
                         defer allocator.free(msg);
                         try platform_impl.writeStderr(msg);
-                        std.process.exit(1);
+                        return error.ObjectNotFound; // Signal denial
                     }
                 }
             }
@@ -10030,7 +10065,7 @@ fn pushRefspecInner(allocator: std.mem.Allocator, local_git_dir: []const u8, rem
                 const msg = try std.fmt.allocPrint(allocator, " ! [rejected]        {s} -> {s} (non-fast-forward)\nerror: failed to push some refs to '{s}'\nhint: Updates were rejected because the tip of your current branch is behind\nhint: its remote counterpart.\n", .{ dst_ref, dst_ref, remote_git_dir });
                 defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
-                std.process.exit(1);
+                return error.ObjectNotFound; // Signal non-FF failure
             }
         }
     }
