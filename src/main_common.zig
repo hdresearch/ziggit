@@ -31462,7 +31462,7 @@ fn cmdFormatPatch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         } else {
             // Write to file
             const dir = output_dir orelse ".";
-            const filename = try std.fmt.allocPrint(allocator, "{s}/{d:0>4}-{s}.patch", .{ dir, patch_num, sanitizeSubject(first_line, allocator) catch first_line });
+            const filename = try std.fmt.allocPrint(allocator, "{s}/{d:0>4}-{s}.patch", .{ dir, patch_num, sanitizeSubjectForFilename(first_line, allocator) catch first_line });
             defer allocator.free(filename);
             
             const out_msg = try std.fmt.allocPrint(allocator, "{s}\n", .{filename});
@@ -31539,7 +31539,7 @@ fn formatRfc2822Date(timestamp: i64, tz: []const u8, allocator: std.mem.Allocato
     });
 }
 
-fn sanitizeSubject(subject: []const u8, allocator: std.mem.Allocator) ![]u8 {
+fn sanitizeSubjectForFilename(subject: []const u8, allocator: std.mem.Allocator) ![]u8 {
     var result = try allocator.alloc(u8, subject.len);
     for (subject, 0..) |c, i| {
         result[i] = if (c == ' ' or c == '/' or c == '\\' or c == ':') '-' else c;
