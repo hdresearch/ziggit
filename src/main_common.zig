@@ -25996,6 +25996,59 @@ fn resolveToTree(allocator: std.mem.Allocator, ref_str: []const u8, git_path: []
     }
 }
 
+fn outputPrettyCommitHeader(allocator: std.mem.Allocator, commit_hash: []const u8, commit_data: []const u8, opts: *const DiffTreeOpts, platform_impl: *const platform_mod.Platform) !void {
+    const pretty_fmt = opts.pretty_fmt orelse "medium";
+    
+    if (std.mem.eql(u8, pretty_fmt, "oneline")) {
+        // One-line format: <hash> <subject>
+        const msg = if (std.mem.indexOf(u8, commit_data, "\n\n")) |pos| commit_data[pos + 2 ..] else "";
+        const first_line = if (std.mem.indexOf(u8, msg, "\n")) |nl| msg[0..nl] else msg;
+        const out = try std.fmt.allocPrint(allocator, "{s} {s}\n", .{ commit_hash, first_line });
+        defer allocator.free(out);
+        try platform_impl.writeStdout(out);
+    } else {
+        // Medium format (default)
+        const author_line = extractHeaderField(commit_data, "author");
+        const msg = if (std.mem.indexOf(u8, commit_data, "\n\n")) |pos| commit_data[pos + 2 ..] else "";
+        
+        const out1 = try std.fmt.allocPrint(allocator, "commit {s}\n", .{commit_hash});
+        defer allocator.free(out1);
+        try platform_impl.writeStdout(out1);
+        
+        // Parse author name and email
+        const author_name = parseAuthorName(author_line);
+        const author_email = parseAuthorEmail(author_line);
+        const out2 = try std.fmt.allocPrint(allocator, "Author: {s} <{s}>\n", .{ author_name, author_email });
+        defer allocator.free(out2);
+        try platform_impl.writeStdout(out2);
+        
+        // Parse and format date
+        const date_str = parseAuthorDate(author_line, allocator);
+        defer if (date_str) |d| allocator.free(d);
+        const out3 = try std.fmt.allocPrint(allocator, "Date:   {s}\n", .{ date_str orelse "Thu, 1 Jan 1970 00:00:00 +0000" });
+        defer allocator.free(out3);
+        try platform_impl.writeStdout(out3);
+        
+        try platform_impl.writeStdout("\n");
+        
+        // Output message with 4-space indent
+        var msg_iter = std.mem.splitScalar(u8, msg, '\n');
+        while (msg_iter.next()) |line| {
+            if (line.len == 0) {
+                try platform_impl.writeStdout("\n");
+            } else {
+                const indented = try std.fmt.allocPrint(allocator, "    {s}\n", .{line});
+                defer allocator.free(indented);
+                try platform_impl.writeStdout(indented);
+            }
+        }
+        // Ensure trailing newline
+        if (msg.len > 0 and msg[msg.len - 1] != '\n') {
+            try platform_impl.writeStdout("\n");
+        }
+    }
+}
+
 fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, opts: *const DiffTreeOpts, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform) !bool {
     const show_root = opts.show_root;
     const no_commit_id = opts.no_commit_id;
@@ -26034,9 +26087,13 @@ fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, opts:
     if (parent_hash == null) {
         if (show_root) {
             if (!quiet and !no_commit_id) {
-                const id_line = try std.fmt.allocPrint(allocator, "{s}\n", .{commit_hash});
-                defer allocator.free(id_line);
-                try platform_impl.writeStdout(id_line);
+                if (opts.show_pretty) {
+                    try outputPrettyCommitHeader(allocator, commit_hash, commit_obj.data, opts, platform_impl);
+                } else {
+                    const id_line = try std.fmt.allocPrint(allocator, "{s}\n", .{commit_hash});
+                    defer allocator.free(id_line);
+                    try platform_impl.writeStdout(id_line);
+                }
             }
             if (!quiet) {
                 if (opts.patch_with_raw) {
@@ -26086,9 +26143,13 @@ fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, opts:
         if (has_diff) {
             if (!quiet) {
                 if (!no_commit_id) {
-                    const id_line = try std.fmt.allocPrint(allocator, "{s}\n", .{commit_hash});
-                    defer allocator.free(id_line);
-                    try platform_impl.writeStdout(id_line);
+                    if (opts.show_pretty) {
+                        try outputPrettyCommitHeader(allocator, commit_hash, commit_obj.data, opts, platform_impl);
+                    } else {
+                        const id_line = try std.fmt.allocPrint(allocator, "{s}\n", .{commit_hash});
+                        defer allocator.free(id_line);
+                        try platform_impl.writeStdout(id_line);
+                    }
                 }
                 _ = try diffTwoTreesFiltered(allocator, pt, this_tree, "", opts, pathspecs, platform_impl);
             }
