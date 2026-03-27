@@ -13261,6 +13261,8 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var first_parent = false;
     var max_age: ?i64 = null;
     var min_age: ?i64 = null;
+    var max_parents: ?i32 = null;
+    var min_parents: ?i32 = null;
     var format_str: ?[]const u8 = null;
     var no_commit_header = false;
     var not_mode = false;
@@ -13283,6 +13285,24 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             topo_order = false; // author-date-order overrides topo
         } else if (std.mem.eql(u8, arg, "--first-parent")) {
             first_parent = true;
+        } else if (std.mem.eql(u8, arg, "--no-merges")) {
+            max_parents = 1;
+        } else if (std.mem.eql(u8, arg, "--merges")) {
+            min_parents = 2;
+        } else if (std.mem.startsWith(u8, arg, "--max-parents=")) {
+            max_parents = std.fmt.parseInt(i32, arg["--max-parents=".len..], 10) catch {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' is not an integer\n", .{arg["--max-parents=".len..]});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--min-parents=")) {
+            min_parents = std.fmt.parseInt(i32, arg["--min-parents=".len..], 10) catch {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' is not an integer\n", .{arg["--min-parents=".len..]});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            };
         } else if (std.mem.startsWith(u8, arg, "--max-age=") or std.mem.startsWith(u8, arg, "--after=") or std.mem.startsWith(u8, arg, "--since=")) {
             const eq_pos = std.mem.indexOf(u8, arg, "=").?;
             max_age = std.fmt.parseInt(i64, arg[eq_pos + 1..], 10) catch null;
@@ -13622,6 +13642,30 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             .author_ts = author_ts,
             .parents = try parents_list.toOwnedSlice(),
         });
+    }
+
+    // Apply parent count filters
+    if (max_parents != null or min_parents != null) {
+        var filtered = std.array_list.Managed(CommitInfo).init(allocator);
+        for (all_commits.items) |ci| {
+            const nparents: i32 = @intCast(ci.parents.len);
+            var keep = true;
+            if (max_parents) |mp| {
+                if (mp >= 0 and nparents > mp) keep = false;
+            }
+            if (min_parents) |mp2| {
+                if (mp2 >= 0 and nparents < mp2) keep = false;
+            }
+            if (keep) {
+                try filtered.append(ci);
+            } else {
+                allocator.free(ci.hash);
+                for (ci.parents) |p| allocator.free(@constCast(p));
+                allocator.free(ci.parents);
+            }
+        }
+        all_commits.deinit();
+        all_commits = filtered;
     }
 
     // Sort based on order mode
