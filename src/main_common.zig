@@ -11888,6 +11888,17 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
                 checkoutCommitTree(git_path, target_hash, allocator, platform_impl) catch {};
             },
         }
+        // Output "HEAD is now at <short-hash> <subject>" for hard reset
+        if (reset_mode == .hard) {
+            const short_hash = if (target_hash.len >= 7) target_hash[0..7] else target_hash;
+            const subj = getCommitSubject(target_hash, git_path, platform_impl, allocator) catch "";
+            defer if (subj.len > 0) allocator.free(subj);
+            const reset_msg = std.fmt.allocPrint(allocator, "HEAD is now at {s} {s}\n", .{ short_hash, subj }) catch "";
+            if (reset_msg.len > 0) {
+                defer allocator.free(reset_msg);
+                platform_impl.writeStdout(reset_msg) catch {};
+            }
+        }
     } else {
         // Unborn branch: reset clears the index (and working tree for --hard)
         const index_path = std.fmt.allocPrint(allocator, "{s}/index", .{git_path}) catch return;
@@ -11917,6 +11928,18 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
 }
 
 /// Reset the index to match the tree of the given commit
+fn getCommitSubject(hash: []const u8, git_path: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![]const u8 {
+    const obj = objects.GitObject.load(hash, git_path, platform_impl, allocator) catch return "";
+    defer obj.deinit(allocator);
+    var lines = std.mem.splitSequence(u8, obj.data, "\n");
+    var past_header = false;
+    while (lines.next()) |line| {
+        if (past_header) return allocator.dupe(u8, line) catch "";
+        if (line.len == 0) past_header = true;
+    }
+    return "";
+}
+
 fn writeEmptyIndex(allocator: std.mem.Allocator, index_path: []const u8) !void {
     var output = std.array_list.Managed(u8).init(allocator);
     defer output.deinit();
