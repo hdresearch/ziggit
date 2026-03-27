@@ -344,8 +344,6 @@ pub fn loadFromPackFiles(hash_str: []const u8, git_dir: []const u8, platform_imp
     while (iterator.next() catch null) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
-        if (entry.name.len != 49) continue;
-        if (!std.mem.startsWith(u8, entry.name, "pack-")) continue;
         if (idx_count >= 64) break;
         idx_names_buf[idx_count] = allocator.dupe(u8, entry.name) catch continue;
         idx_count += 1;

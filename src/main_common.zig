@@ -15905,11 +15905,16 @@ fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, comman
     var progress = true;
     var revs_mode = false;
     var use_all = false;
+    var stdin_packs = false;
 
     var i = command_index + 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--stdout")) {
+        if (std.mem.eql(u8, arg, "--stdin")) {
+            try platform_impl.writeStderr("fatal: disallowed abbreviated or ambiguous option 'stdin'\n");
+            std.process.exit(1);
+            unreachable;
+        } else if (std.mem.eql(u8, arg, "--stdout")) {
             stdout_mode = true;
         } else if (std.mem.eql(u8, arg, "--all-progress") or std.mem.eql(u8, arg, "--all-progress-implied")) {
             // accepted
@@ -15919,6 +15924,8 @@ fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, comman
             progress = true;
         } else if (std.mem.eql(u8, arg, "--revs")) {
             revs_mode = true;
+        } else if (std.mem.eql(u8, arg, "--stdin-packs")) {
+            stdin_packs = true;
         } else if (std.mem.eql(u8, arg, "--all")) {
             use_all = true;
         } else if (std.mem.eql(u8, arg, "--no-reuse-delta") or std.mem.eql(u8, arg, "--no-reuse-object")) {
@@ -15933,6 +15940,82 @@ fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, comman
             std.mem.eql(u8, arg, "--indexed-objects") or std.mem.eql(u8, arg, "--unpack-unreachable"))
         {
             // Accepted flags
+        } else if (std.mem.startsWith(u8, arg, "--index-version=")) {
+            // Validate --index-version=<ver>[,<offset>]
+            const val = arg["--index-version=".len..];
+            if (std.mem.indexOfScalar(u8, val, ',')) |comma_pos| {
+                const ver_str = val[0..comma_pos];
+                const off_str = val[comma_pos + 1 ..];
+                const ver = std.fmt.parseInt(u32, ver_str, 10) catch {
+                    const msg = try std.fmt.allocPrint(allocator, "bad index version '{s}'\n", .{val});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(1);
+                    unreachable;
+                };
+                if (ver < 1 or ver > 2) {
+                    const msg = try std.fmt.allocPrint(allocator, "bad index version '{s}'\n", .{val});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(1);
+                    unreachable;
+                }
+                if (off_str.len == 0) {
+                    const msg = try std.fmt.allocPrint(allocator, "bad index version '{s}'\n", .{val});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(1);
+                    unreachable;
+                }
+                // Parse offset (may be hex with 0x prefix)
+                if (std.mem.startsWith(u8, off_str, "0x") or std.mem.startsWith(u8, off_str, "0X")) {
+                    _ = std.fmt.parseInt(u64, off_str[2..], 16) catch {
+                        const msg = try std.fmt.allocPrint(allocator, "bad index version '{s}'\n", .{val});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                        std.process.exit(1);
+                        unreachable;
+                    };
+                } else {
+                    _ = std.fmt.parseInt(u64, off_str, 10) catch {
+                        const msg = try std.fmt.allocPrint(allocator, "bad index version '{s}'\n", .{val});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                        std.process.exit(1);
+                        unreachable;
+                    };
+                }
+            } else {
+                const ver = std.fmt.parseInt(u32, val, 10) catch {
+                    const msg = try std.fmt.allocPrint(allocator, "bad index version '{s}'\n", .{val});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(1);
+                    unreachable;
+                };
+                if (ver < 1 or ver > 2) {
+                    const msg = try std.fmt.allocPrint(allocator, "bad index version '{s}'\n", .{val});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(1);
+                    unreachable;
+                }
+            }
+        } else if (std.mem.startsWith(u8, arg, "--name-hash-version=")) {
+            // Validate --name-hash-version=<ver>
+            const val = arg["--name-hash-version=".len..];
+            const ver = std.fmt.parseInt(i32, val, 10) catch {
+                const msg = try std.fmt.allocPrint(allocator, "error: invalid --name-hash-version option: '{s}'\n", .{val});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(1);
+                unreachable;
+            };
+            if (ver == 0 or ver > 2) {
+                try platform_impl.writeStderr("error: invalid --name-hash-version option\n");
+                std.process.exit(1);
+                unreachable;
+            }
         } else if (std.mem.startsWith(u8, arg, "--window=") or
             std.mem.startsWith(u8, arg, "--depth=") or
             std.mem.startsWith(u8, arg, "--threads=") or
@@ -15952,6 +16035,13 @@ fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, comman
             }
             base_name = arg;
         }
+    }
+
+    // Check incompatible options
+    if (stdin_packs and revs_mode) {
+        try platform_impl.writeStderr("error: --stdin-packs is incompatible with --revs\n");
+        std.process.exit(1);
+        unreachable;
     }
 
     if (base_name == null and !stdout_mode) {
@@ -15983,12 +16073,32 @@ fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, comman
         object_hashes.deinit();
     }
 
-    if (revs_mode) {
-        // --revs mode: treat stdin as revision arguments and walk reachable objects
+    if (stdin_packs) {
+        // --stdin-packs mode: each line is a pack name (without path)
+        // Look for matching packs in objects/pack/ directory
         var lines_iter = std.mem.splitScalar(u8, stdin_data, '\n');
         while (lines_iter.next()) |line| {
             const trimmed = std.mem.trim(u8, line, " \t\r");
             if (trimmed.len == 0) continue;
+            // Check if the pack exists
+            const pack_path = std.fmt.allocPrint(allocator, "{s}/objects/pack/pack-{s}.idx", .{ git_dir, trimmed }) catch continue;
+            defer allocator.free(pack_path);
+            std.fs.cwd().access(pack_path, .{}) catch {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: could not find pack '{s}'\n", .{trimmed});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(1);
+                unreachable;
+            };
+            // TODO: actually read objects from the pack
+        }
+    } else if (revs_mode) {
+        // --revs mode: treat stdin as revision arguments and walk reachable objects
+        // An empty line terminates the revision input (matching git's behavior)
+        var lines_iter = std.mem.splitScalar(u8, stdin_data, '\n');
+        while (lines_iter.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (trimmed.len == 0) break; // empty line terminates revision input
             if (trimmed[0] == '^') continue; // exclude ref
 
             var resolved: ?[]const u8 = null;
