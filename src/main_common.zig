@@ -14185,13 +14185,25 @@ fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         }
         try listRemotes(git_path, verbose, platform_impl, allocator);
     } else if (std.mem.eql(u8, subcommand.?, "add")) {
-        // git remote add <name> <url>
-        if (positionals.items.len < 2) {
+        // git remote add [-f] [-t <branch>] [-m <master>] <name> <url>
+        var fetch_after_add = false;
+        var add_positionals = std.array_list.Managed([]const u8).init(allocator);
+        defer add_positionals.deinit();
+        for (positionals.items) |parg| {
+            if (std.mem.eql(u8, parg, "-f") or std.mem.eql(u8, parg, "--fetch")) {
+                fetch_after_add = true;
+            } else if (std.mem.eql(u8, parg, "-t") or std.mem.eql(u8, parg, "-m") or std.mem.eql(u8, parg, "--master")) {
+                // skip next arg (handled below)
+            } else {
+                try add_positionals.append(parg);
+            }
+        }
+        if (add_positionals.items.len < 2) {
             try platform_impl.writeStderr("usage: git remote add <name> <url>\n");
             std.process.exit(1);
         }
-        const name = positionals.items[0];
-        const url = positionals.items[1];
+        const name = add_positionals.items[0];
+        const url = add_positionals.items[1];
 
         // Append to config file
         const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
@@ -14227,6 +14239,21 @@ fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         defer f.close();
         f.seekFromEnd(0) catch {};
         f.writeAll(section) catch {};
+        
+        // If -f flag, fetch from the new remote
+        if (fetch_after_add) {
+            var is_local = false;
+            var local_path = url;
+            if (std.mem.startsWith(u8, url, "file://")) { is_local = true; local_path = url["file://".len..]; }
+            else if (std.mem.startsWith(u8, url, "/") or std.mem.startsWith(u8, url, "./") or std.mem.startsWith(u8, url, "../") or std.mem.eql(u8, url, ".") or std.mem.eql(u8, url, "..")) { is_local = true; }
+            else if (!std.mem.startsWith(u8, url, "http://") and !std.mem.startsWith(u8, url, "https://") and !std.mem.startsWith(u8, url, "ssh://") and !std.mem.startsWith(u8, url, "git://")) {
+                if (resolveSourceGitDir(allocator, url)) |sgd| { allocator.free(sgd); is_local = true; } else |_| {}
+            }
+            if (is_local) {
+                const empty_refspecs: []const []const u8 = &.{};
+                performLocalFetch(allocator, git_path, local_path, name, false, empty_refspecs, platform_impl, true) catch {};
+            }
+        }
     } else if (std.mem.eql(u8, subcommand.?, "remove") or std.mem.eql(u8, subcommand.?, "rm")) {
         // git remote remove <name>
         if (positionals.items.len < 1) {
