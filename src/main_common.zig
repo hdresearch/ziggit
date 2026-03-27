@@ -8410,7 +8410,7 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             const output = try std.fmt.allocPrint(allocator, "{s}\n", .{repo_root});
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
-            return;
+            continue;
         } else if (std.mem.eql(u8, arg, "--git-dir")) {
             const git_path = findGitDirectory(allocator, platform_impl) catch {
                 try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
@@ -8453,7 +8453,7 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                     try platform_impl.writeStdout(output);
                 }
             }
-            return;
+            continue;
         } else if (std.mem.eql(u8, arg, "--git-common-dir")) {
             const git_path = findGitDirectory(allocator, platform_impl) catch {
                 try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
@@ -8477,11 +8477,11 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                 defer allocator.free(output);
                 try platform_impl.writeStdout(output);
             }
-            return;
+            continue;
         } else if (std.mem.eql(u8, arg, "--is-inside-work-tree")) {
             const git_path = findGitDirectory(allocator, platform_impl) catch {
                 try platform_impl.writeStdout("false\n");
-                return;
+                continue;
             };
             defer allocator.free(git_path);
             // Check bare
@@ -8491,16 +8491,16 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                 defer allocator.free(cfg);
                 if (std.mem.indexOf(u8, cfg, "bare = true") != null) {
                     try platform_impl.writeStdout("false\n");
-                    return;
+                    continue;
                 }
             } else |_| {}
             try platform_impl.writeStdout("true\n");
-            return;
+            continue;
         } else if (std.mem.eql(u8, arg, "--is-inside-git-dir")) {
             // Check if cwd is inside the .git directory
             const git_path = findGitDirectory(allocator, platform_impl) catch {
                 try platform_impl.writeStdout("false\n");
-                return;
+                continue;
             };
             defer allocator.free(git_path);
             const cwd = try platform_impl.fs.getCwd(allocator);
@@ -8517,11 +8517,11 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             } else {
                 try platform_impl.writeStdout("false\n");
             }
-            return;
+            continue;
         } else if (std.mem.eql(u8, arg, "--is-bare-repository")) {
             const git_path = findGitDirectory(allocator, platform_impl) catch {
                 try platform_impl.writeStdout("false\n");
-                return;
+                continue;
             };
             defer allocator.free(git_path);
             const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
@@ -8530,11 +8530,11 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                 defer allocator.free(cfg);
                 if (std.mem.indexOf(u8, cfg, "bare = true") != null) {
                     try platform_impl.writeStdout("true\n");
-                    return;
+                    continue;
                 }
             } else |_| {}
             try platform_impl.writeStdout("false\n");
-            return;
+            continue;
         } else if (std.mem.eql(u8, arg, "--show-cdup")) {
             const git_path = findGitDirectory(allocator, platform_impl) catch {
                 try platform_impl.writeStderr("fatal: not a git repository\n");
@@ -8563,7 +8563,7 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             } else {
                 try platform_impl.writeStdout("\n");
             }
-            return;
+            continue;
         } else if (std.mem.eql(u8, arg, "--show-prefix")) {
             const git_path = findGitDirectory(allocator, platform_impl) catch {
                 try platform_impl.writeStderr("fatal: not a git repository\n");
@@ -8583,7 +8583,7 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             } else {
                 try platform_impl.writeStdout("\n");
             }
-            return;
+            continue;
         } else if (std.mem.eql(u8, arg, "--absolute-git-dir")) {
             const git_path = findGitDirectory(allocator, platform_impl) catch {
                 try platform_impl.writeStderr("fatal: not a git repository\n");
@@ -8593,17 +8593,17 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             const output = try std.fmt.allocPrint(allocator, "{s}\n", .{git_path});
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
-            return;
+            continue;
         } else if (std.mem.eql(u8, arg, "--git-path")) {
             // --git-path <path> - resolve path relative to GIT_DIR
             // The next positional should be the path component
             continue; // The path will be the next arg, handled below
         } else if (std.mem.eql(u8, arg, "--show-object-format") or std.mem.startsWith(u8, arg, "--show-object-format=")) {
             try platform_impl.writeStdout("sha1\n");
-            return;
+            continue;
         } else if (std.mem.eql(u8, arg, "--show-ref-format")) {
             try platform_impl.writeStdout("files\n");
-            return;
+            continue;
         } else if (std.mem.eql(u8, arg, "--is-shallow-repository")) {
             // Check for shallow file
             if (findGitDirectory(allocator, platform_impl) catch null) |gp_shallow| {
@@ -8618,7 +8618,7 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             } else {
                 try platform_impl.writeStdout("false\n");
             }
-            return;
+            continue;
         }
     }
 
