@@ -25969,6 +25969,18 @@ fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, recur
     return false;
 }
 
+fn padMode6(buf: *[6]u8, mode: []const u8) []const u8 {
+    if (mode.len >= 6) return mode[0..6];
+    const pad_len = 6 - mode.len;
+    @memset(buf[0..pad_len], '0');
+    @memcpy(buf[pad_len..6], mode);
+    return buf[0..6];
+}
+
+fn isTreeMode(mode: []const u8) bool {
+    return std.mem.eql(u8, mode, "40000") or std.mem.eql(u8, mode, "040000");
+}
+
 fn diffTreeWithEmpty(allocator: std.mem.Allocator, tree_hash_str: []const u8, recursive: bool, show_patch: bool, name_only: bool, name_status: bool, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
     const tree_obj = objects.GitObject.load(tree_hash_str, git_path, platform_impl, allocator) catch return;
     defer tree_obj.deinit(allocator);
@@ -25979,7 +25991,7 @@ fn diffTreeWithEmpty(allocator: std.mem.Allocator, tree_hash_str: []const u8, re
     const zero_hash = "0000000000000000000000000000000000000000";
     
     for (entries.items) |entry| {
-        if (recursive and std.mem.eql(u8, entry.mode, "040000")) {
+        if (recursive and isTreeMode(entry.mode)) {
             try diffTreeWithEmpty(allocator, entry.hash, recursive, show_patch, name_only, name_status, git_path, platform_impl);
             continue;
         }
@@ -25993,7 +26005,8 @@ fn diffTreeWithEmpty(allocator: std.mem.Allocator, tree_hash_str: []const u8, re
             defer allocator.free(out);
             try platform_impl.writeStdout(out);
         } else {
-            const out = try std.fmt.allocPrint(allocator, ":000000 {s} {s} {s} A\t{s}\n", .{ entry.mode, zero_hash, entry.hash, entry.name });
+            var mbuf: [6]u8 = undefined;
+            const out = try std.fmt.allocPrint(allocator, ":000000 {s} {s} {s} A\t{s}\n", .{ padMode6(&mbuf, entry.mode), zero_hash, entry.hash, entry.name });
             defer allocator.free(out);
             try platform_impl.writeStdout(out);
         }
@@ -26046,7 +26059,7 @@ fn diffTwoTreesPatch(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2
         
         if (e1 != null and e2 != null) {
             if (std.mem.eql(u8, e1.?.hash, e2.?.hash) and std.mem.eql(u8, e1.?.mode, e2.?.mode)) continue;
-            if (std.mem.eql(u8, e1.?.mode, "040000") and std.mem.eql(u8, e2.?.mode, "040000")) {
+            if (isTreeMode(e1.?.mode) and isTreeMode(e2.?.mode)) {
                 const sub = try diffTwoTreesPatch(allocator, e1.?.hash, e2.?.hash, full_name, git_path, quiet, pathspecs, platform_impl);
                 if (sub) had_diff = true;
                 continue;
@@ -26162,7 +26175,7 @@ fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8, tr
         
         if (e1 != null and e2 != null) {
             if (std.mem.eql(u8, e1.?.hash, e2.?.hash) and std.mem.eql(u8, e1.?.mode, e2.?.mode)) continue;
-            if (recursive and std.mem.eql(u8, e1.?.mode, "040000") and std.mem.eql(u8, e2.?.mode, "040000")) {
+            if (recursive and isTreeMode(e1.?.mode) and isTreeMode(e2.?.mode)) {
                 const sub = try diffTwoTreesFiltered(allocator, e1.?.hash, e2.?.hash, full_name, recursive, show_patch, name_only, name_status, quiet, pathspecs, platform_impl);
                 if (sub) had_diff = true;
                 continue;
@@ -26179,7 +26192,9 @@ fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8, tr
                     defer allocator.free(out);
                     try platform_impl.writeStdout(out);
                 } else {
-                    const out = try std.fmt.allocPrint(allocator, ":{s} {s} {s} {s} M\t{s}\n", .{ e1.?.mode, e2.?.mode, e1.?.hash, e2.?.hash, full_name });
+                    var mb1: [6]u8 = undefined;
+                    var mb2: [6]u8 = undefined;
+                    const out = try std.fmt.allocPrint(allocator, ":{s} {s} {s} {s} M\t{s}\n", .{ padMode6(&mb1, e1.?.mode), padMode6(&mb2, e2.?.mode), e1.?.hash, e2.?.hash, full_name });
                     defer allocator.free(out);
                     try platform_impl.writeStdout(out);
                 }
@@ -26197,7 +26212,8 @@ fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8, tr
                     defer allocator.free(out);
                     try platform_impl.writeStdout(out);
                 } else {
-                    const out = try std.fmt.allocPrint(allocator, ":{s} 000000 {s} {s} D\t{s}\n", .{ e1.?.mode, e1.?.hash, zero_hash, full_name });
+                    var mb1: [6]u8 = undefined;
+                    const out = try std.fmt.allocPrint(allocator, ":{s} 000000 {s} {s} D\t{s}\n", .{ padMode6(&mb1, e1.?.mode), e1.?.hash, zero_hash, full_name });
                     defer allocator.free(out);
                     try platform_impl.writeStdout(out);
                 }
@@ -26215,7 +26231,8 @@ fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8, tr
                     defer allocator.free(out);
                     try platform_impl.writeStdout(out);
                 } else {
-                    const out = try std.fmt.allocPrint(allocator, ":000000 {s} {s} {s} A\t{s}\n", .{ e2.?.mode, zero_hash, e2.?.hash, full_name });
+                    var mb2: [6]u8 = undefined;
+                    const out = try std.fmt.allocPrint(allocator, ":000000 {s} {s} {s} A\t{s}\n", .{ padMode6(&mb2, e2.?.mode), zero_hash, e2.?.hash, full_name });
                     defer allocator.free(out);
                     try platform_impl.writeStdout(out);
                 }
