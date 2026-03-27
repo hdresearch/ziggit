@@ -25897,16 +25897,36 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
             try tree_refs.append(arg);
         }
     }
-    _ = show_m;
-    _ = first_parent;
-    _ = show_notes;
-    _ = format_str;
-    _ = compact_summary;
-    _ = reverse_diff;
-    _ = line_prefix;
-    _ = show_shortstat;
-    _ = show_cc;
-    _ = show_combined;
+    // Build options struct
+    const dt_opts = DiffTreeOpts{
+        .recursive = recursive,
+        .show_patch = show_patch,
+        .show_root = show_root,
+        .name_only = name_only,
+        .name_status = name_status,
+        .no_commit_id = no_commit_id,
+        .quiet = quiet,
+        .abbrev_len = abbrev_len,
+        .full_index = full_index,
+        .show_stat = show_stat,
+        .show_summary = show_summary,
+        .show_raw = show_raw,
+        .patch_with_stat = patch_with_stat,
+        .patch_with_raw = patch_with_raw,
+        .show_shortstat = show_shortstat,
+        .show_pretty = show_pretty,
+        .pretty_fmt = pretty_fmt,
+        .show_cc = show_cc,
+        .show_combined = show_combined,
+        .show_m = show_m,
+        .first_parent = first_parent,
+        .show_notes = show_notes,
+        .format_str = format_str,
+        .compact_summary = compact_summary,
+        .reverse_diff = reverse_diff,
+        .stdin_mode = stdin_mode,
+        .line_prefix = line_prefix,
+    };
     
     var had_diff = false;
     
