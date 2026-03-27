@@ -31413,7 +31413,7 @@ fn cmdFormatPatch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             }
             
             try platform_impl.writeStdout("-- \n");
-            const version_line = try std.fmt.allocPrint(allocator, "{s}\n\n", .{@import("version.zig").version});
+            const version_line = try std.fmt.allocPrint(allocator, "{s}\n\n", .{@import("version.zig").GIT_COMPAT_VERSION});
             defer allocator.free(version_line);
             try platform_impl.writeStdout(version_line);
         } else {
