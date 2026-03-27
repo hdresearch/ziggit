@@ -82,8 +82,8 @@ pub const TreeEntry = struct {
 };
 
 /// Parse a tree object from git object data
-pub fn parseTree(tree_data: []const u8, allocator: std.mem.Allocator) !std.array_list.Managed(TreeEntry) {
-    var entries = std.array_list.Managed(TreeEntry).init(allocator);
+pub fn parseTree(tree_data: []const u8, allocator: std.mem.Allocator) !std.ArrayList(TreeEntry) {
+    var entries = std.ArrayList(TreeEntry).init(allocator);
     var pos: usize = 0;
 
     while (pos < tree_data.len) {
@@ -107,7 +107,7 @@ pub fn parseTree(tree_data: []const u8, allocator: std.mem.Allocator) !std.array
         pos += 20;
 
         // Convert hash to hex string
-        const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{hash_bytes});
+        const hash_str = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
 
         const entry = TreeEntry{
             .mode = try allocator.dupe(u8, mode),
@@ -124,11 +124,11 @@ pub fn parseTree(tree_data: []const u8, allocator: std.mem.Allocator) !std.array
 
 /// Create tree object data from entries
 pub fn createTreeData(entries: []const TreeEntry, allocator: std.mem.Allocator) ![]u8 {
-    var content = std.array_list.Managed(u8).init(allocator);
+    var content = std.ArrayList(u8).init(allocator);
     defer content.deinit();
 
     // Sort entries by name for consistent tree hashes
-    var sorted_entries = std.array_list.Managed(TreeEntry).init(allocator);
+    var sorted_entries = std.ArrayList(TreeEntry).init(allocator);
     defer sorted_entries.deinit();
     
     for (entries) |entry| {
@@ -203,7 +203,7 @@ pub const TreeWalker = struct {
     }
 
     /// List all files in a tree (non-recursive)
-    pub fn listFiles(self: TreeWalker, tree_hash: []const u8) !std.array_list.Managed(TreeEntry) {
+    pub fn listFiles(self: TreeWalker, tree_hash: []const u8) !std.ArrayList(TreeEntry) {
         const tree_obj = objects.GitObject.load(tree_hash, self.git_dir, self.platform_impl, self.allocator) catch return error.TreeNotFound;
         defer tree_obj.deinit(self.allocator);
 

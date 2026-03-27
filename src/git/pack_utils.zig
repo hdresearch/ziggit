@@ -56,8 +56,8 @@ pub const PackUtils = struct {
     }
     
     /// Find all pack files in a repository
-    pub fn findPackFiles(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.array_list.Managed(PackFileDesc) {
-        var pack_files = std.array_list.Managed(PackFileDesc).init(allocator);
+    pub fn findPackFiles(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.ArrayList(PackFileDesc) {
+        var pack_files = std.ArrayList(PackFileDesc).init(allocator);
         
         const pack_dir = try std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir});
         defer allocator.free(pack_dir);
@@ -94,7 +94,7 @@ pub const PackUtils = struct {
     }
     
     /// Clean up resources for pack file list
-    pub fn deinitPackFiles(pack_files: std.array_list.Managed(PackFileDesc), allocator: std.mem.Allocator) void {
+    pub fn deinitPackFiles(pack_files: std.ArrayList(PackFileDesc), allocator: std.mem.Allocator) void {
         for (pack_files.items) |pack_file| {
             allocator.free(pack_file.path);
             allocator.free(pack_file.basename);

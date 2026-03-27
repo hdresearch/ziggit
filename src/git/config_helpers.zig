@@ -123,7 +123,7 @@ pub const ConfigHelpers = struct {
     
     /// Get all remotes configured in the repository
     pub fn getAllRemotes(self: ConfigHelpers, allocator: std.mem.Allocator) ![]RemoteInfo {
-        var remotes = std.array_list.Managed(RemoteInfo).init(allocator);
+        var remotes = std.ArrayList(RemoteInfo).init(allocator);
         var seen_remotes = std.StringHashMap(void).init(allocator);
         defer seen_remotes.deinit();
         
