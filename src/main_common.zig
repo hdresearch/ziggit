@@ -11802,19 +11802,18 @@ fn resolveCommitByMessage(git_path: []const u8, pattern: []const u8, platform_im
 }
 
 fn resolveReflogEntry(git_path: []const u8, ref_name: []const u8, n: u32, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
-    // Try multiple reflog paths: logs/<ref>, logs/refs/heads/<ref>
-    const paths_to_try = [_][]const u8{ ref_name, if (std.mem.startsWith(u8, ref_name, "refs/heads/")) ref_name["refs/heads/".len..] else ref_name };
-    var content: ?[]u8 = null;
-    for (paths_to_try) |p| {
-        const reflog_path = std.fmt.allocPrint(allocator, "{s}/logs/{s}", .{ git_path, p }) catch continue;
-        defer allocator.free(reflog_path);
-        if (platform_impl.fs.readFile(allocator, reflog_path)) |c| {
-            content = c;
-            break;
-        } else |_| {}
-    }
-    if (content == null) return error.NotFound;
-    defer allocator.free(content.?);
+    // Try full path first, then stripped
+    const short_name = if (std.mem.startsWith(u8, ref_name, "refs/heads/")) ref_name["refs/heads/".len..] else ref_name;
+    
+    const path1 = try std.fmt.allocPrint(allocator, "{s}/logs/{s}", .{ git_path, ref_name });
+    defer allocator.free(path1);
+    const path2 = try std.fmt.allocPrint(allocator, "{s}/logs/{s}", .{ git_path, short_name });
+    defer allocator.free(path2);
+    
+    const content = platform_impl.fs.readFile(allocator, path1) catch
+        platform_impl.fs.readFile(allocator, path2) catch
+        return error.NotFound;
+    defer allocator.free(content);
     defer allocator.free(content);
 
     // Collect all entries (each line has: old_hash new_hash ...)
