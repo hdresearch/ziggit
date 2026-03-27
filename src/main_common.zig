@@ -8747,11 +8747,15 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             if (stage) {
                 const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
                 defer allocator.free(hash_str);
-                const output = try std.fmt.allocPrint(allocator, "{o} {s} 0\t{s}\n", .{ entry.mode, hash_str, entry.path });
+                const quoted = try cQuotePath(allocator, entry.path, true);
+                defer allocator.free(quoted);
+                const output = try std.fmt.allocPrint(allocator, "{o} {s} 0\t{s}\n", .{ entry.mode, hash_str, quoted });
                 defer allocator.free(output);
                 try platform_impl.writeStdout(output);
             } else {
-                const output = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path});
+                const quoted = try cQuotePath(allocator, entry.path, true);
+                defer allocator.free(quoted);
+                const output = try std.fmt.allocPrint(allocator, "{s}\n", .{quoted});
                 defer allocator.free(output);
                 try platform_impl.writeStdout(output);
             }
