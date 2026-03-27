@@ -19449,6 +19449,7 @@ const PatchLineType = enum { context, add, remove };
 const PatchLine = struct {
     line_type: PatchLineType,
     content: []const u8,
+    no_newline: bool = false, // "\ No newline at end of file" follows this line
 
     fn deinit(self: *PatchLine, alloc: std.mem.Allocator) void {
         alloc.free(self.content);
@@ -19772,7 +19773,10 @@ fn parseHunk(allocator: std.mem.Allocator, lines: []const []const u8, pos: *usiz
             try hunk.lines.append(.{ .line_type = .context, .content = try allocator.dupe(u8, line[1..]) });
             pos.* += 1;
         } else if (std.mem.startsWith(u8, line, "\\ No newline at end of file")) {
-            // Mark last line as having no trailing newline (handled during apply)
+            // Mark last line as having no trailing newline
+            if (hunk.lines.items.len > 0) {
+                hunk.lines.items[hunk.lines.items.len - 1].no_newline = true;
+            }
             pos.* += 1;
         } else if (std.mem.startsWith(u8, line, "@@") or
             std.mem.startsWith(u8, line, "diff ") or
@@ -19870,6 +19874,7 @@ fn applyOnePatch(allocator: std.mem.Allocator, patch: *const Patch, reverse: boo
     // Apply hunks using context matching
     var result_lines = std.array_list.Managed([]const u8).init(allocator);
     defer result_lines.deinit();
+    var last_line_no_newline = false;
 
     var orig_idx: usize = 0;
 
@@ -19942,15 +19947,23 @@ fn applyOnePatch(allocator: std.mem.Allocator, patch: *const Patch, reverse: boo
         // Apply hunk lines
         for (hunk.lines.items) |pline| {
             const lt = if (reverse) reverseLineType(pline.line_type) else pline.line_type;
+            const pline_no_newline = if (reverse)
+                // When reversing, add becomes remove and vice versa
+                // no_newline flag applies to the reversed line type
+                pline.no_newline
+            else
+                pline.no_newline;
             switch (lt) {
                 .context => {
                     if (orig_idx < orig_lines.items.len) {
                         try result_lines.append(orig_lines.items[orig_idx]);
                         orig_idx += 1;
+                        last_line_no_newline = pline_no_newline;
                     }
                 },
                 .add => {
                     try result_lines.append(pline.content);
+                    last_line_no_newline = pline_no_newline;
                 },
                 .remove => {
                     // Skip this line from original
@@ -19973,8 +19986,13 @@ fn applyOnePatch(allocator: std.mem.Allocator, patch: *const Patch, reverse: boo
     defer output.deinit();
     for (result_lines.items, 0..) |line, idx| {
         try output.appendSlice(line);
-        if (idx + 1 < result_lines.items.len or (original.len > 0 and original[original.len - 1] == '\n')) {
+        if (idx + 1 < result_lines.items.len) {
             try output.append('\n');
+        } else {
+            // Last line: add newline unless no_newline flag is set
+            if (!last_line_no_newline) {
+                try output.append('\n');
+            }
         }
     }
 
