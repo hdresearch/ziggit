@@ -11929,7 +11929,7 @@ fn formatPersonDateWithFormat(person_line: []const u8, date_fmt: []const u8, all
     if (std.mem.endsWith(u8, date_fmt, "-local")) {
         const base_fmt = date_fmt[0 .. date_fmt.len - 6];
         if (std.mem.eql(u8, base_fmt, "default")) {
-            return formatTimestamp(timestamp, "+0000", allocator) catch return "";
+            return formatTimestampNoTZ(timestamp, "+0000", allocator) catch return "";
         }
         if (std.mem.eql(u8, base_fmt, "short")) {
             return formatTimestampShort(timestamp, "+0000", allocator) catch return "";
@@ -11951,6 +11951,41 @@ fn formatPersonDateWithFormat(person_line: []const u8, date_fmt: []const u8, all
     }
     // Fallback
     return formatTimestamp(timestamp, tz_str, allocator) catch return "";
+}
+
+fn formatTimestampNoTZ(timestamp: i64, tz_str: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+    var tz_off: i32 = 0;
+    if (tz_str.len >= 5) {
+        const sign: i32 = if (tz_str[0] == '-') @as(i32, -1) else 1;
+        const h = std.fmt.parseInt(i32, tz_str[1..3], 10) catch 0;
+        const m = std.fmt.parseInt(i32, tz_str[3..5], 10) catch 0;
+        tz_off = sign * (h * 60 + m);
+    }
+    const adj = timestamp + @as(i64, tz_off) * 60;
+    const SPD: i64 = 86400;
+    var days = @divFloor(adj, SPD);
+    var rem = @mod(adj, SPD);
+    if (rem < 0) { rem += SPD; days -= 1; }
+    const hour = @as(u32, @intCast(@divFloor(rem, 3600)));
+    const minute = @as(u32, @intCast(@divFloor(@mod(rem, 3600), 60)));
+    const second = @as(u32, @intCast(@mod(rem, 60)));
+    const wday = @mod(days + 4, 7);
+    const wday_u: usize = if (wday >= 0) @intCast(wday) else @intCast(wday + 7);
+    var y: i64 = 1970;
+    var d = days;
+    while (true) {
+        const yd: i64 = if (@mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0)) 366 else 365;
+        if (d < yd) break;
+        d -= yd; y += 1;
+    }
+    const leap = (@mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0));
+    const mdays_arr = [12]u32{ 31, if (leap) 29 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    var mon: usize = 0;
+    while (mon < 12) : (mon += 1) { if (d < mdays_arr[mon]) break; d -= mdays_arr[mon]; }
+    const day = @as(u32, @intCast(d)) + 1;
+    const wn = [7][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    const mn = [12][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    return std.fmt.allocPrint(allocator, "{s} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} {d}", .{ wn[wday_u], mn[mon], day, hour, minute, second, y });
 }
 
 fn formatTimestampShort(timestamp: i64, tz_str: []const u8, allocator: std.mem.Allocator) ![]const u8 {
@@ -16973,15 +17008,27 @@ fn formatRefOutput(allocator: std.mem.Allocator, format: []const u8, refname: []
                         }
                         try result.append('\'');
                     },
-                    .perl, .python => {
-                        try result.append('"');
+                    .perl => {
+                        try result.append('\'');
                         for (value) |c| {
-                            if (c == '"' or c == '\\') {
-                                try result.append('\\');
+                            if (c == '\'') {
+                                try result.appendSlice("'\\''");
+                            } else {
+                                try result.append(c);
                             }
-                            try result.append(c);
                         }
-                        try result.append('"');
+                        try result.append('\'');
+                    },
+                    .python => {
+                        try result.append('\'');
+                        for (value) |c| {
+                            if (c == '\'') {
+                                try result.appendSlice("'\\''");
+                            } else {
+                                try result.append(c);
+                            }
+                        }
+                        try result.append('\'');
                     },
                     .tcl => {
                         try result.append('"');
