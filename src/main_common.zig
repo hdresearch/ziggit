@@ -14190,6 +14190,45 @@ fn collectTreeEntries(git_path: []const u8, tree_hash: []const u8, prefix: []con
     }
 }
 
+fn pathspecMatch(pattern: []const u8, path: []const u8) bool {
+    // Handle simple cases
+    if (std.mem.eql(u8, pattern, ".")) return true;
+    if (std.mem.eql(u8, pattern, "*")) return std.mem.indexOf(u8, path, "/") == null; // match top-level only
+    if (std.mem.eql(u8, pattern, path)) return true;
+
+    // Prefix/directory match: pattern "dir" matches "dir/file"
+    if (std.mem.startsWith(u8, path, pattern) and path.len > pattern.len and path[pattern.len] == '/') return true;
+
+    // Simple glob matching with * and ?
+    return pathspecGlobMatch(pattern, path);
+}
+
+fn pathspecGlobMatch(pattern: []const u8, str: []const u8) bool {
+    var pi: usize = 0;
+    var si: usize = 0;
+    var star_pi: ?usize = null;
+    var star_si: usize = 0;
+
+    while (si < str.len) {
+        if (pi < pattern.len and (pattern[pi] == str[si] or pattern[pi] == '?')) {
+            pi += 1;
+            si += 1;
+        } else if (pi < pattern.len and pattern[pi] == '*') {
+            star_pi = pi;
+            star_si = si;
+            pi += 1;
+        } else if (star_pi) |sp| {
+            pi = sp + 1;
+            star_si += 1;
+            si = star_si;
+        } else {
+            return false;
+        }
+    }
+    while (pi < pattern.len and pattern[pi] == '*') pi += 1;
+    return pi == pattern.len;
+}
+
 fn cmdRm(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     if (@import("builtin").target.os.tag == .freestanding) {
         try platform_impl.writeStderr("rm: not supported in freestanding mode\n");
@@ -14208,29 +14247,48 @@ fn cmdRm(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform
     var force = false;
     var cached = false;
     var recursive = false;
+    var quiet = false;
+    var saw_dashdash = false;
     var files = std.array_list.Managed([]const u8).init(allocator);
     defer files.deinit();
 
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
+        if (saw_dashdash) {
+            try files.append(arg);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--")) {
+            saw_dashdash = true;
+        } else if (std.mem.eql(u8, arg, "--force")) {
             force = true;
         } else if (std.mem.eql(u8, arg, "--cached")) {
             cached = true;
-        } else if (std.mem.eql(u8, arg, "-r") or std.mem.eql(u8, arg, "--recursive")) {
+        } else if (std.mem.eql(u8, arg, "--recursive")) {
             recursive = true;
-        } else if (std.mem.startsWith(u8, arg, "-")) {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: unknown option '{s}'\n", .{arg});
-            defer allocator.free(msg);
-            try platform_impl.writeStderr(msg);
-            std.process.exit(128);
-            return;
+        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
+            quiet = true;
+        } else if (std.mem.startsWith(u8, arg, "-") and !std.mem.eql(u8, arg, "--") and arg.len > 1 and arg[1] != '-') {
+            // Handle combined short flags like -rf, -fr, etc.
+            for (arg[1..]) |ch| {
+                switch (ch) {
+                    'f' => force = true,
+                    'r' => recursive = true,
+                    'q' => quiet = true,
+                    else => {
+                        const msg = try std.fmt.allocPrint(allocator, "fatal: unknown option '{s}'\n", .{arg});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                        std.process.exit(128);
+                    },
+                }
+            }
         } else {
             try files.append(arg);
         }
     }
 
     if (files.items.len == 0) {
-        try platform_impl.writeStderr("fatal: no files specified\n");
+        try platform_impl.writeStderr("usage: git rm [-f | --force] [-n] [-r] [--cached] [--ignore-unmatch] [--quiet] [--pathspec-from-file=<file> [--pathspec-file-nul]] [--] [<pathspec>...]\n");
         std.process.exit(128);
         return;
     }
@@ -14246,51 +14304,82 @@ fn cmdRm(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform
     };
     defer index.deinit();
 
-    // Remove files from index and optionally from working tree
+    // Collect indices to remove (reverse order to preserve indices)
+    var to_remove = std.array_list.Managed(usize).init(allocator);
+    defer to_remove.deinit();
+    var removed_paths = std.array_list.Managed([]const u8).init(allocator);
+    defer removed_paths.deinit();
+
     for (files.items) |file_path| {
-        // Find the file in the index
         var found = false;
         for (index.entries.items, 0..) |entry, i| {
-            if (std.mem.eql(u8, entry.path, file_path)) {
-                found = true;
-                
-                // Remove from index
-                _ = index.entries.orderedRemove(i);
-                
-                // Remove from working tree unless --cached is specified
-                if (!cached) {
-                    const full_path = try std.fmt.allocPrint(allocator, "{s}/../{s}", .{git_path, file_path});
-                    defer allocator.free(full_path);
-                    
-                    platform_impl.fs.deleteFile(full_path) catch |err| switch (err) {
-                        error.FileNotFound => {
-                            if (!force) {
-                                const msg = try std.fmt.allocPrint(allocator, "fatal: file '{s}' not found in working tree\n", .{file_path});
-                                defer allocator.free(msg);
-                                try platform_impl.writeStderr(msg);
-                                std.process.exit(128);
-                            }
-                        },
-                        else => {
-                            if (!force) {
-                                const msg = try std.fmt.allocPrint(allocator, "fatal: could not remove '{s}': {}\n", .{file_path, err});
-                                defer allocator.free(msg);
-                                try platform_impl.writeStderr(msg);
-                                std.process.exit(128);
-                            }
-                        },
-                    };
+            if (pathspecMatch(file_path, entry.path)) {
+                // Check if non-recursive and path is in subdirectory
+                if (!recursive and !std.mem.eql(u8, file_path, entry.path) and std.mem.indexOf(u8, entry.path, "/") != null) {
+                    // Only skip if the pathspec is a directory prefix match and -r not set
+                    if (std.mem.startsWith(u8, entry.path, file_path)) {
+                        if (!force) {
+                            const msg = try std.fmt.allocPrint(allocator, "fatal: not removing '{s}' recursively without -r\n", .{file_path});
+                            defer allocator.free(msg);
+                            try platform_impl.writeStderr(msg);
+                            std.process.exit(128);
+                        }
+                        continue;
+                    }
                 }
-                break;
+                found = true;
+                try to_remove.append(i);
+                try removed_paths.append(entry.path);
             }
         }
-        
+
         if (!found) {
             const msg = try std.fmt.allocPrint(allocator, "fatal: pathspec '{s}' did not match any files\n", .{file_path});
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);
             std.process.exit(128);
             return;
+        }
+    }
+
+    // Sort removal indices in reverse order to preserve earlier indices
+    std.mem.sort(usize, to_remove.items, {}, struct {
+        fn cmp(_: void, a: usize, b: usize) bool {
+            return a > b; // reverse order
+        }
+    }.cmp);
+
+    // Remove duplicates and perform removal
+    var last_removed: ?usize = null;
+    for (to_remove.items) |idx| {
+        if (last_removed != null and last_removed.? == idx) continue;
+        last_removed = idx;
+        _ = index.entries.orderedRemove(idx);
+    }
+
+    // Output removed files and remove from working tree
+    for (removed_paths.items) |path| {
+        if (!quiet) {
+            const msg = try std.fmt.allocPrint(allocator, "rm '{s}'\n", .{path});
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
+        }
+
+        if (!cached) {
+            const full_path = try std.fmt.allocPrint(allocator, "{s}/../{s}", .{git_path, path});
+            defer allocator.free(full_path);
+
+            platform_impl.fs.deleteFile(full_path) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => {
+                    if (!force) {
+                        const msg = try std.fmt.allocPrint(allocator, "fatal: could not remove '{s}': {}\n", .{path, err});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                        std.process.exit(128);
+                    }
+                },
+            };
         }
     }
 
