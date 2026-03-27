@@ -2798,6 +2798,29 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         }
     }
 
+    // Find .git directory (needed for MERGE_MSG check below)
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+
+    // Check for MERGE_MSG or SQUASH_MSG as default message if no message provided
+    if (message == null) {
+        const merge_msg_path = try std.fmt.allocPrint(allocator, "{s}/MERGE_MSG", .{git_path});
+        defer allocator.free(merge_msg_path);
+        if (platform_impl.fs.readFile(allocator, merge_msg_path)) |mmsg| {
+            message = mmsg;
+        } else |_| {}
+    }
+    if (message == null) {
+        const squash_msg_path = try std.fmt.allocPrint(allocator, "{s}/SQUASH_MSG", .{git_path});
+        defer allocator.free(squash_msg_path);
+        if (platform_impl.fs.readFile(allocator, squash_msg_path)) |smsg| {
+            message = smsg;
+        } else |_| {}
+    }
+
     if (message == null) {
         try platform_impl.writeStderr("error: no commit message provided (use -m)\n");
         std.process.exit(1);
@@ -2811,13 +2834,6 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             std.process.exit(1);
         }
     }
-
-    // Find .git directory
-    const git_path = findGitDirectory(allocator, platform_impl) catch {
-        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
-        std.process.exit(128);
-    };
-    defer allocator.free(git_path);
 
     // Load index
     var index = index_mod.Index.load(git_path, platform_impl, allocator) catch |err| switch (err) {
@@ -2932,15 +2948,6 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                     try parent_hashes.append(try allocator.dupe(u8, mhash));
                 }
             }
-        } else |_| {}
-    }
-
-    // Check for MERGE_MSG as default message if no message provided
-    if (message == null) {
-        const merge_msg_path = try std.fmt.allocPrint(allocator, "{s}/MERGE_MSG", .{git_path});
-        defer allocator.free(merge_msg_path);
-        if (platform_impl.fs.readFile(allocator, merge_msg_path)) |mmsg| {
-            message = mmsg;
         } else |_| {}
     }
 
@@ -4960,7 +4967,7 @@ fn cmdMerge(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             defer allocator.free(success_msg);
             try platform_impl.writeStdout(success_msg);
         } else {
-            try performThreeWayMerge(git_path, current_hash, target_hash, current_branch, merge_target, merge_message, allocator, platform_impl);
+            try performThreeWayMerge(git_path, current_hash, target_hash, current_branch, merge_target, merge_message, no_commit, squash, allocator, platform_impl);
         }
     }
 }
@@ -5084,7 +5091,23 @@ fn findFirstCommonAncestor(git_path: []const u8, commit_hash: []const u8, ancest
 }
 
 /// Perform a 3-way merge between current branch and target branch
-fn performThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_hash: []const u8, current_branch: []const u8, target_branch: []const u8, merge_message: ?[]const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+fn writeMergeState(git_path: []const u8, target_hash: []const u8, merge_msg_text: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    const merge_head_path = try std.fmt.allocPrint(allocator, "{s}/MERGE_HEAD", .{git_path});
+    defer allocator.free(merge_head_path);
+    const merge_head_content = try std.fmt.allocPrint(allocator, "{s}\n", .{target_hash});
+    defer allocator.free(merge_head_content);
+    try platform_impl.fs.writeFile(merge_head_path, merge_head_content);
+
+    const merge_msg_path = try std.fmt.allocPrint(allocator, "{s}/MERGE_MSG", .{git_path});
+    defer allocator.free(merge_msg_path);
+    try platform_impl.fs.writeFile(merge_msg_path, merge_msg_text);
+
+    const merge_mode_path = try std.fmt.allocPrint(allocator, "{s}/MERGE_MODE", .{git_path});
+    defer allocator.free(merge_mode_path);
+    try platform_impl.fs.writeFile(merge_mode_path, "");
+}
+
+fn performThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_hash: []const u8, current_branch: []const u8, target_branch: []const u8, merge_message: ?[]const u8, no_commit: bool, squash: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     // Find common base (merge base) - simplified implementation
     const merge_base = findMergeBase(git_path, current_hash, target_hash, allocator, platform_impl) catch try allocator.dupe(u8, current_hash);
     defer allocator.free(merge_base);
@@ -5099,21 +5122,31 @@ fn performThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_h
     const target_tree = try getCommitTree(git_path, target_hash, allocator, platform_impl);  
     defer allocator.free(target_tree);
     
+    // Build the merge message
+    const actual_msg = merge_message orelse try buildMergeMessage(target_branch, current_branch, git_path, allocator, platform_impl);
+    const should_free_msg = merge_message == null;
+    defer if (should_free_msg) allocator.free(actual_msg);
+    
     // Perform the merge
     const conflicts_found = try mergeTreesWithConflicts(git_path, base_tree, current_tree, target_tree, allocator, platform_impl);
     
     if (conflicts_found) {
+        try writeMergeState(git_path, target_hash, actual_msg, allocator, platform_impl);
         try platform_impl.writeStderr("Automatic merge failed; fix conflicts and then commit the result.\n");
         std.process.exit(1);
+    } else if (no_commit or squash) {
+        if (!squash) {
+            try writeMergeState(git_path, target_hash, actual_msg, allocator, platform_impl);
+        } else {
+            const squash_msg_path = try std.fmt.allocPrint(allocator, "{s}/SQUASH_MSG", .{git_path});
+            defer allocator.free(squash_msg_path);
+            try platform_impl.fs.writeFile(squash_msg_path, actual_msg);
+        }
+        try platform_impl.writeStdout("Automatic merge went well; stopped before committing as requested\n");
     } else {
         // Create merge commit
         try createMergeCommitWithMsg(git_path, current_hash, target_hash, current_branch, target_branch, merge_message, allocator, platform_impl);
-        
-        const merge_msg_out = merge_message orelse try buildMergeMessage(target_branch, current_branch, git_path, allocator, platform_impl);
-        defer if (merge_message == null) allocator.free(merge_msg_out);
-        const msg = try std.fmt.allocPrint(allocator, "{s}\n", .{merge_msg_out});
-        defer allocator.free(msg);
-        try platform_impl.writeStdout(msg);
+        try platform_impl.writeStdout("Merge made by the 'ort' strategy.\n");
     }
 }
 
