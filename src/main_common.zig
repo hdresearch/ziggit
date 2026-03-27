@@ -11210,7 +11210,10 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         } else if (std.mem.eql(u8, arg, "-N") or std.mem.eql(u8, arg, "--no-refresh")) {
             // Accepted
         } else if (std.mem.startsWith(u8, arg, "-") and arg.len > 1) {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: unknown option '{s}'\n", .{arg});
+            // Strip leading dashes for error message
+            var opt_name = arg;
+            while (opt_name.len > 0 and opt_name[0] == '-') opt_name = opt_name[1..];
+            const msg = try std.fmt.allocPrint(allocator, "error: unknown option `{s}'\n", .{opt_name});
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);
             std.process.exit(128);
