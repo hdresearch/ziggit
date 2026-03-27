@@ -13651,6 +13651,20 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         }
     }
 
+    // Validate: --soft/--hard with paths is not allowed
+    if (reset_paths.items.len > 0 or seen_separator) {
+        if (reset_mode == .soft) {
+            try platform_impl.writeStderr("fatal: Cannot do soft reset with paths.\n");
+            std.process.exit(1);
+            unreachable;
+        }
+        if (reset_mode == .hard) {
+            try platform_impl.writeStderr("fatal: Cannot do hard reset with paths.\n");
+            std.process.exit(1);
+            unreachable;
+        }
+    }
+
     // Check if we have a worktree (bare repos and inside .git without GIT_WORK_TREE have none)
     const has_worktree = blk: {
         if (std.posix.getenv("GIT_WORK_TREE")) |_| break :blk true;
@@ -13690,6 +13704,17 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         try platform_impl.writeStderr("fatal: this operation must be run in a work tree\n");
         std.process.exit(128);
         unreachable;
+    }
+
+    // Check for --soft with unmerged index
+    if (reset_mode == .soft) {
+        const merge_head_path = try std.fmt.allocPrint(allocator, "{s}/MERGE_HEAD", .{git_path});
+        defer allocator.free(merge_head_path);
+        if (std.fs.cwd().access(merge_head_path, .{})) |_| {
+            try platform_impl.writeStderr("fatal: Cannot do a soft reset in the middle of a merge.\n");
+            std.process.exit(128);
+            unreachable;
+        } else |_| {}
     }
 
     // Track if user explicitly gave a target
@@ -22529,7 +22554,7 @@ fn getVarValueP(allocator: std.mem.Allocator, var_name: []const u8, pi: ?*const 
     if (std.mem.eql(u8, var_name, "GIT_AUTHOR_IDENT") or std.mem.eql(u8, var_name, "GIT_COMMITTER_IDENT")) return getGitIdent(allocator, if (std.mem.eql(u8, var_name, "GIT_AUTHOR_IDENT")) "GIT_AUTHOR" else "GIT_COMMITTER");
     if (std.mem.eql(u8, var_name, "GIT_EDITOR") or std.mem.eql(u8, var_name, "GIT_SEQUENCE_EDITOR")) {
         if (std.mem.eql(u8, var_name, "GIT_SEQUENCE_EDITOR")) { if (std.process.getEnvVarOwned(allocator, "GIT_SEQUENCE_EDITOR")) |v| return v else |_| {} if (pi) |p| { if (readCfg(allocator, "sequence.editor", p)) |v| return v; } return getVarValueP(allocator, "GIT_EDITOR", pi); }
-        if (std.process.getEnvVarOwned(allocator, "GIT_EDITOR")) |v| return v else |_| {} if (pi) |p| { if (readCfg(allocator, "core.editor", p)) |v| return v; } if (std.process.getEnvVarOwned(allocator, "VISUAL")) |v| return v else |_| {} if (std.process.getEnvVarOwned(allocator, "EDITOR")) |v| return v else |_| {} return error.UnknownVariable;
+        if (std.process.getEnvVarOwned(allocator, "GIT_EDITOR")) |v| return v else |_| {} if (pi) |p| { if (readCfg(allocator, "core.editor", p)) |v| return v; } if (std.process.getEnvVarOwned(allocator, "VISUAL")) |v| return v else |_| {} if (std.process.getEnvVarOwned(allocator, "EDITOR")) |v| return v else |_| {} if (std.process.getEnvVarOwned(allocator, "TERM") catch null) |t| { defer allocator.free(t); if (!std.mem.eql(u8, t, "dumb")) return allocator.dupe(u8, "vi"); } return error.UnknownVariable;
     }
     if (std.mem.eql(u8, var_name, "GIT_PAGER")) { if (std.process.getEnvVarOwned(allocator, "GIT_PAGER")) |v| return v else |_| {} if (pi) |p| { if (readCfg(allocator, "core.pager", p)) |v| return v; } if (std.process.getEnvVarOwned(allocator, "PAGER")) |v| return v else |_| {} return allocator.dupe(u8, "less"); }
     if (std.mem.eql(u8, var_name, "GIT_DEFAULT_BRANCH")) { if (std.process.getEnvVarOwned(allocator, "GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME") catch null) |ev| { if (ev.len > 0) return ev; allocator.free(ev); } if (pi) |p| { if (readCfg(allocator, "init.defaultbranch", p)) |v| return v; } return allocator.dupe(u8, "master"); }
