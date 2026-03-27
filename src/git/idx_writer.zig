@@ -92,7 +92,7 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
     if (zc.inflateInit(&zstream) != zc.Z_OK) return error.ZlibInitFailed;
     defer _ = zc.inflateEnd(&zstream);
 
-    var chunk_buf: [32768]u8 = undefined;
+    var chunk_buf: [65536]u8 = undefined;
 
     var pos: usize = 12;
     var obj_idx: u32 = 0;
@@ -314,64 +314,69 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
     // ═══════════════════════════════════════════════════════════════════
     // OFS_DELTAs are processed in pack order (base always at smaller offset).
     // REF_DELTAs use multi-pass convergence.
+    // Skip entirely if there are no unresolved objects (common for shallow packs).
 
-    var cache = DeltaCache.init(allocator, 128 * 1024 * 1024);
-    defer cache.deinit();
-
-    // Reusable buffer for delta instruction decompression.
-    var decomp_buf = std.array_list.Managed(u8).init(allocator);
-    defer decomp_buf.deinit();
-
-    // --- Resolve OFS_DELTAs in pack order ---
-    var i: u32 = 0;
-    while (i < total_objects) : (i += 1) {
-        const rec = &records[i];
-        if (rec.resolved or rec.obj_type != 6) continue;
-
-        resolveOfsDelta(
-            allocator,
-            pack_data,
-            content_end,
-            rec,
-            records[0..total_objects],
-            &offset_to_idx,
-            &cache,
-            &decomp_buf,
-            &sha_to_offset,
-        ) catch continue;
-    }
-
-    // --- Resolve REF_DELTAs with multi-pass convergence ---
     var unresolved_count: usize = countUnresolved(records[0..total_objects]);
-    var max_iters: usize = 50;
-    while (unresolved_count > 0 and max_iters > 0) : (max_iters -= 1) {
-        var new_unresolved: usize = 0;
-        for (records[0..total_objects]) |*rec| {
-            if (rec.resolved or rec.obj_type != 7) continue;
 
-            const base_offset = sha_to_offset.get(rec.base_sha1) orelse {
-                new_unresolved += 1;
-                continue;
-            };
+    if (unresolved_count > 0) {
+        var cache = DeltaCache.init(allocator, 128 * 1024 * 1024);
+        defer cache.deinit();
 
-            resolveDelta(
+        // Reusable buffer for delta instruction decompression.
+        var decomp_buf = std.array_list.Managed(u8).init(allocator);
+        defer decomp_buf.deinit();
+
+        // --- Resolve OFS_DELTAs in pack order ---
+        var i: u32 = 0;
+        while (i < total_objects) : (i += 1) {
+            const rec = &records[i];
+            if (rec.resolved or rec.obj_type != 6) continue;
+
+            resolveOfsDelta(
                 allocator,
                 pack_data,
                 content_end,
                 rec,
-                base_offset,
                 records[0..total_objects],
                 &offset_to_idx,
                 &cache,
                 &decomp_buf,
                 &sha_to_offset,
-            ) catch {
-                new_unresolved += 1;
-                continue;
-            };
+            ) catch continue;
         }
-        if (new_unresolved == unresolved_count) break;
-        unresolved_count = new_unresolved;
+
+        // --- Resolve REF_DELTAs with multi-pass convergence ---
+        unresolved_count = countUnresolved(records[0..total_objects]);
+        var max_iters: usize = 50;
+        while (unresolved_count > 0 and max_iters > 0) : (max_iters -= 1) {
+            var new_unresolved: usize = 0;
+            for (records[0..total_objects]) |*rec| {
+                if (rec.resolved or rec.obj_type != 7) continue;
+
+                const base_offset = sha_to_offset.get(rec.base_sha1) orelse {
+                    new_unresolved += 1;
+                    continue;
+                };
+
+                resolveDelta(
+                    allocator,
+                    pack_data,
+                    content_end,
+                    rec,
+                    base_offset,
+                    records[0..total_objects],
+                    &offset_to_idx,
+                    &cache,
+                    &decomp_buf,
+                    &sha_to_offset,
+                ) catch {
+                    new_unresolved += 1;
+                    continue;
+                };
+            }
+            if (new_unresolved == unresolved_count) break;
+            unresolved_count = new_unresolved;
+        }
     }
 
     if (trace_timing) {
@@ -389,7 +394,7 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
 
     for (records[0..total_objects]) |rec| {
         if (!rec.resolved) continue;
-        try entries.append(.{
+        entries.appendAssumeCapacity(.{
             .sha1 = rec.sha1,
             .offset = @intCast(rec.offset),
             .crc32 = rec.crc32,
@@ -401,6 +406,13 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
             return std.mem.order(u8, &a.sha1, &b.sha1) == .lt;
         }
     }.lessThan);
+
+    if (trace_timing) {
+        if (phase_timer) |*t| {
+            std.debug.print("[timing]   idx sort entries: {}ms, count={}\n", .{ t.read() / std.time.ns_per_ms, entries.items.len });
+            t.reset();
+        }
+    }
 
     // ═══════════════════════════════════════════════════════════════════
     // Build v2 .idx file
