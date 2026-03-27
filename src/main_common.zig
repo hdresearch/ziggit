@@ -2047,15 +2047,56 @@ fn findGitDirectory(allocator: std.mem.Allocator, platform_impl: *const platform
                 dd.close();
                 break :blk true;
             } else |_| {}
-            // Check if it's a valid gitdir link file (starts with "gitdir: ")
+            // Check if it's a file (gitdir link)
             if (std.fs.cwd().readFileAlloc(allocator, git_path, 4096)) |content| {
                 defer allocator.free(content);
                 const trimmed = std.mem.trim(u8, content, " \t\r\n");
-                if (std.mem.startsWith(u8, trimmed, "gitdir: ")) break :blk true;
+                if (std.mem.startsWith(u8, trimmed, "gitdir: ")) {
+                    break :blk true;
+                } else {
+                    // .git is a file but not valid format - error
+                    platform_impl.writeStderr("fatal: invalid gitfile format: ") catch {};
+                    platform_impl.writeStderr(git_path) catch {};
+                    platform_impl.writeStderr("\n") catch {};
+                    allocator.free(dir_to_check);
+                    allocator.free(git_path);
+                    std.process.exit(128);
+                    unreachable;
+                }
             } else |_| {}
             break :blk false;
         };
         if (git_is_valid) {
+            // If .git is a gitdir file, resolve and validate the target path
+            if (std.fs.cwd().readFileAlloc(allocator, git_path, 4096)) |content| {
+                defer allocator.free(content);
+                const trimmed2 = std.mem.trim(u8, content, " \t\r\n");
+                if (std.mem.startsWith(u8, trimmed2, "gitdir: ")) {
+                    const target_path = trimmed2["gitdir: ".len..];
+                    // Resolve relative path
+                    const abs_target = if (std.fs.path.isAbsolute(target_path))
+                        try allocator.dupe(u8, target_path)
+                    else
+                        try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_to_check, target_path });
+                    
+                    // Check that the target exists
+                    const target_exists = if (std.fs.cwd().access(abs_target, .{})) |_| true else |_| false;
+                    if (!target_exists) {
+                        platform_impl.writeStderr("fatal: not a git repository: ") catch {};
+                        platform_impl.writeStderr(abs_target) catch {};
+                        platform_impl.writeStderr("\n") catch {};
+                        allocator.free(abs_target);
+                        allocator.free(dir_to_check);
+                        allocator.free(git_path);
+                        std.process.exit(128);
+                        unreachable;
+                    }
+                    allocator.free(git_path);
+                    allocator.free(dir_to_check);
+                    return abs_target;
+                }
+            } else |_| {}
+            
             allocator.free(dir_to_check);
             return git_path;
         }
@@ -7932,7 +7973,13 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     }
 
     if (all_args.items.len == 0) {
-        // git rev-parse with no args outputs nothing and exits 0
+        // git rev-parse with no args still validates we're in a git repo
+        // findGitDirectory handles invalid gitfile with exit(128)
+        const gp_check = findGitDirectory(allocator, platform_impl) catch {
+            try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+            std.process.exit(128);
+        };
+        allocator.free(gp_check);
         return;
     }
 
