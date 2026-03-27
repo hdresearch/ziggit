@@ -5864,6 +5864,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     var do_add = false;
     var do_remove_section = false;
     var do_rename_section = false;
+    var config_comment: ?[]const u8 = null;
     var use_global = false;
     var use_system = false;
     var use_local = false;
@@ -5971,10 +5972,12 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             do_get_colorbool = true;
         } else if (std.mem.eql(u8, arg, "--replace-all")) {
             do_set = true; // treat like set but replaces all
-        } else if (std.mem.startsWith(u8, arg, "--comment=") or std.mem.eql(u8, arg, "--comment")) {
-            // --comment flag for git 2.45+, accept and store
-            if (std.mem.eql(u8, arg, "--comment")) {
-                i += 1; // skip comment value
+        } else if (std.mem.startsWith(u8, arg, "--comment=")) {
+            config_comment = arg["--comment=".len..];
+        } else if (std.mem.eql(u8, arg, "--comment")) {
+            i += 1;
+            if (i < config_args.items.len) {
+                config_comment = config_args.items[i];
             }
         } else if (std.mem.eql(u8, arg, "--no-type")) {
             config_type = .none;
@@ -6218,7 +6221,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             std.process.exit(128);
         };
         defer allocator.free(cfg_path);
-        try configSetValue(cfg_path, key, value, do_add, allocator, platform_impl);
+        try configSetValue(cfg_path, key, value, do_add, config_comment, allocator, platform_impl);
         return;
     }
 
@@ -6363,7 +6366,31 @@ fn formatConfigType(value: []const u8, config_type: ConfigType, allocator: std.m
             }
             return try allocator.dupe(u8, value);
         },
-        .int_type => try allocator.dupe(u8, value),
+        .int_type => {
+            // Expand git-style size suffixes: k/K=1024, m/M=1048576, g/G=1073741824
+            const trimmed_val = std.mem.trim(u8, value, " \t");
+            if (trimmed_val.len == 0) {
+                return try allocator.dupe(u8, value);
+            }
+            const last = trimmed_val[trimmed_val.len - 1];
+            if (last == 'k' or last == 'K' or last == 'm' or last == 'M' or last == 'g' or last == 'G') {
+                const num_str = trimmed_val[0 .. trimmed_val.len - 1];
+                if (std.fmt.parseInt(i64, num_str, 10)) |num| {
+                    const multiplier: i64 = switch (last) {
+                        'k', 'K' => 1024,
+                        'm', 'M' => 1048576,
+                        'g', 'G' => 1073741824,
+                        else => 1,
+                    };
+                    return try std.fmt.allocPrint(allocator, "{d}", .{num * multiplier});
+                } else |_| {}
+            }
+            // Try parsing as plain int
+            if (std.fmt.parseInt(i64, trimmed_val, 10)) |_| {
+                return try allocator.dupe(u8, trimmed_val);
+            } else |_| {}
+            return try allocator.dupe(u8, value);
+        },
         .bool_or_int => {
             if (std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "yes") or std.mem.eql(u8, value, "on")) {
                 return try allocator.dupe(u8, "true");
@@ -6551,7 +6578,22 @@ fn isValidConfigKey(key: []const u8) bool {
     return true;
 }
 
-fn configSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+fn formatConfigComment(comment_raw: ?[]const u8, allocator: std.mem.Allocator) ![]const u8 {
+    if (comment_raw) |c| {
+        // If comment already starts with #, use it with just a space prefix
+        if (c.len > 0 and c[0] == '#') {
+            return try std.fmt.allocPrint(allocator, " {s}", .{c});
+        }
+        // If comment starts with tab + #, preserve it
+        if (c.len > 1 and c[0] == '\t' and c[1] == '#') {
+            return try std.fmt.allocPrint(allocator, "{s}", .{c});
+        }
+        return try std.fmt.allocPrint(allocator, " # {s}", .{c});
+    }
+    return try allocator.dupe(u8, "");
+}
+
+fn configSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add: bool, comment: ?[]const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     // Parse key into section[.subsection].variable
     const parsed_key = parseConfigKey(key, allocator) catch {
         try platform_impl.writeStderr("error: key does not contain a section: ");
@@ -6578,7 +6620,9 @@ fn configSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_a
             // Create new file with this setting
             const section_header = try formatSectionHeader(section_part, allocator);
             defer allocator.free(section_header);
-            const new_content = try std.fmt.allocPrint(allocator, "[{s}]\n\t{s} = {s}\n", .{ section_header, key_part, value });
+            const comment_suffix = try formatConfigComment(comment, allocator);
+            defer allocator.free(comment_suffix);
+            const new_content = try std.fmt.allocPrint(allocator, "[{s}]\n\t{s} = {s}{s}\n", .{ section_header, key_part, value, comment_suffix });
             defer allocator.free(new_content);
             try platform_impl.fs.writeFile(cfg_path, new_content);
             return;
@@ -6641,10 +6685,13 @@ fn configSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_a
                 const k = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
                 if (std.ascii.eqlIgnoreCase(k, key_part)) {
                     // Replace this line
+                    const cs = try formatConfigComment(comment, allocator);
+                    defer allocator.free(cs);
                     try result.appendSlice("\t");
                     try result.appendSlice(key_part);
                     try result.appendSlice(" = ");
                     try result.appendSlice(value);
+                    try result.appendSlice(cs);
                     try result.append('\n');
                     found = true;
                     pos = line_end + @as(usize, if (has_newline) 1 else 0);
@@ -6671,11 +6718,14 @@ fn configSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_a
             var insert_result = std.array_list.Managed(u8).init(allocator);
             defer insert_result.deinit();
             
+            const cs2 = try formatConfigComment(comment, allocator);
+            defer allocator.free(cs2);
             try insert_result.appendSlice(result.items[0..last_line_in_section_end]);
             try insert_result.appendSlice("\t");
             try insert_result.appendSlice(key_part);
             try insert_result.appendSlice(" = ");
             try insert_result.appendSlice(value);
+            try insert_result.appendSlice(cs2);
             try insert_result.append('\n');
             if (last_line_in_section_end < result.items.len) {
                 try insert_result.appendSlice(result.items[last_line_in_section_end..]);
@@ -6689,10 +6739,13 @@ fn configSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_a
             defer allocator.free(section_header);
             try result.appendSlice("[");
             try result.appendSlice(section_header);
+            const cs3 = try formatConfigComment(comment, allocator);
+            defer allocator.free(cs3);
             try result.appendSlice("]\n\t");
             try result.appendSlice(key_part);
             try result.appendSlice(" = ");
             try result.appendSlice(value);
+            try result.appendSlice(cs3);
             try result.append('\n');
         }
     }
