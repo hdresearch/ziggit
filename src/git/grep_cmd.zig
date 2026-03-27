@@ -32,7 +32,7 @@ const ExprNode = union(enum) {
 
 /// Grep options
 const GrepOptions = struct {
-    patterns: std.ArrayList([]const u8),
+    patterns: std.array_list.Managed([]const u8),
     pattern_type: PatternType = .basic,
     case_insensitive: bool = false,
     word_match: bool = false,
@@ -61,7 +61,7 @@ const GrepOptions = struct {
     cached: bool = false,
     untracked: bool = false,
     color: ColorMode = .auto,
-    pathspecs: std.ArrayList([]const u8),
+    pathspecs: std.array_list.Managed([]const u8),
     tree_ish: ?[]const u8 = null,
     suppress_filename: bool = false, // -h
     show_filename: bool = true, // -H (default)
@@ -70,12 +70,12 @@ const GrepOptions = struct {
     has_boolean_expr: bool = false,
     expr_root: ?*ExprNode = null,
     // Pattern files
-    pattern_files: std.ArrayList([]const u8),
+    pattern_files: std.array_list.Managed([]const u8),
     // Config-driven settings
     config_pattern_type: ?PatternType = null,
     config_extended_regexp: ?bool = null,
-    extended_regexp_values: std.ArrayList(bool),
-    pattern_type_values: std.ArrayList(?PatternType),
+    extended_regexp_values: std.array_list.Managed(bool),
+    pattern_type_values: std.array_list.Managed(?PatternType),
     // Track whether line number was configured
     config_linenumber: ?bool = null,
     // Exclude standard
@@ -86,11 +86,11 @@ const GrepOptions = struct {
 
     fn init(allocator: Allocator) GrepOptions {
         return .{
-            .patterns = std.ArrayList([]const u8).init(allocator),
-            .pathspecs = std.ArrayList([]const u8).init(allocator),
-            .pattern_files = std.ArrayList([]const u8).init(allocator),
-            .extended_regexp_values = std.ArrayList(bool).init(allocator),
-            .pattern_type_values = std.ArrayList(?PatternType).init(allocator),
+            .patterns = std.array_list.Managed([]const u8).init(allocator),
+            .pathspecs = std.array_list.Managed([]const u8).init(allocator),
+            .pattern_files = std.array_list.Managed([]const u8).init(allocator),
+            .extended_regexp_values = std.array_list.Managed(bool).init(allocator),
+            .pattern_type_values = std.array_list.Managed(?PatternType).init(allocator),
         };
     }
 
@@ -116,8 +116,8 @@ const GrepOptions = struct {
         var final_extended_regexp: ?bool = null;
 
         // Config values come first, then command-line flags append to the same lists
-        var pt_idx: usize = 0;
-        var er_idx: usize = 0;
+        
+        
 
         // Process in order: pattern_type_values and extended_regexp_values
         // These were collected in order from config and command line
@@ -133,12 +133,12 @@ const GrepOptions = struct {
                 final_pattern_type = null;
             }
         }
-        _ = pt_idx;
+        
 
         if (self.extended_regexp_values.items.len > 0) {
             final_extended_regexp = self.extended_regexp_values.items[self.extended_regexp_values.items.len - 1];
         }
-        _ = er_idx;
+        
 
         // If patternType was explicitly set (not default), use it
         if (final_pattern_type) |pt| {
@@ -183,15 +183,15 @@ pub fn cmdGrep(allocator: Allocator, args: *platform_mod.ArgIterator, platform_i
         close_paren,
     };
 
-    var expr_tokens = std.ArrayList(ExprToken).init(allocator);
+    var expr_tokens = std.array_list.Managed(ExprToken).init(allocator);
     defer expr_tokens.deinit();
     var has_explicit_pattern = false;
     var after_dd = false;
-    var pending_not = false;
+    
     var has_boolean_op = false;
 
     // Collect all args first for parsing
-    var raw_args = std.ArrayList([]const u8).init(allocator);
+    var raw_args = std.array_list.Managed([]const u8).init(allocator);
     defer raw_args.deinit();
     while (args.next()) |arg| {
         try raw_args.append(arg);
@@ -823,7 +823,7 @@ fn grepWorkingTree(allocator: Allocator, opts: *GrepOptions, git_dir: []const u8
     var prev_file_had_output = false;
 
     // Collect and sort file paths
-    var file_paths = std.ArrayList([]const u8).init(allocator);
+    var file_paths = std.array_list.Managed([]const u8).init(allocator);
     defer file_paths.deinit();
 
     for (index.entries.items) |entry| {
@@ -937,7 +937,7 @@ fn grepCached(allocator: Allocator, opts: *GrepOptions, git_dir: []const u8, rep
     var prev_file_had_output = false;
 
     // Collect and sort file paths
-    var file_paths = std.ArrayList(FileInfo).init(allocator);
+    var file_paths = std.array_list.Managed(FileInfo).init(allocator);
     defer file_paths.deinit();
 
     const FileInfo = struct {
@@ -1051,7 +1051,7 @@ fn grepTreeIsh(allocator: Allocator, opts: *GrepOptions, git_dir: []const u8, re
     var prev_file_had_output = false;
 
     // Collect all files from tree
-    var files = std.ArrayList(TreeFile).init(allocator);
+    var files = std.array_list.Managed(TreeFile).init(allocator);
     defer {
         for (files.items) |f| {
             allocator.free(f.path);
@@ -1113,7 +1113,7 @@ const TreeFile = struct {
     hash: []const u8,
 };
 
-fn walkTree(allocator: Allocator, git_dir: []const u8, tree_hash: []const u8, path_prefix: []const u8, files: *std.ArrayList(TreeFile), platform_impl: *const platform_mod.Platform) !void {
+fn walkTree(allocator: Allocator, git_dir: []const u8, tree_hash: []const u8, path_prefix: []const u8, files: *std.array_list.Managed(TreeFile), platform_impl: *const platform_mod.Platform) !void {
     const tree_obj = objects.GitObject.load(tree_hash, git_dir, platform_impl, allocator) catch return;
     defer tree_obj.deinit(allocator);
 
@@ -1166,7 +1166,7 @@ fn grepNoIndex(allocator: Allocator, opts: *GrepOptions, platform_impl: *const p
     var prev_file_had_output = false;
 
     // Get pathspecs or use current directory
-    var search_paths = std.ArrayList([]const u8).init(allocator);
+    var search_paths = std.array_list.Managed([]const u8).init(allocator);
     defer search_paths.deinit();
 
     if (opts.pathspecs.items.len > 0) {
@@ -1208,7 +1208,7 @@ fn grepNoIndex(allocator: Allocator, opts: *GrepOptions, platform_impl: *const p
     }
 
     // Collect files to search
-    var files = std.ArrayList([]const u8).init(allocator);
+    var files = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (files.items) |f| allocator.free(f);
         files.deinit();
@@ -1248,7 +1248,7 @@ fn grepNoIndex(allocator: Allocator, opts: *GrepOptions, platform_impl: *const p
     }
 }
 
-fn collectFilesRecursive(allocator: Allocator, path: []const u8, files: *std.ArrayList([]const u8), opts: *const GrepOptions) !void {
+fn collectFilesRecursive(allocator: Allocator, path: []const u8, files: *std.array_list.Managed([]const u8), opts: *const GrepOptions) !void {
     // Check if path is a file or directory
     const stat = std.fs.cwd().statFile(path) catch return;
     if (stat.kind == .directory) {
@@ -1324,7 +1324,7 @@ fn grepContent(allocator: Allocator, opts: *GrepOptions, display_path: []const u
     }
 
     // Split content into lines
-    var lines = std.ArrayList([]const u8).init(allocator);
+    var lines = std.array_list.Managed([]const u8).init(allocator);
     defer lines.deinit();
     {
         var line_iter = std.mem.splitScalar(u8, content, '\n');
@@ -1655,7 +1655,7 @@ fn getMatchColumn(line: []const u8, opts: *GrepOptions, eff_pt: PatternType, all
 }
 
 fn printGrepLine(allocator: Allocator, opts: *GrepOptions, display_path: []const u8, line: []const u8, line_num: usize, separator: u8, col: ?usize, platform_impl: *const platform_mod.Platform) !void {
-    var buf = std.ArrayList(u8).init(allocator);
+    var buf = std.array_list.Managed(u8).init(allocator);
     defer buf.deinit();
 
     if (!opts.show_heading and !opts.suppress_filename) {
@@ -2075,7 +2075,7 @@ fn quotePathIfNeeded(path: []const u8, allocator: Allocator, null_sep: bool) []c
     if (!needs_quoting) return allocator.dupe(u8, path) catch path;
 
     // Quote the path
-    var buf = std.ArrayList(u8).init(allocator);
+    var buf = std.array_list.Managed(u8).init(allocator);
     buf.append('"') catch return allocator.dupe(u8, path) catch path;
     for (path) |c| {
         if (c == '"') {
@@ -2151,12 +2151,12 @@ const RegexEngine = struct {
         }
     };
 
-    insts: std.ArrayList(Inst),
+    insts: std.array_list.Managed(Inst),
     case_insensitive: bool,
 
     fn compile(pattern: []const u8, extended: bool, case_insensitive: bool, allocator: Allocator) !RegexEngine {
         var engine = RegexEngine{
-            .insts = std.ArrayList(Inst).init(allocator),
+            .insts = std.array_list.Managed(Inst).init(allocator),
             .case_insensitive = case_insensitive,
         };
 
@@ -2191,7 +2191,7 @@ const RegexEngine = struct {
             _ = left_end;
 
             // Save current instructions
-            var left_insts = std.ArrayList(Inst).init(engine.insts.allocator);
+            var left_insts = std.array_list.Managed(Inst).init(engine.insts.allocator);
             defer left_insts.deinit();
             for (engine.insts.items[start..]) |inst| {
                 try left_insts.append(inst);
@@ -2199,11 +2199,11 @@ const RegexEngine = struct {
             engine.insts.shrinkRetainingCapacity(start);
 
             // Compile right side
-            var right_insts = std.ArrayList(Inst).init(engine.insts.allocator);
+            var right_insts = std.array_list.Managed(Inst).init(engine.insts.allocator);
             defer right_insts.deinit();
             {
                 var temp_engine = RegexEngine{
-                    .insts = std.ArrayList(Inst).init(engine.insts.allocator),
+                    .insts = std.array_list.Managed(Inst).init(engine.insts.allocator),
                     .case_insensitive = engine.case_insensitive,
                 };
                 defer temp_engine.insts.deinit();
@@ -2459,7 +2459,7 @@ const RegexEngine = struct {
                 const after = atom_end;
 
                 // Restructure: insert split before atom, add jump after atom back to split
-                var atom_insts = std.ArrayList(Inst).init(engine.insts.allocator);
+                var atom_insts = std.array_list.Managed(Inst).init(engine.insts.allocator);
                 defer atom_insts.deinit();
                 for (engine.insts.items[atom_start..atom_end]) |inst| {
                     atom_insts.append(inst) catch {};
@@ -2483,7 +2483,7 @@ const RegexEngine = struct {
             } else if ((extended and q == '?') or (!extended and q == '\\' and pos.* + 1 < pattern.len and pattern[pos.* + 1] == '?')) {
                 // a? = split(a, skip)
                 if (extended) pos.* += 1 else pos.* += 2;
-                var atom_insts2 = std.ArrayList(Inst).init(engine.insts.allocator);
+                var atom_insts2 = std.array_list.Managed(Inst).init(engine.insts.allocator);
                 defer atom_insts2.deinit();
                 for (engine.insts.items[atom_start..atom_end]) |inst| {
                     atom_insts2.append(inst) catch {};
