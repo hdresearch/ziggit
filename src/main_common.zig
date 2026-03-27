@@ -5784,6 +5784,16 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             }
         }
 
+        // Validate origin name
+        if (clone_origin) |origin| {
+            if (!isValidRemoteName(origin)) {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' is not a valid remote name\n", .{origin});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            }
+        }
+
         // For SSH and git:// protocols, show error (SSH transport not yet fully integrated into clone)
         if (std.mem.startsWith(u8, url.?, "ssh://") or std.mem.startsWith(u8, url.?, "git://") or
             (std.mem.indexOf(u8, url.?, ":") != null and std.mem.indexOf(u8, url.?, "/") != null and
@@ -7434,6 +7444,22 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
         "so you can use them interchangeably.\n", .{ remote, branch });
     defer allocator.free(msg);
     try platform_impl.writeStdout(msg);
+}
+
+fn isValidRemoteName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    if (name[0] == '-') return false;
+    if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return false;
+    // Check for .. sequences
+    if (std.mem.indexOf(u8, name, "..") != null) return false;
+    // Check for invalid characters
+    for (name) |c| {
+        if (c == ' ' or c == '~' or c == '^' or c == ':' or c == '?' or c == '*' or c == '[' or c == '\\') return false;
+        if (c < 0x20 or c == 0x7f) return false;
+    }
+    if (name[name.len - 1] == '.') return false;
+    if (std.mem.endsWith(u8, name, ".lock")) return false;
+    return true;
 }
 
 fn isValidHash(hash: []const u8) bool {
