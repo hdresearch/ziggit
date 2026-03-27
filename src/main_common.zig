@@ -14185,8 +14185,12 @@ fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platform_im
     // Generate idx directly from tracked entries (no re-parsing needed)
     try generatePackIdxFromEntries(allocator, pack_entries.items, &checksum, pack_dir, &hash_hex);
 
-    // Delete old pack files
+    // Delete old pack files (but not the newly created one)
+    const new_idx_name = std.fmt.allocPrint(allocator, "pack-{s}.idx", .{hash_hex}) catch "";
+    defer if (new_idx_name.len > 0) allocator.free(new_idx_name);
     for (existing_packs.items) |old_idx| {
+        // Skip if this is our newly created pack
+        if (std.mem.eql(u8, old_idx, new_idx_name)) continue;
         const old_idx_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir, old_idx }) catch continue;
         defer allocator.free(old_idx_path);
         std.fs.cwd().deleteFile(old_idx_path) catch {};
@@ -14208,6 +14212,47 @@ fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platform_im
         const loose_path = std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ objects_dir_path, hex[0..2], hex[2..] }) catch continue;
         defer allocator.free(loose_path);
         std.fs.cwd().deleteFile(loose_path) catch {};
+    }
+
+    // Update objects/info/packs to list current pack files
+    {
+        const obj_info_dir = std.fmt.allocPrint(allocator, "{s}/objects/info", .{git_dir}) catch return;
+        defer allocator.free(obj_info_dir);
+        std.fs.cwd().makePath(obj_info_dir) catch {};
+
+        const packs_file_path = std.fmt.allocPrint(allocator, "{s}/objects/info/packs", .{git_dir}) catch return;
+        defer allocator.free(packs_file_path);
+
+        var content = std.array_list.Managed(u8).init(allocator);
+        defer content.deinit();
+
+        if (std.fs.cwd().openDir(pack_dir, .{ .iterate = true })) |pd| {
+            var pack_d2 = pd;
+            defer pack_d2.close();
+            var pack_names2 = std.array_list.Managed([]const u8).init(allocator);
+            defer {
+                for (pack_names2.items) |n| allocator.free(n);
+                pack_names2.deinit();
+            }
+            var iter2 = pack_d2.iterate();
+            while (iter2.next() catch null) |entry| {
+                if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".pack")) {
+                    pack_names2.append(allocator.dupe(u8, entry.name) catch continue) catch {};
+                }
+            }
+            std.mem.sort([]const u8, pack_names2.items, {}, struct {
+                fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                    return std.mem.order(u8, a, b).compare(.lt);
+                }
+            }.lessThan);
+            for (pack_names2.items) |name| {
+                const line = std.fmt.allocPrint(allocator, "P {s}\n", .{name}) catch continue;
+                defer allocator.free(line);
+                content.appendSlice(line) catch {};
+            }
+        } else |_| {}
+        content.append('\n') catch {};
+        std.fs.cwd().writeFile(.{ .sub_path = packs_file_path, .data = content.items }) catch {};
     }
 }
 
