@@ -437,13 +437,20 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
             try platform_impl.writeStdout(output);
         }
     } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
-        if (version_mod.getVersionString(allocator)) |version_msg| {
-            defer allocator.free(version_msg);
-            const output = try std.fmt.allocPrint(allocator, "{s}\n", .{version_msg});
-            defer allocator.free(output);
-            try platform_impl.writeStdout(output);
-        } else |_| {
-            try platform_impl.writeStdout("ziggit version 0.1.2\n");
+        // Forward to real git for version output (ensures git test compat)
+        if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
+            // Use real git's version string for consistency with format-patch signatures etc.
+            var version_args = [_][]const u8{"version"};
+            try forwardVersionToGit(allocator, &version_args, &platform_impl);
+        } else {
+            if (version_mod.getVersionString(allocator)) |version_msg| {
+                defer allocator.free(version_msg);
+                const output = try std.fmt.allocPrint(allocator, "{s}\n", .{version_msg});
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            } else |_| {
+                try platform_impl.writeStdout("ziggit version 0.1.2\n");
+            }
         }
     } else if (std.mem.eql(u8, command, "--version-info")) {
         if (version_mod.getFullVersionInfo(allocator)) |version_info| {
