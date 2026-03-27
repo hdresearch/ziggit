@@ -7417,9 +7417,14 @@ fn resolveSourceGitDir(allocator: std.mem.Allocator, source_path: []const u8) ![
         try allocator.dupe(u8, source_path);
     defer allocator.free(path);
 
-    // Resolve to absolute path
-    const abs_path = std.fs.cwd().realpathAlloc(allocator, path) catch {
-        return error.RepositoryNotFound;
+    // Resolve to absolute path (try original, then with .git suffix)
+    const abs_path = std.fs.cwd().realpathAlloc(allocator, path) catch blk: {
+        // Try with .git suffix before giving up
+        const with_git_suffix = try std.fmt.allocPrint(allocator, "{s}.git", .{path});
+        defer allocator.free(with_git_suffix);
+        break :blk std.fs.cwd().realpathAlloc(allocator, with_git_suffix) catch {
+            return error.RepositoryNotFound;
+        };
     };
     errdefer allocator.free(abs_path);
 
@@ -7493,6 +7498,35 @@ fn resolveSourceGitDir(allocator: std.mem.Allocator, source_path: []const u8) ![
     } else |_| {}
 
     allocator.free(abs_path);
+
+    // Try adding .git suffix
+    const with_git = try std.fmt.allocPrint(allocator, "{s}.git", .{path});
+    defer allocator.free(with_git);
+
+    const abs_with_git = std.fs.cwd().realpathAlloc(allocator, with_git) catch {
+        return error.RepositoryNotFound;
+    };
+    errdefer allocator.free(abs_with_git);
+
+    // Check if it's a bare repo
+    const obj2 = try std.fmt.allocPrint(allocator, "{s}/objects", .{abs_with_git});
+    defer allocator.free(obj2);
+    const ref2 = try std.fmt.allocPrint(allocator, "{s}/refs", .{abs_with_git});
+    defer allocator.free(ref2);
+    const has_obj2 = if (std.fs.cwd().access(obj2, .{})) |_| true else |_| false;
+    const has_ref2 = if (std.fs.cwd().access(ref2, .{})) |_| true else |_| false;
+    if (has_obj2 and has_ref2) return abs_with_git;
+
+    // Check for .git subdir of .git-suffixed path
+    const git_obj2 = try std.fmt.allocPrint(allocator, "{s}/.git/objects", .{abs_with_git});
+    defer allocator.free(git_obj2);
+    if (std.fs.cwd().access(git_obj2, .{})) |_| {
+        const result = try std.fmt.allocPrint(allocator, "{s}/.git", .{abs_with_git});
+        allocator.free(abs_with_git);
+        return result;
+    } else |_| {}
+
+    allocator.free(abs_with_git);
     return error.RepositoryNotFound;
 }
 
@@ -11906,6 +11940,24 @@ pub fn resolveRevision(git_path: []const u8, rev: []const u8, platform_impl: *co
     if (std.mem.eql(u8, rev, "HEAD") or std.mem.eql(u8, rev, "@")) {
         const head_commit = refs.getCurrentCommit(git_path, platform_impl, allocator) catch return error.BadRevision;
         return head_commit orelse error.BadRevision;
+    }
+
+    // Try special refs: FETCH_HEAD, MERGE_HEAD, ORIG_HEAD, CHERRY_PICK_HEAD, REVERT_HEAD
+    if (std.mem.eql(u8, rev, "FETCH_HEAD") or std.mem.eql(u8, rev, "MERGE_HEAD") or
+        std.mem.eql(u8, rev, "ORIG_HEAD") or std.mem.eql(u8, rev, "CHERRY_PICK_HEAD") or
+        std.mem.eql(u8, rev, "REVERT_HEAD"))
+    {
+        const special_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, rev });
+        defer allocator.free(special_path);
+        if (platform_impl.fs.readFile(allocator, special_path)) |content| {
+            defer allocator.free(content);
+            const trimmed = std.mem.trim(u8, content, " \t\n\r");
+            // FETCH_HEAD has tab-separated format: hash\t...\t...
+            if (std.mem.indexOfScalar(u8, trimmed, '\t')) |tab| {
+                if (tab >= 40 and isValidHexString(trimmed[0..40])) return try allocator.dupe(u8, trimmed[0..40]);
+            }
+            if (trimmed.len >= 40 and isValidHexString(trimmed[0..40])) return try allocator.dupe(u8, trimmed[0..40]);
+        } else |_| {}
     }
 
     // Try refs/heads/<rev>
