@@ -148,7 +148,7 @@ pub fn clonePack(allocator: std.mem.Allocator, url: []const u8) !CloneResult {
         want_set.deinit();
     }
 
-    var wants = std.array_list.Managed(Oid).init(allocator);
+    var wants = std.ArrayList(Oid).init(allocator);
     defer wants.deinit();
 
     for (discovery.refs) |ref| {
@@ -210,9 +210,9 @@ pub fn fetchNewPack(allocator: std.mem.Allocator, url: []const u8, local_refs: [
     }
 
     // Determine wants and haves
-    var wants = std.array_list.Managed(Oid).init(allocator);
+    var wants = std.ArrayList(Oid).init(allocator);
     defer wants.deinit();
-    var haves = std.array_list.Managed(Oid).init(allocator);
+    var haves = std.ArrayList(Oid).init(allocator);
     defer haves.deinit();
 
     var have_set = std.StringHashMap(void).init(allocator);
@@ -283,7 +283,7 @@ pub fn fetchNewPack(allocator: std.mem.Allocator, url: []const u8, local_refs: [
 fn spawnSshUploadPack(allocator: std.mem.Allocator, parsed: SshUrl) !std.process.Child {
     // Build the ssh command
     // ssh [-p port] user@host "git-upload-pack '/path'"
-    var argv = std.array_list.Managed([]const u8).init(allocator);
+    var argv = std.ArrayList([]const u8).init(allocator);
     defer argv.deinit();
 
     try argv.append("ssh");
@@ -366,7 +366,7 @@ fn readExact(process: *std.process.Child, buf: []u8) !void {
 /// This avoids the deadlock of trying to read all stdout before sending the request,
 /// since git-upload-pack sends refs then waits for input.
 fn readRefAdvertisementFromPipe(allocator: std.mem.Allocator, process: *std.process.Child) !smart_http.RefDiscovery {
-    var refs = std.array_list.Managed(Ref).init(allocator);
+    var refs = std.ArrayList(Ref).init(allocator);
     errdefer {
         for (refs.items) |ref| allocator.free(ref.name);
         refs.deinit();
@@ -439,7 +439,7 @@ fn readRefAdvertisementFromPipe(allocator: std.mem.Allocator, process: *std.proc
 /// format is otherwise identical: pkt-lines with hash + refname, capabilities
 /// on first line after NUL byte, terminated by flush.
 fn parseRefAdvertisement(allocator: std.mem.Allocator, data: []const u8, ref_end: *usize) !smart_http.RefDiscovery {
-    var refs = std.array_list.Managed(Ref).init(allocator);
+    var refs = std.ArrayList(Ref).init(allocator);
     errdefer {
         for (refs.items) |ref| allocator.free(ref.name);
         refs.deinit();

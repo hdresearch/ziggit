@@ -8,26 +8,14 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "enable_git_fallback", enable_git_fallback);
     const exe_optimize: std.builtin.OptimizeMode = if (optimize == .Debug) .ReleaseFast else optimize;
 
-    const ziggit_mod = b.addModule("ziggit", .{
-        .root_source_file = b.path("src/ziggit.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    ziggit_mod.addOptions("build_options", options);
-
     const exe = b.addExecutable(.{
         .name = "ziggit",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = exe_optimize,
-            .imports = &.{
-                .{ .name = "build_options", .module = options.createModule() },
-            },
-        }),
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = exe_optimize,
     });
+    exe.root_module.addOptions("build_options", options);
     exe.linkLibC();
     exe.linkSystemLibrary("z");
-    exe.linkSystemLibrary("deflate");
     b.installArtifact(exe);
 }
