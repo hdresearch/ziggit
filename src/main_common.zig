@@ -9527,11 +9527,11 @@ fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, command
             continue;
         }
 
-        // Apply patterns
+        // Apply patterns (prefix match, with glob support for * and ?)
         if (patterns.items.len > 0) {
             var matches = false;
             for (patterns.items) |pattern| {
-                if (std.mem.startsWith(u8, entry.name, pattern)) {
+                if (refPatternMatch(entry.name, pattern)) {
                     matches = true;
                     break;
                 }
@@ -9584,8 +9584,6 @@ fn formatRefOutput(allocator: std.mem.Allocator, format: []const u8, refname: []
 }
 
 fn getRefField(field: []const u8, refname: []const u8, objectname: []const u8, objecttype: []const u8, data: []const u8, allocator: std.mem.Allocator) []const u8 {
-    _ = allocator;
-    _ = data;
     if (std.mem.eql(u8, field, "refname")) return refname;
     if (std.mem.eql(u8, field, "refname:short")) {
         // Strip refs/heads/ or refs/tags/ etc.
@@ -9597,6 +9595,154 @@ fn getRefField(field: []const u8, refname: []const u8, objectname: []const u8, o
     if (std.mem.eql(u8, field, "objectname")) return objectname;
     if (std.mem.eql(u8, field, "objectname:short")) return if (objectname.len >= 7) objectname[0..7] else objectname;
     if (std.mem.eql(u8, field, "objecttype")) return objecttype;
+
+    // Contents-related fields: extract message from commit/tag object data
+    if (std.mem.startsWith(u8, field, "contents")) {
+        const message = extractObjectMessage(data);
+        if (std.mem.eql(u8, field, "contents")) {
+            return message;
+        } else if (std.mem.eql(u8, field, "contents:subject")) {
+            // Strip \r for subject line, then join multi-line subjects with space
+            const clean_msg = stripCR(allocator, message) catch message;
+            const raw_subject = extractSubject(clean_msg);
+            return joinLines(allocator, raw_subject) catch raw_subject;
+        } else if (std.mem.eql(u8, field, "contents:body")) {
+            // Body preserves CRLF endings
+            return extractBody(message);
+        }
+    }
+
+    return "";
+}
+
+/// Match a ref name against a pattern (supports * and ? globs, or prefix match)
+fn refPatternMatch(name: []const u8, pattern: []const u8) bool {
+    // If pattern contains glob characters, do glob match
+    if (std.mem.indexOfAny(u8, pattern, "*?[") != null) {
+        return globMatch(name, pattern);
+    }
+    // Otherwise, prefix match (git for-each-ref treats patterns as prefixes)
+    return std.mem.startsWith(u8, name, pattern);
+}
+
+/// Simple glob matching (supports * and ? wildcards)
+fn globMatch(str: []const u8, pattern: []const u8) bool {
+    var si: usize = 0;
+    var pi: usize = 0;
+    var star_pi: ?usize = null;
+    var star_si: usize = 0;
+
+    while (si < str.len) {
+        if (pi < pattern.len and (pattern[pi] == '?' or pattern[pi] == str[si])) {
+            si += 1;
+            pi += 1;
+        } else if (pi < pattern.len and pattern[pi] == '*') {
+            star_pi = pi;
+            star_si = si;
+            pi += 1;
+        } else if (star_pi) |sp| {
+            pi = sp + 1;
+            star_si += 1;
+            si = star_si;
+        } else {
+            return false;
+        }
+    }
+    while (pi < pattern.len and pattern[pi] == '*') pi += 1;
+    return pi == pattern.len;
+}
+
+/// Join multiple lines into a single line with spaces
+fn joinLines(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    if (std.mem.indexOfScalar(u8, text, '\n') == null) return text;
+    var result = std.array_list.Managed(u8).init(allocator);
+    var iter = std.mem.splitScalar(u8, text, '\n');
+    var first = true;
+    while (iter.next()) |line| {
+        const trimmed = std.mem.trimRight(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        if (!first) try result.append(' ');
+        try result.appendSlice(trimmed);
+        first = false;
+    }
+    return result.toOwnedSlice();
+}
+
+/// Extract the message portion from commit/tag object data (after the blank line)
+fn extractObjectMessage(data: []const u8) []const u8 {
+    // Find the blank line separator (\n\n)
+    if (std.mem.indexOf(u8, data, "\n\n")) |pos| {
+        return data[pos + 2 ..];
+    }
+    // Also handle \r\n\r\n
+    if (std.mem.indexOf(u8, data, "\r\n\r\n")) |pos| {
+        return data[pos + 4 ..];
+    }
+    return "";
+}
+
+/// Strip \r characters from string
+fn stripCR(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
+    if (std.mem.indexOfScalar(u8, input, '\r') == null) return input;
+    var result = std.array_list.Managed(u8).init(allocator);
+    for (input) |c| {
+        if (c != '\r') try result.append(c);
+    }
+    return result.toOwnedSlice();
+}
+
+/// Extract subject line(s) from a commit message.
+/// Subject is the first paragraph (up to the first blank line).
+/// Multi-line subjects (non-blank lines before the first blank line) are joined with space.
+fn extractSubject(message: []const u8) []const u8 {
+    if (message.len == 0) return "";
+    // Find the end of the subject (first blank line or end of message)
+    var end: usize = 0;
+    var lines = std.mem.splitScalar(u8, message, '\n');
+    var first = true;
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trimRight(u8, line, " \t\r");
+        if (trimmed.len == 0 and !first) break;
+        if (trimmed.len == 0 and first) break;
+        end = @intFromPtr(line.ptr) - @intFromPtr(message.ptr) + line.len;
+        first = false;
+    }
+    if (end > message.len) end = message.len;
+    // Trim trailing newlines
+    var subject = message[0..end];
+    subject = std.mem.trimRight(u8, subject, "\n\r ");
+    return subject;
+}
+
+/// Extract body from a commit message (everything after the subject and blank lines)
+fn extractBody(message: []const u8) []const u8 {
+    if (message.len == 0) return "";
+    // Skip subject lines (first paragraph) - find first blank line after non-blank
+    var iter = std.mem.splitScalar(u8, message, '\n');
+    var pos: usize = 0;
+    var found_subject = false;
+    var found_blank = false;
+    while (iter.next()) |line| {
+        pos = @intFromPtr(line.ptr) - @intFromPtr(message.ptr) + line.len + 1;
+        const trimmed = std.mem.trimRight(u8, line, " \t\r");
+        if (!found_subject) {
+            if (trimmed.len > 0) found_subject = true;
+            continue;
+        }
+        if (!found_blank) {
+            if (trimmed.len == 0) {
+                found_blank = true;
+                continue;
+            }
+            continue;
+        }
+        // Skip additional blank lines after the separator
+        if (trimmed.len == 0) continue;
+        // Found first non-blank body line
+        const body_start = @intFromPtr(line.ptr) - @intFromPtr(message.ptr);
+        if (body_start > message.len) return "";
+        return message[body_start..];
+    }
     return "";
 }
 
