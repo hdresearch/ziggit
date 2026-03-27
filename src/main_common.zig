@@ -10597,6 +10597,7 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var z_terminator = false;
     var killed_flag = false;
     var tag_flag = false;
+    var verbose_flag = false;
     var resolve_undo_flag = false;
     var deduplicate_flag = false;
     var eol_flag = false;
@@ -10642,6 +10643,9 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--ignored")) {
             ignored_flag = true;
         } else if (std.mem.eql(u8, arg, "-t")) {
+            tag_flag = true;
+        } else if (std.mem.eql(u8, arg, "-v")) {
+            verbose_flag = true;
             tag_flag = true;
         } else if (std.mem.eql(u8, arg, "-k") or std.mem.eql(u8, arg, "--killed")) {
             killed_flag = true;
@@ -10923,9 +10927,9 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 const quoted = try cQuotePath(allocator, entry.path, true);
                 defer allocator.free(quoted);
                 const tag_prefix: []const u8 = if (tag_flag) blk_tag: {
-                    // Skip-worktree check: CE_EXTENDED flag and skip_worktree in extended_flags
                     const has_skip_wt = if (entry.extended_flags) |ef| (ef & 0x4000 != 0) else (entry.flags & 0x4000 != 0);
-                    if (has_skip_wt) break :blk_tag "S " else break :blk_tag "H ";
+                    const is_assume_unchanged = (entry.flags & 0x8000) != 0;
+                    if (has_skip_wt) break :blk_tag "S " else if (verbose_flag and is_assume_unchanged) break :blk_tag "h " else break :blk_tag "H ";
                 } else "";
                 const output = try std.fmt.allocPrint(allocator, "{s}{o} {s} {d}\t{s}\n", .{ tag_prefix, entry.mode, hash_str, stage_num, quoted });
                 defer allocator.free(output);
@@ -10935,7 +10939,8 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 defer allocator.free(quoted);
                 const tag_prefix: []const u8 = if (tag_flag) blk_tag2: {
                     const has_skip_wt = if (entry.extended_flags) |ef| (ef & 0x4000 != 0) else (entry.flags & 0x4000 != 0);
-                    if (has_skip_wt) break :blk_tag2 "S " else break :blk_tag2 "H ";
+                    const is_assume_unchanged2 = (entry.flags & 0x8000) != 0;
+                    if (has_skip_wt) break :blk_tag2 "S " else if (verbose_flag and is_assume_unchanged2) break :blk_tag2 "h " else break :blk_tag2 "H ";
                 } else "";
                 const output = try std.fmt.allocPrint(allocator, "{s}{s}\n", .{ tag_prefix, quoted });
                 defer allocator.free(output);
@@ -16526,7 +16531,18 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     var df_suppress = false;
     var df_show_raw = false;
     var df_patch_with_raw = false;
+    var df_pathspecs = std.array_list.Managed([]const u8).init(allocator);
+    defer df_pathspecs.deinit();
+    var df_seen_dashdash = false;
     while (args.next()) |arg| {
+        if (df_seen_dashdash) {
+            try df_pathspecs.append(arg);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--")) {
+            df_seen_dashdash = true;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--name-only")) {
             name_only = true;
             df_suppress = false;
@@ -16579,6 +16595,21 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     var has_diffs = false;
 
     for (idx.entries.items) |entry| {
+        // Skip assume-unchanged entries
+        if ((entry.flags & 0x8000) != 0) continue;
+
+        // Filter by pathspecs
+        if (df_pathspecs.items.len > 0) {
+            var path_matches = false;
+            for (df_pathspecs.items) |ps| {
+                if (std.mem.eql(u8, entry.path, ps) or std.mem.startsWith(u8, entry.path, ps)) {
+                    path_matches = true;
+                    break;
+                }
+            }
+            if (!path_matches) continue;
+        }
+
         // Build full path from repo root
         const full_path = if (repo_root.len > 0 and !std.mem.eql(u8, repo_root, "."))
             try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path })
