@@ -15299,6 +15299,7 @@ fn packObjectsAddAllObjects(
 fn nativeCmdIndexPack(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
     var stdin_mode = false;
     var verify = false;
+    var strict = false;
     var pack_file: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
 
@@ -15312,11 +15313,11 @@ fn nativeCmdIndexPack(allocator: std.mem.Allocator, args: [][]const u8, command_
         } else if (std.mem.eql(u8, arg, "-o")) {
             i += 1;
             if (i < args.len) output_path = args[i];
+        } else if (std.mem.eql(u8, arg, "--strict") or std.mem.eql(u8, arg, "--fsck-objects")) {
+            strict = true;
         } else if (std.mem.startsWith(u8, arg, "--index-version=") or
             std.mem.eql(u8, arg, "--fix-thin") or
-            std.mem.eql(u8, arg, "--strict") or
             std.mem.eql(u8, arg, "--check-self-contained-and-connected") or
-            std.mem.eql(u8, arg, "--fsck-objects") or
             std.mem.startsWith(u8, arg, "--threads=") or
             std.mem.startsWith(u8, arg, "--max-input-size="))
         {
@@ -15358,6 +15359,15 @@ fn nativeCmdIndexPack(allocator: std.mem.Allocator, args: [][]const u8, command_
             var hash_hex: [40]u8 = undefined;
             for (trailing_sha, 0..) |b, bi| {
                 _ = std.fmt.bufPrint(hash_hex[bi * 2 .. bi * 2 + 2], "{x:0>2}", .{b}) catch continue;
+            }
+
+            // In strict mode, check for duplicate objects
+            if (strict) {
+                if (packHasDuplicates(allocator, pack_data)) {
+                    try platform_impl.writeStderr("fatal: pack has duplicate entries\n");
+                    std.process.exit(1);
+                    unreachable;
+                }
             }
 
             const dest_pack = std.fmt.allocPrint(allocator, "{s}/pack-{s}.pack", .{ pack_dir, hash_hex }) catch unreachable;
@@ -15476,6 +15486,63 @@ fn generatePackIdxFromEntries(allocator: std.mem.Allocator, entries: []const Pac
     const idx_filename = std.fmt.allocPrint(allocator, "{s}/pack-{s}.idx", .{ output_dir, hash_hex }) catch return;
     defer allocator.free(idx_filename);
     std.fs.cwd().writeFile(.{ .sub_path = idx_filename, .data = idx.items }) catch {};
+}
+
+fn packHasDuplicates(allocator: std.mem.Allocator, pack_data: []const u8) bool {
+    if (pack_data.len < 12) return false;
+    if (!std.mem.eql(u8, pack_data[0..4], "PACK")) return false;
+    const num_objects = std.mem.readInt(u32, pack_data[8..12], .big);
+
+    var seen = std.AutoHashMap([20]u8, void).init(allocator);
+    defer seen.deinit();
+
+    var pos: usize = 12;
+    var obj_count: usize = 0;
+    while (obj_count < num_objects and pos < pack_data.len -| 20) : (obj_count += 1) {
+        var c = pack_data[pos];
+        const obj_type = (c >> 4) & 0x07;
+        pos += 1;
+        var obj_size: u64 = c & 0x0F;
+        var shift: u6 = 4;
+        while (c & 0x80 != 0 and pos < pack_data.len) {
+            c = pack_data[pos];
+            pos += 1;
+            obj_size |= @as(u64, c & 0x7F) << shift;
+            shift +|= 7;
+        }
+        if (obj_type == 6) {
+            c = pack_data[pos];
+            pos += 1;
+            while (c & 0x80 != 0 and pos < pack_data.len) {
+                c = pack_data[pos];
+                pos += 1;
+            }
+        } else if (obj_type == 7) {
+            pos += 20;
+        }
+        const decomp_result = zlib_compat_mod.decompressSliceWithConsumed(allocator, pack_data[pos..]) catch return false;
+        defer allocator.free(decomp_result.data);
+        pos += decomp_result.consumed;
+
+        if (obj_type >= 1 and obj_type <= 4) {
+            const type_str: []const u8 = switch (obj_type) {
+                1 => "commit",
+                2 => "tree",
+                3 => "blob",
+                4 => "tag",
+                else => "blob",
+            };
+            const header = std.fmt.allocPrint(allocator, "{s} {d}\x00", .{ type_str, decomp_result.data.len }) catch continue;
+            defer allocator.free(header);
+            var hasher = std.crypto.hash.Sha1.init(.{});
+            hasher.update(header);
+            hasher.update(decomp_result.data);
+            const sha = hasher.finalResult();
+            if (seen.contains(sha)) return true;
+            seen.put(sha, {}) catch {};
+        }
+    }
+    return false;
 }
 
 fn generatePackIdx(allocator: std.mem.Allocator, pack_data: []const u8, output_dir: []const u8, hash_hex: *const [40]u8) !void {
