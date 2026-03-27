@@ -1668,7 +1668,6 @@ fn cmdInit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     var initial_branch: ?[]const u8 = null;
     var quiet = false;
     var separate_git_dir: ?[]const u8 = null;
-    _ = separate_git_dir;
     
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--bare")) {
@@ -1732,7 +1731,7 @@ fn copyTemplateDir(git_dir: []const u8, template_path: []const u8, allocator: st
     }
 }
 
-fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8, initial_branch: ?[]const u8, quiet: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8, _: ?[]const u8, _: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     
     const git_dir = if (bare) 
         try allocator.dupe(u8, path)
@@ -7424,7 +7423,7 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     var null_terminated = false;
     var abbrev_len: ?usize = null;
     var full_tree = false;
-    var no_full_name = false;
+    var full_name = false;
     var object_only = false;
     var has_format = false;
     var format_str: ?[]const u8 = null;
@@ -7452,9 +7451,9 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
         } else if (std.mem.eql(u8, arg, "--full-tree")) {
             full_tree = true;
         } else if (std.mem.eql(u8, arg, "--full-name")) {
-            no_full_name = false;
+            full_name = true;
         } else if (std.mem.eql(u8, arg, "--no-full-name")) {
-            no_full_name = true;
+            full_name = false;
         } else if (std.mem.eql(u8, arg, "--object-only")) {
             object_only = true;
         } else if (std.mem.startsWith(u8, arg, "--format=")) {
@@ -7658,13 +7657,13 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
             entry.hash[0..@min(abl, entry.hash.len)]
         else
             entry.hash;
-        // When --no-full-name, strip the prefix from output paths
-        const raw_display_path = if (no_full_name and prefix_str.len > 0 and
-            std.mem.startsWith(u8, entry.full_path, prefix_str) and
-            entry.full_path.len > prefix_str.len and entry.full_path[prefix_str.len] == '/')
-            entry.full_path[prefix_str.len + 1 ..]
-        else
-            entry.full_path;
+        // By default, paths are shown relative to CWD (prefix).
+        // --full-name shows repo-root-relative paths.
+        const raw_display_path = if (!full_name and prefix_str.len > 0) blk: {
+            break :blk try makeRelativePath(allocator, prefix_str, entry.full_path);
+        } else entry.full_path;
+        const raw_display_path_allocated = !full_name and prefix_str.len > 0;
+        defer if (raw_display_path_allocated) allocator.free(@constCast(raw_display_path));
 
         // C-quote the path if it contains special characters
         const quoted_path = try cQuotePath(allocator, raw_display_path, quote_path);
@@ -8049,6 +8048,48 @@ fn formatLsTreeEntry(
     return try allocator.dupe(u8, result.items);
 }
 
+/// Given a prefix (CWD relative to repo root) and a full_path (relative to repo root),
+/// compute the display path relative to prefix. E.g., prefix="aa", full_path="a[a]/three" → "../a[a]/three"
+fn makeRelativePath(allocator: std.mem.Allocator, prefix: []const u8, full_path: []const u8) ![]const u8 {
+    // Split prefix into components
+    var prefix_parts = std.array_list.Managed([]const u8).init(allocator);
+    defer prefix_parts.deinit();
+    var piter = std.mem.splitScalar(u8, prefix, '/');
+    while (piter.next()) |part| {
+        if (part.len > 0) try prefix_parts.append(part);
+    }
+
+    // Split full_path into components
+    var path_parts = std.array_list.Managed([]const u8).init(allocator);
+    defer path_parts.deinit();
+    var fiter = std.mem.splitScalar(u8, full_path, '/');
+    while (fiter.next()) |part| {
+        if (part.len > 0) try path_parts.append(part);
+    }
+
+    // Find common prefix length
+    var common: usize = 0;
+    while (common < prefix_parts.items.len and common < path_parts.items.len) {
+        if (!std.mem.eql(u8, prefix_parts.items[common], path_parts.items[common])) break;
+        common += 1;
+    }
+
+    // Number of "../" needed
+    const ups = prefix_parts.items.len - common;
+
+    var result = std.array_list.Managed(u8).init(allocator);
+    defer result.deinit();
+    for (0..ups) |_| {
+        try result.appendSlice("../");
+    }
+    for (path_parts.items[common..], 0..) |part, idx| {
+        if (idx > 0) try result.append('/');
+        try result.appendSlice(part);
+    }
+
+    return try allocator.dupe(u8, result.items);
+}
+
 fn normalizePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     var components = std.array_list.Managed([]const u8).init(allocator);
     defer components.deinit();
@@ -8426,8 +8467,8 @@ fn nativeCmdShowRef(allocator: std.mem.Allocator, args: [][]const u8, command_in
             try platform_impl.writeStdout(output);
         }
 
-        // Dereference tag objects
-        if (dereference and std.mem.startsWith(u8, entry.name, "refs/tags/")) {
+        // Dereference tag objects (for any ref, not just refs/tags/)
+        if (dereference) {
             // Try to load the object and check if it's a tag
             if (objects.GitObject.load(entry.hash, git_dir, platform_impl, allocator)) |obj| {
                 defer obj.deinit(allocator);
