@@ -11931,13 +11931,12 @@ fn resolveReflogEntry(git_path: []const u8, ref_name: []const u8, n: u32, alloca
         platform_impl.fs.readFile(allocator, path2) catch
         return error.NotFound;
     defer allocator.free(content);
-    defer allocator.free(content);
 
     // Collect all entries (each line has: old_hash new_hash ...)
     var entries = std.array_list.Managed([]const u8).init(allocator);
     defer entries.deinit();
 
-    var reflog_lines = std.mem.splitScalar(u8, content.?, '\n');
+    var reflog_lines = std.mem.splitScalar(u8, content, '\n');
     while (reflog_lines.next()) |line| {
         if (line.len >= 40) {
             entries.append(line) catch {};
