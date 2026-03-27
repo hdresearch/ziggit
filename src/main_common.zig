@@ -8690,6 +8690,7 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     var delete_mode = false;
     var list_mode = false;
     var force = false;
+    var verify_mode = false;
     var delete_names = std.array_list.Managed([]const u8).init(allocator);
     defer delete_names.deinit();
     var list_patterns = std.array_list.Managed([]const u8).init(allocator);
@@ -8753,7 +8754,7 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             annotated = true; // GPG signing implies annotated
             if (std.mem.eql(u8, arg, "-u")) _ = args.next(); // skip key-id
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verify")) {
-            // Verify mode - stub
+            verify_mode = true;
         } else if (std.mem.eql(u8, arg, "-n") or std.mem.startsWith(u8, arg, "-n")) {
             // -n<num> for listing annotation lines
         } else if (std.mem.startsWith(u8, arg, "--contains") or std.mem.startsWith(u8, arg, "--no-contains") or
@@ -8819,6 +8820,73 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             try platform_impl.writeStderr(msg);
         }
         return;
+    }
+
+    // Handle verify mode
+    if (verify_mode) {
+        const verify_tag = tag_name orelse {
+            try platform_impl.writeStderr("usage: git tag -v <tagname>...\n");
+            std.process.exit(1);
+            unreachable;
+        };
+        // Check if the tag exists
+        const tag_ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags/{s}", .{ git_path, verify_tag });
+        defer allocator.free(tag_ref_path);
+        const tag_content = std.fs.cwd().readFileAlloc(allocator, tag_ref_path, 4096) catch {
+            // Try packed-refs
+            const packed_refs_path2 = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_path});
+            defer allocator.free(packed_refs_path2);
+            const packed_data = std.fs.cwd().readFileAlloc(allocator, packed_refs_path2, 10 * 1024 * 1024) catch {
+                const emsg = try std.fmt.allocPrint(allocator, "error: tag '{s}' not found.\n", .{verify_tag});
+                defer allocator.free(emsg);
+                try platform_impl.writeStderr(emsg);
+                std.process.exit(1);
+                unreachable;
+            };
+            defer allocator.free(packed_data);
+            const ref_to_find = try std.fmt.allocPrint(allocator, "refs/tags/{s}", .{verify_tag});
+            defer allocator.free(ref_to_find);
+            if (std.mem.indexOf(u8, packed_data, ref_to_find) == null) {
+                const emsg = try std.fmt.allocPrint(allocator, "error: tag '{s}' not found.\n", .{verify_tag});
+                defer allocator.free(emsg);
+                try platform_impl.writeStderr(emsg);
+                std.process.exit(1);
+                unreachable;
+            }
+            // Found in packed-refs, try to verify
+            try platform_impl.writeStderr("error: no signature found\n");
+            std.process.exit(1);
+            unreachable;
+        };
+        defer allocator.free(tag_content);
+        const ref_hash = std.mem.trim(u8, tag_content, " \t\r\n");
+        if (ref_hash.len < 40) {
+            const emsg = try std.fmt.allocPrint(allocator, "error: tag '{s}' not found.\n", .{verify_tag});
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
+            std.process.exit(1);
+            unreachable;
+        }
+        // Check if it's a tag object (annotated) - verify needs annotated tag with signature
+        const tag_obj = objects.GitObject.load(ref_hash[0..40], git_path, platform_impl, allocator) catch {
+            const emsg = try std.fmt.allocPrint(allocator, "error: tag '{s}' not found.\n", .{verify_tag});
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
+            std.process.exit(1);
+            unreachable;
+        };
+        defer tag_obj.deinit(allocator);
+        if (tag_obj.type != .tag) {
+            const emsg = try std.fmt.allocPrint(allocator, "error: {s}: cannot verify a non-tag object of type {s}.\n", .{ ref_hash[0..40], @tagName(tag_obj.type) });
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
+            std.process.exit(1);
+            unreachable;
+        }
+        // No GPG signature support - report no signature
+        try platform_impl.writeStderr("error: no signature found\n");
+        std.process.exit(1);
+        unreachable;
     }
 
     if (tag_name == null or list_mode) {
