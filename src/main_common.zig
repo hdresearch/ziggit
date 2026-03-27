@@ -26043,7 +26043,7 @@ fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, opts:
                 try platform_impl.writeStdout(id_line);
             }
             if (!quiet) {
-                try diffTreeWithEmpty(allocator, this_tree, recursive, show_patch, name_only, name_status, git_path, platform_impl);
+                try diffTreeWithEmptyOpts(allocator, this_tree, opts, git_path, platform_impl);
             }
             return true;
         }
@@ -26065,7 +26065,9 @@ fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, opts:
     }
     
     if (parent_tree) |pt| {
-        const has_diff = try diffTwoTreesFiltered(allocator, pt, this_tree, "", recursive, show_patch, name_only, name_status, true, pathspecs, platform_impl);
+        var quiet_opts = opts.*;
+        quiet_opts.quiet = true;
+        const has_diff = try diffTwoTreesFiltered(allocator, pt, this_tree, "", &quiet_opts, pathspecs, platform_impl);
         if (has_diff) {
             if (!quiet) {
                 if (!no_commit_id) {
@@ -26073,7 +26075,7 @@ fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, opts:
                     defer allocator.free(id_line);
                     try platform_impl.writeStdout(id_line);
                 }
-                _ = try diffTwoTreesFiltered(allocator, pt, this_tree, "", recursive, show_patch, name_only, name_status, false, pathspecs, platform_impl);
+                _ = try diffTwoTreesFiltered(allocator, pt, this_tree, "", opts, pathspecs, platform_impl);
             }
             return true;
         }
