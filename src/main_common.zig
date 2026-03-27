@@ -9701,6 +9701,31 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             } else if (add_mode) {
                 idx.add(arg, arg, platform_impl, git_dir) catch {};
                 modified = true;
+            } else {
+                // No --add/--remove flag: file must already be in the index
+                var found_in_index = false;
+                for (idx.entries.items) |entry| {
+                    if (std.mem.eql(u8, entry.path, arg)) {
+                        found_in_index = true;
+                        break;
+                    }
+                }
+                if (!found_in_index) {
+                    const err_msg = std.fmt.allocPrint(allocator, "error: {s}: cannot add to the index - missing --add option?\nfatal: Unable to process path {s}\n", .{ arg, arg }) catch "error: cannot add to the index\n";
+                    try platform_impl.writeStderr(err_msg);
+                    std.process.exit(128);
+                } else {
+                    // File is in index — check if it still exists on disk
+                    std.fs.cwd().access(arg, .{}) catch {
+                        // File deleted but no --remove flag
+                        const err_msg2 = std.fmt.allocPrint(allocator, "error: {s}: does not exist and --remove not passed\nfatal: Unable to process path {s}\n", .{ arg, arg }) catch "error: file does not exist\n";
+                        try platform_impl.writeStderr(err_msg2);
+                        std.process.exit(128);
+                    };
+                    // Update existing entry with current file stat
+                    idx.add(arg, arg, platform_impl, git_dir) catch {};
+                    modified = true;
+                }
             }
         }
     }
