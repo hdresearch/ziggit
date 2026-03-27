@@ -109,7 +109,7 @@ pub fn parseTreeObject(tree_data: []const u8, allocator: std.mem.Allocator) ![]T
         const hash_bytes = tree_data[pos..pos + 20];
         const hash = try allocator.alloc(u8, 40);
         errdefer allocator.free(hash);
-        _ = try std.fmt.bufPrint(hash, "{s}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
+        _ = try std.fmt.bufPrint(hash, "{x}", .{hash_bytes});
         
         pos += 20;
         

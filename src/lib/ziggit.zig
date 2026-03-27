@@ -1287,7 +1287,7 @@ fn getHeadTreeEntries(git_dir: []const u8, head_commit: []const u8) !std.array_l
         const hash_bytes = tree_obj.data[full_null_pos + 1..full_null_pos + 21];
         
         // Convert hash to hex string
-        const hash_hex = try std.fmt.allocPrint(global_allocator, "{s}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
+        const hash_hex = try std.fmt.allocPrint(global_allocator, "{x}", .{hash_bytes});
         defer global_allocator.free(hash_hex);
         
         // Only include files (not subdirectories for now)

@@ -22,7 +22,7 @@ pub const TreeEntry = struct {
     
     /// Get the hash as a hex string
     pub fn getHashString(self: TreeEntry, allocator: std.mem.Allocator) ![]u8 {
-        return try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&self.hash)});
+        return try std.fmt.allocPrint(allocator, "{x}", .{&self.hash});
     }
     
     /// Check if this entry represents a directory

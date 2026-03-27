@@ -261,17 +261,17 @@ pub const GitObjectPool = struct {
     
     pub fn allocate(self: *Self, size: usize) ![]u8 {
         if (size <= SMALL_SIZE) {
-            if (self.small_pool.popOrNull()) |buffer| {
+            if (self.small_pool.pop()) |buffer| {
                 return buffer[0..size];
             }
             return try self.allocator.alloc(u8, SMALL_SIZE);
         } else if (size <= MEDIUM_SIZE) {
-            if (self.medium_pool.popOrNull()) |buffer| {
+            if (self.medium_pool.pop()) |buffer| {
                 return buffer[0..size];
             }
             return try self.allocator.alloc(u8, MEDIUM_SIZE);
         } else if (size <= LARGE_SIZE) {
-            if (self.large_pool.popOrNull()) |buffer| {
+            if (self.large_pool.pop()) |buffer| {
                 return buffer[0..size];
             }
             return try self.allocator.alloc(u8, LARGE_SIZE);
@@ -314,7 +314,7 @@ pub fn computeObjectHash(object_type: []const u8, data: []const u8, allocator: s
         var digest: [20]u8 = undefined;
         hasher.final(&digest);
         
-        return try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&digest)});
+        return try std.fmt.allocPrint(allocator, "{x}", .{&digest});
     } else {
         // Fall back to heap allocation for large objects
         const full_header = try std.fmt.allocPrint(allocator, "{s} {}\x00", .{ object_type, data.len });
@@ -328,7 +328,7 @@ pub fn computeObjectHash(object_type: []const u8, data: []const u8, allocator: s
         var digest: [20]u8 = undefined;
         hasher.final(&digest);
         
-        return try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&digest)});
+        return try std.fmt.allocPrint(allocator, "{x}", .{&digest});
     }
 }
 

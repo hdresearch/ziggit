@@ -213,7 +213,7 @@ pub const TreeWalker = struct {
             
             // Convert hash to hex string
             const hash_hex = try self.allocator.alloc(u8, 40);
-            _ = try std.fmt.bufPrint(hash_hex, "{s}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
+            _ = try std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes});
             
             // Determine object type from mode
             const obj_type: objects.ObjectType = if (std.mem.eql(u8, mode, "040000"))
