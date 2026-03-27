@@ -2168,7 +2168,7 @@ const RegexEngine = struct {
         return engine;
     }
 
-    fn compileExpr(engine: *RegexEngine, pattern: []const u8, pos: *usize, extended: bool, in_group: bool) !void {
+    fn compileExpr(engine: *RegexEngine, pattern: []const u8, pos: *usize, extended: bool, in_group: bool) error{OutOfMemory}!void {
         // Parse alternation (|)
         const start = engine.insts.items.len;
         try compileConcat(engine, pattern, pos, extended, in_group);
@@ -2238,7 +2238,7 @@ const RegexEngine = struct {
         return inst;
     }
 
-    fn compileConcat(engine: *RegexEngine, pattern: []const u8, pos: *usize, extended: bool, in_group: bool) !void {
+    fn compileConcat(engine: *RegexEngine, pattern: []const u8, pos: *usize, extended: bool, in_group: bool) error{OutOfMemory}!void {
         while (pos.* < pattern.len) {
             // Check for alternation or group end
             if (extended) {
@@ -2253,7 +2253,7 @@ const RegexEngine = struct {
         }
     }
 
-    fn compileAtom(engine: *RegexEngine, pattern: []const u8, pos: *usize, extended: bool, in_group: bool) !void {
+    fn compileAtom(engine: *RegexEngine, pattern: []const u8, pos: *usize, extended: bool, in_group: bool) error{OutOfMemory}!void {
         _ = in_group;
         const atom_start = engine.insts.items.len;
 
