@@ -1,123 +1,238 @@
 === Git Test Results (t0000-t4999) ===
-Date: Fri Mar 27 14:29:56 UTC 2026
+Date: Fri Mar 27 15:12:22 UTC 2026
 Git under test: ziggit (pure Zig, no git forwarding)
 
-t0000-basic: ok=86 fail=6 (93%) OK
-t0001-init: ok=65 fail=37 (63%) OK
-t0002-gitfile: ok=10 fail=4 (71%) OK
-t0003-attributes: ok=9 fail=46 (16%) OK
-t0004-unwritable: ok=9 fail=0 (100%) OK
-t0005-signals: ok=1 fail=4 (20%) OK
-t0006-date: ok=16 fail=113 (12%) OK
-t0007-git-var: ok=12 fail=15 (44%) OK
-t0008-ignores: ok=97 fail=301 (24%) OK
-t0009-git-dir-validation: ok=2 fail=0 (100%) OK
-t0010-racy-git: ok=4 fail=6 (40%) OK
-t0012-help: ok=2 fail=30 (6%) OK
-t0013-sha1dc: ok=0 fail=1 (0%) OK
-t0014-alias: ok=5 fail=16 (23%) OK
-t0017-env-helper: ok=1 fail=4 (20%) OK
-t0018-advice: ok=2 fail=4 (33%) OK
-t0019-json-writer: ok=2 fail=14 (12%) OK
-t0020-crlf: ok=6 fail=30 (16%) OK
-t0021-conversion: ok=14 fail=28 (33%) OK
-t0022-crlf-rename: ok=1 fail=1 (50%) OK
-t0023-crlf-am: ok=1 fail=1 (50%) OK
-t0024-crlf-archive: ok=2 fail=1 (66%) OK
-t0025-crlf-renormalize: ok=1 fail=2 (33%) OK
-t0026-eol-config: ok=2 fail=4 (33%) OK
-t0027-auto-crlf: ok=1237 fail=1363 (47%) OK
-t0028-working-tree-encoding: ok=2 fail=20 (9%) OK
-t0029-core-unsetenvvars: ok=0 fail=0 (0%) OK
-t0030-stripspace: ok=18 fail=12 (60%) OK
-t0031-lockfile-pid: ok=3 fail=4 (42%) OK
-t0033-safe-directory: ok=10 fail=12 (45%) OK
-t0034-root-safe-directory: ok=0 fail=0 (0%) OK
-t0035-safe-bare-repository: ok=0 fail=12 (0%) OK
-t0040-parse-options: ok=32 fail=62 (34%) OK
-t0041-usage: ok=4 fail=12 (25%) OK
-t0050-filesystem: ok=9 fail=4 (69%) OK
-t0051-windows-named-pipe: ok=0 fail=0 (0%) OK
-t0052-simple-ipc: ok=1 fail=8 (11%) OK
-t0055-beyond-symlinks: ok=1 fail=2 (33%) OK
-t0056-git-C: ok=6 fail=5 (54%) OK
-t0060-path-utils: ok=109 fail=110 (49%) OK
-t0061-run-command: ok=4 fail=20 (16%) OK
-t0062-revision-walking: ok=1 fail=1 (50%) OK
-t0066-dir-iterator: ok=4 fail=6 (40%) OK
-t0067-parse_pathspec_file: ok=0 fail=8 (0%) OK
-t0068-for-each-repo: ok=0 fail=5 (0%) OK
-t0070-fundamental: ok=3 fail=8 (27%) OK
-t0071-sort: ok=1 fail=0 (100%) OK
-t0080-unit-test-output: ok=0 fail=1 (0%) OK
-t0081-find-pack: ok=1 fail=3 (25%) OK
-t0090-cache-tree: ok=0 fail=22 (0%) OK
-t0091-bugreport: ok=4 fail=9 (30%) OK
-t0092-diagnose: ok=4 fail=0 (100%) OK
-t0095-bloom: ok=1 fail=10 (9%) OK
-t0100-previous: ok=0 fail=6 (0%) OK
-t0101-at-syntax: ok=3 fail=5 (37%) OK
-t0200-gettext-basic: ok=11 fail=5 (68%) OK
-t0201-gettext-fallbacks: ok=1 fail=7 (12%) OK
-t0202-gettext-perl: ok=1 fail=0 (100%) OK
-t0203-gettext-setlocale-sanity: ok=2 fail=0 (100%) OK
-t0204-gettext-reencode-sanity: ok=8 fail=0 (100%) OK
-t0210-trace2-normal: ok=0 fail=14 (0%) OK
-t0211-trace2-perf: ok=0 fail=17 (0%) OK
-t0212-trace2-event: ok=0 fail=11 (0%) OK
-t0213-trace2-ancestry: ok=5 fail=0 (100%) OK
-t0300-credentials: ok=1 fail=55 (1%) OK
-t0301-credential-cache: ok=0 fail=52 (0%) OK
-t0302-credential-store: ok=3 fail=62 (4%) OK
-t0303-credential-external: ok=10 fail=13 (43%) OK
-t0410-partial-clone: ok=10 fail=27 (27%) OK
-t0411-clone-from-partial: ok=3 fail=4 (42%) OK
-t0450-txt-doc-vs-help: ok=1 fail=1 (50%) OK
-t0500-progress-display: ok=1 fail=15 (6%) OK
-t0600-reffiles-backend: ok=4 fail=29 (12%) OK
-t0601-reffiles-pack-refs: ok=8 fail=39 (17%) OK
-t0602-reffiles-fsck: ok=0 fail=23 (0%) OK
-t0610-reftable-basics: ok=10 fail=81 (10%) OK
-t0611-reftable-httpd: ok=0 fail=0 (0%) OK
-t0612-reftable-jgit-compatibility: ok=0 fail=0 (0%) OK
-t0613-reftable-write-options: ok=0 fail=11 (0%) OK
-t0614-reftable-fsck: ok=0 fail=7 (0%) OK
-t1000-read-tree-m-3way: ok=37 fail=42 (46%) OK
-t1001-read-tree-m-2way: ok=6 fail=23 (20%) OK
-t1002-read-tree-m-u-2way: ok=2 fail=20 (9%) OK
-t1003-read-tree-prefix: ok=1 fail=2 (33%) OK
-t1004-read-tree-m-u-wf: ok=7 fail=10 (41%) OK
-t1005-read-tree-reset: ok=1 fail=6 (14%) OK
-t1006-cat-file: ok=91 fail=200 (31%) OK
-t1007-hash-object: ok=33 fail=7 (82%) OK
-t1008-read-tree-overlay: ok=0 fail=2 (0%) OK
-t1009-read-tree-new-index: ok=3 fail=0 (100%) OK
-t1010-mktree: ok=1 fail=7 (12%) OK
-t1011-read-tree-sparse-checkout: ok=0 fail=23 (0%) OK
-t1012-read-tree-df: ok=0 fail=5 (0%) OK
-t1013-read-tree-submodule: ok=0 fail=68 (0%) OK
-t1014-read-tree-confusing: ok=4 fail=24 (14%) OK
-t1015-read-index-unmerged: ok=1 fail=5 (16%) OK
-t1016-compatObjectFormat: ok=0 fail=0 (0%) OK
-t1020-subdirectory: ok=3 fail=12 (20%) OK
-t1022-read-tree-partial-clone: ok=0 fail=1 (0%) OK
-t1050-large: ok=8 fail=21 (27%) OK
-t1051-large-conversion: ok=4 fail=8 (33%) OK
-t1060-object-corruption: ok=8 fail=9 (47%) OK
-t1090-sparse-checkout-scope: ok=2 fail=5 (28%) OK
-t1091-sparse-checkout-builtin: ok=4 fail=73 (5%) OK
-t1092-sparse-checkout-compatibility: ok=0 fail=106 (0%) OK
-t1100-commit-tree-options: ok=4 fail=1 (80%) OK
-t1300-config: ok=154 fail=343 (30%) OK
-t1301-shared-repo: ok=6 fail=16 (27%) OK
-t1302-repo-version: ok=11 fail=7 (61%) OK
-t1303-wacky-config: ok=4 fail=7 (36%) OK
-t1304-default-acl: ok=4 fail=0 (100%) OK
-t1305-config-include: ok=6 fail=31 (16%) OK
-t1306-xdg-files: ok=9 fail=12 (42%) OK
-t1307-config-blob: ok=5 fail=8 (38%) OK
-t1308-config-set: ok=4 fail=35 (10%) OK
-t1309-early-config: ok=5 fail=5 (50%) OK
-t1310-config-default: ok=2 fail=3 (40%) OK
-t1311-config-optional: ok=0 fail=3 (0%) OK
-t1350-config-hooks-path: ok=0 fail=4 (0%) OK
+t0000-basic: ok=86 fail=6 (93%)
+t0001-init: ok=65 fail=37 (63%)
+t0002-gitfile: ok=10 fail=4 (71%)
+t0003-attributes: ok=9 fail=46 (16%)
+t0004-unwritable: ok=9 fail=0 (100%)
+t0005-signals: ok=1 fail=4 (20%)
+t0006-date: ok=16 fail=113 (12%)
+t0007-git-var: ok=15 fail=12 (55%)
+t0008-ignores: ok=97 fail=301 (24%)
+t0009-git-dir-validation: ok=2 fail=0 (100%)
+t0010-racy-git: ok=8 fail=2 (80%)
+t0012-help: ok=2 fail=30 (6%)
+t0013-sha1dc: ok=0 fail=1 (0%)
+t0014-alias: ok=5 fail=16 (23%)
+t0017-env-helper: ok=1 fail=4 (20%)
+t0018-advice: ok=2 fail=4 (33%)
+t0019-json-writer: ok=2 fail=14 (12%)
+t0020-crlf: ok=6 fail=30 (16%)
+t0021-conversion: ok=14 fail=28 (33%)
+t0022-crlf-rename: ok=1 fail=1 (50%)
+t0023-crlf-am: ok=1 fail=1 (50%)
+t0024-crlf-archive: ok=2 fail=1 (66%)
+t0025-crlf-renormalize: ok=1 fail=2 (33%)
+t0026-eol-config: ok=2 fail=4 (33%)
+t0027-auto-crlf: ok=1237 fail=1363 (47%)
+t0028-working-tree-encoding: ok=2 fail=20 (9%)
+t0029-core-unsetenvvars: ok=0 fail=0 (0%)
+t0030-stripspace: ok=18 fail=12 (60%)
+t0031-lockfile-pid: ok=3 fail=4 (42%)
+t0033-safe-directory: ok=10 fail=12 (45%)
+t0034-root-safe-directory: ok=0 fail=0 (0%)
+t0035-safe-bare-repository: ok=0 fail=12 (0%)
+t0040-parse-options: ok=32 fail=62 (34%)
+t0041-usage: ok=3 fail=13 (18%)
+t0050-filesystem: ok=9 fail=4 (69%)
+t0051-windows-named-pipe: ok=0 fail=0 (0%)
+t0052-simple-ipc: ok=1 fail=8 (11%)
+t0055-beyond-symlinks: ok=1 fail=2 (33%)
+t0056-git-C: ok=6 fail=5 (54%)
+t0060-path-utils: ok=109 fail=110 (49%)
+t0061-run-command: ok=4 fail=20 (16%)
+t0062-revision-walking: ok=1 fail=1 (50%)
+t0066-dir-iterator: ok=4 fail=6 (40%)
+t0067-parse_pathspec_file: ok=0 fail=8 (0%)
+t0068-for-each-repo: ok=0 fail=5 (0%)
+t0070-fundamental: ok=3 fail=8 (27%)
+t0071-sort: ok=1 fail=0 (100%)
+t0080-unit-test-output: ok=0 fail=1 (0%)
+t0081-find-pack: ok=1 fail=3 (25%)
+t0090-cache-tree: ok=0 fail=22 (0%)
+t0091-bugreport: ok=4 fail=9 (30%)
+t0092-diagnose: ok=4 fail=0 (100%)
+t0095-bloom: ok=1 fail=10 (9%)
+t0100-previous: ok=0 fail=6 (0%)
+t0101-at-syntax: ok=3 fail=5 (37%)
+t0200-gettext-basic: ok=11 fail=5 (68%)
+t0201-gettext-fallbacks: ok=1 fail=7 (12%)
+t0202-gettext-perl: ok=1 fail=0 (100%)
+t0203-gettext-setlocale-sanity: ok=2 fail=0 (100%)
+t0204-gettext-reencode-sanity: ok=8 fail=0 (100%)
+t0210-trace2-normal: ok=0 fail=14 (0%)
+t0211-trace2-perf: ok=0 fail=17 (0%)
+t0212-trace2-event: ok=0 fail=11 (0%)
+t0213-trace2-ancestry: ok=5 fail=0 (100%)
+t0300-credentials: ok=1 fail=55 (1%)
+t0301-credential-cache: ok=0 fail=52 (0%)
+t0302-credential-store: ok=3 fail=62 (4%)
+t0303-credential-external: ok=10 fail=13 (43%)
+t1000-read-tree-m-3way: ok=37 fail=42 (46%)
+t1001-read-tree-m-2way: ok=6 fail=23 (20%)
+t1002-read-tree-m-u-2way: ok=2 fail=20 (9%)
+t1003-read-tree-prefix: ok=1 fail=2 (33%)
+t1004-read-tree-m-u-wf: ok=7 fail=10 (41%)
+t1005-read-tree-reset: ok=1 fail=6 (14%)
+t1006-cat-file: ok=91 fail=200 (31%)
+t1007-hash-object: ok=33 fail=7 (82%)
+t1008-read-tree-overlay: ok=0 fail=2 (0%)
+t1009-read-tree-new-index: ok=3 fail=0 (100%)
+t1010-mktree: ok=1 fail=7 (12%)
+t1011-read-tree-sparse-checkout: ok=0 fail=23 (0%)
+t1012-read-tree-df: ok=0 fail=5 (0%)
+t1013-read-tree-submodule: ok=0 fail=68 (0%)
+t1014-read-tree-confusing: ok=4 fail=24 (14%)
+t1015-read-index-unmerged: ok=1 fail=5 (16%)
+t1016-compatObjectFormat: ok=0 fail=0 (0%)
+t1020-subdirectory: ok=3 fail=12 (20%)
+t1022-read-tree-partial-clone: ok=0 fail=1 (0%)
+t1050-large: ok=8 fail=21 (27%)
+t1051-large-conversion: ok=4 fail=8 (33%)
+t1060-object-corruption: ok=8 fail=9 (47%)
+t1090-sparse-checkout-scope: ok=2 fail=5 (28%)
+t1091-sparse-checkout-builtin: ok=4 fail=73 (5%)
+t1092-sparse-checkout-compatibility: ok=0 fail=106 (0%)
+t1100-commit-tree-options: ok=4 fail=1 (80%)
+t1300-config: ok=154 fail=343 (30%)
+t1301-shared-repo: ok=6 fail=16 (27%)
+t1302-repo-version: ok=12 fail=6 (66%)
+t1303-wacky-config: ok=4 fail=7 (36%)
+t1304-default-acl: ok=4 fail=0 (100%)
+t1305-config-include: ok=6 fail=31 (16%)
+t1306-xdg-files: ok=9 fail=12 (42%)
+t1307-config-blob: ok=5 fail=8 (38%)
+t1308-config-set: ok=4 fail=35 (10%)
+t1309-early-config: ok=5 fail=5 (50%)
+t1310-config-default: ok=2 fail=3 (40%)
+t1311-config-optional: ok=0 fail=3 (0%)
+t1350-config-hooks-path: ok=0 fail=4 (0%)
+t1400-update-ref: ok=38 fail=151 (20%)
+t1401-symbolic-ref: ok=13 fail=12 (52%)
+t1402-check-ref-format: ok=63 fail=36 (63%)
+t1403-show-ref: ok=4 fail=8 (33%)
+t1404-update-ref-errors: ok=7 fail=31 (18%)
+t1405-main-ref-store: ok=5 fail=11 (31%)
+t1406-submodule-ref-store: ok=4 fail=11 (26%)
+t1407-worktree-ref-store: ok=0 fail=4 (0%)
+t1408-packed-refs: ok=0 fail=3 (0%)
+t1409-avoid-packing-refs: ok=2 fail=9 (18%)
+t1410-reflog: ok=3 fail=38 (7%)
+t1411-reflog-show: ok=2 fail=15 (11%)
+t1412-reflog-loop: ok=2 fail=1 (66%)
+t1413-reflog-detach: ok=2 fail=5 (28%)
+t1414-reflog-walk: ok=2 fail=10 (16%)
+t1415-worktree-refs: ok=0 fail=10 (0%)
+t1416-ref-transaction-hooks: ok=1 fail=8 (11%)
+t1417-reflog-updateref: ok=6 fail=15 (28%)
+t1418-reflog-exists: ok=1 fail=5 (16%)
+t1419-exclude-refs: ok=0 fail=13 (0%)
+t1420-lost-found: ok=1 fail=1 (50%)
+t1421-reflog-write: ok=0 fail=10 (0%)
+t1422-show-ref-exists: ok=1 fail=12 (7%)
+t1423-ref-backend: ok=3 fail=33 (8%)
+t1430-bad-ref-name: ok=11 fail=31 (26%)
+t1450-fsck: ok=6 fail=90 (6%)
+t1451-fsck-buffer: ok=10 fail=62 (13%)
+t1460-refs-migrate: ok=1 fail=36 (2%)
+t1461-refs-list: ok=29 fail=399 (6%)
+t1462-refs-exists: ok=0 fail=13 (0%)
+t1463-refs-optimize: ok=9 fail=38 (19%)
+t1500-rev-parse: ok=50 fail=31 (61%)
+t1501-work-tree: ok=9 fail=30 (23%)
+t1502-rev-parse-parseopt: ok=11 fail=26 (29%)
+t1503-rev-parse-verify: ok=9 fail=3 (75%)
+t1504-ceiling-dirs: ok=41 fail=3 (93%)
+t1505-rev-parse-last: ok=1 fail=6 (14%)
+t1506-rev-parse-diagnosis: ok=5 fail=25 (16%)
+t1507-rev-parse-upstream: ok=5 fail=24 (17%)
+t1508-at-combinations: ok=10 fail=25 (28%)
+t1509-root-work-tree: ok=0 fail=0 (0%)
+t1510-repo-setup: ok=11 fail=98 (10%)
+t1511-rev-parse-caret: ok=6 fail=11 (35%)
+t1512-rev-parse-disambiguation: ok=6 fail=32 (15%)
+t1513-rev-parse-prefix: ok=1 fail=10 (9%)
+t1514-rev-parse-push: ok=2 fail=7 (22%)
+t1515-rev-parse-outside-repo: ok=1 fail=3 (25%)
+t1517-outside-repo: ok=3 fail=8 (27%)
+t2000-conflict-when-checking-files-out: ok=11 fail=3 (78%)
+t2002-checkout-cache-u: ok=2 fail=1 (66%)
+t2003-checkout-cache-mkdir: ok=1 fail=9 (10%)
+t2004-checkout-cache-temp: ok=5 fail=18 (21%)
+t2005-checkout-index-symlinks: ok=1 fail=2 (33%)
+t2006-checkout-index-basic: ok=4 fail=5 (44%)
+t2007-checkout-symlink: ok=2 fail=2 (50%)
+t2008-checkout-subdir: ok=5 fail=4 (55%)
+t2009-checkout-statinfo: ok=3 fail=0 (100%)
+t2010-checkout-ambiguous: ok=4 fail=6 (40%)
+t2011-checkout-invalid-head: ok=5 fail=5 (50%)
+t2012-checkout-last: ok=5 fail=17 (22%)
+t2013-checkout-submodule: ok=1 fail=73 (1%)
+t2014-checkout-switch: ok=4 fail=0 (100%)
+t2015-checkout-unborn: ok=2 fail=4 (33%)
+t2016-checkout-patch: ok=0 fail=19 (0%)
+t2017-checkout-orphan: ok=3 fail=10 (23%)
+t2018-checkout-branch: ok=7 fail=18 (28%)
+t2019-checkout-ambiguous-ref: ok=5 fail=4 (55%)
+t2020-checkout-detach: ok=8 fail=7 (53%)
+t2021-checkout-overwrite: ok=0 fail=9 (0%)
+t2022-checkout-paths: ok=0 fail=5 (0%)
+t2023-checkout-m: ok=0 fail=5 (0%)
+t2024-checkout-dwim: ok=1 fail=22 (4%)
+t2025-checkout-no-overlay: ok=1 fail=5 (16%)
+t2026-checkout-pathspec-file: ok=2 fail=9 (18%)
+t2027-checkout-track: ok=1 fail=4 (20%)
+t2030-unresolve-info: ok=0 fail=14 (0%)
+t2050-git-dir-relative: ok=1 fail=1 (50%)
+t2060-switch: ok=4 fail=12 (25%)
+t2070-restore: ok=4 fail=11 (26%)
+t2071-restore-patch: ok=0 fail=15 (0%)
+t2072-restore-pathspec-file: ok=2 fail=10 (16%)
+t2080-parallel-checkout-basics: ok=1 fail=10 (9%)
+t2081-parallel-checkout-collisions: ok=6 fail=0 (100%)
+t2082-parallel-checkout-attributes: ok=0 fail=5 (0%)
+t2100-update-cache-badpath: ok=1 fail=4 (20%)
+t2101-update-index-reupdate: ok=1 fail=0 (100%)
+t2102-update-index-symlinks: ok=2 fail=1 (66%)
+t2103-update-index-ignore-missing: ok=1 fail=4 (20%)
+t2104-update-index-skip-worktree: ok=0 fail=7 (0%)
+t2105-update-index-gitfile: ok=4 fail=0 (100%)
+t2106-update-index-assume-unchanged: ok=1 fail=1 (50%)
+t2107-update-index-basic: ok=2 fail=8 (20%)
+t2108-update-index-refresh-racy: ok=5 fail=1 (83%)
+t3000-ls-files-others: ok=15 fail=0 (100%)
+t3001-ls-files-others-exclude: ok=12 fail=15 (44%)
+t3002-ls-files-dashpath: ok=6 fail=0 (100%)
+t3003-ls-files-exclude: ok=7 fail=0 (100%)
+t3004-ls-files-basic: ok=6 fail=0 (100%)
+t3005-ls-files-relative: ok=1 fail=3 (25%)
+t3006-ls-files-long: ok=3 fail=0 (100%)
+t3007-ls-files-recurse-submodules: ok=1 fail=23 (4%)
+t3008-ls-files-lazy-init-name-hash: ok=1 fail=0 (100%)
+t3009-ls-files-others-nonsubmodule: ok=1 fail=1 (50%)
+t3010-ls-files-killed-modified: ok=3 fail=3 (50%)
+t3011-common-prefixes-and-directory-traversal: ok=7 fail=14 (33%)
+t3012-ls-files-dedup: ok=1 fail=2 (33%)
+t3013-ls-files-format: ok=18 fail=2 (90%)
+t3020-ls-files-error-unmatch: ok=3 fail=0 (100%)
+t3040-subprojects-basic: ok=2 fail=9 (18%)
+t3050-subprojects-fetch: ok=2 fail=2 (50%)
+t3060-ls-files-with-tree: ok=4 fail=4 (50%)
+t3070-wildmatch: ok=1112 fail=789 (58%)
+t3100-ls-tree-restrict: ok=14 fail=0 (100%)
+t3101-ls-tree-dirname: ok=19 fail=0 (100%)
+t3102-ls-tree-wildcards: ok=4 fail=0 (100%)
+t3103-ls-tree-misc: ok=10 fail=0 (100%)
+t3104-ls-tree-format: ok=18 fail=1 (94%)
+t3105-ls-tree-output: ok=5 fail=55 (8%)
+t3200-branch: ok=34 fail=133 (20%)
+t3201-branch-contains: ok=2 fail=22 (8%)
+t3202-show-branch: ok=6 fail=21 (22%)
+t3203-branch-output: ok=6 fail=35 (14%)
+t3204-branch-name-interpretation: ok=2 fail=14 (12%)
+t3205-branch-color: ok=2 fail=2 (50%)
+t3206-range-diff: ok=1 fail=47 (2%)
+t3207-branch-submodule: ok=0 fail=20 (0%)
+t3211-peel-ref: ok=6 fail=2 (75%)
