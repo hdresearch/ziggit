@@ -3339,6 +3339,7 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
 
     var oneline = false;
     var format_string: ?[]const u8 = null;
+    var format_is_separator = false; // true for "format:", false for "tformat:" / "--format="
     var max_count: ?u32 = null;
     var committish: ?[]const u8 = null;
     
@@ -3350,8 +3351,10 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             format_string = arg["--format=".len..]; 
         } else if (std.mem.startsWith(u8, arg, "--pretty=format:")) {
             format_string = arg["--pretty=format:".len..];
+            format_is_separator = true;
         } else if (std.mem.startsWith(u8, arg, "--pretty=tformat:")) {
             format_string = arg["--pretty=tformat:".len..];
+            format_is_separator = false;
         } else if (std.mem.eql(u8, arg, "--pretty=oneline") or std.mem.eql(u8, arg, "--pretty=short")) {
             oneline = true;
         } else if (std.mem.startsWith(u8, arg, "--pretty=")) {
@@ -3474,7 +3477,13 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
 
         // Display commit based on format
         if (format_string) |fmt| {
+            if (format_is_separator and count > 0) {
+                try platform_impl.writeStdout("\n");
+            }
             try outputFormattedCommit(fmt, commit_hash, allocator, platform_impl);
+            if (!format_is_separator) {
+                try platform_impl.writeStdout("\n");
+            }
         } else if (oneline) {
             const short_hash = commit_hash[0..7];
             const first_line = blk: {
@@ -3744,7 +3753,7 @@ fn outputFormattedCommit(format: []const u8, commit_hash: []const u8, allocator:
         }
     }
     
-    try output.append('\n');
+    // Note: caller is responsible for adding newlines (separator vs terminator)
     try platform_impl.writeStdout(output.items);
 }
 
@@ -14219,6 +14228,7 @@ fn showCommitPrettyFormat(git_object: objects.GitObject, commit_hash: []const u8
         else
             format["tformat:".len..];
         try outputFormattedCommit(fmt_str, commit_hash, allocator, platform_impl);
+        try platform_impl.writeStdout("\n");
     } else {
         // Fallback to default format
         try showCommitDefault(git_object, commit_hash, "", platform_impl, allocator);
