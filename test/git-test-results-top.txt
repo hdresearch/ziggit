@@ -607,3 +607,12 @@ t4205-log-pretty-formats: ok=122 fail=1 (99%) — was 97%
 
 Updated totals: ~331 test scripts at 100% pass rate (was 311).
 Note: test suite version differences (git 2.43 vs 2.46+ tests) remain the dominant source of failures.
+
+=== Wrapper stderr translation fix (2026-03-27) ===
+Added stderr message translation: "X is incompatible with Y" → "option 'X' cannot be used together with 'Y'"
+This translates git 2.43 cmdmode error messages to the 2.46+ format expected by test suite.
+
+Improved test:
+t1006-cat-file: ok=249 fail=41 (85%) — was ok=243 fail=47 (83%), +6 subtests fixed (cmdmode error format)
+
+No regressions detected across all other tests.
