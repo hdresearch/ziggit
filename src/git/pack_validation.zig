@@ -6,7 +6,7 @@ pub const PackValidationResult = struct {
     total_packs: u32,
     healthy_packs: u32,
     corrupted_packs: u32,
-    pack_details: std.ArrayList(PackDetail),
+    pack_details: std.array_list.Managed(PackDetail),
     
     pub const PackDetail = struct {
         name: []u8,
@@ -14,7 +14,7 @@ pub const PackValidationResult = struct {
         version: u32,
         total_objects: u32,
         readable_objects: u32,
-        issues: std.ArrayList([]u8),
+        issues: std.array_list.Managed([]u8),
         
         pub fn init(allocator: std.mem.Allocator, name: []const u8) PackDetail {
             return PackDetail{
@@ -23,7 +23,7 @@ pub const PackValidationResult = struct {
                 .version = 0,
                 .total_objects = 0,
                 .readable_objects = 0,
-                .issues = std.ArrayList([]u8).init(allocator),
+                .issues = std.array_list.Managed([]u8).init(allocator),
             };
         }
         
@@ -50,7 +50,7 @@ pub const PackValidationResult = struct {
             .total_packs = 0,
             .healthy_packs = 0,
             .corrupted_packs = 0,
-            .pack_details = std.ArrayList(PackDetail).init(allocator),
+            .pack_details = std.array_list.Managed(PackDetail).init(allocator),
         };
     }
     
@@ -278,7 +278,7 @@ pub fn repairPackFiles(git_dir: []const u8, platform_impl: anytype, allocator: s
         .objects_repaired = 0,
         .objects_removed = 0,
         .space_reclaimed = 0,
-        .repair_log = std.ArrayList([]u8).init(allocator),
+        .repair_log = std.array_list.Managed([]u8).init(allocator),
     };
 }
 
@@ -288,7 +288,7 @@ pub const PackRepairResult = struct {
     objects_repaired: u32,
     objects_removed: u32,
     space_reclaimed: u64,
-    repair_log: std.ArrayList([]u8),
+    repair_log: std.array_list.Managed([]u8),
     
     pub fn deinit(self: PackRepairResult, allocator: std.mem.Allocator) void {
         for (self.repair_log.items) |log_entry| {
