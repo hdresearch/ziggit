@@ -3199,6 +3199,44 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         const success_msg = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
         defer allocator.free(success_msg);
         try platform_impl.writeStdout(success_msg);
+    } else if (std.mem.eql(u8, first_arg, "-B")) {
+        // -B: create or reset branch
+        const branch_name = args.next() orelse {
+            try platform_impl.writeStderr("fatal: option '-B' requires a value\n");
+            std.process.exit(128);
+        };
+        
+        // Get optional start point
+        const start_point = args.next();
+        
+        // Delete existing branch if it exists (reset)
+        const ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, branch_name });
+        defer allocator.free(ref_path);
+        std.fs.cwd().deleteFile(ref_path) catch {};
+        
+        // Create the branch
+        refs.createBranch(git_path, branch_name, start_point, platform_impl, allocator) catch |err| switch (err) {
+            error.NoCommitsYet => {
+                // For -B on empty repo, just set HEAD
+                const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+                defer allocator.free(head_path);
+                const ref_content = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{branch_name});
+                defer allocator.free(ref_content);
+                platform_impl.fs.writeFile(head_path, ref_content) catch {};
+                const reset_msg = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
+                defer allocator.free(reset_msg);
+                try platform_impl.writeStderr(reset_msg);
+                return;
+            },
+            else => return err,
+        };
+        
+        // Switch to the branch
+        refs.updateHEAD(git_path, branch_name, platform_impl, allocator) catch {};
+        
+        const reset_msg = try std.fmt.allocPrint(allocator, "Switched to and reset branch '{s}'\n", .{branch_name});
+        defer allocator.free(reset_msg);
+        try platform_impl.writeStderr(reset_msg);
     } else {
         // Parse checkout arguments
         var quiet = std.mem.eql(u8, first_arg, "--quiet");
@@ -10633,6 +10671,11 @@ fn cmdUpdateRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     };
     defer allocator.free(git_dir);
 
+    if (stdin_mode) {
+        try updateRefStdin(git_dir, create_reflog, no_deref, allocator, platform_impl);
+        return;
+    }
+
     if (delete_mode) {
         if (positional.items.len < 1) {
             try platform_impl.writeStderr("usage: git update-ref -d <refname> [<old-val>]\n");
@@ -10772,6 +10815,236 @@ fn cmdUpdateRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         writeReflogEntry(git_dir, ref_name, old_hash orelse "0000000000000000000000000000000000000000", resolved_new, msg orelse "", allocator, platform_impl) catch {};
     }
 
+}
+
+fn updateRefStdin(git_dir: []const u8, create_reflog: bool, no_deref: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    _ = no_deref;
+    const stdin_data = readStdin(allocator, 10 * 1024 * 1024) catch {
+        try platform_impl.writeStderr("fatal: unable to read from stdin\n");
+        std.process.exit(128);
+        unreachable;
+    };
+    defer allocator.free(stdin_data);
+    
+    const zero_hash = "0000000000000000000000000000000000000000";
+    
+    var lines = std.mem.splitScalar(u8, stdin_data, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        
+        if (std.mem.startsWith(u8, trimmed, "update ")) {
+            // update <ref> <new-oid> [<old-oid>]
+            const rest = trimmed["update ".len..];
+            var parts = std.mem.splitScalar(u8, rest, ' ');
+            const ref_name = parts.next() orelse continue;
+            const new_val_raw = parts.next() orelse continue;
+            const old_val = parts.next();
+            
+            // Resolve new value
+            const new_val = if (new_val_raw.len == 40 and isValidHexString(new_val_raw))
+                try allocator.dupe(u8, new_val_raw)
+            else
+                resolveRevision(git_dir, new_val_raw, platform_impl, allocator) catch {
+                    const emsg = try std.fmt.allocPrint(allocator, "fatal: {s}: not a valid SHA1\n", .{ref_name});
+                    defer allocator.free(emsg);
+                    try platform_impl.writeStderr(emsg);
+                    std.process.exit(128);
+                    unreachable;
+                };
+            defer allocator.free(new_val);
+            
+            // Verify old value if specified
+            if (old_val) |ov| {
+                if (ov.len > 0) {
+                    const resolved_old = if (ov.len == 40 and isValidHexString(ov))
+                        try allocator.dupe(u8, ov)
+                    else
+                        resolveRevision(git_dir, ov, platform_impl, allocator) catch {
+                            const emsg = try std.fmt.allocPrint(allocator, "fatal: cannot lock ref '{s}': unable to resolve reference\n", .{ref_name});
+                            defer allocator.free(emsg);
+                            try platform_impl.writeStderr(emsg);
+                            std.process.exit(128);
+                            unreachable;
+                        };
+                    defer allocator.free(resolved_old);
+                    
+                    const current = refs.resolveRef(git_dir, ref_name, platform_impl, allocator) catch null;
+                    defer if (current) |c| allocator.free(c);
+                    
+                    if (std.mem.eql(u8, resolved_old, zero_hash)) {
+                        // old=0 means ref must not exist
+                        if (current != null) {
+                            const emsg = try std.fmt.allocPrint(allocator, "fatal: cannot lock ref '{s}': reference already exists\n", .{ref_name});
+                            defer allocator.free(emsg);
+                            try platform_impl.writeStderr(emsg);
+                            std.process.exit(128);
+                            unreachable;
+                        }
+                    } else {
+                        if (current == null or !std.mem.eql(u8, current.?, resolved_old)) {
+                            const emsg = try std.fmt.allocPrint(allocator, "fatal: cannot lock ref '{s}': is at {s} but expected {s}\n", .{ ref_name, current orelse zero_hash, resolved_old });
+                            defer allocator.free(emsg);
+                            try platform_impl.writeStderr(emsg);
+                            std.process.exit(128);
+                            unreachable;
+                        }
+                    }
+                }
+            }
+            
+            const old_hash = refs.resolveRef(git_dir, ref_name, platform_impl, allocator) catch null;
+            defer if (old_hash) |h| allocator.free(h);
+            
+            try refs.updateRef(git_dir, ref_name, new_val, platform_impl, allocator);
+            
+            if (create_reflog or shouldLogRef(git_dir, ref_name, platform_impl, allocator)) {
+                writeReflogEntry(git_dir, ref_name, old_hash orelse zero_hash, new_val, "", allocator, platform_impl) catch {};
+            }
+        } else if (std.mem.startsWith(u8, trimmed, "create ")) {
+            // create <ref> <new-oid>
+            const rest = trimmed["create ".len..];
+            var parts = std.mem.splitScalar(u8, rest, ' ');
+            const ref_name = parts.next() orelse continue;
+            const new_val_raw = parts.next() orelse continue;
+            
+            // Ref must not exist
+            if (refs.resolveRef(git_dir, ref_name, platform_impl, allocator) catch null) |existing| {
+                allocator.free(existing);
+                const emsg = try std.fmt.allocPrint(allocator, "fatal: cannot lock ref '{s}': reference already exists\n", .{ref_name});
+                defer allocator.free(emsg);
+                try platform_impl.writeStderr(emsg);
+                std.process.exit(128);
+                unreachable;
+            }
+            
+            const new_val = if (new_val_raw.len == 40 and isValidHexString(new_val_raw))
+                try allocator.dupe(u8, new_val_raw)
+            else
+                resolveRevision(git_dir, new_val_raw, platform_impl, allocator) catch {
+                    const emsg = try std.fmt.allocPrint(allocator, "fatal: {s}: not a valid SHA1\n", .{ref_name});
+                    defer allocator.free(emsg);
+                    try platform_impl.writeStderr(emsg);
+                    std.process.exit(128);
+                    unreachable;
+                };
+            defer allocator.free(new_val);
+            
+            try refs.updateRef(git_dir, ref_name, new_val, platform_impl, allocator);
+            
+            if (create_reflog or shouldLogRef(git_dir, ref_name, platform_impl, allocator)) {
+                writeReflogEntry(git_dir, ref_name, zero_hash, new_val, "", allocator, platform_impl) catch {};
+            }
+        } else if (std.mem.startsWith(u8, trimmed, "delete ")) {
+            // delete <ref> [<old-oid>]
+            const rest = trimmed["delete ".len..];
+            var parts = std.mem.splitScalar(u8, rest, ' ');
+            const ref_name = parts.next() orelse continue;
+            const old_val = parts.next();
+            
+            // Verify old value if specified
+            if (old_val) |ov| {
+                if (ov.len > 0 and !std.mem.eql(u8, ov, zero_hash)) {
+                    const current = refs.resolveRef(git_dir, ref_name, platform_impl, allocator) catch null;
+                    defer if (current) |c| allocator.free(c);
+                    
+                    const resolved_old = if (ov.len == 40 and isValidHexString(ov))
+                        try allocator.dupe(u8, ov)
+                    else
+                        resolveRevision(git_dir, ov, platform_impl, allocator) catch {
+                            try platform_impl.writeStderr("fatal: cannot resolve old value\n");
+                            std.process.exit(128);
+                            unreachable;
+                        };
+                    defer allocator.free(resolved_old);
+                    
+                    if (current == null or !std.mem.eql(u8, current.?, resolved_old)) {
+                        const emsg = try std.fmt.allocPrint(allocator, "fatal: cannot lock ref '{s}'\n", .{ref_name});
+                        defer allocator.free(emsg);
+                        try platform_impl.writeStderr(emsg);
+                        std.process.exit(128);
+                        unreachable;
+                    }
+                }
+            }
+            
+            // Delete the ref
+            const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_name });
+            defer allocator.free(ref_path);
+            std.fs.cwd().deleteFile(ref_path) catch {};
+            
+            // Remove from packed-refs too
+            removeFromPackedRefs(git_dir, ref_name, allocator, platform_impl);
+            cleanEmptyRefDirs(git_dir, ref_name, allocator);
+        } else if (std.mem.startsWith(u8, trimmed, "verify ")) {
+            // verify <ref> [<old-oid>]
+            const rest = trimmed["verify ".len..];
+            var parts = std.mem.splitScalar(u8, rest, ' ');
+            const ref_name = parts.next() orelse continue;
+            const expected = parts.next();
+            
+            const current = refs.resolveRef(git_dir, ref_name, platform_impl, allocator) catch null;
+            defer if (current) |c| allocator.free(c);
+            
+            if (expected) |exp| {
+                if (std.mem.eql(u8, exp, zero_hash)) {
+                    if (current != null) {
+                        const emsg = try std.fmt.allocPrint(allocator, "fatal: cannot lock ref '{s}': reference exists\n", .{ref_name});
+                        defer allocator.free(emsg);
+                        try platform_impl.writeStderr(emsg);
+                        std.process.exit(128);
+                        unreachable;
+                    }
+                } else {
+                    if (current == null or !std.mem.eql(u8, current.?, exp)) {
+                        const emsg = try std.fmt.allocPrint(allocator, "fatal: cannot lock ref '{s}': is at {s} but expected {s}\n", .{ ref_name, current orelse zero_hash, exp });
+                        defer allocator.free(emsg);
+                        try platform_impl.writeStderr(emsg);
+                        std.process.exit(128);
+                        unreachable;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn removeFromPackedRefs(git_dir: []const u8, ref_name: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) void {
+    const packed_refs_path = std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir}) catch return;
+    defer allocator.free(packed_refs_path);
+    const packed_data = platform_impl.fs.readFile(allocator, packed_refs_path) catch return;
+    defer allocator.free(packed_data);
+    var new_packed = std.array_list.Managed(u8).init(allocator);
+    defer new_packed.deinit();
+    var lines_iter = std.mem.splitScalar(u8, packed_data, '\n');
+    var skip_peel = false;
+    while (lines_iter.next()) |pline| {
+        if (pline.len == 0) continue;
+        if (pline[0] == '#') {
+            new_packed.appendSlice(pline) catch {};
+            new_packed.append('\n') catch {};
+            continue;
+        }
+        if (pline[0] == '^') {
+            if (!skip_peel) {
+                new_packed.appendSlice(pline) catch {};
+                new_packed.append('\n') catch {};
+            }
+            skip_peel = false;
+            continue;
+        }
+        skip_peel = false;
+        if (pline.len > 41) {
+            const line_ref = std.mem.trimRight(u8, pline[41..], " \t\r");
+            if (std.mem.eql(u8, line_ref, ref_name)) {
+                skip_peel = true;
+                continue;
+            }
+        }
+        new_packed.appendSlice(pline) catch {};
+        new_packed.append('\n') catch {};
+    }
+    platform_impl.fs.writeFile(packed_refs_path, new_packed.items) catch {};
 }
 
 fn shouldLogRef(git_dir: []const u8, ref_name: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) bool {
@@ -11031,14 +11304,30 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                     const mode_str = parts.next() orelse continue;
                     const hash_str = parts.next() orelse continue;
                     const path = parts.next() orelse continue;
-                    try addCacheInfo(&idx, mode_str, hash_str, path, allocator);
+                    addCacheInfo(&idx, mode_str, hash_str, path, allocator) catch |err| {
+                        if (err == error.DirectoryFileConflict) {
+                            const emsg = try std.fmt.allocPrint(allocator, "error: '{s}' appears as both a file and as a directory\n", .{path});
+                            defer allocator.free(emsg);
+                            try platform_impl.writeStderr(emsg);
+                            std.process.exit(128);
+                        }
+                        return err;
+                    };
                     modified = true;
                 } else {
                     // Three separate args: mode sha1 path
                     const mode_str = info;
                     const hash_str = args.next() orelse continue;
                     const path = args.next() orelse continue;
-                    try addCacheInfo(&idx, mode_str, hash_str, path, allocator);
+                    addCacheInfo(&idx, mode_str, hash_str, path, allocator) catch |err| {
+                        if (err == error.DirectoryFileConflict) {
+                            const emsg = try std.fmt.allocPrint(allocator, "error: '{s}' appears as both a file and as a directory\n", .{path});
+                            defer allocator.free(emsg);
+                            try platform_impl.writeStderr(emsg);
+                            std.process.exit(128);
+                        }
+                        return err;
+                    };
                     modified = true;
                 }
             }
@@ -11081,7 +11370,10 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                         // It's a type: "<mode> <type> <sha1>\t<path>"
                         hash_str = parts.next() orelse continue;
                     }
-                    try addCacheInfo(&idx, mode_str, hash_str, path, allocator);
+                    addCacheInfo(&idx, mode_str, hash_str, path, allocator) catch |err| {
+                        if (err == error.DirectoryFileConflict) continue;
+                        return err;
+                    };
                     modified = true;
                 }
             }
@@ -11245,6 +11537,27 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     }
 }
 
+fn checkDFConflict(idx: *index_mod.Index, path: []const u8) bool {
+    // Check if adding this path would conflict with existing entries
+    // 1. Does an existing entry have a path that is a prefix of ours + '/'?
+    //    (i.e., the new path would be under an existing file)
+    for (idx.entries.items) |entry| {
+        // Check if existing entry is a prefix of new path (existing file blocks new dir)
+        if (path.len > entry.path.len and 
+            std.mem.startsWith(u8, path, entry.path) and 
+            path[entry.path.len] == '/') {
+            return true;
+        }
+        // Check if new path is a prefix of existing entry (new file blocks existing dir)
+        if (entry.path.len > path.len and 
+            std.mem.startsWith(u8, entry.path, path) and 
+            entry.path[path.len] == '/') {
+            return true;
+        }
+    }
+    return false;
+}
+
 fn addCacheInfo(idx: *index_mod.Index, mode_str: []const u8, hash_str: []const u8, path: []const u8, allocator: std.mem.Allocator) !void {
     const mode = std.fmt.parseInt(u32, mode_str, 8) catch 0o100644;
     
@@ -11253,6 +11566,11 @@ fn addCacheInfo(idx: *index_mod.Index, mode_str: []const u8, hash_str: []const u
     var i: usize = 0;
     while (i < 20) : (i += 1) {
         sha1[i] = std.fmt.parseInt(u8, hash_str[i * 2 .. i * 2 + 2], 16) catch 0;
+    }
+
+    // Check for directory/file conflicts  
+    if (checkDFConflict(idx, path)) {
+        return error.DirectoryFileConflict;
     }
 
     // Remove existing entry with same path
