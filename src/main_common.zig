@@ -31232,14 +31232,14 @@ fn cmdNotes(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             defer notes_commit.deinit(allocator);
             const notes_hash = try notes_commit.store(git_path, platform_impl, allocator);
             defer allocator.free(notes_hash);
-            try refs.updateRef(git_path, "notes/commits", notes_hash, platform_impl, allocator);
+            try refs.updateRef(git_path, "refs/notes/commits", notes_hash, platform_impl, allocator);
         } else {
             const empty_parents: []const []const u8 = &.{};
             const notes_commit = try objects.createCommitObject(tree_hash, empty_parents, author_str, committer_str, "Notes added by 'git notes add'", allocator);
             defer notes_commit.deinit(allocator);
             const notes_hash = try notes_commit.store(git_path, platform_impl, allocator);
             defer allocator.free(notes_hash);
-            try refs.updateRef(git_path, "notes/commits", notes_hash, platform_impl, allocator);
+            try refs.updateRef(git_path, "refs/notes/commits", notes_hash, platform_impl, allocator);
         }
     } else if (std.mem.eql(u8, subcmd, "show")) {
         const target = args.next() orelse "HEAD";
