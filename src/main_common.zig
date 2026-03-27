@@ -5104,21 +5104,39 @@ fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     };
     defer allocator.free(remote_url);
     
-    network.fetchRepository(allocator, remote_url, git_path, platform_impl) catch |err| switch (err) {
-        error.RepositoryNotFound => {
-            try platform_impl.writeStderr("fatal: repository not found\n");
+    // Try local fetch first
+    var pull_is_local = false;
+    if (std.mem.startsWith(u8, remote_url, "file://") or std.mem.startsWith(u8, remote_url, "/") or std.mem.startsWith(u8, remote_url, "./") or std.mem.startsWith(u8, remote_url, "../") or std.mem.eql(u8, remote_url, ".") or std.mem.eql(u8, remote_url, "..")) {
+        pull_is_local = true;
+    } else if (!std.mem.startsWith(u8, remote_url, "http://") and !std.mem.startsWith(u8, remote_url, "https://")) {
+        if (resolveSourceGitDir(allocator, remote_url)) |sgd| { allocator.free(sgd); pull_is_local = true; } else |_| {}
+    }
+    if (pull_is_local) {
+        const lp = if (std.mem.startsWith(u8, remote_url, "file://")) remote_url["file://".len..] else remote_url;
+        const empty_refspecs: []const []const u8 = &.{};
+        performLocalFetch(allocator, git_path, lp, remote, false, empty_refspecs, platform_impl) catch |err| {
+            const emsg = try std.fmt.allocPrint(allocator, "fatal: fetch failed: {}\n", .{err});
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
             std.process.exit(128);
-        },
-        error.InvalidUrl => {
-            try platform_impl.writeStderr("fatal: invalid remote URL\n");
-            std.process.exit(128);
-        },
-        error.HttpError => {
-            try platform_impl.writeStderr("fatal: unable to access remote repository\n");
-            std.process.exit(128);
-        },
-        else => return err,
-    };
+        };
+    } else {
+        network.fetchRepository(allocator, remote_url, git_path, platform_impl) catch |err| switch (err) {
+            error.RepositoryNotFound => {
+                try platform_impl.writeStderr("fatal: repository not found\n");
+                std.process.exit(128);
+            },
+            error.InvalidUrl => {
+                try platform_impl.writeStderr("fatal: invalid remote URL\n");
+                std.process.exit(128);
+            },
+            error.HttpError => {
+                try platform_impl.writeStderr("fatal: unable to access remote repository\n");
+                std.process.exit(128);
+            },
+            else => return err,
+        };
+    }
     
     // Now try to merge the remote branch
     const remote_branch = try std.fmt.allocPrint(allocator, "remotes/{s}/{s}", .{remote, branch});
