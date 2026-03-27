@@ -248,14 +248,8 @@ fn extractAuth(allocator: std.mem.Allocator, url: []const u8) !AuthInfo {
     }
 
     // Check GITHUB_TOKEN env var, then fall back to GIT_TOKEN
-    const env_token = std.process.getEnvVarOwned(allocator, "GITHUB_TOKEN") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => std.process.getEnvVarOwned(allocator, "GIT_TOKEN") catch |err2| switch (err2) {
-            error.EnvironmentVariableNotFound => null,
-            else => return error.OutOfMemory,
-        },
-        else => return error.OutOfMemory,
-    };
-    if (env_token) |t| {
+    // Use std.posix.getenv (no allocation) instead of getEnvVarOwned
+    if (std.posix.getenv("GITHUB_TOKEN") orelse std.posix.getenv("GIT_TOKEN")) |t| {
         return .{ .token = t, .clean_url = url, .needs_free = false };
     }
 
