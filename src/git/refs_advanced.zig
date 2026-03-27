@@ -363,7 +363,7 @@ const RefResolution = struct {
 /// Detailed information about a ref
 pub const RefInfo = struct {
     allocator: std.mem.Allocator,
-    resolution_chain: std.ArrayList([]u8),
+    resolution_chain: std.array_list.Managed([]u8),
     final_hash: ?[]u8 = null,
     is_symbolic: bool = false,
     ref_type: RefType = .unknown,
@@ -372,7 +372,7 @@ pub const RefInfo = struct {
     pub fn init(allocator: std.mem.Allocator) RefInfo {
         return RefInfo{
             .allocator = allocator,
-            .resolution_chain = std.ArrayList([]u8).init(allocator),
+            .resolution_chain = std.array_list.Managed([]u8).init(allocator),
         };
     }
     
@@ -416,12 +416,12 @@ pub const RefInfo = struct {
 /// Collection of refs
 pub const RefList = struct {
     allocator: std.mem.Allocator,
-    refs: std.ArrayList(RefEntry),
+    refs: std.array_list.Managed(RefEntry),
     
     pub fn init(allocator: std.mem.Allocator) RefList {
         return RefList{
             .allocator = allocator,
-            .refs = std.ArrayList(RefEntry).init(allocator),
+            .refs = std.array_list.Managed(RefEntry).init(allocator),
         };
     }
     
@@ -442,7 +442,7 @@ pub const RefList = struct {
     
     /// Filter refs by type
     pub fn filterByType(self: RefList, ref_type: RefType, allocator: std.mem.Allocator) ![]RefEntry {
-        var filtered = std.ArrayList(RefEntry).init(allocator);
+        var filtered = std.array_list.Managed(RefEntry).init(allocator);
         defer filtered.deinit();
         
         for (self.refs.items) |ref| {
