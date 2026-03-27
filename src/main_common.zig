@@ -8453,6 +8453,7 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     var push_all = false;
     var push_tags = false;
     var push_delete = false;
+    var push_mirror = false;
     var set_upstream = false;
     var dry_run = false;
     var verbose = false;
@@ -8461,10 +8462,13 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
             force_push = true;
-        } else if (std.mem.eql(u8, arg, "--all")) {
+        } else if (std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "--branches")) {
             push_all = true;
         } else if (std.mem.eql(u8, arg, "--tags")) {
             push_tags = true;
+        } else if (std.mem.eql(u8, arg, "--mirror")) {
+            push_mirror = true;
+            force_push = true;
         } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--delete")) {
             push_delete = true;
         } else if (std.mem.eql(u8, arg, "-u") or std.mem.eql(u8, arg, "--set-upstream")) {
@@ -8495,6 +8499,25 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
         try platform_impl.writeStderr("fatal: bad repository ''\n");
         std.process.exit(128);
     }
+
+    // Check for conflicting options
+    if (push_all and refspecs.items.len > 0) {
+        try platform_impl.writeStderr("error: --all/--branches can't be combined with refspecs\n");
+        std.process.exit(1);
+    }
+    if (push_all and push_tags) {
+        try platform_impl.writeStderr("error: --all/--branches and --tags cannot be used together\n");
+        std.process.exit(1);
+    }
+    if (push_all and push_delete) {
+        try platform_impl.writeStderr("error: --all/--branches and --delete cannot be used together\n");
+        std.process.exit(1);
+    }
+    if (push_mirror and (push_all or push_tags or push_delete)) {
+        try platform_impl.writeStderr("error: --mirror and --all/--branches/--tags/--delete cannot be used together\n");
+        std.process.exit(1);
+    }
+    if (push_mirror) push_all = true;
 
     // Resolve remote URL
     var remote_url: []const u8 = undefined;
