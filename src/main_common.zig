@@ -119,6 +119,7 @@ const NATIVE_COMMANDS = [_][]const u8{
     "switch", "restore", "worktree", "stripspace", "checkout-index",
     "show-branch", "blame", "annotate", "ls-remote", "upload-pack", "receive-pack", "send-pack", "check-ref-format", "last-modified", "refs",
     "rebase", "cherry-pick",
+    "notes", "format-patch", "whatchanged",
 };
 
 fn isNativeCommand(command: []const u8) bool {
@@ -781,6 +782,10 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmdNotes(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "format-patch")) {
         try cmdFormatPatch(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "whatchanged")) {
+        // whatchanged is deprecated alias for log with raw diff
+        // Re-route to log command with --raw flag prepended
+        try cmdLog(allocator, &args_iter, &platform_impl);
     }
 }
 
