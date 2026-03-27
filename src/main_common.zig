@@ -9725,6 +9725,10 @@ fn configSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_a
             const cs2 = try formatConfigComment(comment, allocator);
             defer allocator.free(cs2);
             try insert_result.appendSlice(result.items[0..last_line_in_section_end]);
+            // Ensure there's a newline before the new entry
+            if (last_line_in_section_end > 0 and result.items[last_line_in_section_end - 1] != '\n') {
+                try insert_result.append('\n');
+            }
             try insert_result.appendSlice("\t");
             try insert_result.appendSlice(key_part);
             try insert_result.appendSlice(" = ");
@@ -9739,6 +9743,10 @@ fn configSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_a
             return;
         } else {
             // Add new section at end
+            // Ensure there's a newline before the new section
+            if (result.items.len > 0 and result.items[result.items.len - 1] != '\n') {
+                try result.append('\n');
+            }
             const section_header = try formatSectionHeader(section_part, allocator);
             defer allocator.free(section_header);
             try result.appendSlice("[");
