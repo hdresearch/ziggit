@@ -53,6 +53,7 @@ const NATIVE_COMMANDS = [_][]const u8{
     "diff-tree", "diff-index", "var", "show-index", "prune-packed",
     "verify-commit", "verify-tag", "mv", "stash", "apply",
     "column", "check-ignore", "check-attr",
+    "switch", "restore", "worktree", "stripspace", "checkout-index",
 };
 
 fn isNativeCommand(command: []const u8) bool {
@@ -588,6 +589,14 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try nativeCmdCheckIgnore(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "check-attr")) {
         try nativeCmdCheckAttr(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "switch")) {
+        try cmdSwitch(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "restore")) {
+        try cmdRestore(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "worktree")) {
+        try cmdWorktree(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "stripspace")) {
+        try cmdStripspace(allocator, &args_iter, &platform_impl);
     }
 }
 
@@ -3215,20 +3224,22 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         std.fs.cwd().deleteFile(ref_path) catch {};
         
         // Create the branch
-        refs.createBranch(git_path, branch_name, start_point, platform_impl, allocator) catch |err| switch (err) {
-            error.NoCommitsYet => {
-                // For -B on empty repo, just set HEAD
-                const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
-                defer allocator.free(head_path);
-                const ref_content = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{branch_name});
-                defer allocator.free(ref_content);
-                platform_impl.fs.writeFile(head_path, ref_content) catch {};
-                const reset_msg = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
-                defer allocator.free(reset_msg);
-                try platform_impl.writeStderr(reset_msg);
-                return;
-            },
-            else => return err,
+        refs.createBranch(git_path, branch_name, start_point, platform_impl, allocator) catch |err| {
+            // For -B on empty repo (no commits yet), just set HEAD
+            switch (err) {
+                error.NoCommitsYet, error.RefNotFound, error.FileNotFound => {
+                    const head_path2 = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+                    defer allocator.free(head_path2);
+                    const ref_content = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{branch_name});
+                    defer allocator.free(ref_content);
+                    platform_impl.fs.writeFile(head_path2, ref_content) catch {};
+                    const reset_msg2 = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
+                    defer allocator.free(reset_msg2);
+                    try platform_impl.writeStderr(reset_msg2);
+                    return;
+                },
+                else => return err,
+            }
         };
         
         // Switch to the branch
@@ -5651,6 +5662,14 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     if (do_set or do_add or (!do_get and !do_get_all and !do_get_regexp and !do_unset and !do_unset_all and positionals.items.len >= 2 and !std.mem.startsWith(u8, positionals.items[0], "-"))) {
         const key = positionals.items[0];
         const value = positionals.items[1];
+        
+        // Validate config key format
+        if (!isValidConfigKey(key)) {
+            const emsg = try std.fmt.allocPrint(allocator, "error: invalid key: {s}\n", .{key});
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
+            std.process.exit(1);
+        }
         // Find config file to write
         const cfg_path = if (config_file) |cf|
             try allocator.dupe(u8, cf)
@@ -5970,6 +5989,33 @@ fn parseConfigGetAll(content: []const u8, key: []const u8, results: *std.array_l
             }
         }
     }
+}
+
+fn isValidConfigKey(key: []const u8) bool {
+    // Format: section[.subsection].variable
+    // Section: must start with letter, contain only alphanumeric and dash
+    // Variable: must start with letter, contain only alphanumeric and dash
+    const dot = std.mem.indexOfScalar(u8, key, '.') orelse return false;
+    if (dot == 0) return false;
+    
+    // Section must start with letter
+    if (!std.ascii.isAlphabetic(key[0])) return false;
+    for (key[0..dot]) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '-') return false;
+    }
+    
+    // Find the last dot - variable name is after it
+    const last_dot = std.mem.lastIndexOfScalar(u8, key, '.') orelse return false;
+    if (last_dot + 1 >= key.len) return false;
+    
+    // Variable must start with letter
+    const var_name = key[last_dot + 1 ..];
+    if (!std.ascii.isAlphabetic(var_name[0])) return false;
+    for (var_name) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '-') return false;
+    }
+    
+    return true;
 }
 
 fn configSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
@@ -10476,16 +10522,23 @@ fn cmdHashObject(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     var files = std.array_list.Managed([]const u8).init(allocator);
     defer files.deinit();
     var literally = false;
+    var path_opt: ?[]const u8 = null;
+    var stdin_count: u32 = 0;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-w")) {
             write_object = true;
         } else if (std.mem.eql(u8, arg, "--stdin")) {
             stdin_mode = true;
+            stdin_count += 1;
         } else if (std.mem.eql(u8, arg, "--stdin-paths")) {
             stdin_paths = true;
         } else if (std.mem.eql(u8, arg, "--literally")) {
             literally = true;
+        } else if (std.mem.eql(u8, arg, "--path")) {
+            path_opt = args.next();
+        } else if (std.mem.startsWith(u8, arg, "--path=")) {
+            path_opt = arg["--path=".len..];
         } else if (std.mem.eql(u8, arg, "-t")) {
             obj_type = args.next() orelse {
                 try platform_impl.writeStderr("fatal: option '-t' requires a value\n");
@@ -10497,6 +10550,24 @@ fn cmdHashObject(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             try files.append(arg);
         }
+    }
+
+    // Validate mutually exclusive options
+    if (stdin_count > 1) {
+        try platform_impl.writeStderr("fatal: --stdin given twice\n");
+        std.process.exit(128);
+    }
+    if (stdin_mode and stdin_paths) {
+        try platform_impl.writeStderr("fatal: --stdin and --stdin-paths are mutually exclusive\n");
+        std.process.exit(128);
+    }
+    if (stdin_paths and files.items.len > 0) {
+        try platform_impl.writeStderr("fatal: Can't use --stdin-paths with file arguments\n");
+        std.process.exit(128);
+    }
+    if (path_opt != null and stdin_paths) {
+        try platform_impl.writeStderr("fatal: Can't use --path with --stdin-paths\n");
+        std.process.exit(128);
     }
 
     const git_dir = if (write_object) (findGitDirectory(allocator, platform_impl) catch {
@@ -10520,13 +10591,17 @@ fn cmdHashObject(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             try hashOneFile(allocator, trimmed, obj_type, write_object, git_dir, platform_impl);
         }
     } else if (stdin_mode) {
-        // Read data from stdin
+        // Read data from stdin first
         const data = std.fs.File.stdin().readToEndAlloc(allocator, 100 * 1024 * 1024) catch {
             std.process.exit(128);
             unreachable;
         };
         defer allocator.free(data);
         try hashData(allocator, data, obj_type, write_object, git_dir, platform_impl);
+        // Then process any file arguments
+        for (files.items) |file_path| {
+            try hashOneFile(allocator, file_path, obj_type, write_object, git_dir, platform_impl);
+        }
     } else if (files.items.len > 0) {
         for (files.items) |file_path| {
             try hashOneFile(allocator, file_path, obj_type, write_object, git_dir, platform_impl);
@@ -18216,4 +18291,309 @@ fn buildTreeMap(tree_hash: []const u8, prefix: []const u8, git_path: []const u8,
         
         i = hash_start + 20;
     }
+}
+
+fn cmdSwitch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    if (@import("builtin").target.os.tag == .freestanding) {
+        try platform_impl.writeStderr("switch: not supported in freestanding mode\n");
+        return;
+    }
+    
+    var create_branch: ?[]const u8 = null;
+    var force_create: ?[]const u8 = null;
+    var detach = false;
+    var orphan: ?[]const u8 = null;
+    var target: ?[]const u8 = null;
+    var discard_changes = false;
+    
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "--create")) {
+            create_branch = args.next();
+        } else if (std.mem.startsWith(u8, arg, "-c") and arg.len > 2 and arg[1] == 'c') {
+            // This doesn't make sense, skip
+        } else if (std.mem.eql(u8, arg, "-C") or std.mem.eql(u8, arg, "--force-create")) {
+            force_create = args.next();
+        } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--detach")) {
+            detach = true;
+        } else if (std.mem.eql(u8, arg, "--orphan")) {
+            orphan = args.next();
+        } else if (std.mem.eql(u8, arg, "--discard-changes") or std.mem.eql(u8, arg, "--force") or std.mem.eql(u8, arg, "-f")) {
+            discard_changes = true;
+        } else if (std.mem.eql(u8, arg, "--guess") or std.mem.eql(u8, arg, "--no-guess") or std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
+            // ignore
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            if (target == null) target = arg;
+        }
+    }
+
+    
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+    
+    if (orphan) |orphan_name| {
+        // Create orphan branch
+        const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+        defer allocator.free(head_path);
+        const ref_content = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{orphan_name});
+        defer allocator.free(ref_content);
+        platform_impl.fs.writeFile(head_path, ref_content) catch {};
+        // Remove index
+        const index_path = try std.fmt.allocPrint(allocator, "{s}/index", .{git_path});
+        defer allocator.free(index_path);
+        std.fs.cwd().deleteFile(index_path) catch {};
+        const msg = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{orphan_name});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        return;
+    }
+    
+    if (create_branch) |branch_name| {
+        refs.createBranch(git_path, branch_name, target, platform_impl, allocator) catch |err| {
+            switch (err) {
+                error.NoCommitsYet, error.RefNotFound, error.FileNotFound => {
+                    const head_path2 = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+                    defer allocator.free(head_path2);
+                    const ref_content2 = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{branch_name});
+                    defer allocator.free(ref_content2);
+                    platform_impl.fs.writeFile(head_path2, ref_content2) catch {};
+                    const msg2 = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
+                    defer allocator.free(msg2);
+                    try platform_impl.writeStderr(msg2);
+                    return;
+                },
+                else => return err,
+            }
+        };
+        refs.updateHEAD(git_path, branch_name, platform_impl, allocator) catch {};
+        const msg = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        return;
+    }
+    
+    if (force_create) |branch_name| {
+        // Delete existing branch if it exists
+        const ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, branch_name });
+        defer allocator.free(ref_path);
+        std.fs.cwd().deleteFile(ref_path) catch {};
+        
+        refs.createBranch(git_path, branch_name, target, platform_impl, allocator) catch |err| {
+            switch (err) {
+                error.NoCommitsYet, error.RefNotFound, error.FileNotFound => {
+                    const head_path2 = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+                    defer allocator.free(head_path2);
+                    const ref_content2 = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{branch_name});
+                    defer allocator.free(ref_content2);
+                    platform_impl.fs.writeFile(head_path2, ref_content2) catch {};
+                    const msg2 = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
+                    defer allocator.free(msg2);
+                    try platform_impl.writeStderr(msg2);
+                    return;
+                },
+                else => return err,
+            }
+        };
+        refs.updateHEAD(git_path, branch_name, platform_impl, allocator) catch {};
+        const msg = try std.fmt.allocPrint(allocator, "Switched to and reset branch '{s}'\n", .{branch_name});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        return;
+    }
+    
+    if (detach) {
+        const t = target orelse {
+            try platform_impl.writeStderr("fatal: missing branch or commit argument\n");
+            std.process.exit(128);
+        };
+        const hash = resolveRevision(git_path, t, platform_impl, allocator) catch {
+            const emsg = try std.fmt.allocPrint(allocator, "fatal: invalid reference: {s}\n", .{t});
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
+            std.process.exit(128);
+        };
+        defer allocator.free(hash);
+        try checkoutCommitTree(git_path, hash, allocator, platform_impl);
+        const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+        defer allocator.free(head_path);
+        const head_content = try std.fmt.allocPrint(allocator, "{s}\n", .{hash});
+        defer allocator.free(head_content);
+        platform_impl.fs.writeFile(head_path, head_content) catch {};
+        return;
+    }
+    
+    // Default: switch to existing branch
+    if (target) |t| {
+        refs.updateHEAD(git_path, t, platform_impl, allocator) catch {};
+        // Checkout files
+        if (refs.resolveRef(git_path, "HEAD", platform_impl, allocator) catch null) |head_hash| {
+            defer allocator.free(head_hash);
+            checkoutCommitTree(git_path, head_hash, allocator, platform_impl) catch {};
+        }
+        const msg = try std.fmt.allocPrint(allocator, "Switched to branch '{s}'\n", .{t});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+    } else {
+        try platform_impl.writeStderr("fatal: missing branch or commit argument\n");
+        std.process.exit(128);
+    }
+}
+
+fn cmdRestore(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    // Basic restore command - restore working tree files
+    var source: ?[]const u8 = null;
+    var staged = false;
+    var worktree = true;
+    var paths = std.array_list.Managed([]const u8).init(allocator);
+    defer paths.deinit();
+    var seen_separator = false;
+    
+    while (args.next()) |arg| {
+        if (seen_separator) {
+            try paths.append(arg);
+        } else if (std.mem.eql(u8, arg, "--")) {
+            seen_separator = true;
+        } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--source")) {
+            source = args.next();
+        } else if (std.mem.startsWith(u8, arg, "--source=")) {
+            source = arg["--source=".len..];
+        } else if (std.mem.eql(u8, arg, "-S") or std.mem.eql(u8, arg, "--staged")) {
+            staged = true;
+        } else if (std.mem.eql(u8, arg, "-W") or std.mem.eql(u8, arg, "--worktree")) {
+            worktree = true;
+        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
+            // quiet
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            try paths.append(arg);
+        }
+    }
+
+
+
+    
+    if (paths.items.len == 0) {
+        try platform_impl.writeStderr("fatal: you must specify path(s) to restore\n");
+        std.process.exit(128);
+    }
+    
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+    
+    // Restore files from index to working tree
+    var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch return;
+    defer idx.deinit();
+    
+    for (paths.items) |path| {
+        for (idx.entries.items) |entry| {
+            if (std.mem.eql(u8, entry.path, path)) {
+                // Load blob and write to working tree
+                var hash_hex: [40]u8 = undefined;
+                for (entry.sha1, 0..) |byte, bi| {
+                    hash_hex[bi * 2] = "0123456789abcdef"[byte >> 4];
+                    hash_hex[bi * 2 + 1] = "0123456789abcdef"[byte & 0xf];
+                }
+                const blob = objects.GitObject.load(&hash_hex, git_path, platform_impl, allocator) catch continue;
+                defer blob.deinit(allocator);
+                const repo_root = std.fs.path.dirname(git_path) orelse ".";
+                const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path });
+                defer allocator.free(full_path);
+                platform_impl.fs.writeFile(full_path, blob.data) catch {};
+                break;
+            }
+        }
+    }
+}
+
+fn cmdWorktree(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    const subcmd = args.next() orelse {
+        try platform_impl.writeStderr("usage: git worktree add <path> [<branch>]\n       git worktree list\n       git worktree remove <path>\n");
+        std.process.exit(129);
+    };
+    _ = allocator;
+    
+    if (std.mem.eql(u8, subcmd, "add") or std.mem.eql(u8, subcmd, "list") or 
+        std.mem.eql(u8, subcmd, "remove") or std.mem.eql(u8, subcmd, "prune") or
+        std.mem.eql(u8, subcmd, "lock") or std.mem.eql(u8, subcmd, "unlock") or
+        std.mem.eql(u8, subcmd, "move") or std.mem.eql(u8, subcmd, "repair")) {
+        try platform_impl.writeStderr("fatal: worktree command not yet implemented in ziggit\n");
+        std.process.exit(128);
+    } else {
+        try platform_impl.writeStderr("fatal: unknown worktree subcommand\n");
+        std.process.exit(129);
+    }
+}
+
+fn cmdStripspace(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    var strip_comments = false;
+    var comment_lines = false;
+    const comment_char: u8 = '#';
+    
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--strip-comments")) {
+            strip_comments = true;
+        } else if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "--comment-lines")) {
+            comment_lines = true;
+        }
+    }
+    _ = comment_char;
+    
+    const stdin_data = readStdin(allocator, 10 * 1024 * 1024) catch {
+        return;
+    };
+    defer allocator.free(stdin_data);
+    
+    if (comment_lines) {
+        // Prefix each line with "# "
+        var lines = std.mem.splitScalar(u8, stdin_data, '\n');
+        var first = true;
+        while (lines.next()) |line| {
+            if (!first) try platform_impl.writeStdout("\n");
+            first = false;
+            if (line.len == 0) {
+                try platform_impl.writeStdout("#\n");
+            } else {
+                const out = try std.fmt.allocPrint(allocator, "# {s}", .{line});
+                defer allocator.free(out);
+                try platform_impl.writeStdout(out);
+            }
+        }
+        return;
+    }
+    
+    // Strip trailing whitespace, collapse blank lines, strip comments
+    var result = std.array_list.Managed(u8).init(allocator);
+    defer result.deinit();
+    var blank_count: u32 = 0;
+    var lines = std.mem.splitScalar(u8, stdin_data, '\n');
+    var has_content = false;
+    
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trimRight(u8, line, " \t\r");
+        
+        if (strip_comments and trimmed.len > 0 and trimmed[0] == '#') {
+            continue; // skip comment lines
+        }
+        
+        if (trimmed.len == 0) {
+            blank_count += 1;
+            continue;
+        }
+        
+        // Add at most one blank line between content
+        if (has_content and blank_count > 0) {
+            try result.append('\n');
+        }
+        blank_count = 0;
+        has_content = true;
+        
+        try result.appendSlice(trimmed);
+        try result.append('\n');
+    }
+    
+    try platform_impl.writeStdout(result.items);
 }
