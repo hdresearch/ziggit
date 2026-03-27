@@ -13166,19 +13166,7 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         }
     }
 
-    // Get current HEAD commit
-    const head_hash = refs.getCurrentCommit(git_path, platform_impl, allocator) catch {
-        try platform_impl.writeStderr("fatal: no commits yet\n");
-        std.process.exit(128);
-    };
-    defer if (head_hash) |hash| allocator.free(hash);
-    
-    if (head_hash == null) {
-        try platform_impl.writeStderr("fatal: no commits yet\n");
-        std.process.exit(128);
-    }
-
-    // Resolve target ref if specified
+    // Resolve target ref if specified, otherwise use HEAD
     const commit_hash = if (target_ref) |tr|
         resolveRevision(git_path, tr, platform_impl, allocator) catch {
             const msg = try std.fmt.allocPrint(allocator, "fatal: not a valid object name: '{s}'\n", .{tr});
@@ -13187,8 +13175,17 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             std.process.exit(128);
             unreachable;
         }
-    else
-        try allocator.dupe(u8, head_hash.?);
+    else blk: {
+        const head_hash = refs.getCurrentCommit(git_path, platform_impl, allocator) catch {
+            try platform_impl.writeStderr("fatal: no commits yet\n");
+            std.process.exit(128);
+            unreachable;
+        };
+        if (head_hash) |h| break :blk h;
+        try platform_impl.writeStderr("fatal: no commits yet\n");
+        std.process.exit(128);
+        unreachable;
+    };
     defer allocator.free(commit_hash);
 
     // Create tags directory if it doesn't exist
@@ -13295,10 +13292,22 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         }
         const final_msg = cleaned_msg.items;
 
+        // Detect the object type
+        const obj_type_str: []const u8 = blk_type: {
+            const obj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch break :blk_type "commit";
+            defer obj.deinit(allocator);
+            break :blk_type switch (obj.type) {
+                .blob => "blob",
+                .tree => "tree",
+                .commit => "commit",
+                .tag => "tag",
+            };
+        };
+
         const tag_content = if (final_msg.len == 0)
-            try std.fmt.allocPrint(allocator, "object {s}\ntype commit\ntag {s}\ntagger {s} <{s}> {d} {s}\n\n", .{ commit_hash, tag_name.?, tagger_name, tagger_email, timestamp, tz_str })
+            try std.fmt.allocPrint(allocator, "object {s}\ntype {s}\ntag {s}\ntagger {s} <{s}> {d} {s}\n\n", .{ commit_hash, obj_type_str, tag_name.?, tagger_name, tagger_email, timestamp, tz_str })
         else
-            try std.fmt.allocPrint(allocator, "object {s}\ntype commit\ntag {s}\ntagger {s} <{s}> {d} {s}\n\n{s}\n", .{ commit_hash, tag_name.?, tagger_name, tagger_email, timestamp, tz_str, final_msg });
+            try std.fmt.allocPrint(allocator, "object {s}\ntype {s}\ntag {s}\ntagger {s} <{s}> {d} {s}\n\n{s}\n", .{ commit_hash, obj_type_str, tag_name.?, tagger_name, tagger_email, timestamp, tz_str, final_msg });
         defer allocator.free(tag_content);
         
         // Hash and write tag object
@@ -13387,7 +13396,18 @@ fn cmdShow(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
         } else if (std.mem.startsWith(u8, arg, "--pretty=")) {
             pretty_format = arg[9..];
         } else if (std.mem.startsWith(u8, arg, "--format=")) {
-            pretty_format = arg[9..];
+            // --format=<str> is equivalent to --pretty=tformat:<str>
+            const fmt_val = arg[9..];
+            if (std.mem.startsWith(u8, fmt_val, "format:") or std.mem.startsWith(u8, fmt_val, "tformat:") or
+                std.mem.eql(u8, fmt_val, "oneline") or std.mem.eql(u8, fmt_val, "short") or
+                std.mem.eql(u8, fmt_val, "medium") or std.mem.eql(u8, fmt_val, "full") or
+                std.mem.eql(u8, fmt_val, "fuller") or std.mem.eql(u8, fmt_val, "raw")) {
+                pretty_format = fmt_val;
+            } else {
+                // Wrap in tformat: prefix for custom format strings
+                const wrapped = std.fmt.allocPrint(allocator, "tformat:{s}", .{fmt_val}) catch fmt_val;
+                pretty_format = wrapped;
+            }
         } else if (std.mem.eql(u8, arg, "--")) {
             // skip
         } else if (!std.mem.startsWith(u8, arg, "-")) {
