@@ -14718,18 +14718,40 @@ fn cmdSymbolicRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     const ref_name = positional.items[0];
 
     if (delete) {
-        // Delete the symbolic ref by removing the file
-        const ref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_name }) catch {
-            std.process.exit(128);
+        // Delete the symbolic ref
+        if (std.mem.eql(u8, ref_name, "HEAD")) {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: Cannot delete HEAD\n", .{});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(1);
+            unreachable;
+        }
+        const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_name });
+        defer allocator.free(ref_path);
+        // Check if it exists and is a symbolic ref
+        const content = platform_impl.fs.readFile(allocator, ref_path) catch {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: Cannot delete {s}, not a symbolic ref\n", .{ref_name});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(1);
             unreachable;
         };
-        defer allocator.free(ref_path);
+        defer allocator.free(content);
+        if (!std.mem.startsWith(u8, content, "ref: ")) {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: Cannot delete {s}, not a symbolic ref\n", .{ref_name});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(1);
+            unreachable;
+        }
         std.fs.cwd().deleteFile(ref_path) catch {
             if (!quiet) {
-                const msg = std.fmt.allocPrint(allocator, "fatal: Cannot delete {s}\n", .{ref_name}) catch "fatal: Cannot delete ref\n";
+                const msg = try std.fmt.allocPrint(allocator, "fatal: Cannot delete {s}\n", .{ref_name});
+                defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
             }
             std.process.exit(1);
+            unreachable;
         };
         return;
     }
@@ -14737,6 +14759,25 @@ fn cmdSymbolicRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     if (positional.items.len >= 2) {
         // Write mode: symbolic-ref <name> <ref>
         const target = positional.items[1];
+        
+        // Validate target
+        if (std.mem.eql(u8, ref_name, "HEAD")) {
+            if (!std.mem.startsWith(u8, target, "refs/")) {
+                try platform_impl.writeStderr("fatal: Refusing to point HEAD outside of refs/\n");
+                std.process.exit(1);
+                unreachable;
+            }
+        } else {
+            // For non-HEAD, validate that target is a valid ref name
+            if (!checkRefFormatValid_crf(target, true, false, false)) {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: Refusing to set '{s}' to invalid ref '{s}'\n", .{ ref_name, target });
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(1);
+                unreachable;
+            }
+        }
+        
         const ref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_name }) catch {
             std.process.exit(128);
             unreachable;
@@ -14804,7 +14845,15 @@ fn cmdSymbolicRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         } else if (std.mem.startsWith(u8, target, "refs/tags/")) {
             output = target["refs/tags/".len..];
         } else if (std.mem.startsWith(u8, target, "refs/remotes/")) {
-            output = target["refs/remotes/".len..];
+            const rest = target["refs/remotes/".len..];
+            // For refs/remotes/X/HEAD, shorten to X
+            if (std.mem.endsWith(u8, rest, "/HEAD")) {
+                output = rest[0 .. rest.len - "/HEAD".len];
+            } else {
+                output = rest;
+            }
+        } else if (std.mem.startsWith(u8, target, "refs/")) {
+            output = target["refs/".len..];
         } else {
             output = target;
         }
