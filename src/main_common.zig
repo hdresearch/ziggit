@@ -22280,11 +22280,21 @@ fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
             stdin_z = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             // quiet mode
+        } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            try platform_impl.writeStdout("usage: git checkout-index [<options>] [--] [<file>...]\n\n    -u, --index           update stat information in the index file\n    -q, --quiet           be quiet if files exist or are not in the index\n    -f, --force           force overwrite of existing files\n    -a, --all             check out all files in the index\n    -n, --no-create       don't checkout new files\n    --temp                write the content to temporary files\n    --prefix <string>     when creating files, prepend <string>\n    --stage <number>      copy out the files from named stage\n    --stdin               read list of paths from the standard input\n    -z                    paths are separated with NUL character\n");
+            std.process.exit(129);
+            unreachable;
         } else if (std.mem.eql(u8, arg, "--")) {
             while (args.next()) |p| {
                 try paths.append(p);
             }
-        } else if (arg.len > 0 and arg[0] != '-') {
+        } else if (arg.len > 0 and arg[0] == '-') {
+            const msg = try std.fmt.allocPrint(allocator, "error: unknown option '{s}'\nusage: git checkout-index [<options>] [--] [<file>...]\n", .{arg});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(129);
+            unreachable;
+        } else {
             try paths.append(arg);
         }
     }
@@ -22304,6 +22314,21 @@ fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
         unreachable;
     };
     defer idx.deinit();
+
+    // Read core.symlinks config (default true)
+    var core_symlinks = true;
+    {
+        var cfg = config_mod.GitConfig.init(allocator);
+        defer cfg.deinit();
+        const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_dir}) catch "";
+        defer if (config_path.len > 0) allocator.free(config_path);
+        cfg.parseFromFile(config_path) catch {};
+        if (cfg.get("core", null, "symlinks")) |val| {
+            if (std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "0")) {
+                core_symlinks = false;
+            }
+        }
+    }
 
     // Read paths from stdin if requested
     if (stdin_mode) {
@@ -22385,7 +22410,7 @@ fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
         const is_symlink = (entry.mode & 0o170000) == 0o120000;
         const is_executable = (entry.mode & 0o100) != 0;
 
-        if (is_symlink) {
+        if (is_symlink and core_symlinks) {
             // Remove existing file/symlink first
             std.fs.cwd().deleteFile(out_path) catch {};
             std.fs.cwd().symLink(content, out_path, .{}) catch |err| {
