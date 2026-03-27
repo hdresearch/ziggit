@@ -1,11 +1,18 @@
 const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
+const wildmatch_mod = @import("wildmatch.zig");
 
 /// Global config overrides from -c key=value command line options
 pub var global_config_overrides: ?std.array_list.Managed(ConfigOverride) = null;
 
 /// Global --git-dir override
 var global_git_dir_override: ?[]const u8 = null;
+
+/// Global pathspec flags (set from --glob-pathspecs, --icase-pathspecs, etc.)
+var global_glob_pathspecs: bool = false;
+var global_icase_pathspecs: bool = false;
+var global_literal_pathspecs: bool = false;
+var global_noglob_pathspecs: bool = false;
 
 const ConfigOverride = struct {
     key: []const u8,
@@ -256,6 +263,11 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                    std.mem.eql(u8, arg, "--no-lazy-fetch") or
                    std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--paginate") or
                    std.mem.eql(u8, arg, "-P") or std.mem.eql(u8, arg, "--no-pager")) {
+            // Track pathspec global flags
+            if (std.mem.eql(u8, arg, "--glob-pathspecs")) global_glob_pathspecs = true;
+            if (std.mem.eql(u8, arg, "--noglob-pathspecs")) global_noglob_pathspecs = true;
+            if (std.mem.eql(u8, arg, "--icase-pathspecs")) global_icase_pathspecs = true;
+            if (std.mem.eql(u8, arg, "--literal-pathspecs")) global_literal_pathspecs = true;
             // Global flags with = form, or boolean global flags
             command_index += 1;
         } else {
@@ -1074,6 +1086,59 @@ fn scanDirectoryForUntrackedFiles(
             else => continue,
         }
     }
+}
+
+/// Match a pathspec against a path, using global pathspec flags.
+/// Used by ls-files with --glob-pathspecs, --icase-pathspecs, etc.
+fn matchPathspec(path: []const u8, pathspec: []const u8) bool {
+    const use_glob = global_glob_pathspecs and !global_literal_pathspecs;
+    const use_icase = global_icase_pathspecs;
+
+    if (use_glob) {
+        // In glob mode, use wildmatch for pattern matching
+        var flags: u32 = wildmatch_mod.WM_PATHNAME;
+        if (use_icase) flags |= wildmatch_mod.WM_CASEFOLD;
+
+        // Direct wildmatch
+        if (wildmatch_mod.wildmatch(pathspec, path, flags) == wildmatch_mod.WM_MATCH) return true;
+
+        // If pathspec has no glob chars, also try prefix match (pathspec is a directory prefix)
+        const has_glob_chars = std.mem.indexOfAny(u8, pathspec, "*?[\\") != null;
+        if (!has_glob_chars) {
+            // Exact match or prefix match
+            if (use_icase) {
+                if (eqlIgnoreCase(path, pathspec)) return true;
+                if (path.len > pathspec.len and path[pathspec.len] == '/' and
+                    eqlIgnoreCase(path[0..pathspec.len], pathspec)) return true;
+            } else {
+                if (std.mem.eql(u8, path, pathspec)) return true;
+                if (std.mem.startsWith(u8, path, pathspec) and path.len > pathspec.len and path[pathspec.len] == '/') return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Non-glob mode: literal/prefix matching
+    if (use_icase) {
+        if (eqlIgnoreCase(path, pathspec)) return true;
+        if (path.len > pathspec.len and path[pathspec.len] == '/' and
+            eqlIgnoreCase(path[0..pathspec.len], pathspec)) return true;
+    } else {
+        if (std.mem.eql(u8, path, pathspec)) return true;
+        if (std.mem.startsWith(u8, path, pathspec) and path.len > pathspec.len and path[pathspec.len] == '/') return true;
+    }
+    return false;
+}
+
+fn eqlIgnoreCase(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |ca, cb| {
+        const la: u8 = if (ca >= 'A' and ca <= 'Z') ca + 32 else ca;
+        const lb: u8 = if (cb >= 'A' and cb <= 'Z') cb + 32 else cb;
+        if (la != lb) return false;
+    }
+    return true;
 }
 
 /// Check if a pathspec (which may contain globs) matches a path.
@@ -13623,13 +13688,12 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             @memset(pathspec_matched.?, false);
         }
 
+        const terminator_cached: []const u8 = if (z_terminator) "\x00" else "\n";
         for (index.entries.items) |entry| {
             if (effective_pathspecs.len > 0) {
                 var matches = false;
                 for (effective_pathspecs, 0..) |ps, pi| {
-                    if (std.mem.eql(u8, entry.path, ps) or
-                        (std.mem.startsWith(u8, entry.path, ps) and entry.path.len > ps.len and entry.path[ps.len] == '/'))
-                    {
+                    if (matchPathspec(entry.path, ps)) {
                         matches = true;
                         if (pathspec_matched) |pm| pm[pi] = true;
                         break;
@@ -13650,25 +13714,25 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
                 defer allocator.free(hash_str);
                 const stage_num = (entry.flags >> 12) & 0x3;
-                const quoted = try cQuotePath(allocator, entry.path, true);
+                const quoted = if (z_terminator) try allocator.dupe(u8, entry.path) else try cQuotePath(allocator, entry.path, true);
                 defer allocator.free(quoted);
                 const tag_prefix: []const u8 = if (tag_flag) blk_tag: {
                     const has_skip_wt = if (entry.extended_flags) |ef| (ef & 0x4000 != 0) else (entry.flags & 0x4000 != 0);
                     const is_assume_unchanged = (entry.flags & 0x8000) != 0;
                     if (has_skip_wt) break :blk_tag "S " else if (verbose_flag and is_assume_unchanged) break :blk_tag "h " else break :blk_tag "H ";
                 } else "";
-                const output = try std.fmt.allocPrint(allocator, "{s}{o} {s} {d}\t{s}\n", .{ tag_prefix, entry.mode, hash_str, stage_num, quoted });
+                const output = try std.fmt.allocPrint(allocator, "{s}{o} {s} {d}\t{s}{s}", .{ tag_prefix, entry.mode, hash_str, stage_num, quoted, terminator_cached });
                 defer allocator.free(output);
                 try platform_impl.writeStdout(output);
             } else {
-                const quoted = try cQuotePath(allocator, entry.path, true);
+                const quoted = if (z_terminator) try allocator.dupe(u8, entry.path) else try cQuotePath(allocator, entry.path, true);
                 defer allocator.free(quoted);
                 const tag_prefix: []const u8 = if (tag_flag) blk_tag2: {
                     const has_skip_wt = if (entry.extended_flags) |ef| (ef & 0x4000 != 0) else (entry.flags & 0x4000 != 0);
                     const is_assume_unchanged2 = (entry.flags & 0x8000) != 0;
                     if (has_skip_wt) break :blk_tag2 "S " else if (verbose_flag and is_assume_unchanged2) break :blk_tag2 "h " else break :blk_tag2 "H ";
                 } else "";
-                const output = try std.fmt.allocPrint(allocator, "{s}{s}\n", .{ tag_prefix, quoted });
+                const output = try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ tag_prefix, quoted, terminator_cached });
                 defer allocator.free(output);
                 try platform_impl.writeStdout(output);
             }
