@@ -267,7 +267,7 @@ fn downloadObjects(protocol: DumbHttpProtocol, start_hash: []const u8, git_dir: 
     try to_download.append(try allocator.dupe(u8, start_hash));
     
     while (to_download.items.len > 0) {
-        const hash = to_download.pop() orelse continue;
+        const hash = to_download.pop() orelse break;
         defer allocator.free(hash);
         
         if (visited.contains(hash)) continue;

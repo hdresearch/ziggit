@@ -1724,7 +1724,7 @@ fn copyTemplateDir(git_dir: []const u8, template_path: []const u8, allocator: st
     }
 }
 
-fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8, _: ?[]const u8, _: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8, initial_branch: ?[]const u8, quiet: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     
     const git_dir = if (bare) 
         try allocator.dupe(u8, path)
