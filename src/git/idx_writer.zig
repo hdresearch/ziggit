@@ -84,11 +84,15 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
     // Uses libdeflate for one-shot decompression (2-4x faster than zlib
     // streaming) with zlib fallback for edge cases.
     // ═══════════════════════════════════════════════════════════════════
+    const ld = @cImport({
+        @cInclude("libdeflate.h");
+    });
     const zc = @cImport({
         @cInclude("zlib.h");
     });
-    const decompressor: ?*anyopaque = null;
-    _ = decompressor;
+
+    const decompressor = ld.libdeflate_alloc_decompressor();
+    defer if (decompressor) |d| ld.libdeflate_free_decompressor(d);
 
     // Reusable decompression buffer for base objects.
     // Starts at 64KB and grows as needed. Avoids per-object allocation.
@@ -130,9 +134,24 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
                 decomp_buf_ptr = try allocator.alloc(u8, decomp_buf_cap);
             }
 
-            const actual_in: usize = 0;
-            const actual_out: usize = 0;
-            const decomp_ok = false;
+            var actual_in: usize = 0;
+            var actual_out: usize = 0;
+            var decomp_ok = false;
+
+            if (decompressor) |d| {
+                const ret = ld.libdeflate_zlib_decompress_ex(
+                    d,
+                    @ptrCast(pack_data[comp_start..].ptr),
+                    in_avail,
+                    @ptrCast(decomp_buf_ptr.ptr),
+                    hdr.size,
+                    &actual_in,
+                    &actual_out,
+                );
+                if (ret == ld.LIBDEFLATE_SUCCESS and actual_out == hdr.size) {
+                    decomp_ok = true;
+                }
+            }
 
             if (decomp_ok) {
                 pos = comp_start + actual_in;
@@ -242,7 +261,21 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
             var actual_in: usize = 0;
             var skip_ok = false;
 
-            // libdeflate not available
+            if (decompressor != null and hdr.size <= decomp_buf_cap) {
+                var actual_out: usize = 0;
+                const ret = ld.libdeflate_zlib_decompress_ex(
+                    decompressor.?,
+                    @ptrCast(pack_data[comp_start..].ptr),
+                    in_avail,
+                    @ptrCast(decomp_buf_ptr.ptr),
+                    hdr.size,
+                    &actual_in,
+                    &actual_out,
+                );
+                if (ret == ld.LIBDEFLATE_SUCCESS) {
+                    skip_ok = true;
+                }
+            }
 
             if (!skip_ok) {
                 // Use zlib streaming with fixed buffer — avoids large alloc for delta skip
@@ -307,7 +340,21 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
             var actual_in: usize = 0;
             var skip_ok = false;
 
-            // libdeflate not available
+            if (decompressor != null and hdr.size <= decomp_buf_cap) {
+                var actual_out: usize = 0;
+                const ret = ld.libdeflate_zlib_decompress_ex(
+                    decompressor.?,
+                    @ptrCast(pack_data[comp_start..].ptr),
+                    in_avail,
+                    @ptrCast(decomp_buf_ptr.ptr),
+                    hdr.size,
+                    &actual_in,
+                    &actual_out,
+                );
+                if (ret == ld.LIBDEFLATE_SUCCESS) {
+                    skip_ok = true;
+                }
+            }
 
             if (!skip_ok) {
                 if (zc.inflateReset(&zstream) != zc.Z_OK) {
@@ -384,7 +431,7 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
         defer cache.deinit();
 
         // Reusable buffer for delta instruction decompression.
-        var decomp_buf = std.ArrayList(u8).init(allocator);
+        var decomp_buf = std.array_list.Managed(u8).init(allocator);
         defer decomp_buf.deinit();
 
         // --- Resolve OFS_DELTAs in pack order ---
@@ -450,7 +497,7 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
     // ═══════════════════════════════════════════════════════════════════
     // Build sorted entries from resolved records
     // ═══════════════════════════════════════════════════════════════════
-    var entries = try std.ArrayList(IndexEntry).initCapacity(allocator, total_objects);
+    var entries = try std.array_list.Managed(IndexEntry).initCapacity(allocator, total_objects);
     defer entries.deinit();
 
     for (records[0..total_objects]) |rec| {
@@ -499,7 +546,7 @@ fn resolveOfsDelta(
     records: []ObjRecord,
     offset_to_idx: *std.AutoHashMap(usize, u32),
     cache: *DeltaCache,
-    decomp_buf: *std.ArrayList(u8),
+    decomp_buf: *std.array_list.Managed(u8),
     sha_to_offset: *std.AutoHashMap([20]u8, usize),
 ) !void {
     return resolveDelta(allocator, pack_data, content_end, rec, rec.base_offset, records, offset_to_idx, cache, decomp_buf, sha_to_offset);
@@ -515,7 +562,7 @@ fn resolveDelta(
     records: []ObjRecord,
     offset_to_idx: *std.AutoHashMap(usize, u32),
     cache: *DeltaCache,
-    decomp_buf: *std.ArrayList(u8),
+    decomp_buf: *std.array_list.Managed(u8),
     sha_to_offset: *std.AutoHashMap([20]u8, usize),
 ) !void {
     // Get base data (from cache or by decompressing/resolving).
@@ -554,7 +601,7 @@ fn getBaseData(
     records: []ObjRecord,
     offset_to_idx: *std.AutoHashMap(usize, u32),
     cache: *DeltaCache,
-    decomp_buf: *std.ArrayList(u8),
+    decomp_buf: *std.array_list.Managed(u8),
 ) !DeltaCache.Entry {
     // Fast path: already in cache.
     if (cache.get(offset)) |e| return e;
@@ -587,7 +634,7 @@ fn getBaseData(
 
         // Decompress delta instructions into a temporary buffer.
         // We can't use decomp_buf because the caller might be using it.
-        var tmp = try std.ArrayList(u8).initCapacity(allocator, if (rec.size > 0) rec.size else 256);
+        var tmp = try std.array_list.Managed(u8).initCapacity(allocator, if (rec.size > 0) rec.size else 256);
         defer tmp.deinit();
         _ = try stream_utils.decompressInto(
             pack_data[rec.comp_start .. rec.comp_start + rec.comp_len],
@@ -740,7 +787,7 @@ fn readDeltaVarint(data: []const u8, pos_ptr: *usize) usize {
 
 /// Build a v2 .idx file from sorted entries.
 fn buildIdxFile(allocator: std.mem.Allocator, entries: []const IndexEntry, pack_checksum: *const [20]u8) ![]u8 {
-    var idx = std.ArrayList(u8).init(allocator);
+    var idx = std.array_list.Managed(u8).init(allocator);
     defer idx.deinit();
     try idx.ensureTotalCapacity(8 + 256 * 4 + entries.len * (20 + 4 + 4) + 40);
 
@@ -766,7 +813,7 @@ fn buildIdxFile(allocator: std.mem.Allocator, entries: []const IndexEntry, pack_
     for (entries) |entry| try writer.writeInt(u32, entry.crc32, .big);
 
     // Offset table (+ large offset overflow)
-    var large_offsets = std.ArrayList(u64).init(allocator);
+    var large_offsets = std.array_list.Managed(u64).init(allocator);
     defer large_offsets.deinit();
     for (entries) |entry| {
         if (entry.offset >= 0x80000000) {
