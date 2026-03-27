@@ -134,16 +134,16 @@ pub const PackDiagnostics = struct {
 /// Pack file validation result
 pub const PackValidationResult = struct {
     allocator: std.mem.Allocator,
-    errors: std.array_list.Managed([]const u8),
-    warnings: std.array_list.Managed([]const u8),
-    info: std.array_list.Managed([]const u8),
+    errors: std.ArrayList([]const u8),
+    warnings: std.ArrayList([]const u8),
+    info: std.ArrayList([]const u8),
     
     pub fn init(allocator: std.mem.Allocator) PackValidationResult {
         return PackValidationResult{
             .allocator = allocator,
-            .errors = std.array_list.Managed([]const u8).init(allocator),
-            .warnings = std.array_list.Managed([]const u8).init(allocator),
-            .info = std.array_list.Managed([]const u8).init(allocator),
+            .errors = std.ArrayList([]const u8).init(allocator),
+            .warnings = std.ArrayList([]const u8).init(allocator),
+            .info = std.ArrayList([]const u8).init(allocator),
         };
     }
     
