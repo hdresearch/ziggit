@@ -19085,11 +19085,20 @@ fn generatePackIdxToFile(allocator: std.mem.Allocator, pack_data: []const u8, ou
 fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
     var subcmd: []const u8 = "show";
     var ref_name: []const u8 = "HEAD";
+    var ref_name_set = false;
+    var end_of_options = false;
 
     var i = command_index + 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "show") or std.mem.eql(u8, arg, "expire") or
+        if (end_of_options) {
+            ref_name = arg;
+            ref_name_set = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--") or std.mem.eql(u8, arg, "--end-of-options")) {
+            end_of_options = true;
+        } else if (std.mem.eql(u8, arg, "show") or std.mem.eql(u8, arg, "expire") or
             std.mem.eql(u8, arg, "delete") or std.mem.eql(u8, arg, "exists"))
         {
             subcmd = arg;
@@ -19105,9 +19114,24 @@ fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command_ind
             if (std.mem.eql(u8, arg, "-n")) {
                 i += 1; // skip count
             }
-        } else if (!std.mem.startsWith(u8, arg, "-")) {
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            // Unknown option
+            if (std.mem.eql(u8, subcmd, "exists")) {
+                const emsg = try std.fmt.allocPrint(allocator, "error: unknown option '{s}'\nusage: git reflog exists <ref>\n", .{arg});
+                defer allocator.free(emsg);
+                try platform_impl.writeStderr(emsg);
+                std.process.exit(129);
+            }
+        } else {
             ref_name = arg;
+            ref_name_set = true;
         }
+    }
+
+    // "exists" with no ref should exit 129
+    if (std.mem.eql(u8, subcmd, "exists") and !ref_name_set) {
+        try platform_impl.writeStderr("usage: git reflog exists <ref>\n");
+        std.process.exit(129);
     }
 
     const git_dir = findGitDir() catch {
