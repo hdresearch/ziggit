@@ -1,6 +1,59 @@
 const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 
+/// Global config overrides from -c key=value command line options
+var global_config_overrides: ?std.array_list.Managed(ConfigOverride) = null;
+
+const ConfigOverride = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
+fn initConfigOverrides(allocator: std.mem.Allocator) void {
+    if (global_config_overrides == null) {
+        global_config_overrides = std.array_list.Managed(ConfigOverride).init(allocator);
+    }
+}
+
+fn addConfigOverride(allocator: std.mem.Allocator, setting: []const u8) !void {
+    initConfigOverrides(allocator);
+    if (std.mem.indexOfScalar(u8, setting, '=')) |eq| {
+        const key = try allocator.dupe(u8, setting[0..eq]);
+        const value = try allocator.dupe(u8, setting[eq + 1 ..]);
+        try global_config_overrides.?.append(.{ .key = key, .value = value });
+    } else {
+        // key with no value means "true" (boolean)
+        const key = try allocator.dupe(u8, setting);
+        const value = try allocator.dupe(u8, "true");
+        try global_config_overrides.?.append(.{ .key = key, .value = value });
+    }
+}
+
+/// Look up a config override by key (case-insensitive)
+fn getConfigOverride(key: []const u8) ?[]const u8 {
+    if (global_config_overrides) |overrides| {
+        // Return last match (last -c wins)
+        var result: ?[]const u8 = null;
+        for (overrides.items) |ov| {
+            if (asciiCaseInsensitiveEqual(ov.key, key)) {
+                result = ov.value;
+            }
+        }
+        return result;
+    }
+    return null;
+}
+
+fn asciiCaseInsensitiveEqual(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |ca, cb| {
+        const la = if (ca >= 'A' and ca <= 'Z') ca + 32 else ca;
+        const lb = if (cb >= 'A' and cb <= 'Z') cb + 32 else cb;
+        if (la != lb) return false;
+    }
+    return true;
+}
+
 fn readStdin(allocator: std.mem.Allocator, max_size: usize) ![]u8 {
     var result = std.array_list.Managed(u8).init(allocator);
     errdefer result.deinit();
@@ -355,8 +408,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
             }
             
             arg_index += 1;
-            // Skip the config setting for native commands (not implemented)
-            // For forwarded commands, it'll be passed through as part of all_original_args
+            const config_setting = all_original_args.items[arg_index];
+            try addConfigOverride(allocator, config_setting);
             arg_index += 1;
         } else if (std.mem.eql(u8, arg, "--git-dir")) {
             if (arg_index + 1 >= all_original_args.items.len) {
@@ -21861,7 +21914,6 @@ fn cmdWorktree(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
 fn cmdStripspace(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     var strip_comments = false;
     var comment_lines = false;
-    const comment_char: u8 = '#';
     
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--strip-comments")) {
@@ -21870,7 +21922,45 @@ fn cmdStripspace(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             comment_lines = true;
         }
     }
-    _ = comment_char;
+    
+    // Resolve comment character
+    var cc: []const u8 = "#";
+    var cc_needs_free = false;
+    
+    // Check -c overrides first
+    if (getConfigOverride("core.commentchar") orelse getConfigOverride("core.commentChar")) |override_val| {
+        if (override_val.len == 0) {
+            try platform_impl.writeStderr("fatal: core.commentchar must have at least one character\n");
+            std.process.exit(128);
+        }
+        if (std.mem.indexOfScalar(u8, override_val, '\n') != null) {
+            try platform_impl.writeStderr("fatal: core.commentchar cannot contain newline\n");
+            std.process.exit(128);
+        }
+        cc = override_val;
+    } else {
+        // Check .git/config
+        const git_dir_result = findGitDir() catch null;
+        if (git_dir_result) |gd| {
+            const config_path = std.fs.path.join(allocator, &.{ gd, "config" }) catch null;
+            if (config_path) |cp| {
+                defer allocator.free(cp);
+                const config_data = std.fs.cwd().readFileAlloc(allocator, cp, 1024 * 1024) catch null;
+                if (config_data) |cd| {
+                    defer allocator.free(cd);
+                    if (parseConfigValue(cd, "core.commentchar", allocator) catch null) |val| {
+                        if (val.len > 0) {
+                            cc = val;
+                            cc_needs_free = true;
+                        } else {
+                            allocator.free(val);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    defer if (cc_needs_free) allocator.free(cc);
     
     const stdin_data = readStdin(allocator, 10 * 1024 * 1024) catch {
         return;
@@ -21878,16 +21968,25 @@ fn cmdStripspace(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     defer allocator.free(stdin_data);
     
     if (comment_lines) {
-        // Prefix each line with "# "
-        var lines = std.mem.splitScalar(u8, stdin_data, '\n');
-        var first = true;
+        // Prefix each line with comment char + space
+        var data = stdin_data;
+        // Remove trailing newline for splitting
+        if (data.len > 0 and data[data.len - 1] == '\n') {
+            data = data[0 .. data.len - 1];
+        }
+        var lines = std.mem.splitScalar(u8, data, '\n');
         while (lines.next()) |line| {
-            if (!first) try platform_impl.writeStdout("\n");
-            first = false;
             if (line.len == 0) {
-                try platform_impl.writeStdout("#\n");
+                try platform_impl.writeStdout(cc);
+                try platform_impl.writeStdout("\n");
+            } else if (line[0] == '\t') {
+                // Avoid SP-HT sequence: use commentchar+tab directly
+                try platform_impl.writeStdout(cc);
+                const out = try std.fmt.allocPrint(allocator, "{s}\n", .{line});
+                defer allocator.free(out);
+                try platform_impl.writeStdout(out);
             } else {
-                const out = try std.fmt.allocPrint(allocator, "# {s}", .{line});
+                const out = try std.fmt.allocPrint(allocator, "{s} {s}\n", .{ cc, line });
                 defer allocator.free(out);
                 try platform_impl.writeStdout(out);
             }
@@ -21905,7 +22004,7 @@ fn cmdStripspace(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     while (lines.next()) |line| {
         const trimmed = std.mem.trimRight(u8, line, " \t\r");
         
-        if (strip_comments and trimmed.len > 0 and trimmed[0] == '#') {
+        if (strip_comments and trimmed.len >= cc.len and std.mem.startsWith(u8, trimmed, cc)) {
             continue; // skip comment lines
         }
         
