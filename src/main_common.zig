@@ -222,7 +222,23 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         std.mem.eql(u8, command, "-v") or
         std.mem.eql(u8, command, "--version-info") or
         std.mem.eql(u8, command, "--help") or
-        std.mem.eql(u8, command, "-h");
+        std.mem.eql(u8, command, "-h") or
+        std.mem.eql(u8, command, "ls-tree") or
+        std.mem.eql(u8, command, "count-objects") or
+        std.mem.eql(u8, command, "show-ref") or
+        std.mem.eql(u8, command, "for-each-ref") or
+        std.mem.eql(u8, command, "verify-pack") or
+        std.mem.eql(u8, command, "mktree") or
+        std.mem.eql(u8, command, "mktag") or
+        std.mem.eql(u8, command, "name-rev") or
+        std.mem.eql(u8, command, "fsck") or
+        std.mem.eql(u8, command, "gc") or
+        std.mem.eql(u8, command, "prune") or
+        std.mem.eql(u8, command, "repack") or
+        std.mem.eql(u8, command, "pack-objects") or
+        std.mem.eql(u8, command, "index-pack") or
+        std.mem.eql(u8, command, "reflog") or
+        std.mem.eql(u8, command, "clean");
 
     // Process global flags and execute
     var arg_index: usize = 0;
@@ -7240,6 +7256,8 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     var name_only = false;
     var long_format = false;
     var null_terminated = false;
+    var full_tree = false;
+    var no_full_name = false;
     var treeish: ?[]const u8 = null;
     var pathspecs = std.array_list.Managed([]const u8).init(allocator);
     defer pathspecs.deinit();
@@ -7259,8 +7277,14 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
             long_format = true;
         } else if (std.mem.eql(u8, arg, "-z")) {
             null_terminated = true;
-        } else if (std.mem.eql(u8, arg, "--full-name") or std.mem.eql(u8, arg, "--full-tree") or std.mem.eql(u8, arg, "--abbrev")) {
-            // Accept but ignore these for now
+        } else if (std.mem.eql(u8, arg, "--full-tree")) {
+            full_tree = true;
+        } else if (std.mem.eql(u8, arg, "--full-name")) {
+            no_full_name = false;
+        } else if (std.mem.eql(u8, arg, "--no-full-name")) {
+            no_full_name = true;
+        } else if (std.mem.eql(u8, arg, "--abbrev")) {
+            // Accept but ignore
         } else if (std.mem.startsWith(u8, arg, "--abbrev=")) {
             // Accept but ignore
         } else if (std.mem.eql(u8, arg, "--")) {
@@ -7294,6 +7318,43 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     };
     defer allocator.free(git_path);
 
+    // Compute prefix (path from repo root to CWD)
+    var prefix_str: []const u8 = "";
+    var prefix_allocated = false;
+    if (!full_tree) {
+        const cwd = platform_impl.fs.getCwd(allocator) catch "";
+        defer if (cwd.len > 0) allocator.free(cwd);
+        // git_path is like /path/to/repo/.git, repo root is parent
+        const repo_root = std.fs.path.dirname(git_path) orelse "";
+        if (cwd.len > 0 and repo_root.len > 0 and cwd.len > repo_root.len and
+            std.mem.startsWith(u8, cwd, repo_root) and cwd[repo_root.len] == '/')
+        {
+            prefix_str = allocator.dupe(u8, cwd[repo_root.len + 1 ..]) catch "";
+            prefix_allocated = prefix_str.len > 0;
+        }
+    }
+    defer if (prefix_allocated) allocator.free(@constCast(prefix_str));
+
+    // Adjust pathspecs with prefix (prepend prefix to relative pathspecs)
+    var adjusted_pathspecs = std.array_list.Managed([]const u8).init(allocator);
+    defer {
+        for (adjusted_pathspecs.items) |ps| allocator.free(@constCast(ps));
+        adjusted_pathspecs.deinit();
+    }
+    if (prefix_str.len > 0 and pathspecs.items.len > 0) {
+        for (pathspecs.items) |ps| {
+            const adjusted = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix_str, ps });
+            try adjusted_pathspecs.append(adjusted);
+        }
+    } else if (prefix_str.len > 0 and pathspecs.items.len == 0) {
+        // When no pathspecs given but in a subdirectory, restrict to prefix
+        const adjusted = try std.fmt.allocPrint(allocator, "{s}/", .{prefix_str});
+        try adjusted_pathspecs.append(adjusted);
+    }
+
+    // Use adjusted pathspecs if we have them, otherwise original
+    const effective_pathspecs = if (adjusted_pathspecs.items.len > 0) &adjusted_pathspecs else &pathspecs;
+
     // Resolve tree-ish to a tree hash
     const tree_hash = resolveTreeish(git_path, treeish.?, platform_impl, allocator) catch {
         const msg = try std.fmt.allocPrint(allocator, "fatal: Not a valid object name {s}\n", .{treeish.?});
@@ -7312,7 +7373,7 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     }
 
     // Walk the tree
-    try walkTree(allocator, git_path, tree_hash, "", recursive, show_trees, only_trees, &pathspecs, platform_impl, &output_entries);
+    try walkTree(allocator, git_path, tree_hash, "", recursive, show_trees, only_trees, effective_pathspecs, platform_impl, &output_entries);
 
     // Sort by path (git ls-tree outputs sorted)
     std.sort.block(OutputEntry, output_entries.items, {}, struct {
@@ -7324,8 +7385,16 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     // Output
     const line_end: []const u8 = if (null_terminated) "\x00" else "\n";
     for (output_entries.items) |entry| {
+        // When --no-full-name, strip the prefix from output paths
+        const display_path = if (no_full_name and prefix_str.len > 0 and
+            std.mem.startsWith(u8, entry.full_path, prefix_str) and
+            entry.full_path.len > prefix_str.len and entry.full_path[prefix_str.len] == '/')
+            entry.full_path[prefix_str.len + 1 ..]
+        else
+            entry.full_path;
+
         if (name_only) {
-            const output = try std.fmt.allocPrint(allocator, "{s}{s}", .{ entry.full_path, line_end });
+            const output = try std.fmt.allocPrint(allocator, "{s}{s}", .{ display_path, line_end });
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
         } else if (long_format) {
@@ -7341,11 +7410,11 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
                 break :blk try std.fmt.allocPrint(allocator, "{d:>7}", .{obj.data.len});
             };
             defer allocator.free(size_str);
-            const output = try std.fmt.allocPrint(allocator, "{s} {s} {s} {s}\t{s}{s}", .{ entry.mode, entry.obj_type, entry.hash, size_str, entry.full_path, line_end });
+            const output = try std.fmt.allocPrint(allocator, "{s} {s} {s} {s}\t{s}{s}", .{ entry.mode, entry.obj_type, entry.hash, size_str, display_path, line_end });
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
         } else {
-            const output = try std.fmt.allocPrint(allocator, "{s} {s} {s}\t{s}{s}", .{ entry.mode, entry.obj_type, entry.hash, entry.full_path, line_end });
+            const output = try std.fmt.allocPrint(allocator, "{s} {s} {s}\t{s}{s}", .{ entry.mode, entry.obj_type, entry.hash, display_path, line_end });
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
         }
@@ -7468,8 +7537,9 @@ fn walkTree(
                             .full_path = try allocator.dupe(u8, full_path),
                         });
                     }
-                    // Show the contents of this tree (one level)
-                    try walkTreeOneLevel(allocator, git_path, entry.hash, full_path, pathspecs, platform_impl, output, show_trees);
+                    // Recursively descend into this tree to find matching entries
+                    // (handles deep pathspecs like path1/b/c/1.txt)
+                    try walkTree(allocator, git_path, entry.hash, full_path, false, show_trees, only_trees, pathspecs, platform_impl, output);
                 } else if (!only_trees or is_tree) {
                     try output.append(OutputEntry{
                         .mode = try allocator.dupe(u8, entry.mode),
