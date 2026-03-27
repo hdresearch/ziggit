@@ -12985,7 +12985,9 @@ fn cmdDescribe(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             abbrev_zero = true;
         } else if (std.mem.eql(u8, arg, "--exact-match")) {
             exact_match = true;
-        } else if (std.mem.eql(u8, arg, "--contains") or std.mem.eql(u8, arg, "--all") or 
+        } else if (std.mem.eql(u8, arg, "--contains")) {
+            tags = true; // --contains implies tags
+        } else if (std.mem.eql(u8, arg, "--all") or 
             std.mem.eql(u8, arg, "--long") or std.mem.eql(u8, arg, "--always") or
             std.mem.eql(u8, arg, "--dirty")) {
             // accept silently
@@ -13006,16 +13008,19 @@ fn cmdDescribe(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     // Get target commit
     const head_hash: []u8 = blk: {
         if (target_rev) |r| {
-            const resolved = refs.resolveRef(git_path, r, platform_impl, allocator) catch {
-                try platform_impl.writeStderr("fatal: not a valid object name\n");
-                std.process.exit(128);
-                unreachable;
+            const resolved = resolveRevision(git_path, r, platform_impl, allocator) catch {
+                const resolved2 = refs.resolveRef(git_path, r, platform_impl, allocator) catch {
+                    try platform_impl.writeStderr("fatal: not a valid object name\n");
+                    std.process.exit(128);
+                    unreachable;
+                };
+                break :blk resolved2 orelse {
+                    try platform_impl.writeStderr("fatal: not a valid object name\n");
+                    std.process.exit(128);
+                    unreachable;
+                };
             };
-            break :blk resolved orelse {
-                try platform_impl.writeStderr("fatal: not a valid object name\n");
-                std.process.exit(128);
-                unreachable;
-            };
+            break :blk resolved;
         } else {
             const h = refs.getCurrentCommit(git_path, platform_impl, allocator) catch {
                 try platform_impl.writeStderr("fatal: no commits yet\n");
