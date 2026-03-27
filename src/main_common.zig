@@ -19058,6 +19058,10 @@ fn nativeCmdApply(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
 
     // Parse patches
     var patches = parsePatchSet(allocator, all_patch_data.items, p_value) catch |err| {
+        if (err == error.InvalidPatch) {
+            try platform_impl.writeStderr("error: invalid combination in patch header\n");
+            std.process.exit(128);
+        }
         const msg = try std.fmt.allocPrint(allocator, "error: patch parsing failed: {}\n", .{err});
         defer allocator.free(msg);
         try platform_impl.writeStderr(msg);
@@ -19072,6 +19076,36 @@ fn nativeCmdApply(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         // No patches found - could be unrecognized input
         try platform_impl.writeStderr("error: unrecognized input\n");
         std.process.exit(128);
+    }
+
+    // Validate patches
+    for (patches.items) |*p| {
+        // Check for invalid combinations
+        if (p.is_new_file) {
+            // new file + copy/rename is invalid - check if it was parsed as such
+            // (handled during parsing but verify here for edge cases)
+        }
+
+        // Check for no-op patches (only context, no adds/removes) unless --recount
+        if (!recount) {
+            var has_changes = false;
+            for (p.hunks.items) |h| {
+                for (h.lines.items) |l| {
+                    if (l.line_type == .add or l.line_type == .remove) {
+                        has_changes = true;
+                        break;
+                    }
+                }
+                if (has_changes) break;
+            }
+            if (!has_changes and p.hunks.items.len > 0 and !p.is_new_file and !p.is_delete) {
+                const path = p.new_path orelse p.old_path orelse "unknown";
+                const msg = try std.fmt.allocPrint(allocator, "error: No changes in patch for {s}\n", .{path});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            }
+        }
     }
 
     // Apply or check each patch
@@ -19092,6 +19126,10 @@ fn nativeCmdApply(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         if (check_only) {
             // Just verify the patch can apply
             _ = applyOnePatch(allocator, patch, reverse, true, platform_impl) catch |err| {
+                if (err == error.PatchAlreadyApplied and recount) {
+                    // --recount allows no-op patches
+                    continue;
+                }
                 const msg = try std.fmt.allocPrint(allocator, "error: patch failed: {s}: {}\n", .{ patch.new_path orelse patch.old_path orelse "unknown", err });
                 defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
@@ -19250,6 +19288,14 @@ fn parseSinglePatch(allocator: std.mem.Allocator, lines: []const []const u8, pos
             std.mem.startsWith(u8, line, "copy from ") or
             std.mem.startsWith(u8, line, "copy to "))
         {
+            // Detect invalid combination: new file + copy/rename
+            if (patch.is_new_file and (std.mem.startsWith(u8, line, "rename from ") or
+                std.mem.startsWith(u8, line, "copy from ") or
+                std.mem.startsWith(u8, line, "rename to ") or
+                std.mem.startsWith(u8, line, "copy to ")))
+            {
+                return error.InvalidPatch;
+            }
             if (std.mem.startsWith(u8, line, "rename to ") or std.mem.startsWith(u8, line, "copy to ")) {
                 const new_name = std.mem.trim(u8, line[std.mem.indexOf(u8, line, " to ").? + 4 ..], " \t\r");
                 if (patch.new_path) |p| allocator.free(p);
