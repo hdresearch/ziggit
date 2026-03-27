@@ -26412,6 +26412,7 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
             show_raw = false;
         } else if (std.mem.eql(u8, arg, "--summary")) {
             show_summary = true;
+            show_raw = false;
         } else if (std.mem.eql(u8, arg, "--shortstat")) {
             show_shortstat = true;
             show_raw = false;
@@ -26680,20 +26681,22 @@ fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, opts:
                     var patch_opts = opts.*;
                     patch_opts.show_patch = true;
                     try diffTreeWithEmptyOpts(allocator, this_tree, &patch_opts, git_path, platform_impl);
-                } else if (opts.show_stat and !opts.show_patch) {
-                    // Only stat output
-                    try outputStatForEmptyTree(allocator, this_tree, git_path, platform_impl);
+                } else {
+                    // Handle various display modes
+                    if (opts.show_stat) {
+                        try outputStatForEmptyTree(allocator, this_tree, git_path, platform_impl);
+                    }
+                    if (opts.show_raw and !opts.show_stat and !opts.show_summary and !opts.show_patch) {
+                        try diffTreeWithEmptyOpts(allocator, this_tree, opts, git_path, platform_impl);
+                    }
                     if (opts.show_summary) {
                         try outputSummaryForEmptyTree(allocator, this_tree, git_path, platform_impl);
                     }
-                } else if (opts.show_summary and !opts.show_patch and !opts.show_stat) {
-                    // Only summary output (also show raw by default)
-                    if (opts.show_raw) {
-                        try diffTreeWithEmptyOpts(allocator, this_tree, opts, git_path, platform_impl);
+                    if (opts.show_patch and !opts.patch_with_raw and !opts.patch_with_stat) {
+                        var patch_opts = opts.*;
+                        patch_opts.show_patch = true;
+                        try diffTreeWithEmptyOpts(allocator, this_tree, &patch_opts, git_path, platform_impl);
                     }
-                    try outputSummaryForEmptyTree(allocator, this_tree, git_path, platform_impl);
-                } else {
-                    try diffTreeWithEmptyOpts(allocator, this_tree, opts, git_path, platform_impl);
                 }
             }
             return true;
