@@ -191,7 +191,9 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     if (!isNativeCommand(command)) {
         // Not a native command, forward to git with all arguments
         if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
-            try forwardToGit(allocator, all_original_args.items, &platform_impl);
+            // Translate newer flags to older equivalents for specific commands
+            const translated_args = try translateCommandFlags(allocator, all_original_args.items, command_index);
+            try forwardToGit(allocator, translated_args, &platform_impl);
             return;
         } else {
             const error_msg = std.fmt.allocPrint(allocator, "ziggit: '{s}' is not a ziggit command. See 'ziggit --help'.\n", .{command}) catch "ziggit: invalid command. See 'ziggit --help'.\n";
@@ -848,6 +850,33 @@ fn forwardVersionToGit(allocator: std.mem.Allocator, all_args: [][]const u8, pla
         .Stopped => |_| std.process.exit(128),
         .Unknown => |_| std.process.exit(1),
     }
+}
+
+fn translateCommandFlags(allocator: std.mem.Allocator, all_args: [][]const u8, command_index: usize) ![][]const u8 {
+    // Translate newer git flags (2.44+) to older equivalents for git 2.43 compatibility
+    // This is command-specific since flags have different meanings in different commands.
+    if (command_index >= all_args.len) return all_args;
+    const command = all_args[command_index];
+    
+    if (std.mem.eql(u8, command, "ls-remote")) {
+        // --branches → --heads (git 2.46+)
+        var new_args = try allocator.alloc([]const u8, all_args.len);
+        @memcpy(new_args, all_args);
+        for (new_args[command_index + 1..], command_index + 1..) |*arg, i| {
+            _ = i;
+            if (std.mem.eql(u8, arg.*, "--branches")) {
+                arg.* = "--heads";
+            }
+        }
+        return new_args;
+    }
+    
+    if (std.mem.eql(u8, command, "clone")) {
+        // --revision → error-like behavior (git 2.53+ feature)
+        // For now, pass through - git 2.43 will error on unknown flags
+    }
+    
+    return all_args;
 }
 
 fn forwardToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_impl: *const platform_mod.Platform) !void {
