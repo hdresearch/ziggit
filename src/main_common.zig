@@ -11801,6 +11801,45 @@ fn resolveCommitByMessage(git_path: []const u8, pattern: []const u8, platform_im
     return error.NotFound;
 }
 
+fn resolveReflogEntry(git_path: []const u8, ref_name: []const u8, n: u32, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
+    const reflog_path = try std.fmt.allocPrint(allocator, "{s}/logs/{s}", .{ git_path, ref_name });
+    defer allocator.free(reflog_path);
+    const content = platform_impl.fs.readFile(allocator, reflog_path) catch return error.NotFound;
+    defer allocator.free(content);
+
+    // Collect all entries (each line has: old_hash new_hash ...)
+    var entries = std.array_list.Managed([]const u8).init(allocator);
+    defer entries.deinit();
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        if (line.len >= 40) {
+            entries.append(line) catch {};
+        }
+    }
+
+    // @{0} is most recent (last entry), @{1} is previous, etc.
+    if (entries.items.len == 0) return error.NotFound;
+    if (n >= entries.items.len) return error.NotFound;
+
+    const idx = entries.items.len - 1 - n;
+    const entry = entries.items[idx];
+
+    // Parse: the new_hash is at position 41..81
+    if (entry.len >= 81) {
+        const new_hash = entry[41..81];
+        if (isValidHash(new_hash)) {
+            return try allocator.dupe(u8, new_hash);
+        }
+    }
+    // Fallback: try first 40 chars
+    if (entry.len >= 40 and isValidHash(entry[0..40])) {
+        return try allocator.dupe(u8, entry[0..40]);
+    }
+
+    return error.NotFound;
+}
+
 fn resolvePreviousBranch(git_path: []const u8, n: u32, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
     const head_reflog_path = try std.fmt.allocPrint(allocator, "{s}/logs/HEAD", .{git_path});
     defer allocator.free(head_reflog_path);
@@ -11955,6 +11994,39 @@ pub fn resolveRevision(git_path: []const u8, rev: []const u8, platform_impl: *co
         const branch_name = resolvePreviousBranch(git_path, 1, allocator, platform_impl) catch return error.BadRevision;
         defer allocator.free(branch_name);
         return resolveRevision(git_path, branch_name, platform_impl, allocator);
+    }
+
+    // Handle refname@{N} (reflog entry)
+    if (std.mem.indexOf(u8, rev, "@{")) |at_pos| {
+        if (std.mem.indexOf(u8, rev[at_pos..], "}")) |close_off| {
+            const refname = rev[0..at_pos];
+            const inner = rev[at_pos + 2 .. at_pos + close_off];
+            const suffix = rev[at_pos + close_off + 1 ..];
+
+            // Determine the full ref name
+            const full_ref = if (refname.len == 0 or std.mem.eql(u8, refname, "HEAD"))
+                try allocator.dupe(u8, "HEAD")
+            else if (std.mem.startsWith(u8, refname, "refs/"))
+                try allocator.dupe(u8, refname)
+            else
+                try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{refname});
+            defer allocator.free(full_ref);
+
+            // Parse the inner value
+            if (std.fmt.parseInt(u32, inner, 10)) |n| {
+                // @{N}: Nth reflog entry
+                const hash = resolveReflogEntry(git_path, full_ref, n, allocator, platform_impl) catch return error.BadRevision;
+                defer allocator.free(hash);
+                if (suffix.len > 0) {
+                    const combined = try std.fmt.allocPrint(allocator, "{s}{s}", .{ hash, suffix });
+                    defer allocator.free(combined);
+                    return resolveRevision(git_path, combined, platform_impl, allocator);
+                }
+                return try allocator.dupe(u8, hash);
+            } else |_| {
+                // Could be @{upstream}, @{push}, etc. - skip for now
+            }
+        }
     }
 
     // Try HEAD
