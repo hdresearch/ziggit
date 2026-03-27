@@ -31106,3 +31106,159 @@ fn nativeCmdCherryPick(allocator: std.mem.Allocator, args: [][]const u8, command
         }
     }
 }
+
+fn cmdNotes(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+
+    const subcmd = args.next() orelse {
+        // list notes
+        try platform_impl.writeStdout("");
+        return;
+    };
+
+    if (std.mem.eql(u8, subcmd, "add")) {
+        var message: ?[]const u8 = null;
+        var target: ?[]const u8 = null;
+        var force = false;
+
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "-m")) {
+                message = args.next();
+            } else if (std.mem.eql(u8, arg, "-f")) {
+                force = true;
+            } else if (!std.mem.startsWith(u8, arg, "-")) {
+                target = arg;
+            }
+        }
+
+        const msg = message orelse {
+            try platform_impl.writeStderr("error: no message given\n");
+            std.process.exit(1);
+        };
+
+        // Resolve target (default to HEAD)
+        const target_hash = if (target) |t|
+            (resolveRevision(git_path, t, platform_impl, allocator) catch {
+                try platform_impl.writeStderr("fatal: failed to resolve target\n");
+                std.process.exit(1);
+            }) orelse {
+                try platform_impl.writeStderr("fatal: failed to resolve target\n");
+                std.process.exit(1);
+            }
+        else
+            (refs.getCurrentCommit(git_path, platform_impl, allocator) catch {
+                try platform_impl.writeStderr("fatal: failed to resolve HEAD\n");
+                std.process.exit(1);
+            }) orelse {
+                try platform_impl.writeStderr("fatal: failed to resolve HEAD\n");
+                std.process.exit(1);
+            };
+        defer allocator.free(target_hash);
+
+        // Create blob object with the note message
+        const blob_content = try std.fmt.allocPrint(allocator, "{s}\n", .{msg});
+        defer allocator.free(blob_content);
+        const blob_obj = objects.GitObject.init(.blob, blob_content);
+        const blob_hash = try blob_obj.store(git_path, platform_impl, allocator);
+        defer allocator.free(blob_hash);
+
+        // Read existing notes tree (if any)
+        const notes_ref = "refs/notes/commits";
+        const existing_commit = refs.getRef(git_path, notes_ref, platform_impl, allocator) catch null;
+        defer if (existing_commit) |ec| allocator.free(ec);
+
+        var tree_entries = std.ArrayList(u8).init(allocator);
+        defer tree_entries.deinit();
+
+        if (existing_commit) |ec| {
+            // Load existing tree
+            const commit_obj = objects.GitObject.load(ec, git_path, platform_impl, allocator) catch null;
+            defer if (commit_obj) |co| co.deinit(allocator);
+            if (commit_obj) |co| {
+                const tree_hash = extractHeaderField(co.data, "tree");
+                if (tree_hash.len > 0) {
+                    const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch null;
+                    defer if (tree_obj) |to| to.deinit(allocator);
+                    if (tree_obj) |to| {
+                        // Copy existing entries, skipping the target if force
+                        var pos: usize = 0;
+                        while (pos < to.data.len) {
+                            // tree entry format: mode<space>name<null>hash(20 bytes)
+                            const space_pos = std.mem.indexOfPos(u8, to.data, pos, " ") orelse break;
+                            const null_pos = std.mem.indexOfPos(u8, to.data, space_pos, &[_]u8{0}) orelse break;
+                            const entry_name = to.data[space_pos + 1 .. null_pos];
+                            const entry_end = null_pos + 1 + 20;
+                            if (entry_end > to.data.len) break;
+
+                            if (!force or !std.mem.eql(u8, entry_name, target_hash)) {
+                                try tree_entries.appendSlice(to.data[pos..entry_end]);
+                            }
+                            pos = entry_end;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add new note entry: "100644 <target_hash>\0<blob_hash_binary>"
+        var blob_hash_bin: [20]u8 = undefined;
+        var i: usize = 0;
+        while (i < 20) : (i += 1) {
+            blob_hash_bin[i] = std.fmt.parseInt(u8, blob_hash[i * 2 .. i * 2 + 2], 16) catch 0;
+        }
+        try tree_entries.appendSlice("100644 ");
+        try tree_entries.appendSlice(target_hash);
+        try tree_entries.append(0);
+        try tree_entries.appendSlice(&blob_hash_bin);
+
+        // Create tree object
+        const tree_obj = objects.GitObject.init(.tree, tree_entries.items);
+        const tree_hash = try tree_obj.store(git_path, platform_impl, allocator);
+        defer allocator.free(tree_hash);
+
+        // Create commit object for notes
+        const author_str = getAuthorString(allocator) catch try allocator.dupe(u8, "Unknown <unknown@unknown>");
+        defer allocator.free(author_str);
+        const committer_str = getCommitterString(allocator) catch try allocator.dupe(u8, "Unknown <unknown@unknown>");
+        defer allocator.free(committer_str);
+
+        if (existing_commit) |ec| {
+            const parents = [_][]const u8{ec};
+            const notes_commit = try objects.createCommitObject(tree_hash, &parents, author_str, committer_str, "Notes added by 'git notes add'", allocator);
+            defer notes_commit.deinit(allocator);
+            const notes_hash = try notes_commit.store(git_path, platform_impl, allocator);
+            defer allocator.free(notes_hash);
+            try refs.updateRef(git_path, "notes/commits", notes_hash, platform_impl, allocator);
+        } else {
+            const empty_parents: []const []const u8 = &.{};
+            const notes_commit = try objects.createCommitObject(tree_hash, empty_parents, author_str, committer_str, "Notes added by 'git notes add'", allocator);
+            defer notes_commit.deinit(allocator);
+            const notes_hash = try notes_commit.store(git_path, platform_impl, allocator);
+            defer allocator.free(notes_hash);
+            try refs.updateRef(git_path, "notes/commits", notes_hash, platform_impl, allocator);
+        }
+    } else if (std.mem.eql(u8, subcmd, "show")) {
+        const target = args.next() orelse "HEAD";
+        const target_hash = resolveRevision(git_path, target, platform_impl, allocator) catch {
+            try platform_impl.writeStderr("error: no note found\n");
+            std.process.exit(1);
+        };
+        defer if (target_hash) |th| allocator.free(th);
+        _ = target_hash;
+        try platform_impl.writeStderr("error: no note found\n");
+        std.process.exit(1);
+    } else if (std.mem.eql(u8, subcmd, "remove")) {
+        // no-op for now
+    } else if (std.mem.eql(u8, subcmd, "list")) {
+        // no-op for now
+    } else {
+        const emsg = try std.fmt.allocPrint(allocator, "error: unknown notes subcommand: {s}\n", .{subcmd});
+        defer allocator.free(emsg);
+        try platform_impl.writeStderr(emsg);
+        std.process.exit(1);
+    }
+}
