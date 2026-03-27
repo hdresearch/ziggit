@@ -2312,8 +2312,77 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             allow_empty = true;
         } else if (std.mem.eql(u8, arg, "--amend")) {
             amend = true;
-        } else if (std.mem.eql(u8, arg, "--quiet")) {
+        } else if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
             quiet = true;
+        } else if (std.mem.eql(u8, arg, "-F") or std.mem.eql(u8, arg, "--file")) {
+            const file_path = args.next() orelse {
+                try platform_impl.writeStderr("error: option '-F' requires a value\n");
+                std.process.exit(129);
+            };
+            if (std.mem.eql(u8, file_path, "-")) {
+                // Read from stdin
+                const stdin_data = readStdin(allocator, 1024 * 1024) catch {
+                    try platform_impl.writeStderr("error: could not read from stdin\n");
+                    std.process.exit(1);
+                };
+                message = stdin_data;
+            } else {
+                message = platform_impl.fs.readFile(allocator, file_path) catch {
+                    const msg = try std.fmt.allocPrint(allocator, "fatal: could not read file '{s}'\n", .{file_path});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(128);
+                };
+            }
+        } else if (std.mem.startsWith(u8, arg, "-F")) {
+            const file_path = arg[2..];
+            message = platform_impl.fs.readFile(allocator, file_path) catch {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: could not read file '{s}'\n", .{file_path});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            };
+        } else if (std.mem.eql(u8, arg, "-C") or std.mem.eql(u8, arg, "--reuse-message")) {
+            // Reuse message from another commit
+            const commit_ref = args.next() orelse {
+                try platform_impl.writeStderr("error: option '-C' requires a value\n");
+                std.process.exit(129);
+            };
+            // Resolve and read the commit's message
+            const gp = findGitDirectory(allocator, platform_impl) catch {
+                try platform_impl.writeStderr("fatal: not a git repository\n");
+                std.process.exit(128);
+            };
+            defer allocator.free(gp);
+            const hash = resolveRevision(gp, commit_ref, platform_impl, allocator) catch {
+                const err_msg = try std.fmt.allocPrint(allocator, "fatal: could not lookup commit {s}\n", .{commit_ref});
+                defer allocator.free(err_msg);
+                try platform_impl.writeStderr(err_msg);
+                std.process.exit(128);
+            };
+            defer allocator.free(hash);
+            const cobj = objects.GitObject.load(hash, gp, platform_impl, allocator) catch {
+                try platform_impl.writeStderr("fatal: could not read commit\n");
+                std.process.exit(128);
+            };
+            defer cobj.deinit(allocator);
+            // Extract message body (after blank line)
+            if (std.mem.indexOf(u8, cobj.data, "\n\n")) |pos| {
+                message = try allocator.dupe(u8, cobj.data[pos + 2 ..]);
+            }
+        } else if (std.mem.eql(u8, arg, "--cleanup=verbatim") or std.mem.eql(u8, arg, "--cleanup=whitespace") or
+            std.mem.eql(u8, arg, "--cleanup=strip") or std.mem.eql(u8, arg, "--cleanup=scissors") or
+            std.mem.startsWith(u8, arg, "--cleanup="))
+        {
+            // Accept cleanup modes (ignore for now)
+        } else if (std.mem.eql(u8, arg, "--no-verify") or std.mem.eql(u8, arg, "-n")) {
+            // Skip hooks
+        } else if (std.mem.eql(u8, arg, "--signoff") or std.mem.eql(u8, arg, "-s")) {
+            // Signoff - ignore for now  
+        } else if (std.mem.eql(u8, arg, "--no-edit")) {
+            // No edit
+        } else if (std.mem.eql(u8, arg, "--allow-empty-message")) {
+            allow_empty = true; // Close enough
         }
     }
 
