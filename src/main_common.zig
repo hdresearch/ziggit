@@ -16057,6 +16057,8 @@ fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, comman
     var revs_mode = false;
     var use_all = false;
     var stdin_packs = false;
+    var write_bitmap = false;
+    var name_hash_version: i32 = 1;
 
     var i = command_index + 1;
     while (i < args.len) : (i += 1) {
@@ -16091,6 +16093,8 @@ fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, comman
             std.mem.eql(u8, arg, "--indexed-objects") or std.mem.eql(u8, arg, "--unpack-unreachable"))
         {
             // Accepted flags
+        } else if (std.mem.eql(u8, arg, "--write-bitmap-index")) {
+            write_bitmap = true;
         } else if (std.mem.startsWith(u8, arg, "--index-version=")) {
             // Validate --index-version=<ver>[,<offset>]
             const val = arg["--index-version=".len..];
@@ -16167,6 +16171,8 @@ fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, comman
                 std.process.exit(1);
                 unreachable;
             }
+            // Negative values are treated as version 1
+            name_hash_version = if (ver < 0) 1 else ver;
         } else if (std.mem.startsWith(u8, arg, "--window=") or
             std.mem.startsWith(u8, arg, "--depth=") or
             std.mem.startsWith(u8, arg, "--threads=") or
@@ -16193,6 +16199,11 @@ fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, comman
         try platform_impl.writeStderr("error: --stdin-packs is incompatible with --revs\n");
         std.process.exit(1);
         unreachable;
+    }
+
+    // Warn about --write-bitmap-index with --name-hash-version=2
+    if (write_bitmap and name_hash_version == 2 and !stdout_mode) {
+        try platform_impl.writeStderr("warning: currently, --write-bitmap-index requires --name-hash-version=1\n");
     }
 
     if (base_name == null and !stdout_mode) {
