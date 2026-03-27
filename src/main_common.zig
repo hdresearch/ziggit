@@ -17995,17 +17995,18 @@ fn nativeCmdShowRef(allocator: std.mem.Allocator, args: [][]const u8, command_in
     }
     
     if (verify) {
-        // Verify mode: check specific refs
+        // Verify mode: check specific refs (read direct ref value, no tag dereferencing)
         var found_any = false;
         for (patterns.items) |pattern| {
-            const resolved = refs.resolveRef(git_dir, pattern, platform_impl, allocator) catch {
+            const resolved = readRefDirect(git_dir, pattern, allocator, platform_impl) catch null;
+            if (resolved == null) {
                 if (!quiet) {
                     const msg = std.fmt.allocPrint(allocator, "fatal: '{s}' - not a valid ref\n", .{pattern}) catch continue;
                     defer allocator.free(msg);
                     try platform_impl.writeStderr(msg);
                 }
                 continue;
-            };
+            }
             if (resolved) |hash| {
                 defer allocator.free(hash);
                 found_any = true;
