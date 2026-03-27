@@ -19799,20 +19799,26 @@ fn nativeCmdApply(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         }
     }
 
-    // Apply or check each patch
-    for (patches.items) |*patch| {
+    // Handle stat/numstat/summary output modes (collect all then output)
+    if (stat_only or numstat_flag or summary_only) {
         if (stat_only) {
-            try outputPatchStat(allocator, patch, platform_impl);
-            continue;
+            try outputAllPatchStats(allocator, patches.items, platform_impl);
         }
         if (numstat_flag) {
-            try outputPatchNumstat(allocator, patch, platform_impl);
-            continue;
+            for (patches.items) |*patch| {
+                try outputPatchNumstat(allocator, patch, platform_impl);
+            }
         }
-        if (summary_only) {
-            try outputPatchSummary(allocator, patch, platform_impl);
-            continue;
+        if (summary_only or stat_only) {
+            for (patches.items) |*patch| {
+                try outputPatchSummary(allocator, patch, platform_impl);
+            }
         }
+        return;
+    }
+
+    // Apply or check each patch
+    for (patches.items) |*patch| {
 
         if (check_only) {
             // Just verify the patch can apply
@@ -20461,26 +20467,164 @@ fn reverseLineType(lt: PatchLineType) PatchLineType {
     };
 }
 
-fn outputPatchStat(allocator: std.mem.Allocator, patch: *const Patch, platform_impl: anytype) !void {
-    const path = patch.new_path orelse patch.old_path orelse "unknown";
-    var added: u32 = 0;
-    var removed: u32 = 0;
-    for (patch.hunks.items) |hunk| {
-        for (hunk.lines.items) |line| {
-            switch (line.line_type) {
-                .add => added += 1,
-                .remove => removed += 1,
-                .context => {},
+fn outputAllPatchStats(allocator: std.mem.Allocator, patches: []Patch, platform_impl: anytype) !void {
+    // Collect stats for all patches
+    const StatInfo = struct { path: []const u8, added: u32, removed: u32, is_binary: bool, is_rename: bool };
+    var stats = std.array_list.Managed(StatInfo).init(allocator);
+    defer stats.deinit();
+
+    var total_added: u32 = 0;
+    var total_removed: u32 = 0;
+    var max_path_len: usize = 0;
+    var max_count: u32 = 0;
+
+    for (patches) |*patch| {
+        const path = patch.new_path orelse patch.old_path orelse "unknown";
+        var added: u32 = 0;
+        var removed: u32 = 0;
+        for (patch.hunks.items) |hunk| {
+            for (hunk.lines.items) |line| {
+                switch (line.line_type) {
+                    .add => added += 1,
+                    .remove => removed += 1,
+                    .context => {},
+                }
             }
         }
+        total_added += added;
+        total_removed += removed;
+        if (path.len > max_path_len) max_path_len = path.len;
+        const count = added + removed;
+        if (count > max_count) max_count = count;
+        try stats.append(.{
+            .path = path,
+            .added = added,
+            .removed = removed,
+            .is_binary = patch.is_binary,
+            .is_rename = false, // TODO: detect renames
+        });
     }
-    const msg = try std.fmt.allocPrint(allocator, " {s} | {d} {s}\n", .{
-        path,
-        added + removed,
-        if (added > 0 and removed > 0) "+-" else if (added > 0) "+" else "-",
-    });
-    defer allocator.free(msg);
-    try platform_impl.writeStdout(msg);
+
+    // Determine column widths (minimum 4 like git)
+    const count_width = @max(countDigits(max_count), @as(u32, 4));
+    // Calculate available graph width based on terminal width (default 80)
+    // Format: " path | count graph\n"
+    // 1 (space) + max_path_len + 3 ( | ) + count_width + 1 (space) = overhead
+    const overhead = 1 + @as(u32, @intCast(max_path_len)) + 3 + count_width + 1;
+    const term_width: u32 = 79; // max line width (80 cols minus newline)
+    const graph_width: u32 = if (overhead < term_width) term_width - overhead else 10;
+
+    for (stats.items) |stat| {
+        // " path | count +++---"
+        const count = stat.added + stat.removed;
+        const count_str = try std.fmt.allocPrint(allocator, "{d}", .{count});
+        defer allocator.free(count_str);
+
+        // Build graph bar
+        var plus_count: u32 = stat.added;
+        var minus_count: u32 = stat.removed;
+        if (max_count > graph_width) {
+            // Scale down proportionally using rounding (like git)
+            const total64 = @as(u64, count);
+            const max64 = @as(u64, max_count);
+            const gw64 = @as(u64, graph_width);
+            // Scale total count, then distribute between + and -
+            var scaled_total = @as(u32, @intCast((total64 * gw64 + max64 / 2) / max64));
+            if (scaled_total > graph_width) scaled_total = graph_width;
+            if (scaled_total == 0) {
+                plus_count = 0;
+                minus_count = 0;
+            } else if (stat.added > 0 and stat.removed > 0) {
+                const add_ratio = @as(u64, stat.added) * @as(u64, scaled_total);
+                plus_count = @intCast((add_ratio + count / 2) / count);
+                if (plus_count == 0) plus_count = 1;
+                minus_count = scaled_total - plus_count;
+                if (minus_count == 0 and stat.removed > 0) {
+                    minus_count = 1;
+                    if (plus_count > 1) plus_count -= 1;
+                }
+            } else if (stat.added > 0) {
+                plus_count = scaled_total;
+                minus_count = 0;
+            } else {
+                plus_count = 0;
+                minus_count = scaled_total;
+            }
+        }
+
+        var graph_buf: [256]u8 = undefined;
+        var gi: usize = 0;
+        var pi: u32 = 0;
+        while (pi < plus_count and gi < graph_buf.len) : (pi += 1) {
+            graph_buf[gi] = '+';
+            gi += 1;
+        }
+        var mi: u32 = 0;
+        while (mi < minus_count and gi < graph_buf.len) : (mi += 1) {
+            graph_buf[gi] = '-';
+            gi += 1;
+        }
+        const graph = graph_buf[0..gi];
+
+        // Format: " path | count_padded graph"
+        // Path is left-aligned, padded to max_path_len
+        var path_padded = try allocator.alloc(u8, max_path_len);
+        defer allocator.free(path_padded);
+        @memset(path_padded, ' ');
+        @memcpy(path_padded[0..stat.path.len], stat.path);
+
+        // Right-align count string
+        var count_padded_buf: [20]u8 = undefined;
+        var cpi: usize = 0;
+        if (count_str.len < count_width) {
+            var pad = count_width - @as(u32, @intCast(count_str.len));
+            while (pad > 0 and cpi < count_padded_buf.len) : (pad -= 1) {
+                count_padded_buf[cpi] = ' ';
+                cpi += 1;
+            }
+        }
+        @memcpy(count_padded_buf[cpi .. cpi + count_str.len], count_str);
+        cpi += count_str.len;
+        const count_padded = count_padded_buf[0..cpi];
+
+        const msg = try std.fmt.allocPrint(allocator, " {s} | {s} {s}\n", .{ path_padded, count_padded, graph });
+        defer allocator.free(msg);
+        try platform_impl.writeStdout(msg);
+    }
+
+    // Summary line
+    const nfiles = stats.items.len;
+    var summary = std.array_list.Managed(u8).init(allocator);
+    defer summary.deinit();
+    const nfiles_str = try std.fmt.allocPrint(allocator, " {d} file{s} changed", .{ nfiles, if (nfiles != 1) "s" else "" });
+    defer allocator.free(nfiles_str);
+    try summary.appendSlice(nfiles_str);
+    if (total_added > 0) {
+        const add_str = try std.fmt.allocPrint(allocator, ", {d} insertion{s}(+)", .{ total_added, if (total_added != 1) "s" else "" });
+        defer allocator.free(add_str);
+        try summary.appendSlice(add_str);
+    }
+    if (total_removed > 0) {
+        const del_str = try std.fmt.allocPrint(allocator, ", {d} deletion{s}(-)", .{ total_removed, if (total_removed != 1) "s" else "" });
+        defer allocator.free(del_str);
+        try summary.appendSlice(del_str);
+    }
+    try summary.append('\n');
+    try platform_impl.writeStdout(summary.items);
+}
+
+fn countDigits(n: u32) u32 {
+    if (n == 0) return 1;
+    var count: u32 = 0;
+    var val = n;
+    while (val > 0) : (val /= 10) count += 1;
+    return count;
+}
+
+fn outputPatchStat(allocator: std.mem.Allocator, patch: *const Patch, platform_impl: anytype) !void {
+    // Single patch stat (for non-collected output)
+    var p_array = [_]Patch{patch.*};
+    try outputAllPatchStats(allocator, &p_array, platform_impl);
 }
 
 fn outputPatchNumstat(allocator: std.mem.Allocator, patch: *const Patch, platform_impl: anytype) !void {
