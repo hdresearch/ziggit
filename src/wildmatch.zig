@@ -25,8 +25,21 @@ fn charEqual(a: u8, b: u8, case_fold: bool) bool {
     return a == b;
 }
 
+/// Check if name is a valid POSIX character class name.
+fn isValidPosixClass(name: []const u8) bool {
+    const valid_classes = [_][]const u8{
+        "alpha", "digit", "upper", "lower", "xdigit", "space",
+        "blank", "alnum", "print", "graph", "cntrl", "punct",
+    };
+    for (valid_classes) |vc| {
+        if (std.mem.eql(u8, name, vc)) return true;
+    }
+    return false;
+}
+
 /// Check if character matches a POSIX character class name.
-fn matchPosixClass(name: []const u8, c: u8, case_fold: bool) bool {
+/// Returns null for invalid/unknown class names.
+fn matchPosixClass(name: []const u8, c: u8, case_fold: bool) ?bool {
     if (std.mem.eql(u8, name, "alpha")) {
         if (case_fold) return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z');
         return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z');
@@ -57,7 +70,8 @@ fn matchPosixClass(name: []const u8, c: u8, case_fold: bool) bool {
         return (c >= 0x21 and c <= 0x2f) or (c >= 0x3a and c <= 0x40) or
             (c >= 0x5b and c <= 0x60) or (c >= 0x7b and c <= 0x7e);
     }
-    return false;
+    // Unknown/invalid POSIX class
+    return null;
 }
 
 /// Match a character class like [abc], [a-z], [!abc], [^abc], [[:alpha:]]
@@ -104,13 +118,15 @@ fn matchCharClass(pattern: []const u8, start: usize, test_char: u8, case_fold: b
             if (class_end) |ce| {
                 const class_name = pattern[class_start..ce];
                 if (class_name.len == 0) {
-                    // [[::]...] - empty class name, invalid. Return null to treat as error.
-                    // Actually git treats this specially - let's skip past :] and continue
-                    // but mark it as not matching a valid posix class
-                    // In git, [[::]ab] does not match - the whole bracket expression fails
+                    // [[::]...] - empty class name, invalid bracket expression
                     return null;
                 }
-                if (matchPosixClass(class_name, test_char, case_fold)) matched = true;
+                if (matchPosixClass(class_name, test_char, case_fold)) |m| {
+                    if (m) matched = true;
+                } else {
+                    // Invalid/unknown POSIX class name - entire bracket expression fails
+                    return null;
+                }
                 pi = ce + 2; // skip past :]
                 continue;
             }
@@ -312,10 +328,8 @@ fn doWildmatch(pattern: []const u8, text: []const u8, flags: u32) i32 {
             '\\' => {
                 pi += 1;
                 if (pi >= pattern.len) {
-                    // Trailing backslash - match literal backslash
-                    if (ti >= text.len) return WM_NOMATCH;
-                    if (text[ti] != '\\') return WM_NOMATCH;
-                    ti += 1;
+                    // Trailing backslash with nothing to escape - pattern is invalid, no match
+                    return WM_ABORT_ALL;
                 } else {
                     if (ti >= text.len) return WM_NOMATCH;
                     if (!charEqual(pattern[pi], text[ti], case_fold)) return WM_NOMATCH;
