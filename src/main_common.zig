@@ -6045,27 +6045,52 @@ fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     if (std.mem.eql(u8, current_commit, remote_commit)) {
         try platform_impl.writeStdout("Already up to date.\n");
     } else {
-        // Perform merge
-        try platform_impl.writeStdout("Merging changes...\n");
+        // Check if this is a fast-forward: is current_commit an ancestor of remote_commit?
+        const is_ff = isAncestor(git_path, current_commit, remote_commit, allocator, platform_impl) catch false;
         
-        const repo_root = std.fs.path.dirname(git_path) orelse git_path;
-        const current_branch = try refs.getCurrentBranch(git_path, platform_impl, allocator);
-        defer allocator.free(current_branch);
-        
-        const conflicts = mergeCommits(git_path, current_commit, remote_commit, repo_root, platform_impl, allocator) catch |err| switch (err) {
-            error.MergeConflict => true,
-            else => return err,
-        };
-        
-        if (conflicts) {
-            try platform_impl.writeStderr("Automatic merge failed; fix conflicts and then commit the result.\n");
-            std.process.exit(1);
+        if (is_ff) {
+            // Fast-forward: just update the ref and checkout
+            const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
+                try platform_impl.writeStderr("fatal: not on a branch\n");
+                std.process.exit(1);
+            };
+            defer allocator.free(current_branch);
+            
+            const ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, current_branch });
+            defer allocator.free(ref_path);
+            const hash_line = try std.fmt.allocPrint(allocator, "{s}\n", .{remote_commit});
+            defer allocator.free(hash_line);
+            platform_impl.fs.writeFile(ref_path, hash_line) catch {};
+            
+            // Update working tree
+            checkoutCommitTree(git_path, remote_commit, allocator, platform_impl) catch {};
+            
+            const msg = try std.fmt.allocPrint(allocator, "Updating {s}..{s}\nFast-forward\n", .{ current_commit[0..7], remote_commit[0..7] });
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
         } else {
-            // Create merge commit
-            createMergeCommit(git_path, current_commit, remote_commit, current_branch, branch, allocator, platform_impl) catch |err| switch (err) {
+            // Non-fast-forward: need a real merge
+            const repo_root = std.fs.path.dirname(git_path) orelse git_path;
+            const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
+                try platform_impl.writeStderr("fatal: not on a branch\n");
+                std.process.exit(1);
+            };
+            defer allocator.free(current_branch);
+            
+            const conflicts = mergeCommits(git_path, current_commit, remote_commit, repo_root, platform_impl, allocator) catch |err| switch (err) {
+                error.MergeConflict => true,
                 else => return err,
             };
-            try platform_impl.writeStdout("Merge completed successfully.\n");
+            
+            if (conflicts) {
+                try platform_impl.writeStderr("Automatic merge failed; fix conflicts and then commit the result.\n");
+                std.process.exit(1);
+            } else {
+                createMergeCommit(git_path, current_commit, remote_commit, current_branch, branch, allocator, platform_impl) catch |err| switch (err) {
+                    else => return err,
+                };
+                try platform_impl.writeStdout("Merge completed successfully.\n");
+            }
         }
     }
 }
