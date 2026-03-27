@@ -17093,6 +17093,7 @@ fn cmdRm(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform
     var cached = false;
     var recursive = false;
     var quiet = false;
+    var ignore_unmatch = false;
     var saw_dashdash = false;
     var files = std.array_list.Managed([]const u8).init(allocator);
     defer files.deinit();
@@ -17112,6 +17113,8 @@ fn cmdRm(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform
             recursive = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             quiet = true;
+        } else if (std.mem.eql(u8, arg, "--ignore-unmatch")) {
+            ignore_unmatch = true;
         } else if (std.mem.startsWith(u8, arg, "-") and !std.mem.eql(u8, arg, "--") and arg.len > 1 and arg[1] != '-') {
             // Handle combined short flags like -rf, -fr, etc.
             for (arg[1..]) |ch| {
@@ -17179,6 +17182,7 @@ fn cmdRm(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform
         }
 
         if (!found) {
+            if (ignore_unmatch) continue;
             const msg = try std.fmt.allocPrint(allocator, "fatal: pathspec '{s}' did not match any files\n", .{file_path});
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);
