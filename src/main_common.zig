@@ -3988,8 +3988,8 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     if (check_mode) {
         // In check mode, we need to re-run the diff and check for whitespace errors
         // For now, check working tree for trailing whitespace in modified files
-        if (positional.items.len == 0 and !cached) {
-            // Working tree diff check
+        if (positional.items.len == 0) {
+            // Check for whitespace errors in changed files
             for (index.entries.items) |entry| {
                 if (pathspec_args.items.len > 0) {
                     var matches = false;
@@ -3998,23 +3998,51 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
                     }
                     if (!matches) continue;
                 }
-                // Read the working tree file
-                const wt_content = platform_impl.fs.readFile(allocator, entry.path) catch continue;
-                defer allocator.free(wt_content);
-                // Get index content
-                var idx_hash_buf: [40]u8 = undefined;
-                _ = std.fmt.bufPrint(&idx_hash_buf, "{x}", .{&entry.sha1}) catch continue;
-                const idx_obj = objects.GitObject.load(&idx_hash_buf, git_path, platform_impl, allocator) catch continue;
-                defer idx_obj.deinit(allocator);
-                if (std.mem.eql(u8, wt_content, idx_obj.data)) continue;
-                // Check new content for whitespace errors
-                var lines = std.mem.splitScalar(u8, wt_content, '\n');
+                // Get the content to check
+                var check_content: []const u8 = undefined;
+                var check_content_owned = false;
+                if (cached) {
+                    // Cached: check the index (staged) content
+                    var idx_hash_buf: [40]u8 = undefined;
+                    _ = std.fmt.bufPrint(&idx_hash_buf, "{x}", .{&entry.sha1}) catch continue;
+                    const idx_obj = objects.GitObject.load(&idx_hash_buf, git_path, platform_impl, allocator) catch continue;
+                    defer idx_obj.deinit(allocator);
+                    check_content = try allocator.dupe(u8, idx_obj.data);
+                    check_content_owned = true;
+                } else {
+                    // Working tree: check the file content
+                    check_content = platform_impl.fs.readFile(allocator, entry.path) catch continue;
+                    check_content_owned = true;
+                    // Compare with index to skip unchanged
+                    var idx_hash_buf: [40]u8 = undefined;
+                    _ = std.fmt.bufPrint(&idx_hash_buf, "{x}", .{&entry.sha1}) catch continue;
+                    if (objects.GitObject.load(&idx_hash_buf, git_path, platform_impl, allocator)) |idx_obj| {
+                        defer idx_obj.deinit(allocator);
+                        if (std.mem.eql(u8, check_content, idx_obj.data)) {
+                            allocator.free(check_content);
+                            continue;
+                        }
+                    } else |_| {}
+                }
+                defer if (check_content_owned) allocator.free(check_content);
+                // Check content for whitespace errors
+                var lines = std.mem.splitScalar(u8, check_content, '\n');
                 var line_num: usize = 0;
                 while (lines.next()) |line| {
                     line_num += 1;
                     if (line.len > 0 and (line[line.len - 1] == ' ' or line[line.len - 1] == '\t')) {
                         ws_errors = true;
                         const msg = try std.fmt.allocPrint(allocator, "{s}:{d}: trailing whitespace.\n+{s}\n", .{ entry.path, line_num, line });
+                        defer allocator.free(msg);
+                        try platform_impl.writeStdout(msg);
+                    }
+                    // Check for conflict markers
+                    if (std.mem.startsWith(u8, line, "<<<<<<<") or
+                        std.mem.startsWith(u8, line, "=======") or
+                        std.mem.startsWith(u8, line, ">>>>>>>"))
+                    {
+                        ws_errors = true;
+                        const msg = try std.fmt.allocPrint(allocator, "{s}:{d}: leftover conflict marker.\n+{s}\n", .{ entry.path, line_num, line });
                         defer allocator.free(msg);
                         try platform_impl.writeStdout(msg);
                     }
