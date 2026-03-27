@@ -13736,6 +13736,17 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                             try platform_impl.writeStderr(emsg);
                             std.process.exit(128);
                         }
+                        if (err == error.NullSha1) {
+                            if (verbose) {
+                                const vmsg = try std.fmt.allocPrint(allocator, "add '{s}'\n", .{path});
+                                defer allocator.free(vmsg);
+                                try platform_impl.writeStdout(vmsg);
+                            }
+                            const emsg2 = try std.fmt.allocPrint(allocator, "error: Invalid path '{s}': Null sha1\n", .{path});
+                            defer allocator.free(emsg2);
+                            try platform_impl.writeStderr(emsg2);
+                            std.process.exit(128);
+                        }
                         return err;
                     };
                     modified = true;
@@ -13751,10 +13762,25 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                             try platform_impl.writeStderr(emsg);
                             std.process.exit(128);
                         }
+                        if (err == error.NullSha1) {
+                            if (verbose) {
+                                const vmsg = try std.fmt.allocPrint(allocator, "add '{s}'\n", .{path});
+                                defer allocator.free(vmsg);
+                                try platform_impl.writeStdout(vmsg);
+                            }
+                            const emsg2 = try std.fmt.allocPrint(allocator, "error: Invalid path '{s}': Null sha1\n", .{path});
+                            defer allocator.free(emsg2);
+                            try platform_impl.writeStderr(emsg2);
+                            std.process.exit(128);
+                        }
                         return err;
                     };
                     modified = true;
                 }
+            } else {
+                try platform_impl.writeStderr("error: option 'cacheinfo' expects <mode>,<sha1>,<path>\n");
+                std.process.exit(1);
+                unreachable;
             }
         } else if (std.mem.eql(u8, arg, "--assume-unchanged")) {
             assume_unchanged = true;
@@ -13797,6 +13823,7 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                     }
                     addCacheInfo(&idx, mode_str, hash_str, path, allocator) catch |err| {
                         if (err == error.DirectoryFileConflict) continue;
+                        if (err == error.NullSha1) continue;
                         return err;
                     };
                     modified = true;
@@ -13911,6 +13938,18 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                     modified = true;
                 }
             }
+        } else {
+            // Unknown option starting with -
+            if (std.mem.eql(u8, arg, "-h")) {
+                try platform_impl.writeStderr("usage: git update-index [<options>] [--] [<file>...]\n");
+                std.process.exit(129);
+                unreachable;
+            }
+            const msg = try std.fmt.allocPrint(allocator, "error: unknown option '{s}'\nusage: git update-index [<options>] [--] [<file>...]\n", .{arg});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(129);
+            unreachable;
         }
     }
 
@@ -13991,6 +14030,17 @@ fn addCacheInfo(idx: *index_mod.Index, mode_str: []const u8, hash_str: []const u
     var i: usize = 0;
     while (i < 20) : (i += 1) {
         sha1[i] = std.fmt.parseInt(u8, hash_str[i * 2 .. i * 2 + 2], 16) catch 0;
+    }
+
+    // Reject null SHA1 for blob and gitlink entries
+    const is_zero = blk: {
+        for (sha1) |b| {
+            if (b != 0) break :blk false;
+        }
+        break :blk true;
+    };
+    if (is_zero and mode != 0) {
+        return error.NullSha1;
     }
 
     // Check for directory/file conflicts  
