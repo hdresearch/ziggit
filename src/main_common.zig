@@ -1136,6 +1136,11 @@ fn initRepositoryInDir(git_dir: []const u8, bare: bool, template_dir: ?[]const u
     if (platform_impl.fs.exists(head_check_path) catch false) {
         const abs_path = std.fs.cwd().realpathAlloc(allocator, git_dir) catch try allocator.dupe(u8, git_dir);
         defer allocator.free(abs_path);
+        if (initial_branch != null) {
+            const warn_msg = try std.fmt.allocPrint(allocator, "warning: re-init: ignored --initial-branch={s}\n", .{initial_branch.?});
+            defer allocator.free(warn_msg);
+            try platform_impl.writeStderr(warn_msg);
+        }
         if (!quiet) {
             const msg = try std.fmt.allocPrint(allocator, "Reinitialized existing Git repository in {s}/\n", .{abs_path});
             defer allocator.free(msg);
@@ -1159,8 +1164,44 @@ fn initRepositoryInDir(git_dir: []const u8, bare: bool, template_dir: ?[]const u
     defer allocator.free(head_path);
     const default_branch = if (initial_branch) |ib|
         try allocator.dupe(u8, ib)
-    else
-        std.process.getEnvVarOwned(allocator, "GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME") catch try allocator.dupe(u8, "master");
+    else blk: {
+        // Check GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME (non-empty means use it)
+        if (std.process.getEnvVarOwned(allocator, "GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME") catch null) |env_val| {
+            if (env_val.len > 0) break :blk env_val;
+            allocator.free(env_val);
+        }
+        // Check init.defaultBranch from global config
+        const home_dir = std.process.getEnvVarOwned(allocator, "HOME") catch null;
+        defer if (home_dir) |h| allocator.free(h);
+        if (home_dir) |home| {
+            const global_config_path2 = try std.fmt.allocPrint(allocator, "{s}/.gitconfig", .{home});
+            defer allocator.free(global_config_path2);
+            if (platform_impl.fs.readFile(allocator, global_config_path2)) |gcfg| {
+                defer allocator.free(gcfg);
+                if (parseConfigValue(gcfg, "init.defaultbranch", allocator) catch null) |db_val| {
+                    if (db_val.len > 0) break :blk db_val;
+                    allocator.free(db_val);
+                }
+            } else |_| {}
+            // Also check XDG config
+            const xdg_config = std.process.getEnvVarOwned(allocator, "XDG_CONFIG_HOME") catch null;
+            defer if (xdg_config) |x| allocator.free(x);
+            const xdg_base = xdg_config orelse home;
+            const xdg_git_config = if (xdg_config != null)
+                try std.fmt.allocPrint(allocator, "{s}/git/config", .{xdg_base})
+            else
+                try std.fmt.allocPrint(allocator, "{s}/.config/git/config", .{xdg_base});
+            defer allocator.free(xdg_git_config);
+            if (platform_impl.fs.readFile(allocator, xdg_git_config)) |xcfg| {
+                defer allocator.free(xcfg);
+                if (parseConfigValue(xcfg, "init.defaultbranch", allocator) catch null) |db_val2| {
+                    if (db_val2.len > 0) break :blk db_val2;
+                    allocator.free(db_val2);
+                }
+            } else |_| {}
+        }
+        break :blk try allocator.dupe(u8, "master");
+    };
     defer allocator.free(default_branch);
     const head_content = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{default_branch});
     defer allocator.free(head_content);
@@ -2065,7 +2106,23 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         }
     }
 
-    // For --amend, we'll update the last commit instead of creating a new one
+    // For --amend without -m, reuse the previous commit's message
+    if (message == null and amend) {
+        const gp = findGitDirectory(allocator, platform_impl) catch {
+            try platform_impl.writeStderr("fatal: not a git repository\n");
+            std.process.exit(128);
+        };
+        defer allocator.free(gp);
+        if (refs.getCurrentCommit(gp, platform_impl, allocator) catch null) |cur_hash| {
+            defer allocator.free(cur_hash);
+            if (objects.GitObject.load(cur_hash, gp, platform_impl, allocator) catch null) |cobj| {
+                defer cobj.deinit(allocator);
+                if (std.mem.indexOf(u8, cobj.data, "\n\n")) |pos| {
+                    message = try allocator.dupe(u8, cobj.data[pos + 2 ..]);
+                }
+            }
+        }
+    }
 
     if (message == null) {
         try platform_impl.writeStderr("error: no commit message provided (use -m)\n");
@@ -7098,7 +7155,104 @@ fn resolveObjectByPrefix(git_path: []const u8, hash_prefix: []const u8, platform
 
 /// Resolve a revision string like HEAD, HEAD~3, HEAD^2, v1.0^{commit}, branch_name, etc.
 /// Returns the 40-char hash of the resolved object.
+fn resolveTreePath(git_path: []const u8, tree_hash: []const u8, path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
+    // Split path into components and walk the tree
+    var components = std.mem.splitScalar(u8, path, '/');
+    var current_hash = try allocator.dupe(u8, tree_hash);
+    
+    while (components.next()) |component| {
+        if (component.len == 0) continue;
+        
+        // Load current tree
+        const tree_obj = objects.GitObject.load(current_hash, git_path, platform_impl, allocator) catch {
+            allocator.free(current_hash);
+            return error.BadRevision;
+        };
+        defer tree_obj.deinit(allocator);
+        
+        if (tree_obj.type != .tree) {
+            allocator.free(current_hash);
+            return error.BadRevision;
+        }
+        
+        // Parse tree entries to find the component
+        var found = false;
+        var j: usize = 0;
+        while (j < tree_obj.data.len) {
+            const space_pos = std.mem.indexOf(u8, tree_obj.data[j..], " ") orelse break;
+            j += space_pos + 1; // skip mode + space
+            const null_pos = std.mem.indexOf(u8, tree_obj.data[j..], "\x00") orelse break;
+            const name = tree_obj.data[j .. j + null_pos];
+            j += null_pos + 1;
+            if (j + 20 > tree_obj.data.len) break;
+            const hash_bytes = tree_obj.data[j .. j + 20];
+            j += 20;
+            
+            if (std.mem.eql(u8, name, component)) {
+                // Convert binary hash to hex
+                const hex = try allocator.alloc(u8, 40);
+                for (hash_bytes, 0..) |byte, bi| {
+                    const hi = byte >> 4;
+                    const lo = byte & 0x0f;
+                    hex[bi * 2] = "0123456789abcdef"[hi];
+                    hex[bi * 2 + 1] = "0123456789abcdef"[lo];
+                }
+                allocator.free(current_hash);
+                current_hash = hex;
+                found = true;
+                break;
+            }
+        }
+        
+        if (!found) {
+            allocator.free(current_hash);
+            return error.BadRevision;
+        }
+    }
+    
+    return current_hash;
+}
+
 fn resolveRevision(git_path: []const u8, rev: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
+    // Handle <rev>:<path> - resolve a path within a commit's tree
+    if (std.mem.indexOf(u8, rev, ":")) |colon_pos| {
+        // Make sure it's not a reflog like main@{...}:path  
+        // The colon must not be inside ^{} 
+        const base_rev = rev[0..colon_pos];
+        const path = rev[colon_pos + 1 ..];
+        
+        // Resolve the base revision to a commit hash
+        const commit_hash = try resolveRevision(git_path, base_rev, platform_impl, allocator);
+        defer allocator.free(commit_hash);
+        
+        // Get the tree hash from the commit
+        const commit_obj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch return error.BadRevision;
+        defer commit_obj.deinit(allocator);
+        
+        var tree_hash: ?[]const u8 = null;
+        if (commit_obj.type == .commit) {
+            var lines = std.mem.splitSequence(u8, commit_obj.data, "\n");
+            while (lines.next()) |line| {
+                if (std.mem.startsWith(u8, line, "tree ")) {
+                    tree_hash = line["tree ".len..];
+                    break;
+                }
+            }
+        } else if (commit_obj.type == .tree) {
+            tree_hash = commit_hash;
+        }
+        
+        const th = tree_hash orelse return error.BadRevision;
+        
+        if (path.len == 0) {
+            // <rev>: with empty path means the tree itself
+            return try allocator.dupe(u8, th);
+        }
+        
+        // Walk the tree to find the path
+        return resolveTreePath(git_path, th, path, platform_impl, allocator);
+    }
+
     // Handle ^{type} peel suffix: e.g. "v1.0^{commit}" or "HEAD^{tree}"
     if (std.mem.indexOf(u8, rev, "^{")) |peel_start| {
         if (std.mem.indexOfScalar(u8, rev[peel_start..], '}')) |close_offset| {
@@ -8580,6 +8734,14 @@ fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var show_type = false;
     var show_size = false;
     var show_pretty = false;
+    var show_exists = false;
+    var batch_mode = false;
+    var batch_check = false;
+    var batch_all = false;
+    var follow_symlinks = false;
+    var textconv = false;
+    var filters = false;
+    var path_opt: ?[]const u8 = null;
     var object_ref: ?[]const u8 = null;
 
     // Parse arguments
@@ -8590,14 +8752,120 @@ fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             show_size = true;
         } else if (std.mem.eql(u8, arg, "-p")) {
             show_pretty = true;
+        } else if (std.mem.eql(u8, arg, "-e")) {
+            show_exists = true;
+        } else if (std.mem.eql(u8, arg, "--batch") or std.mem.startsWith(u8, arg, "--batch=")) {
+            batch_mode = true;
+        } else if (std.mem.eql(u8, arg, "--batch-check") or std.mem.startsWith(u8, arg, "--batch-check=")) {
+            batch_check = true;
+        } else if (std.mem.eql(u8, arg, "--batch-all-objects")) {
+            batch_all = true;
+        } else if (std.mem.eql(u8, arg, "--follow-symlinks")) {
+            follow_symlinks = true;
+        } else if (std.mem.eql(u8, arg, "--textconv")) {
+            textconv = true;
+        } else if (std.mem.eql(u8, arg, "--filters")) {
+            filters = true;
+        } else if (std.mem.startsWith(u8, arg, "--path=")) {
+            path_opt = arg["--path=".len..];
+        } else if (std.mem.eql(u8, arg, "--path")) {
+            path_opt = args.next();
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             object_ref = arg;
         }
     }
 
+    // Count cmdmode options (mutually exclusive)
+    var cmdmode_count: u32 = 0;
+    if (show_type) cmdmode_count += 1;
+    if (show_size) cmdmode_count += 1;
+    if (show_pretty) cmdmode_count += 1;
+    if (show_exists) cmdmode_count += 1;
+    if (textconv) cmdmode_count += 1;
+    if (filters) cmdmode_count += 1;
+
+    // Check for incompatible option combinations
+    if (cmdmode_count > 1) {
+        try platform_impl.writeStderr("error: switch `e' is incompatible with -t, -s, -p, --textconv, --filters\n");
+        std.process.exit(129);
+    }
+    
+    if (batch_all and (show_exists or show_type or show_size or show_pretty)) {
+        try platform_impl.writeStderr("fatal: --batch-all-objects cannot be combined with cmdmode options\n");
+        std.process.exit(129);
+    }
+    
+    if ((batch_mode or batch_check) and (show_exists or show_type or show_size or show_pretty or follow_symlinks)) {
+        try platform_impl.writeStderr("fatal: options are incompatible\n");
+        std.process.exit(129);
+    }
+    
+    if (follow_symlinks and (show_exists or show_type or show_size or show_pretty)) {
+        try platform_impl.writeStderr("fatal: options are incompatible\n");
+        std.process.exit(129);
+    }
+    
+    if (path_opt != null and (batch_mode or batch_check)) {
+        try platform_impl.writeStderr("fatal: --path is incompatible with --batch\n");
+        std.process.exit(129);
+    }
+    
+    // Options that require an object argument
+    if (!batch_mode and !batch_check and !batch_all) {
+        if (textconv and object_ref == null) {
+            try platform_impl.writeStderr("fatal: --textconv requires a revision\n");
+            std.process.exit(129);
+        }
+        if (filters and object_ref == null) {
+            try platform_impl.writeStderr("fatal: --filters requires a revision\n");
+            std.process.exit(129);
+        }
+        if (show_exists and object_ref == null) {
+            try platform_impl.writeStderr("fatal: -e requires a revision\n");
+            std.process.exit(129);
+        }
+        if (show_type and object_ref == null) {
+            try platform_impl.writeStderr("fatal: -t requires a revision\n");
+            std.process.exit(129);
+        }
+        if (show_size and object_ref == null) {
+            try platform_impl.writeStderr("fatal: -s requires a revision\n");
+            std.process.exit(129);
+        }
+        if (show_pretty and object_ref == null) {
+            try platform_impl.writeStderr("fatal: -p requires a revision\n");
+            std.process.exit(129);
+        }
+    }
+
+    if (batch_mode or batch_check) {
+        // Batch mode: read object names from stdin
+        try catFileBatch(allocator, git_path, batch_mode, platform_impl);
+        return;
+    }
+
     if (object_ref == null) {
-        try platform_impl.writeStderr("fatal: <object> required\n");
-        std.process.exit(128);
+        try platform_impl.writeStderr("usage: git cat-file <type> <object>\n   or: git cat-file (-e | -p) <object>\n   or: git cat-file (-t | -s) [--allow-unknown-type] <object>\n   or: git cat-file (--batch | --batch-check) [--batch-all-objects]\n                    [--buffer] [--follow-symlinks] [--unordered]\n                    [--textconv | --filters]\n");
+        std.process.exit(129);
+    }
+    
+    // Handle -e (exists check)
+    if (show_exists) {
+        var obj_hash: []u8 = undefined;
+        if (isValidHashPrefix(object_ref.?)) {
+            obj_hash = resolveCommitHash(git_path, object_ref.?, platform_impl, allocator) catch {
+                std.process.exit(1);
+            };
+        } else {
+            obj_hash = resolveCommittish(git_path, object_ref.?, platform_impl, allocator) catch {
+                std.process.exit(1);
+            };
+        }
+        defer allocator.free(obj_hash);
+        _ = objects.GitObject.load(obj_hash, git_path, platform_impl, allocator) catch {
+            std.process.exit(1);
+        };
+        return; // exists - exit 0
     }
 
     // Resolve the object reference to a hash
@@ -8672,6 +8940,63 @@ fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     } else {
         // Default: show raw object content
         try platform_impl.writeStdout(git_object.data);
+    }
+}
+
+fn catFileBatch(allocator: std.mem.Allocator, git_path: []const u8, full_content: bool, platform_impl: *const platform_mod.Platform) !void {
+    const stdin_data = readStdin(allocator, 10 * 1024 * 1024) catch return;
+    defer allocator.free(stdin_data);
+    
+    var lines = std.mem.splitScalar(u8, stdin_data, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        
+        // Resolve object
+        var obj_hash: []u8 = undefined;
+        if (isValidHashPrefix(trimmed)) {
+            obj_hash = resolveCommitHash(git_path, trimmed, platform_impl, allocator) catch {
+                const msg = try std.fmt.allocPrint(allocator, "{s} missing\n", .{trimmed});
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+                continue;
+            };
+        } else {
+            obj_hash = resolveCommittish(git_path, trimmed, platform_impl, allocator) catch {
+                const msg = try std.fmt.allocPrint(allocator, "{s} missing\n", .{trimmed});
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+                continue;
+            };
+        }
+        defer allocator.free(obj_hash);
+        
+        const git_object = objects.GitObject.load(obj_hash, git_path, platform_impl, allocator) catch {
+            const msg = try std.fmt.allocPrint(allocator, "{s} missing\n", .{trimmed});
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
+            continue;
+        };
+        defer git_object.deinit(allocator);
+        
+        const type_str: []const u8 = switch (git_object.type) {
+            .blob => "blob",
+            .tree => "tree",
+            .commit => "commit",
+            .tag => "tag",
+        };
+        
+        if (full_content) {
+            const header = try std.fmt.allocPrint(allocator, "{s} {s} {d}\n", .{ obj_hash, type_str, git_object.data.len });
+            defer allocator.free(header);
+            try platform_impl.writeStdout(header);
+            try platform_impl.writeStdout(git_object.data);
+            try platform_impl.writeStdout("\n");
+        } else {
+            const header = try std.fmt.allocPrint(allocator, "{s} {s} {d}\n", .{ obj_hash, type_str, git_object.data.len });
+            defer allocator.free(header);
+            try platform_impl.writeStdout(header);
+        }
     }
 }
 
@@ -9974,6 +10299,18 @@ fn getCommitterString(allocator: std.mem.Allocator) ![]u8 {
     return try std.fmt.allocPrint(allocator, "{s} <{s}> {s}", .{ name, email, date });
 }
 
+fn cleanEmptyRefDirs(git_dir: []const u8, ref_name: []const u8, allocator: std.mem.Allocator) void {
+    // After deleting a ref like refs/heads/foo/bar, clean up empty parent dirs
+    var path = ref_name;
+    while (std.fs.path.dirname(path)) |parent| {
+        if (std.mem.eql(u8, parent, "refs") or parent.len == 0) break;
+        const full = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, parent }) catch break;
+        defer allocator.free(full);
+        std.fs.cwd().deleteDir(full) catch break;
+        path = parent;
+    }
+}
+
 fn cmdUpdateRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     var delete_mode = false;
     var no_deref = false;
@@ -10016,15 +10353,72 @@ fn cmdUpdateRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             unreachable;
         }
         const ref_name = positional.items[0];
+        // If old-value was specified, verify it matches current value
+        if (positional.items.len >= 2) {
+            const old_val = positional.items[1];
+            if (old_val.len > 0) {
+                const current = refs.resolveRef(git_dir, ref_name, platform_impl, allocator) catch null;
+                defer if (current) |c| allocator.free(c);
+                if (current) |cur| {
+                    if (!std.mem.eql(u8, cur, old_val)) {
+                        const err_msg = try std.fmt.allocPrint(allocator, "error: cannot lock ref '{s}': is at {s} but expected {s}\n", .{ ref_name, cur, old_val });
+                        defer allocator.free(err_msg);
+                        try platform_impl.writeStderr(err_msg);
+                        std.process.exit(1);
+                        unreachable;
+                    }
+                }
+            }
+        }
+        
+        // Delete loose ref file
         const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_name });
         defer allocator.free(ref_path);
         std.fs.cwd().deleteFile(ref_path) catch |err| {
-            const err_msg = try std.fmt.allocPrint(allocator, "fatal: cannot delete ref '{s}': {}\n", .{ ref_name, err });
-            defer allocator.free(err_msg);
-            try platform_impl.writeStderr(err_msg);
-            std.process.exit(1);
-            unreachable;
+            if (err != error.FileNotFound) {
+                const err_msg = try std.fmt.allocPrint(allocator, "fatal: cannot delete ref '{s}': {}\n", .{ ref_name, err });
+                defer allocator.free(err_msg);
+                try platform_impl.writeStderr(err_msg);
+                std.process.exit(1);
+                unreachable;
+            }
         };
+        // (loose ref deletion handled above)
+        
+        // Also remove from packed-refs if present
+        const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir});
+        defer allocator.free(packed_refs_path);
+        if (platform_impl.fs.readFile(allocator, packed_refs_path)) |packed_data| {
+            defer allocator.free(packed_data);
+            var new_packed = std.array_list.Managed(u8).init(allocator);
+            defer new_packed.deinit();
+            var lines_iter = std.mem.splitScalar(u8, packed_data, '\n');
+            while (lines_iter.next()) |line| {
+                if (line.len == 0) continue;
+                if (line[0] == '#') {
+                    try new_packed.appendSlice(line);
+                    try new_packed.append('\n');
+                    continue;
+                }
+                if (line[0] == '^') {
+                    // Peeled ref - skip if previous ref was deleted
+                    continue;
+                }
+                // Check if this line references our ref
+                if (line.len > 41) {
+                    const line_ref = std.mem.trimRight(u8, line[41..], " \t\r");
+                    if (std.mem.eql(u8, line_ref, ref_name)) {
+                        continue; // skip this ref
+                    }
+                }
+                try new_packed.appendSlice(line);
+                try new_packed.append('\n');
+            }
+            platform_impl.fs.writeFile(packed_refs_path, new_packed.items) catch {};
+        } else |_| {}
+        
+        // Try to clean up empty parent dirs
+        cleanEmptyRefDirs(git_dir, ref_name, allocator);
         return;
     }
 
@@ -10054,8 +10448,111 @@ fn cmdUpdateRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     }
     defer if (free_resolved) allocator.free(resolved_new);
 
+    // Old value verification
+    if (positional.items.len >= 3) {
+        const old_val = positional.items[2];
+        if (old_val.len > 0 and !std.mem.eql(u8, old_val, "0000000000000000000000000000000000000000")) {
+            const current = refs.resolveRef(git_dir, ref_name, platform_impl, allocator) catch null;
+            defer if (current) |c| allocator.free(c);
+            if (current) |cur| {
+                if (!std.mem.eql(u8, cur, old_val)) {
+                    const err_msg2 = try std.fmt.allocPrint(allocator, "error: cannot lock ref '{s}': is at {s} but expected {s}\n", .{ ref_name, cur, old_val });
+                    defer allocator.free(err_msg2);
+                    try platform_impl.writeStderr(err_msg2);
+                    std.process.exit(1);
+                    unreachable;
+                }
+            } else {
+                // Ref doesn't exist but old value was specified
+                const err_msg2 = try std.fmt.allocPrint(allocator, "error: cannot lock ref '{s}': unable to resolve reference '{s}'\n", .{ ref_name, ref_name });
+                defer allocator.free(err_msg2);
+                try platform_impl.writeStderr(err_msg2);
+                std.process.exit(1);
+                unreachable;
+            }
+        }
+    }
+
+    // Get old value for reflog
+    const old_hash = refs.resolveRef(git_dir, ref_name, platform_impl, allocator) catch null;
+    defer if (old_hash) |h| allocator.free(h);
+
     // Write the ref
     try refs.updateRef(git_dir, ref_name, resolved_new, platform_impl, allocator);
+    
+    // Create reflog dir and write entry if needed
+    if (create_reflog or shouldLogRef(git_dir, ref_name, platform_impl, allocator)) {
+        writeReflogEntry(git_dir, ref_name, old_hash orelse "0000000000000000000000000000000000000000", resolved_new, msg orelse "", allocator, platform_impl) catch {};
+    }
+
+}
+
+fn shouldLogRef(git_dir: []const u8, ref_name: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) bool {
+    // Check core.logAllRefUpdates config
+    const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_dir}) catch return false;
+    defer allocator.free(config_path);
+    const config_data = platform_impl.fs.readFile(allocator, config_path) catch return false;
+    defer allocator.free(config_data);
+    
+    if (parseConfigValue(config_data, "core.logallrefupdates", allocator) catch null) |val| {
+        defer allocator.free(val);
+        if (std.ascii.eqlIgnoreCase(val, "always")) return true;
+        if (std.ascii.eqlIgnoreCase(val, "true")) {
+            // Only log refs/heads/* and HEAD
+            return std.mem.startsWith(u8, ref_name, "refs/heads/") or std.mem.eql(u8, ref_name, "HEAD");
+        }
+    }
+    return false;
+}
+
+fn writeReflogEntry(git_dir: []const u8, ref_name: []const u8, old_hash: []const u8, new_hash: []const u8, msg_str: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    const reflog_path = try std.fmt.allocPrint(allocator, "{s}/logs/{s}", .{ git_dir, ref_name });
+    defer allocator.free(reflog_path);
+    
+    // Create parent directories
+    if (std.fs.path.dirname(reflog_path)) |parent| {
+        std.fs.cwd().makePath(parent) catch {};
+    }
+    
+    // Get committer info
+    const name = std.process.getEnvVarOwned(allocator, "GIT_COMMITTER_NAME") catch try allocator.dupe(u8, "C O Mitter");
+    defer allocator.free(name);
+    const email = std.process.getEnvVarOwned(allocator, "GIT_COMMITTER_EMAIL") catch try allocator.dupe(u8, "committer@example.com");
+    defer allocator.free(email);
+    
+    var timestamp: i64 = undefined;
+    var tz_str: []const u8 = "+0000";
+    var tz_needs_free = false;
+    if (std.process.getEnvVarOwned(allocator, "GIT_COMMITTER_DATE") catch null) |date_str| {
+        defer allocator.free(date_str);
+        // Parse "timestamp tz" format
+        if (std.mem.indexOf(u8, date_str, " ")) |sp| {
+            timestamp = std.fmt.parseInt(i64, date_str[0..sp], 10) catch std.time.timestamp();
+            tz_str = allocator.dupe(u8, date_str[sp + 1 ..]) catch "+0000";
+            tz_needs_free = true;
+        } else {
+            timestamp = std.fmt.parseInt(i64, date_str, 10) catch std.time.timestamp();
+        }
+    } else {
+        timestamp = std.time.timestamp();
+    }
+    defer if (tz_needs_free) allocator.free(tz_str);
+    
+    const entry = try std.fmt.allocPrint(allocator, "{s} {s} {s} <{s}> {d} {s}\t{s}\n", .{ old_hash, new_hash, name, email, timestamp, tz_str, msg_str });
+    defer allocator.free(entry);
+    
+    // Append to reflog file
+    const file = std.fs.cwd().openFile(reflog_path, .{ .mode = .write_only }) catch |err| switch (err) {
+        error.FileNotFound => {
+            // Create new file
+            platform_impl.fs.writeFile(reflog_path, entry) catch {};
+            return;
+        },
+        else => return err,
+    };
+    defer file.close();
+    file.seekFromEnd(0) catch {};
+    file.writeAll(entry) catch {};
 }
 
 fn cmdSymbolicRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
