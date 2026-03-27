@@ -7109,7 +7109,7 @@ fn performLocalClone(
 
     // Create standard git directory structure
     const dirs_to_create = [_][]const u8{
-        "objects", "objects/info", "objects/pack", "refs", "refs/heads", "refs/tags", "info",
+        "objects", "objects/info", "objects/pack", "refs", "refs/heads", "refs/tags", "info", "hooks",
     };
     for (dirs_to_create) |subdir| {
         const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dst_git_dir, subdir });
