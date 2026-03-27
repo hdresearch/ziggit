@@ -117,7 +117,25 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
 
     var lines = try B.splitLines(a, fc);
     defer lines.deinit();
-    if (lines.items.len == 0) return;
+    if (lines.items.len == 0) {
+        // Even for empty files, -L ranges need validation
+        if (lr.items.len > 0) {
+            for (lr.items) |rs| {
+                if (rs.len == 0) continue;
+                // -L0 is always invalid
+                if (std.mem.eql(u8, rs, "0") or std.mem.startsWith(u8, rs, "0,")) {
+                    try pi.writeStderr("fatal: -L invalid line range\n");
+                    std.process.exit(128);
+                }
+                // Any -L on empty file: "has only 0 lines"
+                try pi.writeStderr("fatal: file ");
+                try pi.writeStderr(fp.?);
+                try pi.writeStderr(" has only 0 lines\n");
+                std.process.exit(128);
+            }
+        }
+        return;
+    }
 
     const es = try a.alloc(B.BlameEntry, lines.items.len);
     defer a.free(es);
@@ -158,6 +176,26 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
         for (lr.items) |rs| {
             var s: usize = 1;
             var e: usize = lines.items.len;
+
+            // Handle :funcname syntax
+            if (rs.len > 0 and (rs[0] == ':' or (rs.len > 1 and rs[0] == '^' and rs[1] == ':'))) {
+                const is_absolute = rs[0] == '^';
+                const pattern = if (is_absolute) rs[2..] else rs[1..];
+                const search_from = if (is_absolute) @as(usize, 0) else prev_end;
+                if (resolveFuncname(pattern, lines.items, search_from)) |result| {
+                    s = result.start;
+                    e = result.end;
+                    if (s <= e) {
+                        for (s - 1..e) |idx| inc[idx] = true;
+                        prev_end = e;
+                    }
+                } else {
+                    try pi.writeStderr("fatal: -L: no match\n");
+                    std.process.exit(128);
+                }
+                continue;
+            }
+
             // Find comma separator, but skip commas inside /regex/
             const comma = findLComma(rs);
             if (comma) |ci| {
@@ -299,6 +337,80 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
         else if (col) { try oC(pi, a, e, line, ln, se, srt, mal, lnw, abl); }
         else { try oD(pi, a, e, line, ln, se, srt, mal, lnw, abl); }
     }
+}
+
+/// Resolve a :funcname pattern to a line range (start, end) 1-based
+fn resolveFuncname(pattern: []const u8, file_lines: []const []const u8, search_from: usize) ?struct { start: usize, end: usize } {
+    if (pattern.len == 0) return null;
+    
+    // Find the first line matching the function pattern starting from search_from
+    var found_line: ?usize = null;
+    var i: usize = search_from;
+    while (i < file_lines.len) : (i += 1) {
+        if (isFuncDefMatch(file_lines[i], pattern)) {
+            found_line = i;
+            break;
+        }
+    }
+    // Wrap around if not found
+    if (found_line == null and search_from > 0) {
+        i = 0;
+        while (i < search_from) : (i += 1) {
+            if (isFuncDefMatch(file_lines[i], pattern)) {
+                found_line = i;
+                break;
+            }
+        }
+    }
+    
+    if (found_line == null) return null;
+    const start = found_line.? + 1; // 1-based
+    
+    // Find the end: next function definition or end of file
+    var end: usize = file_lines.len;
+    var j: usize = found_line.? + 1;
+    while (j < file_lines.len) : (j += 1) {
+        // Check if this line starts a new function (heuristic: line starts with non-space, non-# and contains '(')
+        if (isNewFuncStart(file_lines[j])) {
+            end = j; // exclusive
+            break;
+        }
+    }
+    
+    return .{ .start = start, .end = end };
+}
+
+/// Check if a line matches a function definition pattern
+fn isFuncDefMatch(line: []const u8, pattern: []const u8) bool {
+    // Simple heuristic: the line contains the pattern followed by '(' 
+    // or the pattern is a regex that matches the line
+    const trimmed = std.mem.trim(u8, line, " \t");
+    
+    // Try simple pattern matching (like simpleMatch)
+    if (simpleMatch(trimmed, pattern)) return true;
+    
+    // Also check if line contains "pattern(" for function definitions
+    if (std.mem.indexOf(u8, trimmed, pattern)) |pos| {
+        // Check if followed by '(' somewhere after
+        const after = trimmed[pos + pattern.len ..];
+        if (std.mem.indexOf(u8, after, "(") != null) return true;
+    }
+    
+    return false;
+}
+
+/// Check if a line starts a new function (heuristic)
+fn isNewFuncStart(line: []const u8) bool {
+    if (line.len == 0) return false;
+    const trimmed = std.mem.trim(u8, line, " \t");
+    if (trimmed.len == 0) return false;
+    // Skip preprocessor lines, comments, and lines starting with whitespace
+    if (line[0] == ' ' or line[0] == '\t' or line[0] == '#' or line[0] == '/' or line[0] == '*') return false;
+    if (line[0] == '}') return false;
+    if (line[0] == '{') return false;
+    // A function definition typically has a '(' or starts a block
+    if (std.mem.indexOf(u8, trimmed, "(") != null) return true;
+    return false;
 }
 
 /// Find the comma separator in an -L range spec, skipping commas inside /regex/
