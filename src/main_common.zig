@@ -2335,6 +2335,7 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     var amend = false;
     var add_all = false;
     var quiet = false;
+    var signoff = false;
     var msg_source: enum { none, m_flag, f_flag, c_flag } = .none;
 
     // Parse arguments
@@ -2447,7 +2448,7 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         } else if (std.mem.eql(u8, arg, "--no-verify") or std.mem.eql(u8, arg, "-n")) {
             // Skip hooks
         } else if (std.mem.eql(u8, arg, "--signoff") or std.mem.eql(u8, arg, "-s")) {
-            // Signoff - ignore for now  
+            signoff = true;
         } else if (std.mem.eql(u8, arg, "--no-edit")) {
             // No edit
         } else if (std.mem.eql(u8, arg, "--allow-empty-message")) {
@@ -2619,6 +2620,26 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         break :blk try std.fmt.allocPrint(allocator, "Unknown <unknown@unknown> {d} {c}{d:0>2}{d:0>2}", .{ timestamp, tz_sign, tz_hours, tz_minutes });
     };
     defer allocator.free(committer_info);
+
+    // Add sign-off line if requested
+    if (signoff) {
+        // Extract name and email from committer info (format: "Name <email> timestamp tz")
+        const committer_name_email = blk: {
+            // Find the last '>' to get "Name <email>"
+            if (std.mem.lastIndexOf(u8, committer_info, ">")) |gt_pos| {
+                break :blk committer_info[0..gt_pos + 1];
+            }
+            break :blk committer_info;
+        };
+        const signoff_line = try std.fmt.allocPrint(allocator, "Signed-off-by: {s}", .{committer_name_email});
+        defer allocator.free(signoff_line);
+        // Only add if not already present
+        if (message != null and std.mem.indexOf(u8, message.?, signoff_line) == null) {
+            const old_msg = message.?;
+            const trimmed_msg = std.mem.trimRight(u8, old_msg, "\n");
+            message = try std.fmt.allocPrint(allocator, "{s}\n\n{s}\n", .{trimmed_msg, signoff_line});
+        }
+    }
 
     const commit_object = try objects.createCommitObject(
         tree_hash,
@@ -4511,7 +4532,7 @@ fn cmdMerge(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             std.process.exit(1);
         }
         const actual_msg = merge_message orelse
-            try std.fmt.allocPrint(allocator, "Merge branch '{s}'", .{merge_target});
+            try buildMergeMessage(merge_target, current_branch, git_path, allocator, platform_impl);
         defer if (merge_message == null) allocator.free(actual_msg);
         const author_str = getAuthorString(allocator) catch try allocator.dupe(u8, "Unknown <unknown@unknown>");
         defer allocator.free(author_str);
@@ -4546,7 +4567,7 @@ fn cmdMerge(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         if (allow_unrelated_histories) {
             // Create a merge commit with both parents
             const actual_message = merge_message orelse blk: {
-                break :blk try std.fmt.allocPrint(allocator, "Merge branch '{s}'", .{merge_target});
+                break :blk try buildMergeMessage(merge_target, current_branch, git_path, allocator, platform_impl);
             };
             const should_free_msg = merge_message == null;
             defer if (should_free_msg) allocator.free(actual_message);
@@ -4594,7 +4615,7 @@ fn cmdMerge(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             defer allocator.free(success_msg);
             try platform_impl.writeStdout(success_msg);
         } else {
-            try performThreeWayMerge(git_path, current_hash, target_hash, current_branch, merge_target, allocator, platform_impl);
+            try performThreeWayMerge(git_path, current_hash, target_hash, current_branch, merge_target, merge_message, allocator, platform_impl);
         }
     }
 }
@@ -4718,7 +4739,7 @@ fn findFirstCommonAncestor(git_path: []const u8, commit_hash: []const u8, ancest
 }
 
 /// Perform a 3-way merge between current branch and target branch
-fn performThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_hash: []const u8, current_branch: []const u8, target_branch: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+fn performThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_hash: []const u8, current_branch: []const u8, target_branch: []const u8, merge_message: ?[]const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     // Find common base (merge base) - simplified implementation
     const merge_base = findMergeBase(git_path, current_hash, target_hash, allocator, platform_impl) catch try allocator.dupe(u8, current_hash);
     defer allocator.free(merge_base);
@@ -4741,9 +4762,11 @@ fn performThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_h
         std.process.exit(1);
     } else {
         // Create merge commit
-        try createMergeCommit(git_path, current_hash, target_hash, current_branch, target_branch, allocator, platform_impl);
+        try createMergeCommitWithMsg(git_path, current_hash, target_hash, current_branch, target_branch, merge_message, allocator, platform_impl);
         
-        const msg = try std.fmt.allocPrint(allocator, "Merge branch '{s}' into {s}\n", .{target_branch, current_branch});
+        const merge_msg_out = merge_message orelse try buildMergeMessage(target_branch, current_branch, git_path, allocator, platform_impl);
+        defer if (merge_message == null) allocator.free(merge_msg_out);
+        const msg = try std.fmt.allocPrint(allocator, "{s}\n", .{merge_msg_out});
         defer allocator.free(msg);
         try platform_impl.writeStdout(msg);
     }
@@ -5176,24 +5199,71 @@ fn createConflictFile(git_path: []const u8, filename: []const u8, base_hash: ?[]
 }
 
 /// Create a merge commit with two parents
+fn buildMergeMessage(merge_target: []const u8, current_branch: []const u8, git_path: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
+    const is_tag = blk: {
+        const tag_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags/{s}", .{git_path, merge_target});
+        defer allocator.free(tag_path);
+        if (std.fs.cwd().access(tag_path, .{})) |_| break :blk true else |_| {}
+        const packed_ref = try std.fmt.allocPrint(allocator, "refs/tags/{s}", .{merge_target});
+        defer allocator.free(packed_ref);
+        const packed_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_path});
+        defer allocator.free(packed_path);
+        if (std.fs.cwd().readFileAlloc(allocator, packed_path, 10 * 1024 * 1024)) |content| {
+            defer allocator.free(content);
+            if (std.mem.indexOf(u8, content, packed_ref) != null) break :blk true;
+        } else |_| {}
+        break :blk false;
+    };
+    const kind = if (is_tag) "tag" else "branch";
+    const is_default = isDefaultBranch(current_branch, allocator, platform_impl);
+    if (is_default) {
+        return std.fmt.allocPrint(allocator, "Merge {s} '{s}'", .{kind, merge_target});
+    } else {
+        return std.fmt.allocPrint(allocator, "Merge {s} '{s}' into {s}", .{kind, merge_target, current_branch});
+    }
+}
+
+fn isDefaultBranch(branch: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) bool {
+    const short_name = if (std.mem.startsWith(u8, branch, "refs/heads/")) branch["refs/heads/".len..] else branch;
+    if (std.process.getEnvVarOwned(allocator, "GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME") catch null) |ev| {
+        defer allocator.free(ev);
+        if (ev.len > 0) return std.mem.eql(u8, short_name, ev);
+    }
+    if (readCfg(allocator, "init.defaultbranch", platform_impl)) |v| {
+        defer allocator.free(v);
+        return std.mem.eql(u8, short_name, v);
+    }
+    return std.mem.eql(u8, short_name, "master");
+}
+
 fn createMergeCommit(git_path: []const u8, current_hash: []const u8, target_hash: []const u8, current_branch: []const u8, target_branch: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    return createMergeCommitWithMsg(git_path, current_hash, target_hash, current_branch, target_branch, null, allocator, platform_impl);
+}
+
+fn createMergeCommitWithMsg(git_path: []const u8, current_hash: []const u8, target_hash: []const u8, current_branch: []const u8, target_branch: []const u8, custom_message: ?[]const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     // Get current tree (after merge)
     const current_tree = try getCommitTree(git_path, current_hash, allocator, platform_impl);
     defer allocator.free(current_tree);
     
     // Create commit message
-    const commit_message = try std.fmt.allocPrint(allocator, "Merge branch '{s}' into {s}", .{target_branch, current_branch});
-    defer allocator.free(commit_message);
+    const commit_message = custom_message orelse try buildMergeMessage(target_branch, current_branch, git_path, allocator, platform_impl);
+    defer if (custom_message == null) allocator.free(commit_message);
     
-    // Create author/committer info (simplified)
-    const author = "User <user@example.com>";
-    const timestamp = std.time.timestamp();
-    const author_line = try std.fmt.allocPrint(allocator, "{s} {d} +0000", .{author, timestamp});
+    // Create author/committer info
+    const author_line = getAuthorString(allocator) catch blk: {
+        const ts = std.time.timestamp();
+        break :blk try std.fmt.allocPrint(allocator, "User <user@example.com> {d} +0000", .{ts});
+    };
     defer allocator.free(author_line);
+    const committer_line = getCommitterString(allocator) catch blk: {
+        const ts = std.time.timestamp();
+        break :blk try std.fmt.allocPrint(allocator, "User <user@example.com> {d} +0000", .{ts});
+    };
+    defer allocator.free(committer_line);
     
     // Create commit object with two parents
     const parents = [_][]const u8{current_hash, target_hash};
-    const commit_obj = try objects.createCommitObject(current_tree, &parents, author_line, author_line, commit_message, allocator);
+    const commit_obj = try objects.createCommitObject(current_tree, &parents, author_line, committer_line, commit_message, allocator);
     defer commit_obj.deinit(allocator);
     
     // Store commit object
