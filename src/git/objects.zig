@@ -302,7 +302,11 @@ pub fn createCommitObject(tree_hash: []const u8, parent_hashes: []const []const 
     
     try content.writer().print("author {s}\n", .{author});
     try content.writer().print("committer {s}\n", .{committer});
+    // Message: always end with a newline (like real git)
     try content.writer().print("\n{s}", .{message});
+    if (message.len == 0 or message[message.len - 1] != '\n') {
+        try content.writer().writeByte('\n');
+    }
 
     const data = try content.toOwnedSlice();
     return GitObject.init(.commit, data);
