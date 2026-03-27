@@ -16384,35 +16384,440 @@ fn formatRefOutput(allocator: std.mem.Allocator, format: []const u8, refname: []
 }
 
 fn getRefField(field: []const u8, refname: []const u8, objectname: []const u8, objecttype: []const u8, data: []const u8, allocator: std.mem.Allocator) []const u8 {
-    if (std.mem.eql(u8, field, "refname")) return refname;
+    // refname and refname: (trailing colon = same as bare refname)
+    if (std.mem.eql(u8, field, "refname") or std.mem.eql(u8, field, "refname:")) return refname;
     if (std.mem.eql(u8, field, "refname:short")) {
-        // Strip refs/heads/ or refs/tags/ etc.
         if (std.mem.startsWith(u8, refname, "refs/heads/")) return refname["refs/heads/".len..];
         if (std.mem.startsWith(u8, refname, "refs/tags/")) return refname["refs/tags/".len..];
         if (std.mem.startsWith(u8, refname, "refs/remotes/")) return refname["refs/remotes/".len..];
         return refname;
     }
-    if (std.mem.eql(u8, field, "objectname")) return objectname;
+    // refname:lstrip=N, refname:rstrip=N, refname:strip=N
+    if (std.mem.startsWith(u8, field, "refname:lstrip=") or std.mem.startsWith(u8, field, "refname:strip=")) {
+        const eq_pos = std.mem.indexOfScalar(u8, field, '=') orelse return refname;
+        const n_str = field[eq_pos + 1 ..];
+        return applyLstrip(refname, n_str);
+    }
+    if (std.mem.startsWith(u8, field, "refname:rstrip=")) {
+        const n_str = field["refname:rstrip=".len..];
+        return applyRstrip(refname, n_str);
+    }
+
+    // objectname variants
+    if (std.mem.eql(u8, field, "objectname") or std.mem.eql(u8, field, "objectname:")) return objectname;
     if (std.mem.eql(u8, field, "objectname:short")) return if (objectname.len >= 7) objectname[0..7] else objectname;
+    if (std.mem.startsWith(u8, field, "objectname:short=")) {
+        const n_str = field["objectname:short=".len..];
+        const n = std.fmt.parseInt(usize, n_str, 10) catch return objectname;
+        const len = @min(n, objectname.len);
+        if (len < 4) return if (objectname.len >= 4) objectname[0..4] else objectname;
+        return objectname[0..len];
+    }
     if (std.mem.eql(u8, field, "objecttype")) return objecttype;
 
-    // Contents-related fields: extract message from commit/tag object data
+    // objectsize
+    if (std.mem.eql(u8, field, "objectsize")) {
+        return std.fmt.allocPrint(allocator, "{d}", .{data.len}) catch return "";
+    }
+    if (std.mem.eql(u8, field, "objectsize:disk")) {
+        return std.fmt.allocPrint(allocator, "{d}", .{data.len}) catch return "";
+    }
+
+    // deltabase - always zero OID for non-packed
+    if (std.mem.eql(u8, field, "deltabase") or std.mem.eql(u8, field, "*deltabase")) {
+        return "0000000000000000000000000000000000000000";
+    }
+
+    // tree field - extract from commit data
+    if (std.mem.startsWith(u8, field, "tree")) {
+        if (!std.mem.eql(u8, objecttype, "commit")) return "";
+        const tree_hash = extractHeaderField(data, "tree");
+        if (tree_hash.len == 0) return "";
+        if (std.mem.eql(u8, field, "tree") or std.mem.eql(u8, field, "tree:")) return tree_hash;
+        if (std.mem.eql(u8, field, "tree:short")) return if (tree_hash.len >= 7) tree_hash[0..7] else tree_hash;
+        if (std.mem.startsWith(u8, field, "tree:short=")) {
+            const n_str = field["tree:short=".len..];
+            const n = std.fmt.parseInt(usize, n_str, 10) catch return tree_hash;
+            const len = @min(n, tree_hash.len);
+            if (len < 4) return if (tree_hash.len >= 4) tree_hash[0..4] else tree_hash;
+            return tree_hash[0..len];
+        }
+        return tree_hash;
+    }
+
+    // parent field - extract from commit data
+    if (std.mem.startsWith(u8, field, "parent")) {
+        if (!std.mem.eql(u8, objecttype, "commit")) return "";
+        const first_parent = extractHeaderField(data, "parent");
+        if (std.mem.eql(u8, field, "parent") or std.mem.eql(u8, field, "parent:")) return first_parent;
+        if (std.mem.eql(u8, field, "parent:short")) return if (first_parent.len >= 7) first_parent[0..7] else first_parent;
+        if (std.mem.startsWith(u8, field, "parent:short=")) {
+            const n_str = field["parent:short=".len..];
+            const n = std.fmt.parseInt(usize, n_str, 10) catch return first_parent;
+            const len = @min(n, first_parent.len);
+            if (len < 4) return if (first_parent.len >= 4) first_parent[0..4] else first_parent;
+            return first_parent[0..len];
+        }
+        return first_parent;
+    }
+
+    // numparent
+    if (std.mem.eql(u8, field, "numparent")) {
+        if (!std.mem.eql(u8, objecttype, "commit")) return "";
+        var count: usize = 0;
+        var lines_iter = std.mem.splitScalar(u8, data, '\n');
+        while (lines_iter.next()) |line| {
+            if (std.mem.startsWith(u8, line, "parent ")) {
+                count += 1;
+            } else if (line.len == 0) break;
+        }
+        return std.fmt.allocPrint(allocator, "{d}", .{count}) catch return "0";
+    }
+
+    // author fields
+    if (std.mem.startsWith(u8, field, "author")) {
+        if (!std.mem.eql(u8, objecttype, "commit")) return "";
+        const author_line = extractHeaderField(data, "author");
+        return extractPersonField(field["author".len..], author_line, allocator);
+    }
+
+    // committer fields
+    if (std.mem.startsWith(u8, field, "committer")) {
+        if (!std.mem.eql(u8, objecttype, "commit")) return "";
+        const committer_line = extractHeaderField(data, "committer");
+        return extractPersonField(field["committer".len..], committer_line, allocator);
+    }
+
+    // tagger fields
+    if (std.mem.startsWith(u8, field, "tagger")) {
+        if (!std.mem.eql(u8, objecttype, "tag")) return "";
+        const tagger_line = extractHeaderField(data, "tagger");
+        return extractPersonField(field["tagger".len..], tagger_line, allocator);
+    }
+
+    // tag field (name of the tag from tag object)
+    if (std.mem.eql(u8, field, "tag")) {
+        if (!std.mem.eql(u8, objecttype, "tag")) return "";
+        return extractHeaderField(data, "tag");
+    }
+
+    // type field (from tag object: the type of the target)
+    if (std.mem.eql(u8, field, "type")) {
+        if (!std.mem.eql(u8, objecttype, "tag")) return "";
+        return extractHeaderField(data, "type");
+    }
+
+    // object field (from tag object: the target OID)
+    if (std.mem.eql(u8, field, "object")) {
+        if (!std.mem.eql(u8, objecttype, "tag")) return "";
+        return extractHeaderField(data, "object");
+    }
+
+    // *objectname - dereferenced object name (for tags)
+    if (std.mem.eql(u8, field, "*objectname")) {
+        if (!std.mem.eql(u8, objecttype, "tag")) return "";
+        return extractHeaderField(data, "object");
+    }
+    // *objecttype - dereferenced object type (for tags)
+    if (std.mem.eql(u8, field, "*objecttype")) {
+        if (!std.mem.eql(u8, objecttype, "tag")) return "";
+        return extractHeaderField(data, "type");
+    }
+
+    // raw - the complete object data
+    if (std.mem.eql(u8, field, "raw")) {
+        return data;
+    }
+    if (std.mem.eql(u8, field, "*raw")) {
+        return "";
+    }
+
+    // creator/creatordate
+    if (std.mem.eql(u8, field, "creator")) {
+        if (std.mem.eql(u8, objecttype, "commit")) {
+            return extractHeaderField(data, "committer");
+        } else if (std.mem.eql(u8, objecttype, "tag")) {
+            return extractHeaderField(data, "tagger");
+        }
+        return "";
+    }
+    if (std.mem.eql(u8, field, "creatordate")) {
+        const person_line = if (std.mem.eql(u8, objecttype, "commit"))
+            extractHeaderField(data, "committer")
+        else if (std.mem.eql(u8, objecttype, "tag"))
+            extractHeaderField(data, "tagger")
+        else
+            "";
+        if (person_line.len == 0) return "";
+        return formatPersonDate(person_line, allocator);
+    }
+
+    // subject and subject:sanitize
+    if (std.mem.eql(u8, field, "subject")) {
+        const message = extractObjectMessage(data);
+        const clean_msg = stripCR(allocator, message) catch message;
+        const raw_subject = extractSubject(clean_msg);
+        return joinLines(allocator, raw_subject) catch raw_subject;
+    }
+    if (std.mem.eql(u8, field, "subject:sanitize")) {
+        const message = extractObjectMessage(data);
+        const clean_msg = stripCR(allocator, message) catch message;
+        const raw_subject = extractSubject(clean_msg);
+        const joined = joinLines(allocator, raw_subject) catch raw_subject;
+        return sanitizeSubject(allocator, joined) catch joined;
+    }
+
+    // body
+    if (std.mem.eql(u8, field, "body")) {
+        const message = extractObjectMessage(data);
+        return extractBody(message);
+    }
+
+    // HEAD indicator
+    if (std.mem.eql(u8, field, "HEAD")) {
+        const git_dir = findGitDir() catch return " ";
+        const head_path = std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir}) catch return " ";
+        defer allocator.free(head_path);
+        const head_content = std.fs.cwd().readFileAlloc(allocator, head_path, 4096) catch return " ";
+        defer allocator.free(head_content);
+        const trimmed = std.mem.trimRight(u8, head_content, "\n\r ");
+        if (std.mem.startsWith(u8, trimmed, "ref: ")) {
+            const head_ref = trimmed["ref: ".len..];
+            if (std.mem.eql(u8, head_ref, refname)) return "*" else return " ";
+        }
+        return " ";
+    }
+
+    // upstream/push - tracking branch info
+    if (std.mem.startsWith(u8, field, "upstream") or std.mem.startsWith(u8, field, "push")) {
+        return "";
+    }
+
+    // Contents-related fields
     if (std.mem.startsWith(u8, field, "contents")) {
         const message = extractObjectMessage(data);
         if (std.mem.eql(u8, field, "contents")) {
             return message;
         } else if (std.mem.eql(u8, field, "contents:subject")) {
-            // Strip \r for subject line, then join multi-line subjects with space
             const clean_msg = stripCR(allocator, message) catch message;
             const raw_subject = extractSubject(clean_msg);
             return joinLines(allocator, raw_subject) catch raw_subject;
         } else if (std.mem.eql(u8, field, "contents:body")) {
-            // Body preserves CRLF endings
             return extractBody(message);
+        } else if (std.mem.eql(u8, field, "contents:signature")) {
+            return "";
+        } else if (std.mem.eql(u8, field, "contents:size")) {
+            const msg_len = message.len;
+            return std.fmt.allocPrint(allocator, "{d}", .{msg_len}) catch return "0";
         }
     }
 
     return "";
+}
+
+/// Apply lstrip=N to a ref path
+fn applyLstrip(refname: []const u8, n_str: []const u8) []const u8 {
+    const n = std.fmt.parseInt(i32, n_str, 10) catch return refname;
+    if (n >= 0) {
+        var result = refname;
+        var count: i32 = 0;
+        while (count < n) : (count += 1) {
+            if (std.mem.indexOfScalar(u8, result, '/')) |idx| {
+                result = result[idx + 1 ..];
+            } else break;
+        }
+        return result;
+    } else {
+        const abs_n = @as(usize, @intCast(-n));
+        var total: usize = 1;
+        for (refname) |c| {
+            if (c == '/') total += 1;
+        }
+        if (abs_n >= total) return refname;
+        const strip = total - abs_n;
+        var result = refname;
+        var count: usize = 0;
+        while (count < strip) : (count += 1) {
+            if (std.mem.indexOfScalar(u8, result, '/')) |idx| {
+                result = result[idx + 1 ..];
+            } else break;
+        }
+        return result;
+    }
+}
+
+/// Apply rstrip=N to a ref path
+fn applyRstrip(refname: []const u8, n_str: []const u8) []const u8 {
+    const n = std.fmt.parseInt(i32, n_str, 10) catch return refname;
+    if (n >= 0) {
+        var end = refname.len;
+        var count: i32 = 0;
+        while (count < n) : (count += 1) {
+            if (std.mem.lastIndexOfScalar(u8, refname[0..end], '/')) |idx| {
+                end = idx;
+            } else break;
+        }
+        return refname[0..end];
+    } else {
+        const abs_n = @as(usize, @intCast(-n));
+        var pos: usize = 0;
+        var count: usize = 0;
+        for (refname, 0..) |c, idx| {
+            if (c == '/') {
+                count += 1;
+                if (count == abs_n) {
+                    pos = idx;
+                    break;
+                }
+            }
+        }
+        if (count < abs_n) return refname;
+        return refname[0..pos];
+    }
+}
+
+/// Extract a header field value from git object data
+fn extractHeaderField(data: []const u8, header_name: []const u8) []const u8 {
+    var lines_iter = std.mem.splitScalar(u8, data, '\n');
+    while (lines_iter.next()) |line| {
+        if (line.len == 0) break;
+        if (std.mem.startsWith(u8, line, header_name)) {
+            if (line.len > header_name.len and line[header_name.len] == ' ') {
+                return line[header_name.len + 1 ..];
+            }
+        }
+    }
+    return "";
+}
+
+/// Extract person sub-fields from a person line
+fn extractPersonField(suffix: []const u8, person_line: []const u8, allocator: std.mem.Allocator) []const u8 {
+    if (person_line.len == 0) return "";
+    if (suffix.len == 0) return person_line;
+
+    const lt_pos = std.mem.indexOfScalar(u8, person_line, '<') orelse return person_line;
+    const gt_pos = std.mem.indexOfScalar(u8, person_line, '>') orelse return person_line;
+    const name = std.mem.trimRight(u8, person_line[0..lt_pos], " ");
+    const email_with_brackets = person_line[lt_pos .. gt_pos + 1];
+    const email_bare = person_line[lt_pos + 1 .. gt_pos];
+
+    if (std.mem.eql(u8, suffix, "name")) return name;
+    if (std.mem.eql(u8, suffix, "name:mailmap")) return name;
+    if (std.mem.eql(u8, suffix, "email")) return email_with_brackets;
+    if (std.mem.eql(u8, suffix, "email:trim")) return email_bare;
+    if (std.mem.eql(u8, suffix, "email:localpart")) {
+        if (std.mem.indexOfScalar(u8, email_bare, '@')) |at_pos| return email_bare[0..at_pos];
+        return email_bare;
+    }
+    if (std.mem.eql(u8, suffix, "email:trim,localpart") or std.mem.eql(u8, suffix, "email:localpart,trim")) {
+        if (std.mem.indexOfScalar(u8, email_bare, '@')) |at_pos| return email_bare[0..at_pos];
+        return email_bare;
+    }
+    // mailmap email variants - return un-mapped versions for now
+    if (std.mem.startsWith(u8, suffix, "email:mailmap") or std.mem.startsWith(u8, suffix, "email:trim,mailmap") or std.mem.startsWith(u8, suffix, "email:localpart,mailmap")) {
+        if (std.mem.indexOf(u8, suffix, "trim") != null and std.mem.indexOf(u8, suffix, "localpart") != null) {
+            if (std.mem.indexOfScalar(u8, email_bare, '@')) |at_pos| return email_bare[0..at_pos];
+            return email_bare;
+        }
+        if (std.mem.indexOf(u8, suffix, "trim") != null) return email_bare;
+        if (std.mem.indexOf(u8, suffix, "localpart") != null) {
+            if (std.mem.indexOfScalar(u8, email_bare, '@')) |at_pos| return email_bare[0..at_pos];
+            return email_bare;
+        }
+        return email_with_brackets;
+    }
+    if (std.mem.eql(u8, suffix, "date")) {
+        return formatPersonDate(person_line, allocator);
+    }
+
+    return person_line;
+}
+
+/// Format a date from a person line into git's default date format
+fn formatPersonDate(person_line: []const u8, allocator: std.mem.Allocator) []const u8 {
+    const gt_pos = std.mem.indexOfScalar(u8, person_line, '>') orelse return "";
+    const after_email = std.mem.trimLeft(u8, if (gt_pos + 1 < person_line.len) person_line[gt_pos + 1 ..] else "", " ");
+    const space = std.mem.indexOfScalar(u8, after_email, ' ');
+    const ts_str = if (space) |s| after_email[0..s] else after_email;
+    const tz_str = if (space) |s| after_email[s + 1 ..] else "+0000";
+
+    const timestamp = std.fmt.parseInt(i64, ts_str, 10) catch return "";
+    return formatTimestamp(timestamp, tz_str, allocator) catch return "";
+}
+
+/// Format a Unix timestamp with timezone into git's default date format
+fn formatTimestamp(timestamp: i64, tz_str: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+    var tz_offset_minutes: i32 = 0;
+    if (tz_str.len >= 5) {
+        const sign: i32 = if (tz_str[0] == '-') @as(i32, -1) else @as(i32, 1);
+        const hours = std.fmt.parseInt(i32, tz_str[1..3], 10) catch 0;
+        const mins = std.fmt.parseInt(i32, tz_str[3..5], 10) catch 0;
+        tz_offset_minutes = sign * (hours * 60 + mins);
+    }
+
+    const adjusted = timestamp + @as(i64, tz_offset_minutes) * 60;
+    const SECS_PER_DAY: i64 = 86400;
+    var days = @divFloor(adjusted, SECS_PER_DAY);
+    var rem = @mod(adjusted, SECS_PER_DAY);
+    if (rem < 0) {
+        rem += SECS_PER_DAY;
+        days -= 1;
+    }
+    const hour = @as(u32, @intCast(@divFloor(rem, 3600)));
+    const minute = @as(u32, @intCast(@divFloor(@mod(rem, 3600), 60)));
+    const second = @as(u32, @intCast(@mod(rem, 60)));
+    const wday = @mod(days + 4, 7);
+    const wday_u: usize = if (wday >= 0) @intCast(wday) else @intCast(wday + 7);
+
+    var y: i64 = 1970;
+    var d = days;
+    while (true) {
+        const yd: i64 = if (@mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0)) 366 else 365;
+        if (d < yd) break;
+        d -= yd;
+        y += 1;
+    }
+    const leap: bool = (@mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0));
+    const mdays = [12]u32{ 31, if (leap) 29 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    var mon: usize = 0;
+    while (mon < 12) : (mon += 1) {
+        if (d < mdays[mon]) break;
+        d -= mdays[mon];
+    }
+    const day = @as(u32, @intCast(d)) + 1;
+
+    const wday_names = [7][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    const mon_names = [12][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+
+    return std.fmt.allocPrint(allocator, "{s} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} {d} {s}", .{
+        wday_names[wday_u],
+        mon_names[mon],
+        day,
+        hour,
+        minute,
+        second,
+        y,
+        tz_str,
+    });
+}
+
+/// Sanitize a subject line
+fn sanitizeSubject(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    var result = std.array_list.Managed(u8).init(allocator);
+    for (text) |c| {
+        if (std.ascii.isAlphanumeric(c)) {
+            try result.append(c);
+        } else {
+            if (result.items.len > 0 and result.items[result.items.len - 1] != '-') {
+                try result.append('-');
+            } else if (result.items.len == 0) {
+                try result.append('-');
+            }
+        }
+    }
+    var len = result.items.len;
+    while (len > 0 and result.items[len - 1] == '-') len -= 1;
+    return result.items[0..len];
 }
 
 /// Match a ref name against a pattern (supports * and ? globs, or prefix match)
