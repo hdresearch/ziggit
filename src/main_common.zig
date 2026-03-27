@@ -7483,12 +7483,17 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
         else
             entry.hash;
         // When --no-full-name, strip the prefix from output paths
-        const display_path = if (no_full_name and prefix_str.len > 0 and
+        const raw_display_path = if (no_full_name and prefix_str.len > 0 and
             std.mem.startsWith(u8, entry.full_path, prefix_str) and
             entry.full_path.len > prefix_str.len and entry.full_path[prefix_str.len] == '/')
             entry.full_path[prefix_str.len + 1 ..]
         else
             entry.full_path;
+
+        // C-quote the path if it contains special characters
+        const quoted_path = try cQuotePath(allocator, raw_display_path);
+        defer allocator.free(quoted_path);
+        const display_path = quoted_path;
 
         if (object_only) {
             const output = try std.fmt.allocPrint(allocator, "{s}{s}", .{ display_hash, line_end });
@@ -7742,6 +7747,40 @@ fn pathMatchesSpec(path: []const u8, spec: []const u8, is_tree: bool) bool {
 
 /// Check if pathspec starts with the given prefix (for tree recursion)
 /// Normalize a path by resolving . and .. components
+/// C-style quote a filename if it contains special characters
+fn cQuotePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var needs_quoting = false;
+    for (path) |c| {
+        if (c == '\t' or c == '\n' or c == '\\' or c == '"' or c >= 0x80 or c < 0x20) {
+            needs_quoting = true;
+            break;
+        }
+    }
+    if (!needs_quoting) return try allocator.dupe(u8, path);
+
+    var result = std.array_list.Managed(u8).init(allocator);
+    try result.append('"');
+    for (path) |c| {
+        switch (c) {
+            '\t' => try result.appendSlice("\\t"),
+            '\n' => try result.appendSlice("\\n"),
+            '\\' => try result.appendSlice("\\\\"),
+            '"' => try result.appendSlice("\\\""),
+            else => {
+                if (c < 0x20 or c >= 0x80) {
+                    var buf: [4]u8 = undefined;
+                    _ = std.fmt.bufPrint(&buf, "\\{o:0>3}", .{c}) catch unreachable;
+                    try result.appendSlice(&buf);
+                } else {
+                    try result.append(c);
+                }
+            },
+        }
+    }
+    try result.append('"');
+    return try allocator.dupe(u8, result.items);
+}
+
 fn normalizePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     var components = std.array_list.Managed([]const u8).init(allocator);
     defer components.deinit();
