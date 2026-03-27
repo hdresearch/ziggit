@@ -9478,7 +9478,8 @@ fn cmdDescribe(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                     };
                     break :blk object_hash;
                 } else if (tag_obj.type == .commit) {
-                    // It's a lightweight tag pointing directly to a commit
+                    // It's a lightweight tag - only include if --tags
+                    if (!tags) continue;
                     break :blk try allocator.dupe(u8, tag_hash);
                 } else {
                     continue; // Skip tags pointing to non-commit objects for now
@@ -9497,18 +9498,21 @@ fn cmdDescribe(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     }
     
     // Walk HEAD commit chain backward looking for a match with any tag
-    const found_tag = findTagInHistory(git_path, head_hash.?, &tag_map, allocator, platform_impl) catch null;
-    
-    if (found_tag) |tag_name| {
-        defer allocator.free(tag_name);
-        
-        if (abbrev_zero) {
-            const output = try std.fmt.allocPrint(allocator, "{s}\n", .{tag_name});
+    const result = findTagInHistoryWithDistance(git_path, head_hash.?, &tag_map, tags, allocator, platform_impl) catch null;
+
+    if (result) |r| {
+        defer allocator.free(r.tag_name);
+        if (r.distance == 0) {
+            const output = try std.fmt.allocPrint(allocator, "{s}\n", .{r.tag_name});
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+        } else if (abbrev_zero) {
+            const output = try std.fmt.allocPrint(allocator, "{s}-{d}\n", .{ r.tag_name, r.distance });
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
         } else {
-            // For simplicity, just output the tag name (full implementation would include distance and commit hash)
-            const output = try std.fmt.allocPrint(allocator, "{s}\n", .{tag_name});
+            const short_hash = head_hash.?[0..@min(7, head_hash.?.len)];
+            const output = try std.fmt.allocPrint(allocator, "{s}-{d}-g{s}\n", .{ r.tag_name, r.distance, short_hash });
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
         }
@@ -9531,6 +9535,69 @@ fn parseTagObject(tag_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
         }
     }
     return error.NoObjectInTag;
+}
+
+const TagWithDistance = struct {
+    tag_name: []u8,
+    distance: u32,
+};
+
+fn findTagInHistoryWithDistance(git_path: []const u8, start_hash: []const u8, tag_map: *const std.StringHashMap([]u8), include_lightweight: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !?TagWithDistance {
+    // BFS to find closest tagged ancestor
+    var queue = std.array_list.Managed(struct { hash: []u8, depth: u32 }).init(allocator);
+    defer {
+        for (queue.items) |item| allocator.free(item.hash);
+        queue.deinit();
+    }
+    var visited = std.StringHashMap(void).init(allocator);
+    defer {
+        var it = visited.iterator();
+        while (it.next()) |entry| allocator.free(entry.key_ptr.*);
+        visited.deinit();
+    }
+
+    try queue.append(.{ .hash = try allocator.dupe(u8, start_hash), .depth = 0 });
+
+    while (queue.items.len > 0) {
+        const item = queue.orderedRemove(0);
+        defer allocator.free(item.hash);
+
+        if (visited.contains(item.hash)) continue;
+        try visited.put(try allocator.dupe(u8, item.hash), {});
+
+        // Check if any tag points to this commit
+        var tag_iter = tag_map.iterator();
+        while (tag_iter.next()) |entry| {
+            if (std.mem.eql(u8, entry.value_ptr.*, item.hash)) {
+                _ = include_lightweight; // TODO: filter by annotated vs lightweight
+                return TagWithDistance{
+                    .tag_name = try allocator.dupe(u8, entry.key_ptr.*),
+                    .distance = item.depth,
+                };
+            }
+        }
+
+        // Don't search too deep
+        if (item.depth > 1000) continue;
+
+        // Add parents
+        const obj = objects.GitObject.load(item.hash, git_path, platform_impl, allocator) catch continue;
+        defer obj.deinit(allocator);
+        if (obj.type != .commit) continue;
+
+        var lines = std.mem.splitScalar(u8, obj.data, '\n');
+        while (lines.next()) |line| {
+            if (line.len == 0) break;
+            if (std.mem.startsWith(u8, line, "parent ")) {
+                const parent_hash = line["parent ".len..];
+                if (!visited.contains(parent_hash)) {
+                    try queue.append(.{ .hash = try allocator.dupe(u8, parent_hash), .depth = item.depth + 1 });
+                }
+            }
+        }
+    }
+
+    return null;
 }
 
 fn findTagInHistory(git_path: []const u8, start_hash: []const u8, tag_map: *const std.StringHashMap([]u8), allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !?[]u8 {
