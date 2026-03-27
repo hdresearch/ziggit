@@ -4,6 +4,9 @@ const platform_mod = @import("platform/platform.zig");
 /// Global config overrides from -c key=value command line options
 var global_config_overrides: ?std.array_list.Managed(ConfigOverride) = null;
 
+/// Global --git-dir override
+var global_git_dir_override: ?[]const u8 = null;
+
 const ConfigOverride = struct {
     key: []const u8,
     value: []const u8,
@@ -447,7 +450,11 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
             }
             
             arg_index += 1;
-            // Skip the path for now (not implemented)
+            const git_dir_path = all_original_args.items[arg_index];
+            global_git_dir_override = git_dir_path;
+            arg_index += 1;
+        } else if (std.mem.startsWith(u8, arg, "--git-dir=")) {
+            global_git_dir_override = arg["--git-dir=".len..];
             arg_index += 1;
         } else if (std.mem.eql(u8, arg, "--work-tree")) {
             if (arg_index + 1 >= all_original_args.items.len) {
@@ -2359,6 +2366,23 @@ fn resolveAlias(allocator: std.mem.Allocator, name: []const u8, platform_impl: *
 }
 
 pub fn findGitDirectory(allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
+    // Check --git-dir override first
+    if (global_git_dir_override) |gd| {
+        const abs_gd = std.fs.cwd().realpathAlloc(allocator, gd) catch {
+            return allocator.dupe(u8, gd);
+        };
+        return abs_gd;
+    }
+    // Check GIT_DIR environment variable
+    if (std.posix.getenv("GIT_DIR")) |git_dir_env| {
+        if (git_dir_env.len > 0) {
+            const abs_gd = std.fs.cwd().realpathAlloc(allocator, git_dir_env) catch {
+                return allocator.dupe(u8, git_dir_env);
+            };
+            return abs_gd;
+        }
+    }
+
     const current_dir = try platform_impl.fs.getCwd(allocator);
     defer allocator.free(current_dir);
     
