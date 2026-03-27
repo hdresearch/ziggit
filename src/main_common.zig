@@ -2018,8 +2018,26 @@ fn findGitDirectory(allocator: std.mem.Allocator, platform_impl: *const platform
     
     // Walk up the directory tree looking for .git or bare repository
     var dir_to_check = try allocator.dupe(u8, current_dir);
+    var is_first = true;
     
     while (true) {
+        // Check GIT_CEILING_DIRECTORIES - don't search at or above ceiling dirs
+        // (but always check the starting directory itself)
+        if (!is_first) {
+            if (std.posix.getenv("GIT_CEILING_DIRECTORIES")) |ceilings| {
+                var ceil_iter = std.mem.splitScalar(u8, ceilings, ':');
+                while (ceil_iter.next()) |ceil| {
+                    const trimmed_ceil = std.mem.trimRight(u8, ceil, "/");
+                    if (trimmed_ceil.len == 0) continue;
+                    if (std.mem.eql(u8, dir_to_check, trimmed_ceil)) {
+                        allocator.free(dir_to_check);
+                        return error.NotAGitRepository;
+                    }
+                }
+            }
+        }
+        is_first = false;
+
         // First check for .git subdirectory (normal repository) or valid gitdir link
         const git_path = try std.fmt.allocPrint(allocator, "{s}/.git", .{dir_to_check});
         const git_is_valid = blk: {
@@ -13838,12 +13856,26 @@ fn findGitDir() ![]const u8 {
     // Walk up from cwd looking for .git
     var path_buf: [4096]u8 = undefined;
     const cwd = std.process.getCwd(&path_buf) catch return error.FileNotFound;
+
+    // Check GIT_CEILING_DIRECTORIES - paths that stop upward traversal
+    const ceiling_dirs = std.posix.getenv("GIT_CEILING_DIRECTORIES");
+
     var dir = cwd;
     while (true) {
         if (std.mem.lastIndexOf(u8, dir, "/")) |idx| {
             dir = dir[0..idx];
             if (dir.len == 0) break;
         } else break;
+
+        // Check if we've hit a ceiling directory
+        if (ceiling_dirs) |ceilings| {
+            var ceil_iter = std.mem.splitScalar(u8, ceilings, ':');
+            while (ceil_iter.next()) |ceil| {
+                const trimmed_ceil = std.mem.trimRight(u8, ceil, "/");
+                if (trimmed_ceil.len == 0) continue;
+                if (std.mem.eql(u8, dir, trimmed_ceil)) return error.FileNotFound;
+            }
+        }
 
         var check_buf: [4096]u8 = undefined;
         const check_path = std.fmt.bufPrint(&check_buf, "{s}/.git", .{dir}) catch return error.FileNotFound;
