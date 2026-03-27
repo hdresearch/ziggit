@@ -31272,11 +31272,8 @@ fn cmdFormatPatch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     var output_dir: ?[]const u8 = null;
     var subject_prefix: []const u8 = "PATCH";
     var start_number: usize = 1;
-    var in_reply_to: ?[]const u8 = null;
-    var thread: ?[]const u8 = null;
-    var signature: ?[]const u8 = null;
-    var base_arg: ?[]const u8 = null;
-    var range_diff_arg: ?[]const u8 = null;
+    _ = cover_letter;
+    _ = output_dir;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--stdout")) {
