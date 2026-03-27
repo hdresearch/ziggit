@@ -10747,15 +10747,25 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             if (stage) {
                 const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
                 defer allocator.free(hash_str);
+                const stage_num = (entry.flags >> 12) & 0x3;
                 const quoted = try cQuotePath(allocator, entry.path, true);
                 defer allocator.free(quoted);
-                const output = try std.fmt.allocPrint(allocator, "{o} {s} 0\t{s}\n", .{ entry.mode, hash_str, quoted });
+                const tag_prefix: []const u8 = if (tag_flag) blk_tag: {
+                    // Skip-worktree check: CE_EXTENDED flag and skip_worktree in extended_flags
+                    const has_skip_wt = if (entry.extended_flags) |ef| (ef & 0x4000 != 0) else (entry.flags & 0x4000 != 0);
+                    if (has_skip_wt) break :blk_tag "S " else break :blk_tag "H ";
+                } else "";
+                const output = try std.fmt.allocPrint(allocator, "{s}{o} {s} {d}\t{s}\n", .{ tag_prefix, entry.mode, hash_str, stage_num, quoted });
                 defer allocator.free(output);
                 try platform_impl.writeStdout(output);
             } else {
                 const quoted = try cQuotePath(allocator, entry.path, true);
                 defer allocator.free(quoted);
-                const output = try std.fmt.allocPrint(allocator, "{s}\n", .{quoted});
+                const tag_prefix: []const u8 = if (tag_flag) blk_tag2: {
+                    const has_skip_wt = if (entry.extended_flags) |ef| (ef & 0x4000 != 0) else (entry.flags & 0x4000 != 0);
+                    if (has_skip_wt) break :blk_tag2 "S " else break :blk_tag2 "H ";
+                } else "";
+                const output = try std.fmt.allocPrint(allocator, "{s}{s}\n", .{ tag_prefix, quoted });
                 defer allocator.free(output);
                 try platform_impl.writeStdout(output);
             }
@@ -14818,6 +14828,8 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     var skip_worktree = false;
     var no_skip_worktree = false;
     var stdin_mode = false;
+    var ignore_missing = false;
+    var unmerged_mode = false;
     var verbose = false;
 
     var replace_mode = false;
@@ -14834,6 +14846,12 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             refresh = true;
         } else if (std.mem.eql(u8, arg, "--really-refresh")) {
             refresh = true;
+        } else if (std.mem.eql(u8, arg, "--ignore-missing")) {
+            ignore_missing = true;
+        } else if (std.mem.eql(u8, arg, "--unmerged")) {
+            unmerged_mode = true;
+        } else if (std.mem.eql(u8, arg, "--ignore-submodules")) {
+            // silently accept
         } else if (std.mem.eql(u8, arg, "--cacheinfo")) {
             cache_info_mode = true;
             // Format: --cacheinfo <mode>,<sha1>,<path> or --cacheinfo <mode> <sha1> <path>
@@ -14964,7 +14982,32 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         } else if (std.mem.eql(u8, arg, "--")) {
             // rest are paths
             while (args.next()) |path| {
-                if (add_mode) {
+                if (force_remove) {
+                    idx.remove(path) catch {};
+                    modified = true;
+                } else if (add_mode) {
+                    if (!replace_mode and checkDFConflict(&idx, path)) {
+                        const emdf = std.fmt.allocPrint(allocator, "error: '{s}' appears as both a file and as a directory\nerror: {s}: cannot add to the index - missing --replace option?\nfatal: Unable to process path {s}\n", .{ path, path, path }) catch "error: D/F conflict\n";
+                        try platform_impl.writeStderr(emdf);
+                        std.process.exit(128);
+                    }
+                    idx.add(path, path, platform_impl, git_dir) catch {};
+                    modified = true;
+                } else {
+                    var pfound = false;
+                    for (idx.entries.items) |entry| {
+                        if (std.mem.eql(u8, entry.path, path)) { pfound = true; break; }
+                    }
+                    if (!pfound) {
+                        const enf = std.fmt.allocPrint(allocator, "error: {s}: cannot add to the index - missing --add option?\nfatal: Unable to process path {s}\n", .{ path, path }) catch "error: cannot add\n";
+                        try platform_impl.writeStderr(enf);
+                        std.process.exit(128);
+                    }
+                    std.fs.cwd().access(path, .{}) catch {
+                        const ene = std.fmt.allocPrint(allocator, "error: {s}: does not exist and --remove not passed\nfatal: Unable to process path {s}\n", .{ path, path }) catch "error: file missing\n";
+                        try platform_impl.writeStderr(ene);
+                        std.process.exit(128);
+                    };
                     idx.add(path, path, platform_impl, git_dir) catch {};
                     modified = true;
                 }
@@ -15035,6 +15078,13 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                             }
                         }
                     }
+                } else {
+                    // Without --replace, check for D/F conflicts and fail
+                    if (checkDFConflict(&idx, arg)) {
+                        const emdf2 = std.fmt.allocPrint(allocator, "error: '{s}' appears as both a file and as a directory\nerror: {s}: cannot add to the index - missing --replace option?\nfatal: Unable to process path {s}\n", .{ arg, arg, arg }) catch "error: D/F conflict\n";
+                        try platform_impl.writeStderr(emdf2);
+                        std.process.exit(128);
+                    }
                 }
                 idx.add(arg, arg, platform_impl, git_dir) catch {};
                 modified = true;
@@ -15059,8 +15109,31 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                         try platform_impl.writeStderr(err_msg2);
                         std.process.exit(128);
                     };
+                    // Save old mode for symlink preservation
+                    var prev_mode: u32 = 0;
+                    for (idx.entries.items) |entry| {
+                        if (std.mem.eql(u8, entry.path, arg)) { prev_mode = entry.mode; break; }
+                    }
                     // Update existing entry with current file stat
                     idx.add(arg, arg, platform_impl, git_dir) catch {};
+                    // Preserve symlink mode when core.symlinks=false
+                    if (prev_mode == 0o120000) {
+                        const cfp2 = std.fmt.allocPrint(allocator, "{s}/config", .{git_dir}) catch null;
+                        if (cfp2) |cp2| {
+                            defer allocator.free(cp2);
+                            if (platform_impl.fs.readFile(allocator, cp2)) |cd2| {
+                                defer allocator.free(cd2);
+                                if (parseConfigValue(cd2, "core.symlinks", allocator) catch null) |sv2| {
+                                    defer allocator.free(sv2);
+                                    if (std.mem.eql(u8, sv2, "false")) {
+                                        for (idx.entries.items) |*e2| {
+                                            if (std.mem.eql(u8, e2.path, arg)) { e2.mode = 0o120000; break; }
+                                        }
+                                    }
+                                }
+                            } else |_| {}
+                        }
+                    }
                     modified = true;
                 }
             }
@@ -15082,21 +15155,49 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     if (refresh) {
         // Refresh stat info for all entries by re-statting files
         const repo_root = std.fs.path.dirname(git_dir) orelse ".";
+        var refresh_failed = false;
         for (idx.entries.items) |*entry| {
+            // Skip higher-stage (unmerged) entries
+            const stage = (entry.flags >> 12) & 0x3;
+            if (stage != 0) {
+                if (!unmerged_mode) {
+                    refresh_failed = true;
+                    const umsg = std.fmt.allocPrint(allocator, "{s}: needs merge\n", .{entry.path}) catch continue;
+                    defer allocator.free(umsg);
+                    platform_impl.writeStderr(umsg) catch {};
+                }
+                continue;
+            }
+            // Skip assume-unchanged entries
+            if (entry.flags & 0x8000 != 0) continue;
+            // Skip submodule entries (mode 160000)
+            if (entry.mode == 0o160000) continue;
+
             const full_path = if (repo_root.len > 0 and !std.mem.eql(u8, repo_root, "."))
                 std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path }) catch continue
             else
                 allocator.dupe(u8, entry.path) catch continue;
             defer allocator.free(full_path);
 
+            // Check if file exists
+            const file_exists = blk: {
+                std.fs.cwd().access(full_path, .{}) catch break :blk false;
+                break :blk true;
+            };
+            if (!file_exists) {
+                if (!ignore_missing) {
+                    refresh_failed = true;
+                    const mmsg = std.fmt.allocPrint(allocator, "{s}: needs update\n", .{entry.path}) catch continue;
+                    defer allocator.free(mmsg);
+                    platform_impl.writeStderr(mmsg) catch {};
+                }
+                continue;
+            }
+
             // Check if it's a symlink
             var link_buf: [4096]u8 = undefined;
             if (std.fs.cwd().readLink(full_path, &link_buf)) |link_target| {
-                // Symlink: update size to link target length
                 entry.size = @intCast(link_target.len);
-                // Get the file's lstat info via fstatat or approximate
-                // For symlinks, we need the symlink's own mtime, not the target's
-                // Use the parent dir + entry to get proper stat
                 if (std.fs.cwd().statFile(full_path)) |stat| {
                     entry.ctime_sec = @intCast(@max(0, @divTrunc(stat.ctime, std.time.ns_per_s)));
                     entry.ctime_nsec = @intCast(@max(0, @rem(stat.ctime, std.time.ns_per_s)));
@@ -15105,18 +15206,47 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                     entry.ino = @intCast(stat.inode);
                 } else |_| {}
             } else |_| {
-                // Regular file
+                // Regular file - check if content changed
                 if (std.fs.cwd().statFile(full_path)) |stat| {
+                    const file_size: u32 = @intCast(@min(stat.size, std.math.maxInt(u32)));
+                    const new_mtime_sec: u32 = @intCast(@max(0, @divTrunc(stat.mtime, std.time.ns_per_s)));
+                    const new_mtime_nsec: u32 = @intCast(@max(0, @rem(stat.mtime, std.time.ns_per_s)));
+
+                    if (entry.size != file_size or entry.mtime_sec != new_mtime_sec or entry.mtime_nsec != new_mtime_nsec) {
+                        const content = platform_impl.fs.readFile(allocator, full_path) catch {
+                            refresh_failed = true;
+                            continue;
+                        };
+                        defer allocator.free(content);
+                        const blob_obj = objects.createBlobObject(content, allocator) catch continue;
+                        defer blob_obj.deinit(allocator);
+                        const new_hash_str = blob_obj.hash(allocator) catch continue;
+                        defer allocator.free(new_hash_str);
+                        var new_hash: [20]u8 = undefined;
+                        _ = std.fmt.hexToBytes(&new_hash, new_hash_str) catch continue;
+
+                        if (!std.mem.eql(u8, &new_hash, &entry.sha1)) {
+                            refresh_failed = true;
+                            const nmsg = std.fmt.allocPrint(allocator, "{s}: needs update\n", .{entry.path}) catch continue;
+                            defer allocator.free(nmsg);
+                            platform_impl.writeStderr(nmsg) catch {};
+                        }
+                    }
+
                     entry.ctime_sec = @intCast(@max(0, @divTrunc(stat.ctime, std.time.ns_per_s)));
                     entry.ctime_nsec = @intCast(@max(0, @rem(stat.ctime, std.time.ns_per_s)));
-                    entry.mtime_sec = @intCast(@max(0, @divTrunc(stat.mtime, std.time.ns_per_s)));
-                    entry.mtime_nsec = @intCast(@max(0, @rem(stat.mtime, std.time.ns_per_s)));
-                    entry.size = @intCast(@min(stat.size, std.math.maxInt(u32)));
+                    entry.mtime_sec = new_mtime_sec;
+                    entry.mtime_nsec = new_mtime_nsec;
+                    entry.size = file_size;
                     entry.ino = @intCast(stat.inode);
                 } else |_| {}
             }
         }
         modified = true;
+        if (refresh_failed) {
+            idx.save(git_dir, platform_impl) catch {};
+            std.process.exit(1);
+        }
     }
 
     if (modified) {
