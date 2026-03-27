@@ -26008,10 +26008,26 @@ fn performLocalFetch(allocator: std.mem.Allocator, git_path: []const u8, source_
 }
 fn t5Match(rn: []const u8, p: []const u8) ?[]const u8 {
     if (std.mem.endsWith(u8, p, "*")) { const pfx = p[0..p.len-1]; if (std.mem.startsWith(u8, rn, pfx)) return rn[pfx.len..]; }
-    else if (std.mem.eql(u8, rn, p)) return ""; return null;
+    else if (std.mem.eql(u8, rn, p)) return "";
+    // Handle short refspecs: "main" should match "refs/heads/main"
+    if (!std.mem.startsWith(u8, p, "refs/")) {
+        if (std.mem.startsWith(u8, rn, "refs/heads/")) {
+            const branch = rn["refs/heads/".len..];
+            if (std.mem.eql(u8, branch, p)) return "";
+        }
+        if (std.mem.startsWith(u8, rn, "refs/tags/")) {
+            const tag = rn["refs/tags/".len..];
+            if (std.mem.eql(u8, tag, p)) return "";
+        }
+    }
+    return null;
 }
 fn t5Map(a: std.mem.Allocator, suffix: []const u8, dp: []const u8) ![]u8 {
     if (std.mem.endsWith(u8, dp, "*")) return std.fmt.allocPrint(a, "{s}{s}", .{dp[0..dp.len-1], suffix});
+    // Expand short ref names
+    if (!std.mem.startsWith(u8, dp, "refs/") and dp.len > 0) {
+        return std.fmt.allocPrint(a, "refs/heads/{s}", .{dp});
+    }
     return a.dupe(u8, dp);
 }
 fn t5CopyMissingObjects(src: []const u8, dst: []const u8) !void {
