@@ -26786,6 +26786,7 @@ fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
     }
 
     var did_update_stat = false;
+    var has_errors = false;
 
     for (idx.entries.items) |*entry| {
         // Skip higher stages (unmerged) unless specifically requested
@@ -26820,7 +26821,11 @@ fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
         // Check if file exists and we need -f to overwrite
         if (!force) {
             if (std.fs.cwd().access(out_path, .{})) |_| {
-                continue; // File exists, skip without -f
+                // File exists - report error and track failure
+                const emsg = std.fmt.allocPrint(allocator, "error: {s} already exists, no checkout\n", .{entry_path}) catch "error: file already exists\n";
+                platform_impl.writeStderr(emsg) catch {};
+                has_errors = true;
+                continue;
             } else |_| {}
         }
 
@@ -26840,8 +26845,38 @@ fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
 
         const content = obj.data;
 
+        // When force, remove any existing file/dir that conflicts
+        if (force) {
+            // Remove the output path if it exists (file or dir)
+            std.fs.cwd().deleteFile(out_path) catch {};
+            std.fs.cwd().deleteDir(out_path) catch {};
+            // For files under a dir-turned-file, remove the dir tree
+            std.fs.cwd().deleteTree(out_path) catch {};
+        }
+
         // Create parent directories
         if (std.fs.path.dirname(out_path)) |dir| {
+            // If a file/symlink exists where a parent directory should be, remove it when force
+            if (force) {
+                // Check if any parent path component is a non-directory
+                var check_path = dir;
+                while (check_path.len > 0) {
+                    var link_buf2: [4096]u8 = undefined;
+                    if (std.fs.cwd().readLink(check_path, &link_buf2)) |_| {
+                        // It's a symlink - remove it so we can create a dir
+                        std.fs.cwd().deleteFile(check_path) catch {};
+                        break;
+                    } else |_| {
+                        if (std.fs.cwd().statFile(check_path)) |st| {
+                            if (st.kind != .directory) {
+                                std.fs.cwd().deleteFile(check_path) catch {};
+                                break;
+                            } else break; // It's already a directory, good
+                        } else |_| break; // Doesn't exist, makePath will create it
+                    }
+                    check_path = std.fs.path.dirname(check_path) orelse break;
+                }
+            }
             std.fs.cwd().makePath(dir) catch {};
         }
 
@@ -26897,6 +26932,10 @@ fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
     // Save index if stat info was updated
     if (did_update_stat) {
         idx.save(git_dir, platform_impl) catch {};
+    }
+
+    if (has_errors) {
+        std.process.exit(1);
     }
 }
 
