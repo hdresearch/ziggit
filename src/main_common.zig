@@ -26193,14 +26193,26 @@ fn nativeCmdColumn(_: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
 fn nativeCmdCheckIgnore(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     var verbose = false;
     var quiet = false;
+    var use_stdin = false;
+    var no_index = false;
+    var non_matching = false;
+    var null_term = false;
     var paths = std.array_list.Managed([]const u8).init(allocator);
     defer paths.deinit();
-    
+
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
             verbose = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             quiet = true;
+        } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--non-matching")) {
+            non_matching = true;
+        } else if (std.mem.eql(u8, arg, "--stdin")) {
+            use_stdin = true;
+        } else if (std.mem.eql(u8, arg, "--no-index")) {
+            no_index = true;
+        } else if (std.mem.eql(u8, arg, "-z")) {
+            null_term = true;
         } else if (std.mem.eql(u8, arg, "--")) {
             while (args.next()) |a| try paths.append(a);
             break;
@@ -26208,72 +26220,134 @@ fn nativeCmdCheckIgnore(allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             try paths.append(arg);
         }
     }
-    
+
+    // Read paths from stdin if --stdin
+    var stdin_buf: ?[]u8 = null;
+    defer if (stdin_buf) |b| allocator.free(b);
+    if (use_stdin) {
+        const stdin_file = std.fs.File{ .handle = std.posix.STDIN_FILENO };
+        stdin_buf = stdin_file.readToEndAlloc(allocator, 1024 * 1024) catch null;
+        if (stdin_buf) |buf| {
+            const sep: u8 = if (null_term) 0 else '\n';
+            var iter = std.mem.splitScalar(u8, buf, sep);
+            while (iter.next()) |line| {
+                const trimmed = std.mem.trim(u8, line, " \t\r");
+                if (trimmed.len > 0) try paths.append(trimmed);
+            }
+        }
+    }
+
+    if (!use_stdin and paths.items.len == 0) {
+        try platform_impl.writeStderr("fatal: no path specified\n");
+        std.process.exit(128);
+    }
+
     const git_path = findGitDirectory(allocator, platform_impl) catch {
         try platform_impl.writeStderr("fatal: not a git repository\n");
         std.process.exit(128);
     };
     defer allocator.free(git_path);
-    
+
     const repo_root = std.fs.path.dirname(git_path) orelse ".";
+
+    // Load .gitignore relative to repo root
     const gitignore_path = try std.fmt.allocPrint(allocator, "{s}/.gitignore", .{repo_root});
     defer allocator.free(gitignore_path);
-    
+
+    // Make gitignore source path relative for output
     var gitignore = gitignore_mod.GitIgnore.loadFromFile(allocator, gitignore_path, platform_impl) catch
         gitignore_mod.GitIgnore.init(allocator);
     defer gitignore.deinit();
-    
+
+    // Also load .git/info/exclude
+    const exclude_path = try std.fmt.allocPrint(allocator, "{s}/info/exclude", .{git_path});
+    defer allocator.free(exclude_path);
+    if (platform_impl.fs.readFile(allocator, exclude_path)) |content| {
+        defer allocator.free(content);
+        gitignore.addPatternsFromSource(content, ".git/info/exclude");
+    } else |_| {}
+
+    // Load index for tracked file detection (unless --no-index)
+    var tracked_paths = std.StringHashMap(void).init(allocator);
+    defer tracked_paths.deinit();
+    if (!no_index) {
+        if (index_mod.Index.load(git_path, platform_impl, allocator)) |*idx| {
+            defer @constCast(idx).deinit();
+            for (idx.entries.items) |entry| {
+                tracked_paths.put(entry.path, {}) catch {};
+            }
+        } else |_| {}
+    }
+
     const cwd = try platform_impl.fs.getCwd(allocator);
     defer allocator.free(cwd);
-    
+
     var found_any = false;
+    const sep_char: u8 = if (null_term) 0 else '\n';
     for (paths.items) |path| {
         // Resolve path relative to repo root
         var check_path: []const u8 = path;
         var allocated_check_path: ?[]u8 = null;
         defer if (allocated_check_path) |p| allocator.free(p);
-        
+
         if (std.mem.eql(u8, path, ".")) {
-            // "." means current directory - resolve to path relative to repo root
             if (cwd.len > repo_root.len and std.mem.startsWith(u8, cwd, repo_root) and cwd[repo_root.len] == '/') {
                 check_path = cwd[repo_root.len + 1..];
             }
         } else if (!std.fs.path.isAbsolute(path)) {
-            // Resolve relative to cwd then make relative to repo root
             if (cwd.len > repo_root.len and std.mem.startsWith(u8, cwd, repo_root) and cwd[repo_root.len] == '/') {
                 const prefix = cwd[repo_root.len + 1..];
-                allocated_check_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{prefix, path});
+                allocated_check_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, path });
                 check_path = allocated_check_path.?;
             }
         }
-        
-        // Try matching with and without trailing slash for directories
+
+        // Check if directory
         const is_dir = blk: {
-            const full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{repo_root, check_path});
+            const full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, check_path });
             defer allocator.free(full);
             var dir = std.fs.cwd().openDir(full, .{}) catch break :blk false;
             dir.close();
             break :blk true;
         };
-        
-        const matched = gitignore.isIgnoredPath(check_path, is_dir);
-        
-        if (matched) {
+
+        // Check if tracked (in index) - tracked files are not ignored unless --no-index
+        const is_tracked = if (!no_index) tracked_paths.contains(check_path) else false;
+
+        const match_info = gitignore.getMatchInfo(check_path, is_dir);
+        const is_ignored = match_info.matched and !is_tracked;
+
+        if (is_ignored) {
             found_any = true;
             if (!quiet) {
                 if (verbose) {
-                    const msg = try std.fmt.allocPrint(allocator, ".gitignore:0:\t{s}\n", .{path});
+                    // Format: source:linenum:pattern\tpath
+                    const source_display = if (match_info.source.len > 0) blk: {
+                        // Make source relative to repo root
+                        if (std.mem.startsWith(u8, match_info.source, repo_root)) {
+                            const rel = match_info.source[repo_root.len..];
+                            if (rel.len > 0 and rel[0] == '/') break :blk rel[1..];
+                            break :blk rel;
+                        }
+                        break :blk match_info.source;
+                    } else "";
+                    const msg = try std.fmt.allocPrint(allocator, "{s}:{d}:{s}\t{s}{c}", .{ source_display, match_info.line_number, match_info.pattern, path, sep_char });
                     defer allocator.free(msg);
                     try platform_impl.writeStdout(msg);
                 } else {
-                    const msg = try std.fmt.allocPrint(allocator, "{s}\n", .{path});
+                    const msg = try std.fmt.allocPrint(allocator, "{s}{c}", .{ path, sep_char });
                     defer allocator.free(msg);
                     try platform_impl.writeStdout(msg);
                 }
             }
+        } else if (non_matching and verbose) {
+            // Show non-matching entries with ::\tpath
+            const msg = try std.fmt.allocPrint(allocator, "::\t{s}{c}", .{ path, sep_char });
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
         }
     }
-    
+
     if (!found_any) std.process.exit(1);
 }
 

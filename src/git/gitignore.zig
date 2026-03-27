@@ -6,16 +6,33 @@ pub const PatternType = enum {
     unignore, // Negation pattern (starts with !)
 };
 
+/// Result of a gitignore match
+pub const MatchResult = struct {
+    matched: bool,
+    source: []const u8, // source file (e.g., ".gitignore")
+    line_number: usize, // 1-based line number
+    pattern: []const u8, // the original pattern text
+    is_negated: bool,
+};
+
 /// A parsed gitignore pattern
 pub const GitignoreEntry = struct {
     pattern: []const u8,
+    original_pattern: []const u8, // original pattern as written in file
     pattern_type: PatternType,
     is_absolute: bool, // Pattern starts with /
     dir_only: bool, // Pattern ends with /
+    line_number: usize, // 1-based line number in source file
+    source_file: []const u8, // source file path
     allocator: std.mem.Allocator,
 
     pub fn init(raw_pattern: []const u8, allocator: std.mem.Allocator) !GitignoreEntry {
+        return initWithSource(raw_pattern, "", 0, allocator);
+    }
+
+    pub fn initWithSource(raw_pattern: []const u8, source: []const u8, line_num: usize, allocator: std.mem.Allocator) !GitignoreEntry {
         var pat = std.mem.trim(u8, raw_pattern, " \t\r");
+        const orig = try allocator.dupe(u8, pat);
 
         var ptype: PatternType = .ignore;
         if (pat.len > 0 and pat[0] == '!') {
@@ -42,15 +59,20 @@ pub const GitignoreEntry = struct {
 
         return GitignoreEntry{
             .pattern = try allocator.dupe(u8, pat),
+            .original_pattern = orig,
             .pattern_type = ptype,
             .is_absolute = is_abs,
             .dir_only = dir_only,
+            .line_number = line_num,
+            .source_file = try allocator.dupe(u8, source),
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: GitignoreEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.pattern);
+        allocator.free(self.original_pattern);
+        allocator.free(self.source_file);
     }
 
     pub fn matches(self: GitignoreEntry, path: []const u8, is_dir: bool) bool {
@@ -190,18 +212,25 @@ pub const GitIgnore = struct {
             };
         };
         defer allocator.free(content);
-        gi.addPatterns(content);
+        gi.addPatternsFromSource(content, path);
         return gi;
     }
 
     /// Add patterns from a string (one pattern per line)
     pub fn addPatterns(self: *GitIgnore, content: []const u8) void {
+        self.addPatternsFromSource(content, "");
+    }
+
+    /// Add patterns from a string with source file tracking
+    pub fn addPatternsFromSource(self: *GitIgnore, content: []const u8, source: []const u8) void {
         var lines = std.mem.splitScalar(u8, content, '\n');
+        var line_num: usize = 0;
         while (lines.next()) |line| {
+            line_num += 1;
             const trimmed = std.mem.trim(u8, line, " \t\r");
             if (trimmed.len == 0) continue;
             if (trimmed[0] == '#') continue;
-            const entry = GitignoreEntry.init(trimmed, self.allocator) catch continue;
+            const entry = GitignoreEntry.initWithSource(trimmed, source, line_num, self.allocator) catch continue;
             self.entries.append(entry) catch continue;
         }
     }
@@ -226,6 +255,27 @@ pub const GitIgnore = struct {
             }
         }
         return ignored;
+    }
+
+    /// Get detailed match information for a path
+    pub fn getMatchInfo(self: *const GitIgnore, path: []const u8, is_dir: bool) MatchResult {
+        var result = MatchResult{
+            .matched = false,
+            .source = "",
+            .line_number = 0,
+            .pattern = "",
+            .is_negated = false,
+        };
+        for (self.entries.items) |entry| {
+            if (entry.matches(path, is_dir)) {
+                result.matched = entry.pattern_type == .ignore;
+                result.source = entry.source_file;
+                result.line_number = entry.line_number;
+                result.pattern = entry.original_pattern;
+                result.is_negated = entry.pattern_type == .unignore;
+            }
+        }
+        return result;
     }
 };
 
