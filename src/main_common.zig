@@ -12100,9 +12100,18 @@ fn resolveReflogEntry(git_path: []const u8, ref_name: []const u8, n: u32, alloca
     const path2 = try std.fmt.allocPrint(allocator, "{s}/logs/{s}", .{ git_path, short_name });
     defer allocator.free(path2);
     
-    const content = platform_impl.fs.readFile(allocator, path1) catch
-        platform_impl.fs.readFile(allocator, path2) catch
-        return error.NotFound;
+    var content: []u8 = undefined;
+    var content_valid = false;
+    if (platform_impl.fs.readFile(allocator, path1)) |c| {
+        content = c;
+        content_valid = true;
+    } else |_| {
+        if (platform_impl.fs.readFile(allocator, path2)) |c| {
+            content = c;
+            content_valid = true;
+        } else |_| {}
+    }
+    if (!content_valid) return error.NotFound;
     defer allocator.free(content);
 
     // Collect all entries (each line has: old_hash new_hash ...)
