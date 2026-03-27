@@ -19548,7 +19548,7 @@ fn nativeCmdMv(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             for (index.entries.items) |entry| {
                 if (std.mem.eql(u8, entry.path, src)) {
                     var new_entry = entry;
-                    new_entry.path = target;
+                    new_entry.path = try allocator.dupe(u8, target);
                     try new_entries.append(new_entry);
                 } else {
                     try new_entries.append(entry);
