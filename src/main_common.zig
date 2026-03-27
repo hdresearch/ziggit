@@ -383,16 +383,12 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
 
     // Commands with native ziggit implementations
     if (std.mem.eql(u8, command, "init")) {
-<<<<<<< Updated upstream
-        try cmdInit(allocator, &args_iter, &platform_impl);
-=======
         // Check for global --bare flag
         var global_bare = false;
         for (all_original_args.items[0..command_index]) |ga| {
             if (std.mem.eql(u8, ga, "--bare")) global_bare = true;
         }
         try cmdInit(allocator, &args_iter, &platform_impl, global_bare);
->>>>>>> Stashed changes
     } else if (std.mem.eql(u8, command, "status")) {
         try cmdStatus(allocator, &args_iter, &platform_impl, all_original_args.items);
     } else if (std.mem.eql(u8, command, "rev-list")) {
@@ -476,11 +472,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         defer allocator.free(output);
         try platform_impl.writeStdout(output);
     } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
-<<<<<<< Updated upstream
-        try cmdVersion(allocator, &args_iter, &platform_impl);
-=======
         try platform_impl.writeStdout("git version 2.47.0\n");
->>>>>>> Stashed changes
     } else if (std.mem.eql(u8, command, "--version-info")) {
         if (version_mod.getFullVersionInfo(allocator)) |version_info| {
             defer allocator.free(version_info);
@@ -1681,10 +1673,7 @@ fn cmdInit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     var initial_branch: ?[]const u8 = null;
     var quiet = false;
     var separate_git_dir: ?[]const u8 = null;
-<<<<<<< Updated upstream
-=======
     _ = &separate_git_dir;
->>>>>>> Stashed changes
     
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--bare")) {
