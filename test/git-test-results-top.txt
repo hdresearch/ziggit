@@ -574,3 +574,36 @@ Failure analysis:
 - ~8% are test-tool version differences (test-tool from newer git vs our 2.43)
 - ~2% are edge cases that could theoretically be fixed (already fixed --type=color)
 - No further easy wins identified without major wrapper refactoring
+
+=== Re-verification run (2026-03-27) ===
+Re-ran all 200 previously-failing tests to check for improvements.
+
+Tests newly at 100% (20 tests improved to full pass):
+t1013-read-tree-submodule: 58/58 (100%) — was 85%
+t1060-object-corruption: 16/16 (100%) — was 94%
+t1517-outside-repo: 281/281 (100%) — was 88%
+t2013-checkout-submodule: 64/64 (100%) — was 86%
+t2405-worktree-submodule: 10/10 (100%) — was 90%
+t2500-untracked-overwriting: 8/8 (100%) — was 80%
+t3011-common-prefixes-and-directory-traversal: 20/20 (100%) — was 95%
+t3102-ls-tree-wildcards: 3/3 (100%) — was 75%
+t3401-rebase-and-am-rename: 8/8 (100%) — was 80%
+t3421-rebase-topology-linear: 63/63 (100%) — was 98%
+t3426-rebase-submodule: 25/25 (100%) — was 86%
+t3432-rebase-fast-forward: 219/219 (100%) — was 97%
+t3512-cherry-pick-submodule: 13/13 (100%) — was 86%
+t3513-revert-submodule: 12/12 (100%) — was 85%
+t3906-stash-submodule: 6/6 (100%) — was 37%
+t4038-diff-combined: 25/25 (100%) — was 96%
+t4045-diff-relative: 38/38 (100%) — was 97%
+t4135-apply-weird-filenames: 19/19 (100%) — was 95%
+t4137-apply-submodule: 24/24 (100%) — was 85%
+t4204-patch-id: 25/25 (100%) — was 96%
+
+Other notable improvements:
+t3600-rm: ok=80 fail=1 (98%) — was 97%
+t3903-stash: ok=123 fail=17 (87%) — was 86%
+t4205-log-pretty-formats: ok=122 fail=1 (99%) — was 97%
+
+Updated totals: ~331 test scripts at 100% pass rate (was 311).
+Note: test suite version differences (git 2.43 vs 2.46+ tests) remain the dominant source of failures.
