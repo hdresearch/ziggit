@@ -14974,6 +14974,17 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             } else if (force_remove) {
                 idx.remove(arg) catch {};
                 modified = true;
+            } else if (remove_mode and add_mode) {
+                // Both --add and --remove: add if exists, remove if not
+                if (std.fs.cwd().access(arg, .{})) |_| {
+                    // File exists - add it
+                    idx.add(arg, arg, platform_impl, git_dir) catch {};
+                    modified = true;
+                } else |_| {
+                    // File doesn't exist - remove from index
+                    idx.remove(arg) catch {};
+                    modified = true;
+                }
             } else if (remove_mode) {
                 // Only remove if file doesn't exist
                 std.fs.cwd().access(arg, .{}) catch {
