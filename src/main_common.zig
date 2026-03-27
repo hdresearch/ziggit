@@ -4359,6 +4359,8 @@ fn isBinaryContent(content: []const u8) bool {
     return false;
 }
 
+// pathspecMatch is defined elsewhere in the file
+
 fn readBlobContent(allocator: std.mem.Allocator, git_path: []const u8, hash_hex: []const u8, platform_impl: *const platform_mod.Platform) ![]const u8 {
     _ = platform_impl;
     return readGitObjectContent(git_path, hash_hex, allocator) catch return error.FileNotFound;
@@ -16204,11 +16206,19 @@ fn pathspecMatch(pattern: []const u8, path: []const u8) bool {
     if (std.mem.eql(u8, pattern, "*")) return std.mem.indexOf(u8, path, "/") == null; // match top-level only
     if (std.mem.eql(u8, pattern, path)) return true;
 
-    // Prefix/directory match: pattern "dir" matches "dir/file"
-    if (std.mem.startsWith(u8, path, pattern) and path.len > pattern.len and path[pattern.len] == '/') return true;
+    // Strip trailing slash from pattern for directory matching
+    const has_trailing_slash = pattern.len > 0 and pattern[pattern.len - 1] == '/';
+    const pat = if (has_trailing_slash) pattern[0 .. pattern.len - 1] else pattern;
+
+    // If pattern has trailing slash, only match as directory prefix (not exact file)
+    if (!has_trailing_slash and std.mem.eql(u8, pat, path)) return true;
+
+    // Prefix/directory match: pattern "dir" or "dir/" matches "dir/file"
+    if (pat.len > 0 and std.mem.startsWith(u8, path, pat) and path.len > pat.len and path[pat.len] == '/') return true;
 
     // Simple glob matching with * and ?
-    return pathspecGlobMatch(pattern, path);
+    if (!has_trailing_slash) return pathspecGlobMatch(pattern, path);
+    return false;
 }
 
 fn pathspecGlobMatch(pattern: []const u8, str: []const u8) bool {
@@ -19428,7 +19438,7 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         if (df_pathspecs.items.len > 0) {
             var path_matches = false;
             for (df_pathspecs.items) |ps| {
-                if (std.mem.eql(u8, entry.path, ps) or std.mem.startsWith(u8, entry.path, ps)) {
+                if (pathspecMatch(ps, entry.path)) {
                     path_matches = true;
                     break;
                 }
@@ -25549,8 +25559,8 @@ fn loadBlobContent(allocator: std.mem.Allocator, hash: []const u8, git_path: []c
 fn matchesPathspecs(path: []const u8, pathspecs: []const []const u8) bool {
     if (pathspecs.len == 0) return true;
     for (pathspecs) |ps| {
-        if (std.mem.eql(u8, path, ps)) return true;
-        if (std.mem.startsWith(u8, path, ps) and path.len > ps.len and path[ps.len] == '/') return true;
+        if (pathspecMatch(ps, path)) return true;
+        // Also allow matching when path is a parent directory of the pathspec
         if (std.mem.startsWith(u8, ps, path) and ps.len > path.len and ps[path.len] == '/') return true;
     }
     return false;
@@ -25754,7 +25764,7 @@ fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_index: u
         if (pathspecs.items.len > 0) {
             var matches = false;
             for (pathspecs.items) |ps| {
-                if (std.mem.eql(u8, entry.path, ps) or std.mem.startsWith(u8, entry.path, ps)) {
+                if (pathspecMatch(ps, entry.path)) {
                     matches = true;
                     break;
                 }
@@ -25806,7 +25816,7 @@ fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_index: u
             if (pathspecs.items.len > 0) {
                 var matches = false;
                 for (pathspecs.items) |ps| {
-                    if (std.mem.eql(u8, kv.key_ptr.*, ps) or std.mem.startsWith(u8, kv.key_ptr.*, ps)) {
+                    if (pathspecMatch(ps, kv.key_ptr.*)) {
                         matches = true;
                         break;
                     }
