@@ -6028,7 +6028,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             do_unset = true;
         } else if (std.mem.eql(u8, arg, "--unset-all")) {
             do_unset_all = true;
-        } else if (std.mem.eql(u8, arg, "--add")) {
+        } else if (std.mem.eql(u8, arg, "--add") or std.mem.eql(u8, arg, "--append")) {
             do_add = true;
         } else if (std.mem.eql(u8, arg, "--remove-section")) {
             do_remove_section = true;
