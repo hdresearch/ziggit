@@ -8280,19 +8280,29 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                 defer allocator.free(output);
                 try platform_impl.writeStdout(output);
             } else {
-                const cwd = try platform_impl.fs.getCwd(allocator);
-                defer allocator.free(cwd);
-                if (std.mem.startsWith(u8, git_path, cwd) and git_path.len > cwd.len) {
-                    const rel = git_path[cwd.len..];
-                    const trimmed_rel = if (rel.len > 0 and rel[0] == '/') rel[1..] else rel;
-                    if (trimmed_rel.len > 0) {
-                        const output = try std.fmt.allocPrint(allocator, "{s}\n", .{trimmed_rel});
+                // For gitdir links (paths that don't end with .git), output as-is
+                // For normal .git dirs, output relative to cwd
+                const is_dotgit = std.mem.endsWith(u8, git_path, "/.git") or std.mem.eql(u8, git_path, ".git");
+                if (is_dotgit) {
+                    const cwd = try platform_impl.fs.getCwd(allocator);
+                    defer allocator.free(cwd);
+                    if (std.mem.startsWith(u8, git_path, cwd) and git_path.len > cwd.len) {
+                        const rel = git_path[cwd.len..];
+                        const trimmed_rel = if (rel.len > 0 and rel[0] == '/') rel[1..] else rel;
+                        if (trimmed_rel.len > 0) {
+                            const output = try std.fmt.allocPrint(allocator, "{s}\n", .{trimmed_rel});
+                            defer allocator.free(output);
+                            try platform_impl.writeStdout(output);
+                        } else {
+                            try platform_impl.writeStdout(".git\n");
+                        }
+                    } else {
+                        const output = try std.fmt.allocPrint(allocator, "{s}\n", .{git_path});
                         defer allocator.free(output);
                         try platform_impl.writeStdout(output);
-                    } else {
-                        try platform_impl.writeStdout(".git\n");
                     }
                 } else {
+                    // Gitdir link target or bare repo - output as-is
                     const output = try std.fmt.allocPrint(allocator, "{s}\n", .{git_path});
                     defer allocator.free(output);
                     try platform_impl.writeStdout(output);
