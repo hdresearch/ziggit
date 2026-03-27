@@ -2,7 +2,7 @@ const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 
 /// Global config overrides from -c key=value command line options
-var global_config_overrides: ?std.array_list.Managed(ConfigOverride) = null;
+var global_config_overrides: ?std.ArrayList(ConfigOverride) = null;
 
 const ConfigOverride = struct {
     key: []const u8,
@@ -11,7 +11,7 @@ const ConfigOverride = struct {
 
 fn initConfigOverrides(allocator: std.mem.Allocator) void {
     if (global_config_overrides == null) {
-        global_config_overrides = std.array_list.Managed(ConfigOverride).init(allocator);
+        global_config_overrides = std.ArrayList(ConfigOverride).init(allocator);
     }
 }
 
@@ -55,7 +55,7 @@ fn asciiCaseInsensitiveEqual(a: []const u8, b: []const u8) bool {
 }
 
 fn readStdin(allocator: std.mem.Allocator, max_size: usize) ![]u8 {
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     errdefer result.deinit();
     const f = std.fs.File{ .handle = std.posix.STDIN_FILENO };
     var buf: [4096]u8 = undefined;
@@ -129,7 +129,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     _ = args.skip();
 
     // Store all arguments for potential git fallback
-    var all_original_args = std.array_list.Managed([]const u8).init(allocator);
+    var all_original_args = std.ArrayList([]const u8).init(allocator);
     defer all_original_args.deinit();
     
     // Collect all arguments first
@@ -279,7 +279,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 // Shell alias: execute via /bin/sh -c
                 const shell_cmd = alias_cmd[1..];
                 // Append remaining args to the shell command
-                var full_cmd = std.array_list.Managed(u8).init(allocator);
+                var full_cmd = std.ArrayList(u8).init(allocator);
                 defer full_cmd.deinit();
                 try full_cmd.appendSlice(shell_cmd);
                 var ri: usize = command_index + 1;
@@ -305,7 +305,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 return;
             }
             // Split alias into words
-            var alias_words = std.array_list.Managed([]const u8).init(allocator);
+            var alias_words = std.ArrayList([]const u8).init(allocator);
             defer alias_words.deinit();
             var word_iter = std.mem.tokenizeAny(u8, alias_cmd, " \t");
             while (word_iter.next()) |word| {
@@ -313,7 +313,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
             }
             if (alias_words.items.len > 0) {
                 // Rebuild all_original_args: global flags + alias words + remaining args
-                var new_args = std.array_list.Managed([]const u8).init(allocator);
+                var new_args = std.ArrayList([]const u8).init(allocator);
                 defer new_args.deinit();
                 // Copy global flags (before command_index)
                 for (all_original_args.items[0..command_index]) |ga| {
@@ -436,7 +436,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     }
     
     // Create args iterator for the remaining arguments (after the command)
-    var remaining_args = std.array_list.Managed([]const u8).init(allocator);
+    var remaining_args = std.ArrayList([]const u8).init(allocator);
     defer remaining_args.deinit();
     
     var remaining_arg_index = command_index + 1;
@@ -783,7 +783,7 @@ fn translateCommitFlags(allocator: std.mem.Allocator, all_args: [][]const u8, co
     // Translate commit flags for git 2.43 compat
     // Handle --template ":(optional)path" by stripping the prefix if file doesn't exist,
     // or using the real path if it does.
-    var new_args = std.array_list.Managed([]const u8).init(allocator);
+    var new_args = std.ArrayList([]const u8).init(allocator);
     var i: usize = 0;
     while (i < all_args.len) : (i += 1) {
         if (i > command_index) {
@@ -870,7 +870,7 @@ fn translateStderrLine(allocator: std.mem.Allocator, line: []const u8) ![]const 
 }
 
 fn translateStderr(allocator: std.mem.Allocator, stderr_data: []const u8) ![]const u8 {
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     var iter = std.mem.splitScalar(u8, stderr_data, '\n');
     var first = true;
     while (iter.next()) |line| {
@@ -885,8 +885,8 @@ fn translateStderr(allocator: std.mem.Allocator, stderr_data: []const u8) ![]con
 
 
 
-fn findUntrackedFiles(allocator: std.mem.Allocator, repo_root: []const u8, index: *const index_mod.Index, gitignore: *const gitignore_mod.GitIgnore, platform_impl: *const platform_mod.Platform) !std.array_list.Managed([]u8) {
-    var untracked_files = std.array_list.Managed([]u8).init(allocator);
+fn findUntrackedFiles(allocator: std.mem.Allocator, repo_root: []const u8, index: *const index_mod.Index, gitignore: *const gitignore_mod.GitIgnore, platform_impl: *const platform_mod.Platform) !std.ArrayList([]u8) {
+    var untracked_files = std.ArrayList([]u8).init(allocator);
     
     // Create a set of tracked file paths for fast lookup
     var tracked_files = std.StringHashMap(void).init(allocator);
@@ -912,7 +912,7 @@ fn scanDirectoryForUntrackedFiles(
     allocator: std.mem.Allocator,
     repo_root: []const u8,
     relative_path: []const u8,
-    untracked_files: *std.array_list.Managed([]u8),
+    untracked_files: *std.ArrayList([]u8),
     tracked_files: *const std.StringHashMap(void),
     gitignore: *const gitignore_mod.GitIgnore,
     platform_impl: *const platform_mod.Platform,
@@ -1011,7 +1011,7 @@ fn findUntrackedDirEntries(
     allocator: std.mem.Allocator,
     repo_root: []const u8,
     relative_path: []const u8,
-    results: *std.array_list.Managed([]u8),
+    results: *std.ArrayList([]u8),
     index: *const index_mod.Index,
     gitignore: *const gitignore_mod.GitIgnore,
     no_empty_directory: bool,
@@ -1426,7 +1426,7 @@ fn initRepositoryInDir(git_dir: []const u8, bare: bool, template_dir: ?[]const u
     const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_dir});
     defer allocator.free(config_path);
     
-    var config_buf = std.array_list.Managed(u8).init(allocator);
+    var config_buf = std.ArrayList(u8).init(allocator);
     defer config_buf.deinit();
     try config_buf.appendSlice("[core]\n");
     try config_buf.appendSlice("\trepositoryformatversion = 0\n");
@@ -1540,7 +1540,7 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     var show_branch = false;
     var short_format = false;
     var show_untracked = true; // default: show untracked files
-    var status_args = std.array_list.Managed([]const u8).init(allocator);
+    var status_args = std.ArrayList([]const u8).init(allocator);
     defer status_args.deinit();
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--porcelain") or std.mem.eql(u8, arg, "--porcelain=v1")) {
@@ -1759,9 +1759,9 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     }
 
     // Detect staged files vs modified files vs deleted files vs clean files
-    var staged_files = std.array_list.Managed(index_mod.IndexEntry).init(allocator);
-    var modified_files = std.array_list.Managed(index_mod.IndexEntry).init(allocator);
-    var deleted_files = std.array_list.Managed(index_mod.IndexEntry).init(allocator);
+    var staged_files = std.ArrayList(index_mod.IndexEntry).init(allocator);
+    var modified_files = std.ArrayList(index_mod.IndexEntry).init(allocator);
+    var deleted_files = std.ArrayList(index_mod.IndexEntry).init(allocator);
     defer staged_files.deinit();
     defer modified_files.deinit();
     defer deleted_files.deinit();
@@ -1806,7 +1806,7 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 defer allocator.free(current_hash);
                 
                 // Compare with index hash
-                const index_hash = std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1}) catch break :blk false;
+                const index_hash = std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch break :blk false;
                 defer allocator.free(index_hash);
                 
                 break :blk !std.mem.eql(u8, current_hash, index_hash);
@@ -1855,7 +1855,7 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     defer if (head_tree_hash) |h| allocator.free(h);
 
     // For porcelain output, collect all lines then sort and output together
-    var porcelain_lines = std.array_list.Managed([]u8).init(allocator);
+    var porcelain_lines = std.ArrayList([]u8).init(allocator);
     defer {
         for (porcelain_lines.items) |line| allocator.free(line);
         porcelain_lines.deinit();
@@ -1952,9 +1952,9 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 
     // Find untracked files
     var untracked_files = if (show_untracked)
-        findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.array_list.Managed([]u8).init(allocator)
+        findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.ArrayList([]u8).init(allocator)
     else
-        std.array_list.Managed([]u8).init(allocator);
+        std.ArrayList([]u8).init(allocator);
     defer {
         for (untracked_files.items) |file| {
             allocator.free(file);
@@ -2493,7 +2493,7 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     defer allocator.free(tree_hash);
 
     // Get parent commit (if any)
-    var parent_hashes = std.array_list.Managed([]const u8).init(allocator);
+    var parent_hashes = std.ArrayList([]const u8).init(allocator);
     defer {
         for (parent_hashes.items) |hash| {
             allocator.free(hash);
@@ -2829,7 +2829,7 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         var parent_hash: ?[]const u8 = null;
         var author_line: ?[]const u8 = null;
         var empty_line_found = false;
-        var message = std.array_list.Managed(u8).init(allocator);
+        var message = std.ArrayList(u8).init(allocator);
         defer message.deinit();
 
         while (lines.next()) |line| {
@@ -2961,12 +2961,12 @@ fn outputFormattedCommit(format: []const u8, commit_hash: []const u8, allocator:
     
     // Parse commit fields
     var tree_hash: []const u8 = "";
-    var parent_hashes = std.array_list.Managed([]const u8).init(allocator);
+    var parent_hashes = std.ArrayList([]const u8).init(allocator);
     defer parent_hashes.deinit();
     var author_full: []const u8 = "";
     var committer_full: []const u8 = "";
     var subject: []const u8 = "";
-    var body = std.array_list.Managed(u8).init(allocator);
+    var body = std.ArrayList(u8).init(allocator);
     defer body.deinit();
     
     var lines_iter = std.mem.splitSequence(u8, commit_obj.data, "\n");
@@ -2994,7 +2994,7 @@ fn outputFormattedCommit(format: []const u8, commit_hash: []const u8, allocator:
         }
     }
     
-    var output = std.array_list.Managed(u8).init(allocator);
+    var output = std.ArrayList(u8).init(allocator);
     defer output.deinit();
     
     var i: usize = 0;
@@ -3160,9 +3160,9 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     var cached = false;
     var quiet = false;
     var exit_code = false;
-    var positional = std.array_list.Managed([]const u8).init(allocator);
+    var positional = std.ArrayList([]const u8).init(allocator);
     defer positional.deinit();
-    var pathspec_args = std.array_list.Managed([]const u8).init(allocator);
+    var pathspec_args = std.ArrayList([]const u8).init(allocator);
     defer pathspec_args.deinit();
     var seen_dashdash = false;
     while (args.next()) |arg| {
@@ -3278,7 +3278,7 @@ fn showWorkingTreeDiff(index: *const index_mod.Index, cwd: []const u8, platform_
             defer allocator.free(current_hash);
             
             // Compare with index hash
-            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
+            const index_hash = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
             defer allocator.free(index_hash);
             
             if (!std.mem.eql(u8, current_hash, index_hash)) {
@@ -3312,7 +3312,7 @@ fn showWorkingTreeDiff(index: *const index_mod.Index, cwd: []const u8, platform_
             defer allocator.free(empty_hash);
             
             // Get index hash
-            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
+            const index_hash = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
             defer allocator.free(index_hash);
             
             const short_index_hash = index_hash[0..7];
@@ -3347,7 +3347,7 @@ fn showStagedDiff(index: *const index_mod.Index, git_path: []const u8, platform_
             const empty_hash = try empty_blob.hash(allocator);
             defer allocator.free(empty_hash);
             
-            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
+            const index_hash = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
             defer allocator.free(index_hash);
             
             const short_empty_hash = empty_hash[0..7];
@@ -3361,7 +3361,7 @@ fn showStagedDiff(index: *const index_mod.Index, git_path: []const u8, platform_
         }
     } else {
         for (index.entries.items) |entry| {
-            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
+            const index_hash = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
             defer allocator.free(index_hash);
             
             // Check if this file exists in HEAD tree with same hash
@@ -3453,7 +3453,7 @@ fn getTreeEntryHashByPath(git_path: []const u8, tree_hash: []const u8, file_path
         if (std.mem.eql(u8, name, first_component)) {
             // Convert hash bytes to hex
             var hex_buf: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&hex_buf, "{x}", .{entry_hash_bytes[0..20]}) catch return error.InvalidHash;
+            _ = std.fmt.bufPrint(&hex_buf, "{s}", .{std.fmt.fmtSliceHexLower(entry_hash_bytes[0..20])}) catch return error.InvalidHash;
             
             if (rest) |remaining_path| {
                 // Need to recurse into subtree
@@ -3484,7 +3484,7 @@ fn getIndexedFileContent(entry: index_mod.IndexEntry, allocator: std.mem.Allocat
     // Convert hash bytes to hex string
     const hash_str = try allocator.alloc(u8, 40);
     defer allocator.free(hash_str);
-    _ = std.fmt.bufPrint(hash_str, "{x}", .{&entry.sha1}) catch |err| {
+    _ = std.fmt.bufPrint(hash_str, "{s}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch |err| {
         std.log.debug("Could not format hash: {}", .{err});
         return try allocator.dupe(u8, "");
     };
@@ -3964,7 +3964,7 @@ fn checkoutTreeRecursive(git_path: []const u8, tree_data: []const u8, repo_root:
         const hash_bytes = tree_data[i..i + 20];
         const hash_hex = try allocator.alloc(u8, 40);
         defer allocator.free(hash_hex);
-        _ = std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes}) catch break;
+        _ = std.fmt.bufPrint(hash_hex, "{s}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch break;
         
         i += 20;
         
@@ -4083,7 +4083,7 @@ fn populateIndexFromTree(git_path: []const u8, tree_data: []const u8, repo_root:
             // Convert hash to hex for loading
             const hash_hex = try allocator.alloc(u8, 40);
             defer allocator.free(hash_hex);
-            _ = try std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes});
+            _ = try std.fmt.bufPrint(hash_hex, "{s}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
             
             const subtree_loaded = objects.GitObject.load(hash_hex, git_path, platform_impl, allocator) catch continue;
             defer subtree_loaded.deinit(allocator);
@@ -4583,7 +4583,7 @@ fn parseTreeIntoMap(tree_data: []const u8, file_map: *std.StringHashMap([]const 
         // Extract 20-byte hash and convert to hex string
         const hash_bytes = tree_data[i..i + 20];
         const hash_hex = try allocator.alloc(u8, 40);
-        _ = std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes}) catch {
+        _ = std.fmt.bufPrint(hash_hex, "{s}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch {
             allocator.free(hash_hex);
             break;
         };
@@ -4731,7 +4731,7 @@ fn threeWayContentMerge(base: []const u8, ours: []const u8, theirs: []const u8, 
 
     // Simple approach: compute hunks of changes from base->ours and base->theirs
     // If changes don't overlap, merge them
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     errdefer result.deinit();
 
     var bi: usize = 0; // base index
@@ -4836,7 +4836,7 @@ fn threeWayContentMerge(base: []const u8, ours: []const u8, theirs: []const u8, 
 
 fn splitLines(text: []const u8, allocator: std.mem.Allocator) ![][]const u8 {
     if (text.len == 0) return try allocator.alloc([]const u8, 0);
-    var lines = std.array_list.Managed([]const u8).init(allocator);
+    var lines = std.ArrayList([]const u8).init(allocator);
     var iter = std.mem.splitScalar(u8, text, '\n');
     while (iter.next()) |line| {
         // Skip trailing empty line from final newline
@@ -4891,7 +4891,7 @@ fn createConflictFile(git_path: []const u8, filename: []const u8, base_hash: ?[]
     defer if (target_content.len > 0) allocator.free(target_content);
     
     // Create conflict content with markers
-    var conflict_content = std.array_list.Managed(u8).init(allocator);
+    var conflict_content = std.ArrayList(u8).init(allocator);
     defer conflict_content.deinit();
     
     const writer = conflict_content.writer();
@@ -5170,7 +5170,7 @@ fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
 /// Resolve a path to its .git directory. Handles bare repos, .git files (worktrees/submodules),
 /// and file:// URLs. Returns the path to the git directory (objects, refs, etc.).
 fn urlDecodePath(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     errdefer result.deinit();
     var i: usize = 0;
     while (i < input.len) {
@@ -5540,7 +5540,7 @@ fn performLocalClone(
         // Also copy packed-refs but rewrite heads to remotes
         if (std.fs.cwd().readFileAlloc(allocator, src_packed_refs, 10 * 1024 * 1024)) |packed_content| {
             defer allocator.free(packed_content);
-            var new_packed = std.array_list.Managed(u8).init(allocator);
+            var new_packed = std.ArrayList(u8).init(allocator);
             defer new_packed.deinit();
             var lines = std.mem.splitScalar(u8, packed_content, '\n');
             while (lines.next()) |line| {
@@ -5701,7 +5701,7 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     }
 
     // Collect all arguments first
-    var all_args = std.array_list.Managed([]const u8).init(allocator);
+    var all_args = std.ArrayList([]const u8).init(allocator);
     defer all_args.deinit();
     
     while (args.next()) |arg| {
@@ -5868,7 +5868,7 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
                 defer allocator.free(config_content);
 
                 // Replace bare = true with bare = false
-                var new_config = std.array_list.Managed(u8).init(allocator);
+                var new_config = std.ArrayList(u8).init(allocator);
                 defer new_config.deinit();
                 var config_lines = std.mem.splitSequence(u8, config_content, "\n");
                 var first = true;
@@ -6139,7 +6139,7 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         defer allocator.free(config_content);
 
         // Replace bare = true with bare = false
-        var new_config = std.array_list.Managed(u8).init(allocator);
+        var new_config = std.ArrayList(u8).init(allocator);
         defer new_config.deinit();
         var config_lines = std.mem.splitSequence(u8, config_content, "\n");
         var first = true;
@@ -6215,7 +6215,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     }
 
     // Collect all remaining args
-    var config_args = std.array_list.Managed([]const u8).init(allocator);
+    var config_args = std.ArrayList([]const u8).init(allocator);
     defer config_args.deinit();
     while (args.next()) |arg| {
         try config_args.append(arg);
@@ -6247,7 +6247,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     var default_value: ?[]const u8 = null;
     var fixed_value = false;
     _ = &fixed_value;
-    var positionals = std.array_list.Managed([]const u8).init(allocator);
+    var positionals = std.ArrayList([]const u8).init(allocator);
     defer positionals.deinit();
     var do_edit = false;
     var do_get_color = false;
@@ -6379,7 +6379,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 
     // Determine config file path(s) to read
     // ConfigSource is defined at module level
-    var sources = std.array_list.Managed(ConfigSource).init(allocator);
+    var sources = std.ArrayList(ConfigSource).init(allocator);
     defer {
         for (sources.items) |s| {
             if (s.needs_free) allocator.free(s.path);
@@ -6650,7 +6650,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         for (sources.items) |source| {
             const content = platform_impl.fs.readFile(allocator, source.path) catch continue;
             defer allocator.free(content);
-            var all_vals = std.array_list.Managed([]const u8).init(allocator);
+            var all_vals = std.ArrayList([]const u8).init(allocator);
             defer {
                 for (all_vals.items) |v| allocator.free(v);
                 all_vals.deinit();
@@ -6804,7 +6804,7 @@ fn outputConfigList(content: []const u8, source_path: []const u8, scope: []const
             }
 
             const term: []const u8 = if (null_term) "\x00" else "\n";
-            var out = std.array_list.Managed(u8).init(allocator);
+            var out = std.ArrayList(u8).init(allocator);
             defer out.deinit();
             if (show_scope) {
                 try out.appendSlice(scope);
@@ -6889,7 +6889,7 @@ fn outputConfigGetRegexp(content: []const u8, pattern: []const u8, name_only: bo
     return found;
 }
 
-fn parseConfigGetAll(content: []const u8, key: []const u8, results: *std.array_list.Managed([]const u8), allocator: std.mem.Allocator) !void {
+fn parseConfigGetAll(content: []const u8, key: []const u8, results: *std.ArrayList([]const u8), allocator: std.mem.Allocator) !void {
     var lines = std.mem.splitSequence(u8, content, "\n");
     var current_section: ?[]u8 = null;
     defer if (current_section) |s| allocator.free(s);
@@ -7004,7 +7004,7 @@ fn configSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_a
     // We need to find the matching section and either replace the key or add it
     
     // First pass: try to find and replace existing key
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
     var found = false;
     var section_found = false;
@@ -7084,7 +7084,7 @@ fn configSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_a
         if (section_found) {
             // Insert the new key at the end of the target section
             // We need to rebuild, inserting before the next section or at end
-            var insert_result = std.array_list.Managed(u8).init(allocator);
+            var insert_result = std.ArrayList(u8).init(allocator);
             defer insert_result.deinit();
             
             const cs2 = try formatConfigComment(comment, allocator);
@@ -7166,7 +7166,7 @@ fn configUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, allo
     };
     defer allocator.free(content);
 
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
     var lines = std.mem.splitSequence(u8, content, "\n");
     var current_section_str: ?[]u8 = null;
@@ -7229,7 +7229,7 @@ fn configRenameSection(cfg_path: []const u8, old_name: []const u8, new_name: []c
     };
     defer allocator.free(content);
 
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
     var lines = std.mem.splitSequence(u8, content, "\n");
     var found = false;
@@ -7287,7 +7287,7 @@ fn configRemoveSection(cfg_path: []const u8, section_name: []const u8, allocator
     };
     defer allocator.free(content);
 
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
     var lines = std.mem.splitSequence(u8, content, "\n");
     var in_removed_section = false;
@@ -7407,7 +7407,7 @@ fn parseConfigValue(config_content: []const u8, key: []const u8, allocator: std.
                 const inline_raw_key = std.mem.trim(u8, after_bracket[0..inline_eq_pos], " \t");
                 const inline_raw_value = after_bracket[inline_eq_pos + 1 ..];
                 
-                var inline_value_buf = std.array_list.Managed(u8).init(allocator);
+                var inline_value_buf = std.ArrayList(u8).init(allocator);
                 defer inline_value_buf.deinit();
                 try appendConfigValuePart(&inline_value_buf, inline_raw_value);
                 
@@ -7438,7 +7438,7 @@ fn parseConfigValue(config_content: []const u8, key: []const u8, allocator: std.
             var raw_value = trimmed[eq_pos + 1 ..];
             
             // Handle continuation lines
-            var value_buf = std.array_list.Managed(u8).init(allocator);
+            var value_buf = std.ArrayList(u8).init(allocator);
             defer value_buf.deinit();
             
             while (true) {
@@ -7563,7 +7563,7 @@ fn parseConfigSectionHeader(header: []const u8, allocator: std.mem.Allocator) !P
             subsection_raw = subsection_raw[0 .. subsection_raw.len - 1];
         }
         // Unescape backslashes in subsection
-        var sub_buf = std.array_list.Managed(u8).init(allocator);
+        var sub_buf = std.ArrayList(u8).init(allocator);
         defer sub_buf.deinit();
         var si: usize = 0;
         while (si < subsection_raw.len) : (si += 1) {
@@ -7586,7 +7586,7 @@ fn parseConfigSectionHeader(header: []const u8, allocator: std.mem.Allocator) !P
     };
 }
 
-fn appendConfigValuePart(buf: *std.array_list.Managed(u8), raw: []const u8) !void {
+fn appendConfigValuePart(buf: *std.ArrayList(u8), raw: []const u8) !void {
     // Parse a config value part, handling quotes and inline comments
     // Leading whitespace of raw value is trimmed only before first non-whitespace or quote
     const trimmed = std.mem.trimLeft(u8, raw, " \t");
@@ -7811,7 +7811,7 @@ fn lookupBlobInTree(tree_hash: []const u8, path: []const u8, git_path: []const u
         if (std.mem.eql(u8, name, name_to_find)) {
             if (remaining) |rest| {
                 // This is a directory - recurse
-                const sub_tree_hash = try std.fmt.allocPrint(allocator, "{x}", .{hash_bytes});
+                const sub_tree_hash = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
                 defer allocator.free(sub_tree_hash);
                 return try lookupBlobInTree(sub_tree_hash, rest, git_path, platform_impl, allocator);
             } else {
@@ -7945,7 +7945,7 @@ fn buildRecursiveTree(allocator: std.mem.Allocator, entries: []const index_mod.I
         mode: []const u8,
         hash_bytes: [20]u8,
     };
-    var items = std.array_list.Managed(TreeItem).init(allocator);
+    var items = std.ArrayList(TreeItem).init(allocator);
     defer {
         for (items.items) |item| {
             allocator.free(item.name);
@@ -8045,7 +8045,7 @@ fn buildRecursiveTree(allocator: std.mem.Allocator, entries: []const index_mod.I
     }.lessThan);
 
     // Build tree content
-    var tree_content = std.array_list.Managed(u8).init(allocator);
+    var tree_content = std.ArrayList(u8).init(allocator);
     defer tree_content.deinit();
 
     for (items.items) |item| {
@@ -8070,12 +8070,12 @@ fn buildRecursiveTree(allocator: std.mem.Allocator, entries: []const index_mod.I
 fn stageTrackedChanges(allocator: std.mem.Allocator, index: *index_mod.Index, git_path: []const u8, repo_root: []const u8, platform_impl: *const platform_mod.Platform) !void {
     // Collect paths to remove (deleted files) and paths to re-add (modified files).
     // We collect first to avoid mutating the list while iterating.
-    var to_remove = std.array_list.Managed([]const u8).init(allocator);
+    var to_remove = std.ArrayList([]const u8).init(allocator);
     defer {
         for (to_remove.items) |p| allocator.free(p);
         to_remove.deinit();
     }
-    var to_readd = std.array_list.Managed([]const u8).init(allocator);
+    var to_readd = std.ArrayList([]const u8).init(allocator);
     defer {
         for (to_readd.items) |p| allocator.free(p);
         to_readd.deinit();
@@ -8913,7 +8913,7 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     }
 
     // Collect all args
-    var all_args = std.array_list.Managed([]const u8).init(allocator);
+    var all_args = std.ArrayList([]const u8).init(allocator);
     defer all_args.deinit();
     while (args.next()) |arg| {
         try all_args.append(arg);
@@ -8942,7 +8942,7 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     var no_flags = false;
     var path_format_absolute = false;
     var default_rev: ?[]const u8 = null;
-    var positional_args = std.array_list.Managed([]const u8).init(allocator);
+    var positional_args = std.ArrayList([]const u8).init(allocator);
     defer positional_args.deinit();
 
     var arg_i: usize = 0;
@@ -9153,7 +9153,7 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                 for (rel) |c| {
                     if (c == '/') depth += 1;
                 }
-                var buf = std.array_list.Managed(u8).init(allocator);
+                var buf = std.ArrayList(u8).init(allocator);
                 defer buf.deinit();
                 var d: usize = 0;
                 while (d < depth) : (d += 1) {
@@ -9525,7 +9525,7 @@ fn findTagInHistory(git_path: []const u8, start_hash: []const u8, tag_map: *cons
         visited.deinit();
     }
     
-    var commit_stack = std.array_list.Managed([]u8).init(allocator);
+    var commit_stack = std.ArrayList([]u8).init(allocator);
     defer {
         for (commit_stack.items) |hash| {
             allocator.free(hash);
@@ -9536,7 +9536,7 @@ fn findTagInHistory(git_path: []const u8, start_hash: []const u8, tag_map: *cons
     try commit_stack.append(try allocator.dupe(u8, start_hash));
     
     while (commit_stack.items.len > 0) {
-        const current_hash = commit_stack.pop() orelse break;
+        const current_hash = commit_stack.popOrNull() orelse break;
         defer allocator.free(current_hash);
         
         // Avoid infinite loops
@@ -9599,9 +9599,9 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     var list_mode = false;
     var force = false;
     var verify_mode = false;
-    var delete_names = std.array_list.Managed([]const u8).init(allocator);
+    var delete_names = std.ArrayList([]const u8).init(allocator);
     defer delete_names.deinit();
-    var list_patterns = std.array_list.Managed([]const u8).init(allocator);
+    var list_patterns = std.ArrayList([]const u8).init(allocator);
     defer list_patterns.deinit();
     var target_ref: ?[]const u8 = null;
 
@@ -9818,7 +9818,7 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         };
         defer tags_dir.close();
         
-        var tag_list = std.array_list.Managed([]u8).init(allocator);
+        var tag_list = std.ArrayList([]u8).init(allocator);
         defer {
             for (tag_list.items) |tag| {
                 allocator.free(tag);
@@ -10016,7 +10016,7 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         }
         
         // Clean up message: strip comments, leading/trailing blanks, trailing whitespace per line
-        var msg_lines_arr = std.array_list.Managed([]const u8).init(allocator);
+        var msg_lines_arr = std.ArrayList([]const u8).init(allocator);
         defer msg_lines_arr.deinit();
         {
             var msg_lines = std.mem.splitScalar(u8, message.?, '\n');
@@ -10037,7 +10037,7 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             lead_skip += 1;
         }
         // Build final message
-        var cleaned_msg = std.array_list.Managed(u8).init(allocator);
+        var cleaned_msg = std.ArrayList(u8).init(allocator);
         defer cleaned_msg.deinit();
         for (msg_lines_arr.items[lead_skip..]) |mline| {
             try cleaned_msg.appendSlice(mline);
@@ -10076,7 +10076,7 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         defer allocator.free(obj_path);
         
         // Compress and write
-        var full_obj = std.array_list.Managed(u8).init(allocator);
+        var full_obj = std.ArrayList(u8).init(allocator);
         defer full_obj.deinit();
         try full_obj.appendSlice(header);
         try full_obj.appendSlice(tag_content);
@@ -10191,7 +10191,7 @@ fn showCommitDefault(git_object: objects.GitObject, commit_hash: []const u8, git
     var author_line: ?[]const u8 = null;
     var committer_line: ?[]const u8 = null;
     var empty_line_found = false;
-    var message = std.array_list.Managed(u8).init(allocator);
+    var message = std.ArrayList(u8).init(allocator);
     defer message.deinit();
 
     while (lines.next()) |line| {
@@ -10339,7 +10339,7 @@ fn showTreeObject(git_object: objects.GitObject, platform_impl: *const platform_
         const hash_bytes = git_object.data[i..i + 20];
         const hash_hex = try allocator.alloc(u8, 40);
         defer allocator.free(hash_hex);
-        _ = std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes}) catch break;
+        _ = std.fmt.bufPrint(hash_hex, "{s}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch break;
         
         i += 20;
         
@@ -10365,7 +10365,7 @@ fn showTagObject(git_object: objects.GitObject, git_path: []const u8, platform_i
     var tag_name: ?[]const u8 = null;
     var tagger_line: ?[]const u8 = null;
     var empty_line_found = false;
-    var message = std.array_list.Managed(u8).init(allocator);
+    var message = std.ArrayList(u8).init(allocator);
     defer message.deinit();
 
     while (lines.next()) |line| {
@@ -10444,11 +10444,11 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var resolve_undo_flag = false;
     var deduplicate_flag = false;
     var eol_flag = false;
-    var exclude_patterns = std.array_list.Managed([]const u8).init(allocator);
+    var exclude_patterns = std.ArrayList([]const u8).init(allocator);
     defer exclude_patterns.deinit();
-    var exclude_files = std.array_list.Managed([]const u8).init(allocator);
+    var exclude_files = std.ArrayList([]const u8).init(allocator);
     defer exclude_files.deinit();
-    var pathspecs = std.array_list.Managed([]const u8).init(allocator);
+    var pathspecs = std.ArrayList([]const u8).init(allocator);
     defer pathspecs.deinit();
 
     const ls_files_usage = "usage: git ls-files [<options>] [<file>...]\n\n    -z                  paths are separated with NUL character\n    -c, --cached        show cached files in the output (default)\n    -d, --deleted       show deleted files in the output\n    -m, --modified      show modified files in the output\n    -o, --others        show other files in the output\n    -s, --stage         show staged contents' object name in the output\n    --directory         show 'other' directories' names only\n    --no-empty-directory  don't show empty directories\n    --error-unmatch     if any <file> is not in the index, treat this as an error\n    -x, --exclude <pattern>  skip files matching pattern\n    -X, --exclude-from <file>  read exclude patterns from <file>\n    --exclude-standard  add the standard git exclusions\n\n";
@@ -10541,7 +10541,7 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
 
     // Normalize pathspecs: convert absolute paths to repo-relative paths
     const repo_root = std.fs.path.dirname(git_path) orelse ".";
-    var normalized_pathspecs = std.array_list.Managed([]const u8).init(allocator);
+    var normalized_pathspecs = std.ArrayList([]const u8).init(allocator);
     defer {
         for (normalized_pathspecs.items) |p| allocator.free(@constCast(p));
         normalized_pathspecs.deinit();
@@ -10706,7 +10706,7 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                     defer blob2.deinit(allocator);
                     const current_hash2 = blob2.hash(allocator) catch continue;
                     defer allocator.free(current_hash2);
-                    const index_hash2 = std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1}) catch continue;
+                    const index_hash2 = std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch continue;
                     defer allocator.free(index_hash2);
                     if (std.mem.eql(u8, current_hash2, index_hash2)) continue; // not modified
                 }
@@ -10761,7 +10761,7 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 }
             }
             if (stage) {
-                const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
+                const hash_str = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
                 defer allocator.free(hash_str);
                 const stage_num = (entry.flags >> 12) & 0x3;
                 const quoted = try cQuotePath(allocator, entry.path, true);
@@ -10834,7 +10834,7 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                     defer blob.deinit(allocator);
                     const current_hash = blob.hash(allocator) catch break :blk false;
                     defer allocator.free(current_hash);
-                    const index_hash = std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1}) catch break :blk false;
+                    const index_hash = std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch break :blk false;
                     defer allocator.free(index_hash);
                     break :blk !std.mem.eql(u8, current_hash, index_hash);
                 };
@@ -10858,7 +10858,7 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
 
         var others_found: usize = 0;
         if (directory) {
-            var dir_entries = std.array_list.Managed([]u8).init(allocator);
+            var dir_entries = std.ArrayList([]u8).init(allocator);
             defer {
                 for (dir_entries.items) |e| allocator.free(e);
                 dir_entries.deinit();
@@ -10874,7 +10874,7 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 try platform_impl.writeStdout(output);
             }
         } else {
-            var untracked_files = findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.array_list.Managed([]u8).init(allocator);
+            var untracked_files = findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.ArrayList([]u8).init(allocator);
             defer {
                 for (untracked_files.items) |file| allocator.free(file);
                 untracked_files.deinit();
@@ -10903,7 +10903,7 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
 }
 
 fn formatLsFilesEntry(allocator: std.mem.Allocator, fmt: []const u8, entry: anytype, git_path: []const u8, platform_impl: anytype) ![]u8 {
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
 
     var i: usize = 0;
@@ -10941,7 +10941,7 @@ fn formatLsFilesEntry(allocator: std.mem.Allocator, fmt: []const u8, entry: anyt
                     defer allocator.free(mode_str);
                     try result.appendSlice(mode_str);
                 } else if (std.mem.eql(u8, field, "objectname")) {
-                    const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
+                    const hash_str = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
                     defer allocator.free(hash_str);
                     try result.appendSlice(hash_str);
                 } else if (std.mem.eql(u8, field, "objecttype")) {
@@ -11015,7 +11015,7 @@ fn formatLsFilesEntry(allocator: std.mem.Allocator, fmt: []const u8, entry: anyt
 
 fn getObjectSize(allocator: std.mem.Allocator, git_path: []const u8, sha1: *const [20]u8, platform_impl: anytype) !u64 {
     // Try to read object from loose store and get size
-    const hex = try std.fmt.allocPrint(allocator, "{x}", .{sha1});
+    const hex = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(sha1)});
     defer allocator.free(hex);
     const obj_path = try std.fmt.allocPrint(allocator, "{s}/objects/{s}/{s}", .{ git_path, hex[0..2], hex[2..] });
     defer allocator.free(obj_path);
@@ -11271,7 +11271,7 @@ fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
 }
 
 fn formatCatFileOutput(allocator: std.mem.Allocator, fmt: []const u8, obj_hash: []const u8, type_str: []const u8, size: usize) ![]u8 {
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
 
     var i: usize = 0;
@@ -11400,7 +11400,7 @@ fn showTreeObjectFormatted(git_object: objects.GitObject, platform_impl: *const 
         const hash_bytes = git_object.data[i..i + 20];
         const hash_hex = try allocator.alloc(u8, 40);
         defer allocator.free(hash_hex);
-        _ = std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes}) catch break;
+        _ = std.fmt.bufPrint(hash_hex, "{s}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch break;
         
         i += 20;
         
@@ -11439,9 +11439,9 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var no_walk = false;
     var format_str: ?[]const u8 = null;
     var no_commit_header = false;
-    var include_refs = std.array_list.Managed([]const u8).init(allocator);
+    var include_refs = std.ArrayList([]const u8).init(allocator);
     defer include_refs.deinit();
-    var exclude_refs = std.array_list.Managed([]const u8).init(allocator);
+    var exclude_refs = std.ArrayList([]const u8).init(allocator);
     defer exclude_refs.deinit();
 
     // Parse arguments
@@ -11615,7 +11615,7 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     }
 
     // Resolve all include/exclude refs
-    var include_hashes = std.array_list.Managed([]u8).init(allocator);
+    var include_hashes = std.ArrayList([]u8).init(allocator);
     defer {
         for (include_hashes.items) |h| allocator.free(h);
         include_hashes.deinit();
@@ -11653,14 +11653,14 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         visited.deinit();
     }
 
-    var result = std.array_list.Managed([]u8).init(allocator);
+    var result = std.ArrayList([]u8).init(allocator);
     defer {
         for (result.items) |h| allocator.free(h);
         result.deinit();
     }
 
     // Use a queue for BFS
-    var queue = std.array_list.Managed([]u8).init(allocator);
+    var queue = std.ArrayList([]u8).init(allocator);
     defer {
         for (queue.items) |h| allocator.free(h);
         queue.deinit();
@@ -11725,7 +11725,7 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         defer emitted_objects.deinit();
 
         // Collect deferred objects (trees/blobs) for non-in-commit-order mode
-        var deferred_objects = std.array_list.Managed([]const u8).init(allocator);
+        var deferred_objects = std.ArrayList([]const u8).init(allocator);
         defer {
             for (deferred_objects.items) |s| allocator.free(@constCast(s));
             deferred_objects.deinit();
@@ -11794,7 +11794,7 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
 /// Walk a tree recursively and output all tree/blob objects (inline for --in-commit-order)
 /// Format a commit according to a format string (like --pretty=format:...)
 fn formatCommitLine(allocator: std.mem.Allocator, fmt: []const u8, hash: []const u8, data: []const u8) ![]const u8 {
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     errdefer result.deinit();
 
     // Parse commit data fields
@@ -12283,7 +12283,7 @@ fn revListWalkTree(allocator: std.mem.Allocator, git_path: []const u8, tree_hash
 }
 
 /// Collect tree/blob objects into deferred list (for default order: commits first, then objects)
-fn revListCollectTree(allocator: std.mem.Allocator, git_path: []const u8, tree_hash: []const u8, prefix: []const u8, no_names: bool, emitted: *std.StringHashMap(void), deferred: *std.array_list.Managed([]const u8), platform_impl: *const platform_mod.Platform) !void {
+fn revListCollectTree(allocator: std.mem.Allocator, git_path: []const u8, tree_hash: []const u8, prefix: []const u8, no_names: bool, emitted: *std.StringHashMap(void), deferred: *std.ArrayList([]const u8), platform_impl: *const platform_mod.Platform) !void {
     if (emitted.contains(tree_hash)) return;
     try emitted.put(try allocator.dupe(u8, tree_hash), {});
 
@@ -12339,7 +12339,7 @@ fn revListCollectTree(allocator: std.mem.Allocator, git_path: []const u8, tree_h
 
 /// Walk all ancestors of a commit and add them to the set
 fn walkAncestors(git_path: []const u8, start_hash: []const u8, set: *std.StringHashMap(void), platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
-    var queue = std.array_list.Managed([]u8).init(allocator);
+    var queue = std.ArrayList([]u8).init(allocator);
     defer {
         for (queue.items) |h| allocator.free(h);
         queue.deinit();
@@ -12495,7 +12495,7 @@ fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 
     var verbose = false;
     var subcommand: ?[]const u8 = null;
-    var positionals = std.array_list.Managed([]const u8).init(allocator);
+    var positionals = std.ArrayList([]const u8).init(allocator);
     defer positionals.deinit();
 
     // Parse arguments
@@ -12588,7 +12588,7 @@ fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         }
 
         // Remove the section
-        var result = std.array_list.Managed(u8).init(allocator);
+        var result = std.ArrayList(u8).init(allocator);
         defer result.deinit();
         var in_remove_section = false;
         var lines = std.mem.splitScalar(u8, existing, '\n');
@@ -12635,7 +12635,7 @@ fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         };
         defer allocator.free(existing);
 
-        var result = std.array_list.Managed(u8).init(allocator);
+        var result = std.ArrayList(u8).init(allocator);
         defer result.deinit();
         var in_target_section = false;
         var url_replaced = false;
@@ -12697,7 +12697,7 @@ fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         defer allocator.free(new_header);
 
         // Simple string replacement for the section header
-        var result = std.array_list.Managed(u8).init(allocator);
+        var result = std.ArrayList(u8).init(allocator);
         defer result.deinit();
         var rest: []const u8 = existing;
         while (std.mem.indexOf(u8, rest, old_header)) |idx| {
@@ -12878,7 +12878,7 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     // Parse arguments
     var reset_mode: enum { soft, mixed, hard } = .mixed; // default is mixed
     var target_ref: ?[]const u8 = null;
-    var reset_paths = std.array_list.Managed([]const u8).init(allocator);
+    var reset_paths = std.ArrayList([]const u8).init(allocator);
     defer reset_paths.deinit();
     var seen_separator = false;
 
@@ -13082,7 +13082,7 @@ fn getCommitSubject(hash: []const u8, git_path: []const u8, platform_impl: anyty
 }
 
 fn writeEmptyIndex(allocator: std.mem.Allocator, index_path: []const u8) !void {
-    var output = std.array_list.Managed(u8).init(allocator);
+    var output = std.ArrayList(u8).init(allocator);
     defer output.deinit();
     try output.appendSlice("DIRC");
     try output.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, 2))); // version 2
@@ -13107,7 +13107,7 @@ fn removePathsFromIndex(allocator: std.mem.Allocator, index_path: []const u8, pa
     const num_entries = std.mem.readInt(u32, idx_data[8..12], .big);
 
     // Parse entries, keeping those not in paths
-    var new_entries = std.array_list.Managed(u8).init(allocator);
+    var new_entries = std.ArrayList(u8).init(allocator);
     defer new_entries.deinit();
     var kept_count: u32 = 0;
 
@@ -13142,7 +13142,7 @@ fn removePathsFromIndex(allocator: std.mem.Allocator, index_path: []const u8, pa
     }
 
     // Write new index
-    var output = std.array_list.Managed(u8).init(allocator);
+    var output = std.ArrayList(u8).init(allocator);
     defer output.deinit();
     try output.appendSlice("DIRC");
     try output.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, 2)));
@@ -13203,7 +13203,7 @@ fn resetIndex(git_path: []const u8, commit_hash: []const u8, platform_impl: *con
 
     // Use read-tree to reset the index
     // Build index entries from the tree
-    var entries = std.array_list.Managed(index_mod.IndexEntry).init(allocator);
+    var entries = std.ArrayList(index_mod.IndexEntry).init(allocator);
     defer {
         for (entries.items) |*entry| {
             allocator.free(entry.path);
@@ -13238,7 +13238,7 @@ fn resetIndex(git_path: []const u8, commit_hash: []const u8, platform_impl: *con
 }
 
 /// Recursively collect all blob entries from a tree
-fn collectTreeEntries(git_path: []const u8, tree_hash: []const u8, prefix: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, entries: *std.array_list.Managed(index_mod.IndexEntry)) !void {
+fn collectTreeEntries(git_path: []const u8, tree_hash: []const u8, prefix: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, entries: *std.ArrayList(index_mod.IndexEntry)) !void {
     const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch return;
     defer tree_obj.deinit(allocator);
 
@@ -13326,7 +13326,7 @@ fn cmdRm(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform
     var force = false;
     var cached = false;
     var recursive = false;
-    var files = std.array_list.Managed([]const u8).init(allocator);
+    var files = std.ArrayList([]const u8).init(allocator);
     defer files.deinit();
 
     while (args.next()) |arg| {
@@ -13455,7 +13455,7 @@ fn cmdHashObject(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     var stdin_mode = false;
     var stdin_paths = false;
     var obj_type: []const u8 = "blob";
-    var files = std.array_list.Managed([]const u8).init(allocator);
+    var files = std.ArrayList([]const u8).init(allocator);
     defer files.deinit();
     var literally = false;
     var path_opt: ?[]const u8 = null;
@@ -13667,7 +13667,7 @@ fn writeTreeFromIndex(allocator: std.mem.Allocator, idx: *index_mod.Index, git_d
 
 fn writeTreeRecursive(allocator: std.mem.Allocator, idx: *index_mod.Index, prefix: []const u8, git_dir: []const u8, platform_impl: *const platform_mod.Platform) ![]u8 {
     // Collect entries at this level
-    var entries = std.array_list.Managed(objects.TreeEntry).init(allocator);
+    var entries = std.ArrayList(objects.TreeEntry).init(allocator);
     defer {
         for (entries.items) |*e| e.deinit(allocator);
         entries.deinit();
@@ -13758,7 +13758,7 @@ fn writeTreeRecursive(allocator: std.mem.Allocator, idx: *index_mod.Index, prefi
 
 fn cmdCommitTree(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     var tree_hash: ?[]const u8 = null;
-    var parents = std.array_list.Managed([]const u8).init(allocator);
+    var parents = std.ArrayList([]const u8).init(allocator);
     defer parents.deinit();
     var message: ?[]const u8 = null;
     var read_stdin = true;
@@ -13813,7 +13813,7 @@ fn cmdCommitTree(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
 
     // Deduplicate parent hashes (git silently removes duplicates)
     {
-        var unique = std.array_list.Managed([]const u8).init(allocator);
+        var unique = std.ArrayList([]const u8).init(allocator);
         for (parents.items) |p| {
             var dup = false;
             for (unique.items) |u| {
@@ -14203,7 +14203,7 @@ fn cmdUpdateRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     var create_reflog = false;
     var stdin_mode = false;
     var msg: ?[]const u8 = null;
-    var positional = std.array_list.Managed([]const u8).init(allocator);
+    var positional = std.ArrayList([]const u8).init(allocator);
     defer positional.deinit();
 
     while (args.next()) |arg| {
@@ -14281,7 +14281,7 @@ fn cmdUpdateRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         defer allocator.free(packed_refs_path);
         if (platform_impl.fs.readFile(allocator, packed_refs_path)) |packed_data| {
             defer allocator.free(packed_data);
-            var new_packed = std.array_list.Managed(u8).init(allocator);
+            var new_packed = std.ArrayList(u8).init(allocator);
             defer new_packed.deinit();
             var lines_iter = std.mem.splitScalar(u8, packed_data, '\n');
             while (lines_iter.next()) |line| {
@@ -14575,7 +14575,7 @@ fn removeFromPackedRefs(git_dir: []const u8, ref_name: []const u8, allocator: st
     defer allocator.free(packed_refs_path);
     const packed_data = platform_impl.fs.readFile(allocator, packed_refs_path) catch return;
     defer allocator.free(packed_data);
-    var new_packed = std.array_list.Managed(u8).init(allocator);
+    var new_packed = std.ArrayList(u8).init(allocator);
     defer new_packed.deinit();
     var lines_iter = std.mem.splitScalar(u8, packed_data, '\n');
     var skip_peel = false;
@@ -14685,7 +14685,7 @@ fn cmdSymbolicRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     var quiet = false;
     var short = false;
     var delete = false;
-    var positional = std.array_list.Managed([]const u8).init(allocator);
+    var positional = std.ArrayList([]const u8).init(allocator);
     defer positional.deinit();
 
     while (args.next()) |arg| {
@@ -15413,8 +15413,8 @@ fn resolveTreeish(git_path: []const u8, treeish: []const u8, platform_impl: *con
 }
 
 /// Parse tree object data and return entries as a list
-fn parseTreeEntries(tree_data: []const u8, allocator: std.mem.Allocator) !std.array_list.Managed(LsTreeEntry) {
-    var entries = std.array_list.Managed(LsTreeEntry).init(allocator);
+fn parseTreeEntries(tree_data: []const u8, allocator: std.mem.Allocator) !std.ArrayList(LsTreeEntry) {
+    var entries = std.ArrayList(LsTreeEntry).init(allocator);
     var pos: usize = 0;
 
     while (pos < tree_data.len) {
@@ -15431,7 +15431,7 @@ fn parseTreeEntries(tree_data: []const u8, allocator: std.mem.Allocator) !std.ar
         pos += 20;
 
         var hash_hex: [40]u8 = undefined;
-        _ = std.fmt.bufPrint(&hash_hex, "{x}", .{hash_bytes}) catch break;
+        _ = std.fmt.bufPrint(&hash_hex, "{s}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch break;
 
         const is_tree = std.mem.eql(u8, mode, "40000");
         const is_commit = std.mem.eql(u8, mode, "160000");
@@ -15478,7 +15478,7 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     var has_format = false;
     var format_str: ?[]const u8 = null;
     var treeish: ?[]const u8 = null;
-    var pathspecs = std.array_list.Managed([]const u8).init(allocator);
+    var pathspecs = std.ArrayList([]const u8).init(allocator);
     defer pathspecs.deinit();
 
     var i = command_index + 1;
@@ -15597,7 +15597,7 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     defer if (prefix_allocated) allocator.free(@constCast(prefix_str));
 
     // Adjust pathspecs with prefix (prepend prefix to relative pathspecs)
-    var adjusted_pathspecs = std.array_list.Managed([]const u8).init(allocator);
+    var adjusted_pathspecs = std.ArrayList([]const u8).init(allocator);
     defer {
         for (adjusted_pathspecs.items) |ps| allocator.free(@constCast(ps));
         adjusted_pathspecs.deinit();
@@ -15641,7 +15641,7 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     }
 
     // Use empty pathspecs when path resolved to root (show everything)
-    var empty_pathspecs = std.array_list.Managed([]const u8).init(allocator);
+    var empty_pathspecs = std.ArrayList([]const u8).init(allocator);
     defer empty_pathspecs.deinit();
     const effective_pathspecs = if (no_path_restriction)
         &empty_pathspecs
@@ -15661,7 +15661,7 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     defer allocator.free(tree_hash);
 
     // Collect all output entries
-    var output_entries = std.array_list.Managed(OutputEntry) .init(allocator);
+    var output_entries = std.ArrayList(OutputEntry) .init(allocator);
     defer {
         for (output_entries.items) |*entry| entry.deinit(allocator);
         output_entries.deinit();
@@ -15776,9 +15776,9 @@ fn walkTree(
     recursive: bool,
     show_trees: bool,
     only_trees: bool,
-    pathspecs: *std.array_list.Managed([]const u8),
+    pathspecs: *std.ArrayList([]const u8),
     platform_impl: *const platform_mod.Platform,
-    output: *std.array_list.Managed(OutputEntry),
+    output: *std.ArrayList(OutputEntry),
 ) !void {
     // Load the tree object
     const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch {
@@ -15906,9 +15906,9 @@ fn walkTreeOneLevel(
     git_path: []const u8,
     tree_hash: []const u8,
     prefix: []const u8,
-    pathspecs: *std.array_list.Managed([]const u8),
+    pathspecs: *std.ArrayList([]const u8),
     platform_impl: *const platform_mod.Platform,
-    output: *std.array_list.Managed(OutputEntry),
+    output: *std.ArrayList(OutputEntry),
     show_trees_flag: bool,
 ) !void {
     _ = show_trees_flag;
@@ -15991,7 +15991,7 @@ fn cQuotePath(allocator: std.mem.Allocator, path: []const u8, quote_high_bytes: 
     }
     if (!needs_quoting) return try allocator.dupe(u8, path);
 
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     try result.append('"');
     for (path) |c| {
         switch (c) {
@@ -16023,7 +16023,7 @@ fn formatLsTreeEntry(
     git_path: []const u8,
     platform_impl: *const platform_mod.Platform,
 ) ![]u8 {
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     var i: usize = 0;
     while (i < fmt.len) {
         if (fmt[i] == '%' and i + 1 < fmt.len) {
@@ -16098,7 +16098,7 @@ fn formatLsTreeEntry(
 /// compute the display path relative to prefix. E.g., prefix="aa", full_path="a[a]/three" → "../a[a]/three"
 fn makeRelativePath(allocator: std.mem.Allocator, prefix: []const u8, full_path: []const u8) ![]const u8 {
     // Split prefix into components
-    var prefix_parts = std.array_list.Managed([]const u8).init(allocator);
+    var prefix_parts = std.ArrayList([]const u8).init(allocator);
     defer prefix_parts.deinit();
     var piter = std.mem.splitScalar(u8, prefix, '/');
     while (piter.next()) |part| {
@@ -16106,7 +16106,7 @@ fn makeRelativePath(allocator: std.mem.Allocator, prefix: []const u8, full_path:
     }
 
     // Split full_path into components
-    var path_parts = std.array_list.Managed([]const u8).init(allocator);
+    var path_parts = std.ArrayList([]const u8).init(allocator);
     defer path_parts.deinit();
     var fiter = std.mem.splitScalar(u8, full_path, '/');
     while (fiter.next()) |part| {
@@ -16123,7 +16123,7 @@ fn makeRelativePath(allocator: std.mem.Allocator, prefix: []const u8, full_path:
     // Number of "../" needed
     const ups = prefix_parts.items.len - common;
 
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
     for (0..ups) |_| {
         try result.appendSlice("../");
@@ -16137,7 +16137,7 @@ fn makeRelativePath(allocator: std.mem.Allocator, prefix: []const u8, full_path:
 }
 
 fn normalizePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    var components = std.array_list.Managed([]const u8).init(allocator);
+    var components = std.ArrayList([]const u8).init(allocator);
     defer components.deinit();
 
     // Handle trailing slash
@@ -16159,7 +16159,7 @@ fn normalizePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     if (components.items.len == 0) return try allocator.dupe(u8, "");
 
     // Join components
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     for (components.items, 0..) |comp, idx| {
         if (idx > 0) try result.append('/');
         try result.appendSlice(comp);
@@ -16395,7 +16395,7 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             has_diffs = true;
             if (df_suppress) continue;
             var hash_buf: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&hash_buf, "{x}", .{&entry.sha1}) catch unreachable;
+            _ = std.fmt.bufPrint(&hash_buf, "{s}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch unreachable;
             if (name_only) {
                 const line = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path});
                 defer allocator.free(line);
@@ -16507,7 +16507,7 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             has_diffs = true;
             if (df_suppress) continue;
             var hash_buf: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&hash_buf, "{x}", .{&entry.sha1}) catch unreachable;
+            _ = std.fmt.bufPrint(&hash_buf, "{s}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch unreachable;
             if (name_only) {
                 const line = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path});
                 defer allocator.free(line);
@@ -16843,7 +16843,7 @@ fn nativeCmdShowRef(allocator: std.mem.Allocator, args: [][]const u8, command_in
     var hash_only = false;
     var hash_len: usize = 40;
     var dereference = false;
-    var patterns = std.array_list.Managed([]const u8).init(allocator);
+    var patterns = std.ArrayList([]const u8).init(allocator);
     defer patterns.deinit();
 
     var i = command_index + 1;
@@ -16928,7 +16928,7 @@ fn nativeCmdShowRef(allocator: std.mem.Allocator, args: [][]const u8, command_in
     }
 
     // List mode: enumerate all refs
-    var ref_list = std.array_list.Managed(RefEntry).init(allocator);
+    var ref_list = std.ArrayList(RefEntry).init(allocator);
     defer {
         for (ref_list.items) |entry| {
             allocator.free(entry.name);
@@ -17054,7 +17054,7 @@ const RefEntry = struct {
     broken: bool = false,
 };
 
-fn collectLooseRefs(allocator: std.mem.Allocator, git_dir: []const u8, prefix: []const u8, ref_list: *std.array_list.Managed(RefEntry), platform_impl: anytype) !void {
+fn collectLooseRefs(allocator: std.mem.Allocator, git_dir: []const u8, prefix: []const u8, ref_list: *std.ArrayList(RefEntry), platform_impl: anytype) !void {
     const dir_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, prefix }) catch return;
     defer allocator.free(dir_path);
 
@@ -17143,7 +17143,7 @@ fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, command
     var sort_reverse = false;
     var count_limit: ?usize = null;
     var quoting_style: enum { none, shell, perl, python, tcl } = .none;
-    var patterns = std.array_list.Managed([]const u8).init(allocator);
+    var patterns = std.ArrayList([]const u8).init(allocator);
     defer patterns.deinit();
 
     var i = command_index + 1;
@@ -17203,7 +17203,7 @@ fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, command
     };
 
     // Collect all refs
-    var ref_list = std.array_list.Managed(RefEntry).init(allocator);
+    var ref_list = std.ArrayList(RefEntry).init(allocator);
     defer {
         for (ref_list.items) |entry| {
             allocator.free(entry.name);
@@ -17325,7 +17325,7 @@ fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, command
 }
 
 fn formatRefOutput(allocator: std.mem.Allocator, format: []const u8, refname: []const u8, objectname: []const u8, objecttype: []const u8, data: []const u8, quoting: anytype) ![]u8 {
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
 
     var idx: usize = 0;
@@ -17955,7 +17955,7 @@ fn parseMailmapLineEmail(line: []const u8, orig_name: []const u8, orig_email: []
 }
 
 fn sanitizeSubject(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     for (text) |c| {
         if (std.ascii.isAlphanumeric(c)) {
             try result.append(c);
@@ -18009,7 +18009,7 @@ fn globMatch(str: []const u8, pattern: []const u8) bool {
 /// Join multiple lines into a single line with spaces
 fn joinLines(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
     if (std.mem.indexOfScalar(u8, text, '\n') == null) return text;
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     var iter = std.mem.splitScalar(u8, text, '\n');
     var first = true;
     while (iter.next()) |line| {
@@ -18038,7 +18038,7 @@ fn extractObjectMessage(data: []const u8) []const u8 {
 /// Strip \r characters from string
 fn stripCR(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
     if (std.mem.indexOfScalar(u8, input, '\r') == null) return input;
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     for (input) |c| {
         if (c != '\r') try result.append(c);
     }
@@ -18103,7 +18103,7 @@ fn extractBody(message: []const u8) []const u8 {
 fn nativeCmdVerifyPack(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
     var verbose = false;
     var stat_only = false;
-    var pack_files = std.array_list.Managed([]const u8).init(allocator);
+    var pack_files = std.ArrayList([]const u8).init(allocator);
     defer pack_files.deinit();
 
     var i = command_index + 1;
@@ -18373,7 +18373,7 @@ fn nativeCmdUpdateServerInfo(allocator: std.mem.Allocator, args: [][]const u8, c
     const info_refs_path = std.fmt.allocPrint(allocator, "{s}/info/refs", .{git_dir}) catch unreachable;
     defer allocator.free(info_refs_path);
     {
-        var ref_list = std.array_list.Managed(RefEntry).init(allocator);
+        var ref_list = std.ArrayList(RefEntry).init(allocator);
         defer {
             for (ref_list.items) |entry| {
                 allocator.free(entry.name);
@@ -18412,7 +18412,7 @@ fn nativeCmdUpdateServerInfo(allocator: std.mem.Allocator, args: [][]const u8, c
         }.lessThan);
 
         // Write info/refs (only if content changed, unless force)
-        var content = std.array_list.Managed(u8).init(allocator);
+        var content = std.ArrayList(u8).init(allocator);
         defer content.deinit();
         for (ref_list.items) |entry| {
             const line = std.fmt.allocPrint(allocator, "{s}\t{s}\n", .{ entry.hash, entry.name }) catch continue;
@@ -18441,7 +18441,7 @@ fn nativeCmdUpdateServerInfo(allocator: std.mem.Allocator, args: [][]const u8, c
     const packs_file_path = std.fmt.allocPrint(allocator, "{s}/objects/info/packs", .{git_dir}) catch unreachable;
     defer allocator.free(packs_file_path);
     {
-        var content = std.array_list.Managed(u8).init(allocator);
+        var content = std.ArrayList(u8).init(allocator);
         defer content.deinit();
 
         const pack_dir = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir}) catch unreachable;
@@ -18450,7 +18450,7 @@ fn nativeCmdUpdateServerInfo(allocator: std.mem.Allocator, args: [][]const u8, c
         if (std.fs.cwd().openDir(pack_dir, .{ .iterate = true })) |pd| {
             var pack_d = pd;
             defer pack_d.close();
-            var pack_names = std.array_list.Managed([]const u8).init(allocator);
+            var pack_names = std.ArrayList([]const u8).init(allocator);
             defer {
                 for (pack_names.items) |n| allocator.free(n);
                 pack_names.deinit();
@@ -18527,7 +18527,7 @@ fn nativeCmdMktree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     };
     defer allocator.free(stdin_data);
 
-    var entries = std.array_list.Managed(objects.TreeEntry).init(allocator);
+    var entries = std.ArrayList(objects.TreeEntry).init(allocator);
     defer entries.deinit();
 
     var lines = std.mem.splitScalar(u8, stdin_data, '\n');
@@ -18620,7 +18620,7 @@ fn nativeCmdNameRev(allocator: std.mem.Allocator, args: [][]const u8, command_in
     var name_only = false;
     var stdin_mode = false;
     var refs_pattern: ?[]const u8 = null;
-    var targets = std.array_list.Managed([]const u8).init(allocator);
+    var targets = std.ArrayList([]const u8).init(allocator);
     defer targets.deinit();
 
     var i = command_index + 1;
@@ -18647,7 +18647,7 @@ fn nativeCmdNameRev(allocator: std.mem.Allocator, args: [][]const u8, command_in
     };
 
     // Collect all refs for naming
-    var ref_list = std.array_list.Managed(RefEntry).init(allocator);
+    var ref_list = std.ArrayList(RefEntry).init(allocator);
     defer {
         for (ref_list.items) |entry| {
             allocator.free(entry.name);
@@ -19159,7 +19159,7 @@ fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platform_im
 
     // Simple repack: collect all loose objects and write them into a pack file
     // Also consolidate existing packs
-    var all_objects = std.array_list.Managed([20]u8).init(allocator);
+    var all_objects = std.ArrayList([20]u8).init(allocator);
     defer all_objects.deinit();
 
     const objects_dir_path = std.fmt.allocPrint(allocator, "{s}/objects", .{git_dir}) catch return;
@@ -19191,7 +19191,7 @@ fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platform_im
     }
 
     // Also collect objects from existing packs
-    var object_hashes = std.array_list.Managed([]const u8).init(allocator);
+    var object_hashes = std.ArrayList([]const u8).init(allocator);
     defer {
         for (object_hashes.items) |h| allocator.free(h);
         object_hashes.deinit();
@@ -19211,7 +19211,7 @@ fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platform_im
     defer allocator.free(pack_dir);
     std.fs.cwd().makePath(pack_dir) catch {};
 
-    var existing_packs = std.array_list.Managed([]const u8).init(allocator);
+    var existing_packs = std.ArrayList([]const u8).init(allocator);
     defer {
         for (existing_packs.items) |p| allocator.free(p);
         existing_packs.deinit();
@@ -19263,10 +19263,10 @@ fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platform_im
     if (object_hashes.items.len == 0) return;
 
     // Build pack data, tracking offsets and SHA-1s for idx generation
-    var pack_data = std.array_list.Managed(u8).init(allocator);
+    var pack_data = std.ArrayList(u8).init(allocator);
     defer pack_data.deinit();
 
-    var pack_entries = std.array_list.Managed(PackIdxEntry).init(allocator);
+    var pack_entries = std.ArrayList(PackIdxEntry).init(allocator);
     defer pack_entries.deinit();
 
     // Pack header
@@ -19382,13 +19382,13 @@ fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platform_im
         const packs_file_path = std.fmt.allocPrint(allocator, "{s}/objects/info/packs", .{git_dir}) catch return;
         defer allocator.free(packs_file_path);
 
-        var content = std.array_list.Managed(u8).init(allocator);
+        var content = std.ArrayList(u8).init(allocator);
         defer content.deinit();
 
         if (std.fs.cwd().openDir(pack_dir, .{ .iterate = true })) |pd| {
             var pack_d2 = pd;
             defer pack_d2.close();
-            var pack_names2 = std.array_list.Managed([]const u8).init(allocator);
+            var pack_names2 = std.ArrayList([]const u8).init(allocator);
             defer {
                 for (pack_names2.items) |n| allocator.free(n);
                 pack_names2.deinit();
@@ -19417,7 +19417,7 @@ fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platform_im
 
 fn packRefs(allocator: std.mem.Allocator, git_dir: []const u8) !void {
     // Pack loose refs into packed-refs file
-    var ref_list = std.array_list.Managed(RefEntry).init(allocator);
+    var ref_list = std.ArrayList(RefEntry).init(allocator);
     defer {
         for (ref_list.items) |entry| {
             allocator.free(entry.name);
@@ -19692,7 +19692,7 @@ fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, comman
     // Collect object hashes to pack (deduplicated)
     var object_set = std.StringHashMap(void).init(allocator);
     defer object_set.deinit();
-    var object_hashes = std.array_list.Managed([]const u8).init(allocator);
+    var object_hashes = std.ArrayList([]const u8).init(allocator);
     defer {
         for (object_hashes.items) |h| allocator.free(h);
         object_hashes.deinit();
@@ -19907,7 +19907,7 @@ fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, comman
     }
 
     // Build the pack
-    var pack_data = std.array_list.Managed(u8).init(allocator);
+    var pack_data = std.ArrayList(u8).init(allocator);
     defer pack_data.deinit();
 
     try pack_data.appendSlice("PACK");
@@ -19986,10 +19986,10 @@ fn packObjectsWalkReachable(
     git_dir: []const u8,
     start_hash: []const u8,
     object_set: *std.StringHashMap(void),
-    object_hashes: *std.array_list.Managed([]const u8),
+    object_hashes: *std.ArrayList([]const u8),
     platform_impl: *const platform_mod.Platform,
 ) !void {
-    var worklist = std.array_list.Managed([]const u8).init(allocator);
+    var worklist = std.ArrayList([]const u8).init(allocator);
     defer {
         for (worklist.items) |item| allocator.free(item);
         worklist.deinit();
@@ -19997,7 +19997,7 @@ fn packObjectsWalkReachable(
     try worklist.append(try allocator.dupe(u8, start_hash));
 
     while (worklist.items.len > 0) {
-        const hash = worklist.pop() orelse break;
+        const hash = worklist.popOrNull() orelse break;
         defer allocator.free(hash);
 
         if (object_set.contains(hash)) continue;
@@ -20056,7 +20056,7 @@ fn packObjectsAddAllObjects(
     allocator: std.mem.Allocator,
     git_dir: []const u8,
     object_set: *std.StringHashMap(void),
-    object_hashes: *std.array_list.Managed([]const u8),
+    object_hashes: *std.ArrayList([]const u8),
 ) !void {
     const objects_dir_path = try std.fmt.allocPrint(allocator, "{s}/objects", .{git_dir});
     defer allocator.free(objects_dir_path);
@@ -20272,7 +20272,7 @@ fn generatePackIdxFromEntries(allocator: std.mem.Allocator, entries: []const Pac
         }
     }.lessThan);
 
-    var idx = std.array_list.Managed(u8).init(allocator);
+    var idx = std.ArrayList(u8).init(allocator);
     defer idx.deinit();
 
     // Magic + version
@@ -20387,11 +20387,11 @@ fn generatePackIdx(allocator: std.mem.Allocator, pack_data: []const u8, output_d
     const num_objects = std.mem.readInt(u32, pack_data[8..12], .big);
 
     // Collect object hashes by parsing pack entries
-    var object_shas = std.array_list.Managed([20]u8).init(allocator);
+    var object_shas = std.ArrayList([20]u8).init(allocator);
     defer object_shas.deinit();
-    var offsets = std.array_list.Managed(u32).init(allocator);
+    var offsets = std.ArrayList(u32).init(allocator);
     defer offsets.deinit();
-    var crcs = std.array_list.Managed(u32).init(allocator);
+    var crcs = std.ArrayList(u32).init(allocator);
     defer crcs.deinit();
 
     var pos: usize = 12;
@@ -20463,7 +20463,7 @@ fn generatePackIdx(allocator: std.mem.Allocator, pack_data: []const u8, output_d
     }
 
     // Write v2 idx file
-    var idx = std.array_list.Managed(u8).init(allocator);
+    var idx = std.ArrayList(u8).init(allocator);
     defer idx.deinit();
 
     // Magic + version
@@ -20547,11 +20547,11 @@ fn generatePackIdxToFile(allocator: std.mem.Allocator, pack_data: []const u8, ou
     const num_objects = std.mem.readInt(u32, pack_data[8..12], .big);
 
     // Collect object hashes by parsing pack entries
-    var object_shas = std.array_list.Managed([20]u8).init(allocator);
+    var object_shas = std.ArrayList([20]u8).init(allocator);
     defer object_shas.deinit();
-    var offsets_list = std.array_list.Managed(u32).init(allocator);
+    var offsets_list = std.ArrayList(u32).init(allocator);
     defer offsets_list.deinit();
-    var crcs_list = std.array_list.Managed(u32).init(allocator);
+    var crcs_list = std.ArrayList(u32).init(allocator);
     defer crcs_list.deinit();
 
     var pos: usize = 12;
@@ -20622,7 +20622,7 @@ fn generatePackIdxToFile(allocator: std.mem.Allocator, pack_data: []const u8, ou
     }
 
     // Write v2 idx file
-    var idx = std.array_list.Managed(u8).init(allocator);
+    var idx = std.ArrayList(u8).init(allocator);
     defer idx.deinit();
 
     // Magic + version
@@ -20772,7 +20772,7 @@ fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command_ind
         defer allocator.free(content);
 
         // Parse and display reflog entries in reverse order
-        var entries = std.array_list.Managed([]const u8).init(allocator);
+        var entries = std.ArrayList([]const u8).init(allocator);
         defer entries.deinit();
         var lines = std.mem.splitScalar(u8, content, '\n');
         while (lines.next()) |line| {
@@ -20946,7 +20946,7 @@ fn nativeCmdMergeBase(allocator: std.mem.Allocator, args: [][]const u8, command_
     var independent = false;
     var fork_point = false;
     var octopus = false;
-    var commits = std.array_list.Managed([]const u8).init(allocator);
+    var commits = std.ArrayList([]const u8).init(allocator);
     defer commits.deinit();
 
     var i = command_index + 1;
@@ -20977,7 +20977,7 @@ fn nativeCmdMergeBase(allocator: std.mem.Allocator, args: [][]const u8, command_
     };
 
     // Resolve all commit arguments to hashes
-    var resolved = std.array_list.Managed([]const u8).init(allocator);
+    var resolved = std.ArrayList([]const u8).init(allocator);
     defer {
         for (resolved.items) |h| allocator.free(h);
         resolved.deinit();
@@ -21028,7 +21028,7 @@ fn nativeCmdMergeBase(allocator: std.mem.Allocator, args: [][]const u8, command_
     if (independent) {
         // Find commits that are not ancestors of any other commit in the list
         // For each commit, check if it's an ancestor of any other
-        var indep = std.array_list.Managed([]const u8).init(allocator);
+        var indep = std.ArrayList([]const u8).init(allocator);
         defer indep.deinit();
 
         for (resolved.items, 0..) |commit_hash, ci| {
@@ -21174,7 +21174,7 @@ fn findAllMergeBases(git_dir: []const u8, hash1: []const u8, hash2: []const u8, 
     try collectAncestors(git_dir, hash2, &ancestors2, allocator, platform_impl);
 
     // Common ancestors are the intersection
-    var common = std.array_list.Managed([]const u8).init(allocator);
+    var common = std.ArrayList([]const u8).init(allocator);
     defer common.deinit();
 
     var it = ancestors1.iterator();
@@ -21186,7 +21186,7 @@ fn findAllMergeBases(git_dir: []const u8, hash1: []const u8, hash2: []const u8, 
 
     // Filter out non-maximal: remove any common ancestor that is itself
     // an ancestor of another common ancestor
-    var result = std.array_list.Managed([]const u8).init(allocator);
+    var result = std.ArrayList([]const u8).init(allocator);
     defer result.deinit();
 
     for (common.items) |candidate| {
@@ -21221,7 +21221,7 @@ fn nativeCmdShowBranch(allocator: std.mem.Allocator, args: [][]const u8, command
     // Minimal show-branch: supports --merge-base and --independent modes
     var merge_base_mode = false;
     var independent_mode = false;
-    var branch_refs = std.array_list.Managed([]const u8).init(allocator);
+    var branch_refs = std.ArrayList([]const u8).init(allocator);
     defer branch_refs.deinit();
 
     var i = command_index + 1;
@@ -21238,7 +21238,7 @@ fn nativeCmdShowBranch(allocator: std.mem.Allocator, args: [][]const u8, command
 
     if (merge_base_mode or independent_mode) {
         // Delegate to merge-base with appropriate flags
-        var new_args = std.array_list.Managed([]const u8).init(allocator);
+        var new_args = std.ArrayList([]const u8).init(allocator);
         defer new_args.deinit();
         try new_args.append("git");
         try new_args.append("merge-base");
@@ -21452,7 +21452,7 @@ fn nativeCmdUnpackObjects(allocator: std.mem.Allocator, args: [][]const u8, comm
 
             // Compress and write object
             const zlib_compat2 = @import("git/zlib_compat.zig");
-            var combined = std.array_list.Managed(u8).init(allocator);
+            var combined = std.ArrayList(u8).init(allocator);
             defer combined.deinit();
             try combined.appendSlice(header);
             try combined.appendSlice(final_content);
@@ -21503,7 +21503,7 @@ fn applyDelta(allocator: std.mem.Allocator, base: []const u8, delta: []const u8)
 
     if (base_size != base.len) return error.BaseSizeMismatch;
 
-    var result = try std.array_list.Managed(u8).initCapacity(allocator, @intCast(result_size));
+    var result = try std.ArrayList(u8).initCapacity(allocator, @intCast(result_size));
     errdefer result.deinit();
 
     while (pos < delta.len) {
@@ -21748,9 +21748,9 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
     var name_status = false;
     var no_commit_id = false;
     var quiet = false;
-    var tree_refs = std.array_list.Managed([]const u8).init(allocator);
+    var tree_refs = std.ArrayList([]const u8).init(allocator);
     defer tree_refs.deinit();
-    var pathspecs = std.array_list.Managed([]const u8).init(allocator);
+    var pathspecs = std.ArrayList([]const u8).init(allocator);
     defer pathspecs.deinit();
     var seen_dashdash = false;
     
@@ -21986,7 +21986,7 @@ fn diffTwoTreesPatch(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2
     for (entries1.items) |e| all_names.put(e.name, {}) catch {};
     for (entries2.items) |e| all_names.put(e.name, {}) catch {};
     
-    var name_list = std.array_list.Managed([]const u8).init(allocator);
+    var name_list = std.ArrayList([]const u8).init(allocator);
     defer name_list.deinit();
     var niter = all_names.keyIterator();
     while (niter.next()) |key| try name_list.append(key.*);
@@ -22102,7 +22102,7 @@ fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8, tr
     for (entries1.items) |e| all_names.put(e.name, {}) catch {};
     for (entries2.items) |e| all_names.put(e.name, {}) catch {};
     
-    var name_list = std.array_list.Managed([]const u8).init(allocator);
+    var name_list = std.ArrayList([]const u8).init(allocator);
     defer name_list.deinit();
     var niter = all_names.keyIterator();
     while (niter.next()) |key| try name_list.append(key.*);
@@ -22719,7 +22719,7 @@ fn nativeCmdMv(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     var dry_run = false;
     var skip_errors = false;
     var verbose = false;
-    var sources = std.array_list.Managed([]const u8).init(allocator);
+    var sources = std.ArrayList([]const u8).init(allocator);
     defer sources.deinit();
     
     while (args.next()) |arg| {
@@ -22809,7 +22809,7 @@ fn nativeCmdMv(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             };
             
             // Update index: remove old entry, add new entry
-            var new_entries = std.array_list.Managed(index_mod.IndexEntry).init(allocator);
+            var new_entries = std.ArrayList(index_mod.IndexEntry).init(allocator);
             defer new_entries.deinit();
             
             for (index.entries.items) |entry| {
@@ -22900,7 +22900,7 @@ fn nativeCmdApply(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     var allow_empty = false;
     var verbose = false;
     var p_value: u32 = 1;
-    var patch_files = std.array_list.Managed([]const u8).init(allocator);
+    var patch_files = std.ArrayList([]const u8).init(allocator);
     defer patch_files.deinit();
 
     while (args.next()) |arg| {
@@ -22971,7 +22971,7 @@ fn nativeCmdApply(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     _ = &allow_empty;
 
     // Read patch content
-    var all_patch_data = std.array_list.Managed(u8).init(allocator);
+    var all_patch_data = std.ArrayList(u8).init(allocator);
     defer all_patch_data.deinit();
 
     if (patch_files.items.len == 0) {
@@ -23117,7 +23117,7 @@ const PatchHunk = struct {
     old_count: u32,
     new_start: u32,
     new_count: u32,
-    lines: std.array_list.Managed(PatchLine),
+    lines: std.ArrayList(PatchLine),
 
     fn deinit(self: *PatchHunk, alloc: std.mem.Allocator) void {
         for (self.lines.items) |*l| l.deinit(alloc);
@@ -23150,7 +23150,7 @@ const Patch = struct {
     is_rewrite: bool = false,
     similarity: ?u32 = null, // similarity index percentage
     dissimilarity: ?u32 = null, // dissimilarity index percentage
-    hunks: std.array_list.Managed(PatchHunk),
+    hunks: std.ArrayList(PatchHunk),
     added: u32,
     removed: u32,
 
@@ -23162,10 +23162,10 @@ const Patch = struct {
     }
 };
 
-fn parsePatchSet(allocator: std.mem.Allocator, data: []const u8, p_value: u32, corrupt_line: *usize) !std.array_list.Managed(Patch) {
-    var patches = std.array_list.Managed(Patch).init(allocator);
+fn parsePatchSet(allocator: std.mem.Allocator, data: []const u8, p_value: u32, corrupt_line: *usize) !std.ArrayList(Patch) {
+    var patches = std.ArrayList(Patch).init(allocator);
     var lines_iter = std.mem.splitScalar(u8, data, '\n');
-    var lines = std.array_list.Managed([]const u8).init(allocator);
+    var lines = std.ArrayList([]const u8).init(allocator);
     defer lines.deinit();
     while (lines_iter.next()) |line| try lines.append(line);
 
@@ -23222,7 +23222,7 @@ fn parseSinglePatch(allocator: std.mem.Allocator, lines: []const []const u8, pos
         .new_mode = null,
         .old_mode = null,
         .is_binary = false,
-        .hunks = std.array_list.Managed(PatchHunk).init(allocator),
+        .hunks = std.ArrayList(PatchHunk).init(allocator),
         .added = 0,
         .removed = 0,
     };
@@ -23359,7 +23359,7 @@ fn parseTraditionalPatch(allocator: std.mem.Allocator, lines: []const []const u8
         .new_mode = null,
         .old_mode = null,
         .is_binary = false,
-        .hunks = std.array_list.Managed(PatchHunk).init(allocator),
+        .hunks = std.ArrayList(PatchHunk).init(allocator),
         .added = 0,
         .removed = 0,
     };
@@ -23443,7 +23443,7 @@ fn parseHunk(allocator: std.mem.Allocator, lines: []const []const u8, pos: *usiz
         .old_count = old_count,
         .new_start = new_start,
         .new_count = new_count,
-        .lines = std.array_list.Managed(PatchLine).init(allocator),
+        .lines = std.ArrayList(PatchLine).init(allocator),
     };
 
     while (pos.* < lines.len) {
@@ -23515,7 +23515,7 @@ fn applyOnePatch(allocator: std.mem.Allocator, patch: *const Patch, reverse: boo
     // Handle new file creation
     if ((patch.is_new_file and !reverse) or (patch.is_delete and reverse)) {
         if (check_only) return;
-        var content = std.array_list.Managed(u8).init(allocator);
+        var content = std.ArrayList(u8).init(allocator);
         defer content.deinit();
         for (patch.hunks.items) |hunk| {
             for (hunk.lines.items) |line| {
@@ -23548,7 +23548,7 @@ fn applyOnePatch(allocator: std.mem.Allocator, patch: *const Patch, reverse: boo
     const original = platform_impl.fs.readFile(allocator, read_path) catch {
         // File doesn't exist - if all hunks are additions from line 0/1, create it
         if (patch.hunks.items.len > 0) {
-            var content = std.array_list.Managed(u8).init(allocator);
+            var content = std.ArrayList(u8).init(allocator);
             defer content.deinit();
             for (patch.hunks.items) |hunk| {
                 for (hunk.lines.items) |line| {
@@ -23572,7 +23572,7 @@ fn applyOnePatch(allocator: std.mem.Allocator, patch: *const Patch, reverse: boo
     defer allocator.free(original);
 
     // Split into lines
-    var orig_lines = std.array_list.Managed([]const u8).init(allocator);
+    var orig_lines = std.ArrayList([]const u8).init(allocator);
     defer orig_lines.deinit();
     var line_iter = std.mem.splitScalar(u8, original, '\n');
     while (line_iter.next()) |line| try orig_lines.append(line);
@@ -23582,7 +23582,7 @@ fn applyOnePatch(allocator: std.mem.Allocator, patch: *const Patch, reverse: boo
     }
 
     // Apply hunks using context matching
-    var result_lines = std.array_list.Managed([]const u8).init(allocator);
+    var result_lines = std.ArrayList([]const u8).init(allocator);
     defer result_lines.deinit();
     var last_line_no_newline = false;
 
@@ -23590,7 +23590,7 @@ fn applyOnePatch(allocator: std.mem.Allocator, patch: *const Patch, reverse: boo
 
     for (patch.hunks.items) |hunk| {
         // Build the context/remove lines for matching
-        var match_lines = std.array_list.Managed([]const u8).init(allocator);
+        var match_lines = std.ArrayList([]const u8).init(allocator);
         defer match_lines.deinit();
         for (hunk.lines.items) |pline| {
             const lt = if (reverse) reverseLineType(pline.line_type) else pline.line_type;
@@ -23692,7 +23692,7 @@ fn applyOnePatch(allocator: std.mem.Allocator, patch: *const Patch, reverse: boo
     }
 
     // Write result
-    var output = std.array_list.Managed(u8).init(allocator);
+    var output = std.ArrayList(u8).init(allocator);
     defer output.deinit();
     for (result_lines.items, 0..) |line, idx| {
         try output.appendSlice(line);
@@ -23762,7 +23762,7 @@ fn reverseLineType(lt: PatchLineType) PatchLineType {
 fn outputAllPatchStats(allocator: std.mem.Allocator, patches: []Patch, platform_impl: anytype) !void {
     // Collect stats for all patches
     const StatInfo = struct { path: []const u8, added: u32, removed: u32, is_binary: bool, is_rename: bool };
-    var stats = std.array_list.Managed(StatInfo).init(allocator);
+    var stats = std.ArrayList(StatInfo).init(allocator);
     defer stats.deinit();
 
     var total_added: u32 = 0;
@@ -23886,7 +23886,7 @@ fn outputAllPatchStats(allocator: std.mem.Allocator, patches: []Patch, platform_
 
     // Summary line
     const nfiles = stats.items.len;
-    var summary = std.array_list.Managed(u8).init(allocator);
+    var summary = std.ArrayList(u8).init(allocator);
     defer summary.deinit();
     const nfiles_str = try std.fmt.allocPrint(allocator, " {d} file{s} changed", .{ nfiles, if (nfiles != 1) "s" else "" });
     defer allocator.free(nfiles_str);
@@ -24104,7 +24104,7 @@ fn nativeCmdColumn(_: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     const data = readStdin(allocator, 10 * 1024 * 1024) catch return;
     defer allocator.free(data);
     
-    var lines = std.array_list.Managed([]const u8).init(allocator);
+    var lines = std.ArrayList([]const u8).init(allocator);
     defer lines.deinit();
     var max_len: u32 = 0;
     
@@ -24256,7 +24256,7 @@ fn nativeCmdColumn(_: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
 fn nativeCmdCheckIgnore(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     var verbose = false;
     var quiet = false;
-    var paths = std.array_list.Managed([]const u8).init(allocator);
+    var paths = std.ArrayList([]const u8).init(allocator);
     defer paths.deinit();
     
     while (args.next()) |arg| {
@@ -24378,7 +24378,7 @@ fn buildTreeMap(tree_hash: []const u8, prefix: []const u8, git_path: []const u8,
         
         if (std.mem.eql(u8, mode_str, "40000") or std.mem.eql(u8, mode_str, "040000")) {
             // Directory - recurse
-            const sub_hash = try std.fmt.allocPrint(allocator, "{x}", .{hash_bytes[0..20]});
+            const sub_hash = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(hash_bytes[0..20])});
             defer allocator.free(sub_hash);
             buildTreeMap(sub_hash, full_path, git_path, platform_impl, allocator, map) catch {};
             allocator.free(full_path);
@@ -24546,7 +24546,7 @@ fn cmdRestore(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var source: ?[]const u8 = null;
     var staged = false;
     var worktree = true;
-    var paths = std.array_list.Managed([]const u8).init(allocator);
+    var paths = std.ArrayList([]const u8).init(allocator);
     defer paths.deinit();
     var seen_separator = false;
     
@@ -24712,7 +24712,7 @@ fn cmdStripspace(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     }
     
     // Strip trailing whitespace, collapse blank lines, strip comments
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
     var blank_count: u32 = 0;
     var lines = std.mem.splitScalar(u8, stdin_data, '\n');
@@ -24752,7 +24752,7 @@ fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
     var no_create = false;
     var stdin_mode = false;
     var stdin_z = false;
-    var paths = std.array_list.Managed([]const u8).init(allocator);
+    var paths = std.ArrayList([]const u8).init(allocator);
     defer paths.deinit();
 
     while (args.next()) |arg| {
@@ -24890,7 +24890,7 @@ fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
 
         // Load the blob content
         var hash_buf: [40]u8 = undefined;
-        _ = std.fmt.bufPrint(&hash_buf, "{x}", .{&entry.sha1}) catch continue;
+        _ = std.fmt.bufPrint(&hash_buf, "{s}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch continue;
 
         const obj = objects.GitObject.load(&hash_buf, git_dir, platform_impl, allocator) catch {
             const msg = std.fmt.allocPrint(allocator, "error: unable to read sha1 file of {s} ({s})\n", .{ entry_path, &hash_buf }) catch continue;

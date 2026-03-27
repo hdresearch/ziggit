@@ -45,7 +45,7 @@ pub fn cloneBareSmart(allocator: std.mem.Allocator, url: []const u8, target_dir:
     errdefer allocator.free(checksum);
 
     // 5. Update refs (bare mode)
-    var ref_updates = std.array_list.Managed(pack_writer.RefUpdate).init(allocator);
+    var ref_updates = std.ArrayList(pack_writer.RefUpdate).init(allocator);
     defer ref_updates.deinit();
     for (clone_result.refs) |ref| {
         try ref_updates.append(.{
@@ -95,7 +95,7 @@ pub fn cloneSmart(allocator: std.mem.Allocator, url: []const u8, target_dir: []c
     errdefer allocator.free(checksum);
 
     // 5. Update refs (non-bare: branches go to remotes/origin/)
-    var ref_updates = std.array_list.Managed(pack_writer.RefUpdate).init(allocator);
+    var ref_updates = std.ArrayList(pack_writer.RefUpdate).init(allocator);
     defer ref_updates.deinit();
     for (clone_result.refs) |ref| {
         try ref_updates.append(.{
@@ -116,7 +116,7 @@ pub fn cloneSmart(allocator: std.mem.Allocator, url: []const u8, target_dir: []c
 /// Updates refs/remotes/origin/* and writes FETCH_HEAD.
 pub fn fetchSmart(allocator: std.mem.Allocator, url: []const u8, git_dir: []const u8) !?[]u8 {
     // 1. Build list of local refs
-    var local_refs = std.array_list.Managed(smart_http.LocalRef).init(allocator);
+    var local_refs = std.ArrayList(smart_http.LocalRef).init(allocator);
     defer local_refs.deinit();
 
     // Read refs/remotes/origin/* to get local state
@@ -165,7 +165,7 @@ pub fn fetchSmart(allocator: std.mem.Allocator, url: []const u8, git_dir: []cons
     try idx_writer.generateIdx(allocator, pp);
 
     // 5. Update remote refs
-    var ref_updates = std.array_list.Managed(pack_writer.RefUpdate).init(allocator);
+    var ref_updates = std.ArrayList(pack_writer.RefUpdate).init(allocator);
     defer ref_updates.deinit();
     for (fetch_result.refs) |ref| {
         try ref_updates.append(.{
