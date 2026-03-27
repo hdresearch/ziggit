@@ -22102,20 +22102,23 @@ fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     } else if (std.mem.eql(u8, subcmd, "delete")) {
         // Delete specific reflog entries - for now, no-op
     } else if (std.mem.eql(u8, subcmd, "exists")) {
-        // Check if a reflog exists
-        var reflog_path: []const u8 = undefined;
-        if (std.mem.eql(u8, ref_name, "HEAD")) {
-            reflog_path = std.fmt.allocPrint(allocator, "{s}/logs/HEAD", .{git_dir}) catch unreachable;
-        } else if (std.mem.startsWith(u8, ref_name, "refs/")) {
-            reflog_path = std.fmt.allocPrint(allocator, "{s}/logs/{s}", .{ git_dir, ref_name }) catch unreachable;
-        } else {
-            reflog_path = std.fmt.allocPrint(allocator, "{s}/logs/refs/heads/{s}", .{ git_dir, ref_name }) catch unreachable;
+        // Check if a reflog exists - try multiple paths
+        var found_reflog = false;
+        const p1 = std.fmt.allocPrint(allocator, "{s}/logs/{s}", .{ git_dir, ref_name }) catch unreachable;
+        defer allocator.free(p1);
+        if (std.fs.cwd().statFile(p1)) |_| { found_reflog = true; } else |_| {}
+        if (!found_reflog and std.mem.startsWith(u8, ref_name, "refs/heads/")) {
+            const branch = ref_name["refs/heads/".len..];
+            const p2 = std.fmt.allocPrint(allocator, "{s}/logs/{s}", .{ git_dir, branch }) catch unreachable;
+            defer allocator.free(p2);
+            if (std.fs.cwd().statFile(p2)) |_| { found_reflog = true; } else |_| {}
         }
-        defer allocator.free(reflog_path);
-
-        _ = std.fs.cwd().statFile(reflog_path) catch {
-            std.process.exit(1);
-        };
+        if (!found_reflog and !std.mem.startsWith(u8, ref_name, "refs/")) {
+            const p3 = std.fmt.allocPrint(allocator, "{s}/logs/refs/heads/{s}", .{ git_dir, ref_name }) catch unreachable;
+            defer allocator.free(p3);
+            if (std.fs.cwd().statFile(p3)) |_| { found_reflog = true; } else |_| {}
+        }
+        if (!found_reflog) std.process.exit(1);
     }
 }
 
