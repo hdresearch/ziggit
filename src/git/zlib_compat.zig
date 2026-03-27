@@ -156,71 +156,42 @@ pub fn compressorWriter(old_writer: anytype, options: anytype) !Compressor(@Type
     return .{ .inner_writer = old_writer };
 }
 
-/// Compress a slice of data using zlib, returning allocated compressed bytes.
-const c = @cImport({
-    @cInclude("zlib.h");
-});
-
 pub fn compressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    const c = @cImport({ @cInclude("zlib.h"); });
     const bound = c.compressBound(@intCast(input.len));
-    const output = try allocator.alloc(u8, @intCast(bound));
-    errdefer allocator.free(output);
-    var dest_len: c.uLongf = @intCast(output.len);
-    const ret = c.compress2(output.ptr, &dest_len, input.ptr, @intCast(input.len), 6);
-    if (ret != c.Z_OK) return error.CompressionFailed;
-    const result = try allocator.dupe(u8, output[0..@intCast(dest_len)]);
-    allocator.free(output);
-    return result;
+    const dest = try allocator.alloc(u8, @intCast(bound));
+    var dest_len: c.uLongf = @intCast(dest.len);
+    const ret = c.compress2(dest.ptr, &dest_len, input.ptr, @intCast(input.len), c.Z_DEFAULT_COMPRESSION);
+    if (ret != c.Z_OK) { allocator.free(dest); return error.CompressionFailed; }
+    return try allocator.realloc(dest, @intCast(dest_len));
 }
-
-/// Decompress a slice of zlib data, returning allocated decompressed bytes.
-pub fn decompressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var output = std.array_list.Managed(u8).init(allocator);
-    errdefer output.deinit();
-
-    var fbs = std.io.fixedBufferStream(input);
-    var reader_adapter_buf: [65536]u8 = undefined;
-    var reader_adapter = fbs.reader().adaptToNewApi(&reader_adapter_buf);
-
-    var window_buf: [flate.max_window_len]u8 = undefined;
-    var dec = flate.Decompress.init(&reader_adapter.new_interface, .zlib, &window_buf);
-
-    var writer_adapter_buf: [65536]u8 = undefined;
-    var writer_adapter = output.writer().adaptToNewApi(&writer_adapter_buf);
-
-    _ = dec.reader.streamRemaining(&writer_adapter.new_interface) catch return error.InvalidInput;
-    writer_adapter.new_interface.flush() catch return error.InvalidInput;
-
-    return output.toOwnedSlice();
+pub fn decompressSlice(allocator: std.mem.Allocator, input: []const u8, max_output: usize) ![]u8 {
+    const c = @cImport({ @cInclude("zlib.h"); });
+    const dest = try allocator.alloc(u8, max_output);
+    var dest_len: c.uLongf = @intCast(dest.len);
+    const ret = c.uncompress(dest.ptr, &dest_len, input.ptr, @intCast(input.len));
+    if (ret != c.Z_OK) { allocator.free(dest); return error.DecompressionFailed; }
+    return try allocator.realloc(dest, @intCast(dest_len));
 }
-
-/// Decompress zlib data from a slice, returning decompressed content and
-/// the number of compressed bytes consumed from input.
 pub fn decompressSliceWithConsumed(allocator: std.mem.Allocator, input: []const u8) !struct { data: []u8, consumed: usize } {
+    const c = @cImport({ @cInclude("zlib.h"); });
     var stream: c.z_stream = std.mem.zeroes(c.z_stream);
     stream.next_in = @constCast(input.ptr);
     stream.avail_in = @intCast(input.len);
-
     var ret = c.inflateInit(&stream);
-    if (ret != c.Z_OK) return error.InvalidInput;
+    if (ret != c.Z_OK) return error.DecompressionFailed;
     defer _ = c.inflateEnd(&stream);
-
-    var output = std.array_list.Managed(u8).init(allocator);
-    errdefer output.deinit();
-
-    var buf: [16384]u8 = undefined;
+    var result = std.array_list.Managed(u8).init(allocator);
+    errdefer result.deinit();
+    var buf: [65536]u8 = undefined;
     while (true) {
         stream.next_out = &buf;
         stream.avail_out = buf.len;
         ret = c.inflate(&stream, c.Z_NO_FLUSH);
         const have = buf.len - @as(usize, @intCast(stream.avail_out));
-        if (have > 0) {
-            try output.appendSlice(buf[0..have]);
-        }
+        if (have > 0) try result.appendSlice(buf[0..have]);
         if (ret == c.Z_STREAM_END) break;
-        if (ret != c.Z_OK) return error.InvalidInput;
+        if (ret != c.Z_OK) { result.deinit(); return error.DecompressionFailed; }
     }
-
-    const consumed = @as(usize, @intCast(stream.total_in));
-    return .{ .data = try output.toOwnedSlice(), .consumed = consumed };
+    return .{ .data = try result.toOwnedSlice(), .consumed = input.len - @as(usize, @intCast(stream.avail_in)) };
 }

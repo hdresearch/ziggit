@@ -23,14 +23,14 @@ fn getArgsImpl(allocator: std.mem.Allocator) !interface.ArgIterator {
 }
 
 fn writeStdoutImpl(data: []const u8) !void {
-    std.io.getStdOut().writeAll(data) catch |err| switch (err) {
+    std.fs.File.stdout().writeAll(data) catch |err| switch (err) {
         error.BrokenPipe => return,
         else => return err,
     };
 }
 
 fn writeStderrImpl(data: []const u8) !void {
-    std.io.getStdErr().writeAll(data) catch |err| switch (err) {
+    std.fs.File.stderr().writeAll(data) catch |err| switch (err) {
         error.BrokenPipe => return,
         else => return err,
     };
