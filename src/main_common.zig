@@ -33,7 +33,7 @@ fn addConfigOverride(allocator: std.mem.Allocator, setting: []const u8) !void {
 }
 
 /// Look up a config override by key (case-insensitive)
-fn getConfigOverride(key: []const u8) ?[]const u8 {
+pub fn getConfigOverride(key: []const u8) ?[]const u8 {
     if (global_config_overrides) |overrides| {
         // Return last match (last -c wins)
         var result: ?[]const u8 = null;
@@ -47,7 +47,7 @@ fn getConfigOverride(key: []const u8) ?[]const u8 {
     return null;
 }
 
-fn asciiCaseInsensitiveEqual(a: []const u8, b: []const u8) bool {
+pub fn asciiCaseInsensitiveEqual(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
     for (a, b) |ca, cb| {
         const la = if (ca >= 'A' and ca <= 'Z') ca + 32 else ca;
