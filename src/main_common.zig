@@ -3849,28 +3849,29 @@ fn parseCommitTreeHash(commit_data: []const u8, allocator: std.mem.Allocator) ![
     return error.NoTreeInCommit;
 }
 
-/// Clear working directory except .git and other hidden directories
+/// Clear tracked files from working directory (only files in the index)
 fn clearWorkingDirectory(repo_root: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
-    _ = platform_impl;
-    var dir = std.fs.cwd().openDir(repo_root, .{ .iterate = true }) catch return;
+    // Load the current index to know which files are tracked
+    const git_path_for_clear = blk: {
+        const gp = std.fmt.allocPrint(allocator, "{s}/.git", .{repo_root}) catch return;
+        break :blk gp;
+    };
+    defer allocator.free(git_path_for_clear);
+    
+    var idx = index_mod.Index.load(git_path_for_clear, platform_impl, allocator) catch return;
+    defer idx.deinit();
+    
+    var dir = std.fs.cwd().openDir(repo_root, .{}) catch return;
     defer dir.close();
     
-    var iterator = dir.iterate();
-    while (try iterator.next()) |entry| {
-        // Skip .git and other hidden directories/files
-        if (entry.name[0] == '.') continue;
-        
-        switch (entry.kind) {
-            .file => {
-                dir.deleteFile(entry.name) catch {};
-            },
-            .directory => {
-                dir.deleteTree(entry.name) catch {};
-            },
-            else => {},
+    // Only delete files that are in the index (tracked files)
+    for (idx.entries.items) |entry| {
+        dir.deleteFile(entry.path) catch {};
+        // Try to remove empty parent directories
+        if (std.fs.path.dirname(entry.path)) |parent| {
+            dir.deleteDir(parent) catch {};
         }
     }
-    _ = allocator; // Suppress unused variable warning
 }
 
 /// Recursively checkout tree entries to working directory
