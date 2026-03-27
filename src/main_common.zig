@@ -747,6 +747,10 @@ fn translateConfigKeyValue(kv: []const u8) []const u8 {
     // merge.stat=compact → merge.stat=true
     // status.showuntrackedfiles=false → status.showuntrackedfiles=no
     // status.showuntrackedfiles=true → status.showuntrackedfiles=normal
+    // help.autocorrect=show → help.autocorrect=0
+    // help.autocorrect=immediate → help.autocorrect=-1
+    // help.autocorrect=never → help.autocorrect=0
+    // help.autocorrect=prompt → help.autocorrect=0
     if (std.ascii.startsWithIgnoreCase(kv, "merge.stat=")) {
         const val = kv["merge.stat=".len..];
         if (std.mem.eql(u8, val, "diffstat") or std.mem.eql(u8, val, "compact")) {
@@ -759,6 +763,17 @@ fn translateConfigKeyValue(kv: []const u8) []const u8 {
             return "status.showuntrackedfiles=no";
         } else if (std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "1")) {
             return "status.showuntrackedfiles=normal";
+        }
+    }
+    if (std.ascii.startsWithIgnoreCase(kv, "help.autocorrect=")) {
+        const val = kv["help.autocorrect=".len..];
+        if (std.mem.eql(u8, val, "show") or
+            std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or
+            std.mem.eql(u8, val, "off") or
+            std.mem.eql(u8, val, "never") or std.mem.eql(u8, val, "prompt")) {
+            return "help.autocorrect=0";
+        } else if (std.mem.eql(u8, val, "immediate")) {
+            return "help.autocorrect=-1";
         }
     }
     return kv;
@@ -815,6 +830,19 @@ fn translateConfigValues(allocator: std.mem.Allocator, all_args: [][]const u8) !
         if (std.mem.eql(u8, key, "merge.stat")) {
             if (std.mem.eql(u8, val, "diffstat") or std.mem.eql(u8, val, "compact")) {
                 new_args[val_idx.?] = "true";
+            }
+        }
+        // help.autocorrect: git 2.47+ supports string values; git 2.43 only numeric
+        // false/no/off/show/never/prompt → 0 (show candidates, don't run)
+        // immediate → -1 (run immediately)
+        if (std.mem.eql(u8, key, "help.autocorrect")) {
+            if (std.mem.eql(u8, val, "show") or
+                std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or
+                std.mem.eql(u8, val, "off") or
+                std.mem.eql(u8, val, "never") or std.mem.eql(u8, val, "prompt")) {
+                new_args[val_idx.?] = "0";
+            } else if (std.mem.eql(u8, val, "immediate")) {
+                new_args[val_idx.?] = "-1";
             }
         }
     }
