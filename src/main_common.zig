@@ -8725,6 +8725,17 @@ fn showCommitPrettyFormat(git_object: objects.GitObject, commit_hash: []const u8
         const output = try std.fmt.allocPrint(allocator, "{s} {s}\n", .{ short_hash, msg });
         defer allocator.free(output);
         try platform_impl.writeStdout(output);
+    } else if (std.mem.eql(u8, format, "raw")) {
+        // Raw format: show the commit headers and message exactly as stored
+        const header = try std.fmt.allocPrint(allocator, "commit {s}\n", .{commit_hash});
+        defer allocator.free(header);
+        try platform_impl.writeStdout(header);
+        // The commit data IS the raw format - just output it as-is
+        try platform_impl.writeStdout(git_object.data);
+        // Ensure trailing newline
+        if (git_object.data.len == 0 or git_object.data[git_object.data.len - 1] != '\n') {
+            try platform_impl.writeStdout("\n");
+        }
     } else {
         // Fallback to default format
         try showCommitDefault(git_object, commit_hash, "", platform_impl, allocator);
@@ -10286,6 +10297,25 @@ fn cmdCommitTree(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         try platform_impl.writeStderr("fatal: must specify a tree object\n");
         std.process.exit(128);
         unreachable;
+    }
+
+    // Deduplicate parent hashes (git silently removes duplicates)
+    {
+        var unique = std.array_list.Managed([]const u8).init(allocator);
+        for (parents.items) |p| {
+            var dup = false;
+            for (unique.items) |u| {
+                if (std.mem.eql(u8, p, u)) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup) {
+                try unique.append(p);
+            }
+        }
+        parents.deinit();
+        parents = unique;
     }
 
     var final_message: []const u8 = undefined;
