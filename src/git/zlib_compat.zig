@@ -47,7 +47,7 @@ pub fn compress(old_reader: anytype, old_writer: anytype, options: anytype) !voi
 
     // Feed input through compressor
     comp.writer.writeAll(all_input.items) catch return error.CompressionFailed;
-    comp.finish() catch return error.CompressionFailed;
+    comp.end() catch return error.CompressionFailed;
 }
 
 /// Streaming decompressor wrapper compatible with old API.
@@ -133,7 +133,7 @@ pub fn Compressor(comptime WriterType: type) type {
 
         pub fn finish(self: *Self) !void {
             self.ensureInit();
-            self.comp.?.finish() catch return error.CompressionFailed;
+            self.comp.?.end() catch return error.CompressionFailed;
         }
 
         pub fn writer(self: *Self) GenWriter {
