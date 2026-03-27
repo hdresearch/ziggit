@@ -8455,19 +8455,100 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     var annotated = false;
     var message: ?[]const u8 = null;
     var tag_name: ?[]const u8 = null;
+    var delete_mode = false;
+    var list_mode = false;
+    var force = false;
+    var delete_names = std.array_list.Managed([]const u8).init(allocator);
+    defer delete_names.deinit();
+    var target_ref: ?[]const u8 = null;
 
     // Parse arguments
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-a")) {
             annotated = true;
+        } else if (std.mem.eql(u8, arg, "-d")) {
+            delete_mode = true;
+        } else if (std.mem.eql(u8, arg, "-l") or std.mem.eql(u8, arg, "--list")) {
+            list_mode = true;
+        } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
+            force = true;
         } else if (std.mem.eql(u8, arg, "-m")) {
             message = args.next() orelse {
                 try platform_impl.writeStderr("error: option '-m' requires a value\n");
                 std.process.exit(129);
             };
+            annotated = true;
+        } else if (std.mem.eql(u8, arg, "-F")) {
+            const fname = args.next() orelse {
+                try platform_impl.writeStderr("error: option '-F' requires a value\n");
+                std.process.exit(129);
+            };
+            message = std.fs.cwd().readFileAlloc(allocator, fname, 10 * 1024 * 1024) catch {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: could not open '{s}'\n", .{fname});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+                unreachable;
+            };
+            annotated = true;
+        } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--sign") or std.mem.eql(u8, arg, "-u")) {
+            annotated = true; // GPG signing implies annotated
+            if (std.mem.eql(u8, arg, "-u")) _ = args.next(); // skip key-id
+        } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verify")) {
+            // Verify mode - stub
+        } else if (std.mem.eql(u8, arg, "-n") or std.mem.startsWith(u8, arg, "-n")) {
+            // -n<num> for listing annotation lines
+        } else if (std.mem.startsWith(u8, arg, "--contains") or std.mem.startsWith(u8, arg, "--no-contains") or
+            std.mem.startsWith(u8, arg, "--merged") or std.mem.startsWith(u8, arg, "--no-merged") or
+            std.mem.startsWith(u8, arg, "--sort=") or std.mem.startsWith(u8, arg, "--format=") or
+            std.mem.startsWith(u8, arg, "--points-at") or std.mem.eql(u8, arg, "--create-reflog") or
+            std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--ignore-case") or
+            std.mem.eql(u8, arg, "--column") or std.mem.eql(u8, arg, "--no-column") or
+            std.mem.eql(u8, arg, "--color") or std.mem.startsWith(u8, arg, "--color="))
+        {
+            // Accepted options (not fully implemented)
         } else if (!std.mem.startsWith(u8, arg, "-")) {
-            tag_name = arg;
+            if (delete_mode) {
+                try delete_names.append(arg);
+            } else if (tag_name == null) {
+                tag_name = arg;
+            } else if (target_ref == null) {
+                target_ref = arg;
+            }
         }
+    }
+
+    // Handle delete mode
+    if (delete_mode) {
+        if (delete_names.items.len == 0) {
+            try platform_impl.writeStderr("fatal: tag name required\n");
+            std.process.exit(128);
+        }
+        for (delete_names.items) |del_name| {
+            const tag_ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags/{s}", .{ git_path, del_name });
+            defer allocator.free(tag_ref_path);
+            // Read hash before deleting for output
+            const tag_hash = std.fs.cwd().readFileAlloc(allocator, tag_ref_path, 4096) catch {
+                const msg = try std.fmt.allocPrint(allocator, "error: tag '{s}' not found.\n", .{del_name});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(1);
+                unreachable;
+            };
+            defer allocator.free(tag_hash);
+            std.fs.cwd().deleteFile(tag_ref_path) catch {
+                const msg = try std.fmt.allocPrint(allocator, "error: tag '{s}' not found.\n", .{del_name});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(1);
+                unreachable;
+            };
+            const trimmed = std.mem.trimRight(u8, tag_hash, "\r\n");
+            const msg = try std.fmt.allocPrint(allocator, "Deleted tag '{s}' (was {s})\n", .{ del_name, if (trimmed.len >= 7) trimmed[0..7] else trimmed });
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+        }
+        return;
     }
 
     if (tag_name == null) {
@@ -8512,6 +8593,14 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         return;
     }
 
+    // Validate tag name
+    if (tag_name) |tn| {
+        if (std.mem.eql(u8, tn, "HEAD")) {
+            try platform_impl.writeStderr("fatal: 'HEAD' is not a valid tag name\n");
+            std.process.exit(128);
+        }
+    }
+
     // Get current HEAD commit
     const head_hash = refs.getCurrentCommit(git_path, platform_impl, allocator) catch {
         try platform_impl.writeStderr("fatal: no commits yet\n");
@@ -8524,6 +8613,19 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         std.process.exit(128);
     }
 
+    // Resolve target ref if specified
+    const commit_hash = if (target_ref) |tr|
+        resolveRevision(git_path, tr, platform_impl, allocator) catch {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: not a valid object name: '{s}'\n", .{tr});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+            unreachable;
+        }
+    else
+        try allocator.dupe(u8, head_hash.?);
+    defer allocator.free(commit_hash);
+
     // Create tags directory if it doesn't exist
     const tags_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags", .{git_path});
     defer allocator.free(tags_path);
@@ -8532,6 +8634,21 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         error.AlreadyExists => {},
         else => return err,
     };
+
+    // Check if tag already exists (unless -f)
+    {
+        const existing_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ tags_path, tag_name.? });
+        defer allocator.free(existing_path);
+        if (std.fs.cwd().access(existing_path, .{})) |_| {
+            if (!force) {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: tag '{s}' already exists\n", .{tag_name.?});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+                unreachable;
+            }
+        } else |_| {}
+    }
 
     if (annotated) {
         // For now, just create a lightweight tag and ignore the annotation
@@ -8545,7 +8662,7 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         const tag_ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{tags_path, tag_name.?});
         defer allocator.free(tag_ref_path);
         
-        const ref_content = try std.fmt.allocPrint(allocator, "{s}\n", .{head_hash.?});
+        const ref_content = try std.fmt.allocPrint(allocator, "{s}\n", .{commit_hash});
         defer allocator.free(ref_content);
         
         try platform_impl.fs.writeFile(tag_ref_path, ref_content);
@@ -8554,7 +8671,7 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         const tag_ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{tags_path, tag_name.?});
         defer allocator.free(tag_ref_path);
         
-        const ref_content = try std.fmt.allocPrint(allocator, "{s}\n", .{head_hash.?});
+        const ref_content = try std.fmt.allocPrint(allocator, "{s}\n", .{commit_hash});
         defer allocator.free(ref_content);
         
         try platform_impl.fs.writeFile(tag_ref_path, ref_content);
