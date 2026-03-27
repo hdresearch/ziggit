@@ -89,13 +89,7 @@ pub const GitObject = struct {
             // This is a temporary workaround - repositories work but may be slightly larger
             break :blk try allocator.dupe(u8, content);
         } else blk: {
-            var compressed_data = std.array_list.Managed(u8).init(allocator);
-            defer compressed_data.deinit();
-            
-            var input_stream = std.io.fixedBufferStream(content);
-            try zlib_compat.compress(input_stream.reader(), compressed_data.writer(), .{});
-            
-            break :blk try allocator.dupe(u8, compressed_data.items);
+            break :blk try zlib_compat.compressSlice(allocator, content);
         };
         defer allocator.free(final_content);
         
