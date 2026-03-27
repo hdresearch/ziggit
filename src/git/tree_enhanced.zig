@@ -22,7 +22,7 @@ pub const TreeEntry = struct {
     
     /// Get the hash as a hex string
     pub fn getHashString(self: TreeEntry, allocator: std.mem.Allocator) ![]u8 {
-        return try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&self.hash)});
+        return try std.fmt.allocPrint(allocator, "{x}", .{&self.hash});
     }
     
     /// Check if this entry represents a directory
@@ -83,12 +83,12 @@ pub const FileMode = enum(u32) {
 
 /// Git tree object
 pub const GitTree = struct {
-    entries: std.ArrayList(TreeEntry),
+    entries: std.array_list.Managed(TreeEntry),
     allocator: std.mem.Allocator,
     
     pub fn init(allocator: std.mem.Allocator) GitTree {
         return GitTree{
-            .entries = std.ArrayList(TreeEntry).init(allocator),
+            .entries = std.array_list.Managed(TreeEntry).init(allocator),
             .allocator = allocator,
         };
     }
@@ -142,7 +142,7 @@ pub const GitTree = struct {
     
     /// Serialize tree to git object data format
     pub fn serialize(self: GitTree, allocator: std.mem.Allocator) ![]u8 {
-        var result = std.ArrayList(u8).init(allocator);
+        var result = std.array_list.Managed(u8).init(allocator);
         defer result.deinit();
         
         for (self.entries.items) |entry| {
@@ -193,8 +193,8 @@ pub const GitTree = struct {
     }
     
     /// Get all file entries (non-directories)
-    pub fn getFiles(self: GitTree, allocator: std.mem.Allocator) !std.ArrayList(TreeEntry) {
-        var files = std.ArrayList(TreeEntry).init(allocator);
+    pub fn getFiles(self: GitTree, allocator: std.mem.Allocator) !std.array_list.Managed(TreeEntry) {
+        var files = std.array_list.Managed(TreeEntry).init(allocator);
         
         for (self.entries.items) |entry| {
             if (entry.isFile() or entry.isSymlink()) {
@@ -206,8 +206,8 @@ pub const GitTree = struct {
     }
     
     /// Get all directory entries
-    pub fn getDirectories(self: GitTree, allocator: std.mem.Allocator) !std.ArrayList(TreeEntry) {
-        var dirs = std.ArrayList(TreeEntry).init(allocator);
+    pub fn getDirectories(self: GitTree, allocator: std.mem.Allocator) !std.array_list.Managed(TreeEntry) {
+        var dirs = std.array_list.Managed(TreeEntry).init(allocator);
         
         for (self.entries.items) |entry| {
             if (entry.isDirectory()) {
@@ -220,7 +220,7 @@ pub const GitTree = struct {
     
     /// Generate a formatted tree listing
     pub fn formatListing(self: GitTree, allocator: std.mem.Allocator) ![]u8 {
-        var result = std.ArrayList(u8).init(allocator);
+        var result = std.array_list.Managed(u8).init(allocator);
         defer result.deinit();
         
         for (self.entries.items) |entry| {
@@ -322,15 +322,15 @@ pub const TreeWalker = struct {
 
 /// Tree difference result
 pub const TreeDiff = struct {
-    added: std.ArrayList(TreeEntry),
-    modified: std.ArrayList(struct { old: TreeEntry, new: TreeEntry }),
-    deleted: std.ArrayList(TreeEntry),
+    added: std.array_list.Managed(TreeEntry),
+    modified: std.array_list.Managed(struct { old: TreeEntry, new: TreeEntry }),
+    deleted: std.array_list.Managed(TreeEntry),
     
     pub fn init(allocator: std.mem.Allocator) TreeDiff {
         return TreeDiff{
-            .added = std.ArrayList(TreeEntry).init(allocator),
-            .modified = std.ArrayList(struct { old: TreeEntry, new: TreeEntry }).init(allocator),
-            .deleted = std.ArrayList(TreeEntry).init(allocator),
+            .added = std.array_list.Managed(TreeEntry).init(allocator),
+            .modified = std.array_list.Managed(struct { old: TreeEntry, new: TreeEntry }).init(allocator),
+            .deleted = std.array_list.Managed(TreeEntry).init(allocator),
         };
     }
     
