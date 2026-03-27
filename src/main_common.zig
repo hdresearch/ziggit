@@ -54,6 +54,7 @@ const NATIVE_COMMANDS = [_][]const u8{
     "verify-commit", "verify-tag", "mv", "stash", "apply",
     "column", "check-ignore", "check-attr",
     "switch", "restore", "worktree", "stripspace", "checkout-index",
+    "show-branch",
 };
 
 fn isNativeCommand(command: []const u8) bool {
@@ -597,6 +598,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmdWorktree(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "stripspace")) {
         try cmdStripspace(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "show-branch")) {
+        try nativeCmdShowBranch(allocator, all_original_args.items, command_index, &platform_impl);
     }
 }
 
@@ -17914,6 +17917,47 @@ fn findAllMergeBases(git_dir: []const u8, hash1: []const u8, hash2: []const u8, 
     for (common.items) |c| allocator.free(c);
 
     return try result.toOwnedSlice();
+}
+
+fn nativeCmdShowBranch(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    // Minimal show-branch: supports --merge-base and --independent modes
+    var merge_base_mode = false;
+    var independent_mode = false;
+    var branch_refs = std.array_list.Managed([]const u8).init(allocator);
+    defer branch_refs.deinit();
+
+    var i = command_index + 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--merge-base")) {
+            merge_base_mode = true;
+        } else if (std.mem.eql(u8, arg, "--independent")) {
+            independent_mode = true;
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            try branch_refs.append(arg);
+        }
+    }
+
+    if (merge_base_mode or independent_mode) {
+        // Delegate to merge-base with appropriate flags
+        var new_args = std.array_list.Managed([]const u8).init(allocator);
+        defer new_args.deinit();
+        try new_args.append("git");
+        try new_args.append("merge-base");
+        if (independent_mode) {
+            try new_args.append("--independent");
+        } else {
+            try new_args.append("--all");
+        }
+        for (branch_refs.items) |ref| {
+            try new_args.append(ref);
+        }
+        try nativeCmdMergeBase(allocator, new_args.items, 1, platform_impl);
+    } else {
+        // Full show-branch is complex, provide minimal output
+        try platform_impl.writeStderr("error: show-branch without --merge-base is not yet implemented\n");
+        std.process.exit(1);
+    }
 }
 
 fn nativeCmdUnpackObjects(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
