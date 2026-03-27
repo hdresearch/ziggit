@@ -12758,6 +12758,10 @@ fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, comman
             try platform_impl.writeStdout("usage: git pack-objects [<options>] base-name\n");
             std.process.exit(129);
         } else if (!std.mem.startsWith(u8, arg, "-")) {
+            if (base_name != null) {
+                try platform_impl.writeStderr("usage: git pack-objects [<options>] base-name\n");
+                std.process.exit(1);
+            }
             base_name = arg;
         }
     }
