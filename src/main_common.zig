@@ -3093,74 +3093,9 @@ fn resolveHeadRelative(git_path: []const u8, steps: u32, platform_impl: *const p
 }
 
 fn resolveCommittish(git_path: []const u8, committish: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
-    // First try as a direct hash
-    if (committish.len >= 4 and isValidHashPrefix(committish)) {
-        if (resolveCommitHash(git_path, committish, platform_impl, allocator)) |resolved_hash| {
-            return resolved_hash;
-        } else |_| {
-            // Fall through to try other methods
-        }
-    }
-    
-    // Try as branch reference
-    const branch_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{git_path, committish});
-    defer allocator.free(branch_path);
-    
-    if (platform_impl.fs.readFile(allocator, branch_path)) |branch_content| {
-        defer allocator.free(branch_content);
-        const hash = std.mem.trim(u8, branch_content, " \t\n\r");
-        if (hash.len == 40) {
-            return try allocator.dupe(u8, hash);
-        }
-    } else |_| {}
-    
-    // Try as tag reference
-    const tag_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags/{s}", .{git_path, committish});
-    defer allocator.free(tag_path);
-    
-    if (platform_impl.fs.readFile(allocator, tag_path)) |tag_content| {
-        defer allocator.free(tag_content);
-        const hash = std.mem.trim(u8, tag_content, " \t\n\r");
-        if (hash.len == 40) {
-            // This might be an annotated tag, resolve it
-            const tag_obj = objects.GitObject.load(hash, git_path, platform_impl, allocator) catch {
-                return try allocator.dupe(u8, hash);
-            };
-            defer tag_obj.deinit(allocator);
-            
-            if (tag_obj.type == .tag) {
-                return parseTagObject(tag_obj.data, allocator) catch try allocator.dupe(u8, hash);
-            } else {
-                return try allocator.dupe(u8, hash);
-            }
-        }
-    } else |_| {}
-    
-    // Try HEAD if committish is "HEAD"
-    if (std.mem.eql(u8, committish, "HEAD")) {
-        const head_commit = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
-        if (head_commit) |commit| {
-            return commit;
-        }
-    }
-    
-    // Try HEAD~N relative references
-    if (std.mem.startsWith(u8, committish, "HEAD~")) {
-        const tilde_part = committish[5..]; // Skip "HEAD~"
-        
-        if (tilde_part.len == 0) {
-            // HEAD~ is equivalent to HEAD~1
-            return resolveHeadRelative(git_path, 1, platform_impl, allocator);
-        }
-        
-        const n = std.fmt.parseInt(u32, tilde_part, 10) catch {
-            return error.UnknownRevision;
-        };
-        
-        return resolveHeadRelative(git_path, n, platform_impl, allocator);
-    }
-    
-    return error.UnknownRevision;
+    // Use the comprehensive resolveRevision which handles all ref formats,
+    // ~, ^, ^{type}, hashes, branches, tags, remotes, packed-refs
+    return resolveRevision(git_path, committish, platform_impl, allocator) catch error.UnknownRevision;
 }
 
 fn outputFormattedCommit(format: []const u8, commit_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
@@ -9205,51 +9140,242 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     };
     defer allocator.free(git_path);
 
-    var count = false;
+    var do_count = false;
     var max_count: ?u32 = null;
-    var start_ref: ?[]const u8 = null;
+    var reverse = false;
+    var topo_order = false;
+    var show_objects = false;
+    var all_refs = false;
+    var include_refs = std.array_list.Managed([]const u8).init(allocator);
+    defer include_refs.deinit();
+    var exclude_refs = std.array_list.Managed([]const u8).init(allocator);
+    defer exclude_refs.deinit();
 
     // Parse arguments
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--count")) {
-            count = true;
-        } else if (std.mem.startsWith(u8, arg, "-") and arg.len > 1 and std.ascii.isDigit(arg[1])) {
-            // Parse -n format like -1, -5, etc.
-            const count_str = arg[1..];
-            max_count = std.fmt.parseInt(u32, count_str, 10) catch null;
-        } else if (std.mem.eql(u8, arg, "-n")) {
-            // Parse -n followed by number
+            do_count = true;
+        } else if (std.mem.eql(u8, arg, "--reverse")) {
+            reverse = true;
+        } else if (std.mem.eql(u8, arg, "--topo-order")) {
+            topo_order = true;
+        } else if (std.mem.eql(u8, arg, "--date-order")) {
+            // Accept but use default ordering
+        } else if (std.mem.eql(u8, arg, "--objects") or std.mem.eql(u8, arg, "--objects-edge")) {
+            show_objects = true;
+        } else if (std.mem.eql(u8, arg, "--all")) {
+            all_refs = true;
+        } else if (std.mem.eql(u8, arg, "--stdin")) {
+            // Read refs from stdin
+        } else if (std.mem.eql(u8, arg, "--quiet")) {
+            // Suppress output (but still set exit code)
+        } else if (std.mem.eql(u8, arg, "--no-walk")) {
+            max_count = 1;
+        } else if (std.mem.startsWith(u8, arg, "--max-count=")) {
+            max_count = std.fmt.parseInt(u32, arg[12..], 10) catch null;
+        } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--max-count")) {
             if (args.next()) |count_str| {
                 max_count = std.fmt.parseInt(u32, count_str, 10) catch null;
             }
-        } else if (!std.mem.startsWith(u8, arg, "-")) {
-            start_ref = arg;
+        } else if (std.mem.startsWith(u8, arg, "-") and arg.len > 1 and std.ascii.isDigit(arg[1])) {
+            max_count = std.fmt.parseInt(u32, arg[1..], 10) catch null;
+        } else if (std.mem.startsWith(u8, arg, "--not")) {
+            // Next positional arg is excluded
+        } else if (std.mem.eql(u8, arg, "--")) {
+            break; // End of revisions
+        } else if (std.mem.startsWith(u8, arg, "--")) {
+            // Skip unknown flags
+        } else if (std.mem.indexOf(u8, arg, "..") != null) {
+            // Range: A..B means ^A B (exclude A ancestors, include B ancestors)
+            const dot_pos = std.mem.indexOf(u8, arg, "..").?;
+            const from_ref = if (dot_pos == 0) "HEAD" else arg[0..dot_pos];
+            const to_ref = if (dot_pos + 2 >= arg.len) "HEAD" else arg[dot_pos + 2 ..];
+            try exclude_refs.append(from_ref);
+            try include_refs.append(to_ref);
+        } else if (arg.len > 0 and arg[0] == '^') {
+            try exclude_refs.append(arg[1..]);
+        } else {
+            try include_refs.append(arg);
         }
     }
 
-    // Default to HEAD if no starting reference specified
-    if (start_ref == null) {
-        start_ref = "HEAD";
+    // If --all, add all refs
+    if (all_refs) {
+        // Add HEAD
+        try include_refs.append("HEAD");
+        // Add all branches
+        const heads_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads", .{git_path});
+        defer allocator.free(heads_path);
+        if (std.fs.cwd().openDir(heads_path, .{ .iterate = true })) |*dir_ptr| {
+            var dir = dir_ptr.*;
+            defer dir.close();
+            var it = dir.iterate();
+            while (try it.next()) |entry| {
+                if (entry.kind == .file) {
+                    const ref_name = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{entry.name});
+                    try include_refs.append(ref_name);
+                }
+            }
+        } else |_| {}
+        // Add all tags
+        const tags_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags", .{git_path});
+        defer allocator.free(tags_path);
+        if (std.fs.cwd().openDir(tags_path, .{ .iterate = true })) |*dir_ptr| {
+            var dir = dir_ptr.*;
+            defer dir.close();
+            var it = dir.iterate();
+            while (try it.next()) |entry| {
+                if (entry.kind == .file) {
+                    const ref_name = try std.fmt.allocPrint(allocator, "refs/tags/{s}", .{entry.name});
+                    try include_refs.append(ref_name);
+                }
+            }
+        } else |_| {}
     }
 
-    // Resolve starting commit
-    const start_commit = resolveCommittish(git_path, start_ref.?, platform_impl, allocator) catch {
-        const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\n", .{start_ref.?});
-        defer allocator.free(msg);
-        try platform_impl.writeStderr(msg);
-        std.process.exit(128);
-    };
-    defer allocator.free(start_commit);
+    // Default to HEAD if no refs specified
+    if (include_refs.items.len == 0) {
+        try include_refs.append("HEAD");
+    }
 
-    if (count) {
-        // Count commits from starting commit to root
-        const commit_count = try countCommits(git_path, start_commit, platform_impl, allocator);
-        const count_output = try std.fmt.allocPrint(allocator, "{d}\n", .{commit_count});
+    // Resolve all include/exclude refs
+    var include_hashes = std.array_list.Managed([]u8).init(allocator);
+    defer {
+        for (include_hashes.items) |h| allocator.free(h);
+        include_hashes.deinit();
+    }
+    var exclude_hashes = std.StringHashMap(void).init(allocator);
+    defer {
+        var eit = exclude_hashes.iterator();
+        while (eit.next()) |entry| allocator.free(@constCast(entry.key_ptr.*));
+        exclude_hashes.deinit();
+    }
+
+    for (include_refs.items) |ref_str| {
+        const hash = resolveRevision(git_path, ref_str, platform_impl, allocator) catch continue;
+        try include_hashes.append(hash);
+    }
+
+    // Resolve excludes and walk their ancestors into the exclude set
+    for (exclude_refs.items) |ref_str| {
+        const hash = resolveRevision(git_path, ref_str, platform_impl, allocator) catch continue;
+        // Walk all ancestors of excluded refs
+        try walkAncestors(git_path, hash, &exclude_hashes, platform_impl, allocator);
+        allocator.free(hash);
+    }
+
+    if (include_hashes.items.len == 0) {
+        try platform_impl.writeStderr("fatal: bad default revision 'HEAD'\n");
+        std.process.exit(128);
+    }
+
+    // BFS traversal from all include refs
+    var visited = std.StringHashMap(void).init(allocator);
+    defer {
+        var vit = visited.iterator();
+        while (vit.next()) |entry| allocator.free(@constCast(entry.key_ptr.*));
+        visited.deinit();
+    }
+
+    var result = std.array_list.Managed([]u8).init(allocator);
+    defer {
+        for (result.items) |h| allocator.free(h);
+        result.deinit();
+    }
+
+    // Use a queue for BFS
+    var queue = std.array_list.Managed([]u8).init(allocator);
+    defer {
+        for (queue.items) |h| allocator.free(h);
+        queue.deinit();
+    }
+
+    for (include_hashes.items) |h| {
+        try queue.append(try allocator.dupe(u8, h));
+    }
+
+    while (queue.items.len > 0) {
+        const current = queue.orderedRemove(0);
+        defer allocator.free(current);
+
+        if (visited.contains(current)) continue;
+        if (exclude_hashes.contains(current)) continue;
+
+        try visited.put(try allocator.dupe(u8, current), {});
+        try result.append(try allocator.dupe(u8, current));
+
+        if (max_count) |mc| {
+            if (result.items.len >= mc) break;
+        }
+
+        // Load commit and add parents to queue
+        const obj = objects.GitObject.load(current, git_path, platform_impl, allocator) catch continue;
+        defer obj.deinit(allocator);
+        if (obj.type != .commit) continue;
+
+        var lines = std.mem.splitSequence(u8, obj.data, "\n");
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "parent ")) {
+                const parent = line[7..];
+                if (parent.len == 40) {
+                    try queue.append(try allocator.dupe(u8, parent));
+                }
+            } else if (line.len == 0) break;
+        }
+    }
+
+    if (do_count) {
+        const count_output = try std.fmt.allocPrint(allocator, "{d}\n", .{result.items.len});
         defer allocator.free(count_output);
         try platform_impl.writeStdout(count_output);
     } else {
-        // List commit hashes
-        try listCommits(git_path, start_commit, max_count, platform_impl, allocator);
+        if (reverse) {
+            var ri: usize = result.items.len;
+            while (ri > 0) {
+                ri -= 1;
+                const out = try std.fmt.allocPrint(allocator, "{s}\n", .{result.items[ri]});
+                defer allocator.free(out);
+                try platform_impl.writeStdout(out);
+            }
+        } else {
+            for (result.items) |h| {
+                const out = try std.fmt.allocPrint(allocator, "{s}\n", .{h});
+                defer allocator.free(out);
+                try platform_impl.writeStdout(out);
+            }
+        }
+    }
+}
+
+/// Walk all ancestors of a commit and add them to the set
+fn walkAncestors(git_path: []const u8, start_hash: []const u8, set: *std.StringHashMap(void), platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+    var queue = std.array_list.Managed([]u8).init(allocator);
+    defer {
+        for (queue.items) |h| allocator.free(h);
+        queue.deinit();
+    }
+    try queue.append(try allocator.dupe(u8, start_hash));
+
+    while (queue.items.len > 0) {
+        const current = queue.orderedRemove(0);
+        defer allocator.free(current);
+
+        if (set.contains(current)) continue;
+        try set.put(try allocator.dupe(u8, current), {});
+
+        const obj = objects.GitObject.load(current, git_path, platform_impl, allocator) catch continue;
+        defer obj.deinit(allocator);
+        if (obj.type != .commit) continue;
+
+        var lines = std.mem.splitSequence(u8, obj.data, "\n");
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "parent ")) {
+                const parent = line[7..];
+                if (parent.len == 40) {
+                    try queue.append(try allocator.dupe(u8, parent));
+                }
+            } else if (line.len == 0) break;
+        }
     }
 }
 
