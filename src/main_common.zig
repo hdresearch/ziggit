@@ -25785,6 +25785,26 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
     var name_status = false;
     var no_commit_id = false;
     var quiet = false;
+    var abbrev_len: ?usize = null; // null = no abbrev, 0 = default (7)
+    var full_index = false;
+    var show_stat = false;
+    var show_summary = false;
+    var show_raw = true; // default for diff-tree
+    var patch_with_stat = false;
+    var patch_with_raw = false;
+    var show_shortstat = false;
+    var pretty_fmt: ?[]const u8 = null;
+    var show_pretty = false;
+    var show_cc = false;
+    var show_combined = false;
+    var show_m = false;
+    var first_parent = false;
+    var show_notes = false;
+    var format_str: ?[]const u8 = null;
+    var compact_summary = false;
+    var reverse_diff = false;
+    var stdin_mode = false;
+    var line_prefix: []const u8 = "";
     var tree_refs = std.array_list.Managed([]const u8).init(allocator);
     defer tree_refs.deinit();
     var pathspecs = std.array_list.Managed([]const u8).init(allocator);
@@ -25802,6 +25822,7 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
             recursive = true;
         } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--patch") or std.mem.eql(u8, arg, "-u")) {
             show_patch = true;
+            show_raw = false;
             recursive = true;
         } else if (std.mem.eql(u8, arg, "--root")) {
             show_root = true;
@@ -25813,6 +25834,60 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
             no_commit_id = true;
         } else if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
             quiet = true;
+        } else if (std.mem.eql(u8, arg, "--abbrev")) {
+            abbrev_len = 0; // default
+        } else if (std.mem.startsWith(u8, arg, "--abbrev=")) {
+            abbrev_len = std.fmt.parseInt(usize, arg["--abbrev=".len..], 10) catch 7;
+        } else if (std.mem.eql(u8, arg, "--full-index")) {
+            full_index = true;
+        } else if (std.mem.eql(u8, arg, "--stat")) {
+            show_stat = true;
+            show_raw = false;
+        } else if (std.mem.eql(u8, arg, "--summary")) {
+            show_summary = true;
+        } else if (std.mem.eql(u8, arg, "--shortstat")) {
+            show_shortstat = true;
+            show_raw = false;
+        } else if (std.mem.eql(u8, arg, "--patch-with-stat")) {
+            patch_with_stat = true;
+            show_patch = true;
+            show_stat = true;
+            show_raw = false;
+            recursive = true;
+        } else if (std.mem.eql(u8, arg, "--patch-with-raw")) {
+            patch_with_raw = true;
+            show_patch = true;
+            show_raw = true;
+            recursive = true;
+        } else if (std.mem.eql(u8, arg, "--pretty") or std.mem.eql(u8, arg, "--pretty=medium")) {
+            show_pretty = true;
+            pretty_fmt = "medium";
+        } else if (std.mem.startsWith(u8, arg, "--pretty=")) {
+            show_pretty = true;
+            pretty_fmt = arg["--pretty=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--format=")) {
+            format_str = arg["--format=".len..];
+            show_pretty = true;
+        } else if (std.mem.eql(u8, arg, "--cc")) {
+            show_cc = true;
+            show_raw = false;
+        } else if (std.mem.eql(u8, arg, "-c")) {
+            show_combined = true;
+            show_raw = false;
+        } else if (std.mem.eql(u8, arg, "-m")) {
+            show_m = true;
+        } else if (std.mem.eql(u8, arg, "--first-parent")) {
+            first_parent = true;
+        } else if (std.mem.eql(u8, arg, "--notes")) {
+            show_notes = true;
+        } else if (std.mem.eql(u8, arg, "--compact-summary")) {
+            compact_summary = true;
+        } else if (std.mem.eql(u8, arg, "-R")) {
+            reverse_diff = true;
+        } else if (std.mem.eql(u8, arg, "--stdin")) {
+            stdin_mode = true;
+        } else if (std.mem.startsWith(u8, arg, "--line-prefix=")) {
+            line_prefix = arg["--line-prefix=".len..];
         } else if (std.mem.eql(u8, arg, "-h")) {
             try platform_impl.writeStdout("usage: git diff-tree [<options>] <tree-ish> [<tree-ish>] [<path>...]\n");
             std.process.exit(129);
@@ -25822,6 +25897,16 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
             try tree_refs.append(arg);
         }
     }
+    _ = show_m;
+    _ = first_parent;
+    _ = show_notes;
+    _ = format_str;
+    _ = compact_summary;
+    _ = reverse_diff;
+    _ = line_prefix;
+    _ = show_shortstat;
+    _ = show_cc;
+    _ = show_combined;
     
     var had_diff = false;
     
@@ -25982,6 +26067,10 @@ fn isTreeMode(mode: []const u8) bool {
 }
 
 fn diffTreeWithEmpty(allocator: std.mem.Allocator, tree_hash_str: []const u8, recursive: bool, show_patch: bool, name_only: bool, name_status: bool, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
+    try diffTreeWithEmptyPrefix(allocator, tree_hash_str, "", recursive, show_patch, name_only, name_status, git_path, platform_impl);
+}
+
+fn diffTreeWithEmptyPrefix(allocator: std.mem.Allocator, tree_hash_str: []const u8, prefix: []const u8, recursive: bool, show_patch: bool, name_only: bool, name_status: bool, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
     const tree_obj = objects.GitObject.load(tree_hash_str, git_path, platform_impl, allocator) catch return;
     defer tree_obj.deinit(allocator);
     
@@ -25991,22 +26080,28 @@ fn diffTreeWithEmpty(allocator: std.mem.Allocator, tree_hash_str: []const u8, re
     const zero_hash = "0000000000000000000000000000000000000000";
     
     for (entries.items) |entry| {
+        const full_name = if (prefix.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, entry.name })
+        else
+            try allocator.dupe(u8, entry.name);
+        defer allocator.free(full_name);
+        
         if (recursive and isTreeMode(entry.mode)) {
-            try diffTreeWithEmpty(allocator, entry.hash, recursive, show_patch, name_only, name_status, git_path, platform_impl);
+            try diffTreeWithEmptyPrefix(allocator, entry.hash, full_name, recursive, show_patch, name_only, name_status, git_path, platform_impl);
             continue;
         }
         
         if (name_only) {
-            const out = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.name});
+            const out = try std.fmt.allocPrint(allocator, "{s}\n", .{full_name});
             defer allocator.free(out);
             try platform_impl.writeStdout(out);
         } else if (name_status) {
-            const out = try std.fmt.allocPrint(allocator, "A\t{s}\n", .{entry.name});
+            const out = try std.fmt.allocPrint(allocator, "A\t{s}\n", .{full_name});
             defer allocator.free(out);
             try platform_impl.writeStdout(out);
         } else {
             var mbuf: [6]u8 = undefined;
-            const out = try std.fmt.allocPrint(allocator, ":000000 {s} {s} {s} A\t{s}\n", .{ padMode6(&mbuf, entry.mode), zero_hash, entry.hash, entry.name });
+            const out = try std.fmt.allocPrint(allocator, ":000000 {s} {s} {s} A\t{s}\n", .{ padMode6(&mbuf, entry.mode), zero_hash, entry.hash, full_name });
             defer allocator.free(out);
             try platform_impl.writeStdout(out);
         }
