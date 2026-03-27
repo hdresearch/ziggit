@@ -15860,8 +15860,106 @@ fn formatPersonDateWithFormat(person_line: []const u8, date_fmt: []const u8, all
         }
         return formatTimestamp(timestamp, "+0000", allocator) catch return "";
     }
+    // Handle format: and format-local: strftime format strings
+    if (std.mem.startsWith(u8, date_fmt, "format-local:")) {
+        const strftime_fmt = date_fmt["format-local:".len..];
+        return formatTimestampStrftime(timestamp, "+0000", strftime_fmt, allocator) catch return "";
+    }
+    if (std.mem.startsWith(u8, date_fmt, "format:")) {
+        const strftime_fmt = date_fmt["format:".len..];
+        return formatTimestampStrftime(timestamp, tz_str, strftime_fmt, allocator) catch return "";
+    }
     // Fallback
     return formatTimestamp(timestamp, tz_str, allocator) catch return "";
+}
+
+fn formatTimestampStrftime(timestamp: i64, tz_str: []const u8, fmt: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+    var tz_off: i32 = 0;
+    if (tz_str.len >= 5) {
+        const sign: i32 = if (tz_str[0] == '-') @as(i32, -1) else 1;
+        const hh = std.fmt.parseInt(i32, tz_str[1..3], 10) catch 0;
+        const mm = std.fmt.parseInt(i32, tz_str[3..5], 10) catch 0;
+        tz_off = sign * (hh * 60 + mm);
+    }
+    const adj = timestamp + @as(i64, tz_off) * 60;
+    const SPD: i64 = 86400;
+    var days = @divFloor(adj, SPD);
+    var rem_sec = @mod(adj, SPD);
+    if (rem_sec < 0) { rem_sec += SPD; days -= 1; }
+    const hour = @as(u32, @intCast(@divFloor(rem_sec, 3600)));
+    const minute = @as(u32, @intCast(@divFloor(@mod(rem_sec, 3600), 60)));
+    const second = @as(u32, @intCast(@mod(rem_sec, 60)));
+    const wday = @mod(days + 4, 7);
+    const wday_u: usize = if (wday >= 0) @intCast(wday) else @intCast(wday + 7);
+    var y: i64 = 1970;
+    var d = days;
+    while (true) {
+        const yd: i64 = if (@mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0)) 366 else 365;
+        if (d < yd) break;
+        d -= yd;
+        y += 1;
+    }
+    while (d < 0) {
+        y -= 1;
+        const yd: i64 = if (@mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0)) 366 else 365;
+        d += yd;
+    }
+    const leap: bool = (@mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0));
+    const mdays_arr = [12]u32{ 31, if (leap) 29 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    var month: u32 = 0;
+    var day_of_month: u32 = @intCast(d);
+    for (mdays_arr) |md| {
+        if (day_of_month < md) break;
+        day_of_month -= md;
+        month += 1;
+    }
+    day_of_month += 1;
+    const yday: u32 = @intCast(d);
+    const day_names = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+    const day_abbrs = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    const mon_names = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
+    const mon_abbrs = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    var result = std.array_list.Managed(u8).init(allocator);
+    var fi: usize = 0;
+    while (fi < fmt.len) {
+        if (fmt[fi] == '%' and fi + 1 < fmt.len) {
+            fi += 1;
+            switch (fmt[fi]) {
+                'Y' => { var buf: [16]u8 = undefined; const s = std.fmt.bufPrint(&buf, "{d:0>4}", .{y}) catch "0000"; try result.appendSlice(s); },
+                'm' => { var buf: [4]u8 = undefined; const s = std.fmt.bufPrint(&buf, "{d:0>2}", .{month + 1}) catch "00"; try result.appendSlice(s); },
+                'd' => { var buf: [4]u8 = undefined; const s = std.fmt.bufPrint(&buf, "{d:0>2}", .{day_of_month}) catch "00"; try result.appendSlice(s); },
+                'H' => { var buf: [4]u8 = undefined; const s = std.fmt.bufPrint(&buf, "{d:0>2}", .{hour}) catch "00"; try result.appendSlice(s); },
+                'M' => { var buf: [4]u8 = undefined; const s = std.fmt.bufPrint(&buf, "{d:0>2}", .{minute}) catch "00"; try result.appendSlice(s); },
+                'S' => { var buf: [4]u8 = undefined; const s = std.fmt.bufPrint(&buf, "{d:0>2}", .{second}) catch "00"; try result.appendSlice(s); },
+                'A' => try result.appendSlice(day_names[wday_u]),
+                'a' => try result.appendSlice(day_abbrs[wday_u]),
+                'B' => try result.appendSlice(mon_names[month]),
+                'b', 'h' => try result.appendSlice(mon_abbrs[month]),
+                'e' => { var buf: [4]u8 = undefined; const s = std.fmt.bufPrint(&buf, "{d:>2}", .{day_of_month}) catch " 0"; try result.appendSlice(s); },
+                'j' => { var buf: [8]u8 = undefined; const s = std.fmt.bufPrint(&buf, "{d:0>3}", .{yday + 1}) catch "000"; try result.appendSlice(s); },
+                'p' => try result.appendSlice(if (hour < 12) "AM" else "PM"),
+                'P' => try result.appendSlice(if (hour < 12) "am" else "pm"),
+                'I' => { const h12 = if (hour == 0) @as(u32, 12) else if (hour > 12) hour - 12 else hour; var buf: [4]u8 = undefined; const s = std.fmt.bufPrint(&buf, "{d:0>2}", .{h12}) catch "00"; try result.appendSlice(s); },
+                'l' => { const h12 = if (hour == 0) @as(u32, 12) else if (hour > 12) hour - 12 else hour; var buf: [4]u8 = undefined; const s = std.fmt.bufPrint(&buf, "{d:>2}", .{h12}) catch " 0"; try result.appendSlice(s); },
+                'n' => try result.append('\n'),
+                't' => try result.append('\t'),
+                '%' => try result.append('%'),
+                'z' => try result.appendSlice(tz_str),
+                'Z' => { if (std.mem.eql(u8, tz_str, "+0000")) try result.appendSlice("UTC") else try result.appendSlice(tz_str); },
+                's' => { var buf: [20]u8 = undefined; const s = std.fmt.bufPrint(&buf, "{d}", .{timestamp}) catch "0"; try result.appendSlice(s); },
+                'w' => { var buf: [4]u8 = undefined; const s = std.fmt.bufPrint(&buf, "{d}", .{wday_u}) catch "0"; try result.appendSlice(s); },
+                'u' => { const iso_wday = if (wday_u == 0) @as(usize, 7) else wday_u; var buf: [4]u8 = undefined; const s = std.fmt.bufPrint(&buf, "{d}", .{iso_wday}) catch "0"; try result.appendSlice(s); },
+                'C' => { var buf: [8]u8 = undefined; const s = std.fmt.bufPrint(&buf, "{d:0>2}", .{@divFloor(y, 100)}) catch "00"; try result.appendSlice(s); },
+                'y' => { var buf: [4]u8 = undefined; const s = std.fmt.bufPrint(&buf, "{d:0>2}", .{@mod(y, 100)}) catch "00"; try result.appendSlice(s); },
+                else => { try result.append('%'); try result.append(fmt[fi]); },
+            }
+            fi += 1;
+        } else {
+            try result.append(fmt[fi]);
+            fi += 1;
+        }
+    }
+    return result.toOwnedSlice();
 }
 
 fn formatTimestampNoTZ(timestamp: i64, tz_str: []const u8, allocator: std.mem.Allocator) ![]const u8 {
@@ -21493,12 +21591,19 @@ fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, command
             if (format[vidx] == '%' and vidx + 1 < format.len and format[vidx + 1] == '(') {
                 if (std.mem.indexOfScalar(u8, format[vidx..], ')')) |close| {
                     const field = format[vidx + 2 .. vidx + close];
-                    if (!isValidFormatAtom(field)) {
-                        const msg = try std.fmt.allocPrint(allocator, "fatal: unknown field name: {s}\n", .{field});
-                        defer allocator.free(msg);
-                        try platform_impl.writeStderr(msg);
+                    const validation = validateFormatAtom(field, allocator);
+                    if (!validation.valid) {
+                        if (validation.err_msg) |err_msg| {
+                            defer allocator.free(err_msg);
+                            try platform_impl.writeStderr(err_msg);
+                        } else {
+                            const msg = try std.fmt.allocPrint(allocator, "fatal: unknown field name: {s}\n", .{field});
+                            defer allocator.free(msg);
+                            try platform_impl.writeStderr(msg);
+                        }
                         std.process.exit(1);
                     }
+                    if (validation.err_msg) |err_msg| allocator.free(err_msg);
                     vidx += close + 1;
                     continue;
                 }
@@ -21920,7 +22025,9 @@ fn getRefField(field: []const u8, refname: []const u8, objectname: []const u8, o
     return "";
 }
 
-fn isValidFormatAtom(field: []const u8) bool {
+const FormatAtomError = struct { valid: bool, err_msg: ?[]const u8 = null };
+
+fn validateFormatAtom(field: []const u8, allocator: std.mem.Allocator) FormatAtomError {
     const valid_atoms = [_][]const u8{
         "refname", "objectname", "objecttype", "objectsize", "deltabase",
         "tree", "parent", "numparent", "object", "type", "tag",
@@ -21934,12 +22041,84 @@ fn isValidFormatAtom(field: []const u8) bool {
         "ahead-behind", "describe", "rest", "trailers", "signature",
         "symref", "worktreepath", "flag", "path",
     };
+    var matched_atom: ?[]const u8 = null;
     for (valid_atoms) |atom| {
-        if (std.mem.eql(u8, field, atom)) return true;
-        if (std.mem.startsWith(u8, field, atom) and field.len > atom.len and field[atom.len] == ':')
-            return true;
+        if (std.mem.eql(u8, field, atom)) return .{ .valid = true };
+        if (std.mem.startsWith(u8, field, atom) and field.len > atom.len and field[atom.len] == ':') {
+            matched_atom = atom;
+            break;
+        }
     }
-    return false;
+    if (matched_atom == null) return .{ .valid = false };
+    const atom = matched_atom.?;
+    const options = field[atom.len + 1 ..];
+    const email_atoms = [_][]const u8{ "authoremail", "committeremail", "taggeremail" };
+    for (email_atoms) |ea| {
+        if (std.mem.eql(u8, atom, ea)) return validateEmailOptions(ea, options, allocator);
+    }
+    const date_atoms = [_][]const u8{ "authordate", "committerdate", "taggerdate", "creatordate" };
+    for (date_atoms) |da| {
+        if (std.mem.eql(u8, atom, da)) return validateDateOptions(options);
+    }
+    if (std.mem.eql(u8, atom, "objectname") or std.mem.eql(u8, atom, "*objectname")) return validateObjectnameOptions(options);
+    if (std.mem.eql(u8, atom, "refname")) return validateRefnameOptions(options);
+    return .{ .valid = true };
+}
+
+fn validateEmailOptions(atom_name: []const u8, options: []const u8, allocator: std.mem.Allocator) FormatAtomError {
+    const valid_opts = [_][]const u8{ "trim", "localpart", "mailmap" };
+    var remaining = options;
+    while (remaining.len > 0) {
+        var found = false;
+        for (valid_opts) |vo| {
+            if (std.mem.startsWith(u8, remaining, vo)) {
+                remaining = remaining[vo.len..];
+                found = true;
+                if (remaining.len == 0) return .{ .valid = true };
+                if (remaining[0] == ',') { remaining = remaining[1..]; break; }
+                const msg = std.fmt.allocPrint(allocator, "fatal: unrecognized %({s}) argument: {s}\n", .{ atom_name, remaining }) catch return .{ .valid = false };
+                return .{ .valid = false, .err_msg = msg };
+            }
+        }
+        if (!found) {
+            const msg = std.fmt.allocPrint(allocator, "fatal: unrecognized %({s}) argument: {s}\n", .{ atom_name, remaining }) catch return .{ .valid = false };
+            return .{ .valid = false, .err_msg = msg };
+        }
+    }
+    const msg = std.fmt.allocPrint(allocator, "fatal: unrecognized %({s}) argument: {s}\n", .{ atom_name, remaining }) catch return .{ .valid = false };
+    return .{ .valid = false, .err_msg = msg };
+}
+
+fn validateDateOptions(options: []const u8) FormatAtomError {
+    const valid = [_][]const u8{ "default", "relative", "relative-local", "short", "short-local", "local", "iso", "iso8601", "iso-strict", "iso8601-strict", "rfc", "rfc2822", "raw", "human", "unix", "default-local", "iso-local", "iso8601-local", "iso-strict-local", "iso8601-strict-local", "rfc-local", "rfc2822-local", "raw-local", "human-local", "unix-local" };
+    for (valid) |vf| { if (std.mem.eql(u8, options, vf)) return .{ .valid = true }; }
+    if (std.mem.startsWith(u8, options, "format:") or std.mem.startsWith(u8, options, "format-local:")) return .{ .valid = true };
+    return .{ .valid = false };
+}
+
+fn validateObjectnameOptions(options: []const u8) FormatAtomError {
+    if (std.mem.eql(u8, options, "short")) return .{ .valid = true };
+    if (std.mem.startsWith(u8, options, "short=")) {
+        const n = std.fmt.parseInt(i64, options["short=".len..], 10) catch return .{ .valid = false };
+        if (n <= 0) return .{ .valid = false };
+        return .{ .valid = true };
+    }
+    return .{ .valid = true };
+}
+
+fn validateRefnameOptions(options: []const u8) FormatAtomError {
+    if (options.len == 0) return .{ .valid = true };
+    const valid_opts = [_][]const u8{ "short", "strip", "rstrip", "lstrip" };
+    for (valid_opts) |vo| {
+        if (std.mem.eql(u8, options, vo) or std.mem.startsWith(u8, options, vo)) return .{ .valid = true };
+    }
+    return .{ .valid = false };
+}
+
+fn isValidFormatAtom(field: []const u8) bool {
+    const result = validateFormatAtom(field, std.heap.page_allocator);
+    if (result.err_msg) |msg| std.heap.page_allocator.free(msg);
+    return result.valid;
 }
 
 fn applyLstrip(refname: []const u8, n_str: []const u8) []const u8 {
