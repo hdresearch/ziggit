@@ -2296,15 +2296,26 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     var amend = false;
     var add_all = false;
     var quiet = false;
+    var msg_source: enum { none, m_flag, f_flag, c_flag } = .none;
 
     // Parse arguments
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-m")) {
+            if (msg_source == .f_flag or msg_source == .c_flag) {
+                try platform_impl.writeStderr("fatal: Option -m cannot be combined with -F or -C/-c\n");
+                std.process.exit(128);
+            }
+            msg_source = .m_flag;
             message = args.next() orelse {
                 try platform_impl.writeStderr("error: option `-m' requires a value\n");
                 std.process.exit(129);
             };
         } else if (std.mem.startsWith(u8, arg, "-m")) {
+            if (msg_source == .f_flag or msg_source == .c_flag) {
+                try platform_impl.writeStderr("fatal: Option -m cannot be combined with -F or -C/-c\n");
+                std.process.exit(128);
+            }
+            msg_source = .m_flag;
             message = arg[2..];
         } else if (std.mem.eql(u8, arg, "-a")) {
             add_all = true;
@@ -2324,6 +2335,11 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         } else if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
             quiet = true;
         } else if (std.mem.eql(u8, arg, "-F") or std.mem.eql(u8, arg, "--file")) {
+            if (msg_source == .m_flag or msg_source == .c_flag) {
+                try platform_impl.writeStderr("fatal: Option -F cannot be combined with -m or -C/-c\n");
+                std.process.exit(128);
+            }
+            msg_source = .f_flag;
             const file_path = args.next() orelse {
                 try platform_impl.writeStderr("error: option '-F' requires a value\n");
                 std.process.exit(129);
@@ -2352,6 +2368,11 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 std.process.exit(128);
             };
         } else if (std.mem.eql(u8, arg, "-C") or std.mem.eql(u8, arg, "--reuse-message")) {
+            if (msg_source == .m_flag or msg_source == .f_flag) {
+                try platform_impl.writeStderr("fatal: Option -C cannot be combined with -m or -F\n");
+                std.process.exit(128);
+            }
+            msg_source = .c_flag;
             // Reuse message from another commit
             const commit_ref = args.next() orelse {
                 try platform_impl.writeStderr("error: option '-C' requires a value\n");
