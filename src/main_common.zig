@@ -2695,6 +2695,79 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             signoff = true;
         } else if (std.mem.eql(u8, arg, "--no-edit")) {
             // No edit
+        } else if (std.mem.startsWith(u8, arg, "--fixup=")) {
+            const fixup_ref = arg["--fixup=".len..];
+            // Parse fixup variants: --fixup=<commit>, --fixup=amend:<commit>, --fixup=reword:<commit>
+            var actual_ref = fixup_ref;
+            var fixup_prefix: []const u8 = "fixup";
+            if (std.mem.startsWith(u8, fixup_ref, "amend:")) {
+                actual_ref = fixup_ref["amend:".len..];
+                fixup_prefix = "amend";
+            } else if (std.mem.startsWith(u8, fixup_ref, "reword:")) {
+                actual_ref = fixup_ref["reword:".len..];
+                fixup_prefix = "amend";
+            }
+            // Resolve the commit and get its message
+            const gp2 = findGitDirectory(allocator, platform_impl) catch { std.process.exit(128); unreachable; };
+            defer allocator.free(gp2);
+            const fixup_hash = resolveRevision(gp2, actual_ref, platform_impl, allocator) catch { std.process.exit(128); unreachable; };
+            defer allocator.free(fixup_hash);
+            const fixup_obj = objects.GitObject.load(fixup_hash, gp2, platform_impl, allocator) catch { std.process.exit(128); unreachable; };
+            defer fixup_obj.deinit(allocator);
+            if (std.mem.indexOf(u8, fixup_obj.data, "\n\n")) |pos| {
+                const orig_msg = fixup_obj.data[pos + 2..];
+                // Get first line
+                const first_line_end = std.mem.indexOf(u8, orig_msg, "\n") orelse orig_msg.len;
+                const first_line = orig_msg[0..first_line_end];
+                if (std.mem.eql(u8, fixup_prefix, "amend")) {
+                    message = try std.fmt.allocPrint(allocator, "amend! {s}", .{first_line});
+                } else {
+                    message = try std.fmt.allocPrint(allocator, "fixup! {s}", .{first_line});
+                }
+            }
+            allow_empty = true;
+        } else if (std.mem.eql(u8, arg, "--fixup")) {
+            const fixup_ref = args.next() orelse { std.process.exit(128); unreachable; };
+            const gp2 = findGitDirectory(allocator, platform_impl) catch { std.process.exit(128); unreachable; };
+            defer allocator.free(gp2);
+            const fixup_hash = resolveRevision(gp2, fixup_ref, platform_impl, allocator) catch { std.process.exit(128); unreachable; };
+            defer allocator.free(fixup_hash);
+            const fixup_obj = objects.GitObject.load(fixup_hash, gp2, platform_impl, allocator) catch { std.process.exit(128); unreachable; };
+            defer fixup_obj.deinit(allocator);
+            if (std.mem.indexOf(u8, fixup_obj.data, "\n\n")) |pos| {
+                const orig_msg = fixup_obj.data[pos + 2..];
+                const first_line_end = std.mem.indexOf(u8, orig_msg, "\n") orelse orig_msg.len;
+                message = try std.fmt.allocPrint(allocator, "fixup! {s}", .{orig_msg[0..first_line_end]});
+            }
+            allow_empty = true;
+        } else if (std.mem.startsWith(u8, arg, "--squash=")) {
+            const squash_ref = arg["--squash=".len..];
+            const gp2 = findGitDirectory(allocator, platform_impl) catch { std.process.exit(128); unreachable; };
+            defer allocator.free(gp2);
+            const squash_hash = resolveRevision(gp2, squash_ref, platform_impl, allocator) catch { std.process.exit(128); unreachable; };
+            defer allocator.free(squash_hash);
+            const squash_obj = objects.GitObject.load(squash_hash, gp2, platform_impl, allocator) catch { std.process.exit(128); unreachable; };
+            defer squash_obj.deinit(allocator);
+            if (std.mem.indexOf(u8, squash_obj.data, "\n\n")) |pos| {
+                const orig_msg = squash_obj.data[pos + 2..];
+                const first_line_end = std.mem.indexOf(u8, orig_msg, "\n") orelse orig_msg.len;
+                message = try std.fmt.allocPrint(allocator, "squash! {s}", .{orig_msg[0..first_line_end]});
+            }
+            allow_empty = true;
+        } else if (std.mem.eql(u8, arg, "--squash")) {
+            const squash_ref = args.next() orelse { std.process.exit(128); unreachable; };
+            const gp2 = findGitDirectory(allocator, platform_impl) catch { std.process.exit(128); unreachable; };
+            defer allocator.free(gp2);
+            const squash_hash = resolveRevision(gp2, squash_ref, platform_impl, allocator) catch { std.process.exit(128); unreachable; };
+            defer allocator.free(squash_hash);
+            const squash_obj = objects.GitObject.load(squash_hash, gp2, platform_impl, allocator) catch { std.process.exit(128); unreachable; };
+            defer squash_obj.deinit(allocator);
+            if (std.mem.indexOf(u8, squash_obj.data, "\n\n")) |pos| {
+                const orig_msg = squash_obj.data[pos + 2..];
+                const first_line_end = std.mem.indexOf(u8, orig_msg, "\n") orelse orig_msg.len;
+                message = try std.fmt.allocPrint(allocator, "squash! {s}", .{orig_msg[0..first_line_end]});
+            }
+            allow_empty = true;
         } else if (std.mem.eql(u8, arg, "--allow-empty-message")) {
             allow_empty = true; // Close enough
         } else if (std.mem.eql(u8, arg, "--")) {
