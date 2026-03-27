@@ -19549,6 +19549,9 @@ fn nativeCmdMv(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                 if (std.mem.eql(u8, entry.path, src)) {
                     var new_entry = entry;
                     new_entry.path = try allocator.dupe(u8, target);
+                    // Update flags to reflect new path length (lower 12 bits)
+                    const path_len_bits: u16 = if (target.len >= 0xFFF) 0xFFF else @intCast(target.len);
+                    new_entry.flags = (entry.flags & 0xF000) | path_len_bits;
                     try new_entries.append(new_entry);
                 } else {
                     try new_entries.append(entry);
