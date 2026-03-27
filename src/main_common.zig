@@ -20410,7 +20410,9 @@ const Patch = struct {
     is_binary: bool,
     is_rename: bool = false,
     is_copy: bool = false,
+    is_rewrite: bool = false,
     similarity: ?u32 = null, // similarity index percentage
+    dissimilarity: ?u32 = null, // dissimilarity index percentage
     hunks: std.array_list.Managed(PatchHunk),
     added: u32,
     removed: u32,
@@ -20542,6 +20544,10 @@ fn parseSinglePatch(allocator: std.mem.Allocator, lines: []const []const u8, pos
             } else if (std.mem.startsWith(u8, line, "similarity index ")) {
                 const pct = std.mem.trim(u8, line["similarity index ".len..], " \t\r%");
                 patch.similarity = std.fmt.parseInt(u32, pct, 10) catch null;
+            } else if (std.mem.startsWith(u8, line, "dissimilarity index ")) {
+                const pct = std.mem.trim(u8, line["dissimilarity index ".len..], " \t\r%");
+                patch.dissimilarity = std.fmt.parseInt(u32, pct, 10) catch null;
+                patch.is_rewrite = true;
             }
             if (std.mem.startsWith(u8, line, "rename to ") or std.mem.startsWith(u8, line, "copy to ")) {
                 const new_name = std.mem.trim(u8, line[std.mem.indexOf(u8, line, " to ").? + 4 ..], " \t\r");
@@ -21148,15 +21154,19 @@ fn outputAllPatchStats(allocator: std.mem.Allocator, patches: []Patch, platform_
     const nfiles_str = try std.fmt.allocPrint(allocator, " {d} file{s} changed", .{ nfiles, if (nfiles != 1) "s" else "" });
     defer allocator.free(nfiles_str);
     try summary.appendSlice(nfiles_str);
-    if (total_added > 0) {
-        const add_str = try std.fmt.allocPrint(allocator, ", {d} insertion{s}(+)", .{ total_added, if (total_added != 1) "s" else "" });
-        defer allocator.free(add_str);
-        try summary.appendSlice(add_str);
-    }
-    if (total_removed > 0) {
-        const del_str = try std.fmt.allocPrint(allocator, ", {d} deletion{s}(-)", .{ total_removed, if (total_removed != 1) "s" else "" });
-        defer allocator.free(del_str);
-        try summary.appendSlice(del_str);
+    if (total_added > 0 or total_removed > 0) {
+        if (total_added > 0) {
+            const add_str = try std.fmt.allocPrint(allocator, ", {d} insertion{s}(+)", .{ total_added, if (total_added != 1) "s" else "" });
+            defer allocator.free(add_str);
+            try summary.appendSlice(add_str);
+        }
+        if (total_removed > 0) {
+            const del_str = try std.fmt.allocPrint(allocator, ", {d} deletion{s}(-)", .{ total_removed, if (total_removed != 1) "s" else "" });
+            defer allocator.free(del_str);
+            try summary.appendSlice(del_str);
+        }
+    } else {
+        try summary.appendSlice(", 0 insertions(+), 0 deletions(-)");
     }
     try summary.append('\n');
     try platform_impl.writeStdout(summary.items);
@@ -21231,6 +21241,14 @@ fn outputPatchSummary(allocator: std.mem.Allocator, patch: *const Patch, platfor
             try platform_impl.writeStdout(msg);
         }
     }
+    if (patch.is_rewrite) {
+        const path = patch.new_path orelse patch.old_path orelse "unknown";
+        if (patch.dissimilarity) |dis| {
+            const msg = try std.fmt.allocPrint(allocator, " rewrite {s} ({d}%)\n", .{ path, dis });
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
+        }
+    }
     if (patch.old_mode != null and patch.new_mode != null and patch.old_mode.? != patch.new_mode.? and !patch.is_new_file and !patch.is_delete) {
         const msg = try std.fmt.allocPrint(allocator, " mode change {o} => {o} {s}\n", .{ patch.old_mode.?, patch.new_mode.?, patch.new_path orelse patch.old_path orelse "unknown" });
         defer allocator.free(msg);
@@ -21251,12 +21269,23 @@ fn formatRenamePath(allocator: std.mem.Allocator, old_path: []const u8, new_path
     const old_suffix = old_path[last_slash..];
     const new_suffix = new_path[last_slash..];
 
-    // Find common suffix
+    // Find common suffix (only at '/' boundaries, like git)
     var suffix_len: usize = 0;
-    while (suffix_len < old_suffix.len and suffix_len < new_suffix.len and
-        old_suffix[old_suffix.len - 1 - suffix_len] == new_suffix[new_suffix.len - 1 - suffix_len])
     {
-        suffix_len += 1;
+        var s: usize = 0;
+        while (s < old_suffix.len and s < new_suffix.len and
+            old_suffix[old_suffix.len - 1 - s] == new_suffix[new_suffix.len - 1 - s])
+        {
+            s += 1;
+            // Lock in suffix at '/' boundaries
+            if (old_suffix[old_suffix.len - s] == '/') {
+                suffix_len = s;
+            }
+        }
+        // If the entire remaining parts match, use full match
+        if (s == old_suffix.len and s == new_suffix.len) {
+            suffix_len = s;
+        }
     }
 
     if (prefix.len > 0 or suffix_len > 0) {
