@@ -107,7 +107,7 @@ const NATIVE_COMMANDS = [_][]const u8{
     "verify-commit", "verify-tag", "mv", "stash", "apply",
     "column", "check-ignore", "check-attr",
     "switch", "restore", "worktree", "stripspace", "checkout-index",
-    "show-branch", "blame", "annotate", "ls-remote", "upload-pack", "receive-pack", "send-pack", "check-ref-format", "last-modified",
+    "show-branch", "blame", "annotate", "ls-remote", "upload-pack", "receive-pack", "send-pack", "check-ref-format", "last-modified", "refs",
 };
 
 fn isNativeCommand(command: []const u8) bool {
@@ -696,6 +696,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         std.process.exit(128);
     } else if (std.mem.eql(u8, command, "check-ref-format")) {
         try cmdCheckRefFormat(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "refs")) {
+        try cmdRefs(allocator, &args_iter, &platform_impl);
     }
 }
 
@@ -27186,4 +27188,68 @@ fn lmFindLastModified(allocator: std.mem.Allocator, git_path: []const u8, start_
         current = next;
     }
     return current;
+}
+
+fn cmdRefs(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    const subcmd = args.next() orelse {
+        try platform_impl.writeStderr("usage: git refs <subcommand>\n");
+        std.process.exit(129);
+        unreachable;
+    };
+    
+    if (std.mem.eql(u8, subcmd, "exists")) {
+        const ref_name = args.next() orelse {
+            try platform_impl.writeStderr("error: refs exists requires a ref argument\n");
+            std.process.exit(129);
+            unreachable;
+        };
+        
+        const git_dir = findGitDirectory(allocator, platform_impl) catch {
+            try platform_impl.writeStderr("fatal: not a git repository\n");
+            std.process.exit(128);
+            unreachable;
+        };
+        defer allocator.free(git_dir);
+        
+        const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_name });
+        defer allocator.free(ref_path);
+        
+        if (std.fs.cwd().access(ref_path, .{})) |_| {
+            // Check not a directory
+            const stat = std.fs.cwd().statFile(ref_path) catch return;
+            if (stat.kind == .directory) {
+                try platform_impl.writeStderr("error: reference does not exist\n");
+                std.process.exit(2);
+                unreachable;
+            }
+            return; // exists
+        } else |_| {
+            // Check packed-refs
+            const packed_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir});
+            defer allocator.free(packed_path);
+            const packed_data = platform_impl.fs.readFile(allocator, packed_path) catch {
+                try platform_impl.writeStderr("error: reference does not exist\n");
+                std.process.exit(2);
+                unreachable;
+            };
+            defer allocator.free(packed_data);
+            var lines = std.mem.splitScalar(u8, packed_data, '\n');
+            while (lines.next()) |line| {
+                if (line.len == 0 or line[0] == '#') continue;
+                if (line.len >= 41 and line[40] == ' ') {
+                    const packed_ref = std.mem.trim(u8, line[41..], " \t\r");
+                    if (std.mem.eql(u8, packed_ref, ref_name)) return;
+                }
+            }
+            try platform_impl.writeStderr("error: reference does not exist\n");
+            std.process.exit(2);
+            unreachable;
+        }
+    } else {
+        const msg = try std.fmt.allocPrint(allocator, "error: unknown subcommand '{s}'\n", .{subcmd});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        std.process.exit(1);
+        unreachable;
+    }
 }
