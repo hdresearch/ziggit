@@ -282,21 +282,11 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 // Continue the while loop to check if the expanded command is native or needs further alias resolution
             }
         } else {
-            // No alias found - give error
-            if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
-                const translated_args = try translateCommandFlags(allocator, all_original_args.items, command_index);
-                if (needsStderrTranslation(command)) {
-                    try forwardToGitWithStderrTranslation(allocator, translated_args, &platform_impl);
-                } else {
-                    try forwardToGit(allocator, translated_args, &platform_impl);
-                }
-                return;
-            } else {
-                const error_msg = std.fmt.allocPrint(allocator, "ziggit: '{s}' is not a ziggit command. See 'ziggit --help'.\n", .{command}) catch "ziggit: invalid command. See 'ziggit --help'.\n";
-                defer if (error_msg.ptr != "ziggit: invalid command. See 'ziggit --help'.\n".ptr) allocator.free(error_msg);
-                try platform_impl.writeStderr(error_msg);
-                std.process.exit(1);
-            }
+            // Command not found - error (pure Zig, no git forwarding)
+            const error_msg = std.fmt.allocPrint(allocator, "ziggit: '{s}' is not a ziggit command. See 'ziggit --help'.\n", .{command}) catch "ziggit: invalid command. See 'ziggit --help'.\n";
+            defer if (error_msg.ptr != "ziggit: invalid command. See 'ziggit --help'.\n".ptr) allocator.free(error_msg);
+            try platform_impl.writeStderr(error_msg);
+            std.process.exit(1);
         }
     }
     // Check for alias loop (depth exceeded)
@@ -620,17 +610,6 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     }
 }
 
-fn findRealGit() []const u8 {
-    // Find real git binary, avoiding recursive calls when ziggit is installed as 'git'
-    const candidates = [_][]const u8{ "/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git", "git" };
-    for (candidates) |candidate| {
-        // Check if file exists using access
-        const result = std.fs.cwd().statFile(candidate) catch continue;
-        _ = result;
-        return candidate;
-    }
-    return "git";
-}
 
 
 fn translateConfigKeyValue(kv: []const u8) []const u8 {
@@ -744,68 +723,6 @@ fn translateConfigValues(allocator: std.mem.Allocator, all_args: [][]const u8) !
 
 
 
-fn translateCommandFlags(allocator: std.mem.Allocator, all_args: [][]const u8, command_index: usize) ![][]const u8 {
-    // Translate newer git flags (2.44+) to older equivalents for git 2.43 compatibility
-    // This is command-specific since flags have different meanings in different commands.
-    if (command_index >= all_args.len) return all_args;
-    const command = all_args[command_index];
-    
-    if (std.mem.eql(u8, command, "ls-remote")) {
-        // --branches → --heads (git 2.46+)
-        var new_args = try allocator.alloc([]const u8, all_args.len);
-        @memcpy(new_args, all_args);
-        for (new_args[command_index + 1..], command_index + 1..) |*arg, i| {
-            _ = i;
-            if (std.mem.eql(u8, arg.*, "--branches")) {
-                arg.* = "--heads";
-            }
-        }
-        return new_args;
-    }
-    
-    if (std.mem.eql(u8, command, "clone")) {
-        // --revision → error-like behavior (git 2.53+ feature)
-        // For now, pass through - git 2.43 will error on unknown flags
-    }
-    
-    // Translate --end-of-options for commands that don't support it in git 2.43
-    // Git 2.46+ added --end-of-options support to many commands
-    // For archive: --end-of-options can be translated to -- since it separates options from tree-ish
-    if (std.mem.eql(u8, command, "archive"))
-    {
-        var new_args = try allocator.alloc([]const u8, all_args.len);
-        @memcpy(new_args, all_args);
-        for (new_args[command_index + 1..]) |*arg| {
-            if (std.mem.eql(u8, arg.*, "--end-of-options")) {
-                arg.* = "--";
-            }
-        }
-        return new_args;
-    }
-
-    // Strip --no-path-walk and --path-walk (git 2.46+ feature for pack-objects)
-    if (std.mem.eql(u8, command, "pack-objects") or
-        std.mem.eql(u8, command, "repack"))
-    {
-        var new_args = std.array_list.Managed([]const u8).init(allocator);
-        for (all_args) |arg| {
-            if (std.mem.eql(u8, arg, "--no-path-walk") or
-                std.mem.eql(u8, arg, "--path-walk"))
-            {
-                continue; // Strip these flags
-            }
-            try new_args.append(arg);
-        }
-        return new_args.toOwnedSlice();
-    }
-
-    // Handle commit --template with :(optional) prefix (git 2.46+ feature)
-    if (std.mem.eql(u8, command, "commit")) {
-        return translateCommitFlags(allocator, all_args, command_index);
-    }
-
-    return all_args;
-}
 
 fn translateCommitFlags(allocator: std.mem.Allocator, all_args: [][]const u8, command_index: usize) ![][]const u8 {
     // Translate commit flags for git 2.43 compat
@@ -854,215 +771,7 @@ fn translateCommitFlags(allocator: std.mem.Allocator, all_args: [][]const u8, co
     return new_args.toOwnedSlice();
 }
 
-fn forwardToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_impl: *const platform_mod.Platform) !void {
-    // Check if -h or --help-all is in the args (after global flags and command name).
-    // In git 2.47+, -h outputs to stdout and --help-all works outside a repo.
-    // In git 2.43, -h goes to stderr and --help-all fails outside a repo.
-    // We fix this by capturing output and ensuring correct behavior.
-    var has_help_flag = false;
-    var has_help_all = false;
-    var past_command = false;
-    var saw_double_dash = false;
-    for (all_args) |arg| {
-        if (!past_command) {
-            // Skip global flags like -C, -c, --git-dir etc
-            if (!std.mem.startsWith(u8, arg, "-")) {
-                past_command = true;
-                continue;
-            }
-            continue;
-        }
-        // Don't intercept -h or --help-all after -- (they're arguments, not flags)
-        if (std.mem.eql(u8, arg, "--")) {
-            saw_double_dash = true;
-            continue;
-        }
-        if (saw_double_dash) continue;
-        if (std.mem.eql(u8, arg, "-h")) {
-            has_help_flag = true;
-            break;
-        }
-        if (std.mem.eql(u8, arg, "--help-all")) {
-            has_help_all = true;
-            break;
-        }
-    }
 
-    if (has_help_flag or has_help_all) {
-        // For -h: git 2.43 sends output to stderr; we redirect to stdout for 2.47 compat
-        // For --help-all: git 2.43 fails outside a repo; we fall back to -h
-        var argv = std.array_list.Managed([]const u8).init(allocator);
-        defer argv.deinit();
-        
-        try argv.append(findRealGit());
-        for (all_args) |arg| {
-            if (has_help_all and std.mem.eql(u8, arg, "--help-all")) {
-                // Try --help-all first, fall back to -h if it fails
-                try argv.append("--help-all");
-            } else {
-                try argv.append(arg);
-            }
-        }
-        
-        var child = std.process.Child.init(argv.items, allocator);
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-        
-        _ = child.spawn() catch |err| switch (err) {
-            error.FileNotFound => {
-                try platform_impl.writeStderr("ziggit: git is not installed.\n");
-                std.process.exit(1);
-            },
-            else => {
-                const msg = try std.fmt.allocPrint(allocator, "ziggit: failed to execute git: {}\n", .{err});
-                defer allocator.free(msg);
-                try platform_impl.writeStderr(msg);
-                std.process.exit(1);
-            },
-        };
-        const stdout_data = child.stdout.?.readToEndAlloc(allocator, 4 * 1024 * 1024) catch "";
-        defer allocator.free(stdout_data);
-        const stderr_data = child.stderr.?.readToEndAlloc(allocator, 4 * 1024 * 1024) catch "";
-        defer allocator.free(stderr_data);
-        const term = try child.wait();
-        
-        var exit_code: u8 = switch (term) {
-            .Exited => |code| @intCast(code),
-            .Signal => 128,
-            .Stopped => 128,
-            .Unknown => 1,
-        };
-        
-        // Check if --help-all failed (exit 128 = not in repo). Fall back to -h.
-        if (has_help_all and exit_code == 128) {
-            var argv2 = std.array_list.Managed([]const u8).init(allocator);
-            defer argv2.deinit();
-            try argv2.append(findRealGit());
-            for (all_args) |arg| {
-                if (std.mem.eql(u8, arg, "--help-all")) {
-                    try argv2.append("-h");
-                } else {
-                    try argv2.append(arg);
-                }
-            }
-            var child2 = std.process.Child.init(argv2.items, allocator);
-            child2.stdin_behavior = .Ignore;
-            child2.stdout_behavior = .Pipe;
-            child2.stderr_behavior = .Pipe;
-            _ = child2.spawn() catch {
-                std.process.exit(1);
-            };
-            const stdout2 = child2.stdout.?.readToEndAlloc(allocator, 4 * 1024 * 1024) catch "";
-            defer allocator.free(stdout2);
-            const stderr2 = child2.stderr.?.readToEndAlloc(allocator, 4 * 1024 * 1024) catch "";
-            defer allocator.free(stderr2);
-            const term2 = try child2.wait();
-            
-            // Output everything to stdout (git 2.47 sends -h output to stdout)
-            if (stdout2.len > 0) try platform_impl.writeStdout(stdout2);
-            if (stderr2.len > 0) try platform_impl.writeStdout(stderr2);
-            
-            exit_code = switch (term2) {
-                .Exited => |code| @intCast(code),
-                .Signal => 128,
-                .Stopped => 128,
-                .Unknown => 1,
-            };
-            // In git 2.53, -h exits 129 for builtins with output on stdout
-            if (exit_code == 0 or exit_code == 129) {
-                std.process.exit(129);
-            }
-            std.process.exit(exit_code);
-        }
-        
-        // Output stdout first, then stderr content to stdout (for -h and --help-all compat)
-        // In git 2.53, -h outputs to stdout (in 2.43 it goes to stderr). Exit code is 129 for builtins.
-        if (stdout_data.len > 0) try platform_impl.writeStdout(stdout_data);
-        if (stderr_data.len > 0) {
-            // For -h and --help-all: stderr contains usage info in git 2.43, redirect to stdout
-            if (has_help_flag or has_help_all) {
-                try platform_impl.writeStdout(stderr_data);
-            } else {
-                try platform_impl.writeStderr(stderr_data);
-            }
-        }
-        
-        // In git 2.53, -h outputs to stdout. For C builtins it exits 129,
-        // for shell scripts (like submodule) it exits 0.
-        // If git 2.43 already returned 0 (e.g. submodule), keep it.
-        // If git 2.43 returned 129 (C builtin), keep it (output now goes to stdout).
-        if (has_help_flag and exit_code == 0) {
-            // Shell script that already handles -h to stdout with exit 0
-            std.process.exit(0);
-        }
-        if (has_help_flag and exit_code == 129) {
-            // C builtin: stderr was redirected to stdout, keep exit 129
-            std.process.exit(129);
-        }
-        if (has_help_all and (exit_code == 0 or exit_code == 129)) {
-            std.process.exit(129);
-        }
-        std.process.exit(exit_code);
-    }
-
-    // Build argv array with git as argv[0] and all original args after that
-    var argv = std.array_list.Managed([]const u8).init(allocator);
-    defer argv.deinit();
-    
-    try argv.append(findRealGit());
-    
-    // Add all arguments to git (including global flags)
-    for (all_args) |arg| {
-        try argv.append(arg);
-    }
-    
-    // Spawn git child process with inherited stdin/stdout/stderr
-    var child = std.process.Child.init(argv.items, allocator);
-    child.stdin_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-    
-    // Try to spawn the git process
-    const term = child.spawnAndWait() catch |err| switch (err) {
-        error.FileNotFound => {
-            // git binary not found
-            const msg = try std.fmt.allocPrint(allocator, "ziggit: '{s}' is not a ziggit command and git is not installed.\n", .{argv.items[1]});
-            defer allocator.free(msg);
-            try platform_impl.writeStderr(msg);
-            try platform_impl.writeStderr("Either install git for fallback functionality or use a natively supported ziggit command.\n");
-            try platform_impl.writeStderr("See 'ziggit --help' for supported commands.\n");
-            std.process.exit(1);
-        },
-        else => {
-            const msg = try std.fmt.allocPrint(allocator, "ziggit: failed to execute git: {}\n", .{err});
-            defer allocator.free(msg);
-            try platform_impl.writeStderr(msg);
-            std.process.exit(1);
-        },
-    };
-    
-    // Propagate git's exit code
-    switch (term) {
-        .Exited => |code| std.process.exit(@intCast(code)),
-        .Signal => |_| std.process.exit(128),
-        .Stopped => |_| std.process.exit(128),
-        .Unknown => |_| std.process.exit(1),
-    }
-}
-
-fn needsStderrTranslation(command: []const u8) bool {
-    // Commands whose stderr messages differ between git 2.43 and 2.46+
-    const cmds = [_][]const u8{
-        "bisect", "checkout", "switch", "restore",
-        "fsck", "index-pack", "unpack-objects",
-        "submodule",
-    };
-    for (cmds) |cmd| {
-        if (std.mem.eql(u8, command, cmd)) return true;
-    }
-    return false;
-}
 
 fn translateStderrLine(allocator: std.mem.Allocator, line: []const u8) ![]const u8 {
     // Translate git 2.43 error messages to git 2.46+ format
@@ -1119,51 +828,6 @@ fn translateStderr(allocator: std.mem.Allocator, stderr_data: []const u8) ![]con
     return result.toOwnedSlice();
 }
 
-fn forwardToGitWithStderrTranslation(allocator: std.mem.Allocator, all_args: [][]const u8, platform_impl: *const platform_mod.Platform) !void {
-    var argv = std.array_list.Managed([]const u8).init(allocator);
-    defer argv.deinit();
-    
-    try argv.append(findRealGit());
-    for (all_args) |arg| {
-        try argv.append(arg);
-    }
-    
-    var child = std.process.Child.init(argv.items, allocator);
-    child.stdin_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Pipe;
-    
-    _ = child.spawn() catch |err| switch (err) {
-        error.FileNotFound => {
-            try platform_impl.writeStderr("ziggit: git is not installed.\n");
-            std.process.exit(1);
-        },
-        else => {
-            const msg = try std.fmt.allocPrint(allocator, "ziggit: failed to execute git: {}\n", .{err});
-            defer allocator.free(msg);
-            try platform_impl.writeStderr(msg);
-            std.process.exit(1);
-        },
-    };
-    
-    const stderr_data = child.stderr.?.readToEndAlloc(allocator, 4 * 1024 * 1024) catch "";
-    defer allocator.free(stderr_data);
-    const term = try child.wait();
-    
-    // Translate and output stderr
-    if (stderr_data.len > 0) {
-        const translated = try translateStderr(allocator, stderr_data);
-        defer allocator.free(translated);
-        try platform_impl.writeStderr(translated);
-    }
-    
-    switch (term) {
-        .Exited => |code| std.process.exit(@intCast(code)),
-        .Signal => |_| std.process.exit(128),
-        .Stopped => |_| std.process.exit(128),
-        .Unknown => |_| std.process.exit(1),
-    }
-}
 
 
 fn findUntrackedFiles(allocator: std.mem.Allocator, repo_root: []const u8, index: *const index_mod.Index, gitignore: *const gitignore_mod.GitIgnore, platform_impl: *const platform_mod.Platform) !std.array_list.Managed([]u8) {
@@ -4349,40 +4013,9 @@ fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         return;
     }
 
-    // For non-HTTPS URLs, shell out to git
-    if (build_options.enable_git_fallback) {
-        var git_args = std.array_list.Managed([]const u8).init(allocator);
-        defer git_args.deinit();
-
-        try git_args.append(findRealGit());
-        try git_args.append("fetch");
-        if (quiet) try git_args.append("--quiet");
-        try git_args.append(remote_name);
-
-        var child = std.process.Child.init(git_args.items, allocator);
-        child.stdin_behavior = .Inherit;
-        child.stdout_behavior = .Inherit;
-        child.stderr_behavior = .Inherit;
-
-        const term = child.spawnAndWait() catch |err| {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: failed to execute git: {}\n", .{err});
-            defer allocator.free(msg);
-            try platform_impl.writeStderr(msg);
-            std.process.exit(128);
-        };
-
-        switch (term) {
-            .Exited => |code| {
-                if (code != 0) std.process.exit(@intCast(code));
-            },
-            .Signal => |_| std.process.exit(128),
-            .Stopped => |_| std.process.exit(128),
-            .Unknown => |_| std.process.exit(1),
-        }
-    } else {
-        try platform_impl.writeStderr("fatal: non-HTTPS fetch not supported without git fallback\n");
-        std.process.exit(128);
-    }
+    // For non-HTTPS URLs, not yet supported natively
+    try platform_impl.writeStderr("fatal: non-HTTPS fetch not supported natively yet\n");
+    std.process.exit(128);
 }
 
 fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
@@ -4913,7 +4546,7 @@ fn performLocalClone(
     }
 }
 
-fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform, all_original_args: [][]const u8) !void {
+fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform, _: [][]const u8) !void {
     if (@import("builtin").target.os.tag == .freestanding) {
         try platform_impl.writeStderr("clone: not supported in freestanding mode\n");
         return;
@@ -5235,16 +4868,13 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             }
         }
 
-        // For SSH and git:// protocols, we still need to forward (not local)
+        // For SSH and git:// protocols, show error (SSH transport not yet fully integrated into clone)
         if (std.mem.startsWith(u8, url.?, "ssh://") or std.mem.startsWith(u8, url.?, "git://") or
             (std.mem.indexOf(u8, url.?, ":") != null and std.mem.indexOf(u8, url.?, "/") != null and
              (std.mem.indexOf(u8, url.?, ":").? < std.mem.indexOf(u8, url.?, "/").?) and !std.mem.startsWith(u8, url.?, "/")))
         {
-            // SSH-style URL (user@host:path) or git:// - forward to git
-            if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
-                try forwardToGit(allocator, all_original_args, platform_impl);
-                return;
-            }
+            try platform_impl.writeStderr("fatal: SSH/git:// clone not yet supported natively\n");
+            std.process.exit(128);
         }
 
         // Check if target directory already exists
