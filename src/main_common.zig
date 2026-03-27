@@ -4560,6 +4560,429 @@ fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     }
 }
 
+/// Resolve a path to its .git directory. Handles bare repos, .git files (worktrees/submodules),
+/// and file:// URLs. Returns the path to the git directory (objects, refs, etc.).
+fn resolveSourceGitDir(allocator: std.mem.Allocator, source_path: []const u8) ![]const u8 {
+    // Strip file:// prefix if present
+    const path = if (std.mem.startsWith(u8, source_path, "file://"))
+        source_path["file://".len..]
+    else
+        source_path;
+
+    // Resolve to absolute path
+    const abs_path = std.fs.cwd().realpathAlloc(allocator, path) catch {
+        return error.RepositoryNotFound;
+    };
+    errdefer allocator.free(abs_path);
+
+    // Check if it's a bare repo (has objects/ and refs/ directly)
+    const objects_path = try std.fmt.allocPrint(allocator, "{s}/objects", .{abs_path});
+    defer allocator.free(objects_path);
+    const refs_path = try std.fmt.allocPrint(allocator, "{s}/refs", .{abs_path});
+    defer allocator.free(refs_path);
+
+    const has_objects = std.fs.cwd().access(objects_path, .{});
+    const has_refs = std.fs.cwd().access(refs_path, .{});
+
+    if (has_objects != error.FileNotFound and has_refs != error.FileNotFound) {
+        // This is a bare repo or .git directory
+        return abs_path;
+    }
+
+    // Check for .git subdirectory
+    const git_subdir = try std.fmt.allocPrint(allocator, "{s}/.git", .{abs_path});
+    defer allocator.free(git_subdir);
+
+    // .git could be a file (gitlink) or directory
+    if (std.fs.cwd().openFile(git_subdir, .{})) |file| {
+        defer file.close();
+        // Read gitlink content
+        var buf: [4096]u8 = undefined;
+        const n = file.readAll(&buf) catch return error.RepositoryNotFound;
+        const content = std.mem.trim(u8, buf[0..n], " \t\r\n");
+        if (std.mem.startsWith(u8, content, "gitdir: ")) {
+            const gitdir_ref = content["gitdir: ".len..];
+            if (std.fs.path.isAbsolute(gitdir_ref)) {
+                allocator.free(abs_path);
+                return try allocator.dupe(u8, gitdir_ref);
+            } else {
+                const resolved = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ abs_path, gitdir_ref });
+                allocator.free(abs_path);
+                return resolved;
+            }
+        }
+        return error.RepositoryNotFound;
+    } else |_| {}
+
+    // Check if .git is a directory
+    const git_objects = try std.fmt.allocPrint(allocator, "{s}/.git/objects", .{abs_path});
+    defer allocator.free(git_objects);
+    if (std.fs.cwd().access(git_objects, .{}) != error.FileNotFound) {
+        const result = try std.fmt.allocPrint(allocator, "{s}/.git", .{abs_path});
+        allocator.free(abs_path);
+        return result;
+    }
+
+    allocator.free(abs_path);
+    return error.RepositoryNotFound;
+}
+
+/// Copy a directory recursively from src to dst
+fn copyDirectoryRecursive(allocator: std.mem.Allocator, src_path: []const u8, dst_path: []const u8) !void {
+    std.fs.cwd().makePath(dst_path) catch {};
+
+    var src_dir = std.fs.cwd().openDir(src_path, .{ .iterate = true }) catch return;
+    defer src_dir.close();
+
+    var iter = src_dir.iterate();
+    while (try iter.next()) |entry| {
+        const src_child = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ src_path, entry.name });
+        defer allocator.free(src_child);
+        const dst_child = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dst_path, entry.name });
+        defer allocator.free(dst_child);
+
+        switch (entry.kind) {
+            .directory => {
+                try copyDirectoryRecursive(allocator, src_child, dst_child);
+            },
+            .file => {
+                std.fs.cwd().copyFile(src_child, std.fs.cwd(), dst_child, .{}) catch {};
+            },
+            .sym_link => {
+                // Read and recreate symlink
+                var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const link_target = std.fs.cwd().readLink(src_child, &link_buf) catch continue;
+                // Delete existing file/link at destination if any
+                std.fs.cwd().deleteFile(dst_child) catch {};
+                const dst_dir = std.fs.cwd().openDir(dst_path, .{}) catch continue;
+                // Use the directory-relative createSymLink
+                var dst_dir_m = dst_dir;
+                dst_dir_m.symLink(link_target, entry.name, .{}) catch {};
+            },
+            else => {},
+        }
+    }
+}
+
+/// Perform a local clone (copy objects and refs from source git dir to destination)
+fn performLocalClone(
+    allocator: std.mem.Allocator,
+    source_url: []const u8,
+    target_dir: []const u8,
+    is_bare: bool,
+    is_no_checkout: bool,
+    branch: ?[]const u8,
+    origin_name: ?[]const u8,
+    platform_impl: *const platform_mod.Platform,
+) !void {
+    // Resolve source git directory
+    const src_git_dir = try resolveSourceGitDir(allocator, source_url);
+    defer allocator.free(src_git_dir);
+
+    const remote_name = origin_name orelse "origin";
+
+    // Determine the target .git directory
+    const dst_git_dir = if (is_bare)
+        try allocator.dupe(u8, target_dir)
+    else
+        try std.fmt.allocPrint(allocator, "{s}/.git", .{target_dir});
+    defer allocator.free(dst_git_dir);
+
+    // Create destination directory structure
+    std.fs.cwd().makePath(dst_git_dir) catch |err| {
+        const msg = try std.fmt.allocPrint(allocator, "fatal: cannot mkdir {s}: {}\n", .{ dst_git_dir, err });
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        std.process.exit(128);
+    };
+
+    // Create standard git directory structure
+    const dirs_to_create = [_][]const u8{
+        "objects", "objects/info", "objects/pack", "refs", "refs/heads", "refs/tags", "info",
+    };
+    for (dirs_to_create) |subdir| {
+        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dst_git_dir, subdir });
+        defer allocator.free(full_path);
+        std.fs.cwd().makePath(full_path) catch {};
+    }
+
+    // Copy objects (loose objects + pack files)
+    const src_objects = try std.fmt.allocPrint(allocator, "{s}/objects", .{src_git_dir});
+    defer allocator.free(src_objects);
+    const dst_objects = try std.fmt.allocPrint(allocator, "{s}/objects", .{dst_git_dir});
+    defer allocator.free(dst_objects);
+    try copyDirectoryRecursive(allocator, src_objects, dst_objects);
+
+    // Copy packed-refs if it exists
+    const src_packed_refs = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{src_git_dir});
+    defer allocator.free(src_packed_refs);
+
+    // Read source HEAD to determine default branch
+    const src_head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{src_git_dir});
+    defer allocator.free(src_head_path);
+    const src_head_content = std.fs.cwd().readFileAlloc(allocator, src_head_path, 4096) catch "ref: refs/heads/master\n";
+    defer if (src_head_content.ptr != @as([*]const u8, "ref: refs/heads/master\n")) allocator.free(src_head_content);
+
+    const src_head_trimmed = std.mem.trim(u8, src_head_content, " \t\r\n");
+
+    // Determine the default branch from source HEAD
+    var default_branch: []const u8 = "master";
+    if (std.mem.startsWith(u8, src_head_trimmed, "ref: refs/heads/")) {
+        default_branch = src_head_trimmed["ref: refs/heads/".len..];
+    }
+
+    // If --branch was specified, use that
+    const checkout_branch = branch orelse default_branch;
+
+    if (is_bare) {
+        // For bare repos, copy all refs directly and set HEAD
+        const src_refs = try std.fmt.allocPrint(allocator, "{s}/refs", .{src_git_dir});
+        defer allocator.free(src_refs);
+        const dst_refs = try std.fmt.allocPrint(allocator, "{s}/refs", .{dst_git_dir});
+        defer allocator.free(dst_refs);
+        try copyDirectoryRecursive(allocator, src_refs, dst_refs);
+
+        // Copy packed-refs
+        const dst_packed_refs = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{dst_git_dir});
+        defer allocator.free(dst_packed_refs);
+        std.fs.cwd().copyFile(src_packed_refs, std.fs.cwd(), dst_packed_refs, .{}) catch {};
+
+        // Set HEAD
+        const dst_head = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{dst_git_dir});
+        defer allocator.free(dst_head);
+        {
+            const f = try std.fs.cwd().createFile(dst_head, .{});
+            defer f.close();
+            const head_ref = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{checkout_branch});
+            defer allocator.free(head_ref);
+            try f.writeAll(head_ref);
+        }
+
+        // Write config
+        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{dst_git_dir});
+        defer allocator.free(config_path);
+        {
+            const f = try std.fs.cwd().createFile(config_path, .{});
+            defer f.close();
+            // Resolve the source URL to an absolute path for the remote
+            const abs_source = std.fs.cwd().realpathAlloc(allocator, if (std.mem.startsWith(u8, source_url, "file://")) source_url["file://".len..] else source_url) catch try allocator.dupe(u8, source_url);
+            defer allocator.free(abs_source);
+            const cfg = try std.fmt.allocPrint(allocator, "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n[remote \"{s}\"]\n\turl = {s}\n", .{ remote_name, abs_source });
+            defer allocator.free(cfg);
+            try f.writeAll(cfg);
+        }
+
+        // Write description
+        const desc_path = try std.fmt.allocPrint(allocator, "{s}/description", .{dst_git_dir});
+        defer allocator.free(desc_path);
+        {
+            const f = std.fs.cwd().createFile(desc_path, .{}) catch return;
+            defer f.close();
+            f.writeAll("Unnamed repository; edit this file 'description' to name the repository.\n") catch {};
+        }
+
+    } else {
+        // Non-bare clone: source refs become remote tracking refs
+        // Map source refs/heads/* to refs/remotes/<origin>/*
+        const remote_refs_dir = try std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}", .{ dst_git_dir, remote_name });
+        defer allocator.free(remote_refs_dir);
+        std.fs.cwd().makePath(remote_refs_dir) catch {};
+
+        // Copy source heads to remote tracking
+        const src_heads = try std.fmt.allocPrint(allocator, "{s}/refs/heads", .{src_git_dir});
+        defer allocator.free(src_heads);
+
+        // Read all source branch refs (loose)
+        var branch_map = std.StringHashMap([]const u8).init(allocator);
+        defer {
+            var it = branch_map.iterator();
+            while (it.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+                allocator.free(entry.value_ptr.*);
+            }
+            branch_map.deinit();
+        }
+
+        if (std.fs.cwd().openDir(src_heads, .{ .iterate = true })) |*dir_handle| {
+            var d = dir_handle.*;
+            defer d.close();
+            var iter = d.iterate();
+            while (try iter.next()) |entry| {
+                if (entry.kind == .file) {
+                    const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ src_heads, entry.name });
+                    defer allocator.free(ref_path);
+                    const hash = std.fs.cwd().readFileAlloc(allocator, ref_path, 256) catch continue;
+                    const hash_trimmed = std.mem.trim(u8, hash, " \t\r\n");
+                    const ht = try allocator.dupe(u8, hash_trimmed);
+                    allocator.free(hash);
+                    try branch_map.put(try allocator.dupe(u8, entry.name), ht);
+                }
+            }
+        } else |_| {}
+
+        // Also read packed-refs from source
+        if (std.fs.cwd().readFileAlloc(allocator, src_packed_refs, 10 * 1024 * 1024)) |packed_content| {
+            defer allocator.free(packed_content);
+            var lines = std.mem.splitScalar(u8, packed_content, '\n');
+            while (lines.next()) |line| {
+                if (line.len == 0 or line[0] == '#' or line[0] == '^') continue;
+                // Format: <hash> <refname>
+                if (std.mem.indexOfScalar(u8, line, ' ')) |space_idx| {
+                    const hash = line[0..space_idx];
+                    const refname = line[space_idx + 1..];
+                    if (std.mem.startsWith(u8, refname, "refs/heads/")) {
+                        const bname = refname["refs/heads/".len..];
+                        if (!branch_map.contains(bname)) {
+                            try branch_map.put(
+                                try allocator.dupe(u8, bname),
+                                try allocator.dupe(u8, hash),
+                            );
+                        }
+                    }
+                }
+            }
+        } else |_| {}
+
+        // Write remote tracking refs
+        var branch_iter = branch_map.iterator();
+        while (branch_iter.next()) |entry| {
+            const dst_ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ remote_refs_dir, entry.key_ptr.* });
+            defer allocator.free(dst_ref_path);
+            const f = std.fs.cwd().createFile(dst_ref_path, .{}) catch continue;
+            defer f.close();
+            f.writeAll(entry.value_ptr.*) catch continue;
+            f.writeAll("\n") catch continue;
+        }
+
+        // Copy tags
+        const src_tags = try std.fmt.allocPrint(allocator, "{s}/refs/tags", .{src_git_dir});
+        defer allocator.free(src_tags);
+        const dst_tags = try std.fmt.allocPrint(allocator, "{s}/refs/tags", .{dst_git_dir});
+        defer allocator.free(dst_tags);
+        copyDirectoryRecursive(allocator, src_tags, dst_tags) catch {};
+
+        // Also copy packed-refs but rewrite heads to remotes
+        if (std.fs.cwd().readFileAlloc(allocator, src_packed_refs, 10 * 1024 * 1024)) |packed_content| {
+            defer allocator.free(packed_content);
+            var new_packed = std.array_list.Managed(u8).init(allocator);
+            defer new_packed.deinit();
+            var lines = std.mem.splitScalar(u8, packed_content, '\n');
+            while (lines.next()) |line| {
+                if (line.len == 0) continue;
+                if (line[0] == '#') {
+                    try new_packed.appendSlice(line);
+                    try new_packed.append('\n');
+                    continue;
+                }
+                if (std.mem.indexOf(u8, line, "refs/heads/")) |_| {
+                    // Rewrite refs/heads/X to refs/remotes/<origin>/X
+                    if (std.mem.indexOfScalar(u8, line, ' ')) |sp| {
+                        try new_packed.appendSlice(line[0 .. sp + 1]);
+                        const refname = line[sp + 1..];
+                        if (std.mem.startsWith(u8, refname, "refs/heads/")) {
+                            const bname = refname["refs/heads/".len..];
+                            const new_ref = try std.fmt.allocPrint(allocator, "refs/remotes/{s}/{s}", .{ remote_name, bname });
+                            defer allocator.free(new_ref);
+                            try new_packed.appendSlice(new_ref);
+                        } else {
+                            try new_packed.appendSlice(refname);
+                        }
+                        try new_packed.append('\n');
+                    }
+                } else if (std.mem.indexOf(u8, line, "refs/tags/")) |_| {
+                    try new_packed.appendSlice(line);
+                    try new_packed.append('\n');
+                } else if (line[0] == '^') {
+                    // Peeled tag ref - keep it
+                    try new_packed.appendSlice(line);
+                    try new_packed.append('\n');
+                }
+            }
+            if (new_packed.items.len > 0) {
+                const dst_packed = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{dst_git_dir});
+                defer allocator.free(dst_packed);
+                const f = std.fs.cwd().createFile(dst_packed, .{}) catch unreachable;
+                defer f.close();
+                f.writeAll(new_packed.items) catch {};
+            }
+        } else |_| {}
+
+        // Create local branch from the checkout branch
+        const branch_hash = branch_map.get(checkout_branch) orelse blk: {
+            // Try default_branch if checkout_branch not found
+            if (branch_map.get(default_branch)) |h| break :blk h;
+            // Use first available branch
+            var first_iter = branch_map.iterator();
+            if (first_iter.next()) |entry| break :blk entry.value_ptr.*;
+            break :blk null;
+        };
+
+        if (branch_hash) |hash| {
+            // Create local branch ref
+            const local_ref = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ dst_git_dir, checkout_branch });
+            defer allocator.free(local_ref);
+            {
+                const f = try std.fs.cwd().createFile(local_ref, .{});
+                defer f.close();
+                try f.writeAll(hash);
+                try f.writeAll("\n");
+            }
+
+            // Set HEAD to point to the branch
+            const dst_head = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{dst_git_dir});
+            defer allocator.free(dst_head);
+            {
+                const f = try std.fs.cwd().createFile(dst_head, .{});
+                defer f.close();
+                const head_content = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{checkout_branch});
+                defer allocator.free(head_content);
+                try f.writeAll(head_content);
+            }
+        } else {
+            // Empty repository or no branches
+            const dst_head = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{dst_git_dir});
+            defer allocator.free(dst_head);
+            {
+                const f = try std.fs.cwd().createFile(dst_head, .{});
+                defer f.close();
+                try f.writeAll("ref: refs/heads/master\n");
+            }
+            try platform_impl.writeStderr("warning: You appear to have cloned an empty repository.\n");
+        }
+
+        // Write config
+        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{dst_git_dir});
+        defer allocator.free(config_path);
+        {
+            const f = try std.fs.cwd().createFile(config_path, .{});
+            defer f.close();
+            const abs_source = std.fs.cwd().realpathAlloc(allocator, if (std.mem.startsWith(u8, source_url, "file://")) source_url["file://".len..] else source_url) catch try allocator.dupe(u8, source_url);
+            defer allocator.free(abs_source);
+            const cfg = try std.fmt.allocPrint(allocator, "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n[remote \"{s}\"]\n\turl = {s}\n\tfetch = +refs/heads/*:refs/remotes/{s}/*\n[branch \"{s}\"]\n\tremote = {s}\n\tmerge = refs/heads/{s}\n", .{ remote_name, abs_source, remote_name, checkout_branch, remote_name, checkout_branch });
+            defer allocator.free(cfg);
+            try f.writeAll(cfg);
+        }
+
+        // Write description
+        const desc_path = try std.fmt.allocPrint(allocator, "{s}/description", .{dst_git_dir});
+        defer allocator.free(desc_path);
+        {
+            const f = std.fs.cwd().createFile(desc_path, .{}) catch return;
+            defer f.close();
+            f.writeAll("Unnamed repository; edit this file 'description' to name the repository.\n") catch {};
+        }
+
+        // Checkout working tree (unless --no-checkout)
+        if (!is_no_checkout and branch_hash != null) {
+            checkoutCommitTree(dst_git_dir, branch_hash.?, allocator, platform_impl) catch |err| {
+                const emsg = try std.fmt.allocPrint(allocator, "warning: checkout failed: {}, repository cloned but working tree not populated\n", .{err});
+                defer allocator.free(emsg);
+                try platform_impl.writeStderr(emsg);
+            };
+        }
+    }
+}
+
 fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform, all_original_args: [][]const u8) !void {
     if (@import("builtin").target.os.tag == .freestanding) {
         try platform_impl.writeStderr("clone: not supported in freestanding mode\n");
@@ -4764,15 +5187,52 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         // Non-HTTPS --no-checkout: fall through to git
     }
 
-    // Shell out to real git for non-HTTPS cases that need --bare or other unsupported combos
+    // For non-HTTPS --bare, handle locally
     if (is_bare) {
-        // This shouldn't be reached for HTTPS (handled above), only non-HTTPS bare clones
-        if (build_options.enable_git_fallback) {
-            try forwardToGit(allocator, all_original_args, platform_impl);
-            return;
-        } else {
-            try platform_impl.writeStderr("fatal: non-HTTPS clone not supported without git fallback\n");
-            std.process.exit(128);
+        // Find URL and target for bare clone
+        var bare_url: ?[]const u8 = null;
+        var bare_target: ?[]const u8 = null;
+        {
+            var i: usize = 0;
+            while (i < all_args.items.len) : (i += 1) {
+                const arg = all_args.items[i];
+                if (std.mem.eql(u8, arg, "--depth") or std.mem.eql(u8, arg, "-b") or
+                    std.mem.eql(u8, arg, "--branch") or std.mem.eql(u8, arg, "--origin") or
+                    std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--reference") or
+                    std.mem.eql(u8, arg, "--separate-git-dir"))
+                {
+                    i += 1;
+                    continue;
+                }
+                if (std.mem.startsWith(u8, arg, "-")) continue;
+                if (bare_url == null) {
+                    bare_url = arg;
+                } else if (bare_target == null) {
+                    bare_target = arg;
+                }
+            }
+        }
+        if (bare_url) |burl| {
+            if (!(std.mem.startsWith(u8, burl, "https://") or std.mem.startsWith(u8, burl, "http://") or
+                std.mem.startsWith(u8, burl, "ssh://") or std.mem.startsWith(u8, burl, "git://")))
+            {
+                const bfinal_target = bare_target orelse bt: {
+                    if (std.mem.lastIndexOfScalar(u8, burl, '/')) |ls| {
+                        const rn = burl[ls + 1..];
+                        if (std.mem.endsWith(u8, rn, ".git")) break :bt rn else {
+                            const bn = try std.fmt.allocPrint(allocator, "{s}.git", .{rn});
+                            break :bt bn;
+                        }
+                    } else break :bt "repository.git";
+                };
+
+                const bare_msg = try std.fmt.allocPrint(allocator, "Cloning into bare repository '{s}'...\n", .{bfinal_target});
+                defer allocator.free(bare_msg);
+                try platform_impl.writeStderr(bare_msg);
+
+                try performLocalClone(allocator, burl, bfinal_target, true, false, null, null, platform_impl);
+                return;
+            }
         }
     }
 
@@ -4822,12 +5282,62 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         }
     };
     
-    // For non-HTTP URLs (local paths, ssh://, git://), forward to real git early
+    // For non-HTTP URLs (local paths, ssh://, git://), handle local clone natively
     if (!(std.mem.startsWith(u8, url.?, "https://") or std.mem.startsWith(u8, url.?, "http://"))) {
-        if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
-            try forwardToGit(allocator, all_original_args, platform_impl);
-            return;
+        // Parse --branch and --origin flags
+        var clone_branch: ?[]const u8 = null;
+        var clone_origin: ?[]const u8 = null;
+        {
+            var i: usize = 0;
+            while (i < all_args.items.len) : (i += 1) {
+                const arg = all_args.items[i];
+                if ((std.mem.eql(u8, arg, "-b") or std.mem.eql(u8, arg, "--branch")) and i + 1 < all_args.items.len) {
+                    clone_branch = all_args.items[i + 1];
+                    i += 1;
+                } else if (std.mem.startsWith(u8, arg, "--branch=")) {
+                    clone_branch = arg["--branch=".len..];
+                } else if ((std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--origin")) and i + 1 < all_args.items.len) {
+                    clone_origin = all_args.items[i + 1];
+                    i += 1;
+                } else if (std.mem.startsWith(u8, arg, "--origin=")) {
+                    clone_origin = arg["--origin=".len..];
+                }
+            }
         }
+
+        // For SSH and git:// protocols, we still need to forward (not local)
+        if (std.mem.startsWith(u8, url.?, "ssh://") or std.mem.startsWith(u8, url.?, "git://") or
+            (std.mem.indexOf(u8, url.?, ":") != null and std.mem.indexOf(u8, url.?, "/") != null and
+             (std.mem.indexOf(u8, url.?, ":").? < std.mem.indexOf(u8, url.?, "/").?) and !std.mem.startsWith(u8, url.?, "/")))
+        {
+            // SSH-style URL (user@host:path) or git:// - forward to git
+            if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
+                try forwardToGit(allocator, all_original_args, platform_impl);
+                return;
+            }
+        }
+
+        // Check if target directory already exists
+        if (platform_impl.fs.exists(final_target_dir) catch false) {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: destination path '{s}' already exists and is not an empty directory.\n", .{final_target_dir});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        }
+
+        const clone_msg = try std.fmt.allocPrint(allocator, "Cloning into '{s}'...\n", .{final_target_dir});
+        defer allocator.free(clone_msg);
+        try platform_impl.writeStderr(clone_msg);
+
+        performLocalClone(allocator, url.?, final_target_dir, false, is_no_checkout, clone_branch, clone_origin, platform_impl) catch |err| {
+            // Clean up on failure
+            std.fs.cwd().deleteTree(final_target_dir) catch {};
+            const emsg = try std.fmt.allocPrint(allocator, "fatal: {}\n", .{err});
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
+            std.process.exit(128);
+        };
+        return;
     }
 
     // Check if target directory already exists
@@ -4930,36 +5440,6 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             };
         }
 
-        return;
-    }
-
-    // For non-HTTP URLs (local paths, ssh://, git://), forward to real git
-    if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
-        var git_args = std.array_list.Managed([]const u8).init(allocator);
-        defer git_args.deinit();
-        try git_args.append(findRealGit());
-        try git_args.append("clone");
-        for (all_args.items) |arg| {
-            try git_args.append(arg);
-        }
-        var child = std.process.Child.init(git_args.items, allocator);
-        child.stdin_behavior = .Inherit;
-        child.stdout_behavior = .Inherit;
-        child.stderr_behavior = .Inherit;
-        const result = child.spawnAndWait() catch |err| {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: failed to execute git: {}\n", .{err});
-            defer allocator.free(msg);
-            try platform_impl.writeStderr(msg);
-            std.process.exit(128);
-        };
-        switch (result) {
-            .Exited => |code| {
-                if (code != 0) std.process.exit(@intCast(code));
-            },
-            .Signal => |_| std.process.exit(128),
-            .Stopped => |_| std.process.exit(128),
-            .Unknown => |_| std.process.exit(1),
-        }
         return;
     }
 
