@@ -7564,6 +7564,23 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         // Create new branch
         const branch_name = first_arg.?;
         const start_point = args.next();
+        
+        // Check if branch already exists
+        const existing_ref = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, branch_name });
+        defer allocator.free(existing_ref);
+        const branch_exists = if (std.fs.cwd().access(existing_ref, .{})) |_| true else |_| false;
+        if (branch_exists) {
+            const emsg = try std.fmt.allocPrint(allocator, "fatal: a branch named '{s}' already exists\n", .{branch_name});
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
+            std.process.exit(128);
+        }
+        
+        // Validate branch name
+        if (std.mem.eql(u8, branch_name, "HEAD")) {
+            try platform_impl.writeStderr("fatal: 'HEAD' is not a valid branch name\n");
+            std.process.exit(128);
+        }
 
         refs.createBranch(git_path, branch_name, start_point, platform_impl, allocator) catch |err| switch (err) {
             error.NoCommitsYet => {
