@@ -13424,7 +13424,11 @@ fn cmdShow(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
         try refs_to_show.append("HEAD");
     }
 
-    for (refs_to_show.items) |ref_to_show| {
+    for (refs_to_show.items, 0..) |ref_to_show, ref_idx| {
+        // Add separator between multiple items
+        if (ref_idx > 0) {
+            try platform_impl.writeStdout("\n");
+        }
         // Resolve the reference to a commit hash
         const commit_hash = resolveCommittish(git_path, ref_to_show, platform_impl, allocator) catch {
             const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\n", .{ref_to_show});
