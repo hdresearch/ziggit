@@ -2429,53 +2429,7 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
 
     // Check if any files were specified
     var has_files = false;
-    var update_mode = false;
-    var add_all = false;
-    var force_add = false;
-    var dry_run = false;
-    var intent_to_add = false;
-    var collected_paths_add = std.array_list.Managed([]const u8).init(allocator);
-    defer collected_paths_add.deinit();
     
-    // Parse flags first
-    while (args.next()) |raw_arg| {
-        if (std.mem.eql(u8, raw_arg, "--")) {
-            while (args.next()) |p| try collected_paths_add.append(p);
-            break;
-        } else if (std.mem.eql(u8, raw_arg, "--all") or std.mem.eql(u8, raw_arg, "-A")) {
-            add_all = true;
-        } else if (std.mem.eql(u8, raw_arg, "--update") or std.mem.eql(u8, raw_arg, "-u")) {
-            update_mode = true;
-        } else if (std.mem.eql(u8, raw_arg, "--intent-to-add") or std.mem.eql(u8, raw_arg, "-N")) {
-            intent_to_add = true;
-        } else if (std.mem.eql(u8, raw_arg, "--force") or std.mem.eql(u8, raw_arg, "-f")) {
-            force_add = true;
-        } else if (std.mem.eql(u8, raw_arg, "--dry-run") or std.mem.eql(u8, raw_arg, "-n")) {
-            dry_run = true;
-        } else if (std.mem.eql(u8, raw_arg, "--verbose") or std.mem.eql(u8, raw_arg, "-v") or
-            std.mem.eql(u8, raw_arg, "--refresh") or std.mem.eql(u8, raw_arg, "--ignore-errors") or
-            std.mem.eql(u8, raw_arg, "--ignore-missing") or std.mem.eql(u8, raw_arg, "--no-warn-embedded-repo") or
-            std.mem.eql(u8, raw_arg, "--renormalize") or std.mem.eql(u8, raw_arg, "--sparse") or
-            std.mem.eql(u8, raw_arg, "--no-all"))
-        {
-            // Accept flags silently
-        } else if (std.mem.startsWith(u8, raw_arg, "-") and raw_arg.len > 1 and raw_arg[1] == '-') {
-            // Unknown --flags
-        } else if (raw_arg.len > 0 and raw_arg[0] == '-') {
-            // Unknown short flags
-        } else {
-            try collected_paths_add.append(raw_arg);
-        }
-    }
-    if (intent_to_add) {}
-    if (dry_run) {}
-    if (force_add) {}
-    
-    // If --all or -u and no paths, default to "."
-    if ((add_all or update_mode) and collected_paths_add.items.len == 0) {
-        try collected_paths_add.append(".");
-    }
-
     // Load index
     var index = index_mod.Index.load(git_path, platform_impl, allocator) catch |err| switch (err) {
         error.FileNotFound => index_mod.Index.init(allocator),
@@ -2487,8 +2441,34 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     const cwd = try platform_impl.fs.getCwd(allocator);
     defer allocator.free(cwd);
 
+    // Pre-scan for flags
+    var add_all_flag = false;
+    var update_flag = false;
+    var force_flag = false;
+    var collected_add_paths = std.array_list.Managed([]const u8).init(allocator);
+    defer collected_add_paths.deinit();
+    while (args.next()) |raw_arg| {
+        if (std.mem.eql(u8, raw_arg, "--")) {
+            while (args.next()) |p| try collected_add_paths.append(p);
+            break;
+        } else if (std.mem.eql(u8, raw_arg, "--all") or std.mem.eql(u8, raw_arg, "-A")) {
+            add_all_flag = true;
+        } else if (std.mem.eql(u8, raw_arg, "--update") or std.mem.eql(u8, raw_arg, "-u")) {
+            update_flag = true;
+        } else if (std.mem.eql(u8, raw_arg, "--force") or std.mem.eql(u8, raw_arg, "-f")) {
+            force_flag = true;
+        } else if (raw_arg.len > 0 and raw_arg[0] == '-') {
+            // Skip other flags
+        } else {
+            try collected_add_paths.append(raw_arg);
+        }
+    }
+    if ((add_all_flag or update_flag) and collected_add_paths.items.len == 0) {
+        try collected_add_paths.append(".");
+    }
+
     // Process all file arguments
-    for (collected_paths_add.items) |file_path| {
+    for (collected_add_paths.items) |file_path| {
         has_files = true;
         
         // Handle special cases like "." for current directory
@@ -2542,21 +2522,25 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     }
 
     // When --all or --update, remove index entries for deleted files
-    if (add_all or update_mode) {
+    if (add_all_flag or update_flag) {
         const repo_root = std.fs.path.dirname(git_path) orelse ".";
-        var rm_i: usize = 0;
-        while (rm_i < index.entries.items.len) {
-            const entry = index.entries.items[rm_i];
-            const full_path = if (repo_root.len > 0 and !std.mem.eql(u8, repo_root, "."))
-                std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path }) catch { rm_i += 1; continue; }
+        var i: usize = 0;
+        while (i < index.entries.items.len) {
+            const entry = index.entries.items[i];
+            const fp = if (repo_root.len > 0 and !std.mem.eql(u8, repo_root, "."))
+                std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path }) catch { i += 1; continue; }
             else
-                allocator.dupe(u8, entry.path) catch { rm_i += 1; continue; };
-            defer allocator.free(full_path);
-            const exists = if (platform_impl.fs.exists(full_path) catch false) true else false;
+                allocator.dupe(u8, entry.path) catch { i += 1; continue; };
+            defer allocator.free(fp);
+            const exists = blk2: {
+                std.fs.cwd().access(fp, .{}) catch break :blk2 false;
+                break :blk2 true;
+            };
             if (!exists) {
-                _ = index.entries.orderedRemove(rm_i);
+                index.entries.items[i].deinit(allocator);
+                _ = index.entries.orderedRemove(i);
             } else {
-                rm_i += 1;
+                i += 1;
             }
         }
     }
@@ -2695,79 +2679,6 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             signoff = true;
         } else if (std.mem.eql(u8, arg, "--no-edit")) {
             // No edit
-        } else if (std.mem.startsWith(u8, arg, "--fixup=")) {
-            const fixup_ref = arg["--fixup=".len..];
-            // Parse fixup variants: --fixup=<commit>, --fixup=amend:<commit>, --fixup=reword:<commit>
-            var actual_ref = fixup_ref;
-            var fixup_prefix: []const u8 = "fixup";
-            if (std.mem.startsWith(u8, fixup_ref, "amend:")) {
-                actual_ref = fixup_ref["amend:".len..];
-                fixup_prefix = "amend";
-            } else if (std.mem.startsWith(u8, fixup_ref, "reword:")) {
-                actual_ref = fixup_ref["reword:".len..];
-                fixup_prefix = "amend";
-            }
-            // Resolve the commit and get its message
-            const gp2 = findGitDirectory(allocator, platform_impl) catch { std.process.exit(128); unreachable; };
-            defer allocator.free(gp2);
-            const fixup_hash = resolveRevision(gp2, actual_ref, platform_impl, allocator) catch { std.process.exit(128); unreachable; };
-            defer allocator.free(fixup_hash);
-            const fixup_obj = objects.GitObject.load(fixup_hash, gp2, platform_impl, allocator) catch { std.process.exit(128); unreachable; };
-            defer fixup_obj.deinit(allocator);
-            if (std.mem.indexOf(u8, fixup_obj.data, "\n\n")) |pos| {
-                const orig_msg = fixup_obj.data[pos + 2..];
-                // Get first line
-                const first_line_end = std.mem.indexOf(u8, orig_msg, "\n") orelse orig_msg.len;
-                const first_line = orig_msg[0..first_line_end];
-                if (std.mem.eql(u8, fixup_prefix, "amend")) {
-                    message = try std.fmt.allocPrint(allocator, "amend! {s}", .{first_line});
-                } else {
-                    message = try std.fmt.allocPrint(allocator, "fixup! {s}", .{first_line});
-                }
-            }
-            allow_empty = true;
-        } else if (std.mem.eql(u8, arg, "--fixup")) {
-            const fixup_ref = args.next() orelse { std.process.exit(128); unreachable; };
-            const gp2 = findGitDirectory(allocator, platform_impl) catch { std.process.exit(128); unreachable; };
-            defer allocator.free(gp2);
-            const fixup_hash = resolveRevision(gp2, fixup_ref, platform_impl, allocator) catch { std.process.exit(128); unreachable; };
-            defer allocator.free(fixup_hash);
-            const fixup_obj = objects.GitObject.load(fixup_hash, gp2, platform_impl, allocator) catch { std.process.exit(128); unreachable; };
-            defer fixup_obj.deinit(allocator);
-            if (std.mem.indexOf(u8, fixup_obj.data, "\n\n")) |pos| {
-                const orig_msg = fixup_obj.data[pos + 2..];
-                const first_line_end = std.mem.indexOf(u8, orig_msg, "\n") orelse orig_msg.len;
-                message = try std.fmt.allocPrint(allocator, "fixup! {s}", .{orig_msg[0..first_line_end]});
-            }
-            allow_empty = true;
-        } else if (std.mem.startsWith(u8, arg, "--squash=")) {
-            const squash_ref = arg["--squash=".len..];
-            const gp2 = findGitDirectory(allocator, platform_impl) catch { std.process.exit(128); unreachable; };
-            defer allocator.free(gp2);
-            const squash_hash = resolveRevision(gp2, squash_ref, platform_impl, allocator) catch { std.process.exit(128); unreachable; };
-            defer allocator.free(squash_hash);
-            const squash_obj = objects.GitObject.load(squash_hash, gp2, platform_impl, allocator) catch { std.process.exit(128); unreachable; };
-            defer squash_obj.deinit(allocator);
-            if (std.mem.indexOf(u8, squash_obj.data, "\n\n")) |pos| {
-                const orig_msg = squash_obj.data[pos + 2..];
-                const first_line_end = std.mem.indexOf(u8, orig_msg, "\n") orelse orig_msg.len;
-                message = try std.fmt.allocPrint(allocator, "squash! {s}", .{orig_msg[0..first_line_end]});
-            }
-            allow_empty = true;
-        } else if (std.mem.eql(u8, arg, "--squash")) {
-            const squash_ref = args.next() orelse { std.process.exit(128); unreachable; };
-            const gp2 = findGitDirectory(allocator, platform_impl) catch { std.process.exit(128); unreachable; };
-            defer allocator.free(gp2);
-            const squash_hash = resolveRevision(gp2, squash_ref, platform_impl, allocator) catch { std.process.exit(128); unreachable; };
-            defer allocator.free(squash_hash);
-            const squash_obj = objects.GitObject.load(squash_hash, gp2, platform_impl, allocator) catch { std.process.exit(128); unreachable; };
-            defer squash_obj.deinit(allocator);
-            if (std.mem.indexOf(u8, squash_obj.data, "\n\n")) |pos| {
-                const orig_msg = squash_obj.data[pos + 2..];
-                const first_line_end = std.mem.indexOf(u8, orig_msg, "\n") orelse orig_msg.len;
-                message = try std.fmt.allocPrint(allocator, "squash! {s}", .{orig_msg[0..first_line_end]});
-            }
-            allow_empty = true;
         } else if (std.mem.eql(u8, arg, "--allow-empty-message")) {
             allow_empty = true; // Close enough
         } else if (std.mem.eql(u8, arg, "--")) {
@@ -7213,21 +7124,6 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             defer allocator.free(content);
             try outputConfigList(content, source.path, source.scope, null_terminator, show_names, show_origin, show_scope, allocator, platform_impl);
         }
-        // Also show -c overrides
-        if (global_config_overrides) |overrides| {
-            for (overrides.items) |ov| {
-                const term: []const u8 = if (null_terminator) "\x00" else "\n";
-                if (show_names) {
-                    const output = try std.fmt.allocPrint(allocator, "{s}{s}", .{ ov.key, term });
-                    defer allocator.free(output);
-                    try platform_impl.writeStdout(output);
-                } else {
-                    const output = try std.fmt.allocPrint(allocator, "{s}={s}{s}", .{ ov.key, ov.value, term });
-                    defer allocator.free(output);
-                    try platform_impl.writeStdout(output);
-                }
-            }
-        }
         return;
     }
 
@@ -8635,27 +8531,6 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
 
             // Handle delete refspec  :branch
             if (rs.len > 0 and rs[0] == ':') {
-                // Empty :  means push matching (all branches that exist on both sides)
-                if (rs.len == 1) {
-                    // Push matching: for each local branch, if it exists on remote, push it
-                    const heads_dir = try std.fmt.allocPrint(allocator, "{s}/refs/heads", .{git_path});
-                    defer allocator.free(heads_dir);
-                    var dir2 = std.fs.cwd().openDir(heads_dir, .{ .iterate = true }) catch continue;
-                    defer dir2.close();
-                    var iter2 = dir2.iterate();
-                    while (iter2.next() catch null) |entry2| {
-                        if (entry2.kind != .file) continue;
-                        // Check if branch exists on remote
-                        const remote_ref_check = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ remote_git_dir, entry2.name });
-                        defer allocator.free(remote_ref_check);
-                        if (std.fs.cwd().access(remote_ref_check, .{})) {
-                            const rspec = try std.fmt.allocPrint(allocator, "refs/heads/{s}:refs/heads/{s}", .{ entry2.name, entry2.name });
-                            defer allocator.free(rspec);
-                            pushRefspec(allocator, git_path, remote_git_dir, rspec, force_this, dry_run, quiet, platform_impl) catch {};
-                        } else |_| {}
-                    }
-                    continue;
-                }
                 // Delete remote ref
                 const remote_ref_name = rs[1..];
                 const full_ref = if (std.mem.startsWith(u8, remote_ref_name, "refs/"))
@@ -8668,16 +8543,10 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
                     const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ remote_git_dir, full_ref });
                     defer allocator.free(ref_path);
                     std.fs.cwd().deleteFile(ref_path) catch {
-                        // Also try packed-refs
+                        const msg = try std.fmt.allocPrint(allocator, "error: unable to delete '{s}': remote ref does not exist\n", .{full_ref});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
                     };
-                    // Also delete local tracking ref
-                    const branch_name = if (std.mem.startsWith(u8, remote_ref_name, "refs/heads/"))
-                        remote_ref_name["refs/heads/".len..]
-                    else
-                        remote_ref_name;
-                    const tracking_ref = try std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}/{s}", .{ git_path, remote, branch_name });
-                    defer allocator.free(tracking_ref);
-                    std.fs.cwd().deleteFile(tracking_ref) catch {};
                 }
                 if (!quiet) {
                     const msg = try std.fmt.allocPrint(allocator, " - [deleted]         {s}\n", .{remote_ref_name});
@@ -8732,37 +8601,7 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
         }
     }
 
-    // Update remote tracking refs - sync refs/remotes/<remote>/* with what remote has
-    if (!dry_run and remote_url_allocated) {
-        // Read all remote refs and update tracking
-        const remote_heads_dir = std.fmt.allocPrint(allocator, "{s}/refs/heads", .{remote_git_dir}) catch null;
-        defer if (remote_heads_dir) |d| allocator.free(d);
-        if (remote_heads_dir) |rhd| {
-            var rdir = std.fs.cwd().openDir(rhd, .{ .iterate = true }) catch null;
-            if (rdir) |*rd| {
-                defer rd.close();
-                var riter = rd.iterate();
-                while (riter.next() catch null) |rentry| {
-                    if (rentry.kind != .file) continue;
-                    const rref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ rhd, rentry.name }) catch continue;
-                    defer allocator.free(rref_path);
-                    if (std.fs.cwd().readFileAlloc(allocator, rref_path, 256)) |rval| {
-                        defer allocator.free(rval);
-                        const rh = std.mem.trim(u8, rval, " \t\r\n");
-                        const tracking_path = std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}/{s}", .{ git_path, remote, rentry.name }) catch continue;
-                        defer allocator.free(tracking_path);
-                        if (std.fs.path.dirname(tracking_path)) |dir| std.fs.cwd().makePath(dir) catch {};
-                        const tf = std.fs.cwd().createFile(tracking_path, .{}) catch continue;
-                        defer tf.close();
-                        const thl = std.fmt.allocPrint(allocator, "{s}\n", .{rh}) catch continue;
-                        defer allocator.free(thl);
-                        tf.writeAll(thl) catch {};
-                    } else |_| {}
-                }
-            }
-        }
-    }
-
+    // Update remote tracking refs
     if (set_upstream) {
         // TODO: update branch.<name>.remote and branch.<name>.merge
     }
@@ -8833,8 +8672,7 @@ fn pushRefspecInner(allocator: std.mem.Allocator, local_git_dir: []const u8, rem
                         } else |_| {}
                     }
                     if (deny) {
-                        const branch_short = if (std.mem.startsWith(u8, full_dst, "refs/heads/")) full_dst["refs/heads/".len..] else full_dst;
-                        const msg = try std.fmt.allocPrint(allocator, " ! [remote rejected] {s} -> {s} (branch is currently checked out)\nremote: error: refusing to update checked out branch: {s}\nremote: error: By default, updating the current branch in a non-bare repository\nremote: is denied.\nerror: failed to push some refs\n", .{branch_short, branch_short, full_dst});
+                        const msg = try std.fmt.allocPrint(allocator, "remote: error: refusing to update checked out branch: {s}\nremote: error: By default, updating the current branch in a non-bare repository\nremote: is denied.\n", .{full_dst});
                         defer allocator.free(msg);
                         try platform_impl.writeStderr(msg);
                         std.process.exit(1);
@@ -10784,28 +10622,8 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         defer allocator.free(git_path);
 
         const hash = resolveRevision(git_path, rev_arg.?, platform_impl, allocator) catch {
-            // If it's already a valid hex hash, use it directly (e.g., git hash-object output)
-            if (rev_arg.?.len == 40) {
-                var valid_hex = true;
-                for (rev_arg.?) |ch| {
-                    if (!((ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f'))) { valid_hex = false; break; }
-                }
-                if (valid_hex) {
-                    if (short) |n| {
-                        const s = if (n > 40) @as(u8, 40) else n;
-                        const out_s = try std.fmt.allocPrint(allocator, "{s}\n", .{rev_arg.?[0..s]});
-                        defer allocator.free(out_s);
-                        try platform_impl.writeStdout(out_s);
-                    } else {
-                        const out_s = try std.fmt.allocPrint(allocator, "{s}\n", .{rev_arg.?});
-                        defer allocator.free(out_s);
-                        try platform_impl.writeStdout(out_s);
-                    }
-                    return;
-                }
-            }
             if (!quiet) {
-                const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\nUse '--' to separate paths from revisions, like this:\n'git <command> [<revision>...] -- [<file>...]'\n", .{rev_arg.?});
+                const msg = try std.fmt.allocPrint(allocator, "fatal: Needed a single revision\n", .{});
                 defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
             }
@@ -10908,24 +10726,6 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                 try platform_impl.writeStdout(out);
             }
         } else |_| {
-            // If it's a valid 40-char hex hash, use it directly
-            if (arg.len == 40) {
-                var vhex = true;
-                for (arg) |ch| { if (!((ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f'))) { vhex = false; break; } }
-                if (vhex) {
-                    if (short) |n| {
-                        const s = if (n > 40) @as(u8, 40) else n;
-                        const o = try std.fmt.allocPrint(allocator, "{s}\n", .{arg[0..s]});
-                        defer allocator.free(o);
-                        try platform_impl.writeStdout(o);
-                    } else {
-                        const o = try std.fmt.allocPrint(allocator, "{s}\n", .{arg});
-                        defer allocator.free(o);
-                        try platform_impl.writeStdout(o);
-                    }
-                    continue;
-                }
-            }
             if (!quiet) {
                 const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\nUse '--' to separate paths from revisions, like this:\n'git <command> [<revision>...] -- [<file>...]'\n", .{arg});
                 defer allocator.free(msg);
@@ -24498,6 +24298,8 @@ fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_index: u
     var exit_code_flag = false;
     var patch_mode = false;
     var suppress_output = false;
+    var name_status = false;
+    var name_only = false;
     var tree_ish: ?[]const u8 = null;
     var pathspecs = std.array_list.Managed([]const u8).init(allocator);
     defer pathspecs.deinit();
@@ -24521,6 +24323,10 @@ fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_index: u
         } else if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
             suppress_output = true;
             exit_code_flag = true;
+        } else if (std.mem.eql(u8, arg, "--name-status")) {
+            name_status = true;
+        } else if (std.mem.eql(u8, arg, "--name-only")) {
+            name_only = true;
         } else if (std.mem.eql(u8, arg, "--")) {
             seen_dashdash = true;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
@@ -24577,7 +24383,12 @@ fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_index: u
                 _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&te.hash}) catch unreachable;
                 var new_hash_buf: [40]u8 = undefined;
                 _ = std.fmt.bufPrint(&new_hash_buf, "{x}", .{&entry.sha1}) catch unreachable;
-                const line = try std.fmt.allocPrint(allocator, ":{o:0>6} {o:0>6} {s} {s} M\t{s}\n", .{ te.mode, entry.mode, &old_hash_buf, &new_hash_buf, entry.path });
+                const line = if (name_status)
+                    try std.fmt.allocPrint(allocator, "M\t{s}\n", .{entry.path})
+                else if (name_only)
+                    try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path})
+                else
+                    try std.fmt.allocPrint(allocator, ":{o:0>6} {o:0>6} {s} {s} M\t{s}\n", .{ te.mode, entry.mode, &old_hash_buf, &new_hash_buf, entry.path });
                 defer allocator.free(line);
                 try platform_impl.writeStdout(line);
             }
@@ -24585,7 +24396,12 @@ fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_index: u
             has_diffs = true;
             var new_hash_buf: [40]u8 = undefined;
             _ = std.fmt.bufPrint(&new_hash_buf, "{x}", .{&entry.sha1}) catch unreachable;
-            const line = try std.fmt.allocPrint(allocator, ":000000 {o:0>6} {s} {s} A\t{s}\n", .{ entry.mode, zero_oid, &new_hash_buf, entry.path });
+            const line = if (name_status)
+                try std.fmt.allocPrint(allocator, "A\t{s}\n", .{entry.path})
+            else if (name_only)
+                try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path})
+            else
+                try std.fmt.allocPrint(allocator, ":000000 {o:0>6} {s} {s} A\t{s}\n", .{ entry.mode, zero_oid, &new_hash_buf, entry.path });
             defer allocator.free(line);
             try platform_impl.writeStdout(line);
         }
@@ -24614,7 +24430,12 @@ fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_index: u
             has_diffs = true;
             var old_hash_buf: [40]u8 = undefined;
             _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&kv.value_ptr.hash}) catch unreachable;
-            const line = try std.fmt.allocPrint(allocator, ":{o:0>6} 000000 {s} {s} D\t{s}\n", .{ kv.value_ptr.mode, &old_hash_buf, zero_oid, kv.key_ptr.* });
+            const line = if (name_status)
+                try std.fmt.allocPrint(allocator, "D\t{s}\n", .{kv.key_ptr.*})
+            else if (name_only)
+                try std.fmt.allocPrint(allocator, "{s}\n", .{kv.key_ptr.*})
+            else
+                try std.fmt.allocPrint(allocator, ":{o:0>6} 000000 {s} {s} D\t{s}\n", .{ kv.value_ptr.mode, &old_hash_buf, zero_oid, kv.key_ptr.* });
             defer allocator.free(line);
             try platform_impl.writeStdout(line);
         }
@@ -26556,26 +26377,14 @@ fn nativeCmdColumn(_: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
 fn nativeCmdCheckIgnore(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     var verbose = false;
     var quiet = false;
-    var use_stdin = false;
-    var no_index = false;
-    var non_matching = false;
-    var null_term = false;
     var paths = std.array_list.Managed([]const u8).init(allocator);
     defer paths.deinit();
-
+    
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
             verbose = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             quiet = true;
-        } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--non-matching")) {
-            non_matching = true;
-        } else if (std.mem.eql(u8, arg, "--stdin")) {
-            use_stdin = true;
-        } else if (std.mem.eql(u8, arg, "--no-index")) {
-            no_index = true;
-        } else if (std.mem.eql(u8, arg, "-z")) {
-            null_term = true;
         } else if (std.mem.eql(u8, arg, "--")) {
             while (args.next()) |a| try paths.append(a);
             break;
@@ -26583,134 +26392,72 @@ fn nativeCmdCheckIgnore(allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             try paths.append(arg);
         }
     }
-
-    // Read paths from stdin if --stdin
-    var stdin_buf: ?[]u8 = null;
-    defer if (stdin_buf) |b| allocator.free(b);
-    if (use_stdin) {
-        const stdin_file = std.fs.File{ .handle = std.posix.STDIN_FILENO };
-        stdin_buf = stdin_file.readToEndAlloc(allocator, 1024 * 1024) catch null;
-        if (stdin_buf) |buf| {
-            const sep: u8 = if (null_term) 0 else '\n';
-            var iter = std.mem.splitScalar(u8, buf, sep);
-            while (iter.next()) |line| {
-                const trimmed = std.mem.trim(u8, line, " \t\r");
-                if (trimmed.len > 0) try paths.append(trimmed);
-            }
-        }
-    }
-
-    if (!use_stdin and paths.items.len == 0) {
-        try platform_impl.writeStderr("fatal: no path specified\n");
-        std.process.exit(128);
-    }
-
+    
     const git_path = findGitDirectory(allocator, platform_impl) catch {
         try platform_impl.writeStderr("fatal: not a git repository\n");
         std.process.exit(128);
     };
     defer allocator.free(git_path);
-
+    
     const repo_root = std.fs.path.dirname(git_path) orelse ".";
-
-    // Load .gitignore relative to repo root
     const gitignore_path = try std.fmt.allocPrint(allocator, "{s}/.gitignore", .{repo_root});
     defer allocator.free(gitignore_path);
-
-    // Make gitignore source path relative for output
+    
     var gitignore = gitignore_mod.GitIgnore.loadFromFile(allocator, gitignore_path, platform_impl) catch
         gitignore_mod.GitIgnore.init(allocator);
     defer gitignore.deinit();
-
-    // Also load .git/info/exclude
-    const exclude_path = try std.fmt.allocPrint(allocator, "{s}/info/exclude", .{git_path});
-    defer allocator.free(exclude_path);
-    if (platform_impl.fs.readFile(allocator, exclude_path)) |content| {
-        defer allocator.free(content);
-        gitignore.addPatternsFromSource(content, ".git/info/exclude");
-    } else |_| {}
-
-    // Load index for tracked file detection (unless --no-index)
-    var tracked_paths = std.StringHashMap(void).init(allocator);
-    defer tracked_paths.deinit();
-    if (!no_index) {
-        if (index_mod.Index.load(git_path, platform_impl, allocator)) |*idx| {
-            defer @constCast(idx).deinit();
-            for (idx.entries.items) |entry| {
-                tracked_paths.put(entry.path, {}) catch {};
-            }
-        } else |_| {}
-    }
-
+    
     const cwd = try platform_impl.fs.getCwd(allocator);
     defer allocator.free(cwd);
-
+    
     var found_any = false;
-    const sep_char: u8 = if (null_term) 0 else '\n';
     for (paths.items) |path| {
         // Resolve path relative to repo root
         var check_path: []const u8 = path;
         var allocated_check_path: ?[]u8 = null;
         defer if (allocated_check_path) |p| allocator.free(p);
-
+        
         if (std.mem.eql(u8, path, ".")) {
+            // "." means current directory - resolve to path relative to repo root
             if (cwd.len > repo_root.len and std.mem.startsWith(u8, cwd, repo_root) and cwd[repo_root.len] == '/') {
                 check_path = cwd[repo_root.len + 1..];
             }
         } else if (!std.fs.path.isAbsolute(path)) {
+            // Resolve relative to cwd then make relative to repo root
             if (cwd.len > repo_root.len and std.mem.startsWith(u8, cwd, repo_root) and cwd[repo_root.len] == '/') {
                 const prefix = cwd[repo_root.len + 1..];
-                allocated_check_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, path });
+                allocated_check_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{prefix, path});
                 check_path = allocated_check_path.?;
             }
         }
-
-        // Check if directory
+        
+        // Try matching with and without trailing slash for directories
         const is_dir = blk: {
-            const full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, check_path });
+            const full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{repo_root, check_path});
             defer allocator.free(full);
             var dir = std.fs.cwd().openDir(full, .{}) catch break :blk false;
             dir.close();
             break :blk true;
         };
-
-        // Check if tracked (in index) - tracked files are not ignored unless --no-index
-        const is_tracked = if (!no_index) tracked_paths.contains(check_path) else false;
-
-        const match_info = gitignore.getMatchInfo(check_path, is_dir);
-        const is_ignored = match_info.matched and !is_tracked;
-
-        if (is_ignored) {
+        
+        const matched = gitignore.isIgnoredPath(check_path, is_dir);
+        
+        if (matched) {
             found_any = true;
             if (!quiet) {
                 if (verbose) {
-                    // Format: source:linenum:pattern\tpath
-                    const source_display = if (match_info.source.len > 0) blk: {
-                        // Make source relative to repo root
-                        if (std.mem.startsWith(u8, match_info.source, repo_root)) {
-                            const rel = match_info.source[repo_root.len..];
-                            if (rel.len > 0 and rel[0] == '/') break :blk rel[1..];
-                            break :blk rel;
-                        }
-                        break :blk match_info.source;
-                    } else "";
-                    const msg = try std.fmt.allocPrint(allocator, "{s}:{d}:{s}\t{s}{c}", .{ source_display, match_info.line_number, match_info.pattern, path, sep_char });
+                    const msg = try std.fmt.allocPrint(allocator, ".gitignore:0:\t{s}\n", .{path});
                     defer allocator.free(msg);
                     try platform_impl.writeStdout(msg);
                 } else {
-                    const msg = try std.fmt.allocPrint(allocator, "{s}{c}", .{ path, sep_char });
+                    const msg = try std.fmt.allocPrint(allocator, "{s}\n", .{path});
                     defer allocator.free(msg);
                     try platform_impl.writeStdout(msg);
                 }
             }
-        } else if (non_matching and verbose) {
-            // Show non-matching entries with ::\tpath
-            const msg = try std.fmt.allocPrint(allocator, "::\t{s}{c}", .{ path, sep_char });
-            defer allocator.free(msg);
-            try platform_impl.writeStdout(msg);
         }
     }
-
+    
     if (!found_any) std.process.exit(1);
 }
 
