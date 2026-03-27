@@ -6968,6 +6968,14 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             std.process.exit(128);
         };
         defer allocator.free(cfg_path);
+        // Validate comment doesn't contain LF
+        if (config_comment) |cc| {
+            if (std.mem.indexOfScalar(u8, cc, '\n') != null) {
+                try platform_impl.writeStderr("error: invalid comment character: '\\n'\n");
+                std.process.exit(1);
+                unreachable;
+            }
+        }
         try configSetValue(cfg_path, key, value, do_add, config_comment, allocator, platform_impl);
         return;
     }
