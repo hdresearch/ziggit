@@ -9391,15 +9391,14 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         var tz_str: []const u8 = "+0000";
         var tz_buf: [6]u8 = undefined;
         if (std.posix.getenv("GIT_COMMITTER_DATE")) |date_str| {
-            // Parse git date formats: "@<epoch> <tz>" or "<epoch> <tz>"
-            const trimmed_date = std.mem.trim(u8, date_str, " \t");
-            const start: usize = if (trimmed_date.len > 0 and trimmed_date[0] == '@') 1 else 0;
-            const rest = trimmed_date[start..];
-            if (std.mem.indexOfScalar(u8, rest, ' ')) |sp| {
-                timestamp = std.fmt.parseInt(i64, rest[0..sp], 10) catch timestamp;
-                tz_str = rest[sp + 1 ..];
+            // Parse git date formats using shared parser
+            const parsed = try parseDateToGitFormat(date_str, allocator);
+            defer allocator.free(parsed);
+            if (std.mem.indexOfScalar(u8, parsed, ' ')) |sp| {
+                timestamp = std.fmt.parseInt(i64, parsed[0..sp], 10) catch timestamp;
+                tz_str = parsed[sp + 1 ..];
             } else {
-                timestamp = std.fmt.parseInt(i64, rest, 10) catch timestamp;
+                timestamp = std.fmt.parseInt(i64, parsed, 10) catch timestamp;
             }
         } else {
             // Compute local timezone offset
@@ -12490,8 +12489,142 @@ fn cmdCommitTree(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     for (parents.items) |p| allocator.free(p);
 }
 
+/// Parse a date string into git's internal "epoch timezone" format.
+fn parseDateToGitFormat(date_str: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    const trimmed = std.mem.trim(u8, date_str, " \t\n\r");
+    if (trimmed.len == 0) {
+        const now = std.time.timestamp();
+        return try std.fmt.allocPrint(allocator, "{d} +0000", .{now});
+    }
+
+    // Handle @epoch format
+    if (trimmed[0] == '@') {
+        const rest = std.mem.trim(u8, trimmed[1..], " ");
+        if (std.mem.indexOfScalar(u8, rest, ' ')) |sp| {
+            const epoch_str = rest[0..sp];
+            const tz_s = std.mem.trim(u8, rest[sp + 1 ..], " ");
+            const epoch = std.fmt.parseInt(i64, epoch_str, 10) catch {
+                return try allocator.dupe(u8, trimmed);
+            };
+            return try std.fmt.allocPrint(allocator, "{d} {s}", .{ epoch, tz_s });
+        } else {
+            const epoch = std.fmt.parseInt(i64, rest, 10) catch {
+                return try allocator.dupe(u8, trimmed);
+            };
+            return try std.fmt.allocPrint(allocator, "{d} +0000", .{epoch});
+        }
+    }
+
+    // Check if already "epoch +/-tz" format
+    if (trimmed.len > 0 and (trimmed[0] >= '0' and trimmed[0] <= '9')) {
+        if (std.mem.indexOfScalar(u8, trimmed, ' ')) |sp| {
+            const maybe_epoch = trimmed[0..sp];
+            const rest = std.mem.trim(u8, trimmed[sp + 1 ..], " ");
+            if (std.fmt.parseInt(i64, maybe_epoch, 10)) |epoch| {
+                if (rest.len >= 5 and (rest[0] == '+' or rest[0] == '-')) {
+                    return try std.fmt.allocPrint(allocator, "{d} {s}", .{ epoch, rest });
+                }
+            } else |_| {}
+        } else {
+            if (std.fmt.parseInt(i64, trimmed, 10)) |epoch| {
+                return try std.fmt.allocPrint(allocator, "{d} +0000", .{epoch});
+            } else |_| {}
+        }
+    }
+
+    // Try ISO-like date parsing
+    var date_part: []const u8 = trimmed;
+    var explicit_tz: ?[]const u8 = null;
+
+    // Check for trailing timezone
+    if (trimmed.len > 6) {
+        const last6 = trimmed[trimmed.len - 6 ..];
+        if (last6[0] == ' ' and (last6[1] == '+' or last6[1] == '-')) {
+            if (std.fmt.parseInt(i32, last6[2..6], 10)) |_| {
+                explicit_tz = last6[1..];
+                date_part = std.mem.trim(u8, trimmed[0 .. trimmed.len - 6], " ");
+            } else |_| {}
+        }
+    }
+
+    // Replace 'T' with space
+    var dbuf: [64]u8 = undefined;
+    var dlen: usize = 0;
+    for (date_part) |c| {
+        if (dlen >= dbuf.len) break;
+        dbuf[dlen] = if (c == 'T') ' ' else c;
+        dlen += 1;
+    }
+    const normalized = dbuf[0..dlen];
+
+    // Parse YYYY-MM-DD HH:MM:SS or YYYY-MM-DD HH:MM or YYYY-MM-DD
+    if (normalized.len >= 10 and normalized[4] == '-' and normalized[7] == '-') {
+        const year = std.fmt.parseInt(i32, normalized[0..4], 10) catch return try allocator.dupe(u8, trimmed);
+        const month = std.fmt.parseInt(u32, normalized[5..7], 10) catch return try allocator.dupe(u8, trimmed);
+        const day = std.fmt.parseInt(u32, normalized[8..10], 10) catch return try allocator.dupe(u8, trimmed);
+
+        var hour: u32 = 0;
+        var minute: u32 = 0;
+        var second: u32 = 0;
+
+        if (normalized.len >= 16 and normalized[10] == ' ' and normalized[13] == ':') {
+            hour = std.fmt.parseInt(u32, normalized[11..13], 10) catch 0;
+            minute = std.fmt.parseInt(u32, normalized[14..16], 10) catch 0;
+            if (normalized.len >= 19 and normalized[16] == ':') {
+                second = std.fmt.parseInt(u32, normalized[17..19], 10) catch 0;
+            }
+        }
+
+        const epoch = dateToEpoch(year, month, day, hour, minute, second);
+
+        if (explicit_tz) |tz| {
+            const tz_sign: i64 = if (tz[0] == '-') @as(i64, 1) else @as(i64, -1);
+            const tz_hours = std.fmt.parseInt(i64, tz[1..3], 10) catch 0;
+            const tz_minutes = std.fmt.parseInt(i64, tz[3..5], 10) catch 0;
+            const tz_offset_secs = tz_sign * (tz_hours * 3600 + tz_minutes * 60);
+            return try std.fmt.allocPrint(allocator, "{d} {s}", .{ epoch + tz_offset_secs, tz });
+        }
+
+        // Check TZ env var
+        const tz_env = std.posix.getenv("TZ");
+        if (tz_env != null and (std.mem.eql(u8, tz_env.?, "GMT") or std.mem.eql(u8, tz_env.?, "UTC") or std.mem.eql(u8, tz_env.?, "UTC0"))) {
+            return try std.fmt.allocPrint(allocator, "{d} +0000", .{epoch});
+        }
+
+        return try std.fmt.allocPrint(allocator, "{d} +0000", .{epoch});
+    }
+
+    return try allocator.dupe(u8, trimmed);
+}
+
+fn dateToEpoch(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) i64 {
+    const days_in_months = [_]u32{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    var total_days: i64 = 0;
+    var y: i32 = 1970;
+    while (y < year) : (y += 1) {
+        total_days += if (isLeapYear(y)) @as(i64, 366) else @as(i64, 365);
+    }
+    while (y > year) {
+        y -= 1;
+        total_days -= if (isLeapYear(y)) @as(i64, 366) else @as(i64, 365);
+    }
+    var m: u32 = 1;
+    while (m < month) : (m += 1) {
+        total_days += days_in_months[m - 1];
+        if (m == 2 and isLeapYear(year)) total_days += 1;
+    }
+    total_days += @as(i64, day) - 1;
+    return total_days * 86400 + @as(i64, hour) * 3600 + @as(i64, minute) * 60 + @as(i64, second);
+}
+
+fn isLeapYear(year: i32) bool {
+    if (@mod(year, 400) == 0) return true;
+    if (@mod(year, 100) == 0) return false;
+    if (@mod(year, 4) == 0) return true;
+    return false;
+}
+
 fn getAuthorString(allocator: std.mem.Allocator) ![]u8 {
-    // Check GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL, GIT_AUTHOR_DATE env vars
     const name = std.process.getEnvVarOwned(allocator, "GIT_AUTHOR_NAME") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => try allocator.dupe(u8, "Test User"),
         else => return err,
@@ -12502,13 +12635,15 @@ fn getAuthorString(allocator: std.mem.Allocator) ![]u8 {
         else => return err,
     };
     defer allocator.free(email);
-    const date = std.process.getEnvVarOwned(allocator, "GIT_AUTHOR_DATE") catch |err| switch (err) {
+    const raw_date = std.process.getEnvVarOwned(allocator, "GIT_AUTHOR_DATE") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => blk: {
             const now = std.time.timestamp();
             break :blk try std.fmt.allocPrint(allocator, "{d} +0000", .{now});
         },
         else => return err,
     };
+    defer allocator.free(raw_date);
+    const date = try parseDateToGitFormat(raw_date, allocator);
     defer allocator.free(date);
 
     return try std.fmt.allocPrint(allocator, "{s} <{s}> {s}", .{ name, email, date });
@@ -12525,13 +12660,15 @@ fn getCommitterString(allocator: std.mem.Allocator) ![]u8 {
         else => return err,
     };
     defer allocator.free(email);
-    const date = std.process.getEnvVarOwned(allocator, "GIT_COMMITTER_DATE") catch |err| switch (err) {
+    const raw_date = std.process.getEnvVarOwned(allocator, "GIT_COMMITTER_DATE") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => blk: {
             const now = std.time.timestamp();
             break :blk try std.fmt.allocPrint(allocator, "{d} +0000", .{now});
         },
         else => return err,
     };
+    defer allocator.free(raw_date);
+    const date = try parseDateToGitFormat(raw_date, allocator);
     defer allocator.free(date);
 
     return try std.fmt.allocPrint(allocator, "{s} <{s}> {s}", .{ name, email, date });
@@ -13098,13 +13235,18 @@ fn writeReflogEntry(git_dir: []const u8, ref_name: []const u8, old_hash: []const
     var tz_needs_free = false;
     if (std.process.getEnvVarOwned(allocator, "GIT_COMMITTER_DATE") catch null) |date_str| {
         defer allocator.free(date_str);
-        // Parse "timestamp tz" format
-        if (std.mem.indexOf(u8, date_str, " ")) |sp| {
-            timestamp = std.fmt.parseInt(i64, date_str[0..sp], 10) catch std.time.timestamp();
-            tz_str = allocator.dupe(u8, date_str[sp + 1 ..]) catch "+0000";
-            tz_needs_free = true;
-        } else {
-            timestamp = std.fmt.parseInt(i64, date_str, 10) catch std.time.timestamp();
+        // Parse date using shared parser
+        if (parseDateToGitFormat(date_str, allocator)) |parsed| {
+            defer allocator.free(parsed);
+            if (std.mem.indexOf(u8, parsed, " ")) |sp| {
+                timestamp = std.fmt.parseInt(i64, parsed[0..sp], 10) catch std.time.timestamp();
+                tz_str = allocator.dupe(u8, parsed[sp + 1 ..]) catch "+0000";
+                tz_needs_free = true;
+            } else {
+                timestamp = std.fmt.parseInt(i64, parsed, 10) catch std.time.timestamp();
+            }
+        } else |_| {
+            timestamp = std.time.timestamp();
         }
     } else {
         timestamp = std.time.timestamp();
