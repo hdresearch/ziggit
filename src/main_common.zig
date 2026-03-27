@@ -4957,6 +4957,13 @@ fn isValidHashPrefix(hash: []const u8) bool {
     return true;
 }
 
+fn isValidHexString(s: []const u8) bool {
+    for (s) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return s.len > 0;
+}
+
 fn resolveCommitHash(git_path: []const u8, hash_prefix: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
     // If it's already a full hash, just validate it exists
     if (hash_prefix.len == 40) {
@@ -8067,13 +8074,29 @@ fn nativeCmdShowRef(allocator: std.mem.Allocator, args: [][]const u8, command_in
         if (heads and !std.mem.startsWith(u8, entry.name, "refs/heads/")) continue;
         if (tags and !std.mem.startsWith(u8, entry.name, "refs/tags/")) continue;
 
-        // Apply patterns
+        // Apply patterns (match as suffix after /)
         if (patterns.items.len > 0) {
             var matches = false;
             for (patterns.items) |pattern| {
-                if (std.mem.indexOf(u8, entry.name, pattern) != null) {
+                // Exact match
+                if (std.mem.eql(u8, entry.name, pattern)) {
                     matches = true;
                     break;
+                }
+                // Pattern matches as a suffix after /
+                if (std.mem.endsWith(u8, entry.name, pattern)) {
+                    // Check there's a / before the match
+                    if (entry.name.len > pattern.len and entry.name[entry.name.len - pattern.len - 1] == '/') {
+                        matches = true;
+                        break;
+                    }
+                }
+                // Pattern with / matches as prefix
+                if (std.mem.indexOf(u8, pattern, "/") != null) {
+                    if (std.mem.endsWith(u8, entry.name, pattern)) {
+                        matches = true;
+                        break;
+                    }
                 }
             }
             if (!matches) continue;
@@ -8236,18 +8259,43 @@ fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, command
     defer allocator.free(packed_refs_path);
     if (std.fs.cwd().readFileAlloc(allocator, packed_refs_path, 10 * 1024 * 1024)) |packed_content| {
         defer allocator.free(packed_content);
+        // Check for unterminated last line
+        if (packed_content.len > 0 and packed_content[packed_content.len - 1] != '\n') {
+            // Find the last line
+            const last_nl = std.mem.lastIndexOfScalar(u8, packed_content, '\n');
+            const last_line = if (last_nl) |nl| packed_content[nl + 1 ..] else packed_content;
+            if (last_line.len > 0 and last_line[0] != '#') {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: unterminated line in {s}: {s}\n", .{ packed_refs_path, last_line });
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+                unreachable;
+            }
+        }
         var lines = std.mem.splitScalar(u8, packed_content, '\n');
         while (lines.next()) |line| {
             if (line.len == 0 or line[0] == '#' or line[0] == '^') continue;
             if (std.mem.indexOfScalar(u8, line, ' ')) |space_idx| {
                 const hash = line[0..space_idx];
                 const name = line[space_idx + 1..];
-                if (hash.len >= 40) {
-                    try ref_list.append(.{
-                        .name = try allocator.dupe(u8, name),
-                        .hash = try allocator.dupe(u8, hash[0..40]),
-                    });
+                if (hash.len < 40 or !isValidHexString(hash[0..@min(40, hash.len)])) {
+                    const msg = try std.fmt.allocPrint(allocator, "fatal: unexpected line in {s}: {s}\n", .{ packed_refs_path, line });
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(128);
+                    unreachable;
                 }
+                try ref_list.append(.{
+                    .name = try allocator.dupe(u8, name),
+                    .hash = try allocator.dupe(u8, hash[0..40]),
+                });
+            } else {
+                // Line without space - invalid
+                const msg = try std.fmt.allocPrint(allocator, "fatal: unexpected line in {s}: {s}\n", .{ packed_refs_path, line });
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+                unreachable;
             }
         }
     } else |_| {}
