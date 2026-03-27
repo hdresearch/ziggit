@@ -422,7 +422,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 }
             }
             // Command not found - error (pure Zig, no git forwarding)
-            const error_msg = std.fmt.allocPrint(allocator, "ziggit: '{s}' is not a ziggit command. See 'ziggit --help'.\n", .{command}) catch "ziggit: invalid command. See 'ziggit --help'.\n";
+            const error_msg = std.fmt.allocPrint(allocator, "git: '{s}' is not a git command. See 'git --help'.\n", .{command}) catch "git: invalid command. See 'git --help'.\n";
             defer if (error_msg.ptr != "ziggit: invalid command. See 'ziggit --help'.\n".ptr) allocator.free(error_msg);
             try platform_impl.writeStderr(error_msg);
             std.process.exit(1);
@@ -2447,10 +2447,14 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 }
 
 /// Resolve a git alias by looking up alias.<name> in config files.
+/// Also supports subsection syntax: alias.<name>.command
 /// Returns the alias value (caller must free), or null if not found.
 fn resolveAlias(allocator: std.mem.Allocator, name: []const u8, platform_impl: *const platform_mod.Platform) !?[]u8 {
     const alias_key = try std.fmt.allocPrint(allocator, "alias.{s}", .{name});
     defer allocator.free(alias_key);
+    // Also try subsection syntax: alias.<name>.command
+    const alias_subsection_key = try std.fmt.allocPrint(allocator, "alias.{s}.command", .{name});
+    defer allocator.free(alias_subsection_key);
     
     // Search config sources in order: local (.git/config), global (~/.gitconfig), system (/etc/gitconfig)
     // Last value wins in git, but for aliases we want first match (local > global > system)
@@ -2463,6 +2467,9 @@ fn resolveAlias(allocator: std.mem.Allocator, name: []const u8, platform_impl: *
         if (platform_impl.fs.readFile(allocator, config_path)) |content| {
             defer allocator.free(content);
             if (parseConfigValue(content, alias_key, allocator) catch null) |val| {
+                return val;
+            }
+            if (parseConfigValue(content, alias_subsection_key, allocator) catch null) |val| {
                 return val;
             }
         } else |_| {}
@@ -2478,6 +2485,9 @@ fn resolveAlias(allocator: std.mem.Allocator, name: []const u8, platform_impl: *
             if (parseConfigValue(content, alias_key, allocator) catch null) |val| {
                 return val;
             }
+            if (parseConfigValue(content, alias_subsection_key, allocator) catch null) |val| {
+                return val;
+            }
         } else |_| {}
         
         // Try XDG config
@@ -2488,6 +2498,9 @@ fn resolveAlias(allocator: std.mem.Allocator, name: []const u8, platform_impl: *
             if (parseConfigValue(content, alias_key, allocator) catch null) |val| {
                 return val;
             }
+            if (parseConfigValue(content, alias_subsection_key, allocator) catch null) |val| {
+                return val;
+            }
         } else |_| {}
     } else |_| {}
     
@@ -2496,6 +2509,9 @@ fn resolveAlias(allocator: std.mem.Allocator, name: []const u8, platform_impl: *
         if (platform_impl.fs.readFile(allocator, "/etc/gitconfig")) |content| {
             defer allocator.free(content);
             if (parseConfigValue(content, alias_key, allocator) catch null) |val| {
+                return val;
+            }
+            if (parseConfigValue(content, alias_subsection_key, allocator) catch null) |val| {
                 return val;
             }
         } else |_| {}
