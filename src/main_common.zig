@@ -26039,7 +26039,26 @@ fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, opts:
                 try platform_impl.writeStdout(id_line);
             }
             if (!quiet) {
-                try diffTreeWithEmptyOpts(allocator, this_tree, opts, git_path, platform_impl);
+                if (opts.patch_with_raw) {
+                    // Output raw first, then patch
+                    var raw_opts = opts.*;
+                    raw_opts.show_patch = false;
+                    raw_opts.show_raw = true;
+                    try diffTreeWithEmptyOpts(allocator, this_tree, &raw_opts, git_path, platform_impl);
+                    try platform_impl.writeStdout("\n");
+                    var patch_opts = opts.*;
+                    patch_opts.show_patch = true;
+                    try diffTreeWithEmptyOpts(allocator, this_tree, &patch_opts, git_path, platform_impl);
+                } else if (opts.patch_with_stat) {
+                    // Output stat first, then patch
+                    try outputStatForEmptyTree(allocator, this_tree, git_path, platform_impl);
+                    try platform_impl.writeStdout("\n");
+                    var patch_opts = opts.*;
+                    patch_opts.show_patch = true;
+                    try diffTreeWithEmptyOpts(allocator, this_tree, &patch_opts, git_path, platform_impl);
+                } else {
+                    try diffTreeWithEmptyOpts(allocator, this_tree, opts, git_path, platform_impl);
+                }
             }
             return true;
         }
