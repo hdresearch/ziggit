@@ -7,27 +7,28 @@ const mc = @import("../main_common.zig");
 pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platform, is_annotate: bool) !void {
     var col = is_annotate;
     var se = false;
+    var se_explicit = false;
     var sp = false;
     var slp = false;
     var srt = false;
     var fp: ?[]const u8 = null;
     var rv: ?[]const u8 = null;
     var cf: ?[]const u8 = null;
-    var abl: usize = 8;
+    var abl: usize = 7;
     var lr = std.array_list.Managed([]const u8).init(a);
     defer lr.deinit();
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-c")) { col = true; }
-        else if (std.mem.eql(u8, arg, "-e") or std.mem.eql(u8, arg, "--show-email")) { se = true; }
-        else if (std.mem.eql(u8, arg, "--no-show-email")) { se = false; }
+        else if (std.mem.eql(u8, arg, "-e") or std.mem.eql(u8, arg, "--show-email")) { se = true; se_explicit = true; }
+        else if (std.mem.eql(u8, arg, "--no-show-email")) { se = false; se_explicit = true; }
         else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--porcelain")) { sp = true; }
         else if (std.mem.eql(u8, arg, "--line-porcelain")) { slp = true; }
         else if (std.mem.eql(u8, arg, "-t")) { srt = true; }
         else if (std.mem.startsWith(u8, arg, "--contents=")) { cf = arg["--contents=".len..]; }
         else if (std.mem.eql(u8, arg, "--contents")) { cf = args.next(); }
         else if (std.mem.startsWith(u8, arg, "--abbrev=")) {
-            abl = std.fmt.parseInt(usize, arg["--abbrev=".len..], 10) catch 8;
+            abl = std.fmt.parseInt(usize, arg["--abbrev=".len..], 10) catch 7;
             if (abl < 4) abl = 4;
             if (abl > 40) abl = 40;
         }
@@ -62,7 +63,7 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
     defer a.free(gp);
 
     // Config check for blame.showEmail
-    if (!se) {
+    if (!se_explicit) {
         const cp = std.fmt.allocPrint(a, "{s}/config", .{gp}) catch null;
         if (cp) |cfp| {
             defer a.free(cfp);
@@ -505,7 +506,9 @@ fn oC(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []con
     defer a.free(ds);
     const pnum = try B.padN(a, ln, lnw2);
     defer a.free(pnum);
-    const out = try std.fmt.allocPrint(a, "{s}\t({s}\t{s}\t{s}){s}\n", .{ e.commit_hash[0..abl2], pn, ds, pnum, line });
+    // Non-boundary commits get +1 for alignment (to account for ^ prefix on boundary commits)
+    const effective_abl = @min(abl2 + 1, 40);
+    const out = try std.fmt.allocPrint(a, "{s}\t({s}\t{s}\t{s}){s}\n", .{ e.commit_hash[0..effective_abl], pn, ds, pnum, line });
     defer a.free(out);
     try so.writeStdout(out);
 }
@@ -519,7 +522,9 @@ fn oD(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []con
     defer a.free(ds);
     const pnum = try B.padN(a, ln, lnw2);
     defer a.free(pnum);
-    const out = try std.fmt.allocPrint(a, "{s} ({s} {s} {s}) {s}\n", .{ e.commit_hash[0..abl2], pn, ds, pnum, line });
+    // Non-boundary commits get +1 for alignment
+    const effective_abl = @min(abl2 + 1, 40);
+    const out = try std.fmt.allocPrint(a, "{s} ({s} {s} {s}) {s}\n", .{ e.commit_hash[0..effective_abl], pn, ds, pnum, line });
     defer a.free(out);
     try so.writeStdout(out);
 }
