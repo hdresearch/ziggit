@@ -3217,6 +3217,27 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
         return;
     }
 
+    // Collect all args first to check for --no-index
+    var all_diff_args = std.array_list.Managed([]const u8).init(allocator);
+    defer all_diff_args.deinit();
+    while (args.next()) |arg| {
+        try all_diff_args.append(arg);
+    }
+
+    // Check for --no-index
+    var no_index = false;
+    for (all_diff_args.items) |arg| {
+        if (std.mem.eql(u8, arg, "--no-index")) {
+            no_index = true;
+            break;
+        }
+    }
+
+    if (no_index) {
+        try cmdDiffNoIndex(allocator, all_diff_args.items, platform_impl);
+        return;
+    }
+
     // Find .git directory first
     const git_path = findGitDirectory(allocator, platform_impl) catch {
         try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
@@ -3233,7 +3254,10 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     var pathspec_args = std.array_list.Managed([]const u8).init(allocator);
     defer pathspec_args.deinit();
     var seen_dashdash = false;
-    while (args.next()) |arg| {
+    // Re-parse args (need an iterator)
+    var diff_arg_idx: usize = 0;
+    while (diff_arg_idx < all_diff_args.items.len) : (diff_arg_idx += 1) {
+        const arg = all_diff_args.items[diff_arg_idx];
         if (seen_dashdash) {
             try pathspec_args.append(arg);
         } else if (std.mem.eql(u8, arg, "--")) {
@@ -3322,6 +3346,178 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     if (exit_code and has_diff) {
         std.process.exit(1);
     }
+}
+
+fn cmdDiffNoIndex(allocator: std.mem.Allocator, diff_args: []const []const u8, platform_impl: *const platform_mod.Platform) !void {
+    var exit_code = false;
+    var quiet = false;
+    var paths = std.array_list.Managed([]const u8).init(allocator);
+    defer paths.deinit();
+    var seen_dashdash = false;
+
+    for (diff_args) |arg| {
+        if (seen_dashdash) {
+            try paths.append(arg);
+        } else if (std.mem.eql(u8, arg, "--")) {
+            seen_dashdash = true;
+        } else if (std.mem.eql(u8, arg, "--no-index")) {
+            // already handled
+        } else if (std.mem.eql(u8, arg, "--exit-code")) {
+            exit_code = true;
+        } else if (std.mem.eql(u8, arg, "--quiet")) {
+            quiet = true;
+            exit_code = true;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            // ignore other flags for now
+        } else {
+            try paths.append(arg);
+        }
+    }
+
+    if (paths.items.len < 2) {
+        try platform_impl.writeStderr("usage: git diff --no-index <path> <path>\n");
+        std.process.exit(129);
+    }
+
+    const path_a = paths.items[0];
+    const path_b = paths.items[1];
+
+    // Check if paths are directories
+    const a_is_dir = if (std.fs.cwd().openDir(path_a, .{})) |d| blk: { var dd = d; dd.close(); break :blk true; } else |_| false;
+    const b_is_dir = if (std.fs.cwd().openDir(path_b, .{})) |d| blk: { var dd = d; dd.close(); break :blk true; } else |_| false;
+
+    var has_diff = false;
+    if (a_is_dir and b_is_dir) {
+        // Compare directories
+        has_diff = try diffNoIndexDirs(allocator, path_a, path_b, quiet, platform_impl);
+    } else {
+        // Compare files
+        has_diff = try diffNoIndexFiles(allocator, path_a, path_b, quiet, platform_impl);
+    }
+
+    if (exit_code and has_diff) {
+        std.process.exit(1);
+    }
+    if (has_diff and !exit_code) {
+        std.process.exit(1);
+    }
+}
+
+fn diffNoIndexFiles(allocator: std.mem.Allocator, path_a: []const u8, path_b: []const u8, quiet: bool, platform_impl: *const platform_mod.Platform) !bool {
+    const content_a = platform_impl.fs.readFile(allocator, path_a) catch "";
+    defer if (content_a.len > 0) allocator.free(content_a);
+    const content_b = platform_impl.fs.readFile(allocator, path_b) catch "";
+    defer if (content_b.len > 0) allocator.free(content_b);
+
+    if (std.mem.eql(u8, content_a, content_b)) return false;
+    if (quiet) return true;
+
+    // Generate unified diff
+    const diff_output = diff_mod.generateUnifiedDiff(content_a, content_b, path_b, allocator) catch return true;
+    defer allocator.free(diff_output);
+
+    // Build proper header
+    var out = std.array_list.Managed(u8).init(allocator);
+    defer out.deinit();
+    try out.appendSlice("diff --git a/");
+    try out.appendSlice(path_a);
+    try out.appendSlice(" b/");
+    try out.appendSlice(path_b);
+    try out.appendSlice("\n--- a/");
+    try out.appendSlice(path_a);
+    try out.appendSlice("\n+++ b/");
+    try out.appendSlice(path_b);
+    try out.appendSlice("\n");
+
+    // Extract hunks from diff output
+    if (std.mem.indexOf(u8, diff_output, "\n@@")) |hs| {
+        try out.appendSlice(diff_output[hs + 1 ..]);
+    } else if (std.mem.startsWith(u8, diff_output, "@@")) {
+        try out.appendSlice(diff_output);
+    }
+
+    try platform_impl.writeStdout(out.items);
+    return true;
+}
+
+fn diffNoIndexDirs(allocator: std.mem.Allocator, dir_a: []const u8, dir_b: []const u8, quiet: bool, platform_impl: *const platform_mod.Platform) !bool {
+    // List files in both directories
+    var files_a = std.StringHashMap(void).init(allocator);
+    defer {
+        var kit = files_a.keyIterator();
+        while (kit.next()) |k| allocator.free(k.*);
+        files_a.deinit();
+    }
+    var files_b = std.StringHashMap(void).init(allocator);
+    defer {
+        var kit = files_b.keyIterator();
+        while (kit.next()) |k| allocator.free(k.*);
+        files_b.deinit();
+    }
+
+    if (std.fs.cwd().openDir(dir_a, .{ .iterate = true })) |d| {
+        var dir = d;
+        defer dir.close();
+        var iter = dir.iterate();
+        while (try iter.next()) |entry| {
+            if (entry.kind == .file) {
+                try files_a.put(try allocator.dupe(u8, entry.name), {});
+            }
+        }
+    } else |_| {}
+
+    if (std.fs.cwd().openDir(dir_b, .{ .iterate = true })) |d| {
+        var dir = d;
+        defer dir.close();
+        var iter = dir.iterate();
+        while (try iter.next()) |entry| {
+            if (entry.kind == .file) {
+                try files_b.put(try allocator.dupe(u8, entry.name), {});
+            }
+        }
+    } else |_| {}
+
+    var has_diff = false;
+
+    // Check files in A
+    var it_a = files_a.keyIterator();
+    while (it_a.next()) |key| {
+        const name = key.*;
+        const full_a = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_a, name });
+        defer allocator.free(full_a);
+        const full_b = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_b, name });
+        defer allocator.free(full_b);
+        if (files_b.contains(name)) {
+            // Both have the file, diff them
+            if (try diffNoIndexFiles(allocator, full_a, full_b, quiet, platform_impl)) {
+                has_diff = true;
+            }
+        } else {
+            // Only in A - deleted from B perspective
+            has_diff = true;
+            if (!quiet) {
+                const content_a = platform_impl.fs.readFile(allocator, full_a) catch "";
+                defer if (content_a.len > 0) allocator.free(content_a);
+                if (try diffNoIndexFiles(allocator, full_a, "/dev/null", quiet, platform_impl)) {}
+            }
+        }
+    }
+
+    // Check files only in B
+    var it_b = files_b.keyIterator();
+    while (it_b.next()) |key| {
+        const name = key.*;
+        if (!files_a.contains(name)) {
+            has_diff = true;
+            if (!quiet) {
+                const full_b = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_b, name });
+                defer allocator.free(full_b);
+                if (try diffNoIndexFiles(allocator, "/dev/null", full_b, quiet, platform_impl)) {}
+            }
+        }
+    }
+
+    return has_diff;
 }
 
 fn showWorkingTreeDiff(index: *const index_mod.Index, cwd: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, quiet: bool) !bool {
