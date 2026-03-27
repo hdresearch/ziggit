@@ -3254,30 +3254,34 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
         }
     }
     
-    // Handle commit-to-commit diff: git diff <commit1> <commit2>
-    // or git diff <commit1>..<commit2>
+    // Handle commit-to-commit diff, or treat as pathspecs if unresolvable
     if (positional.items.len >= 1) {
         var ref1: []const u8 = undefined;
         var ref2: []const u8 = undefined;
         var have_two_refs = false;
+        var pos_as_pathspec = false;
         
-        if (positional.items.len >= 2) {
-            ref1 = positional.items[0];
-            ref2 = positional.items[1];
-            have_two_refs = true;
-        } else if (std.mem.indexOf(u8, positional.items[0], "..")) |dot_pos| {
+        if (std.mem.indexOf(u8, positional.items[0], "..")) |dot_pos| {
             ref1 = positional.items[0][0..dot_pos];
             ref2 = positional.items[0][dot_pos + 2 ..];
-            // Handle ... (three dots)
             if (ref2.len > 0 and ref2[0] == '.') ref2 = ref2[1..];
             have_two_refs = true;
         } else {
-            // Single commit - diff against working tree
-            // For now, treat as commit vs HEAD
-            ref1 = positional.items[0];
-            ref2 = "HEAD";
-            have_two_refs = true;
+            // Try resolving as ref
+            const mt = resolveToTree(allocator, positional.items[0], git_path, platform_impl) catch null;
+            if (mt) |t1| {
+                if (positional.items.len >= 2) {
+                    const mt2 = resolveToTree(allocator, positional.items[1], git_path, platform_impl) catch null;
+                    if (mt2) |t2| {
+                        ref1 = positional.items[0]; ref2 = positional.items[1]; have_two_refs = true;
+                        allocator.free(t2);
+                        for (positional.items[2..]) |p| try pathspec_args.append(p);
+                    } else { allocator.free(t1); pos_as_pathspec = true; }
+                } else { ref1 = positional.items[0]; ref2 = "HEAD"; have_two_refs = true; }
+                if (!pos_as_pathspec and !have_two_refs) allocator.free(t1);
+            } else { pos_as_pathspec = true; }
         }
+        if (pos_as_pathspec) { for (positional.items) |p| try pathspec_args.append(p); }
         
         if (have_two_refs) {
             const tree1 = resolveToTree(allocator, ref1, git_path, platform_impl) catch {
