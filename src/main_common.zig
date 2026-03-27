@@ -472,7 +472,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         defer allocator.free(output);
         try platform_impl.writeStdout(output);
     } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
-        try platform_impl.writeStdout("git version 2.47.0\n");
+        try cmdVersion(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "--version-info")) {
         if (version_mod.getFullVersionInfo(allocator)) |version_info| {
             defer allocator.free(version_info);
@@ -1606,30 +1606,6 @@ fn scanDirectoryForUntrackedFiles(
     }
 }
 
-fn cmdVersion(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
-    var build_options_flag = false;
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--build-options")) {
-            build_options_flag = true;
-        }
-    }
-
-    // Output version that matches what tests expect (git version 2.47.0.xxx)
-    try platform_impl.writeStdout("git version 2.47.0.ziggit\n");
-
-    if (build_options_flag) {
-        const info =
-            \\sizeof-long: 8
-            \\sizeof-size_t: 8
-            \\shell-path: /bin/sh
-            \\default-hash: sha1
-            \\
-        ;
-        try platform_impl.writeStdout(info);
-    }
-    _ = allocator;
-}
-
 fn showUsage(platform_impl: *const platform_mod.Platform) !void {
     const target_info = switch (@import("builtin").target.os.tag) {
         .wasi => " (WASI)",
@@ -1735,9 +1711,7 @@ fn copyTemplateDir(git_dir: []const u8, template_path: []const u8, allocator: st
     }
 }
 
-fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8, initial_branch: ?[]const u8, _quiet: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
-    _ = _quiet;
-    _ = initial_branch;
+fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8, initial_branch: ?[]const u8, quiet: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     
     const git_dir = if (bare) 
         try allocator.dupe(u8, path)
