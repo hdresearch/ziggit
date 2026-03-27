@@ -11362,6 +11362,47 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         }
     }
 
+    // Check if we have a worktree (bare repos and inside .git without GIT_WORK_TREE have none)
+    const has_worktree = blk: {
+        if (std.posix.getenv("GIT_WORK_TREE")) |_| break :blk true;
+        // Check config for bare = true
+        const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch break :blk true;
+        defer allocator.free(config_path);
+        if (std.fs.cwd().readFileAlloc(allocator, config_path, 1024 * 1024)) |config_content| {
+            defer allocator.free(config_content);
+            if (std.mem.indexOf(u8, config_content, "bare = true")) |_| break :blk false;
+        } else |_| {}
+        // Check if cwd IS the git dir (we're inside .git dir)
+        if (std.mem.eql(u8, cwd, git_path)) break :blk false;
+        // If git_path doesn't end with /.git, we might be inside a bare repo
+        if (!std.mem.endsWith(u8, git_path, "/.git") and !std.mem.eql(u8, git_path, ".git")) {
+            break :blk false;
+        }
+        break :blk true;
+    };
+    
+    // Check config for bare flag
+    const is_bare_repo = blk: {
+        const bc_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch break :blk false;
+        defer allocator.free(bc_path);
+        if (std.fs.cwd().readFileAlloc(allocator, bc_path, 1024 * 1024)) |bc_content| {
+            defer allocator.free(bc_content);
+            if (std.mem.indexOf(u8, bc_content, "bare = true")) |_| break :blk true;
+        } else |_| {}
+        break :blk false;
+    };
+    
+    if (!has_worktree and reset_mode == .hard) {
+        try platform_impl.writeStderr("fatal: this operation must be run in a work tree\n");
+        std.process.exit(128);
+        unreachable;
+    }
+    if (is_bare_repo and reset_mode == .mixed) {
+        try platform_impl.writeStderr("fatal: this operation must be run in a work tree\n");
+        std.process.exit(128);
+        unreachable;
+    }
+
     // Track if user explicitly gave a target
     const explicit_target = target_ref != null;
     // If no target ref specified, default to HEAD
