@@ -13113,7 +13113,9 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         } else if (std.mem.eql(u8, arg, "--topo-order")) {
             topo_order = true;
         } else if (std.mem.eql(u8, arg, "--date-order")) {
-            // Accept but use default ordering
+            topo_order = false; // date-order overrides topo
+        } else if (std.mem.eql(u8, arg, "--author-date-order")) {
+            topo_order = false; // author-date-order overrides topo
         } else if (std.mem.eql(u8, arg, "--objects") or std.mem.eql(u8, arg, "--objects-edge")) {
             show_objects = true;
         } else if (std.mem.eql(u8, arg, "--no-object-names")) {
@@ -13333,7 +13335,14 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         std.process.exit(128);
     }
 
-    // BFS traversal from all include refs
+    // Collect all reachable commits with timestamps for sorting
+    const CommitInfo = struct {
+        hash: []u8,
+        commit_ts: i64,
+        author_ts: i64,
+        parents: [][]const u8,
+    };
+
     var visited = std.StringHashMap(void).init(allocator);
     defer {
         var vit = visited.iterator();
@@ -13341,13 +13350,17 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         visited.deinit();
     }
 
-    var result = std.array_list.Managed([]u8).init(allocator);
+    var all_commits = std.array_list.Managed(CommitInfo).init(allocator);
     defer {
-        for (result.items) |h| allocator.free(h);
-        result.deinit();
+        for (all_commits.items) |ci| {
+            allocator.free(ci.hash);
+            for (ci.parents) |p| allocator.free(@constCast(p));
+            allocator.free(ci.parents);
+        }
+        all_commits.deinit();
     }
 
-    // Use a queue for BFS
+    // BFS to collect all commits
     var queue = std.array_list.Managed([]u8).init(allocator);
     defer {
         for (queue.items) |h| allocator.free(h);
@@ -13360,32 +13373,163 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
 
     while (queue.items.len > 0) {
         const current = queue.orderedRemove(0);
-        defer allocator.free(current);
 
-        if (visited.contains(current)) continue;
-        if (exclude_hashes.contains(current)) continue;
-
-        try visited.put(try allocator.dupe(u8, current), {});
-        try result.append(try allocator.dupe(u8, current));
-
-        if (max_count) |mc| {
-            if (mc >= 0 and result.items.len >= @as(usize, @intCast(mc)) + @as(usize, skip_count)) break;
+        if (visited.contains(current)) {
+            allocator.free(current);
+            continue;
+        }
+        if (exclude_hashes.contains(current)) {
+            allocator.free(current);
+            continue;
         }
 
-        // Load commit and add parents to queue
-        const obj = objects.GitObject.load(current, git_path, platform_impl, allocator) catch continue;
-        defer obj.deinit(allocator);
-        if (obj.type != .commit) continue;
+        try visited.put(try allocator.dupe(u8, current), {});
 
-        var lines = std.mem.splitSequence(u8, obj.data, "\n");
-        while (lines.next()) |line| {
+        // Load commit
+        const obj = objects.GitObject.load(current, git_path, platform_impl, allocator) catch {
+            allocator.free(current);
+            continue;
+        };
+        defer obj.deinit(allocator);
+        if (obj.type != .commit) {
+            allocator.free(current);
+            continue;
+        }
+
+        var parents_list = std.array_list.Managed([]const u8).init(allocator);
+        var commit_ts: i64 = 0;
+        var author_ts: i64 = 0;
+        var clines = std.mem.splitSequence(u8, obj.data, "\n");
+        while (clines.next()) |line| {
             if (std.mem.startsWith(u8, line, "parent ")) {
                 const parent = line[7..];
                 if (parent.len == 40) {
+                    try parents_list.append(try allocator.dupe(u8, parent));
                     try queue.append(try allocator.dupe(u8, parent));
                 }
+            } else if (std.mem.startsWith(u8, line, "committer ")) {
+                commit_ts = parseTimestampFromLine(line) catch 0;
+            } else if (std.mem.startsWith(u8, line, "author ")) {
+                author_ts = parseTimestampFromLine(line) catch 0;
             } else if (line.len == 0) break;
         }
+
+        try all_commits.append(.{
+            .hash = current,
+            .commit_ts = commit_ts,
+            .author_ts = author_ts,
+            .parents = try parents_list.toOwnedSlice(),
+        });
+    }
+
+    // Sort based on order mode
+    if (topo_order) {
+        // Kahn's algorithm for topological sort
+        // In-degree = number of children (commits that have this as parent)
+        var in_degree = std.StringHashMap(usize).init(allocator);
+        defer in_degree.deinit();
+
+        // Initialize in-degree to 0 for all commits
+        for (all_commits.items) |ci| {
+            try in_degree.put(ci.hash, 0);
+        }
+
+        // Count in-degrees (how many children each commit has)
+        for (all_commits.items) |ci| {
+            for (ci.parents) |p| {
+                if (in_degree.getPtr(p)) |deg| {
+                    deg.* += 1;
+                }
+            }
+        }
+
+        // Build index map for fast lookup
+        var hash_to_idx = std.StringHashMap(usize).init(allocator);
+        defer hash_to_idx.deinit();
+        for (all_commits.items, 0..) |ci, idx| {
+            try hash_to_idx.put(ci.hash, idx);
+        }
+
+        var result = std.array_list.Managed([]u8).init(allocator);
+        defer {
+            for (result.items) |h| allocator.free(h);
+            result.deinit();
+        }
+
+        // Start with commits that have in-degree 0 (no children)
+        // Use a priority queue sorted by timestamp to break ties
+        var ready = std.array_list.Managed(usize).init(allocator);
+        defer ready.deinit();
+
+        for (all_commits.items, 0..) |ci, idx| {
+            if (in_degree.get(ci.hash).? == 0) {
+                try ready.append(idx);
+            }
+        }
+
+        while (ready.items.len > 0) {
+            // Pick the commit with the highest commit timestamp among ready commits
+            var best_idx: usize = 0;
+            var best_ts: i64 = all_commits.items[ready.items[0]].commit_ts;
+            for (ready.items, 0..) |ri, k| {
+                const ts = all_commits.items[ri].commit_ts;
+                if (ts > best_ts) {
+                    best_ts = ts;
+                    best_idx = k;
+                }
+            }
+
+            const ci_idx = ready.orderedRemove(best_idx);
+            const ci = all_commits.items[ci_idx];
+
+            try result.append(try allocator.dupe(u8, ci.hash));
+
+            // Decrease in-degree of parents
+            for (ci.parents) |p| {
+                if (in_degree.getPtr(p)) |deg| {
+                    deg.* -= 1;
+                    if (deg.* == 0) {
+                        if (hash_to_idx.get(p)) |pidx| {
+                            try ready.append(pidx);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Now apply skip/max_count/reverse on result
+        const skipped_results = if (skip_count > 0 and skip_count < result.items.len)
+            result.items[skip_count..]
+        else if (skip_count >= result.items.len)
+            result.items[0..0]
+        else
+            result.items;
+
+        const final_results_topo = if (max_count) |mc| blk: {
+            if (mc < 0) break :blk skipped_results;
+            const limit = @as(usize, @intCast(mc));
+            break :blk if (limit < skipped_results.len) skipped_results[0..limit] else skipped_results;
+        } else skipped_results;
+
+        // Output using the shared output logic
+        try outputRevListResults(final_results_topo, reverse, do_count, format_str, no_commit_header, show_objects, no_object_names, in_commit_order, git_path, allocator, platform_impl);
+        return;
+    }
+
+    // Default: sort by commit timestamp (descending) for date-order, or by commit timestamp for default
+    std.mem.sort(CommitInfo, all_commits.items, {}, struct {
+        fn cmp(_: void, a: CommitInfo, b: CommitInfo) bool {
+            return a.commit_ts > b.commit_ts;
+        }
+    }.cmp);
+
+    var result = std.array_list.Managed([]u8).init(allocator);
+    defer {
+        for (result.items) |h| allocator.free(h);
+        result.deinit();
+    }
+    for (all_commits.items) |ci| {
+        try result.append(try allocator.dupe(u8, ci.hash));
     }
 
     // Apply skip
@@ -13403,6 +13547,19 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         break :blk if (limit < skipped_results.len) skipped_results[0..limit] else skipped_results;
     } else skipped_results;
 
+    try outputRevListResults(final_results, reverse, do_count, format_str, no_commit_header, show_objects, no_object_names, in_commit_order, git_path, allocator, platform_impl);
+}
+
+fn parseTimestampFromLine(line: []const u8) !i64 {
+    // Parse timestamp from author/committer line: "author/committer Name <email> TIMESTAMP TIMEZONE"
+    // Find the last '>' then parse the number after it
+    const gt_pos = std.mem.lastIndexOf(u8, line, ">") orelse return error.InvalidFormat;
+    const after_gt = std.mem.trim(u8, line[gt_pos + 1..], " ");
+    const space_pos = std.mem.indexOf(u8, after_gt, " ") orelse after_gt.len;
+    return std.fmt.parseInt(i64, after_gt[0..space_pos], 10) catch return error.InvalidFormat;
+}
+
+fn outputRevListResults(final_results: [][]u8, reverse: bool, do_count: bool, format_str: ?[]const u8, no_commit_header: bool, show_objects: bool, no_object_names: bool, in_commit_order: bool, git_path: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     if (do_count) {
         const count_output = try std.fmt.allocPrint(allocator, "{d}\n", .{final_results.len});
         defer allocator.free(count_output);
