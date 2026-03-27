@@ -3381,7 +3381,7 @@ fn getTreeEntryHashByPath(git_path: []const u8, tree_hash: []const u8, file_path
         if (std.mem.eql(u8, name, first_component)) {
             // Convert hash bytes to hex
             var hex_buf: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&hex_buf, "{x}", .{entry_hash_bytes[0..20].*}) catch return error.InvalidHash;
+            _ = std.fmt.bufPrint(&hex_buf, "{x}", .{entry_hash_bytes[0..20]}) catch return error.InvalidHash;
             
             if (rest) |remaining_path| {
                 // Need to recurse into subtree
@@ -9256,7 +9256,7 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             };
             if (std.mem.eql(u8, fname, "-")) {
                 // Read from stdin
-                const stdin = std.fs.File.stdin();
+                const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
                 message = stdin.readToEndAlloc(allocator, 10 * 1024 * 1024) catch {
                     try platform_impl.writeStderr("fatal: could not read from stdin\n");
                     std.process.exit(128);
@@ -10165,8 +10165,10 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     for (pathspecs.items) |ps| {
         // Handle git pathspec magic (e.g., ":/*" means "everything from root")
         if (ps.len >= 2 and ps[0] == ':' and ps[1] == '/') {
+            // :/ prefix means "from root of working tree"
             const pattern = ps[2..];
             if (pattern.len == 0 or std.mem.eql(u8, pattern, "*")) {
+                // ":/" or ":/*" means match everything
                 match_all = true;
                 continue;
             }
@@ -12349,7 +12351,7 @@ fn cmdHashObject(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
 
     if (stdin_paths) {
         // Read file paths from stdin, one per line
-        const stdin_data = std.fs.File.stdin().readToEndAlloc(allocator, 10 * 1024 * 1024) catch {
+        const stdin_data = readStdin(allocator, 10 * 1024 * 1024) catch {
             std.process.exit(128);
             unreachable;
         };
@@ -12362,7 +12364,7 @@ fn cmdHashObject(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         }
     } else if (stdin_mode) {
         // Read data from stdin first
-        const data = std.fs.File.stdin().readToEndAlloc(allocator, 100 * 1024 * 1024) catch {
+        const data = readStdin(allocator, 100 * 1024 * 1024) catch {
             std.process.exit(128);
             unreachable;
         };
@@ -12667,7 +12669,7 @@ fn cmdCommitTree(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     var final_message: []const u8 = undefined;
     var free_message = false;
     if (read_stdin and message == null) {
-        final_message = std.fs.File.stdin().readToEndAlloc(allocator, 10 * 1024 * 1024) catch {
+        final_message = readStdin(allocator, 10 * 1024 * 1024) catch {
             try platform_impl.writeStderr("fatal: unable to read commit message\n");
             std.process.exit(128);
             unreachable;
@@ -15017,7 +15019,7 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             // File deleted
             has_diffs = true;
             var hash_buf: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&hash_buf, "{x}", .{entry.sha1}) catch unreachable;
+            _ = std.fmt.bufPrint(&hash_buf, "{x}", .{&entry.sha1}) catch unreachable;
             if (name_only) {
                 const line = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path});
                 defer allocator.free(line);
@@ -15091,7 +15093,7 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         if (modified) {
             has_diffs = true;
             var hash_buf: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&hash_buf, "{x}", .{entry.sha1}) catch unreachable;
+            _ = std.fmt.bufPrint(&hash_buf, "{x}", .{&entry.sha1}) catch unreachable;
             if (name_only) {
                 const line = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path});
                 defer allocator.free(line);
@@ -16428,7 +16430,7 @@ fn nativeCmdMktree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     };
 
     // Read tree entries from stdin
-    const stdin = std.fs.File.stdin();
+    const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
     const stdin_data = stdin.readToEndAlloc(allocator, 100 * 1024 * 1024) catch {
         try platform_impl.writeStderr("fatal: error reading from stdin\n");
         std.process.exit(128);
@@ -16493,7 +16495,7 @@ fn nativeCmdMktag(allocator: std.mem.Allocator, args: [][]const u8, command_inde
     };
 
     // Read tag content from stdin
-    const stdin = std.fs.File.stdin();
+    const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
     const stdin_data = stdin.readToEndAlloc(allocator, 10 * 1024 * 1024) catch {
         try platform_impl.writeStderr("fatal: error reading from stdin\n");
         std.process.exit(128);
@@ -17590,7 +17592,7 @@ fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, comman
     };
 
     // Read stdin
-    const stdin = std.fs.File.stdin();
+    const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
     const stdin_data = stdin.readToEndAlloc(allocator, 100 * 1024 * 1024) catch {
         try platform_impl.writeStderr("fatal: error reading stdin\n");
         std.process.exit(128);
@@ -17906,7 +17908,7 @@ fn packObjectsWalkReachable(
     try worklist.append(try allocator.dupe(u8, start_hash));
 
     while (worklist.items.len > 0) {
-        const hash = worklist.pop().?;
+        const hash = worklist.pop() orelse break;
         defer allocator.free(hash);
 
         if (object_set.contains(hash)) continue;
@@ -18047,7 +18049,7 @@ fn nativeCmdIndexPack(allocator: std.mem.Allocator, args: [][]const u8, command_
             std.process.exit(128);
             unreachable;
         };
-        const stdin = std.fs.File.stdin();
+        const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
         pack_data = stdin.readToEndAlloc(allocator, 4 * 1024 * 1024 * 1024) catch {
             try platform_impl.writeStderr("fatal: error reading pack from stdin\n");
             std.process.exit(128);
@@ -19128,7 +19130,7 @@ fn nativeCmdUnpackObjects(allocator: std.mem.Allocator, args: [][]const u8, comm
     };
 
     // Read pack data from stdin
-    const stdin_file = std.fs.File.stdin();
+    const stdin_file = std.fs.File{ .handle = std.posix.STDIN_FILENO };
     const pack_data = stdin_file.readToEndAlloc(allocator, 4 * 1024 * 1024 * 1024) catch {
         try platform_impl.writeStderr("fatal: error reading pack data from stdin\n");
         std.process.exit(128);
@@ -21878,7 +21880,7 @@ fn buildTreeMap(tree_hash: []const u8, prefix: []const u8, git_path: []const u8,
         
         if (std.mem.eql(u8, mode_str, "40000") or std.mem.eql(u8, mode_str, "040000")) {
             // Directory - recurse
-            const sub_hash = try std.fmt.allocPrint(allocator, "{x}", .{hash_bytes[0..20].*});
+            const sub_hash = try std.fmt.allocPrint(allocator, "{x}", .{hash_bytes[0..20]});
             defer allocator.free(sub_hash);
             buildTreeMap(sub_hash, full_path, git_path, platform_impl, allocator, map) catch {};
             allocator.free(full_path);
@@ -22390,7 +22392,7 @@ fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
 
         // Load the blob content
         var hash_buf: [40]u8 = undefined;
-        _ = std.fmt.bufPrint(&hash_buf, "{x}", .{entry.sha1}) catch continue;
+        _ = std.fmt.bufPrint(&hash_buf, "{x}", .{&entry.sha1}) catch continue;
 
         const obj = objects.GitObject.load(&hash_buf, git_dir, platform_impl, allocator) catch {
             const msg = std.fmt.allocPrint(allocator, "error: unable to read sha1 file of {s} ({s})\n", .{ entry_path, &hash_buf }) catch continue;
