@@ -8537,6 +8537,49 @@ fn pushRefspecInner(allocator: std.mem.Allocator, local_git_dir: []const u8, rem
         try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{dst_ref});
     defer allocator.free(full_dst);
 
+    // Check receive.denyCurrentBranch for non-bare repos
+    {
+        const remote_head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{remote_git_dir});
+        defer allocator.free(remote_head_path);
+        if (std.fs.cwd().readFileAlloc(allocator, remote_head_path, 4096)) |head_content| {
+            defer allocator.free(head_content);
+            const trimmed_head = std.mem.trim(u8, head_content, " \t\r\n");
+            if (std.mem.startsWith(u8, trimmed_head, "ref: ")) {
+                const remote_current_ref = trimmed_head["ref: ".len..];
+                // Check if this is a non-bare repo (has a working directory)
+                const is_bare = blk: {
+                    const remote_config_path = std.fmt.allocPrint(allocator, "{s}/config", .{remote_git_dir}) catch break :blk false;
+                    defer allocator.free(remote_config_path);
+                    const rcfg = std.fs.cwd().readFileAlloc(allocator, remote_config_path, 1024 * 1024) catch break :blk false;
+                    defer allocator.free(rcfg);
+                    if (std.mem.indexOf(u8, rcfg, "bare = true")) |_| break :blk true;
+                    break :blk false;
+                };
+                if (!is_bare and std.mem.eql(u8, full_dst, remote_current_ref)) {
+                    // Check receive.denyCurrentBranch config
+                    const remote_config_path = std.fmt.allocPrint(allocator, "{s}/config", .{remote_git_dir}) catch "";
+                    defer if (remote_config_path.len > 0) allocator.free(remote_config_path);
+                    var deny = true; // default is refuse
+                    if (remote_config_path.len > 0) {
+                        if (std.fs.cwd().readFileAlloc(allocator, remote_config_path, 1024 * 1024)) |rcfg| {
+                            defer allocator.free(rcfg);
+                            if (parseConfigValue(rcfg, "receive.denycurrentbranch", allocator) catch null) |val| {
+                                defer allocator.free(val);
+                                if (std.ascii.eqlIgnoreCase(val, "false") or std.ascii.eqlIgnoreCase(val, "warn") or std.ascii.eqlIgnoreCase(val, "ignore")) deny = false;
+                            }
+                        } else |_| {}
+                    }
+                    if (deny) {
+                        const msg = try std.fmt.allocPrint(allocator, "remote: error: refusing to update checked out branch: {s}\nremote: error: By default, updating the current branch in a non-bare repository\nremote: is denied.\n", .{full_dst});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                        std.process.exit(1);
+                    }
+                }
+            }
+        } else |_| {}
+    }
+
     const dst_ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ remote_git_dir, full_dst });
     defer allocator.free(dst_ref_path);
 
