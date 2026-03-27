@@ -1,24 +1,6 @@
 const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 
-/// Compatibility: convert byte slice to hex, returns pointer to static buffer (max 40 hex chars = 20 bytes)
-fn bytesToHexSlice(bytes: []const u8) *const [40]u8 {
-    const S = struct {
-        threadlocal var buf: [40]u8 = undefined;
-    };
-    const len = @min(bytes.len, 20);
-    for (bytes[0..len], 0..) |byte, i| {
-        const hex = std.fmt.bytesToHex([1]u8{byte}, .lower);
-        S.buf[i * 2] = hex[0];
-        S.buf[i * 2 + 1] = hex[1];
-    }
-    // Fill rest with zeros
-    for (len * 2..40) |i| {
-        S.buf[i] = '0';
-    }
-    return &S.buf;
-}
-
 /// Global config overrides from -c key=value command line options
 var global_config_overrides: ?std.array_list.Managed(ConfigOverride) = null;
 
@@ -1824,7 +1806,7 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 defer allocator.free(current_hash);
                 
                 // Compare with index hash
-                const index_hash = std.fmt.allocPrint(allocator, "{s}", .{std.fmt.bytesToHex(entry.sha1, .lower)}) catch break :blk false;
+                const index_hash = std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1}) catch break :blk false;
                 defer allocator.free(index_hash);
                 
                 break :blk !std.mem.eql(u8, current_hash, index_hash);
@@ -3296,7 +3278,7 @@ fn showWorkingTreeDiff(index: *const index_mod.Index, cwd: []const u8, platform_
             defer allocator.free(current_hash);
             
             // Compare with index hash
-            const index_hash = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.bytesToHex(entry.sha1, .lower)});
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
             defer allocator.free(index_hash);
             
             if (!std.mem.eql(u8, current_hash, index_hash)) {
@@ -3330,7 +3312,7 @@ fn showWorkingTreeDiff(index: *const index_mod.Index, cwd: []const u8, platform_
             defer allocator.free(empty_hash);
             
             // Get index hash
-            const index_hash = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.bytesToHex(entry.sha1, .lower)});
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
             defer allocator.free(index_hash);
             
             const short_index_hash = index_hash[0..7];
@@ -3365,7 +3347,7 @@ fn showStagedDiff(index: *const index_mod.Index, git_path: []const u8, platform_
             const empty_hash = try empty_blob.hash(allocator);
             defer allocator.free(empty_hash);
             
-            const index_hash = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.bytesToHex(entry.sha1, .lower)});
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
             defer allocator.free(index_hash);
             
             const short_empty_hash = empty_hash[0..7];
@@ -3379,7 +3361,7 @@ fn showStagedDiff(index: *const index_mod.Index, git_path: []const u8, platform_
         }
     } else {
         for (index.entries.items) |entry| {
-            const index_hash = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.bytesToHex(entry.sha1, .lower)});
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
             defer allocator.free(index_hash);
             
             // Check if this file exists in HEAD tree with same hash
@@ -3471,7 +3453,7 @@ fn getTreeEntryHashByPath(git_path: []const u8, tree_hash: []const u8, file_path
         if (std.mem.eql(u8, name, first_component)) {
             // Convert hash bytes to hex
             var hex_buf: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&hex_buf, "{s}", .{bytesToHexSlice(entry_hash_bytes[0..20])}) catch return error.InvalidHash;
+            _ = std.fmt.bufPrint(&hex_buf, "{x}", .{entry_hash_bytes[0..20]}) catch return error.InvalidHash;
             
             if (rest) |remaining_path| {
                 // Need to recurse into subtree
@@ -3502,7 +3484,7 @@ fn getIndexedFileContent(entry: index_mod.IndexEntry, allocator: std.mem.Allocat
     // Convert hash bytes to hex string
     const hash_str = try allocator.alloc(u8, 40);
     defer allocator.free(hash_str);
-    _ = std.fmt.bufPrint(hash_str, "{s}", .{&std.fmt.bytesToHex(entry.sha1, .lower)}) catch |err| {
+    _ = std.fmt.bufPrint(hash_str, "{x}", .{&entry.sha1}) catch |err| {
         std.log.debug("Could not format hash: {}", .{err});
         return try allocator.dupe(u8, "");
     };
@@ -3589,9 +3571,17 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
 
         // Create new branch at start point (or current HEAD)
         refs.createBranch(git_path, branch_name, resolved_start orelse start_point_arg, platform_impl, allocator) catch |err| switch (err) {
-            error.NoCommitsYet => {
-                try platform_impl.writeStderr("fatal: not a valid object name: 'master'\n");
-                std.process.exit(128);
+            error.NoCommitsYet, error.RefNotFound, error.FileNotFound => {
+                // On empty repo, just set HEAD to new branch
+                const hp = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+                defer allocator.free(hp);
+                const rc = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{branch_name});
+                defer allocator.free(rc);
+                platform_impl.fs.writeFile(hp, rc) catch {};
+                const sm = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
+                defer allocator.free(sm);
+                try platform_impl.writeStderr(sm);
+                return;
             },
             error.InvalidStartPoint => {
                 try platform_impl.writeStderr("fatal: not a valid object name\n");
@@ -3982,7 +3972,7 @@ fn checkoutTreeRecursive(git_path: []const u8, tree_data: []const u8, repo_root:
         const hash_bytes = tree_data[i..i + 20];
         const hash_hex = try allocator.alloc(u8, 40);
         defer allocator.free(hash_hex);
-        _ = std.fmt.bufPrint(hash_hex, "{s}", .{bytesToHexSlice(hash_bytes)}) catch break;
+        _ = std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes}) catch break;
         
         i += 20;
         
@@ -4101,7 +4091,7 @@ fn populateIndexFromTree(git_path: []const u8, tree_data: []const u8, repo_root:
             // Convert hash to hex for loading
             const hash_hex = try allocator.alloc(u8, 40);
             defer allocator.free(hash_hex);
-            _ = try std.fmt.bufPrint(hash_hex, "{s}", .{bytesToHexSlice(hash_bytes)});
+            _ = try std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes});
             
             const subtree_loaded = objects.GitObject.load(hash_hex, git_path, platform_impl, allocator) catch continue;
             defer subtree_loaded.deinit(allocator);
@@ -4601,7 +4591,7 @@ fn parseTreeIntoMap(tree_data: []const u8, file_map: *std.StringHashMap([]const 
         // Extract 20-byte hash and convert to hex string
         const hash_bytes = tree_data[i..i + 20];
         const hash_hex = try allocator.alloc(u8, 40);
-        _ = std.fmt.bufPrint(hash_hex, "{s}", .{bytesToHexSlice(hash_bytes)}) catch {
+        _ = std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes}) catch {
             allocator.free(hash_hex);
             break;
         };
@@ -7829,7 +7819,7 @@ fn lookupBlobInTree(tree_hash: []const u8, path: []const u8, git_path: []const u
         if (std.mem.eql(u8, name, name_to_find)) {
             if (remaining) |rest| {
                 // This is a directory - recurse
-                const sub_tree_hash = try std.fmt.allocPrint(allocator, "{s}", .{bytesToHexSlice(hash_bytes)});
+                const sub_tree_hash = try std.fmt.allocPrint(allocator, "{x}", .{hash_bytes});
                 defer allocator.free(sub_tree_hash);
                 return try lookupBlobInTree(sub_tree_hash, rest, git_path, platform_impl, allocator);
             } else {
@@ -10438,7 +10428,7 @@ fn showTreeObject(git_object: objects.GitObject, platform_impl: *const platform_
         const hash_bytes = git_object.data[i..i + 20];
         const hash_hex = try allocator.alloc(u8, 40);
         defer allocator.free(hash_hex);
-        _ = std.fmt.bufPrint(hash_hex, "{s}", .{bytesToHexSlice(hash_bytes)}) catch break;
+        _ = std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes}) catch break;
         
         i += 20;
         
@@ -10805,7 +10795,7 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                     defer blob2.deinit(allocator);
                     const current_hash2 = blob2.hash(allocator) catch continue;
                     defer allocator.free(current_hash2);
-                    const index_hash2 = std.fmt.allocPrint(allocator, "{s}", .{std.fmt.bytesToHex(entry.sha1, .lower)}) catch continue;
+                    const index_hash2 = std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1}) catch continue;
                     defer allocator.free(index_hash2);
                     if (std.mem.eql(u8, current_hash2, index_hash2)) continue; // not modified
                 }
@@ -10860,7 +10850,7 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 }
             }
             if (stage) {
-                const hash_str = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.bytesToHex(entry.sha1, .lower)});
+                const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
                 defer allocator.free(hash_str);
                 const stage_num = (entry.flags >> 12) & 0x3;
                 const quoted = try cQuotePath(allocator, entry.path, true);
@@ -10933,7 +10923,7 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                     defer blob.deinit(allocator);
                     const current_hash = blob.hash(allocator) catch break :blk false;
                     defer allocator.free(current_hash);
-                    const index_hash = std.fmt.allocPrint(allocator, "{s}", .{std.fmt.bytesToHex(entry.sha1, .lower)}) catch break :blk false;
+                    const index_hash = std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1}) catch break :blk false;
                     defer allocator.free(index_hash);
                     break :blk !std.mem.eql(u8, current_hash, index_hash);
                 };
@@ -11040,7 +11030,7 @@ fn formatLsFilesEntry(allocator: std.mem.Allocator, fmt: []const u8, entry: anyt
                     defer allocator.free(mode_str);
                     try result.appendSlice(mode_str);
                 } else if (std.mem.eql(u8, field, "objectname")) {
-                    const hash_str = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.bytesToHex(entry.sha1, .lower)});
+                    const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
                     defer allocator.free(hash_str);
                     try result.appendSlice(hash_str);
                 } else if (std.mem.eql(u8, field, "objecttype")) {
@@ -11114,7 +11104,7 @@ fn formatLsFilesEntry(allocator: std.mem.Allocator, fmt: []const u8, entry: anyt
 
 fn getObjectSize(allocator: std.mem.Allocator, git_path: []const u8, sha1: *const [20]u8, platform_impl: anytype) !u64 {
     // Try to read object from loose store and get size
-    const hex = try std.fmt.allocPrint(allocator, "{s}", .{bytesToHexSlice(sha1)});
+    const hex = try std.fmt.allocPrint(allocator, "{x}", .{sha1});
     defer allocator.free(hex);
     const obj_path = try std.fmt.allocPrint(allocator, "{s}/objects/{s}/{s}", .{ git_path, hex[0..2], hex[2..] });
     defer allocator.free(obj_path);
@@ -11499,7 +11489,7 @@ fn showTreeObjectFormatted(git_object: objects.GitObject, platform_impl: *const 
         const hash_bytes = git_object.data[i..i + 20];
         const hash_hex = try allocator.alloc(u8, 40);
         defer allocator.free(hash_hex);
-        _ = std.fmt.bufPrint(hash_hex, "{s}", .{bytesToHexSlice(hash_bytes)}) catch break;
+        _ = std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes}) catch break;
         
         i += 20;
         
@@ -14868,7 +14858,7 @@ fn cmdSymbolicRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             }
         } else {
             // For non-HEAD, validate that target is a valid ref name
-            if (!true) {
+            if (false) {
                 const msg = try std.fmt.allocPrint(allocator, "fatal: Refusing to set '{s}' to invalid ref '{s}'\n", .{ ref_name, target });
                 defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
@@ -15579,7 +15569,7 @@ fn parseTreeEntries(tree_data: []const u8, allocator: std.mem.Allocator) !std.ar
         pos += 20;
 
         var hash_hex: [40]u8 = undefined;
-        _ = std.fmt.bufPrint(&hash_hex, "{s}", .{bytesToHexSlice(hash_bytes)}) catch break;
+        _ = std.fmt.bufPrint(&hash_hex, "{x}", .{hash_bytes}) catch break;
 
         const is_tree = std.mem.eql(u8, mode, "40000");
         const is_commit = std.mem.eql(u8, mode, "160000");
@@ -16543,7 +16533,7 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             has_diffs = true;
             if (df_suppress) continue;
             var hash_buf: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&hash_buf, "{s}", .{&std.fmt.bytesToHex(entry.sha1, .lower)}) catch unreachable;
+            _ = std.fmt.bufPrint(&hash_buf, "{x}", .{&entry.sha1}) catch unreachable;
             if (name_only) {
                 const line = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path});
                 defer allocator.free(line);
@@ -16655,7 +16645,7 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             has_diffs = true;
             if (df_suppress) continue;
             var hash_buf: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&hash_buf, "{s}", .{&std.fmt.bytesToHex(entry.sha1, .lower)}) catch unreachable;
+            _ = std.fmt.bufPrint(&hash_buf, "{x}", .{&entry.sha1}) catch unreachable;
             if (name_only) {
                 const line = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path});
                 defer allocator.free(line);
@@ -24606,7 +24596,7 @@ fn buildTreeMap(tree_hash: []const u8, prefix: []const u8, git_path: []const u8,
         
         if (std.mem.eql(u8, mode_str, "40000") or std.mem.eql(u8, mode_str, "040000")) {
             // Directory - recurse
-            const sub_hash = try std.fmt.allocPrint(allocator, "{s}", .{bytesToHexSlice(hash_bytes[0..20])});
+            const sub_hash = try std.fmt.allocPrint(allocator, "{x}", .{hash_bytes[0..20]});
             defer allocator.free(sub_hash);
             buildTreeMap(sub_hash, full_path, git_path, platform_impl, allocator, map) catch {};
             allocator.free(full_path);
@@ -25118,7 +25108,7 @@ fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
 
         // Load the blob content
         var hash_buf: [40]u8 = undefined;
-        _ = std.fmt.bufPrint(&hash_buf, "{s}", .{&std.fmt.bytesToHex(entry.sha1, .lower)}) catch continue;
+        _ = std.fmt.bufPrint(&hash_buf, "{x}", .{&entry.sha1}) catch continue;
 
         const obj = objects.GitObject.load(&hash_buf, git_dir, platform_impl, allocator) catch {
             const msg = std.fmt.allocPrint(allocator, "error: unable to read sha1 file of {s} ({s})\n", .{ entry_path, &hash_buf }) catch continue;
