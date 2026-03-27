@@ -872,13 +872,18 @@ fn scanDirectoryForUntrackedFiles(
         if (gitignore.isIgnored(entry_relative_path)) continue;
         
         switch (entry.kind) {
-            .file => {
-                // Check if file is tracked
+            .file, .sym_link => {
+                // Check if file/symlink is tracked
                 if (!tracked_files.contains(entry_relative_path)) {
                     try untracked_files.append(try allocator.dupe(u8, entry_relative_path));
                 }
             },
             .directory => {
+                // Check for nested git repo
+                const dotgit_full = try std.fmt.allocPrint(allocator, "{s}/{s}/.git", .{ repo_root, entry_relative_path });
+                defer allocator.free(dotgit_full);
+                if (platform_impl.fs.exists(dotgit_full) catch false) continue;
+
                 // Recursively scan subdirectory
                 scanDirectoryForUntrackedFiles(
                     allocator,
@@ -888,9 +893,148 @@ fn scanDirectoryForUntrackedFiles(
                     tracked_files,
                     gitignore,
                     platform_impl,
-                ) catch continue; // Continue if subdirectory scan fails
+                ) catch continue;
             },
-            else => continue, // Skip other types (symlinks, etc.)
+            else => continue,
+        }
+    }
+}
+
+/// Check if a pathspec (which may contain globs) matches a path.
+fn pathspecMatchesPath(pathspec: []const u8, path: []const u8, is_dir: bool) bool {
+    if (std.mem.eql(u8, pathspec, path)) return true;
+    const ps_trimmed = if (std.mem.endsWith(u8, pathspec, "/")) pathspec[0 .. pathspec.len - 1] else pathspec;
+    const path_trimmed = if (std.mem.endsWith(u8, path, "/")) path[0 .. path.len - 1] else path;
+    if (std.mem.eql(u8, ps_trimmed, path_trimmed)) return true;
+    if (std.mem.startsWith(u8, path_trimmed, ps_trimmed) and path_trimmed.len > ps_trimmed.len and path_trimmed[ps_trimmed.len] == '/') return true;
+    if (std.mem.startsWith(u8, ps_trimmed, path_trimmed) and ps_trimmed.len > path_trimmed.len and ps_trimmed[path_trimmed.len] == '/') return true;
+    const has_glob = std.mem.indexOfAny(u8, pathspec, "*?") != null;
+    if (has_glob) {
+        if (globMatch(path, pathspec)) return true;
+        if (is_dir) {
+            const tp = if (std.mem.endsWith(u8, path, "/")) path[0 .. path.len - 1] else path;
+            var glob_start: usize = 0;
+            while (glob_start < pathspec.len) : (glob_start += 1) {
+                if (pathspec[glob_start] == '*' or pathspec[glob_start] == '?') break;
+            }
+            const pre_glob = pathspec[0..glob_start];
+            if (std.mem.lastIndexOfScalar(u8, pre_glob, '/')) |last_slash| {
+                const dir_part = pathspec[0..last_slash];
+                if (std.mem.eql(u8, dir_part, tp) or std.mem.startsWith(u8, dir_part, tp) or
+                    std.mem.startsWith(u8, tp, dir_part) or globMatch(tp, dir_part))
+                    return true;
+            } else return true;
+        }
+    }
+    return false;
+}
+
+fn pathspecIsGlob(pathspec: []const u8) bool {
+    return std.mem.indexOfAny(u8, pathspec, "*?[") != null;
+}
+
+/// Find untracked directory entries for --directory mode.
+fn findUntrackedDirEntries(
+    allocator: std.mem.Allocator,
+    repo_root: []const u8,
+    relative_path: []const u8,
+    results: *std.array_list.Managed([]u8),
+    index: *const index_mod.Index,
+    gitignore: *const gitignore_mod.GitIgnore,
+    no_empty_directory: bool,
+    pathspecs: []const []const u8,
+    platform_impl: *const platform_mod.Platform,
+) !void {
+    const full_path = if (relative_path.len == 0)
+        try allocator.dupe(u8, repo_root)
+    else
+        try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, relative_path });
+    defer allocator.free(full_path);
+
+    var dir = std.fs.cwd().openDir(full_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+
+    var tracked_dirs = std.StringHashMap(void).init(allocator);
+    defer tracked_dirs.deinit();
+    var tracked_files_set = std.StringHashMap(void).init(allocator);
+    defer tracked_files_set.deinit();
+    for (index.entries.items) |entry| {
+        try tracked_files_set.put(entry.path, {});
+        var j: usize = 0;
+        while (j < entry.path.len) : (j += 1) {
+            if (entry.path[j] == '/') try tracked_dirs.put(entry.path[0..j], {});
+        }
+    }
+
+    var iterator = dir.iterate();
+    while (iterator.next() catch null) |entry| {
+        if (std.mem.eql(u8, entry.name, ".git")) continue;
+        const entry_relative_path = if (relative_path.len == 0)
+            try allocator.dupe(u8, entry.name)
+        else
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ relative_path, entry.name });
+        defer allocator.free(entry_relative_path);
+
+        if (gitignore.isIgnored(entry_relative_path)) continue;
+
+        if (pathspecs.len > 0) {
+            var relevant = false;
+            for (pathspecs) |ps| {
+                if (pathspecMatchesPath(ps, entry_relative_path, entry.kind == .directory)) { relevant = true; break; }
+                if (entry.kind == .directory) {
+                    const dp = try std.fmt.allocPrint(allocator, "{s}/", .{entry_relative_path});
+                    defer allocator.free(dp);
+                    if (pathspecMatchesPath(ps, dp, true)) { relevant = true; break; }
+                }
+            }
+            if (!relevant) continue;
+        }
+
+        switch (entry.kind) {
+            .file, .sym_link => {
+                if (!tracked_files_set.contains(entry_relative_path)) {
+                    try results.append(try allocator.dupe(u8, entry_relative_path));
+                }
+            },
+            .directory => {
+                const dotgit_full = try std.fmt.allocPrint(allocator, "{s}/{s}/.git", .{ repo_root, entry_relative_path });
+                defer allocator.free(dotgit_full);
+                if (platform_impl.fs.exists(dotgit_full) catch false) continue;
+
+                if (tracked_dirs.contains(entry_relative_path)) {
+                    try findUntrackedDirEntries(allocator, repo_root, entry_relative_path, results, index, gitignore, no_empty_directory, pathspecs, platform_impl);
+                } else {
+                    var need_recurse = false;
+                    var glob_matches_dir = false;
+                    if (pathspecs.len > 0) {
+                        const dp = try std.fmt.allocPrint(allocator, "{s}/", .{entry_relative_path});
+                        defer allocator.free(dp);
+                        for (pathspecs) |ps| {
+                            if (std.mem.startsWith(u8, ps, dp) and ps.len > dp.len) { need_recurse = true; break; }
+                            if (pathspecIsGlob(ps)) {
+                                if (globMatch(entry_relative_path, ps)) { glob_matches_dir = true; break; }
+                                if (pathspecMatchesPath(ps, entry_relative_path, true)) { need_recurse = true; break; }
+                            }
+                        }
+                    }
+                    if (glob_matches_dir) {
+                        try results.append(try std.fmt.allocPrint(allocator, "{s}/", .{entry_relative_path}));
+                    } else if (need_recurse) {
+                        try findUntrackedDirEntries(allocator, repo_root, entry_relative_path, results, index, gitignore, no_empty_directory, pathspecs, platform_impl);
+                    } else {
+                        if (no_empty_directory) {
+                            const sf = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry_relative_path });
+                            defer allocator.free(sf);
+                            var sd = std.fs.cwd().openDir(sf, .{ .iterate = true }) catch continue;
+                            defer sd.close();
+                            var si = sd.iterate();
+                            if ((si.next() catch null) == null) continue;
+                        }
+                        try results.append(try std.fmt.allocPrint(allocator, "{s}/", .{entry_relative_path}));
+                    }
+                }
+            },
+            else => {},
         }
     }
 }
@@ -1920,8 +2064,14 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
                 try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd, file_path });
             defer allocator.free(full_file_path);
 
-            // Check if path exists
-            if (!(platform_impl.fs.exists(full_file_path) catch false)) {
+            // Check if path exists (including broken symlinks)
+            const path_exists = blk: {
+                if (platform_impl.fs.exists(full_file_path) catch false) break :blk true;
+                var link_buf: [4096]u8 = undefined;
+                _ = std.fs.cwd().readLink(full_file_path, &link_buf) catch break :blk false;
+                break :blk true;
+            };
+            if (!path_exists) {
                 const msg = try std.fmt.allocPrint(allocator, "fatal: pathspec '{s}' did not match any files\n", .{file_path});
                 defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
@@ -1930,7 +2080,7 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
 
             // Check if it's a directory or file
             const metadata = std.fs.cwd().statFile(full_file_path) catch {
-                // If we can't stat it, try to add it as a regular file
+                // If we can't stat it (e.g. broken symlink), try to add it
                 try addSingleFile(allocator, file_path, full_file_path, &index, git_path, platform_impl, cwd);
                 continue;
             };
@@ -7098,7 +7248,67 @@ fn resolveObjectByPrefix(git_path: []const u8, hash_prefix: []const u8, platform
 
 /// Resolve a revision string like HEAD, HEAD~3, HEAD^2, v1.0^{commit}, branch_name, etc.
 /// Returns the 40-char hash of the resolved object.
+fn findRevColonPath(rev: []const u8) ?usize {
+    var in_peel: bool = false;
+    var i: usize = 0;
+    while (i < rev.len) : (i += 1) {
+        if (rev[i] == '^' and i + 1 < rev.len and rev[i + 1] == '{') { in_peel = true; i += 1; }
+        else if (in_peel and rev[i] == '}') { in_peel = false; }
+        else if (!in_peel and rev[i] == ':' and i > 0) { return i; }
+    }
+    return null;
+}
+
+fn resolveTreePath(git_path: []const u8, tree_hash: []const u8, path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
+    var current_hash = try allocator.dupe(u8, tree_hash);
+    var path_iter = std.mem.splitScalar(u8, path, '/');
+    while (path_iter.next()) |component| {
+        if (component.len == 0) continue;
+        const tree_obj = objects.GitObject.load(current_hash, git_path, platform_impl, allocator) catch { allocator.free(current_hash); return error.ObjectNotFound; };
+        defer tree_obj.deinit(allocator);
+        allocator.free(current_hash);
+        if (tree_obj.type != .tree) return error.ObjectNotFound;
+        var entries = try parseTreeEntries(tree_obj.data, allocator);
+        defer { for (entries.items) |*e| e.deinit(allocator); entries.deinit(); }
+        var found = false;
+        for (entries.items) |entry| {
+            if (std.mem.eql(u8, entry.name, component)) { current_hash = try allocator.dupe(u8, entry.hash); found = true; break; }
+        }
+        if (!found) return error.ObjectNotFound;
+    }
+    return current_hash;
+}
+
 fn resolveRevision(git_path: []const u8, rev: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
+    // Handle <rev>:<path> syntax
+    if (findRevColonPath(rev)) |colon_pos| {
+        const rev_part = rev[0..colon_pos];
+        const path_part = rev[colon_pos + 1 ..];
+        const obj_hash = resolveRevision(git_path, rev_part, platform_impl, allocator) catch return error.BadRevision;
+        defer allocator.free(obj_hash);
+        const tree_hash = blk: {
+            const obj = objects.GitObject.load(obj_hash, git_path, platform_impl, allocator) catch return error.BadRevision;
+            defer obj.deinit(allocator);
+            switch (obj.type) {
+                .tree => break :blk try allocator.dupe(u8, obj_hash),
+                .commit => {
+                    var lines = std.mem.splitSequence(u8, obj.data, "\n");
+                    if (lines.next()) |fl| { if (std.mem.startsWith(u8, fl, "tree ")) break :blk try allocator.dupe(u8, fl["tree ".len..]); }
+                    return error.BadRevision;
+                },
+                .tag => {
+                    var lines = std.mem.splitSequence(u8, obj.data, "\n");
+                    while (lines.next()) |l| { if (std.mem.startsWith(u8, l, "object ")) break :blk try allocator.dupe(u8, l["object ".len..]); }
+                    return error.BadRevision;
+                },
+                else => return error.BadRevision,
+            }
+        };
+        defer allocator.free(tree_hash);
+        if (path_part.len == 0) return try allocator.dupe(u8, tree_hash);
+        return resolveTreePath(git_path, tree_hash, path_part, platform_impl, allocator) catch return error.BadRevision;
+    }
+
     // Handle ^{type} peel suffix: e.g. "v1.0^{commit}" or "HEAD^{tree}"
     if (std.mem.indexOf(u8, rev, "^{")) |peel_start| {
         if (std.mem.indexOfScalar(u8, rev[peel_start..], '}')) |close_offset| {
@@ -8390,20 +8600,18 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         return;
     }
 
-    // Find .git directory first
-    const git_path = findGitDirectory(allocator, platform_impl) catch {
-        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
-        std.process.exit(128);
-    };
-    defer allocator.free(git_path);
-
     var cached = false;
     var deleted = false;
     var modified_flag = false;
     var others = false;
     var stage = false;
+    var directory = false;
+    var no_empty_directory = false;
+    var error_unmatch = false;
     var pathspecs = std.array_list.Managed([]const u8).init(allocator);
     defer pathspecs.deinit();
+
+    const ls_files_usage = "usage: git ls-files [<options>] [<file>...]\n\n    -z                  paths are separated with NUL character\n    -c, --cached        show cached files in the output (default)\n    -d, --deleted       show deleted files in the output\n    -m, --modified      show modified files in the output\n    -o, --others        show other files in the output\n    -s, --stage         show staged contents' object name in the output\n    --directory         show 'other' directories' names only\n    --no-empty-directory  don't show empty directories\n    --error-unmatch     if any <file> is not in the index, treat this as an error\n    -x, --exclude <pattern>  skip files matching pattern\n    -X, --exclude-from <file>  read exclude patterns from <file>\n    --exclude-standard  add the standard git exclusions\n\n";
 
     // Parse arguments
     var after_dd = false;
@@ -8412,6 +8620,9 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             try pathspecs.append(arg);
         } else if (std.mem.eql(u8, arg, "--")) {
             after_dd = true;
+        } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            try platform_impl.writeStdout(ls_files_usage);
+            std.process.exit(129);
         } else if (std.mem.eql(u8, arg, "--cached") or std.mem.eql(u8, arg, "-c")) {
             cached = true;
         } else if (std.mem.eql(u8, arg, "--deleted") or std.mem.eql(u8, arg, "-d")) {
@@ -8422,69 +8633,152 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             others = true;
         } else if (std.mem.eql(u8, arg, "--stage") or std.mem.eql(u8, arg, "-s")) {
             stage = true;
-        } else if (arg.len > 0 and arg[0] != '-') {
+        } else if (std.mem.eql(u8, arg, "--directory")) {
+            directory = true;
+        } else if (std.mem.eql(u8, arg, "--no-empty-directory")) {
+            no_empty_directory = true;
+        } else if (std.mem.eql(u8, arg, "-z")) {
+            // null-terminated output (accepted but not fully used yet)
+        } else if (std.mem.eql(u8, arg, "--error-unmatch")) {
+            error_unmatch = true;
+        } else if (std.mem.eql(u8, arg, "--exclude-standard") or
+            std.mem.eql(u8, arg, "--full-name") or std.mem.eql(u8, arg, "--recurse-submodules") or
+            std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "-f") or
+            std.mem.eql(u8, arg, "-k") or std.mem.eql(u8, arg, "--killed") or
+            std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--ignored") or
+            std.mem.eql(u8, arg, "-u") or std.mem.eql(u8, arg, "--unmerged") or
+            std.mem.eql(u8, arg, "--eol") or std.mem.eql(u8, arg, "--debug") or
+            std.mem.eql(u8, arg, "--deduplicate") or std.mem.eql(u8, arg, "--sparse") or
+            std.mem.eql(u8, arg, "--resolve-undo"))
+        {
+            // Known but not fully implemented flags - accept silently
+        } else if (std.mem.eql(u8, arg, "-x") or std.mem.eql(u8, arg, "--exclude")) {
+            _ = args.next(); // consume pattern
+        } else if (std.mem.startsWith(u8, arg, "--exclude=") or std.mem.startsWith(u8, arg, "-x")) {
+            // Inline exclude pattern
+        } else if (std.mem.eql(u8, arg, "-X") or std.mem.eql(u8, arg, "--exclude-from")) {
+            _ = args.next(); // consume file
+        } else if (std.mem.startsWith(u8, arg, "--exclude-from=")) {
+            // Inline
+        } else if (std.mem.eql(u8, arg, "--exclude-per-directory")) {
+            _ = args.next();
+        } else if (std.mem.startsWith(u8, arg, "--abbrev") or std.mem.startsWith(u8, arg, "--format") or
+            std.mem.startsWith(u8, arg, "--with-tree"))
+        {
+            if (std.mem.indexOf(u8, arg, "=") == null) _ = args.next();
+        } else if (std.mem.startsWith(u8, arg, "-") and arg.len > 1) {
+            const msg = try std.fmt.allocPrint(allocator, "error: unknown option `{s}'\n{s}", .{ arg[1..], ls_files_usage });
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(129);
+        } else if (arg.len > 0) {
             try pathspecs.append(arg);
         }
     }
 
-    // Load index to get tracked files
+    // Find .git directory
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+
+    // Normalize pathspecs: convert absolute paths to repo-relative paths
+    const repo_root = std.fs.path.dirname(git_path) orelse ".";
+    var normalized_pathspecs = std.array_list.Managed([]const u8).init(allocator);
+    defer {
+        for (normalized_pathspecs.items) |p| allocator.free(@constCast(p));
+        normalized_pathspecs.deinit();
+    }
+    for (pathspecs.items) |ps| {
+        if (std.fs.path.isAbsolute(ps)) {
+            if (std.mem.startsWith(u8, ps, repo_root) and ps.len > repo_root.len and ps[repo_root.len] == '/') {
+                try normalized_pathspecs.append(try allocator.dupe(u8, ps[repo_root.len + 1 ..]));
+            } else {
+                try normalized_pathspecs.append(try allocator.dupe(u8, ps));
+            }
+        } else {
+            const cwd = platform_impl.fs.getCwd(allocator) catch "";
+            defer if (cwd.len > 0) allocator.free(cwd);
+            if (cwd.len > repo_root.len and std.mem.startsWith(u8, cwd, repo_root) and cwd[repo_root.len] == '/') {
+                const prefix = cwd[repo_root.len + 1 ..];
+                const combined = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, ps });
+                try normalized_pathspecs.append(combined);
+            } else {
+                try normalized_pathspecs.append(try allocator.dupe(u8, ps));
+            }
+        }
+    }
+    const effective_pathspecs = if (normalized_pathspecs.items.len > 0) normalized_pathspecs.items else pathspecs.items;
+
+    // Load index
     var index = index_mod.Index.load(git_path, platform_impl, allocator) catch |err| switch (err) {
         error.FileNotFound => index_mod.Index.init(allocator),
         else => return err,
     };
     defer index.deinit();
 
-    // If no specific flags, default to showing cached files
     if (!cached and !deleted and !modified_flag and !others) {
         cached = true;
     }
 
     if (cached) {
-        // Show files in the index
+        var pathspec_matched: ?[]bool = null;
+        defer if (pathspec_matched) |pm| allocator.free(pm);
+        if (error_unmatch and effective_pathspecs.len > 0) {
+            pathspec_matched = try allocator.alloc(bool, effective_pathspecs.len);
+            @memset(pathspec_matched.?, false);
+        }
+
         for (index.entries.items) |entry| {
-            // Filter by pathspec if given
-            if (pathspecs.items.len > 0) {
+            if (effective_pathspecs.len > 0) {
                 var matches = false;
-                for (pathspecs.items) |ps| {
-                    // Pathspec matches if entry path equals or starts with ps/
-                    if (std.mem.eql(u8, entry.path, ps)) {
+                for (effective_pathspecs, 0..) |ps, pi| {
+                    if (std.mem.eql(u8, entry.path, ps) or
+                        (std.mem.startsWith(u8, entry.path, ps) and entry.path.len > ps.len and entry.path[ps.len] == '/'))
+                    {
                         matches = true;
-                        break;
-                    }
-                    if (std.mem.startsWith(u8, entry.path, ps) and entry.path.len > ps.len and entry.path[ps.len] == '/') {
-                        matches = true;
+                        if (pathspec_matched) |pm| pm[pi] = true;
                         break;
                     }
                 }
                 if (!matches) continue;
             }
             if (stage) {
-                // Show stage information (mode, hash, stage, filename)
                 const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
                 defer allocator.free(hash_str);
                 const output = try std.fmt.allocPrint(allocator, "{o} {s} 0\t{s}\n", .{ entry.mode, hash_str, entry.path });
                 defer allocator.free(output);
                 try platform_impl.writeStdout(output);
             } else {
-                // Just show filename
                 const output = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path});
                 defer allocator.free(output);
                 try platform_impl.writeStdout(output);
             }
         }
+
+        if (error_unmatch) {
+            if (pathspec_matched) |pm| {
+                for (pm, 0..) |matched, pi| {
+                    if (!matched) {
+                        const orig_ps = if (pi < pathspecs.items.len) pathspecs.items[pi] else effective_pathspecs[pi];
+                        const msg = try std.fmt.allocPrint(allocator, "error: pathspec '{s}' did not match any file(s) known to git\n", .{orig_ps});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                        std.process.exit(1);
+                    }
+                }
+            }
+        }
     }
 
     if (deleted) {
-        // Show deleted files (files in index but not in working tree)
-        const repo_root = std.fs.path.dirname(git_path) orelse ".";
-        
         for (index.entries.items) |entry| {
             const full_path = if (std.fs.path.isAbsolute(entry.path))
                 try allocator.dupe(u8, entry.path)
             else
                 try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path });
             defer allocator.free(full_path);
-            
             const file_exists = platform_impl.fs.exists(full_path) catch false;
             if (!file_exists) {
                 const output = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path});
@@ -8495,36 +8789,25 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     }
 
     if (modified_flag) {
-        // Show modified files (files in index but different in working tree)
-        const repo_root = std.fs.path.dirname(git_path) orelse ".";
-        
         for (index.entries.items) |entry| {
             const full_path = if (std.fs.path.isAbsolute(entry.path))
                 try allocator.dupe(u8, entry.path)
             else
                 try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path });
             defer allocator.free(full_path);
-            
             const file_exists = platform_impl.fs.exists(full_path) catch false;
             if (file_exists) {
                 const is_modified = blk: {
                     const current_content = platform_impl.fs.readFile(allocator, full_path) catch break :blk false;
                     defer allocator.free(current_content);
-                    
-                    // Create blob object to get hash
                     const blob = objects.createBlobObject(current_content, allocator) catch break :blk false;
                     defer blob.deinit(allocator);
-                    
                     const current_hash = blob.hash(allocator) catch break :blk false;
                     defer allocator.free(current_hash);
-                    
-                    // Compare with index hash
                     const index_hash = std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1}) catch break :blk false;
                     defer allocator.free(index_hash);
-                    
                     break :blk !std.mem.eql(u8, current_hash, index_hash);
                 };
-                
                 if (is_modified) {
                     const output = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path});
                     defer allocator.free(output);
@@ -8535,31 +8818,50 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     }
 
     if (others) {
-        // Show untracked files
-        const repo_root = std.fs.path.dirname(git_path) orelse ".";
-        
-        // Load gitignore
         const gitignore_path = try std.fmt.allocPrint(allocator, "{s}/.gitignore", .{repo_root});
         defer allocator.free(gitignore_path);
-        
         var gitignore = gitignore_mod.GitIgnore.loadFromFile(allocator, gitignore_path, platform_impl) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => gitignore_mod.GitIgnore.init(allocator),
         };
         defer gitignore.deinit();
 
-        var untracked_files = findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.array_list.Managed([]u8).init(allocator);
-        defer {
-            for (untracked_files.items) |file| {
-                allocator.free(file);
+        if (directory) {
+            var dir_entries = std.array_list.Managed([]u8).init(allocator);
+            defer {
+                for (dir_entries.items) |e| allocator.free(e);
+                dir_entries.deinit();
             }
-            untracked_files.deinit();
-        }
-
-        for (untracked_files.items) |file| {
-            const output = try std.fmt.allocPrint(allocator, "{s}\n", .{file});
-            defer allocator.free(output);
-            try platform_impl.writeStdout(output);
+            try findUntrackedDirEntries(allocator, repo_root, "", &dir_entries, &index, &gitignore, no_empty_directory, effective_pathspecs, platform_impl);
+            std.sort.block([]u8, dir_entries.items, {}, struct {
+                fn lt(_: void, a: []u8, b: []u8) bool { return std.mem.order(u8, a, b) == .lt; }
+            }.lt);
+            for (dir_entries.items) |file| {
+                const output = try std.fmt.allocPrint(allocator, "{s}\n", .{file});
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            }
+        } else {
+            var untracked_files = findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.array_list.Managed([]u8).init(allocator);
+            defer {
+                for (untracked_files.items) |file| allocator.free(file);
+                untracked_files.deinit();
+            }
+            std.sort.block([]u8, untracked_files.items, {}, struct {
+                fn lt(_: void, a: []u8, b: []u8) bool { return std.mem.order(u8, a, b) == .lt; }
+            }.lt);
+            for (untracked_files.items) |file| {
+                if (effective_pathspecs.len > 0) {
+                    var matches = false;
+                    for (effective_pathspecs) |ps| {
+                        if (pathspecMatchesPath(ps, file, false)) { matches = true; break; }
+                    }
+                    if (!matches) continue;
+                }
+                const output = try std.fmt.allocPrint(allocator, "{s}\n", .{file});
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            }
         }
     }
 }

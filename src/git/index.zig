@@ -35,7 +35,7 @@ pub const IndexEntry = struct {
             .gid = getGroupId(),
             .size = @intCast(stat.size),
             .sha1 = sha1,
-            .flags = @intCast(path.len),
+            .flags = if (path.len >= 0xFFF) 0xFFF else @intCast(path.len),
             .extended_flags = null, // No extended flags for new entries
             .path = path,
         };
@@ -66,7 +66,7 @@ pub const IndexEntry = struct {
         const base_len = 62;
         const ext_len = if (self.extended_flags != null) @as(usize, 2) else @as(usize, 0);
         const total_len = base_len + ext_len + self.path.len;
-        const pad_len = (8 - (total_len % 8)) % 8;
+        const pad_len = 8 - (total_len % 8);
         var i: usize = 0;
         while (i < pad_len) : (i += 1) {
             try writer.writeByte(0);
@@ -102,7 +102,7 @@ pub const IndexEntry = struct {
         const base_len = 62;
         const ext_len = if (extended_flags != null) @as(usize, 2) else @as(usize, 0);
         const total_len = base_len + ext_len + path_len;
-        const pad_len = (8 - (total_len % 8)) % 8;
+        const pad_len = 8 - (total_len % 8);
         try reader.skipBytes(pad_len, .{});
 
         return IndexEntry{
@@ -267,6 +267,47 @@ pub const Index = struct {
                     return error.PathTooLong;
                 }
             }
+        }
+        
+        // For v2/v3 with long paths (0xFFF), read until NUL
+        if (version < 4 and actual_path_len == 0xFFF) {
+            // Path is longer than 0xFFF - read until NUL byte
+            var path_buf = std.array_list.Managed(u8).init(self.allocator);
+            defer path_buf.deinit();
+            
+            while (true) {
+                const byte = reader.readByte() catch break;
+                if (byte == 0) break;
+                try path_buf.append(byte);
+            }
+            
+            const path_bytes = try self.allocator.dupe(u8, path_buf.items);
+            
+            // Skip remaining padding to reach 8-byte alignment
+            const ext_len = if (version >= 3 and (flags & 0x4000) != 0) @as(usize, 2) else @as(usize, 0);
+            const entry_size = 62 + ext_len + path_bytes.len;
+            const pad_len = 8 - (entry_size % 8);
+            // We already consumed 1 NUL, skip the rest
+            if (pad_len > 1) {
+                reader.skipBytes(pad_len - 1, .{}) catch {};
+            }
+            
+            return IndexEntry{
+                .ctime_sec = ctime_sec,
+                .ctime_nsec = ctime_nsec,
+                .mtime_sec = mtime_sec,
+                .mtime_nsec = mtime_nsec,
+                .dev = dev,
+                .ino = ino,
+                .mode = mode,
+                .uid = uid,
+                .gid = gid,
+                .size = size,
+                .sha1 = sha1,
+                .flags = flags,
+                .extended_flags = extended_flags,
+                .path = path_bytes,
+            };
         }
         
         // Check if we have enough bytes for the path
