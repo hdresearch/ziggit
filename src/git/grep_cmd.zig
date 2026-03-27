@@ -610,7 +610,8 @@ pub fn cmdGrep(allocator: Allocator, args: *platform_mod.ArgIterator, platform_i
         const content = blk: {
             if (std.mem.eql(u8, pf, "-")) {
                 // Read from stdin
-                break :blk std.io.getStdIn().readToEndAlloc(allocator, 1024 * 1024) catch {
+                const stdin_file = std.fs.File{ .handle = std.posix.STDIN_FILENO };
+                break :blk stdin_file.readToEndAlloc(allocator, 1024 * 1024) catch {
                     try platform_impl.writeStderr("fatal: cannot read patterns from stdin\n");
                     std.process.exit(2);
                     unreachable;
