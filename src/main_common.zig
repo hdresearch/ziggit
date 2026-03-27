@@ -15430,7 +15430,7 @@ fn nativeCmdVerifyPack(allocator: std.mem.Allocator, args: [][]const u8, command
                         hash_hex[bi * 2] = hc[b >> 4];
                         hash_hex[bi * 2 + 1] = hc[b & 0xf];
                     }
-                    const out = std.fmt.allocPrint(allocator, "{s} {s} {d} {d} {d}\n", .{ hash_hex, type_str, decomp.data.len, pos - entry_offset, entry_offset }) catch continue;
+                    const out = std.fmt.allocPrint(allocator, "{s} {s: <6} {d} {d} {d}\n", .{ hash_hex, type_str, decomp.data.len, pos - entry_offset, entry_offset }) catch continue;
                     defer allocator.free(out);
                     try platform_impl.writeStdout(out);
                 } else if (obj_type == 6 and delta_base_offset != null) {
@@ -15446,8 +15446,16 @@ fn nativeCmdVerifyPack(allocator: std.mem.Allocator, args: [][]const u8, command
         }
 
         // Output summary
-        if (!stat_only) {
-            // Real git outputs nothing on non-verbose success
+        if (verbose and !stat_only) {
+            const summary = std.fmt.allocPrint(allocator, "non delta: {d} object{s}\n{s}: ok\n", .{
+                num_objects,
+                if (num_objects == 1) "" else "s",
+                pack_path,
+            }) catch "";
+            if (summary.len > 0) {
+                defer allocator.free(summary);
+                try platform_impl.writeStdout(summary);
+            }
         }
     }
 
