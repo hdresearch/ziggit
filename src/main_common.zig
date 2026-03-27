@@ -2988,6 +2988,11 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         }
     }
 
+    // Run pre-commit hook (unless --no-verify)
+    runGitHook(allocator, git_path, "pre-commit") catch {
+        std.process.exit(1);
+    };
+
     const commit_object = try objects.createCommitObject(
         tree_hash,
         parent_hashes.items,
@@ -9030,6 +9035,27 @@ fn copyObjectsForPush(allocator: std.mem.Allocator, src_git_dir: []const u8, dst
     const dst_pack_dir = try std.fmt.allocPrint(allocator, "{s}/objects/pack", .{dst_git_dir});
     defer allocator.free(dst_pack_dir);
     std.fs.cwd().makePath(dst_pack_dir) catch {};
+}
+
+fn runGitHook(allocator: std.mem.Allocator, git_path: []const u8, hook_name: []const u8) !void {
+    const hook_path = try std.fmt.allocPrint(allocator, "{s}/hooks/{s}", .{ git_path, hook_name });
+    defer allocator.free(hook_path);
+    
+    // Check if hook exists
+    std.fs.cwd().access(hook_path, .{}) catch return; // No hook = success
+    
+    // Execute the hook using /bin/sh
+    const argv = [_][]const u8{ "/bin/sh", hook_path };
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &argv,
+    }) catch return; // Can't run = skip
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    
+    if (result.term == .Exited and result.term.Exited != 0) {
+        return error.HookFailed;
+    }
 }
 
 fn isValidRemoteName(name: []const u8) bool {
