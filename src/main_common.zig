@@ -2505,17 +2505,31 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     }
     defer index.deinit();
 
-    // Check if there's anything to commit
-    if (index.entries.items.len == 0 and !allow_empty) {
-        const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch "master";
-        defer allocator.free(current_branch);
-        
-        const branch_msg = try std.fmt.allocPrint(allocator, "On branch {s}\n", .{current_branch});
-        defer allocator.free(branch_msg);
-        try platform_impl.writeStderr(branch_msg);
-        
-        try platform_impl.writeStderr("nothing to commit, working tree clean\n");
-        std.process.exit(1);
+    // Check if there's anything to commit - compare index tree to HEAD tree
+    if (!allow_empty) {
+        const new_tree = try buildRecursiveTree(allocator, index.entries.items, "", git_path, platform_impl);
+        defer allocator.free(new_tree);
+        var has_changes = true;
+        if (refs.getCurrentCommit(git_path, platform_impl, allocator) catch null) |head_h| {
+            defer allocator.free(head_h);
+            if (objects.GitObject.load(head_h, git_path, platform_impl, allocator)) |head_obj| {
+                defer head_obj.deinit(allocator);
+                const head_tree = extractHeaderField(head_obj.data, "tree");
+                if (std.mem.eql(u8, new_tree, head_tree)) has_changes = false;
+            } else |_| {}
+        } else {
+            // No HEAD - has changes if index is not empty
+            if (index.entries.items.len == 0) has_changes = false;
+        }
+        if (!has_changes and !amend) {
+            const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch "master";
+            defer allocator.free(current_branch);
+            const branch_msg = try std.fmt.allocPrint(allocator, "On branch {s}\n", .{current_branch});
+            defer allocator.free(branch_msg);
+            try platform_impl.writeStderr(branch_msg);
+            try platform_impl.writeStderr("nothing to commit, working tree clean\n");
+            std.process.exit(1);
+        }
     }
 
     // Create recursive tree objects from index entries (handles nested directories)
