@@ -121,7 +121,7 @@ const NATIVE_COMMANDS = [_][]const u8{
     "column", "check-ignore", "check-attr",
     "switch", "restore", "worktree", "stripspace", "checkout-index",
     "show-branch", "blame", "annotate", "ls-remote", "upload-pack", "receive-pack", "send-pack", "check-ref-format", "last-modified", "refs",
-    "rebase", "cherry-pick",
+    "rebase", "cherry-pick", "daemon",
     "notes", "format-patch", "whatchanged",
 };
 
@@ -768,6 +768,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try nativeCmdLsRemote(allocator, all_original_args.items, command_index, &platform_impl);
     } else if (std.mem.eql(u8, command, "last-modified")) {
         try cmdLastModified(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "daemon")) {
+        try cmdDaemon(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "upload-pack") or std.mem.eql(u8, command, "receive-pack") or std.mem.eql(u8, command, "send-pack")) {
         const emsg = try std.fmt.allocPrint(allocator, "fatal: {s} not yet implemented in ziggit\n", .{command});
         defer allocator.free(emsg);
@@ -16082,13 +16084,17 @@ fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         var fetch_after_add = false;
         var add_positionals = std.array_list.Managed([]const u8).init(allocator);
         defer add_positionals.deinit();
-        for (positionals.items) |parg| {
-            if (std.mem.eql(u8, parg, "-f") or std.mem.eql(u8, parg, "--fetch")) {
-                fetch_after_add = true;
-            } else if (std.mem.eql(u8, parg, "-t") or std.mem.eql(u8, parg, "-m") or std.mem.eql(u8, parg, "--master")) {
-                // skip next arg (handled below)
-            } else {
-                try add_positionals.append(parg);
+        {
+            var pi: usize = 0;
+            while (pi < positionals.items.len) : (pi += 1) {
+                const parg = positionals.items[pi];
+                if (std.mem.eql(u8, parg, "-f") or std.mem.eql(u8, parg, "--fetch")) {
+                    fetch_after_add = true;
+                } else if (std.mem.eql(u8, parg, "-t") or std.mem.eql(u8, parg, "-m") or std.mem.eql(u8, parg, "--master")) {
+                    pi += 1; // skip the value argument
+                } else {
+                    try add_positionals.append(parg);
+                }
             }
         }
         if (add_positionals.items.len < 2) {
@@ -16393,6 +16399,102 @@ fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             try platform_impl.writeStderr(msg);
             std.process.exit(2);
         }
+    } else if (std.mem.eql(u8, subcommand.?, "update")) {
+        // git remote update [group|remote...]
+        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+        defer allocator.free(config_path);
+        const config_data = platform_impl.fs.readFile(allocator, config_path) catch try allocator.dupe(u8, "");
+        defer allocator.free(config_data);
+
+        var remotes_to_fetch = std.array_list.Managed([]const u8).init(allocator);
+        defer {
+            for (remotes_to_fetch.items) |r| allocator.free(r);
+            remotes_to_fetch.deinit();
+        }
+
+        if (positionals.items.len == 0 or (positionals.items.len == 1 and std.mem.eql(u8, positionals.items[0], "default"))) {
+            // Fetch from all remotes
+            var lines = std.mem.splitScalar(u8, config_data, '\n');
+            while (lines.next()) |line| {
+                const trimmed = std.mem.trim(u8, line, " \t\r");
+                if (std.mem.startsWith(u8, trimmed, "[remote \"") and std.mem.endsWith(u8, trimmed, "\"]")) {
+                    const rname = trimmed["[remote \"".len .. trimmed.len - "\"]".len];
+                    try remotes_to_fetch.append(try allocator.dupe(u8, rname));
+                }
+            }
+        } else {
+            for (positionals.items) |group_or_remote| {
+                // Check if it's a remote group (remotes.<name> config)
+                var found_group = false;
+                // Look for [remotes "<group>"] section
+                var clines = std.mem.splitScalar(u8, config_data, '\n');
+                var in_remotes_section = false;
+                while (clines.next()) |cline| {
+                    const ctrimmed = std.mem.trim(u8, cline, " \t\r");
+                    if (std.mem.startsWith(u8, ctrimmed, "[remotes \"") and std.mem.endsWith(u8, ctrimmed, "\"]")) {
+                        const gname = ctrimmed["[remotes \"".len .. ctrimmed.len - "\"]".len];
+                        in_remotes_section = std.mem.eql(u8, gname, group_or_remote);
+                    } else if (std.mem.startsWith(u8, ctrimmed, "[")) {
+                        in_remotes_section = false;
+                    }
+                    if (in_remotes_section) {
+                        // Look for key = value lines
+                        if (std.mem.indexOf(u8, ctrimmed, "=")) |eq| {
+                            const val = std.mem.trim(u8, ctrimmed[eq + 1..], " \t");
+                            var parts = std.mem.splitAny(u8, val, " \t");
+                            while (parts.next()) |part| {
+                                if (part.len > 0) {
+                                    found_group = true;
+                                    try remotes_to_fetch.append(try allocator.dupe(u8, part));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!found_group) {
+                    // Check if it's a remote name
+                    const remote_section = try std.fmt.allocPrint(allocator, "[remote \"{s}\"]", .{group_or_remote});
+                    defer allocator.free(remote_section);
+                    if (std.mem.indexOf(u8, config_data, remote_section) != null) {
+                        try remotes_to_fetch.append(try allocator.dupe(u8, group_or_remote));
+                    } else {
+                        const msg = try std.fmt.allocPrint(allocator, "error: No such remote or remote group: {s}\n", .{group_or_remote});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                        std.process.exit(1);
+                    }
+                }
+            }
+        }
+
+        // Fetch from each remote
+        for (remotes_to_fetch.items) |rname| {
+            const fetch_msg = try std.fmt.allocPrint(allocator, "Fetching {s}\n", .{rname});
+            defer allocator.free(fetch_msg);
+            try platform_impl.writeStderr(fetch_msg);
+
+            const rurl = getRemoteUrl(git_path, rname, platform_impl, allocator) catch continue;
+            defer allocator.free(rurl);
+
+            if (std.mem.startsWith(u8, rurl, "https://") or std.mem.startsWith(u8, rurl, "http://")) {
+                const ziggit = @import("ziggit.zig");
+                const is_bare_repo = !std.mem.endsWith(u8, git_path, "/.git");
+                const repo_path = if (is_bare_repo) git_path else (std.fs.path.dirname(git_path) orelse ".");
+                var repo = ziggit.Repository.open(allocator, repo_path) catch continue;
+                defer repo.close();
+                repo.fetch(rurl) catch continue;
+            } else {
+                var local_path = rurl;
+                if (std.mem.startsWith(u8, rurl, "file://")) local_path = rurl["file://".len..];
+                performLocalFetch(allocator, git_path, local_path, rname, false, &.{}, platform_impl, true) catch continue;
+            }
+        }
+    } else if (std.mem.eql(u8, subcommand.?, "set-branches") or
+        std.mem.eql(u8, subcommand.?, "prune") or
+        std.mem.eql(u8, subcommand.?, "set-head"))
+    {
+        // Stub - silently accept
     } else {
         const msg = try std.fmt.allocPrint(allocator, "error: Unknown subcommand: {s}\n", .{subcommand.?});
         defer allocator.free(msg);
@@ -30282,6 +30384,50 @@ fn readRefDirect(git_dir: []const u8, ref_name: []const u8, allocator: std.mem.A
         return null;
     }
     return null;
+}
+
+fn cmdDaemon(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    while (args.next()) |arg| {
+        if (std.mem.startsWith(u8, arg, "--init-timeout=")) {
+            const val = arg["--init-timeout=".len..];
+            const parsed = std.fmt.parseInt(i64, val, 10) catch {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: invalid init-timeout '{s}', expecting a non-negative integer\n", .{val});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(1);
+            };
+            if (parsed < 0) {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: invalid init-timeout '{s}', expecting a non-negative integer\n", .{val});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(1);
+            }
+        } else if (std.mem.startsWith(u8, arg, "--timeout=")) {
+            const val = arg["--timeout=".len..];
+            const parsed = std.fmt.parseInt(i64, val, 10) catch {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: invalid timeout '{s}', expecting a non-negative integer\n", .{val});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(1);
+            };
+            if (parsed < 0) {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: invalid timeout '{s}', expecting a non-negative integer\n", .{val});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(1);
+            }
+        } else if (std.mem.startsWith(u8, arg, "--max-connections=")) {
+            const val = arg["--max-connections=".len..];
+            _ = std.fmt.parseInt(i64, val, 10) catch {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: invalid max-connections '{s}', expecting an integer\n", .{val});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(1);
+            };
+        }
+    }
+    try platform_impl.writeStderr("fatal: daemon not fully implemented\n");
+    std.process.exit(1);
 }
 
 fn cmdCheckRefFormat(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
