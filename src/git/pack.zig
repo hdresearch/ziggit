@@ -158,8 +158,8 @@ pub fn verifyPackFile(pack_dir_path: []const u8, idx_filename: []const u8, platf
 }
 
 /// List all available pack files in a repository
-pub fn listPackFiles(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.array_list.Managed([]u8) {
-    var pack_files = std.array_list.Managed([]u8).init(allocator);
+pub fn listPackFiles(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.ArrayList([]u8) {
+    var pack_files = std.ArrayList([]u8).init(allocator);
     
     const pack_dir_path = try std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir});
     defer allocator.free(pack_dir_path);

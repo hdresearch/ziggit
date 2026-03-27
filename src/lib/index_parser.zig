@@ -21,12 +21,12 @@ pub const IndexEntry = struct {
 };
 
 pub const GitIndex = struct {
-    entries: std.array_list.Managed(IndexEntry),
+    entries: std.ArrayList(IndexEntry),
     allocator: std.mem.Allocator,
     
     pub fn init(allocator: std.mem.Allocator) GitIndex {
         return GitIndex{
-            .entries = std.array_list.Managed(IndexEntry).init(allocator),
+            .entries = std.ArrayList(IndexEntry).init(allocator),
             .allocator = allocator,
         };
     }
