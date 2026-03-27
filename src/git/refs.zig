@@ -183,6 +183,41 @@ const RefResolution = struct {
 
 /// Resolve a reference one level (without following symbolic refs)
 fn resolveRefOnce(git_dir: []const u8, ref_name: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !RefResolution {
+    // Handle special refs like FETCH_HEAD, MERGE_HEAD, ORIG_HEAD, CHERRY_PICK_HEAD
+    if (std.mem.eql(u8, ref_name, "FETCH_HEAD")) {
+        const fh_path = try std.fmt.allocPrint(allocator, "{s}/FETCH_HEAD", .{git_dir});
+        defer allocator.free(fh_path);
+        const fh_content = platform_impl.fs.readFile(allocator, fh_path) catch return error.RefNotFound;
+        defer allocator.free(fh_content);
+        // FETCH_HEAD format: "<hash>\t<merge-status>\t<description>"
+        // First line's hash is what we want
+        const first_line = if (std.mem.indexOfScalar(u8, fh_content, '\n')) |nl| fh_content[0..nl] else fh_content;
+        const hash_end = std.mem.indexOfScalar(u8, first_line, '\t') orelse first_line.len;
+        if (hash_end >= 40) {
+            return RefResolution{
+                .target = try allocator.dupe(u8, first_line[0..40]),
+                .is_symbolic = false,
+            };
+        }
+        return error.RefNotFound;
+    }
+    if (std.mem.eql(u8, ref_name, "MERGE_HEAD") or std.mem.eql(u8, ref_name, "ORIG_HEAD") or
+        std.mem.eql(u8, ref_name, "CHERRY_PICK_HEAD") or std.mem.eql(u8, ref_name, "REVERT_HEAD"))
+    {
+        const special_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_name });
+        defer allocator.free(special_path);
+        const special_content = platform_impl.fs.readFile(allocator, special_path) catch return error.RefNotFound;
+        defer allocator.free(special_content);
+        const trimmed_hash = std.mem.trim(u8, special_content, " \t\r\n");
+        if (trimmed_hash.len >= 40) {
+            return RefResolution{
+                .target = try allocator.dupe(u8, trimmed_hash[0..40]),
+                .is_symbolic = false,
+            };
+        }
+        return error.RefNotFound;
+    }
+
     // Try to read as file first
     const ref_path = if (std.mem.eql(u8, ref_name, "HEAD"))
         try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir})
