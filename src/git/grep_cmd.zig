@@ -1137,7 +1137,7 @@ fn walkTree(allocator: Allocator, git_dir: []const u8, tree_hash: []const u8, pa
         pos += 20;
 
         var hash_hex: [40]u8 = undefined;
-        _ = std.fmt.bufPrint(&hash_hex, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch continue;
+        _ = std.fmt.bufPrint(&hash_hex, "{x}", .{hash_bytes}) catch continue;
 
         const full_path = if (path_prefix.len > 0)
             try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path_prefix, name })
