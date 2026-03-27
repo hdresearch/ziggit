@@ -31424,8 +31424,7 @@ fn cmdFormatPatch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             try platform_impl.writeStdout(version_line);
         } else {
             // Write to file
-            const dir = output_dir orelse ".";
-            const filename = try std.fmt.allocPrint(allocator, "{s}/{d:0>4}-{s}.patch", .{ dir, patch_num, sanitizeSubjectForFilename(first_line, allocator) catch first_line });
+            const filename = try std.fmt.allocPrint(allocator, "./{d:0>4}-{s}.patch", .{ patch_num, sanitizeSubjectForFilename(first_line, allocator) catch first_line });
             defer allocator.free(filename);
             
             const out_msg = try std.fmt.allocPrint(allocator, "{s}\n", .{filename});
