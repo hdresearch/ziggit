@@ -16368,9 +16368,8 @@ fn getRefField(field: []const u8, refname: []const u8, objectname: []const u8, o
     if (std.mem.eql(u8, field, "objectname:short")) return if (objectname.len >= 7) objectname[0..7] else objectname;
     if (std.mem.startsWith(u8, field, "objectname:short=")) {
         const n = std.fmt.parseInt(usize, field["objectname:short=".len..], 10) catch return objectname;
-        const len = @min(n, objectname.len);
-        if (len < 4) return if (objectname.len >= 4) objectname[0..4] else objectname;
-        return objectname[0..len];
+        const len = @max(n, 1);
+        return objectname[0..@min(len, objectname.len)];
     }
     if (std.mem.eql(u8, field, "objecttype")) return objecttype;
 
@@ -16394,9 +16393,7 @@ fn getRefField(field: []const u8, refname: []const u8, objectname: []const u8, o
         if (std.mem.eql(u8, field, "tree:short")) return if (tree_hash.len >= 7) tree_hash[0..7] else tree_hash;
         if (std.mem.startsWith(u8, field, "tree:short=")) {
             const n = std.fmt.parseInt(usize, field["tree:short=".len..], 10) catch return tree_hash;
-            const len = @min(n, tree_hash.len);
-            if (len < 4) return if (tree_hash.len >= 4) tree_hash[0..4] else tree_hash;
-            return tree_hash[0..len];
+            return tree_hash[0..@min(@max(n, 1), tree_hash.len)];
         }
         return tree_hash;
     }
@@ -16409,9 +16406,8 @@ fn getRefField(field: []const u8, refname: []const u8, objectname: []const u8, o
         if (std.mem.eql(u8, field, "parent:short")) return if (first_parent.len >= 7) first_parent[0..7] else first_parent;
         if (std.mem.startsWith(u8, field, "parent:short=")) {
             const n = std.fmt.parseInt(usize, field["parent:short=".len..], 10) catch return first_parent;
-            const len = @min(n, first_parent.len);
-            if (len < 4) return if (first_parent.len >= 4) first_parent[0..4] else first_parent;
-            return first_parent[0..len];
+            if (first_parent.len == 0) return first_parent;
+            return first_parent[0..@min(@max(n, 1), first_parent.len)];
         }
         return first_parent;
     }
@@ -16628,7 +16624,10 @@ fn extractPersonField(suffix: []const u8, person_line: []const u8, allocator: st
     const email_brk = person_line[lt_pos .. gt_pos + 1];
     const email_bare = person_line[lt_pos + 1 .. gt_pos];
 
-    if (std.mem.eql(u8, suffix, "name") or std.mem.eql(u8, suffix, "name:mailmap")) return name;
+    if (std.mem.eql(u8, suffix, "name")) return name;
+    if (std.mem.eql(u8, suffix, "name:mailmap")) {
+        return applyMailmapName(name, email_bare, allocator) catch name;
+    }
     if (std.mem.eql(u8, suffix, "email")) return email_brk;
     if (std.mem.eql(u8, suffix, "email:trim")) return email_bare;
     if (std.mem.eql(u8, suffix, "email:localpart") or std.mem.eql(u8, suffix, "email:trim,localpart") or std.mem.eql(u8, suffix, "email:localpart,trim")) {
@@ -16636,15 +16635,26 @@ fn extractPersonField(suffix: []const u8, person_line: []const u8, allocator: st
         return email_bare;
     }
     if (std.mem.startsWith(u8, suffix, "email:")) {
-        // Handle mailmap and combined variants
-        if (std.mem.indexOf(u8, suffix, "trim") != null and std.mem.indexOf(u8, suffix, "localpart") != null) {
-            if (std.mem.indexOfScalar(u8, email_bare, '@')) |at| return email_bare[0..at];
-            return email_bare;
+        const has_mailmap = std.mem.indexOf(u8, suffix, "mailmap") != null;
+        const has_trim = std.mem.indexOf(u8, suffix, "trim") != null;
+        const has_localpart = std.mem.indexOf(u8, suffix, "localpart") != null;
+
+        var eff_email = email_bare;
+        if (has_mailmap) {
+            eff_email = applyMailmapEmail(name, email_bare, allocator) catch email_bare;
         }
-        if (std.mem.indexOf(u8, suffix, "trim") != null) return email_bare;
-        if (std.mem.indexOf(u8, suffix, "localpart") != null) {
-            if (std.mem.indexOfScalar(u8, email_bare, '@')) |at| return email_bare[0..at];
-            return email_bare;
+
+        if (has_trim and has_localpart) {
+            if (std.mem.indexOfScalar(u8, eff_email, '@')) |at| return eff_email[0..at];
+            return eff_email;
+        }
+        if (has_localpart) {
+            if (std.mem.indexOfScalar(u8, eff_email, '@')) |at| return eff_email[0..at];
+            return eff_email;
+        }
+        if (has_trim) return eff_email;
+        if (has_mailmap) {
+            return std.fmt.allocPrint(allocator, "<{s}>", .{eff_email}) catch email_brk;
         }
         return email_brk;
     }
@@ -16786,6 +16796,112 @@ fn findConfigValue(config_data: []const u8, section: []const u8, subsection: ?[]
         }
     }
     return last_val;
+}
+
+/// Read .mailmap and apply name mapping
+fn applyMailmapName(name: []const u8, email: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+    const mailmap_data = std.fs.cwd().readFileAlloc(allocator, ".mailmap", 64 * 1024) catch return name;
+    defer allocator.free(mailmap_data);
+    var lines = std.mem.splitScalar(u8, mailmap_data, '\n');
+    while (lines.next()) |line| {
+        const t = std.mem.trim(u8, line, " \t\r");
+        if (t.len == 0 or t[0] == '#') continue;
+        // Format: "Proper Name <proper@email> Original Name <original@email>"
+        // or: "Proper Name <proper@email> <original@email>"
+        // Match by original name+email
+        if (parseMailmapLine(t, name, email)) |mapped_name| {
+            return mapped_name;
+        }
+    }
+    return name;
+}
+
+/// Read .mailmap and apply email mapping
+fn applyMailmapEmail(name: []const u8, email: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+    const mailmap_data = std.fs.cwd().readFileAlloc(allocator, ".mailmap", 64 * 1024) catch return email;
+    defer allocator.free(mailmap_data);
+    var lines = std.mem.splitScalar(u8, mailmap_data, '\n');
+    while (lines.next()) |line| {
+        const t = std.mem.trim(u8, line, " \t\r");
+        if (t.len == 0 or t[0] == '#') continue;
+        if (parseMailmapLineEmail(t, name, email)) |mapped_email| {
+            return mapped_email;
+        }
+    }
+    return email;
+}
+
+/// Parse a mailmap line and check if it matches the given name+email, return mapped name
+fn parseMailmapLine(line: []const u8, orig_name: []const u8, orig_email: []const u8) ?[]const u8 {
+    // Format: "Proper Name <proper@email> Original Name <original@email>"
+    // Find all <email> brackets
+    var lt1: ?usize = null;
+    var gt1: ?usize = null;
+    var lt2: ?usize = null;
+    var gt2: ?usize = null;
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        if (line[i] == '<') {
+            if (lt1 == null) { lt1 = i; } else { lt2 = i; }
+        } else if (line[i] == '>') {
+            if (gt1 == null) { gt1 = i; } else { gt2 = i; }
+        }
+    }
+    if (lt1 == null or gt1 == null) return null;
+
+    if (lt2 != null and gt2 != null) {
+        // Two email addresses: "Proper Name <proper@email> Original Name <original@email>"
+        const orig_email_in_line = line[lt2.? + 1 .. gt2.?];
+        if (std.ascii.eqlIgnoreCase(orig_email_in_line, orig_email)) {
+            // Check original name matches too
+            const orig_name_in_line = std.mem.trim(u8, line[gt1.? + 1 .. lt2.?], " \t");
+            if (orig_name_in_line.len == 0 or std.mem.eql(u8, orig_name_in_line, orig_name)) {
+                const proper_name = std.mem.trim(u8, line[0..lt1.?], " \t");
+                if (proper_name.len > 0) return proper_name;
+            }
+        }
+    } else {
+        // One email: "Proper Name <email>" - matches by email only
+        const email_in_line = line[lt1.? + 1 .. gt1.?];
+        if (std.ascii.eqlIgnoreCase(email_in_line, orig_email)) {
+            const proper_name = std.mem.trim(u8, line[0..lt1.?], " \t");
+            if (proper_name.len > 0) return proper_name;
+        }
+    }
+    return null;
+}
+
+/// Parse a mailmap line and return mapped email if it matches
+fn parseMailmapLineEmail(line: []const u8, orig_name: []const u8, orig_email: []const u8) ?[]const u8 {
+    var lt1: ?usize = null;
+    var gt1: ?usize = null;
+    var lt2: ?usize = null;
+    var gt2: ?usize = null;
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        if (line[i] == '<') {
+            if (lt1 == null) { lt1 = i; } else { lt2 = i; }
+        } else if (line[i] == '>') {
+            if (gt1 == null) { gt1 = i; } else { gt2 = i; }
+        }
+    }
+    if (lt1 == null or gt1 == null) return null;
+
+    if (lt2 != null and gt2 != null) {
+        const orig_email_in_line = line[lt2.? + 1 .. gt2.?];
+        if (std.ascii.eqlIgnoreCase(orig_email_in_line, orig_email)) {
+            const orig_name_in_line = std.mem.trim(u8, line[gt1.? + 1 .. lt2.?], " \t");
+            if (orig_name_in_line.len == 0 or std.mem.eql(u8, orig_name_in_line, orig_name)) {
+                return line[lt1.? + 1 .. gt1.?];
+            }
+        }
+    } else {
+        const email_in_line = line[lt1.? + 1 .. gt1.?];
+        if (std.ascii.eqlIgnoreCase(email_in_line, orig_email)) {
+            return line[lt1.? + 1 .. gt1.?];
+        }
+    }
+    return null;
 }
 
 fn sanitizeSubject(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
