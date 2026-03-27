@@ -8,7 +8,7 @@ pub const GitDiagnostics = struct {
     git_dir: []const u8,
     platform_impl: anytype,
     allocator: std.mem.Allocator,
-    issues: std.ArrayList(DiagnosticIssue),
+    issues: std.array_list.Managed(DiagnosticIssue),
     
     const Self = @This();
     
@@ -81,7 +81,7 @@ pub const GitDiagnostics = struct {
             .git_dir = git_dir,
             .platform_impl = platform_impl,
             .allocator = allocator,
-            .issues = std.ArrayList(DiagnosticIssue).init(allocator),
+            .issues = std.array_list.Managed(DiagnosticIssue).init(allocator),
         };
     }
     
@@ -526,7 +526,7 @@ test "diagnostics initialization" {
             }
             pub fn readDir(allocator: std.mem.Allocator, path: []const u8) ![][]u8 {
                 _ = path;
-                var entries = std.ArrayList([]u8).init(allocator);
+                var entries = std.array_list.Managed([]u8).init(allocator);
                 try entries.append(try allocator.dupe(u8, "test.pack"));
                 try entries.append(try allocator.dupe(u8, "test.idx"));
                 return entries.toOwnedSlice();

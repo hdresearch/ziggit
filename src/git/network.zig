@@ -62,7 +62,7 @@ pub const DumbHttpProtocol = struct {
     }
     
     /// Get the list of references from info/refs
-    pub fn getRefs(self: DumbHttpProtocol) !std.ArrayList(RefInfo) {
+    pub fn getRefs(self: DumbHttpProtocol) !std.array_list.Managed(RefInfo) {
         const refs_url = try std.fmt.allocPrint(self.allocator, "{s}/info/refs", .{self.base_url});
         defer self.allocator.free(refs_url);
         
@@ -72,7 +72,7 @@ pub const DumbHttpProtocol = struct {
         };
         defer self.allocator.free(refs_content);
         
-        var ref_list = std.ArrayList(RefInfo).init(self.allocator);
+        var ref_list = std.array_list.Managed(RefInfo).init(self.allocator);
         
         var lines = std.mem.splitSequence(u8, refs_content, "\n");
         while (lines.next()) |line| {
@@ -146,7 +146,7 @@ pub const DumbHttpProtocol = struct {
         };
         defer self.allocator.free(packs_content);
         
-        var pack_list = std.ArrayList([]const u8).init(self.allocator);
+        var pack_list = std.array_list.Managed([]const u8).init(self.allocator);
         
         var lines = std.mem.splitSequence(u8, packs_content, "\n");
         while (lines.next()) |line| {
@@ -256,7 +256,7 @@ fn downloadObjects(protocol: DumbHttpProtocol, start_hash: []const u8, git_dir: 
         visited.deinit();
     }
     
-    var to_download = std.ArrayList([]const u8).init(allocator);
+    var to_download = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (to_download.items) |hash| {
             allocator.free(hash);
@@ -267,7 +267,7 @@ fn downloadObjects(protocol: DumbHttpProtocol, start_hash: []const u8, git_dir: 
     try to_download.append(try allocator.dupe(u8, start_hash));
     
     while (to_download.items.len > 0) {
-        const hash = to_download.popOrNull() orelse break;
+        const hash = to_download.pop() orelse break;
         defer allocator.free(hash);
         
         if (visited.contains(hash)) continue;
@@ -322,7 +322,7 @@ fn storeObject(git_dir: []const u8, hash: []const u8, obj_data: []const u8, plat
 }
 
 /// Add object dependencies to the download queue  
-fn addObjectDependencies(obj: objects.GitObject, to_download: *std.ArrayList([]const u8), allocator: std.mem.Allocator) !void {
+fn addObjectDependencies(obj: objects.GitObject, to_download: *std.array_list.Managed([]const u8), allocator: std.mem.Allocator) !void {
     switch (obj.type) {
         .commit => {
             var lines = std.mem.splitSequence(u8, obj.data, "\n");

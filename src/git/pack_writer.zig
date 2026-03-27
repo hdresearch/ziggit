@@ -72,7 +72,7 @@ pub fn updateRefsAfterClone(allocator: std.mem.Allocator, git_dir: []const u8, r
 /// Update refs after a fetch operation.
 /// Writes refs/remotes/origin/* for branches, refs/tags/* for tags, and FETCH_HEAD.
 pub fn updateRefsAfterFetch(allocator: std.mem.Allocator, git_dir: []const u8, ref_updates: []const RefUpdate) !void {
-    var fetch_head = std.ArrayList(u8).init(allocator);
+    var fetch_head = std.array_list.Managed(u8).init(allocator);
     defer fetch_head.deinit();
 
     for (ref_updates) |ref| {
