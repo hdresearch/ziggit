@@ -193,7 +193,12 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
             // Translate newer flags to older equivalents for specific commands
             const translated_args = try translateCommandFlags(allocator, all_original_args.items, command_index);
-            try forwardToGit(allocator, translated_args, &platform_impl);
+            // Use stderr translation for commands with known message differences
+            if (needsStderrTranslation(command)) {
+                try forwardToGitWithStderrTranslation(allocator, translated_args, &platform_impl);
+            } else {
+                try forwardToGit(allocator, translated_args, &platform_impl);
+            }
             return;
         } else {
             const error_msg = std.fmt.allocPrint(allocator, "ziggit: '{s}' is not a ziggit command. See 'ziggit --help'.\n", .{command}) catch "ziggit: invalid command. See 'ziggit --help'.\n";
@@ -393,11 +398,20 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         } else {
             try forwardCmdToGit(allocator, all_original_args.items, &platform_impl);
         }
+    } else if (std.mem.eql(u8, command, "checkout") or
+        std.mem.eql(u8, command, "bisect"))
+    {
+        // These commands need stderr translation for git 2.43 → 2.46+ compat
+        const translated = try translateCommandFlags(allocator, all_original_args.items, command_index);
+        if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
+            try forwardToGitWithStderrTranslation(allocator, translated, &platform_impl);
+        } else {
+            try forwardCmdToGit(allocator, translated, &platform_impl);
+        }
     } else if (std.mem.eql(u8, command, "commit") or
         std.mem.eql(u8, command, "log") or
         std.mem.eql(u8, command, "diff") or
         std.mem.eql(u8, command, "branch") or
-        std.mem.eql(u8, command, "checkout") or
         std.mem.eql(u8, command, "merge") or
         std.mem.eql(u8, command, "fetch") or
         std.mem.eql(u8, command, "pull") or
@@ -419,7 +433,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         std.mem.eql(u8, command, "read-tree") or
         std.mem.eql(u8, command, "ls-tree"))
     {
-        try forwardCmdToGit(allocator, all_original_args.items, &platform_impl);
+        const translated = try translateCommandFlags(allocator, all_original_args.items, command_index);
+        try forwardCmdToGit(allocator, translated, &platform_impl);
     } else if (std.mem.eql(u8, command, "--exec-path")) {
         // Forward to real git to get the correct exec-path for git helpers
         if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
@@ -972,7 +987,74 @@ fn translateCommandFlags(allocator: std.mem.Allocator, all_args: [][]const u8, c
         // For now, pass through - git 2.43 will error on unknown flags
     }
     
+    // Translate --end-of-options for commands that don't support it in git 2.43
+    // Git 2.46+ added --end-of-options support to many commands
+    // For archive: --end-of-options can be translated to -- since it separates options from tree-ish
+    if (std.mem.eql(u8, command, "archive"))
+    {
+        var new_args = try allocator.alloc([]const u8, all_args.len);
+        @memcpy(new_args, all_args);
+        for (new_args[command_index + 1..]) |*arg| {
+            if (std.mem.eql(u8, arg.*, "--end-of-options")) {
+                arg.* = "--";
+            }
+        }
+        return new_args;
+    }
+
+    // Handle commit --template with :(optional) prefix (git 2.46+ feature)
+    if (std.mem.eql(u8, command, "commit")) {
+        return translateCommitFlags(allocator, all_args, command_index);
+    }
+
     return all_args;
+}
+
+fn translateCommitFlags(allocator: std.mem.Allocator, all_args: [][]const u8, command_index: usize) ![][]const u8 {
+    // Translate commit flags for git 2.43 compat
+    // Handle --template ":(optional)path" by stripping the prefix if file doesn't exist,
+    // or using the real path if it does.
+    var new_args = std.array_list.Managed([]const u8).init(allocator);
+    var i: usize = 0;
+    while (i < all_args.len) : (i += 1) {
+        if (i > command_index) {
+            // Check for --template with :(optional) prefix
+            if (std.mem.eql(u8, all_args[i], "--template") and i + 1 < all_args.len) {
+                const template_path = all_args[i + 1];
+                if (std.mem.startsWith(u8, template_path, ":(optional)")) {
+                    const real_path = template_path[":(optional)".len..];
+                    // Check if file exists
+                    const file_exists = blk: {
+                        std.fs.cwd().access(real_path, .{}) catch break :blk false;
+                        break :blk true;
+                    };
+                    if (file_exists) {
+                        try new_args.append(all_args[i]);
+                        try new_args.append(real_path);
+                    }
+                    // else: skip both --template and the path (optional = ignore if missing)
+                    i += 1;
+                    continue;
+                }
+            }
+            // Check for --template=:(optional)path form
+            if (std.mem.startsWith(u8, all_args[i], "--template=:(optional)")) {
+                const real_path = all_args[i]["--template=:(optional)".len..];
+                const file_exists = blk: {
+                    std.fs.cwd().access(real_path, .{}) catch break :blk false;
+                    break :blk true;
+                };
+                if (file_exists) {
+                    const new_flag = try std.fmt.allocPrint(allocator, "--template={s}", .{real_path});
+                    try new_args.append(new_flag);
+                }
+                // else: skip (optional = ignore if missing)
+                continue;
+            }
+        }
+        try new_args.append(all_args[i]);
+    }
+    return new_args.toOwnedSlice();
 }
 
 fn forwardToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_impl: *const platform_mod.Platform) !void {
@@ -1164,6 +1246,120 @@ fn forwardToGit(allocator: std.mem.Allocator, all_args: [][]const u8, platform_i
     };
     
     // Propagate git's exit code
+    switch (term) {
+        .Exited => |code| std.process.exit(@intCast(code)),
+        .Signal => |_| std.process.exit(128),
+        .Stopped => |_| std.process.exit(128),
+        .Unknown => |_| std.process.exit(1),
+    }
+}
+
+fn needsStderrTranslation(command: []const u8) bool {
+    // Commands whose stderr messages differ between git 2.43 and 2.46+
+    const cmds = [_][]const u8{
+        "bisect", "checkout", "switch", "restore",
+        "fsck", "index-pack", "unpack-objects",
+        "submodule",
+    };
+    for (cmds) |cmd| {
+        if (std.mem.eql(u8, command, cmd)) return true;
+    }
+    return false;
+}
+
+fn translateStderrLine(allocator: std.mem.Allocator, line: []const u8) ![]const u8 {
+    // Translate git 2.43 error messages to git 2.46+ format
+    
+    // "fatal: unknown style 'X' given for 'merge.conflictstyle'" → "error: unknown conflict style 'X'"
+    if (std.mem.startsWith(u8, line, "fatal: unknown style '")) {
+        if (std.mem.indexOf(u8, line, "' given for 'merge.conflictstyle'")) |end_pos| {
+            const style_start = "fatal: unknown style '".len;
+            const style = line[style_start..end_pos];
+            return try std.fmt.allocPrint(allocator, "error: unknown conflict style '{s}'", .{style});
+        }
+    }
+    
+    // "fatal: unable to read tree HASH" → "fatal: unable to read tree (HASH)"
+    if (std.mem.startsWith(u8, line, "fatal: unable to read tree ")) {
+        const rest = line["fatal: unable to read tree ".len..];
+        if (rest.len >= 40 and !std.mem.startsWith(u8, rest, "(")) {
+            // Check if rest is a hex hash
+            var is_hash = true;
+            for (rest[0..40]) |c| {
+                if (!((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f'))) {
+                    is_hash = false;
+                    break;
+                }
+            }
+            if (is_hash) {
+                return try std.fmt.allocPrint(allocator, "fatal: unable to read tree ({s})", .{rest});
+            }
+        }
+    }
+
+    // "error: core.commentChar should only be one ASCII character" →
+    // In git 2.46+, core.commentChar supports multi-byte via core.commentString
+    // Just pass through for now
+    
+    // "fatal: '--ours/--theirs' cannot be used with switching branches" →
+    // When used without pathspec: "error: --ours/--theirs needs the paths to check out"
+    // Note: this is context-dependent; we'd need to know if paths were given
+    
+    return try allocator.dupe(u8, line);
+}
+
+fn translateStderr(allocator: std.mem.Allocator, stderr_data: []const u8) ![]const u8 {
+    var result = std.array_list.Managed(u8).init(allocator);
+    var iter = std.mem.splitScalar(u8, stderr_data, '\n');
+    var first = true;
+    while (iter.next()) |line| {
+        if (!first) try result.append('\n');
+        first = false;
+        const translated = try translateStderrLine(allocator, line);
+        try result.appendSlice(translated);
+        if (translated.ptr != line.ptr) allocator.free(translated);
+    }
+    return result.toOwnedSlice();
+}
+
+fn forwardToGitWithStderrTranslation(allocator: std.mem.Allocator, all_args: [][]const u8, platform_impl: *const platform_mod.Platform) !void {
+    var argv = std.array_list.Managed([]const u8).init(allocator);
+    defer argv.deinit();
+    
+    try argv.append(findRealGit());
+    for (all_args) |arg| {
+        try argv.append(arg);
+    }
+    
+    var child = std.process.Child.init(argv.items, allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Pipe;
+    
+    _ = child.spawn() catch |err| switch (err) {
+        error.FileNotFound => {
+            try platform_impl.writeStderr("ziggit: git is not installed.\n");
+            std.process.exit(1);
+        },
+        else => {
+            const msg = try std.fmt.allocPrint(allocator, "ziggit: failed to execute git: {}\n", .{err});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(1);
+        },
+    };
+    
+    const stderr_data = child.stderr.?.readToEndAlloc(allocator, 4 * 1024 * 1024) catch "";
+    defer allocator.free(stderr_data);
+    const term = try child.wait();
+    
+    // Translate and output stderr
+    if (stderr_data.len > 0) {
+        const translated = try translateStderr(allocator, stderr_data);
+        defer allocator.free(translated);
+        try platform_impl.writeStderr(translated);
+    }
+    
     switch (term) {
         .Exited => |code| std.process.exit(@intCast(code)),
         .Signal => |_| std.process.exit(128),
