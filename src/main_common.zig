@@ -3504,6 +3504,35 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             }
         }
 
+        // Try to resolve revision expressions (like A^0, HEAD~3, etc.)
+        // If the target contains special chars, resolve to a hash first
+        const resolved_target = if (std.mem.indexOfAny(u8, target, "~^@") != null)
+            resolveRevision(git_path, target, platform_impl, allocator) catch null
+        else
+            null;
+        defer if (resolved_target) |rt| allocator.free(rt);
+        const actual_target = resolved_target orelse target;
+
+        // For detached HEAD (resolved hash), just update HEAD directly
+        if (resolved_target != null) {
+            // This is a detached HEAD checkout
+            try checkoutCommitTree(git_path, actual_target, allocator, platform_impl);
+            
+            // Write detached HEAD
+            const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+            defer allocator.free(head_path);
+            const head_content = try std.fmt.allocPrint(allocator, "{s}\n", .{actual_target});
+            defer allocator.free(head_content);
+            platform_impl.fs.writeFile(head_path, head_content) catch {};
+            
+            if (!quiet) {
+                const det_msg = try std.fmt.allocPrint(allocator, "Note: switching to '{s}'.\nHEAD is now at {s}\n", .{ target, actual_target[0..7] });
+                defer allocator.free(det_msg);
+                try platform_impl.writeStderr(det_msg);
+            }
+            return;
+        }
+
         // Use native ziggit checkout
         const ziggit = @import("ziggit.zig");
         
@@ -3519,7 +3548,7 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         };
         defer repo.close();
         
-        repo.checkout(target) catch |err| {
+        repo.checkout(actual_target) catch |err| {
             switch (err) {
                 error.CommitNotFound => {
                     const msg = try std.fmt.allocPrint(allocator, "error: pathspec '{s}' did not match any file(s) known to git\n", .{target});
@@ -9471,8 +9500,8 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         target_ref = "HEAD";
     }
 
-    // Resolve the target commit
-    const target_hash = resolveCommittish(git_path, target_ref.?, platform_impl, allocator) catch {
+    // Resolve the target commit - use resolveRevision for full expression support
+    const target_hash = resolveRevision(git_path, target_ref.?, platform_impl, allocator) catch {
         const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\n", .{target_ref.?});
         defer allocator.free(msg);
         try platform_impl.writeStderr(msg);
@@ -9491,13 +9520,138 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         },
         .mixed => {
             // Update HEAD and index, leave working tree unchanged
-            // For now, just print a message - full implementation would rebuild index
-            try platform_impl.writeStderr("info: mixed mode implemented partially (HEAD updated, index clearing not yet implemented)\n");
+            // Reset the index to match the target commit
+            resetIndex(git_path, target_hash, platform_impl, allocator) catch {};
         },
         .hard => {
-            // Update HEAD, index, and working tree
-            try platform_impl.writeStderr("warning: --hard mode implemented partially (HEAD updated only, index and working tree unchanged)\n");
+            // Update HEAD, index, and working tree to match target commit
+            resetIndex(git_path, target_hash, platform_impl, allocator) catch {};
+            checkoutCommitTree(git_path, target_hash, allocator, platform_impl) catch {};
         },
+    }
+}
+
+/// Reset the index to match the tree of the given commit
+fn resetIndex(git_path: []const u8, commit_hash: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+    // Load commit to get tree hash
+    const commit_obj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch return error.InvalidCommitObject;
+    defer commit_obj.deinit(allocator);
+
+    var tree_hash: ?[]const u8 = null;
+    var lines = std.mem.splitSequence(u8, commit_obj.data, "\n");
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "tree ")) {
+            tree_hash = line[5..];
+            break;
+        }
+    }
+
+    if (tree_hash == null) return error.InvalidCommitObject;
+
+    // Use read-tree to reset the index
+    // Build index entries from the tree
+    var entries = std.array_list.Managed(index_mod.IndexEntry).init(allocator);
+    defer {
+        for (entries.items) |*entry| {
+            allocator.free(entry.path);
+        }
+        entries.deinit();
+    }
+
+    try collectTreeEntries(git_path, tree_hash.?, "", platform_impl, allocator, &entries);
+
+    // Create and write index
+    var idx = index_mod.Index.init(allocator);
+    defer idx.deinit();
+    for (entries.items) |entry| {
+        try idx.entries.append(.{
+            .mode = entry.mode,
+            .path = try allocator.dupe(u8, entry.path),
+            .sha1 = entry.sha1,
+            .flags = entry.flags,
+            .extended_flags = null,
+            .ctime_sec = 0,
+            .ctime_nsec = 0,
+            .mtime_sec = 0,
+            .mtime_nsec = 0,
+            .dev = 0,
+            .ino = 0,
+            .uid = 0,
+            .gid = 0,
+            .size = 0,
+        });
+    }
+    try idx.save(git_path, platform_impl);
+}
+
+/// Recursively collect all blob entries from a tree
+fn collectTreeEntries(git_path: []const u8, tree_hash: []const u8, prefix: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, entries: *std.array_list.Managed(index_mod.IndexEntry)) !void {
+    const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch return;
+    defer tree_obj.deinit(allocator);
+
+    if (tree_obj.type != .tree) return;
+
+    // Parse binary tree format: mode SP name NUL hash(20 bytes)
+    var i: usize = 0;
+    while (i < tree_obj.data.len) {
+        // Find space (end of mode)
+        const space_pos = std.mem.indexOfScalar(u8, tree_obj.data[i..], ' ') orelse break;
+        const mode_str = tree_obj.data[i .. i + space_pos];
+
+        // Find NUL (end of name)
+        const name_start = i + space_pos + 1;
+        const nul_pos = std.mem.indexOfScalar(u8, tree_obj.data[name_start..], 0) orelse break;
+        const name = tree_obj.data[name_start .. name_start + nul_pos];
+
+        // Read 20-byte hash
+        const hash_start = name_start + nul_pos + 1;
+        if (hash_start + 20 > tree_obj.data.len) break;
+        const hash_bytes = tree_obj.data[hash_start .. hash_start + 20];
+
+        // Convert hash to hex
+        var hash_hex: [40]u8 = undefined;
+        for (hash_bytes, 0..) |b, j| {
+            const hex_chars = "0123456789abcdef";
+            hash_hex[j * 2] = hex_chars[b >> 4];
+            hash_hex[j * 2 + 1] = hex_chars[b & 0xf];
+        }
+
+        // Build full path
+        const full_path = if (prefix.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, name })
+        else
+            try allocator.dupe(u8, name);
+
+        // Parse mode
+        const mode = std.fmt.parseInt(u32, mode_str, 8) catch 0o100644;
+
+        if (std.mem.eql(u8, mode_str, "40000") or mode_str.len >= 5 and mode_str[0] == '4') {
+            // Directory - recurse
+            defer allocator.free(full_path);
+            try collectTreeEntries(git_path, &hash_hex, full_path, platform_impl, allocator, entries);
+        } else {
+            // File entry
+            var hash_arr: [20]u8 = undefined;
+            @memcpy(&hash_arr, hash_bytes);
+            try entries.append(.{
+                .mode = mode,
+                .path = full_path, // ownership transferred
+                .sha1 = hash_arr,
+                .flags = @intCast(@min(full_path.len, 0xFFF)),
+                .extended_flags = null,
+                .ctime_sec = 0,
+                .ctime_nsec = 0,
+                .mtime_sec = 0,
+                .mtime_nsec = 0,
+                .dev = 0,
+                .ino = 0,
+                .uid = 0,
+                .gid = 0,
+                .size = 0,
+            });
+        }
+
+        i = hash_start + 20;
     }
 }
 
