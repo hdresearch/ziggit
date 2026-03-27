@@ -5380,6 +5380,15 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         
         // Switch to the branch
         refs.updateHEAD(git_path, branch_name, platform_impl, allocator) catch {};
+
+        // Checkout the tree of the new branch head
+        if (start_point != null) {
+            const commit_hash_B = refs.resolveRef(git_path, try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name}), platform_impl, allocator) catch null;
+            if (commit_hash_B) |ch| {
+                defer allocator.free(ch);
+                checkoutCommitTree(git_path, ch, allocator, platform_impl) catch {};
+            }
+        }
         
         const reset_msg = try std.fmt.allocPrint(allocator, "Switched to and reset branch '{s}'\n", .{branch_name});
         defer allocator.free(reset_msg);
