@@ -111,6 +111,7 @@ const NATIVE_COMMANDS = [_][]const u8{
 };
 
 fn isNativeCommand(command: []const u8) bool {
+    if (std.mem.startsWith(u8, command, "--list-cmds=")) return true;
     for (NATIVE_COMMANDS) |native_cmd| {
         if (std.mem.eql(u8, command, native_cmd)) {
             return true;
@@ -585,6 +586,58 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmdDiffFiles(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "read-tree")) {
         try cmdReadTree(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.startsWith(u8, command, "--list-cmds=")) {
+        const spec = command["--list-cmds=".len..];
+        // Output builtins, one per line
+        if (std.mem.indexOf(u8, spec, "builtins") != null) {
+            const builtins = [_][]const u8{
+                "add", "am", "annotate", "apply", "archive", "bisect", "blame", "branch",
+                "bugreport", "bundle", "cat-file", "check-attr", "check-ignore",
+                "check-mailmap", "check-ref-format", "checkout", "checkout-index",
+                "cherry", "cherry-pick", "clean", "clone", "column", "commit",
+                "commit-graph", "commit-tree", "config", "count-objects", "credential",
+                "credential-cache", "credential-store", "describe", "diagnose", "diff",
+                "diff-files", "diff-index", "diff-tree", "difftool", "fast-export",
+                "fast-import", "fetch", "fmt-merge-msg", "for-each-ref", "for-each-repo",
+                "format-patch", "fsck", "gc", "grep", "hash-object", "help", "index-pack",
+                "init", "interpret-trailers", "log", "ls-files", "ls-remote", "ls-tree",
+                "mailinfo", "mailsplit", "merge", "merge-base", "merge-file", "merge-index",
+                "merge-ours", "merge-recursive", "merge-tree", "mktag", "mktree", "multi-pack-index",
+                "mv", "name-rev", "notes", "pack-objects", "pack-redundant", "pack-refs",
+                "patch-id", "prune", "prune-packed", "pull", "push", "range-diff",
+                "read-tree", "rebase", "receive-pack", "reflog", "remote", "repack",
+                "replace", "rerere", "reset", "restore", "rev-list", "rev-parse",
+                "revert", "rm", "send-pack", "shortlog", "show", "show-branch",
+                "show-index", "show-ref", "sparse-checkout", "stash", "status",
+                "stripspace", "submodule", "switch", "symbolic-ref", "tag",
+                "unpack-file", "unpack-objects", "update-index", "update-ref",
+                "update-server-info", "upload-archive", "upload-pack", "var",
+                "verify-commit", "verify-pack", "verify-tag", "version", "worktree",
+                "write-tree",
+            };
+            for (builtins) |cmd| {
+                const line = try std.fmt.allocPrint(allocator, "{s}\n", .{cmd});
+                defer allocator.free(line);
+                try platform_impl.writeStdout(line);
+            }
+        }
+        if (std.mem.indexOf(u8, spec, "list-mainporcelain") != null or
+            std.mem.indexOf(u8, spec, "main") != null) {
+            const cmds = [_][]const u8{
+                "add", "am", "archive", "bisect", "branch", "bundle", "checkout",
+                "cherry-pick", "citool", "clean", "clone", "commit", "describe",
+                "diff", "fetch", "format-patch", "gc", "gitk", "grep", "gui",
+                "init", "log", "maintenance", "merge", "mv", "notes", "pull",
+                "push", "range-diff", "rebase", "reset", "restore", "revert",
+                "rm", "shortlog", "show", "sparse-checkout", "stash", "status",
+                "submodule", "switch", "tag", "worktree",
+            };
+            for (cmds) |cmd| {
+                const line = try std.fmt.allocPrint(allocator, "{s}\n", .{cmd});
+                defer allocator.free(line);
+                try platform_impl.writeStdout(line);
+            }
+        }
     } else if (std.mem.eql(u8, command, "--exec-path")) {
         // Output the directory containing this executable
         const self_exe = std.fs.selfExePathAlloc(allocator) catch {
