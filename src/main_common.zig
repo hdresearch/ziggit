@@ -6741,6 +6741,11 @@ fn configLookup(sources: []const ConfigSource, key: []const u8, allocator: std.m
             result = v;
         }
     }
+    // Check -c overrides (highest priority)
+    if (getConfigOverride(key)) |override_val| {
+        if (result) |prev| allocator.free(prev);
+        return try allocator.dupe(u8, override_val);
+    }
     return result orelse error.KeyNotFound;
 }
 
