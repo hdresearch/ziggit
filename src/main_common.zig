@@ -3156,28 +3156,75 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     var cached = false;
     var quiet = false;
     var exit_code = false;
+    var positional = std.array_list.Managed([]const u8).init(allocator);
+    defer positional.deinit();
+    var pathspec_args = std.array_list.Managed([]const u8).init(allocator);
+    defer pathspec_args.deinit();
+    var seen_dashdash = false;
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--cached") or std.mem.eql(u8, arg, "--staged")) {
+        if (seen_dashdash) {
+            try pathspec_args.append(arg);
+        } else if (std.mem.eql(u8, arg, "--")) {
+            seen_dashdash = true;
+        } else if (std.mem.eql(u8, arg, "--cached") or std.mem.eql(u8, arg, "--staged")) {
             cached = true;
         } else if (std.mem.eql(u8, arg, "--quiet")) {
             quiet = true;
             exit_code = true;
         } else if (std.mem.eql(u8, arg, "--exit-code")) {
             exit_code = true;
-        } else if (std.mem.eql(u8, arg, "--no-ext-diff") or
-                   std.mem.eql(u8, arg, "--no-color") or
-                   std.mem.eql(u8, arg, "--ignore-submodules") or
-                   std.mem.startsWith(u8, arg, "--ignore-submodules=") or
-                   std.mem.startsWith(u8, arg, "--diff-filter=") or
-                   std.mem.eql(u8, arg, "--name-only") or
-                   std.mem.eql(u8, arg, "--name-status") or
-                   std.mem.eql(u8, arg, "--stat") or
-                   std.mem.eql(u8, arg, "--numstat") or
-                   std.mem.eql(u8, arg, "--shortstat") or
-                   std.mem.eql(u8, arg, "--raw") or
-                   std.mem.eql(u8, arg, "-z"))
-        {
-            // Accept but ignore for now
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            // Accept but ignore flags for now
+        } else {
+            try positional.append(arg);
+        }
+    }
+    
+    // Handle commit-to-commit diff: git diff <commit1> <commit2>
+    // or git diff <commit1>..<commit2>
+    if (positional.items.len >= 1) {
+        var ref1: []const u8 = undefined;
+        var ref2: []const u8 = undefined;
+        var have_two_refs = false;
+        
+        if (positional.items.len >= 2) {
+            ref1 = positional.items[0];
+            ref2 = positional.items[1];
+            have_two_refs = true;
+        } else if (std.mem.indexOf(u8, positional.items[0], "..")) |dot_pos| {
+            ref1 = positional.items[0][0..dot_pos];
+            ref2 = positional.items[0][dot_pos + 2 ..];
+            // Handle ... (three dots)
+            if (ref2.len > 0 and ref2[0] == '.') ref2 = ref2[1..];
+            have_two_refs = true;
+        } else {
+            // Single commit - diff against working tree
+            // For now, treat as commit vs HEAD
+            ref1 = positional.items[0];
+            ref2 = "HEAD";
+            have_two_refs = true;
+        }
+        
+        if (have_two_refs) {
+            const tree1 = resolveToTree(allocator, ref1, git_path, platform_impl) catch {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: bad revision '{s}'\n", .{ref1});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            };
+            defer allocator.free(tree1);
+            const tree2 = resolveToTree(allocator, ref2, git_path, platform_impl) catch {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: bad revision '{s}'\n", .{ref2});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            };
+            defer allocator.free(tree2);
+            const has_diff = try diffTwoTreesPatch(allocator, tree1, tree2, "", git_path, quiet, pathspec_args.items, platform_impl);
+            if (exit_code and has_diff) {
+                std.process.exit(1);
+            }
+            return;
         }
     }
     
@@ -20277,6 +20324,105 @@ fn diffTreeWithEmpty(allocator: std.mem.Allocator, tree_hash_str: []const u8, re
             try platform_impl.writeStdout(out);
         }
     }
+}
+
+fn diffTwoTreesPatch(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, prefix: []const u8, git_path: []const u8, quiet: bool, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform) !bool {
+    const tree1_obj = objects.GitObject.load(tree1_hash, git_path, platform_impl, allocator) catch return false;
+    defer tree1_obj.deinit(allocator);
+    const tree2_obj = objects.GitObject.load(tree2_hash, git_path, platform_impl, allocator) catch return false;
+    defer tree2_obj.deinit(allocator);
+    
+    var entries1 = tree_mod.parseTree(tree1_obj.data, allocator) catch return false;
+    defer entries1.deinit();
+    var entries2 = tree_mod.parseTree(tree2_obj.data, allocator) catch return false;
+    defer entries2.deinit();
+    
+    var map1 = std.StringHashMap(tree_mod.TreeEntry).init(allocator);
+    defer map1.deinit();
+    var map2 = std.StringHashMap(tree_mod.TreeEntry).init(allocator);
+    defer map2.deinit();
+    for (entries1.items) |e| map1.put(e.name, e) catch {};
+    for (entries2.items) |e| map2.put(e.name, e) catch {};
+    
+    var all_names = std.StringHashMap(void).init(allocator);
+    defer all_names.deinit();
+    for (entries1.items) |e| all_names.put(e.name, {}) catch {};
+    for (entries2.items) |e| all_names.put(e.name, {}) catch {};
+    
+    var name_list = std.array_list.Managed([]const u8).init(allocator);
+    defer name_list.deinit();
+    var niter = all_names.keyIterator();
+    while (niter.next()) |key| try name_list.append(key.*);
+    std.mem.sort([]const u8, name_list.items, {}, struct {
+        fn cmp(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.cmp);
+    
+    var had_diff = false;
+    for (name_list.items) |name| {
+        const e1 = map1.get(name);
+        const e2 = map2.get(name);
+        
+        const full_name = if (prefix.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, name })
+        else
+            try allocator.dupe(u8, name);
+        defer allocator.free(full_name);
+        
+        if (e1 != null and e2 != null) {
+            if (std.mem.eql(u8, e1.?.hash, e2.?.hash) and std.mem.eql(u8, e1.?.mode, e2.?.mode)) continue;
+            if (std.mem.eql(u8, e1.?.mode, "040000") and std.mem.eql(u8, e2.?.mode, "040000")) {
+                const sub = try diffTwoTreesPatch(allocator, e1.?.hash, e2.?.hash, full_name, git_path, quiet, pathspecs, platform_impl);
+                if (sub) had_diff = true;
+                continue;
+            }
+            if (!matchesPathspecs(full_name, pathspecs)) continue;
+            had_diff = true;
+            if (!quiet) {
+                // Load both blob contents and generate unified diff
+                const old_content = loadBlobContent(allocator, e1.?.hash, git_path, platform_impl) catch "";
+                defer if (old_content.len > 0) allocator.free(old_content);
+                const new_content = loadBlobContent(allocator, e2.?.hash, git_path, platform_impl) catch "";
+                defer if (new_content.len > 0) allocator.free(new_content);
+                const short1 = e1.?.hash[0..@min(7, e1.?.hash.len)];
+                const short2 = e2.?.hash[0..@min(7, e2.?.hash.len)];
+                const diff_out = diff_mod.generateUnifiedDiffWithHashes(old_content, new_content, full_name, short1, short2, allocator) catch continue;
+                defer allocator.free(diff_out);
+                try platform_impl.writeStdout(diff_out);
+            }
+        } else if (e1 != null and e2 == null) {
+            if (!matchesPathspecs(full_name, pathspecs)) continue;
+            had_diff = true;
+            if (!quiet) {
+                const old_content = loadBlobContent(allocator, e1.?.hash, git_path, platform_impl) catch "";
+                defer if (old_content.len > 0) allocator.free(old_content);
+                const short1 = e1.?.hash[0..@min(7, e1.?.hash.len)];
+                const diff_out = diff_mod.generateUnifiedDiffWithHashes(old_content, "", full_name, short1, "0000000", allocator) catch continue;
+                defer allocator.free(diff_out);
+                try platform_impl.writeStdout(diff_out);
+            }
+        } else if (e2 != null) {
+            if (!matchesPathspecs(full_name, pathspecs)) continue;
+            had_diff = true;
+            if (!quiet) {
+                const new_content = loadBlobContent(allocator, e2.?.hash, git_path, platform_impl) catch "";
+                defer if (new_content.len > 0) allocator.free(new_content);
+                const short2 = e2.?.hash[0..@min(7, e2.?.hash.len)];
+                const diff_out = diff_mod.generateUnifiedDiffWithHashes("", new_content, full_name, "0000000", short2, allocator) catch continue;
+                defer allocator.free(diff_out);
+                try platform_impl.writeStdout(diff_out);
+            }
+        }
+    }
+    return had_diff;
+}
+
+fn loadBlobContent(allocator: std.mem.Allocator, hash: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) ![]u8 {
+    const obj = objects.GitObject.load(hash, git_path, platform_impl, allocator) catch return error.ObjectNotFound;
+    defer obj.deinit(allocator);
+    if (obj.type != .blob) return error.NotABlob;
+    return allocator.dupe(u8, obj.data);
 }
 
 fn matchesPathspecs(path: []const u8, pathspecs: []const []const u8) bool {
