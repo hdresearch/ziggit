@@ -22401,6 +22401,24 @@ fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8, tr
 
 const TreeEntryInfo = struct { mode: u32, hash: [20]u8 };
 
+fn checkRefFormatValid_crf(refname: []const u8, allow_onelevel: bool, refspec_pattern: bool, normalize: bool) bool {
+    _ = allow_onelevel;
+    _ = refspec_pattern;
+    _ = normalize;
+    if (refname.len == 0) return false;
+    // Basic validation: no double dots, no spaces, no control chars
+    for (refname) |ch| {
+        if (ch < 0x20 or ch == 0x7f or ch == ' ' or ch == '~' or ch == '^' or ch == ':' or ch == '\\') return false;
+    }
+    if (std.mem.indexOf(u8, refname, "..") != null) return false;
+    if (std.mem.indexOf(u8, refname, "/.") != null) return false;
+    if (std.mem.indexOf(u8, refname, "@{") != null) return false;
+    if (refname[refname.len - 1] == '.') return false;
+    if (refname[refname.len - 1] == '/') return false;
+    if (std.mem.endsWith(u8, refname, ".lock")) return false;
+    return true;
+}
+
 fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
     const allocator = std.heap.page_allocator;
     const rest = args[command_index + 1 ..];
