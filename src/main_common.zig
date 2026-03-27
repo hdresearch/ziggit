@@ -11632,6 +11632,33 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         while (args.next()) |darg| {
             if (std.mem.eql(u8, darg, "-r") or std.mem.eql(u8, darg, "--remotes")) {
                 is_remote = true;
+            } else if (std.mem.startsWith(u8, darg, "@{-")) {
+                // Resolve @{-N} to previous branch name
+                if (std.mem.indexOf(u8, darg, "}")) |close| {
+                    const n_str = darg[3..close];
+                    const n = std.fmt.parseInt(u32, n_str, 10) catch {
+                        try names_to_delete.append(darg);
+                        continue;
+                    };
+                    const prev_branch = resolvePreviousBranch(git_path, n, allocator, platform_impl) catch {
+                        const emsg = try std.fmt.allocPrint(allocator, "error: branch '{s}' not found.\n", .{darg});
+                        defer allocator.free(emsg);
+                        try platform_impl.writeStderr(emsg);
+                        std.process.exit(1);
+                    };
+                    try names_to_delete.append(prev_branch);
+                } else {
+                    try names_to_delete.append(darg);
+                }
+            } else if (std.mem.eql(u8, darg, "-")) {
+                // "-" is alias for @{-1}
+                const prev_branch = resolvePreviousBranch(git_path, 1, allocator, platform_impl) catch {
+                    const emsg = try std.fmt.allocPrint(allocator, "error: branch '-' not found.\n", .{});
+                    defer allocator.free(emsg);
+                    try platform_impl.writeStderr(emsg);
+                    std.process.exit(1);
+                };
+                try names_to_delete.append(prev_branch);
             } else {
                 try names_to_delete.append(darg);
             }
