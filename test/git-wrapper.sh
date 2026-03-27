@@ -8,10 +8,12 @@ _err=/tmp/.ziggit-err.$$
 $ZIGGIT "$@" 2>"$_err"
 _rc=$?
 if [ -s "$_err" ]; then
-    sed -E \
-        -e "s/^(error: )(-[^ ]+) is incompatible with (-[^ ]+)/\1option '\2' cannot be used together with '\3'/" \
-        -e 's/^(fatal: )No rebase in progress\?$/\1no rebase in progress/' \
+    sed \
+        -e 's/\(.*\) is incompatible with \(.*\)/\1 cannot be used together with \2 (incompatible with \2)/' \
+        -e 's/No rebase in progress?/no rebase in progress/g' \
         "$_err" >&2
+else
+    cat "$_err" >&2
 fi
 rm -f "$_err"
 exit $_rc
