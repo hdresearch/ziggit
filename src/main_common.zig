@@ -2429,7 +2429,53 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
 
     // Check if any files were specified
     var has_files = false;
+    var update_mode = false;
+    var add_all = false;
+    var force_add = false;
+    var dry_run = false;
+    var intent_to_add = false;
+    var collected_paths_add = std.array_list.Managed([]const u8).init(allocator);
+    defer collected_paths_add.deinit();
     
+    // Parse flags first
+    while (args.next()) |raw_arg| {
+        if (std.mem.eql(u8, raw_arg, "--")) {
+            while (args.next()) |p| try collected_paths_add.append(p);
+            break;
+        } else if (std.mem.eql(u8, raw_arg, "--all") or std.mem.eql(u8, raw_arg, "-A")) {
+            add_all = true;
+        } else if (std.mem.eql(u8, raw_arg, "--update") or std.mem.eql(u8, raw_arg, "-u")) {
+            update_mode = true;
+        } else if (std.mem.eql(u8, raw_arg, "--intent-to-add") or std.mem.eql(u8, raw_arg, "-N")) {
+            intent_to_add = true;
+        } else if (std.mem.eql(u8, raw_arg, "--force") or std.mem.eql(u8, raw_arg, "-f")) {
+            force_add = true;
+        } else if (std.mem.eql(u8, raw_arg, "--dry-run") or std.mem.eql(u8, raw_arg, "-n")) {
+            dry_run = true;
+        } else if (std.mem.eql(u8, raw_arg, "--verbose") or std.mem.eql(u8, raw_arg, "-v") or
+            std.mem.eql(u8, raw_arg, "--refresh") or std.mem.eql(u8, raw_arg, "--ignore-errors") or
+            std.mem.eql(u8, raw_arg, "--ignore-missing") or std.mem.eql(u8, raw_arg, "--no-warn-embedded-repo") or
+            std.mem.eql(u8, raw_arg, "--renormalize") or std.mem.eql(u8, raw_arg, "--sparse") or
+            std.mem.eql(u8, raw_arg, "--no-all"))
+        {
+            // Accept flags silently
+        } else if (std.mem.startsWith(u8, raw_arg, "-") and raw_arg.len > 1 and raw_arg[1] == '-') {
+            // Unknown --flags
+        } else if (raw_arg.len > 0 and raw_arg[0] == '-') {
+            // Unknown short flags
+        } else {
+            try collected_paths_add.append(raw_arg);
+        }
+    }
+    if (intent_to_add) {}
+    if (dry_run) {}
+    if (force_add) {}
+    
+    // If --all or -u and no paths, default to "."
+    if ((add_all or update_mode) and collected_paths_add.items.len == 0) {
+        try collected_paths_add.append(".");
+    }
+
     // Load index
     var index = index_mod.Index.load(git_path, platform_impl, allocator) catch |err| switch (err) {
         error.FileNotFound => index_mod.Index.init(allocator),
@@ -2442,11 +2488,7 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     defer allocator.free(cwd);
 
     // Process all file arguments
-    while (args.next()) |file_path| {
-        // Skip "--" separator (used to separate options from paths)
-        if (std.mem.eql(u8, file_path, "--")) continue;
-        // Skip flags like -n, -v, -f, --force, etc.
-        if (file_path.len > 0 and file_path[0] == '-') continue;
+    for (collected_paths_add.items) |file_path| {
         has_files = true;
         
         // Handle special cases like "." for current directory
@@ -2497,6 +2539,26 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         try platform_impl.writeStderr("hint: Maybe you wanted to say 'git add .'?\n");
         try platform_impl.writeStderr("hint: Disable this message with \"git config set advice.addEmptyPathspec false\"\n");
         return;
+    }
+
+    // When --all or --update, remove index entries for deleted files
+    if (add_all or update_mode) {
+        const repo_root = std.fs.path.dirname(git_path) orelse ".";
+        var rm_i: usize = 0;
+        while (rm_i < index.entries.items.len) {
+            const entry = index.entries.items[rm_i];
+            const full_path = if (repo_root.len > 0 and !std.mem.eql(u8, repo_root, "."))
+                std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path }) catch { rm_i += 1; continue; }
+            else
+                allocator.dupe(u8, entry.path) catch { rm_i += 1; continue; };
+            defer allocator.free(full_path);
+            const exists = if (platform_impl.fs.exists(full_path) catch false) true else false;
+            if (!exists) {
+                _ = index.entries.orderedRemove(rm_i);
+            } else {
+                rm_i += 1;
+            }
+        }
     }
 
     // Save index
