@@ -1586,6 +1586,151 @@ fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8, templ
     try initRepositoryInDir(git_dir, bare, template_dir, template_dir_set, initial_branch, quiet, shared, allocator, platform_impl);
 }
 
+fn getUpstreamTrackingInfo(git_path: []const u8, branch_name: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ?[]u8 {
+    // Read branch tracking config
+    const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch return null;
+    defer allocator.free(config_path);
+    const config_data = platform_impl.fs.readFile(allocator, config_path) catch return null;
+    defer allocator.free(config_data);
+    
+    // Find [branch "name"] section
+    const section_header = std.fmt.allocPrint(allocator, "[branch \"{s}\"]", .{branch_name}) catch return null;
+    defer allocator.free(section_header);
+    
+    var merge_ref: ?[]const u8 = null;
+    var in_section = false;
+    var config_lines = std.mem.splitScalar(u8, config_data, '\n');
+    while (config_lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (std.mem.startsWith(u8, trimmed, section_header)) {
+            in_section = true;
+            continue;
+        }
+        if (in_section and trimmed.len > 0 and trimmed[0] == '[') break;
+        if (in_section) {
+            if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
+                const key = std.mem.trim(u8, trimmed[0..eq], " \t");
+                const val = std.mem.trim(u8, trimmed[eq+1..], " \t");
+                if (std.mem.eql(u8, key, "merge")) {
+                    merge_ref = val;
+                }
+            }
+        }
+    }
+    
+    if (merge_ref == null) return null;
+    
+    // Get upstream branch short name (strip refs/heads/)
+    const upstream_short = if (std.mem.startsWith(u8, merge_ref.?, "refs/heads/")) merge_ref.?["refs/heads/".len..] else merge_ref.?;
+    
+    // Count ahead/behind
+    const our_hash = refs.getCurrentCommit(git_path, platform_impl, allocator) catch return std.fmt.allocPrint(allocator, "{s}", .{upstream_short}) catch null;
+    defer if (our_hash) |h| allocator.free(h);
+    if (our_hash == null) return std.fmt.allocPrint(allocator, "{s}", .{upstream_short}) catch null;
+    
+    const upstream_ref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{git_path, merge_ref.?}) catch return null;
+    defer allocator.free(upstream_ref_path);
+    const upstream_hash_raw = std.fs.cwd().readFileAlloc(allocator, upstream_ref_path, 4096) catch return std.fmt.allocPrint(allocator, "{s} [gone]", .{upstream_short}) catch null;
+    defer allocator.free(upstream_hash_raw);
+    const upstream_hash = std.mem.trim(u8, upstream_hash_raw, " \t\r\n");
+    
+    if (std.mem.eql(u8, our_hash.?, upstream_hash)) {
+        return std.fmt.allocPrint(allocator, "{s}", .{upstream_short}) catch null;
+    }
+    
+    // Count commits ahead and behind
+    var ahead: u32 = 0;
+    var behind: u32 = 0;
+    
+    // Count ahead: commits in ours not reachable from upstream
+    ahead = countUnreachable(git_path, our_hash.?, upstream_hash, allocator, platform_impl);
+    behind = countUnreachable(git_path, upstream_hash, our_hash.?, allocator, platform_impl);
+    
+    if (ahead > 0 and behind > 0) {
+        return std.fmt.allocPrint(allocator, "{s} [ahead {d}, behind {d}]", .{upstream_short, ahead, behind}) catch null;
+    } else if (ahead > 0) {
+        return std.fmt.allocPrint(allocator, "{s} [ahead {d}]", .{upstream_short, ahead}) catch null;
+    } else if (behind > 0) {
+        return std.fmt.allocPrint(allocator, "{s} [behind {d}]", .{upstream_short, behind}) catch null;
+    }
+    return std.fmt.allocPrint(allocator, "{s}", .{upstream_short}) catch null;
+}
+
+fn countUnreachable(git_path: []const u8, from: []const u8, not_in: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) u32 {
+    // Simple BFS to count commits reachable from 'from' but not from 'not_in'
+    // First collect all commits reachable from not_in
+    var not_in_set = std.StringHashMap(void).init(allocator);
+    defer {
+        var it = not_in_set.keyIterator();
+        while (it.next()) |k| allocator.free(k.*);
+        not_in_set.deinit();
+    }
+    
+    var queue = std.array_list.Managed([]u8).init(allocator);
+    defer {
+        for (queue.items) |item| allocator.free(item);
+        queue.deinit();
+    }
+    queue.append(allocator.dupe(u8, not_in) catch return 0) catch return 0;
+    
+    var depth: u32 = 0;
+    while (queue.items.len > 0 and depth < 1000) {
+        const current = queue.orderedRemove(0);
+        defer allocator.free(current);
+        if (not_in_set.contains(current)) continue;
+        not_in_set.put(allocator.dupe(u8, current) catch continue, {}) catch continue;
+        depth += 1;
+        
+        // Get parents
+        const obj = objects.GitObject.load(current, git_path, platform_impl, allocator) catch continue;
+        defer obj.deinit(allocator);
+        if (obj.type != .commit) continue;
+        var obj_lines = std.mem.splitSequence(u8, obj.data, "\n");
+        while (obj_lines.next()) |l| {
+            if (std.mem.startsWith(u8, l, "parent ")) {
+                queue.append(allocator.dupe(u8, l["parent ".len..]) catch continue) catch {};
+            } else if (l.len == 0) break;
+        }
+    }
+    
+    // Now count commits reachable from 'from' but not in not_in_set
+    var count: u32 = 0;
+    var visited = std.StringHashMap(void).init(allocator);
+    defer {
+        var it2 = visited.keyIterator();
+        while (it2.next()) |k| allocator.free(k.*);
+        visited.deinit();
+    }
+    
+    var queue2 = std.array_list.Managed([]u8).init(allocator);
+    defer {
+        for (queue2.items) |item| allocator.free(item);
+        queue2.deinit();
+    }
+    queue2.append(allocator.dupe(u8, from) catch return 0) catch return 0;
+    
+    while (queue2.items.len > 0 and count < 1000) {
+        const current = queue2.orderedRemove(0);
+        defer allocator.free(current);
+        if (visited.contains(current)) continue;
+        if (not_in_set.contains(current)) continue;
+        visited.put(allocator.dupe(u8, current) catch continue, {}) catch continue;
+        count += 1;
+        
+        const obj = objects.GitObject.load(current, git_path, platform_impl, allocator) catch continue;
+        defer obj.deinit(allocator);
+        if (obj.type != .commit) continue;
+        var obj_lines = std.mem.splitSequence(u8, obj.data, "\n");
+        while (obj_lines.next()) |l| {
+            if (std.mem.startsWith(u8, l, "parent ")) {
+                queue2.append(allocator.dupe(u8, l["parent ".len..]) catch continue) catch {};
+            } else if (l.len == 0) break;
+        }
+    }
+    
+    return count;
+}
+
 fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform, _: [][]const u8) !void {
     if (@import("builtin").target.os.tag == .freestanding) {
         try platform_impl.writeStderr("status: not supported in freestanding mode\n");
@@ -1758,9 +1903,18 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         
         if (head_raw) |h| {
             if (std.mem.startsWith(u8, h, "ref: ")) {
-                const branch_header = try std.fmt.allocPrint(allocator, "## {s}\n", .{current_branch});
-                defer allocator.free(branch_header);
-                try platform_impl.writeStdout(branch_header);
+                // Read upstream tracking info
+                const upstream_info = getUpstreamTrackingInfo(git_path, current_branch, allocator, platform_impl);
+                defer if (upstream_info) |info| allocator.free(info);
+                if (upstream_info) |info| {
+                    const branch_header = try std.fmt.allocPrint(allocator, "## {s}...{s}\n", .{current_branch, info});
+                    defer allocator.free(branch_header);
+                    try platform_impl.writeStdout(branch_header);
+                } else {
+                    const branch_header = try std.fmt.allocPrint(allocator, "## {s}\n", .{current_branch});
+                    defer allocator.free(branch_header);
+                    try platform_impl.writeStdout(branch_header);
+                }
             } else {
                 try platform_impl.writeStdout("## HEAD (no branch)\n");
             }
