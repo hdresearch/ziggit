@@ -25,6 +25,20 @@ fn charEqual(a: u8, b: u8, case_fold: bool) bool {
     return a == b;
 }
 
+fn toggleCase(c: u8) u8 {
+    if (c >= 'A' and c <= 'Z') return c + 32;
+    if (c >= 'a' and c <= 'z') return c - 32;
+    return c;
+}
+
+fn inRange(range_start: u8, range_end: u8, c: u8) bool {
+    if (range_start <= range_end) {
+        return c >= range_start and c <= range_end;
+    } else {
+        return c >= range_end and c <= range_start;
+    }
+}
+
 /// Check if name is a valid POSIX character class name.
 fn isValidPosixClass(name: []const u8) bool {
     const valid_classes = [_][]const u8{
@@ -151,13 +165,12 @@ fn matchCharClass(pattern: []const u8, start: usize, test_char: u8, case_fold: b
                     } else {
                         range_end_char = pattern[pi + 2];
                     }
-                    const rs = if (case_fold) toLower(escaped) else escaped;
-                    const re = if (case_fold) toLower(range_end_char) else range_end_char;
-                    const tc = if (case_fold) toLower(test_char) else test_char;
-                    if (rs <= re) {
-                        if (tc >= rs and tc <= re) matched = true;
+                    if (case_fold) {
+                        if (inRange(escaped, range_end_char, test_char) or
+                            inRange(escaped, range_end_char, toggleCase(test_char)))
+                            matched = true;
                     } else {
-                        if (tc >= re and tc <= rs) matched = true;
+                        if (inRange(escaped, range_end_char, test_char)) matched = true;
                     }
                     pi += skip;
                     continue;
@@ -182,15 +195,14 @@ fn matchCharClass(pattern: []const u8, start: usize, test_char: u8, case_fold: b
             } else {
                 range_end_char = pattern[pi + 2];
             }
-            const range_start = if (case_fold) toLower(pc) else pc;
-            const range_end = if (case_fold) toLower(range_end_char) else range_end_char;
-            const tc = if (case_fold) toLower(test_char) else test_char;
-
-            if (range_start <= range_end) {
-                if (tc >= range_start and tc <= range_end) matched = true;
+            if (case_fold) {
+                // For case-insensitive: check if char or its case-toggled version is in range
+                // Range endpoints are NOT case-folded
+                if (inRange(pc, range_end_char, test_char) or
+                    inRange(pc, range_end_char, toggleCase(test_char)))
+                    matched = true;
             } else {
-                // Reverse range (e.g. [z-a] or [Z-y])
-                if (tc >= range_end and tc <= range_start) matched = true;
+                if (inRange(pc, range_end_char, test_char)) matched = true;
             }
             pi += skip;
             continue;
