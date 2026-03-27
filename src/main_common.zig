@@ -1128,6 +1128,15 @@ fn matchPathspec(path: []const u8, pathspec: []const u8) bool {
         // Direct wildmatch
         if (wildmatch_mod.wildmatch(pathspec, path, flags) == wildmatch_mod.WM_MATCH) return true;
 
+        // In pathspec context, ** always matches across directories even when
+        // not at a path boundary (e.g., "foo**" matches "foo/bar/baz").
+        // This differs from pure wildmatch where ** only works as globstar
+        // when properly bounded by / or at start/end.
+        if ((flags & wildmatch_mod.WM_PATHNAME) != 0 and std.mem.indexOf(u8, pathspec, "**") != null) {
+            const flags_no_path = flags & ~wildmatch_mod.WM_PATHNAME;
+            if (wildmatch_mod.wildmatch(pathspec, path, flags_no_path) == wildmatch_mod.WM_MATCH) return true;
+        }
+
         // If pathspec has no glob chars, also try prefix match (pathspec is a directory prefix)
         const has_glob_chars = std.mem.indexOfAny(u8, pathspec, "*?[\\") != null;
         if (!has_glob_chars) {
@@ -14141,6 +14150,14 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         for (normalized_pathspecs.items) |p| allocator.free(@constCast(p));
         normalized_pathspecs.deinit();
     }
+    // Validate pathspecs - empty string is not valid
+    for (pathspecs.items) |ps| {
+        if (ps.len == 0) {
+            try platform_impl.writeStderr("fatal: empty string is not a valid pathspec. please use . instead if you meant to match all paths\n");
+            std.process.exit(128);
+        }
+    }
+
     var match_all = false;
     for (pathspecs.items) |ps| {
         // Handle git pathspec magic (e.g., ":/*" means "everything from root")
