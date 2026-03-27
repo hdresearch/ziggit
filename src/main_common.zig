@@ -16334,7 +16334,10 @@ fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, comman
             }
         }
     } else {
-        // Non-revs mode: each line is an object ID
+        // Non-revs mode: each line is an object ID, optionally followed by a name hint
+        // Lines starting with '-' are exclude markers (object should not be packed)
+        var exclude_set = std.StringHashMap(void).init(allocator);
+        defer exclude_set.deinit();
         var lines_iter = std.mem.splitScalar(u8, stdin_data, '\n');
         while (lines_iter.next()) |line| {
             const trimmed = std.mem.trim(u8, line, " \t\r");
@@ -16348,14 +16351,22 @@ fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, comman
                 }
                 continue;
             }
-            if (trimmed.len < 40) {
+
+            // Handle exclude lines: -<hash>
+            const is_exclude = trimmed[0] == '-';
+            const id_start: usize = if (is_exclude) 1 else 0;
+            const rest = trimmed[id_start..];
+
+            // Extract hash (first 40 hex chars), rest may be " name"
+            const hash_end = @min(rest.len, 40);
+            if (hash_end < 40) {
                 const msg = try std.fmt.allocPrint(allocator, "fatal: expected object ID, got garbage:\n {s}\n\n", .{trimmed});
                 defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
                 std.process.exit(128);
                 unreachable;
             }
-            const hash = trimmed[0..40];
+            const hash = rest[0..40];
             var valid = true;
             for (hash) |ch| {
                 if (!std.ascii.isHex(ch)) { valid = false; break; }
@@ -16367,10 +16378,30 @@ fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, comman
                 std.process.exit(128);
                 unreachable;
             }
-            if (!object_set.contains(hash)) {
+
+            if (is_exclude) {
                 const duped = try allocator.dupe(u8, hash);
-                try object_set.put(duped, {});
-                try object_hashes.append(duped);
+                try exclude_set.put(duped, {});
+            } else {
+                if (!object_set.contains(hash)) {
+                    const duped = try allocator.dupe(u8, hash);
+                    try object_set.put(duped, {});
+                    try object_hashes.append(duped);
+                }
+            }
+        }
+
+        // Remove excluded objects
+        if (exclude_set.count() > 0) {
+            var excl_idx: usize = 0;
+            while (excl_idx < object_hashes.items.len) {
+                if (exclude_set.contains(object_hashes.items[excl_idx])) {
+                    _ = object_set.remove(object_hashes.items[excl_idx]);
+                    allocator.free(object_hashes.items[excl_idx]);
+                    _ = object_hashes.orderedRemove(excl_idx);
+                } else {
+                    excl_idx += 1;
+                }
             }
         }
     }
