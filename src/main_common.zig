@@ -9919,6 +9919,13 @@ fn showCommitPrettyFormat(git_object: objects.GitObject, commit_hash: []const u8
         if (git_object.data.len == 0 or git_object.data[git_object.data.len - 1] != '\n') {
             try platform_impl.writeStdout("\n");
         }
+    } else if (std.mem.startsWith(u8, format, "format:") or std.mem.startsWith(u8, format, "tformat:")) {
+        // Custom format string - delegate to the format handler
+        const fmt_str = if (std.mem.startsWith(u8, format, "format:"))
+            format["format:".len..]
+        else
+            format["tformat:".len..];
+        try outputFormattedCommit(fmt_str, commit_hash, allocator, platform_impl);
     } else {
         // Fallback to default format
         try showCommitDefault(git_object, commit_hash, "", platform_impl, allocator);
