@@ -2224,10 +2224,21 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     defer allocator.free(cwd);
 
     // Process all file arguments
+    var update_mode = false;
+    var all_mode = false;
     while (args.next()) |file_path| {
         // Skip "--" separator (used to separate options from paths)
         if (std.mem.eql(u8, file_path, "--")) continue;
-        // Skip flags like -n, -v, -f, --force, etc.
+        // Handle specific flags
+        if (std.mem.eql(u8, file_path, "-u") or std.mem.eql(u8, file_path, "--update")) {
+            update_mode = true;
+            continue;
+        }
+        if (std.mem.eql(u8, file_path, "-A") or std.mem.eql(u8, file_path, "--all") or std.mem.eql(u8, file_path, "--no-ignore-removal")) {
+            all_mode = true;
+            continue;
+        }
+        // Skip other flags like -n, -v, -f, --force, etc.
         if (file_path.len > 0 and file_path[0] == '-') continue;
         has_files = true;
         
@@ -2274,6 +2285,65 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         }
     }
 
+    if (update_mode or all_mode) {
+        // -u: update all tracked files (add modifications and deletions)
+        // -A: like -u but also adds untracked files
+        const repo_root = std.fs.path.dirname(git_path) orelse ".";
+        
+        // Update existing index entries (modified or deleted tracked files)
+        var i: usize = 0;
+        while (i < index.entries.items.len) {
+            const entry = index.entries.items[i];
+            const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path });
+            defer allocator.free(full_path);
+            
+            if (platform_impl.fs.exists(full_path) catch false) {
+                // File exists - check if modified
+                const current_content = platform_impl.fs.readFile(allocator, full_path) catch {
+                    i += 1;
+                    continue;
+                };
+                defer allocator.free(current_content);
+                
+                const blob = objects.createBlobObject(current_content, allocator) catch {
+                    i += 1;
+                    continue;
+                };
+                defer blob.deinit(allocator);
+                
+                // Write the blob to objects
+                const hash = blob.hash(allocator) catch {
+                    i += 1;
+                    continue;
+                };
+                defer allocator.free(hash);
+                
+                const stored_hash = try blob.store(git_path, platform_impl, allocator);
+                allocator.free(stored_hash);
+                
+                // Update index entry with new hash
+                var new_sha1: [20]u8 = undefined;
+                _ = std.fmt.hexToBytes(&new_sha1, hash) catch {
+                    i += 1;
+                    continue;
+                };
+                index.entries.items[i].sha1 = new_sha1;
+                
+                // Update stat info
+                if (std.fs.cwd().statFile(full_path)) |stat| {
+                    index.entries.items[i].size = @intCast(stat.size);
+                } else |_| {}
+            } else {
+                // File deleted - remove from index
+                _ = index.entries.orderedRemove(i);
+                continue; // Don't increment i
+            }
+            i += 1;
+        }
+        
+        has_files = true;
+    }
+    
     if (!has_files) {
         try platform_impl.writeStderr("Nothing specified, nothing added.\n");
         try platform_impl.writeStderr("hint: Maybe you wanted to say 'git add .'?\n");
