@@ -2786,6 +2786,30 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             if (args.next()) |count_str| {
                 max_count = std.fmt.parseInt(u32, count_str, 10) catch null;
             }
+        } else if (std.mem.eql(u8, arg, "--")) {
+            // Everything after -- is a pathspec, skip
+            break;
+        } else if (std.mem.eql(u8, arg, "--all")) {
+            // Show all refs
+        } else if (std.mem.eql(u8, arg, "--source")) {
+            // Show source ref
+        } else if (std.mem.startsWith(u8, arg, "--diff-filter=") or
+            std.mem.eql(u8, arg, "--name-only") or std.mem.eql(u8, arg, "--name-status") or
+            std.mem.eql(u8, arg, "--stat") or std.mem.eql(u8, arg, "--numstat") or
+            std.mem.eql(u8, arg, "--shortstat") or std.mem.eql(u8, arg, "--raw") or
+            std.mem.eql(u8, arg, "--no-walk") or std.mem.eql(u8, arg, "--reverse") or
+            std.mem.startsWith(u8, arg, "--date=") or std.mem.eql(u8, arg, "--no-decorate") or
+            std.mem.eql(u8, arg, "--decorate") or std.mem.startsWith(u8, arg, "--decorate=") or
+            std.mem.eql(u8, arg, "--abbrev-commit") or std.mem.startsWith(u8, arg, "--abbrev=") or
+            std.mem.eql(u8, arg, "--graph") or std.mem.eql(u8, arg, "--left-right") or
+            std.mem.eql(u8, arg, "--cherry-pick") or std.mem.eql(u8, arg, "--cherry-mark") or
+            std.mem.eql(u8, arg, "--topo-order") or std.mem.eql(u8, arg, "--date-order") or
+            std.mem.eql(u8, arg, "--author-date-order") or
+            std.mem.startsWith(u8, arg, "--author=") or std.mem.startsWith(u8, arg, "--grep=") or
+            std.mem.startsWith(u8, arg, "--since=") or std.mem.startsWith(u8, arg, "--until=") or
+            std.mem.startsWith(u8, arg, "--after=") or std.mem.startsWith(u8, arg, "--before="))
+        {
+            // Accepted but not implemented
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             // This is likely a committish (commit hash, branch name, etc.)
             committish = arg;
