@@ -25964,7 +25964,7 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
             std.process.exit(128);
         };
         defer allocator.free(tree2);
-        had_diff = try diffTwoTreesFiltered(allocator, tree1, tree2, "", recursive, show_patch, name_only, name_status, quiet, pathspecs.items, platform_impl);
+        had_diff = try diffTwoTreesFiltered(allocator, tree1, tree2, "", &dt_opts, pathspecs.items, platform_impl);
     }
     
     if (had_diff) {
@@ -25996,7 +25996,14 @@ fn resolveToTree(allocator: std.mem.Allocator, ref_str: []const u8, git_path: []
     }
 }
 
-fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, recursive: bool, show_patch: bool, show_root: bool, name_only: bool, name_status: bool, no_commit_id: bool, quiet: bool, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform) !bool {
+fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, opts: *const DiffTreeOpts, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform) !bool {
+    const recursive = opts.recursive;
+    const show_patch = opts.show_patch;
+    const show_root = opts.show_root;
+    const name_only = opts.name_only;
+    const name_status = opts.name_status;
+    const no_commit_id = opts.no_commit_id;
+    const quiet = opts.quiet;
     const git_path = findGitDirectory(allocator, platform_impl) catch {
         try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
         std.process.exit(128);
