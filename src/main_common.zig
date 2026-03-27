@@ -17183,50 +17183,136 @@ fn nativeCmdColumn(_: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     
     if (lines.items.len == 0) return;
     
-    const col_width = max_len + padding;
+    const dense = std.mem.indexOf(u8, mode, "dense") != null and std.mem.indexOf(u8, mode, "nodense") == null;
+    const row_first = std.mem.indexOf(u8, mode, "row") != null;
     const effective_width = if (width > @as(u32, @intCast(indent.len))) width - @as(u32, @intCast(indent.len)) else width;
-    const num_cols = if (col_width > 0) @max(1, effective_width / col_width) else 1;
-    const num_rows = (lines.items.len + num_cols - 1) / num_cols;
-    
-    if (std.mem.indexOf(u8, mode, "row") != null) {
-        // Row-first layout
-        var i: usize = 0;
-        while (i < lines.items.len) {
-            if (indent.len > 0) try platform_impl.writeStdout(indent);
-            var col: usize = 0;
-            while (col < num_cols and i + col < lines.items.len) : (col += 1) {
-                try platform_impl.writeStdout(lines.items[i + col]);
-                // Pad unless last item on line
-                if (col + 1 < num_cols and i + col + 1 < lines.items.len) {
-                    var pad: usize = lines.items[i + col].len;
-                    while (pad < col_width) : (pad += 1) {
-                        try platform_impl.writeStdout(" ");
+
+    if (dense) {
+        // Dense mode: find the maximum number of columns that fit, using per-column widths
+        // Try from max possible columns down to 1
+        const max_possible_cols = @max(1, effective_width / 2); // minimum 2 chars per col
+        var best_cols: usize = 1;
+        var best_rows: usize = lines.items.len;
+        // Store per-column widths for best layout
+        var best_col_widths: [256]u32 = undefined;
+        best_col_widths[0] = max_len + padding;
+
+        var try_cols: usize = if (max_possible_cols > 256) 256 else max_possible_cols;
+        while (try_cols > 1) : (try_cols -= 1) {
+            const try_rows = (lines.items.len + try_cols - 1) / try_cols;
+            // Compute per-column widths
+            var col_widths: [256]u32 = undefined;
+            var total_w: u32 = 0;
+            var fits = true;
+            var c: usize = 0;
+            while (c < try_cols) : (c += 1) {
+                var cw: u32 = 0;
+                var r: usize = 0;
+                while (r < try_rows) : (r += 1) {
+                    const idx = if (row_first) r * try_cols + c else c * try_rows + r;
+                    if (idx < lines.items.len) {
+                        const l: u32 = @intCast(lines.items[idx].len);
+                        if (l > cw) cw = l;
                     }
                 }
+                col_widths[c] = if (c + 1 < try_cols) cw + padding else cw;
+                total_w += col_widths[c];
+                if (total_w > effective_width) {
+                    fits = false;
+                    break;
+                }
             }
-            try platform_impl.writeStdout("\n");
-            i += num_cols;
+            if (fits) {
+                best_cols = try_cols;
+                best_rows = try_rows;
+                @memcpy(best_col_widths[0..try_cols], col_widths[0..try_cols]);
+                break;
+            }
+        }
+
+        if (row_first) {
+            var i: usize = 0;
+            while (i < lines.items.len) {
+                if (indent.len > 0) try platform_impl.writeStdout(indent);
+                var col: usize = 0;
+                while (col < best_cols and i + col < lines.items.len) : (col += 1) {
+                    try platform_impl.writeStdout(lines.items[i + col]);
+                    if (col + 1 < best_cols and i + col + 1 < lines.items.len) {
+                        var p: usize = lines.items[i + col].len;
+                        while (p < best_col_widths[col]) : (p += 1) {
+                            try platform_impl.writeStdout(" ");
+                        }
+                    }
+                }
+                try platform_impl.writeStdout("\n");
+                i += best_cols;
+            }
+        } else {
+            var row: usize = 0;
+            while (row < best_rows) : (row += 1) {
+                if (indent.len > 0) try platform_impl.writeStdout(indent);
+                var col: usize = 0;
+                while (col < best_cols) : (col += 1) {
+                    const idx = col * best_rows + row;
+                    if (idx >= lines.items.len) break;
+                    try platform_impl.writeStdout(lines.items[idx]);
+                    const next_idx = (col + 1) * best_rows + row;
+                    if (col + 1 < best_cols and next_idx < lines.items.len) {
+                        var p: usize = lines.items[idx].len;
+                        while (p < best_col_widths[col]) : (p += 1) {
+                            try platform_impl.writeStdout(" ");
+                        }
+                    }
+                }
+                try platform_impl.writeStdout("\n");
+            }
         }
     } else {
-        // Column-first layout (default)
-        var row: usize = 0;
-        while (row < num_rows) : (row += 1) {
-            if (indent.len > 0) try platform_impl.writeStdout(indent);
-            var col: usize = 0;
-            while (col < num_cols) : (col += 1) {
-                const idx = col * num_rows + row;
-                if (idx >= lines.items.len) break;
-                try platform_impl.writeStdout(lines.items[idx]);
-                // Pad to col_width unless it's the last item on the line
-                const next_idx = (col + 1) * num_rows + row;
-                if (col + 1 < num_cols and next_idx < lines.items.len) {
-                    var pad_amt: usize = lines.items[idx].len;
-                    while (pad_amt < col_width) : (pad_amt += 1) {
-                        try platform_impl.writeStdout(" ");
+        // Non-dense: uniform column widths
+        const col_width = max_len + padding;
+        const num_cols = if (col_width > 0) @max(1, effective_width / col_width) else 1;
+        const num_rows = (lines.items.len + num_cols - 1) / num_cols;
+
+        if (row_first) {
+            // Row-first layout
+            var i: usize = 0;
+            while (i < lines.items.len) {
+                if (indent.len > 0) try platform_impl.writeStdout(indent);
+                var col: usize = 0;
+                while (col < num_cols and i + col < lines.items.len) : (col += 1) {
+                    try platform_impl.writeStdout(lines.items[i + col]);
+                    // Pad unless last item on line
+                    if (col + 1 < num_cols and i + col + 1 < lines.items.len) {
+                        var pad_c: usize = lines.items[i + col].len;
+                        while (pad_c < col_width) : (pad_c += 1) {
+                            try platform_impl.writeStdout(" ");
+                        }
                     }
                 }
+                try platform_impl.writeStdout("\n");
+                i += num_cols;
             }
-            try platform_impl.writeStdout("\n");
+        } else {
+            // Column-first layout (default)
+            var row: usize = 0;
+            while (row < num_rows) : (row += 1) {
+                if (indent.len > 0) try platform_impl.writeStdout(indent);
+                var col: usize = 0;
+                while (col < num_cols) : (col += 1) {
+                    const idx = col * num_rows + row;
+                    if (idx >= lines.items.len) break;
+                    try platform_impl.writeStdout(lines.items[idx]);
+                    // Pad to col_width unless it's the last item on the line
+                    const next_idx = (col + 1) * num_rows + row;
+                    if (col + 1 < num_cols and next_idx < lines.items.len) {
+                        var pad_amt: usize = lines.items[idx].len;
+                        while (pad_amt < col_width) : (pad_amt += 1) {
+                            try platform_impl.writeStdout(" ");
+                        }
+                    }
+                }
+                try platform_impl.writeStdout("\n");
+            }
         }
     }
 }
