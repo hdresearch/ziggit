@@ -5204,6 +5204,16 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         }
     }
 
+    // Handle -t / --track flag
+    var want_track = false;
+    if (std.mem.eql(u8, effective_first_arg, "-t") or std.mem.eql(u8, effective_first_arg, "--track")) {
+        want_track = true;
+        effective_first_arg = args.next() orelse {
+            try platform_impl.writeStderr("fatal: '--track' requires a value\n");
+            std.process.exit(128);
+        };
+    }
+
     // Check if this is --orphan flag (create orphan branch)
     if (std.mem.eql(u8, effective_first_arg, "--orphan")) {
         const branch_name = args.next() orelse {
@@ -5317,6 +5327,12 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             const reflog_msg_b = try std.fmt.allocPrint(allocator, "checkout: moving from {s} to {s}", .{ from_name, branch_name });
             defer allocator.free(reflog_msg_b);
             writeReflogEntry(git_path, "HEAD", old_h, old_h, reflog_msg_b, allocator, platform_impl) catch {};
+        }
+
+        // Set up tracking if -t was specified
+        if (want_track) {
+            const tracking_branch = if (old_branch_for_b) |ob| ob else "main";
+            setTrackingConfig(git_path, branch_name, ".", tracking_branch, allocator, platform_impl);
         }
 
         const success_msg = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
@@ -11642,7 +11658,119 @@ fn resolveTreePath(git_path: []const u8, tree_hash: []const u8, path: []const u8
     return current_hash;
 }
 
+fn resolveCommitByMessage(git_path: []const u8, pattern: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
+    // Collect all tip commits from refs (HEAD + branches + tags)
+    var visited = std.StringHashMap(void).init(allocator);
+    defer {
+        var vi = visited.iterator();
+        while (vi.next()) |entry| allocator.free(entry.key_ptr.*);
+        visited.deinit();
+    }
+    var queue = std.array_list.Managed([]u8).init(allocator);
+    defer {
+        for (queue.items) |q| allocator.free(q);
+        queue.deinit();
+    }
+
+    const addTip = struct {
+        fn f(hash: []const u8, v: *std.StringHashMap(void), q: *std.array_list.Managed([]u8), alloc: std.mem.Allocator) void {
+            if (v.contains(hash)) return;
+            const dup1 = alloc.dupe(u8, hash) catch return;
+            const dup2 = alloc.dupe(u8, hash) catch { alloc.free(dup1); return; };
+            v.put(dup1, {}) catch { alloc.free(dup1); alloc.free(dup2); return; };
+            q.append(dup2) catch { alloc.free(dup2); return; };
+        }
+    }.f;
+
+    if (refs.getCurrentCommit(git_path, platform_impl, allocator) catch null) |head| {
+        defer allocator.free(head);
+        addTip(head, &visited, &queue, allocator);
+    }
+
+    const ref_dirs = [_][]const u8{ "refs/heads", "refs/tags" };
+    for (ref_dirs) |ref_subdir| {
+        const rd = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, ref_subdir }) catch continue;
+        defer allocator.free(rd);
+        var dir = std.fs.cwd().openDir(rd, .{ .iterate = true }) catch continue;
+        defer dir.close();
+        var it = dir.iterate();
+        while (it.next() catch null) |entry| {
+            if (entry.kind != .file) continue;
+            const fp = std.fmt.allocPrint(allocator, "{s}/{s}", .{ rd, entry.name }) catch continue;
+            defer allocator.free(fp);
+            const content = platform_impl.fs.readFile(allocator, fp) catch continue;
+            defer allocator.free(content);
+            const hash = std.mem.trim(u8, content, " \t\n\r");
+            if (hash.len == 40) addTip(hash, &visited, &queue, allocator);
+        }
+    }
+
+    var qi: usize = 0;
+    while (qi < queue.items.len) : (qi += 1) {
+        const current = queue.items[qi];
+        const commit_obj = objects.GitObject.load(current, git_path, platform_impl, allocator) catch continue;
+        defer commit_obj.deinit(allocator);
+        if (commit_obj.type != .commit) continue;
+
+        if (std.mem.indexOf(u8, commit_obj.data, "\n\n")) |msg_start| {
+            const message = commit_obj.data[msg_start + 2 ..];
+            if (std.mem.indexOf(u8, message, pattern) != null) {
+                return try allocator.dupe(u8, current);
+            }
+        }
+
+        var lines = std.mem.splitSequence(u8, commit_obj.data, "\n");
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "parent ")) {
+                addTip(line["parent ".len..], &visited, &queue, allocator);
+            }
+            if (line.len == 0) break;
+        }
+    }
+
+    return error.NotFound;
+}
+
+fn resolvePreviousBranch(git_path: []const u8, n: u32, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
+    const head_reflog_path = try std.fmt.allocPrint(allocator, "{s}/logs/HEAD", .{git_path});
+    defer allocator.free(head_reflog_path);
+    const reflog_content = platform_impl.fs.readFile(allocator, head_reflog_path) catch return error.NotFound;
+    defer allocator.free(reflog_content);
+
+    var checkout_entries = std.array_list.Managed([]const u8).init(allocator);
+    defer checkout_entries.deinit();
+
+    var lines = std.mem.splitScalar(u8, reflog_content, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "checkout: moving from ")) |idx| {
+            const rest = line[idx + "checkout: moving from ".len..];
+            if (std.mem.indexOf(u8, rest, " to ")) |to_idx| {
+                checkout_entries.append(rest[0..to_idx]) catch {};
+            }
+        }
+    }
+
+    if (checkout_entries.items.len > 0) {
+        var count: u32 = 0;
+        var i_entry: usize = checkout_entries.items.len;
+        while (i_entry > 0) : (count += 1) {
+            i_entry -= 1;
+            if (count + 1 == n) {
+                return try allocator.dupe(u8, checkout_entries.items[i_entry]);
+            }
+        }
+    }
+
+    return error.NotFound;
+}
+
 pub fn resolveRevision(git_path: []const u8, rev: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
+    // Handle :/pattern syntax - search for commit by message
+    if (std.mem.startsWith(u8, rev, ":/")) {
+        const pattern = rev[2..];
+        return resolveCommitByMessage(git_path, pattern, platform_impl, allocator) catch return error.BadRevision;
+    }
+
     // Handle <rev>:<path> syntax
     if (findRevColonPath(rev)) |colon_pos| {
         const rev_part = rev[0..colon_pos];
@@ -11733,6 +11861,30 @@ pub fn resolveRevision(git_path: []const u8, rev: []const u8, platform_impl: *co
         if (resolveObjectByPrefix(git_path, rev, platform_impl, allocator)) |hash| {
             return hash;
         } else |_| {}
+    }
+
+    // Handle @{-N} (Nth previously checked-out branch)
+    if (std.mem.startsWith(u8, rev, "@{-")) {
+        if (std.mem.indexOf(u8, rev, "}")) |close| {
+            const n_str = rev[3..close];
+            const n = std.fmt.parseInt(u32, n_str, 10) catch return error.BadRevision;
+            const branch_name = resolvePreviousBranch(git_path, n, allocator, platform_impl) catch return error.BadRevision;
+            defer allocator.free(branch_name);
+            const suffix = rev[close + 1 ..];
+            if (suffix.len > 0) {
+                const combined = try std.fmt.allocPrint(allocator, "{s}{s}", .{ branch_name, suffix });
+                defer allocator.free(combined);
+                return resolveRevision(git_path, combined, platform_impl, allocator);
+            }
+            return resolveRevision(git_path, branch_name, platform_impl, allocator);
+        }
+    }
+
+    // Handle "-" as alias for @{-1}
+    if (std.mem.eql(u8, rev, "-")) {
+        const branch_name = resolvePreviousBranch(git_path, 1, allocator, platform_impl) catch return error.BadRevision;
+        defer allocator.free(branch_name);
+        return resolveRevision(git_path, branch_name, platform_impl, allocator);
     }
 
     // Try HEAD
@@ -30848,6 +31000,19 @@ fn stripInlineComment(value: []const u8) []const u8 {
 }
 
 // =============================================================================
+fn setTrackingConfig(git_path: []const u8, branch_name: []const u8, remote: []const u8, upstream_branch: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) void {
+    const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch return;
+    defer allocator.free(config_path);
+    const remote_key = std.fmt.allocPrint(allocator, "branch.{s}.remote", .{branch_name}) catch return;
+    defer allocator.free(remote_key);
+    const merge_key = std.fmt.allocPrint(allocator, "branch.{s}.merge", .{branch_name}) catch return;
+    defer allocator.free(merge_key);
+    const merge_value = std.fmt.allocPrint(allocator, "refs/heads/{s}", .{upstream_branch}) catch return;
+    defer allocator.free(merge_value);
+    configSetValue(config_path, remote_key, remote, false, null, allocator, platform_impl) catch {};
+    configSetValue(config_path, merge_key, merge_value, false, null, allocator, platform_impl) catch {};
+}
+
 // git rebase implementation
 // =============================================================================
 
@@ -30870,6 +31035,7 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     var force_rebase = false;
     var apply_mode = false;
     var merge_mode = false;
+    var keep_base = false;
     var positionals = std.array_list.Managed([]const u8).init(allocator);
     defer positionals.deinit();
 
@@ -30904,8 +31070,14 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
             // ignore for now
         } else if (std.mem.eql(u8, arg, "--update-refs")) {
             // ignore for now
+        } else if (std.mem.eql(u8, arg, "--keep-base")) {
+            keep_base = true;
+        } else if (std.mem.eql(u8, arg, "--no-fork-point") or std.mem.eql(u8, arg, "--fork-point")) {
+            // ignore for now
         } else if (std.mem.startsWith(u8, arg, "-C") or std.mem.startsWith(u8, arg, "-c")) {
             // skip -c key=value
+        } else if (std.mem.eql(u8, arg, "-")) {
+            try positionals.append(arg);
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             try positionals.append(arg);
         }
@@ -31040,13 +31212,47 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     try checkRebaseClean(git_path, repo_root, head_hash, allocator, platform_impl);
 
     // Determine the "onto" target
-    const onto_hash = if (onto) |onto_ref|
-        resolveRevision(git_path, onto_ref, platform_impl, allocator) catch {
+    const onto_hash = if (onto) |onto_ref| blk: {
+        // Handle "X..." syntax (merge base of X and HEAD)
+        if (std.mem.endsWith(u8, onto_ref, "...")) {
+            const base_ref = onto_ref[0 .. onto_ref.len - 3];
+            const base_h = resolveRevision(git_path, base_ref, platform_impl, allocator) catch {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: invalid --onto '{s}'\n", .{onto_ref});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            };
+            defer allocator.free(base_h);
+            break :blk findMergeBase(git_path, base_h, head_hash, allocator, platform_impl) catch try allocator.dupe(u8, base_h);
+        }
+        // Handle "X...Y" syntax
+        if (std.mem.indexOf(u8, onto_ref, "...")) |dot_pos| {
+            const left = onto_ref[0..dot_pos];
+            const right = onto_ref[dot_pos + 3 ..];
+            const lh = resolveRevision(git_path, left, platform_impl, allocator) catch {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: invalid --onto '{s}'\n", .{onto_ref});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            };
+            defer allocator.free(lh);
+            const rh = resolveRevision(git_path, right, platform_impl, allocator) catch {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: invalid --onto '{s}'\n", .{onto_ref});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            };
+            defer allocator.free(rh);
+            break :blk findMergeBase(git_path, lh, rh, allocator, platform_impl) catch try allocator.dupe(u8, lh);
+        }
+        break :blk resolveRevision(git_path, onto_ref, platform_impl, allocator) catch {
             const msg = try std.fmt.allocPrint(allocator, "fatal: invalid --onto '{s}'\n", .{onto_ref});
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);
             std.process.exit(128);
-        }
+        };
+    } else if (keep_base)
+        findMergeBase(git_path, head_hash, upstream_hash, allocator, platform_impl) catch try allocator.dupe(u8, upstream_hash)
     else
         try allocator.dupe(u8, upstream_hash);
     defer allocator.free(onto_hash);
@@ -31063,9 +31269,19 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     }
     try collectCommitsToReplay(git_path, head_hash, merge_base, &commits_to_replay, allocator, platform_impl);
 
-    // Check if already up to date
-    if (commits_to_replay.items.len == 0 and !force_rebase) {
-        if (std.mem.eql(u8, head_hash, onto_hash) or std.mem.eql(u8, merge_base, head_hash)) {
+    // Check if already up to date or noop
+    if (!force_rebase) {
+        const is_noop = blk: {
+            if (commits_to_replay.items.len == 0) {
+                if (std.mem.eql(u8, head_hash, onto_hash) or std.mem.eql(u8, merge_base, head_hash))
+                    break :blk true;
+            }
+            // If onto equals the merge base, commits are already on top of it
+            if (std.mem.eql(u8, onto_hash, merge_base))
+                break :blk true;
+            break :blk false;
+        };
+        if (is_noop) {
             if (!quiet) {
                 try platform_impl.writeStdout("Current branch ");
                 try platform_impl.writeStdout(current_branch_name);
