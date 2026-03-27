@@ -4590,7 +4590,7 @@ fn cmdMerge(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             std.process.exit(1);
         }
         const actual_msg = merge_message orelse
-            try std.fmt.allocPrint(allocator, "Merge branch '{s}'", .{merge_target});
+            try buildMergeMessage(merge_target, current_branch, git_path, allocator, platform_impl);
         defer if (merge_message == null) allocator.free(actual_msg);
         const author_str = getAuthorString(allocator) catch try allocator.dupe(u8, "Unknown <unknown@unknown>");
         defer allocator.free(author_str);
@@ -4625,7 +4625,7 @@ fn cmdMerge(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         if (allow_unrelated_histories) {
             // Create a merge commit with both parents
             const actual_message = merge_message orelse blk: {
-                break :blk try std.fmt.allocPrint(allocator, "Merge branch '{s}'", .{merge_target});
+                break :blk try buildMergeMessage(merge_target, current_branch, git_path, allocator, platform_impl);
             };
             const should_free_msg = merge_message == null;
             defer if (should_free_msg) allocator.free(actual_message);
@@ -4822,7 +4822,9 @@ fn performThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_h
         // Create merge commit
         try createMergeCommit(git_path, current_hash, target_hash, current_branch, target_branch, allocator, platform_impl);
         
-        const msg = try std.fmt.allocPrint(allocator, "Merge branch '{s}' into {s}\n", .{target_branch, current_branch});
+        const merge_msg_out = try buildMergeMessage(target_branch, current_branch, git_path, allocator, platform_impl);
+        defer allocator.free(merge_msg_out);
+        const msg = try std.fmt.allocPrint(allocator, "{s}\n", .{merge_msg_out});
         defer allocator.free(msg);
         try platform_impl.writeStdout(msg);
     }
@@ -5255,13 +5257,57 @@ fn createConflictFile(git_path: []const u8, filename: []const u8, base_hash: ?[]
 }
 
 /// Create a merge commit with two parents
+fn buildMergeMessage(merge_target: []const u8, current_branch: []const u8, git_path: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
+    // Determine if target is a tag
+    const is_tag = blk: {
+        const tag_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags/{s}", .{git_path, merge_target});
+        defer allocator.free(tag_path);
+        if (std.fs.cwd().access(tag_path, .{})) |_| break :blk true else |_| {}
+        // Also check packed-refs
+        const packed_ref = try std.fmt.allocPrint(allocator, "refs/tags/{s}", .{merge_target});
+        defer allocator.free(packed_ref);
+        const packed_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_path});
+        defer allocator.free(packed_path);
+        if (std.fs.cwd().readFileAlloc(allocator, packed_path, 10 * 1024 * 1024)) |content| {
+            defer allocator.free(content);
+            if (std.mem.indexOf(u8, content, packed_ref) != null) break :blk true;
+        } else |_| {}
+        break :blk false;
+    };
+
+    const kind = if (is_tag) "tag" else "branch";
+    const is_default = isDefaultBranch(current_branch, allocator, platform_impl);
+    if (is_default) {
+        return std.fmt.allocPrint(allocator, "Merge {s} '{s}'", .{kind, merge_target});
+    } else {
+        return std.fmt.allocPrint(allocator, "Merge {s} '{s}' into {s}", .{kind, merge_target, current_branch});
+    }
+}
+
+fn isDefaultBranch(branch: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) bool {
+    // Strip refs/heads/ prefix if present
+    const short_name = if (std.mem.startsWith(u8, branch, "refs/heads/")) branch["refs/heads/".len..] else branch;
+    // Check GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME first
+    if (std.process.getEnvVarOwned(allocator, "GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME") catch null) |ev| {
+        defer allocator.free(ev);
+        if (ev.len > 0) return std.mem.eql(u8, short_name, ev);
+    }
+    // Check init.defaultBranch config
+    if (readCfg(allocator, "init.defaultbranch", platform_impl)) |v| {
+        defer allocator.free(v);
+        return std.mem.eql(u8, short_name, v);
+    }
+    // Default is "master"
+    return std.mem.eql(u8, short_name, "master");
+}
+
 fn createMergeCommit(git_path: []const u8, current_hash: []const u8, target_hash: []const u8, current_branch: []const u8, target_branch: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     // Get current tree (after merge)
     const current_tree = try getCommitTree(git_path, current_hash, allocator, platform_impl);
     defer allocator.free(current_tree);
     
     // Create commit message
-    const commit_message = try std.fmt.allocPrint(allocator, "Merge branch '{s}' into {s}", .{target_branch, current_branch});
+    const commit_message = try buildMergeMessage(target_branch, current_branch, git_path, allocator, platform_impl);
     defer allocator.free(commit_message);
     
     // Create author/committer info (simplified)
