@@ -10859,7 +10859,7 @@ fn getObjectSize(allocator: std.mem.Allocator, git_path: []const u8, sha1: *cons
     defer allocator.free(compressed);
 
     // Decompress to find the size in the header
-    const decompressed = zlib_compat_mod.decompressSlice(allocator, compressed) catch return error.DecompressError;
+    const decompressed = zlib_compat_mod.decompressSlice(allocator, compressed, 1024 * 1024) catch return error.DecompressError;
     defer allocator.free(decompressed);
 
     // Parse header: "type size\0content..."
