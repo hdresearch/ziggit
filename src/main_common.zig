@@ -7222,12 +7222,14 @@ fn parseTreeEntries(tree_data: []const u8, allocator: std.mem.Allocator) !std.ar
         _ = std.fmt.bufPrint(&hash_hex, "{x}", .{hash_bytes}) catch break;
 
         const is_tree = std.mem.eql(u8, mode, "40000");
+        const is_commit = std.mem.eql(u8, mode, "160000");
         // Pad mode to 6 digits (git format)
         const padded_mode = if (is_tree) "040000" else mode;
+        const obj_type_str: []const u8 = if (is_tree) "tree" else if (is_commit) "commit" else "blob";
 
         try entries.append(LsTreeEntry{
             .mode = try allocator.dupe(u8, padded_mode),
-            .obj_type = if (is_tree) "tree" else "blob",
+            .obj_type = obj_type_str,
             .hash = try allocator.dupe(u8, &hash_hex),
             .name = try allocator.dupe(u8, name),
         });
@@ -7254,10 +7256,13 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     var show_trees = false; // -t flag
     var only_trees = false; // -d flag
     var name_only = false;
+    var name_status = false;
     var long_format = false;
     var null_terminated = false;
     var full_tree = false;
     var no_full_name = false;
+    var object_only = false;
+    var has_format = false;
     var treeish: ?[]const u8 = null;
     var pathspecs = std.array_list.Managed([]const u8).init(allocator);
     defer pathspecs.deinit();
@@ -7271,8 +7276,10 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
             show_trees = true;
         } else if (std.mem.eql(u8, arg, "-d")) {
             only_trees = true;
-        } else if (std.mem.eql(u8, arg, "--name-only") or std.mem.eql(u8, arg, "--name-status")) {
+        } else if (std.mem.eql(u8, arg, "--name-only")) {
             name_only = true;
+        } else if (std.mem.eql(u8, arg, "--name-status")) {
+            name_status = true;
         } else if (std.mem.eql(u8, arg, "-l") or std.mem.eql(u8, arg, "--long")) {
             long_format = true;
         } else if (std.mem.eql(u8, arg, "-z")) {
@@ -7283,6 +7290,10 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
             no_full_name = false;
         } else if (std.mem.eql(u8, arg, "--no-full-name")) {
             no_full_name = true;
+        } else if (std.mem.eql(u8, arg, "--object-only")) {
+            object_only = true;
+        } else if (std.mem.startsWith(u8, arg, "--format=")) {
+            has_format = true;
         } else if (std.mem.eql(u8, arg, "--abbrev")) {
             // Accept but ignore
         } else if (std.mem.startsWith(u8, arg, "--abbrev=")) {
@@ -7304,6 +7315,40 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
                 try pathspecs.append(arg);
             }
         }
+    }
+
+    // Validate incompatible options
+    {
+        const name_opts = @as(u8, if (name_only) 1 else 0) + @as(u8, if (object_only) 1 else 0);
+        if (long_format and (name_only or name_status)) {
+            try platform_impl.writeStderr("error: --long is incompatible with --name-only\n");
+            std.process.exit(129);
+        }
+        if (long_format and object_only) {
+            try platform_impl.writeStderr("error: --long is incompatible with --object-only\n");
+            std.process.exit(129);
+        }
+        if (name_only and name_status) {
+            try platform_impl.writeStderr("error: --name-status is incompatible with --name-only\n");
+            std.process.exit(129);
+        }
+        if ((name_only or name_status) and object_only) {
+            if (name_status) {
+                try platform_impl.writeStderr("error: --object-only is incompatible with --name-status\n");
+            } else {
+                try platform_impl.writeStderr("error: --object-only is incompatible with --name-only\n");
+            }
+            std.process.exit(129);
+        }
+        _ = name_opts;
+        if (has_format) {
+            if (long_format or name_only or name_status or object_only) {
+                try platform_impl.writeStderr("error: --format can't be combined with other format-altering options\n");
+                std.process.exit(129);
+            }
+        }
+        // Merge name_status into name_only for output purposes
+        if (name_status) name_only = true;
     }
 
     if (treeish == null) {
@@ -7373,7 +7418,11 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     }
 
     // Walk the tree
-    try walkTree(allocator, git_path, tree_hash, "", recursive, show_trees, only_trees, effective_pathspecs, platform_impl, &output_entries);
+    walkTree(allocator, git_path, tree_hash, "", recursive, show_trees, only_trees, effective_pathspecs, platform_impl, &output_entries) catch {
+        try platform_impl.writeStderr("fatal: not a tree object\n");
+        std.process.exit(128);
+        unreachable;
+    };
 
     // Sort by path (git ls-tree outputs sorted)
     std.sort.block(OutputEntry, output_entries.items, {}, struct {
@@ -7393,7 +7442,11 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
         else
             entry.full_path;
 
-        if (name_only) {
+        if (object_only) {
+            const output = try std.fmt.allocPrint(allocator, "{s}{s}", .{ entry.hash, line_end });
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+        } else if (name_only) {
             const output = try std.fmt.allocPrint(allocator, "{s}{s}", .{ display_path, line_end });
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
@@ -7448,11 +7501,11 @@ fn walkTree(
 ) !void {
     // Load the tree object
     const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch {
-        return;
+        return error.ObjectNotFound;
     };
     defer tree_obj.deinit(allocator);
 
-    if (tree_obj.type != .tree) return;
+    if (tree_obj.type != .tree) return error.ObjectNotFound;
 
     // Parse tree entries
     var entries = try parseTreeEntries(tree_obj.data, allocator);
