@@ -5543,7 +5543,6 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     var do_add = false;
     var do_remove_section = false;
     var do_rename_section = false;
-    _ = &do_rename_section;
     var use_global = false;
     var use_system = false;
     var use_local = false;
@@ -5560,7 +5559,6 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     var positionals = std.array_list.Managed([]const u8).init(allocator);
     defer positionals.deinit();
     var do_edit = false;
-    _ = &do_edit;
     var do_get_color = false;
     var do_get_colorbool = false;
     // New-style subcommands
@@ -5798,6 +5796,54 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         _ = key;
         // Simple: check if stdout is a terminal
         try platform_impl.writeStdout("false\n");
+        return;
+    }
+
+    // Handle --edit
+    if (do_edit) {
+        const cfg_path2 = if (config_file) |cf| try allocator.dupe(u8, cf) else if (use_global) blk: {
+            const home = std.process.getEnvVarOwned(allocator, "HOME") catch {
+                try platform_impl.writeStderr("fatal: $HOME not set\n");
+                std.process.exit(128);
+            };
+            defer allocator.free(home);
+            break :blk try std.fmt.allocPrint(allocator, "{s}/.gitconfig", .{home});
+        } else if (git_path_opt) |gp| try std.fmt.allocPrint(allocator, "{s}/config", .{gp}) else {
+            try platform_impl.writeStderr("fatal: not a git repository\n");
+            std.process.exit(128);
+        };
+        defer allocator.free(cfg_path2);
+        
+        const editor = std.process.getEnvVarOwned(allocator, "GIT_EDITOR") catch
+            std.process.getEnvVarOwned(allocator, "VISUAL") catch
+            std.process.getEnvVarOwned(allocator, "EDITOR") catch
+            try allocator.dupe(u8, "vi");
+        defer allocator.free(editor);
+        
+        // Launch editor
+        var child = std.process.Child.init(&.{ editor, cfg_path2 }, allocator);
+        child.spawn() catch {
+            try platform_impl.writeStderr("error: could not launch editor\n");
+            std.process.exit(1);
+        };
+        _ = child.wait() catch {};
+        return;
+    }
+    
+    // Handle --rename-section
+    if (do_rename_section) {
+        if (positionals.items.len < 2) {
+            try platform_impl.writeStderr("usage: git config --rename-section <old-name> <new-name>\n");
+            std.process.exit(2);
+        }
+        const old_section = positionals.items[0];
+        const new_section = positionals.items[1];
+        const cfg_path = if (config_file) |cf| try allocator.dupe(u8, cf) else if (git_path_opt) |gp| try std.fmt.allocPrint(allocator, "{s}/config", .{gp}) else {
+            try platform_impl.writeStderr("fatal: not a git repository\n");
+            std.process.exit(128);
+        };
+        defer allocator.free(cfg_path);
+        try configRenameSection(cfg_path, old_section, new_section, allocator, platform_impl);
         return;
     }
 
@@ -6428,6 +6474,64 @@ fn configUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, allo
         try platform_impl.writeStderr(key);
         try platform_impl.writeStderr(" has multiple values\n");
         std.process.exit(5);
+    }
+
+    try platform_impl.fs.writeFile(cfg_path, result.items);
+}
+
+fn configRenameSection(cfg_path: []const u8, old_name: []const u8, new_name: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    const content = platform_impl.fs.readFile(allocator, cfg_path) catch {
+        try platform_impl.writeStderr("fatal: could not read config file\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(content);
+
+    var result = std.array_list.Managed(u8).init(allocator);
+    defer result.deinit();
+    var lines = std.mem.splitSequence(u8, content, "\n");
+    var found = false;
+
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+
+        if (trimmed.len > 0 and trimmed[0] == '[') {
+            const parsed = parseSectionHeader(trimmed, allocator) catch null;
+            defer if (parsed) |p| allocator.free(p);
+            if (parsed) |p| {
+                if (std.ascii.eqlIgnoreCase(p, old_name)) {
+                    found = true;
+                    // Write new section header
+                    // Handle subsection format
+                    if (std.mem.indexOf(u8, new_name, ".")) |dot_pos| {
+                        const sect = new_name[0..dot_pos];
+                        const subsect = new_name[dot_pos + 1 ..];
+                        const new_header = try std.fmt.allocPrint(allocator, "[{s} \"{s}\"]\n", .{ sect, subsect });
+                        defer allocator.free(new_header);
+                        try result.appendSlice(new_header);
+                    } else {
+                        const new_header = try std.fmt.allocPrint(allocator, "[{s}]\n", .{new_name});
+                        defer allocator.free(new_header);
+                        try result.appendSlice(new_header);
+                    }
+                    continue;
+                }
+            }
+        }
+
+        try result.appendSlice(line);
+        try result.append('\n');
+    }
+
+    if (!found) {
+        const msg = try std.fmt.allocPrint(allocator, "fatal: no such section: {s}\n", .{old_name});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        std.process.exit(128);
+    }
+
+    // Remove trailing newline if original didn't have one
+    if (result.items.len > 0 and content.len > 0 and content[content.len - 1] != '\n') {
+        _ = result.pop();
     }
 
     try platform_impl.fs.writeFile(cfg_path, result.items);
