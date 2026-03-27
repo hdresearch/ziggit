@@ -8411,6 +8411,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     var do_get_all = false;
     var do_get_regexp = false;
     var do_set = false;
+    var do_replace_all = false;
     var do_unset = false;
     var do_unset_all = false;
     var do_add = false;
@@ -8523,7 +8524,8 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         } else if (std.mem.eql(u8, arg, "--get-colorbool")) {
             do_get_colorbool = true;
         } else if (std.mem.eql(u8, arg, "--replace-all")) {
-            do_set = true; // treat like set but replaces all
+            do_set = true;
+            do_replace_all = true;
         } else if (std.mem.startsWith(u8, arg, "--comment=")) {
             config_comment = arg["--comment=".len..];
         } else if (std.mem.eql(u8, arg, "--comment")) {
@@ -8868,7 +8870,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 unreachable;
             }
         }
-        try configSetValue(cfg_path, key, value, do_add, config_comment, allocator, platform_impl);
+        try configSetValue(cfg_path, key, value, do_add, do_replace_all, config_comment, allocator, platform_impl);
         return;
     }
 
@@ -9327,7 +9329,7 @@ fn formatConfigComment(comment_raw: ?[]const u8, allocator: std.mem.Allocator) !
     return try allocator.dupe(u8, "");
 }
 
-fn configSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add: bool, comment: ?[]const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+fn configSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add: bool, replace_all: bool, comment: ?[]const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     // Parse key into section[.subsection].variable
     const parsed_key = parseConfigKey(key, allocator) catch {
         try platform_impl.writeStderr("error: key does not contain a section: ");
@@ -9414,10 +9416,15 @@ fn configSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_a
         }
         
         // Check if this line has our key (for replacement)
-        if (in_target_section and !found and !do_add and trimmed.len > 0 and trimmed[0] != '[' and trimmed[0] != '#' and trimmed[0] != ';') {
+        if (in_target_section and !do_add and trimmed.len > 0 and trimmed[0] != '[' and trimmed[0] != '#' and trimmed[0] != ';') {
             if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
                 const k = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
                 if (std.ascii.eqlIgnoreCase(k, key_part)) {
+                    if (found and replace_all) {
+                        // Already replaced one - skip (delete) this duplicate
+                        pos = line_end + @as(usize, if (has_newline) 1 else 0);
+                        continue;
+                    }
                     // Replace this line
                     const cs = try formatConfigComment(comment, allocator);
                     defer allocator.free(cs);
