@@ -3757,6 +3757,7 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     var quiet = false;
     var exit_code = false;
     var diff_output_mode: enum { patch, stat, shortstat, numstat, name_only, name_status, raw, no_patch } = .patch;
+    var check_mode = false;
     var positional = std.array_list.Managed([]const u8).init(allocator);
     defer positional.deinit();
     var pathspec_args = std.array_list.Managed([]const u8).init(allocator);
@@ -3801,7 +3802,7 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
         {
             // whitespace options - accept but don't fully implement
         } else if (std.mem.eql(u8, arg, "--check")) {
-            // whitespace check mode - accept but don't fully implement
+            check_mode = true;
         } else if (std.mem.eql(u8, arg, "--full-index") or std.mem.eql(u8, arg, "--binary") or
             std.mem.eql(u8, arg, "--abbrev") or std.mem.startsWith(u8, arg, "--abbrev=") or
             std.mem.eql(u8, arg, "--no-renames") or std.mem.eql(u8, arg, "-M") or std.mem.startsWith(u8, arg, "-M") or
@@ -3973,17 +3974,66 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
             defer allocator.free(tree_hash);
             // For now, compare tree to index and show patch
             // Get HEAD tree for comparison
-            has_diff = showRefToWorkingTreeDiff(sref, &index, cwd, git_path, platform_impl, allocator, quiet, cached) catch false;
+            has_diff = showRefToWorkingTreeDiff(sref, &index, cwd, git_path, platform_impl, allocator, quiet or check_mode, cached) catch false;
         } else if (cached) {
             // Show differences between index and HEAD (staged changes)
-            has_diff = showStagedDiff(&index, git_path, platform_impl, allocator, quiet) catch false;
+            has_diff = showStagedDiff(&index, git_path, platform_impl, allocator, quiet or check_mode) catch false;
         } else {
             // Show differences between working tree and index
-            has_diff = showWorkingTreeDiff(&index, cwd, platform_impl, allocator, quiet) catch false;
+            has_diff = showWorkingTreeDiff(&index, cwd, platform_impl, allocator, quiet or check_mode) catch false;
         }
     }
     
-    if (exit_code and has_diff) {
+    var ws_errors = false;
+    if (check_mode) {
+        // In check mode, we need to re-run the diff and check for whitespace errors
+        // For now, check working tree for trailing whitespace in modified files
+        if (positional.items.len == 0 and !cached) {
+            // Working tree diff check
+            for (index.entries.items) |entry| {
+                if (pathspec_args.items.len > 0) {
+                    var matches = false;
+                    for (pathspec_args.items) |ps| {
+                        if (pathspecMatch(ps, entry.path)) { matches = true; break; }
+                    }
+                    if (!matches) continue;
+                }
+                // Read the working tree file
+                const wt_content = platform_impl.fs.readFile(allocator, entry.path) catch continue;
+                defer allocator.free(wt_content);
+                // Get index content
+                var idx_hash_buf: [40]u8 = undefined;
+                _ = std.fmt.bufPrint(&idx_hash_buf, "{x}", .{&entry.sha1}) catch continue;
+                const idx_obj = objects.GitObject.load(&idx_hash_buf, git_path, platform_impl, allocator) catch continue;
+                defer idx_obj.deinit(allocator);
+                if (std.mem.eql(u8, wt_content, idx_obj.data)) continue;
+                // Check new content for whitespace errors
+                var lines = std.mem.splitScalar(u8, wt_content, '\n');
+                var line_num: usize = 0;
+                while (lines.next()) |line| {
+                    line_num += 1;
+                    if (line.len > 0 and (line[line.len - 1] == ' ' or line[line.len - 1] == '\t')) {
+                        ws_errors = true;
+                        const msg = try std.fmt.allocPrint(allocator, "{s}:{d}: trailing whitespace.\n+{s}\n", .{ entry.path, line_num, line });
+                        defer allocator.free(msg);
+                        try platform_impl.writeStdout(msg);
+                    }
+                }
+            }
+        }
+        if (!quiet) {
+            // Suppress normal diff output in check mode - it was already suppressed
+        }
+    }
+    
+    if (check_mode and exit_code) {
+        var code: u8 = 0;
+        if (has_diff) code |= 1;
+        if (ws_errors) code |= 2;
+        if (code != 0) std.process.exit(code);
+    } else if (check_mode) {
+        if (ws_errors) std.process.exit(2);
+    } else if (exit_code and has_diff) {
         std.process.exit(1);
     }
 }
@@ -28404,7 +28454,6 @@ fn nativeCmdApply(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     _ = &cached;
     _ = &index_flag;
     _ = &recount;
-    _ = &allow_empty;
 
     // Read patch content
     var all_patch_data = std.array_list.Managed(u8).init(allocator);
@@ -28463,6 +28512,7 @@ fn nativeCmdApply(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     }
 
     if (patches.items.len == 0 and !stat_only and !numstat_flag and !summary_only) {
+        if (allow_empty) return; // --allow-empty: empty patch is OK
         // No patches found - could be unrecognized input
         try platform_impl.writeStderr("error: unrecognized input\n");
         std.process.exit(128);
