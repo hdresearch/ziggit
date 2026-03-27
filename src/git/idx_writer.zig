@@ -108,6 +108,7 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
 
     var pos: usize = 12;
     var obj_idx: u32 = 0;
+    var pass1_unresolved: usize = 0; // Track unresolved count during scan
     while (obj_idx < object_count and pos < content_end) {
         const obj_start = pos;
 
@@ -323,6 +324,7 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
                 .resolved = false,
             };
             offset_to_idx.putAssumeCapacity(obj_start, obj_idx);
+            pass1_unresolved += 1;
         } else if (pt == 7) {
             // REF_DELTA: read base SHA-1, decompress to find compressed length.
             if (pos + 20 > content_end) {
@@ -406,6 +408,7 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
                 .resolved = false,
             };
             offset_to_idx.putAssumeCapacity(obj_start, obj_idx);
+            pass1_unresolved += 1;
         } else {
             records[obj_idx] = emptyRecord(obj_start);
             obj_idx += 1;
@@ -431,7 +434,7 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
     // REF_DELTAs use multi-pass convergence.
     // Skip entirely if there are no unresolved objects (common for shallow packs).
 
-    var unresolved_count: usize = countUnresolved(records[0..total_objects]);
+    var unresolved_count: usize = pass1_unresolved;
 
     if (unresolved_count > 0) {
         var cache = DeltaCache.init(allocator, 128 * 1024 * 1024);
