@@ -3983,9 +3983,30 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
                 std.process.exit(128);
             };
             defer allocator.free(tree2);
-            const has_diff = try diffTwoTreesPatch(allocator, tree1, tree2, "", git_path, quiet, pathspec_args.items, platform_impl);
-            if (exit_code and has_diff) {
-                std.process.exit(1);
+            if (diff_output_mode == .name_only or diff_output_mode == .name_status or diff_output_mode == .numstat or diff_output_mode == .stat or diff_output_mode == .shortstat or diff_output_mode == .raw or diff_output_mode == .no_patch) {
+                // Use tree comparison to get file-level changes, then output in requested format
+                var diff_entries = std.array_list.Managed(DiffStatEntry).init(allocator);
+                defer {
+                    for (diff_entries.items) |*de| {
+                        allocator.free(de.path);
+                    }
+                    diff_entries.deinit();
+                }
+                try collectTreeDiffEntries(allocator, tree1, tree2, "", git_path, pathspec_args.items, platform_impl, &diff_entries);
+                if (diff_output_mode != .no_patch) {
+                    try outputDiffEntries(diff_entries.items, diff_output_mode, platform_impl, allocator);
+                }
+                if ((exit_code or quiet) and diff_entries.items.len > 0) {
+                    std.process.exit(1);
+                }
+            } else {
+                const has_diff2 = try diffTwoTreesPatch(allocator, tree1, tree2, "", git_path, quiet or check_mode, pathspec_args.items, platform_impl);
+                if (check_mode) {
+                    // TODO: check whitespace in tree diff
+                }
+                if ((exit_code or (quiet and has_diff2)) and has_diff2) {
+                    std.process.exit(1);
+                }
             }
             return;
         }
@@ -27647,6 +27668,82 @@ fn diffTreeWithEmptyPrefix(allocator: std.mem.Allocator, tree_hash_str: []const 
             const out = try std.fmt.allocPrint(allocator, ":000000 {s} {s}{s} {s}{s} A\t{s}\n", .{ padMode6(&mbuf, entry.mode), ah1, suf, ah2, suf, full_name });
             defer allocator.free(out);
             try platform_impl.writeStdout(out);
+        }
+    }
+}
+
+fn collectTreeDiffEntries(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, prefix: []const u8, git_path: []const u8, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform, diff_entries_out: *std.array_list.Managed(DiffStatEntry)) !void {
+    const tree1_obj = objects.GitObject.load(tree1_hash, git_path, platform_impl, allocator) catch return;
+    defer tree1_obj.deinit(allocator);
+    const tree2_obj = objects.GitObject.load(tree2_hash, git_path, platform_impl, allocator) catch return;
+    defer tree2_obj.deinit(allocator);
+
+    var parsed1 = tree_mod.parseTree(tree1_obj.data, allocator) catch return;
+    defer parsed1.deinit();
+    var parsed2 = tree_mod.parseTree(tree2_obj.data, allocator) catch return;
+    defer parsed2.deinit();
+
+    var map1 = std.StringHashMap(tree_mod.TreeEntry).init(allocator);
+    defer map1.deinit();
+    var map2 = std.StringHashMap(tree_mod.TreeEntry).init(allocator);
+    defer map2.deinit();
+    for (parsed1.items) |e| map1.put(e.name, e) catch {};
+    for (parsed2.items) |e| map2.put(e.name, e) catch {};
+
+    var all_names = std.StringHashMap(void).init(allocator);
+    defer all_names.deinit();
+    for (parsed1.items) |e| all_names.put(e.name, {}) catch {};
+    for (parsed2.items) |e| all_names.put(e.name, {}) catch {};
+
+    var name_list = std.array_list.Managed([]const u8).init(allocator);
+    defer name_list.deinit();
+    var niter = all_names.keyIterator();
+    while (niter.next()) |key| try name_list.append(key.*);
+    std.mem.sort([]const u8, name_list.items, {}, struct {
+        fn cmp(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.cmp);
+
+    for (name_list.items) |name| {
+        const e1 = map1.get(name);
+        const e2 = map2.get(name);
+
+        const full_name = if (prefix.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, name })
+        else
+            try allocator.dupe(u8, name);
+
+        if (e1 != null and e2 != null) {
+            if (std.mem.eql(u8, e1.?.hash, e2.?.hash) and std.mem.eql(u8, e1.?.mode, e2.?.mode)) {
+                allocator.free(full_name);
+                continue;
+            }
+            if (isTreeMode(e1.?.mode) and isTreeMode(e2.?.mode)) {
+                try collectTreeDiffEntries(allocator, e1.?.hash, e2.?.hash, full_name, git_path, pathspecs, platform_impl, diff_entries_out);
+                allocator.free(full_name);
+                continue;
+            }
+            if (!matchesPathspecs(full_name, pathspecs)) { allocator.free(full_name); continue; }
+            try diff_entries_out.append(.{ .path = full_name, .insertions = 1, .deletions = 1, .is_binary = false, .is_new = false, .is_deleted = false, .old_hash = "", .new_hash = "" });
+        } else if (e1 != null and e2 == null) {
+            if (isTreeMode(e1.?.mode)) {
+                try collectTreeDiffEntries(allocator, e1.?.hash, "4b825dc642cb6eb9a060e54bf899d69f82cf0101", full_name, git_path, pathspecs, platform_impl, diff_entries_out);
+                allocator.free(full_name);
+                continue;
+            }
+            if (!matchesPathspecs(full_name, pathspecs)) { allocator.free(full_name); continue; }
+            try diff_entries_out.append(.{ .path = full_name, .insertions = 0, .deletions = 1, .is_binary = false, .is_new = false, .is_deleted = true, .old_hash = "", .new_hash = "" });
+        } else if (e2 != null) {
+            if (isTreeMode(e2.?.mode)) {
+                try collectTreeDiffEntries(allocator, "4b825dc642cb6eb9a060e54bf899d69f82cf0101", e2.?.hash, full_name, git_path, pathspecs, platform_impl, diff_entries_out);
+                allocator.free(full_name);
+                continue;
+            }
+            if (!matchesPathspecs(full_name, pathspecs)) { allocator.free(full_name); continue; }
+            try diff_entries_out.append(.{ .path = full_name, .insertions = 1, .deletions = 0, .is_binary = false, .is_new = true, .is_deleted = false, .old_hash = "", .new_hash = "" });
+        } else {
+            allocator.free(full_name);
         }
     }
 }
