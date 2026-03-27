@@ -8888,6 +8888,19 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var directory = false;
     var no_empty_directory = false;
     var error_unmatch = false;
+    var ignored_flag = false;
+    var exclude_standard = false;
+    var format_str: ?[]const u8 = null;
+    var z_terminator = false;
+    var killed_flag = false;
+    var tag_flag = false;
+    var resolve_undo_flag = false;
+    var deduplicate_flag = false;
+    var eol_flag = false;
+    var exclude_patterns = std.array_list.Managed([]const u8).init(allocator);
+    defer exclude_patterns.deinit();
+    var exclude_files = std.array_list.Managed([]const u8).init(allocator);
+    defer exclude_files.deinit();
     var pathspecs = std.array_list.Managed([]const u8).init(allocator);
     defer pathspecs.deinit();
 
@@ -8918,31 +8931,47 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         } else if (std.mem.eql(u8, arg, "--no-empty-directory")) {
             no_empty_directory = true;
         } else if (std.mem.eql(u8, arg, "-z")) {
-            // null-terminated output (accepted but not fully used yet)
+            z_terminator = true;
         } else if (std.mem.eql(u8, arg, "--error-unmatch")) {
             error_unmatch = true;
-        } else if (std.mem.eql(u8, arg, "--exclude-standard") or
-            std.mem.eql(u8, arg, "--full-name") or std.mem.eql(u8, arg, "--recurse-submodules") or
-            std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "-f") or
-            std.mem.eql(u8, arg, "-k") or std.mem.eql(u8, arg, "--killed") or
-            std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--ignored") or
+        } else if (std.mem.eql(u8, arg, "--exclude-standard")) {
+            exclude_standard = true;
+        } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--ignored")) {
+            ignored_flag = true;
+        } else if (std.mem.eql(u8, arg, "-t")) {
+            tag_flag = true;
+        } else if (std.mem.eql(u8, arg, "-k") or std.mem.eql(u8, arg, "--killed")) {
+            killed_flag = true;
+        } else if (std.mem.eql(u8, arg, "--resolve-undo")) {
+            resolve_undo_flag = true;
+        } else if (std.mem.eql(u8, arg, "--deduplicate")) {
+            deduplicate_flag = true;
+        } else if (std.mem.eql(u8, arg, "--eol")) {
+            eol_flag = true;
+        } else if (std.mem.eql(u8, arg, "--full-name") or std.mem.eql(u8, arg, "--recurse-submodules") or
+            std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "-f") or
             std.mem.eql(u8, arg, "-u") or std.mem.eql(u8, arg, "--unmerged") or
-            std.mem.eql(u8, arg, "--eol") or std.mem.eql(u8, arg, "--debug") or
-            std.mem.eql(u8, arg, "--deduplicate") or std.mem.eql(u8, arg, "--sparse") or
-            std.mem.eql(u8, arg, "--resolve-undo"))
+            std.mem.eql(u8, arg, "--debug") or
+            std.mem.eql(u8, arg, "--sparse"))
         {
             // Known but not fully implemented flags - accept silently
         } else if (std.mem.eql(u8, arg, "-x") or std.mem.eql(u8, arg, "--exclude")) {
-            _ = args.next(); // consume pattern
-        } else if (std.mem.startsWith(u8, arg, "--exclude=") or std.mem.startsWith(u8, arg, "-x")) {
-            // Inline exclude pattern
+            if (args.next()) |pat| try exclude_patterns.append(pat);
+        } else if (std.mem.startsWith(u8, arg, "--exclude=")) {
+            try exclude_patterns.append(arg["--exclude=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "-x") and arg.len > 2) {
+            try exclude_patterns.append(arg[2..]);
         } else if (std.mem.eql(u8, arg, "-X") or std.mem.eql(u8, arg, "--exclude-from")) {
-            _ = args.next(); // consume file
+            if (args.next()) |f| try exclude_files.append(f);
         } else if (std.mem.startsWith(u8, arg, "--exclude-from=")) {
-            // Inline
+            try exclude_files.append(arg["--exclude-from=".len..]);
         } else if (std.mem.eql(u8, arg, "--exclude-per-directory")) {
             _ = args.next();
-        } else if (std.mem.startsWith(u8, arg, "--abbrev") or std.mem.startsWith(u8, arg, "--format") or
+        } else if (std.mem.startsWith(u8, arg, "--format=")) {
+            format_str = arg["--format=".len..];
+        } else if (std.mem.eql(u8, arg, "--format")) {
+            format_str = args.next();
+        } else if (std.mem.startsWith(u8, arg, "--abbrev") or
             std.mem.startsWith(u8, arg, "--with-tree"))
         {
             if (std.mem.indexOf(u8, arg, "=") == null) _ = args.next();
@@ -8998,8 +9027,145 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     };
     defer index.deinit();
 
+    // Build ignore patterns for -i flag
+    var ignore_checker: ?gitignore_mod.GitIgnore = null;
+    defer if (ignore_checker) |*ic| ic.deinit();
+
+    if (ignored_flag or exclude_standard or exclude_patterns.items.len > 0 or exclude_files.items.len > 0) {
+        var gi = gitignore_mod.GitIgnore.init(allocator);
+
+        // Load --exclude-standard sources
+        if (exclude_standard) {
+            // 1. .gitignore in repo root
+            const gitignore_path = std.fmt.allocPrint(allocator, "{s}/.gitignore", .{repo_root}) catch null;
+            if (gitignore_path) |gip| {
+                defer allocator.free(gip);
+                if (platform_impl.fs.readFile(allocator, gip)) |content| {
+                    defer allocator.free(content);
+                    gi.addPatterns(content);
+                } else |_| {}
+            }
+            // 2. .git/info/exclude
+            const info_exclude = std.fmt.allocPrint(allocator, "{s}/info/exclude", .{git_path}) catch null;
+            if (info_exclude) |ie| {
+                defer allocator.free(ie);
+                if (platform_impl.fs.readFile(allocator, ie)) |content| {
+                    defer allocator.free(content);
+                    gi.addPatterns(content);
+                } else |_| {}
+            }
+            // 3. core.excludesFile from config
+            const global_excludes = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch null;
+            if (global_excludes) |gc| {
+                defer allocator.free(gc);
+                if (platform_impl.fs.readFile(allocator, gc)) |config_content| {
+                    defer allocator.free(config_content);
+                    // Parse core.excludesFile from config - simple approach
+                    var lines_it = std.mem.splitScalar(u8, config_content, '\n');
+                    while (lines_it.next()) |line| {
+                        const trimmed = std.mem.trim(u8, line, " \t\r");
+                        if (std.mem.startsWith(u8, trimmed, "excludesFile") or std.mem.startsWith(u8, trimmed, "excludesfile")) {
+                            if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
+                                const path = std.mem.trim(u8, trimmed[eq + 1 ..], " \t");
+                                if (platform_impl.fs.readFile(allocator, path)) |ef_content| {
+                                    defer allocator.free(ef_content);
+                                    gi.addPatterns(ef_content);
+                                } else |_| {}
+                            }
+                        }
+                    }
+                } else |_| {}
+            }
+        }
+
+        // Load -x patterns
+        for (exclude_patterns.items) |pat| {
+            gi.addPatterns(pat);
+        }
+
+        // Load -X exclude-from files
+        for (exclude_files.items) |ef| {
+            if (platform_impl.fs.readFile(allocator, ef)) |content| {
+                defer allocator.free(content);
+                gi.addPatterns(content);
+            } else |_| {}
+        }
+
+        ignore_checker = gi;
+    }
+
+    // --format incompatibility checks
+    if (format_str != null) {
+        if (stage or others or killed_flag or tag_flag or resolve_undo_flag or deduplicate_flag or eol_flag) {
+            try platform_impl.writeStderr("fatal: options '--format' and other display options are incompatible\n");
+            std.process.exit(129);
+        }
+    }
+
     if (!cached and !deleted and !modified_flag and !others) {
         cached = true;
+    }
+
+    // Handle --format output mode
+    if (format_str) |fmt| {
+        const terminator: []const u8 = if (z_terminator) "\x00" else "\n";
+        const repo_root2 = std.fs.path.dirname(git_path) orelse ".";
+        for (index.entries.items) |entry| {
+            if (effective_pathspecs.len > 0) {
+                var matches = false;
+                for (effective_pathspecs) |ps| {
+                    if (std.mem.eql(u8, ps, ":/") or
+                        std.mem.eql(u8, entry.path, ps) or
+                        (std.mem.startsWith(u8, entry.path, ps) and entry.path.len > ps.len and entry.path[ps.len] == '/') or
+                        pathspecMatchesPath(ps, entry.path, false))
+                    {
+                        matches = true;
+                        break;
+                    }
+                }
+                if (!matches) continue;
+            }
+            if (ignored_flag) {
+                if (ignore_checker) |*ic| {
+                    if (!ic.isIgnored(entry.path)) continue;
+                } else continue;
+            }
+
+            // Apply -m (modified) filter
+            if (modified_flag) {
+                const full_path2 = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root2, entry.path }) catch continue;
+                defer allocator.free(full_path2);
+                const file_exists2 = platform_impl.fs.exists(full_path2) catch false;
+                if (!file_exists2) {
+                    // File doesn't exist on disk = show it (it's "modified" in the sense of deleted)
+                } else {
+                    const current_content2 = platform_impl.fs.readFile(allocator, full_path2) catch continue;
+                    defer allocator.free(current_content2);
+                    const blob2 = objects.createBlobObject(current_content2, allocator) catch continue;
+                    defer blob2.deinit(allocator);
+                    const current_hash2 = blob2.hash(allocator) catch continue;
+                    defer allocator.free(current_hash2);
+                    const index_hash2 = std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1}) catch continue;
+                    defer allocator.free(index_hash2);
+                    if (std.mem.eql(u8, current_hash2, index_hash2)) continue; // not modified
+                }
+            }
+
+            // Apply -d (deleted) filter
+            if (deleted) {
+                const full_path2 = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root2, entry.path }) catch continue;
+                defer allocator.free(full_path2);
+                const file_exists2 = platform_impl.fs.exists(full_path2) catch false;
+                if (file_exists2) continue; // file exists, not deleted
+            }
+
+            const formatted = try formatLsFilesEntry(allocator, fmt, entry, git_path, platform_impl);
+            defer allocator.free(formatted);
+            const output = try std.fmt.allocPrint(allocator, "{s}{s}", .{ formatted, terminator });
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+        }
+        return;
     }
 
     if (cached) {
@@ -9023,6 +9189,15 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                     }
                 }
                 if (!matches) continue;
+            }
+            // When -i (ignored) flag is set, only show files matching ignore patterns
+            if (ignored_flag) {
+                if (ignore_checker) |*ic| {
+                    if (!ic.isIgnored(entry.path)) continue;
+                } else {
+                    // No ignore patterns loaded, nothing can match
+                    continue;
+                }
             }
             if (stage) {
                 const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
@@ -9148,6 +9323,142 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             }
         }
     }
+}
+
+fn formatLsFilesEntry(allocator: std.mem.Allocator, fmt: []const u8, entry: anytype, git_path: []const u8, platform_impl: anytype) ![]u8 {
+    var result = std.array_list.Managed(u8).init(allocator);
+    defer result.deinit();
+
+    var i: usize = 0;
+    while (i < fmt.len) {
+        if (fmt[i] == '%' and i + 1 < fmt.len) {
+            if (fmt[i + 1] == '%') {
+                try result.append('%');
+                i += 2;
+                continue;
+            }
+            if (fmt[i + 1] == 'x' and i + 3 < fmt.len) {
+                // %xNN hex escape
+                const hex = fmt[i + 2 .. i + 4];
+                const byte = std.fmt.parseInt(u8, hex, 16) catch {
+                    try result.append('%');
+                    i += 1;
+                    continue;
+                };
+                try result.append(byte);
+                i += 4;
+                continue;
+            }
+            if (fmt[i + 1] == '(') {
+                // %(fieldname) format
+                const close = std.mem.indexOf(u8, fmt[i + 2 ..], ")") orelse {
+                    try result.append('%');
+                    i += 1;
+                    continue;
+                };
+                const field = fmt[i + 2 .. i + 2 + close];
+                i = i + 2 + close + 1;
+
+                if (std.mem.eql(u8, field, "objectmode")) {
+                    const mode_str = try std.fmt.allocPrint(allocator, "{o}", .{entry.mode});
+                    defer allocator.free(mode_str);
+                    try result.appendSlice(mode_str);
+                } else if (std.mem.eql(u8, field, "objectname")) {
+                    const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
+                    defer allocator.free(hash_str);
+                    try result.appendSlice(hash_str);
+                } else if (std.mem.eql(u8, field, "objecttype")) {
+                    // Determine type from mode
+                    const obj_type: []const u8 = if (entry.mode & 0o170000 == 0o120000)
+                        "blob" // symlink stored as blob
+                    else if (entry.mode & 0o170000 == 0o160000)
+                        "commit" // gitlink/submodule
+                    else if (entry.mode & 0o170000 == 0o040000)
+                        "tree"
+                    else
+                        "blob";
+                    try result.appendSlice(obj_type);
+                } else if (std.mem.eql(u8, field, "objectsize")) {
+                    // Submodule (gitlink) entries have no size
+                    if (entry.mode & 0o170000 == 0o160000) {
+                        try result.append('-');
+                    } else {
+                        const size = getObjectSize(allocator, git_path, &entry.sha1, platform_impl) catch 0;
+                        const size_str = try std.fmt.allocPrint(allocator, "{d}", .{size});
+                        defer allocator.free(size_str);
+                        try result.appendSlice(size_str);
+                    }
+                } else if (std.mem.eql(u8, field, "objectsize:padded")) {
+                    if (entry.mode & 0o170000 == 0o160000) {
+                        try result.appendSlice("      -");
+                    } else {
+                        const size = getObjectSize(allocator, git_path, &entry.sha1, platform_impl) catch 0;
+                        const size_str = try std.fmt.allocPrint(allocator, "{d: >7}", .{size});
+                        defer allocator.free(size_str);
+                        try result.appendSlice(size_str);
+                    }
+                } else if (std.mem.eql(u8, field, "stage")) {
+                    const stage_num = (entry.flags >> 12) & 0x3;
+                    const stage_str = try std.fmt.allocPrint(allocator, "{d}", .{stage_num});
+                    defer allocator.free(stage_str);
+                    try result.appendSlice(stage_str);
+                } else if (std.mem.eql(u8, field, "path")) {
+                    try result.appendSlice(entry.path);
+                } else if (std.mem.eql(u8, field, "eolinfo:index")) {
+                    try result.appendSlice("");
+                } else if (std.mem.eql(u8, field, "eolinfo:worktree")) {
+                    try result.appendSlice("");
+                } else if (std.mem.eql(u8, field, "eolattr")) {
+                    try result.appendSlice("");
+                }
+                continue;
+            }
+            try result.append(fmt[i]);
+            i += 1;
+        } else if (fmt[i] == '\\' and i + 1 < fmt.len) {
+            switch (fmt[i + 1]) {
+                'n' => try result.append('\n'),
+                't' => try result.append('\t'),
+                '\\' => try result.append('\\'),
+                '0' => try result.append(0),
+                else => {
+                    try result.append('\\');
+                    try result.append(fmt[i + 1]);
+                },
+            }
+            i += 2;
+        } else {
+            try result.append(fmt[i]);
+            i += 1;
+        }
+    }
+
+    return result.toOwnedSlice();
+}
+
+fn getObjectSize(allocator: std.mem.Allocator, git_path: []const u8, sha1: *const [20]u8, platform_impl: anytype) !u64 {
+    // Try to read object from loose store and get size
+    const hex = try std.fmt.allocPrint(allocator, "{x}", .{sha1});
+    defer allocator.free(hex);
+    const obj_path = try std.fmt.allocPrint(allocator, "{s}/objects/{s}/{s}", .{ git_path, hex[0..2], hex[2..] });
+    defer allocator.free(obj_path);
+
+    const compressed = platform_impl.fs.readFile(allocator, obj_path) catch return error.NotFound;
+    defer allocator.free(compressed);
+
+    // Decompress to find the size in the header
+    const decompressed = zlib_compat_mod.decompressSlice(allocator, compressed) catch return error.DecompressError;
+    defer allocator.free(decompressed);
+
+    // Parse header: "type size\0content..."
+    if (std.mem.indexOf(u8, decompressed, "\x00")) |null_pos| {
+        const header = decompressed[0..null_pos];
+        if (std.mem.indexOf(u8, header, " ")) |space| {
+            const size_str = header[space + 1 ..];
+            return std.fmt.parseInt(u64, size_str, 10) catch return error.ParseError;
+        }
+    }
+    return error.ParseError;
 }
 
 fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
@@ -9382,7 +9693,49 @@ fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     }
 }
 
-fn catFileBatch(allocator: std.mem.Allocator, git_path: []const u8, full_content: bool, format: ?[]const u8, platform_impl: *const platform_mod.Platform) !void {
+fn formatCatFileOutput(allocator: std.mem.Allocator, fmt: []const u8, obj_hash: []const u8, type_str: []const u8, size: usize) ![]u8 {
+    var result = std.array_list.Managed(u8).init(allocator);
+    defer result.deinit();
+
+    var i: usize = 0;
+    while (i < fmt.len) {
+        if (fmt[i] == '%' and i + 1 < fmt.len and fmt[i + 1] == '(') {
+            const close = std.mem.indexOf(u8, fmt[i + 2 ..], ")") orelse {
+                try result.append(fmt[i]);
+                i += 1;
+                continue;
+            };
+            const field = fmt[i + 2 .. i + 2 + close];
+            i = i + 2 + close + 1;
+
+            if (std.mem.eql(u8, field, "objectname")) {
+                try result.appendSlice(obj_hash);
+            } else if (std.mem.eql(u8, field, "objecttype")) {
+                try result.appendSlice(type_str);
+            } else if (std.mem.eql(u8, field, "objectsize")) {
+                const s = try std.fmt.allocPrint(allocator, "{d}", .{size});
+                defer allocator.free(s);
+                try result.appendSlice(s);
+            } else if (std.mem.eql(u8, field, "objectsize:disk")) {
+                try result.append('0'); // placeholder
+            } else if (std.mem.eql(u8, field, "rest")) {
+                // rest of input line - empty for now
+            }
+        } else if (fmt[i] == '%' and i + 1 < fmt.len and fmt[i + 1] == '%') {
+            try result.append('%');
+            i += 2;
+            continue;
+        } else {
+            try result.append(fmt[i]);
+            i += 1;
+            continue;
+        }
+    }
+
+    return result.toOwnedSlice();
+}
+
+fn catFileBatch(allocator: std.mem.Allocator, git_path: []const u8, full_content: bool, custom_format: ?[]const u8, platform_impl: *const platform_mod.Platform) !void {
     const stdin_data = readStdin(allocator, 10 * 1024 * 1024) catch return;
     defer allocator.free(stdin_data);
     
@@ -9424,39 +9777,12 @@ fn catFileBatch(allocator: std.mem.Allocator, git_path: []const u8, full_content
             .commit => "commit",
             .tag => "tag",
         };
-
-        if (format) |fmt| {
-            // Apply format string with %(field) substitution
-            var output = std.array_list.Managed(u8).init(allocator);
-            defer output.deinit();
-            var fi: usize = 0;
-            while (fi < fmt.len) {
-                if (fi + 1 < fmt.len and fmt[fi] == '%' and fmt[fi + 1] == '(') {
-                    const end = std.mem.indexOfPos(u8, fmt, fi + 2, ")") orelse {
-                        output.append(fmt[fi]) catch break;
-                        fi += 1;
-                        continue;
-                    };
-                    const field = fmt[fi + 2 .. end];
-                    if (std.mem.eql(u8, field, "objectname")) {
-                        output.appendSlice(obj_hash) catch break;
-                    } else if (std.mem.eql(u8, field, "objecttype")) {
-                        output.appendSlice(type_str) catch break;
-                    } else if (std.mem.eql(u8, field, "objectsize")) {
-                        const sz = std.fmt.allocPrint(allocator, "{d}", .{git_object.data.len}) catch break;
-                        defer allocator.free(sz);
-                        output.appendSlice(sz) catch break;
-                    } else if (std.mem.eql(u8, field, "rest")) {
-                        // rest of input after object name
-                    }
-                    fi = end + 1;
-                } else {
-                    output.append(fmt[fi]) catch break;
-                    fi += 1;
-                }
-            }
-            output.append('\n') catch {};
-            try platform_impl.writeStdout(output.items);
+        
+        if (custom_format) |fmt| {
+            const formatted = try formatCatFileOutput(allocator, fmt, obj_hash, type_str, git_object.data.len);
+            defer allocator.free(formatted);
+            try platform_impl.writeStdout(formatted);
+            try platform_impl.writeStdout("\n");
             if (full_content) {
                 try platform_impl.writeStdout(git_object.data);
                 try platform_impl.writeStdout("\n");
