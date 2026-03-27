@@ -8973,6 +8973,28 @@ fn resolveTreePath(git_path: []const u8, tree_hash: []const u8, path: []const u8
 }
 
 fn resolveRevision(git_path: []const u8, rev: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
+    // Handle :<path> syntax (lookup blob from the index)
+    if (rev.len > 1 and rev[0] == ':') {
+        const path_part = rev[1..];
+        // Check for stage number prefix like :N:path
+        var target_stage: u16 = 0;
+        var actual_path = path_part;
+        if (path_part.len > 2 and path_part[0] >= '0' and path_part[0] <= '3' and path_part[1] == ':') {
+            target_stage = path_part[0] - '0';
+            actual_path = path_part[2..];
+        }
+        var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch return error.BadRevision;
+        defer idx.deinit();
+        for (idx.entries.items) |entry| {
+            const entry_stage = (entry.flags >> 12) & 0x3;
+            if (std.mem.eql(u8, entry.path, actual_path) and entry_stage == target_stage) {
+                const hex = std.fmt.bytesToHex(entry.sha1, .lower);
+                return try allocator.dupe(u8, &hex);
+            }
+        }
+        return error.BadRevision;
+    }
+
     // Handle <rev>:<path> syntax
     if (findRevColonPath(rev)) |colon_pos| {
         const rev_part = rev[0..colon_pos];
