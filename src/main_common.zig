@@ -9111,7 +9111,8 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 unreachable;
             }
         }
-        try configSetValue(cfg_path, key, value, do_add, do_replace_all, config_comment, allocator, platform_impl);
+        const value_pattern: ?[]const u8 = if (positionals.items.len >= 3) positionals.items[2] else null;
+        try configSetValue(cfg_path, key, value, do_add, do_replace_all, value_pattern, config_comment, allocator, platform_impl);
         return;
     }
 
@@ -9576,7 +9577,7 @@ fn formatConfigComment(comment_raw: ?[]const u8, allocator: std.mem.Allocator) !
     return try allocator.dupe(u8, "");
 }
 
-fn configSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add: bool, replace_all: bool, comment: ?[]const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+fn configSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add: bool, replace_all: bool, value_pattern: ?[]const u8, comment: ?[]const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     // Parse key into section[.subsection].variable
     const parsed_key = parseConfigKey(key, allocator) catch {
         try platform_impl.writeStderr("error: key does not contain a section: ");
@@ -9704,6 +9705,18 @@ fn configSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_a
             if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
                 const k = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
                 if (std.ascii.eqlIgnoreCase(k, key_part)) {
+                    // Check value pattern if provided
+                    if (value_pattern) |pattern| {
+                        const existing_val = std.mem.trim(u8, trimmed[eq_pos + 1 ..], " \t");
+                        if (!simpleRegexMatch(existing_val, pattern)) {
+                            // Value doesn't match pattern - keep line as-is
+                            try result.appendSlice(line);
+                            if (has_newline) try result.append('\n');
+                            if (in_target_section) last_line_in_section_end = result.items.len;
+                            pos = line_end + @as(usize, if (has_newline) 1 else 0);
+                            continue;
+                        }
+                    }
                     if (found and replace_all) {
                         // Already replaced one - skip (delete) this duplicate
                         pos = line_end + @as(usize, if (has_newline) 1 else 0);
@@ -31992,8 +32005,8 @@ fn setTrackingConfig(git_path: []const u8, branch_name: []const u8, remote: []co
     defer allocator.free(merge_key);
     const merge_value = std.fmt.allocPrint(allocator, "refs/heads/{s}", .{upstream_branch}) catch return;
     defer allocator.free(merge_value);
-    configSetValue(config_path, remote_key, remote, false, false, null, allocator, platform_impl) catch {};
-    configSetValue(config_path, merge_key, merge_value, false, false, null, allocator, platform_impl) catch {};
+    configSetValue(config_path, remote_key, remote, false, false, null, null, allocator, platform_impl) catch {};
+    configSetValue(config_path, merge_key, merge_value, false, false, null, null, allocator, platform_impl) catch {};
 }
 
 // git rebase implementation
