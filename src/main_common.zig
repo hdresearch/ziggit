@@ -9914,18 +9914,10 @@ fn copyObjectsForPush(allocator: std.mem.Allocator, src_git_dir: []const u8, dst
         defer allocator.free(dst_dir);
         std.fs.cwd().makePath(dst_dir) catch {};
 
-        // Check if object already exists at destination (loose, pack, or alternates)
-        const obj_exists_at_dst = blk: {
-            if (std.fs.cwd().access(dst_path, .{})) break :blk true else |_| {}
-            // Check if loadable from destination (pack files + alternates)
-            if (objects.GitObject.load(hash, dst_git_dir, platform_impl, allocator)) |obj_dst| {
-                obj_dst.deinit(allocator);
-                break :blk true;
-            } else |_| {}
-            break :blk false;
-        };
-        
-        if (!obj_exists_at_dst) {
+        // Copy the object if it doesn't exist at destination (loose or pack)
+        if (std.fs.cwd().access(dst_path, .{})) {
+            // Already exists as loose object at destination - skip
+        } else |_| {
             std.fs.cwd().copyFile(src_path, std.fs.cwd(), dst_path, .{}) catch {
                 // Object might be in pack file - need to extract and write it
                 const obj = objects.GitObject.load(hash, src_git_dir, platform_impl, allocator) catch continue;
