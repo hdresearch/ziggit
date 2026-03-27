@@ -190,7 +190,10 @@ pub const GitObject = struct {
             error.FileNotFound => {
                 // Try to find object in pack files
                 return loadFromPackFiles(hash_str, git_dir, platform_impl, allocator) catch {
-                    return error.ObjectNotFound;
+                    // Try alternates
+                    return loadFromAlternates(hash_str, git_dir, platform_impl, allocator) catch {
+                        return error.ObjectNotFound;
+                    };
                 };
             },
             else => return err,
@@ -243,6 +246,102 @@ pub const GitObject = struct {
         };
     }
 };
+
+pub fn loadFromAlternates(hash_str: []const u8, git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) error{ObjectNotFound, OutOfMemory, InvalidObject, InvalidInput, CompressionFailed}!GitObject {
+    const alt_path = try std.fmt.allocPrint(allocator, "{s}/objects/info/alternates", .{git_dir});
+    defer allocator.free(alt_path);
+    
+    const alt_content = platform_impl.fs.readFile(allocator, alt_path) catch return error.ObjectNotFound;
+    defer allocator.free(alt_content);
+    
+    var iter = std.mem.splitScalar(u8, alt_content, '\n');
+    while (iter.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0 or trimmed[0] == '#') continue;
+        
+        // trimmed is an objects directory path
+        // If it ends with /objects, derive the git_dir
+        if (std.mem.endsWith(u8, trimmed, "/objects")) {
+            const alt_git_dir = trimmed[0 .. trimmed.len - "/objects".len];
+            const result = GitObject.load(hash_str, alt_git_dir, platform_impl, allocator) catch continue;
+            return result;
+        }
+        
+        // Otherwise try loose object directly in this objects dir
+        const obj_dir_s = hash_str[0..2];
+        const obj_file_s = hash_str[2..];
+        const obj_file_path = std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ trimmed, obj_dir_s, obj_file_s }) catch continue;
+        defer allocator.free(obj_file_path);
+        
+        if (platform_impl.fs.readFile(allocator, obj_file_path)) |compressed_content| {
+            defer allocator.free(compressed_content);
+            var content = std.array_list.Managed(u8).init(allocator);
+            defer content.deinit();
+            var compressed_stream = std.io.fixedBufferStream(compressed_content);
+            zlib_compat.decompress(compressed_stream.reader(), content.writer()) catch continue;
+            
+            const null_pos = std.mem.indexOf(u8, content.items, "\x00") orelse continue;
+            const header = content.items[0..null_pos];
+            const data = content.items[null_pos + 1 ..];
+            const space_pos = std.mem.indexOf(u8, header, " ") orelse continue;
+            const type_str = header[0..space_pos];
+            const obj_type = ObjectType.fromString(type_str) orelse continue;
+            
+            const data_copy = allocator.dupe(u8, data) catch continue;
+            return GitObject{
+                .type = obj_type,
+                .data = data_copy,
+            };
+        } else |_| {}
+        
+        // Try pack files in this alternate objects dir
+        const pack_dir = std.fmt.allocPrint(allocator, "{s}/pack", .{trimmed}) catch continue;
+        defer allocator.free(pack_dir);
+        
+        var pack_dir_handle = std.fs.cwd().openDir(pack_dir, .{ .iterate = true }) catch continue;
+        defer pack_dir_handle.close();
+        
+        var hash_bytes: [20]u8 = undefined;
+        var hash_valid = true;
+        if (hash_str.len >= 40) {
+            for (0..20) |i| {
+                hash_bytes[i] = std.fmt.parseInt(u8, hash_str[i * 2 .. i * 2 + 2], 16) catch {
+                    hash_valid = false;
+                    break;
+                };
+            }
+        } else {
+            hash_valid = false;
+        }
+        if (!hash_valid) continue;
+        
+        var pack_iter = pack_dir_handle.iterate();
+        while (pack_iter.next() catch null) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".pack")) continue;
+            
+            const pack_file_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir, entry.name }) catch continue;
+            defer allocator.free(pack_file_path);
+            
+            const idx_file_path = std.fmt.allocPrint(allocator, "{s}/{s}.idx", .{ pack_dir, entry.name[0 .. entry.name.len - 5] }) catch continue;
+            defer allocator.free(idx_file_path);
+            
+            const idx_data = platform_impl.fs.readFile(allocator, idx_file_path) catch continue;
+            defer allocator.free(idx_data);
+            
+            if (findOffsetInIdx(idx_data, hash_bytes)) |offset| {
+                const pack_data = platform_impl.fs.readFile(allocator, pack_file_path) catch continue;
+                defer allocator.free(pack_data);
+                
+                if (readPackedObject(pack_data, offset, pack_file_path, platform_impl, allocator)) |result| {
+                    return result;
+                } else |_| continue;
+            }
+        }
+    }
+    
+    return error.ObjectNotFound;
+}
 
 pub fn createBlobObject(data: []const u8, allocator: std.mem.Allocator) !GitObject {
     const data_copy = try allocator.dupe(u8, data);

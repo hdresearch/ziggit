@@ -172,8 +172,8 @@ pub fn doLcs(alloc: std.mem.Allocator, al: []const []const u8, bl: []const []con
     return r;
 }
 
-pub fn splitLines(alloc: std.mem.Allocator, c: []const u8) !std.ArrayList([]const u8) {
-    var l = std.ArrayList([]const u8).init(alloc);
+pub fn splitLines(alloc: std.mem.Allocator, c: []const u8) !std.array_list.Managed([]const u8) {
+    var l = std.array_list.Managed([]const u8).init(alloc);
     var it = std.mem.splitScalar(u8, c, '\n');
     while (it.next()) |ln| try l.append(ln);
     if (l.items.len > 0 and l.items[l.items.len - 1].len == 0) _ = l.pop();
@@ -218,7 +218,7 @@ pub fn fmtTs(alloc: std.mem.Allocator, ts_in: i64, tz: []const u8) ![]const u8 {
 
 pub fn padR(alloc: std.mem.Allocator, str: []const u8, w: usize) ![]const u8 {
     if (str.len >= w) return try alloc.dupe(u8, str);
-    var b = std.ArrayList(u8).init(alloc);
+    var b = std.array_list.Managed(u8).init(alloc);
     var pi: usize = 0;
     while (pi < w - str.len) : (pi += 1) try b.append(' ');
     try b.appendSlice(str);
@@ -229,7 +229,7 @@ pub fn padN(alloc: std.mem.Allocator, num: usize, w: usize) ![]const u8 {
     var nb: [20]u8 = undefined;
     const ns = std.fmt.bufPrint(&nb, "{d}", .{num}) catch "0";
     if (ns.len >= w) return try alloc.dupe(u8, ns);
-    var b = std.ArrayList(u8).init(alloc);
+    var b = std.array_list.Managed(u8).init(alloc);
     var pi: usize = 0;
     while (pi < w - ns.len) : (pi += 1) try b.append(' ');
     try b.appendSlice(ns);
