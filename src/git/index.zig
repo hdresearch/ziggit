@@ -556,15 +556,16 @@ pub const Index = struct {
         var hash_bytes: [20]u8 = undefined;
         _ = try std.fmt.hexToBytes(&hash_bytes, hash_str);
 
-        // Create a simple stat structure
+        // Get real stat info for the file
+        const real_stat = repo_dir.statFile(file_path) catch null;
         const fake_stat = std.fs.File.Stat{
-            .inode = 0,
+            .inode = if (real_stat) |s| s.inode else 0,
             .size = content.len,
             .mode = file_mode,
             .kind = if (symlink_target != null) .sym_link else .file,
-            .atime = 0,
-            .mtime = 0,
-            .ctime = 0,
+            .atime = if (real_stat) |s| s.atime else 0,
+            .mtime = if (real_stat) |s| s.mtime else 0,
+            .ctime = if (real_stat) |s| s.ctime else 0,
         };
 
         // Find existing entry or add new one

@@ -7061,11 +7061,20 @@ fn addDirectoryRecursively(allocator: std.mem.Allocator, repo_root: []const u8, 
             .file => {
                 addSingleFile(allocator, entry_relative_path, entry_full_path, index, git_path, platform_impl, repo_root) catch continue;
             },
+            .sym_link => {
+                // Add symlink - index.add handles symlinks natively
+                const repo_root_dir = std.fs.path.dirname(git_path) orelse ".";
+                const rel_to_repo = if (std.mem.startsWith(u8, entry_full_path, repo_root_dir))
+                    entry_full_path[repo_root_dir.len + 1 ..]
+                else
+                    entry_relative_path;
+                index.add(rel_to_repo, rel_to_repo, platform_impl, git_path) catch continue;
+            },
             .directory => {
                 // Recursively add subdirectory
                 addDirectoryRecursively(allocator, repo_root, entry_relative_path, index, git_path, platform_impl) catch continue;
             },
-            else => continue, // Skip other types (symlinks, etc.)
+            else => continue, // Skip other types
         }
     }
 }
@@ -10067,9 +10076,6 @@ fn cmdWriteTree(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             missing_ok = true;
         }
     }
-    // TODO: implement --prefix support
-    if (prefix != null) {}
-
     const git_dir = findGitDirectory(allocator, platform_impl) catch {
         try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
         std.process.exit(128);
@@ -10088,6 +10094,10 @@ fn cmdWriteTree(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     // Unless --missing-ok, validate that all objects referenced in the index exist
     if (!missing_ok) {
         for (idx.entries.items) |entry| {
+            // Skip entries not under prefix
+            if (prefix) |pfx| {
+                if (!std.mem.startsWith(u8, entry.path, pfx)) continue;
+            }
             var hash_hex: [40]u8 = undefined;
             for (entry.sha1, 0..) |byte, j| {
                 const hex = std.fmt.bytesToHex([1]u8{byte}, .lower);
@@ -10106,8 +10116,17 @@ fn cmdWriteTree(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         }
     }
 
-    // Build tree from index entries
-    const tree_hash = writeTreeFromIndex(allocator, &idx, git_dir, platform_impl) catch {
+    // Build tree from index entries, optionally scoped to prefix
+    // Ensure prefix has trailing slash
+    const write_prefix = if (prefix) |pfx|
+        (if (pfx.len > 0 and pfx[pfx.len - 1] != '/')
+            try std.fmt.allocPrint(allocator, "{s}/", .{pfx})
+        else
+            try allocator.dupe(u8, pfx))
+    else
+        try allocator.dupe(u8, "");
+    defer allocator.free(write_prefix);
+    const tree_hash = writeTreeRecursive(allocator, &idx, write_prefix, git_dir, platform_impl) catch {
         try platform_impl.writeStderr("fatal: unable to write tree\n");
         std.process.exit(128);
         unreachable;
@@ -10796,7 +10815,42 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     }
 
     if (refresh) {
-        // Refresh stat info for all entries
+        // Refresh stat info for all entries by re-statting files
+        const repo_root = std.fs.path.dirname(git_dir) orelse ".";
+        for (idx.entries.items) |*entry| {
+            const full_path = if (repo_root.len > 0 and !std.mem.eql(u8, repo_root, "."))
+                std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path }) catch continue
+            else
+                allocator.dupe(u8, entry.path) catch continue;
+            defer allocator.free(full_path);
+
+            // Check if it's a symlink
+            var link_buf: [4096]u8 = undefined;
+            if (std.fs.cwd().readLink(full_path, &link_buf)) |link_target| {
+                // Symlink: update size to link target length
+                entry.size = @intCast(link_target.len);
+                // Get the file's lstat info via fstatat or approximate
+                // For symlinks, we need the symlink's own mtime, not the target's
+                // Use the parent dir + entry to get proper stat
+                if (std.fs.cwd().statFile(full_path)) |stat| {
+                    entry.ctime_sec = @intCast(@max(0, @divTrunc(stat.ctime, std.time.ns_per_s)));
+                    entry.ctime_nsec = @intCast(@max(0, @rem(stat.ctime, std.time.ns_per_s)));
+                    entry.mtime_sec = @intCast(@max(0, @divTrunc(stat.mtime, std.time.ns_per_s)));
+                    entry.mtime_nsec = @intCast(@max(0, @rem(stat.mtime, std.time.ns_per_s)));
+                    entry.ino = @intCast(stat.inode);
+                } else |_| {}
+            } else |_| {
+                // Regular file
+                if (std.fs.cwd().statFile(full_path)) |stat| {
+                    entry.ctime_sec = @intCast(@max(0, @divTrunc(stat.ctime, std.time.ns_per_s)));
+                    entry.ctime_nsec = @intCast(@max(0, @rem(stat.ctime, std.time.ns_per_s)));
+                    entry.mtime_sec = @intCast(@max(0, @divTrunc(stat.mtime, std.time.ns_per_s)));
+                    entry.mtime_nsec = @intCast(@max(0, @rem(stat.mtime, std.time.ns_per_s)));
+                    entry.size = @intCast(@min(stat.size, std.math.maxInt(u32)));
+                    entry.ino = @intCast(stat.inode);
+                } else |_| {}
+            }
+        }
         modified = true;
     }
 
@@ -11890,24 +11944,13 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         // Compare to detect modifications
         var modified = false;
 
-        if (is_symlink_in_index != is_symlink_on_disk) {
+        // If index entry has zeroed stat cache (e.g., from read-tree), always mark as modified
+        if (entry.ctime_sec == 0 and entry.ctime_nsec == 0 and entry.mtime_sec == 0 and entry.mtime_nsec == 0 and entry.ino == 0) {
+            modified = true;
+        } else if (is_symlink_in_index != is_symlink_on_disk) {
             // Type changed (symlink <-> regular file)
             modified = true;
-        } else if (is_symlink_on_disk) {
-            // Both are symlinks - compare target content
-            const link_target = std.fs.cwd().readLink(full_path, &link_buf) catch {
-                modified = true;
-                continue;
-            };
-            // Hash the symlink target to compare with index
-            const blob_content = try std.fmt.allocPrint(allocator, "blob {d}\x00{s}", .{ link_target.len, link_target });
-            defer allocator.free(blob_content);
-            var hash: [20]u8 = undefined;
-            std.crypto.hash.Sha1.hash(blob_content, &hash, .{});
-            if (!std.mem.eql(u8, &hash, &entry.sha1)) {
-                modified = true;
-            }
-        } else {
+        } else if (!is_symlink_on_disk) {
             // Regular files - check stat
             if (std.fs.cwd().statFile(full_path)) |stat_result| {
                 const file_size: u32 = @intCast(@min(stat_result.size, std.math.maxInt(u32)));
@@ -11922,6 +11965,22 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                     }
                 }
             } else |_| {
+                modified = true;
+            }
+        } else {
+            // Symlink - check stat (mtime/size)
+            // For symlinks, size in index is the length of the target path
+            // Since we can't easily lstat, compare by content if stat check is uncertain
+            const link_target = std.fs.cwd().readLink(full_path, &link_buf) catch {
+                modified = true;
+                continue;
+            };
+            // Hash the symlink target to compare with index
+            const blob_content = try std.fmt.allocPrint(allocator, "blob {d}\x00{s}", .{ link_target.len, link_target });
+            defer allocator.free(blob_content);
+            var hash: [20]u8 = undefined;
+            std.crypto.hash.Sha1.hash(blob_content, &hash, .{});
+            if (!std.mem.eql(u8, &hash, &entry.sha1)) {
                 modified = true;
             }
         }
