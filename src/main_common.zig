@@ -10080,7 +10080,20 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         for (normalized_pathspecs.items) |p| allocator.free(@constCast(p));
         normalized_pathspecs.deinit();
     }
+    var match_all = false;
     for (pathspecs.items) |ps| {
+        // Handle git pathspec magic (e.g., ":/*" means "everything from root")
+        if (ps.len >= 2 and ps[0] == ':' and ps[1] == '/') {
+            // :/ prefix means "from root of working tree"
+            const pattern = ps[2..];
+            if (pattern.len == 0 or std.mem.eql(u8, pattern, "*")) {
+                // ":/" or ":/*" means match everything
+                match_all = true;
+                continue;
+            }
+            try normalized_pathspecs.append(try allocator.dupe(u8, pattern));
+            continue;
+        }
         if (std.fs.path.isAbsolute(ps)) {
             if (std.mem.startsWith(u8, ps, repo_root) and ps.len > repo_root.len and ps[repo_root.len] == '/') {
                 try normalized_pathspecs.append(try allocator.dupe(u8, ps[repo_root.len + 1 ..]));
@@ -10099,7 +10112,8 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             }
         }
     }
-    const effective_pathspecs = if (normalized_pathspecs.items.len > 0) normalized_pathspecs.items else pathspecs.items;
+    const no_pathspecs: []const []const u8 = &.{};
+    const effective_pathspecs = if (match_all) no_pathspecs else if (normalized_pathspecs.items.len > 0) normalized_pathspecs.items else pathspecs.items;
 
     // Load index
     var index = index_mod.Index.load(git_path, platform_impl, allocator) catch |err| switch (err) {
@@ -10366,6 +10380,7 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         };
         defer gitignore.deinit();
 
+        var others_found: usize = 0;
         if (directory) {
             var dir_entries = std.ArrayList([]u8).init(allocator);
             defer {
@@ -10377,6 +10392,7 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 fn lt(_: void, a: []u8, b: []u8) bool { return std.mem.order(u8, a, b) == .lt; }
             }.lt);
             for (dir_entries.items) |file| {
+                others_found += 1;
                 const output = try std.fmt.allocPrint(allocator, "{s}\n", .{file});
                 defer allocator.free(output);
                 try platform_impl.writeStdout(output);
@@ -10398,10 +10414,14 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                     }
                     if (!matches) continue;
                 }
+                others_found += 1;
                 const output = try std.fmt.allocPrint(allocator, "{s}\n", .{file});
                 defer allocator.free(output);
                 try platform_impl.writeStdout(output);
             }
+        }
+        if (error_unmatch and others_found == 0) {
+            std.process.exit(1);
         }
     }
 }
