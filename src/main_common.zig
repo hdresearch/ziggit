@@ -2988,11 +2988,6 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         }
     }
 
-    // Run pre-commit hook (unless --no-verify)
-    runGitHook(allocator, git_path, "pre-commit") catch {
-        std.process.exit(1);
-    };
-
     const commit_object = try objects.createCommitObject(
         tree_hash,
         parent_hashes.items,
@@ -4143,80 +4138,42 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     };
     defer allocator.free(git_path);
 
-    // Handle `checkout -` (switch to previous branch)
+    // Handle "checkout -" (switch to previous branch)
+    var effective_first_arg = first_arg;
+    var resolved_dash: ?[]u8 = null;
+    defer if (resolved_dash) |rd| allocator.free(rd);
     if (std.mem.eql(u8, first_arg, "-")) {
-        // Read the previous branch from the reflog or ORIG_HEAD
-        // In git, `-` refers to @{-1} which is the previous branch from the reflog
-        // For simplicity, we'll check ORIG_HEAD first, then try the reflog
-        const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
-        defer allocator.free(head_path);
-        const orig_head_path = try std.fmt.allocPrint(allocator, "{s}/ORIG_HEAD", .{git_path});
-        defer allocator.free(orig_head_path);
-        
-        // Try reading the HEAD reflog for the previous branch
-        const reflog_path = try std.fmt.allocPrint(allocator, "{s}/logs/HEAD", .{git_path});
-        defer allocator.free(reflog_path);
-        if (std.fs.cwd().readFileAlloc(allocator, reflog_path, 10 * 1024 * 1024)) |reflog| {
-            defer allocator.free(reflog);
-            // Parse reflog entries from bottom up to find the previous branch
-            var prev_branch: ?[]const u8 = null;
-            var lines = std.mem.splitScalar(u8, reflog, '\n');
-            var last_line: ?[]const u8 = null;
-            var second_last: ?[]const u8 = null;
+        // Read HEAD reflog to find previous branch
+        const head_reflog_path = try std.fmt.allocPrint(allocator, "{s}/logs/HEAD", .{git_path});
+        defer allocator.free(head_reflog_path);
+        if (platform_impl.fs.readFile(allocator, head_reflog_path)) |reflog_content| {
+            defer allocator.free(reflog_content);
+            // Find the last "checkout: moving from X to Y" entry
+            var last_from: ?[]const u8 = null;
+            var lines = std.mem.splitScalar(u8, reflog_content, '\n');
             while (lines.next()) |line| {
-                if (line.len == 0) continue;
-                second_last = last_line;
-                last_line = line;
-            }
-            // The second-to-last entry's "to" field or checkout message tells us the previous branch
-            if (second_last) |sl| {
-                // Format: old_hash new_hash Author <email> timestamp \tcheckout: moving from X to Y
-                if (std.mem.indexOf(u8, sl, "moving from ")) |from_idx| {
-                    const after_from = sl[from_idx + "moving from ".len..];
-                    if (std.mem.indexOf(u8, after_from, " to ")) |to_idx| {
-                        prev_branch = after_from[0..to_idx];
+                if (std.mem.indexOf(u8, line, "checkout: moving from ")) |idx| {
+                    const rest = line[idx + "checkout: moving from ".len..];
+                    if (std.mem.indexOf(u8, rest, " to ")) |to_idx| {
+                        last_from = rest[0..to_idx];
                     }
                 }
             }
-            // If we can't find a reflog entry, try last entry
-            if (prev_branch == null and last_line != null) {
-                const ll = last_line.?;
-                if (std.mem.indexOf(u8, ll, "moving from ")) |from_idx| {
-                    const after_from = ll[from_idx + "moving from ".len..];
-                    if (std.mem.indexOf(u8, after_from, " to ")) |to_idx| {
-                        prev_branch = after_from[0..to_idx];
-                    }
-                }
+            if (last_from) |from_branch| {
+                resolved_dash = try allocator.dupe(u8, from_branch);
+                effective_first_arg = resolved_dash.?;
+            } else {
+                try platform_impl.writeStderr("error: no previous branch\n");
+                std.process.exit(1);
             }
-            
-            if (prev_branch) |pb| {
-                // Recursively call checkout with the previous branch name
-                // Write ORIG_HEAD or just update HEAD
-                const ref_content = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{pb});
-                defer allocator.free(ref_content);
-                platform_impl.fs.writeFile(head_path, ref_content) catch {};
-                
-                const msg = try std.fmt.allocPrint(allocator, "Switched to branch '{s}'\n", .{pb});
-                defer allocator.free(msg);
-                try platform_impl.writeStderr(msg);
-                
-                // Update working tree
-                const ref_name = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{pb});
-                defer allocator.free(ref_name);
-                if (refs.resolveRef(git_path, ref_name, platform_impl, allocator) catch null) |commit_hash| {
-                    defer allocator.free(commit_hash);
-                    checkoutCommitTree(git_path, commit_hash, allocator, platform_impl) catch {};
-                }
-                return;
-            }
-        } else |_| {}
-        
-        try platform_impl.writeStderr("error: pathspec '-' did not match any file(s) known to git\n");
-        std.process.exit(1);
+        } else |_| {
+            try platform_impl.writeStderr("error: no previous branch\n");
+            std.process.exit(1);
+        }
     }
-    
+
     // Check if this is --orphan flag (create orphan branch)
-    if (std.mem.eql(u8, first_arg, "--orphan")) {
+    if (std.mem.eql(u8, effective_first_arg, "--orphan")) {
         const branch_name = args.next() orelse {
             try platform_impl.writeStderr("fatal: option '--orphan' requires a value\n");
             std.process.exit(128);
@@ -4246,7 +4203,7 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     }
 
     // Check if this is a -b flag (create new branch)
-    if (std.mem.eql(u8, first_arg, "-b")) {
+    if (std.mem.eql(u8, effective_first_arg, "-b")) {
         const branch_name = args.next() orelse {
             try platform_impl.writeStderr("fatal: option '-b' requires a value\n");
             std.process.exit(128);
@@ -4281,6 +4238,29 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             else => return err,
         };
 
+        // Get old branch name for reflog
+        var old_branch_for_b: ?[]u8 = null;
+        defer if (old_branch_for_b) |ob| allocator.free(ob);
+        var old_hash_for_b: ?[]u8 = null;
+        defer if (old_hash_for_b) |oh| allocator.free(oh);
+        {
+            const hp = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+            defer allocator.free(hp);
+            if (platform_impl.fs.readFile(allocator, hp)) |hd| {
+                defer allocator.free(hd);
+                const tr = std.mem.trim(u8, hd, " \t\r\n");
+                if (std.mem.startsWith(u8, tr, "ref: refs/heads/")) {
+                    old_branch_for_b = try allocator.dupe(u8, tr["ref: refs/heads/".len..]);
+                    const rp = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, tr["ref: ".len..] });
+                    defer allocator.free(rp);
+                    if (platform_impl.fs.readFile(allocator, rp)) |rd| {
+                        defer allocator.free(rd);
+                        old_hash_for_b = try allocator.dupe(u8, std.mem.trim(u8, rd, " \t\r\n"));
+                    } else |_| {}
+                }
+            } else |_| {}
+        }
+
         // Switch to the new branch
         refs.updateHEAD(git_path, branch_name, platform_impl, allocator) catch |err| {
             const msg = try std.fmt.allocPrint(allocator, "error: failed to checkout branch '{s}': {}\n", .{ branch_name, err });
@@ -4298,10 +4278,19 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             }
         }
 
+        // Write reflog entry
+        {
+            const from_name = if (old_branch_for_b) |ob| ob else "HEAD";
+            const old_h = if (old_hash_for_b) |oh| oh else "0000000000000000000000000000000000000000";
+            const reflog_msg_b = try std.fmt.allocPrint(allocator, "checkout: moving from {s} to {s}", .{ from_name, branch_name });
+            defer allocator.free(reflog_msg_b);
+            writeReflogEntry(git_path, "HEAD", old_h, old_h, reflog_msg_b, allocator, platform_impl) catch {};
+        }
+
         const success_msg = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
         defer allocator.free(success_msg);
         try platform_impl.writeStdout(success_msg);
-    } else if (std.mem.eql(u8, first_arg, "-B")) {
+    } else if (std.mem.eql(u8, effective_first_arg, "-B")) {
         // -B: create or reset branch
         const branch_name = args.next() orelse {
             try platform_impl.writeStderr("fatal: option '-B' requires a value\n");
@@ -4341,7 +4330,7 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         const reset_msg = try std.fmt.allocPrint(allocator, "Switched to and reset branch '{s}'\n", .{branch_name});
         defer allocator.free(reset_msg);
         try platform_impl.writeStderr(reset_msg);
-    } else if (std.mem.eql(u8, first_arg, "--")) {
+    } else if (std.mem.eql(u8, effective_first_arg, "--")) {
         // checkout -- <paths>: restore files from index
         var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch return;
         defer idx.deinit();
@@ -4366,10 +4355,10 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         }
     } else {
         // Parse checkout arguments
-        var quiet = std.mem.eql(u8, first_arg, "--quiet") or std.mem.eql(u8, first_arg, "-q");
-        var detach = std.mem.eql(u8, first_arg, "--detach");
-        var force = std.mem.eql(u8, first_arg, "-f") or std.mem.eql(u8, first_arg, "--force");
-        var target: []const u8 = first_arg;
+        var quiet = std.mem.eql(u8, effective_first_arg, "--quiet") or std.mem.eql(u8, effective_first_arg, "-q");
+        var detach = std.mem.eql(u8, effective_first_arg, "--detach");
+        var force = std.mem.eql(u8, effective_first_arg, "-f") or std.mem.eql(u8, effective_first_arg, "--force");
+        var target: []const u8 = effective_first_arg;
         
         // If the first arg was a flag, consume flags and find the target
         if (quiet or detach or force) {
@@ -4502,6 +4491,32 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         };
         defer repo.close();
         
+        // Get current branch name before checkout for reflog
+        var old_branch_name: ?[]u8 = null;
+        defer if (old_branch_name) |obn| allocator.free(obn);
+        var old_head_hash: ?[]u8 = null;
+        defer if (old_head_hash) |ohh| allocator.free(ohh);
+        {
+            const head_path2 = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+            defer allocator.free(head_path2);
+            if (platform_impl.fs.readFile(allocator, head_path2)) |head_data| {
+                defer allocator.free(head_data);
+                const trimmed = std.mem.trim(u8, head_data, " \t\r\n");
+                if (std.mem.startsWith(u8, trimmed, "ref: refs/heads/")) {
+                    old_branch_name = try allocator.dupe(u8, trimmed["ref: refs/heads/".len..]);
+                    // Resolve to hash
+                    const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, trimmed["ref: ".len..] });
+                    defer allocator.free(ref_path);
+                    if (platform_impl.fs.readFile(allocator, ref_path)) |hash_data| {
+                        defer allocator.free(hash_data);
+                        old_head_hash = try allocator.dupe(u8, std.mem.trim(u8, hash_data, " \t\r\n"));
+                    } else |_| {}
+                } else if (trimmed.len >= 40) {
+                    old_head_hash = try allocator.dupe(u8, trimmed[0..40]);
+                }
+            } else |_| {}
+        }
+
         repo.checkout(actual_target) catch |err| {
             switch (err) {
                 error.CommitNotFound => {
@@ -4537,6 +4552,36 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             }
         };
         
+        // Write reflog entry for checkout
+        {
+            var new_head_hash: ?[]u8 = null;
+            defer if (new_head_hash) |nhh| allocator.free(nhh);
+            {
+                const head_path3 = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+                defer allocator.free(head_path3);
+                if (platform_impl.fs.readFile(allocator, head_path3)) |hd| {
+                    defer allocator.free(hd);
+                    const tr = std.mem.trim(u8, hd, " \t\r\n");
+                    if (std.mem.startsWith(u8, tr, "ref: ")) {
+                        const rp = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, tr["ref: ".len..] });
+                        defer allocator.free(rp);
+                        if (platform_impl.fs.readFile(allocator, rp)) |rd| {
+                            defer allocator.free(rd);
+                            new_head_hash = try allocator.dupe(u8, std.mem.trim(u8, rd, " \t\r\n"));
+                        } else |_| {}
+                    } else if (tr.len >= 40) {
+                        new_head_hash = try allocator.dupe(u8, tr[0..40]);
+                    }
+                } else |_| {}
+            }
+            const from_name = if (old_branch_name) |obn| obn else "HEAD";
+            const reflog_msg = try std.fmt.allocPrint(allocator, "checkout: moving from {s} to {s}", .{ from_name, target });
+            defer allocator.free(reflog_msg);
+            const oh = if (old_head_hash) |ohh| ohh else "0000000000000000000000000000000000000000";
+            const nh = if (new_head_hash) |nhh| nhh else "0000000000000000000000000000000000000000";
+            writeReflogEntry(git_path, "HEAD", oh, nh, reflog_msg, allocator, platform_impl) catch {};
+        }
+
         if (!quiet) {
             // Check if this was a branch or detached HEAD
             var ref_check_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -6045,52 +6090,27 @@ fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     if (std.mem.eql(u8, current_commit, remote_commit)) {
         try platform_impl.writeStdout("Already up to date.\n");
     } else {
-        // Check if this is a fast-forward: is current_commit an ancestor of remote_commit?
-        const is_ff = isAncestor(git_path, current_commit, remote_commit, allocator, platform_impl) catch false;
+        // Perform merge
+        try platform_impl.writeStdout("Merging changes...\n");
         
-        if (is_ff) {
-            // Fast-forward: just update the ref and checkout
-            const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
-                try platform_impl.writeStderr("fatal: not on a branch\n");
-                std.process.exit(1);
-            };
-            defer allocator.free(current_branch);
-            
-            const ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, current_branch });
-            defer allocator.free(ref_path);
-            const hash_line = try std.fmt.allocPrint(allocator, "{s}\n", .{remote_commit});
-            defer allocator.free(hash_line);
-            platform_impl.fs.writeFile(ref_path, hash_line) catch {};
-            
-            // Update working tree
-            checkoutCommitTree(git_path, remote_commit, allocator, platform_impl) catch {};
-            
-            const msg = try std.fmt.allocPrint(allocator, "Updating {s}..{s}\nFast-forward\n", .{ current_commit[0..7], remote_commit[0..7] });
-            defer allocator.free(msg);
-            try platform_impl.writeStdout(msg);
+        const repo_root = std.fs.path.dirname(git_path) orelse git_path;
+        const current_branch = try refs.getCurrentBranch(git_path, platform_impl, allocator);
+        defer allocator.free(current_branch);
+        
+        const conflicts = mergeCommits(git_path, current_commit, remote_commit, repo_root, platform_impl, allocator) catch |err| switch (err) {
+            error.MergeConflict => true,
+            else => return err,
+        };
+        
+        if (conflicts) {
+            try platform_impl.writeStderr("Automatic merge failed; fix conflicts and then commit the result.\n");
+            std.process.exit(1);
         } else {
-            // Non-fast-forward: need a real merge
-            const repo_root = std.fs.path.dirname(git_path) orelse git_path;
-            const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
-                try platform_impl.writeStderr("fatal: not on a branch\n");
-                std.process.exit(1);
-            };
-            defer allocator.free(current_branch);
-            
-            const conflicts = mergeCommits(git_path, current_commit, remote_commit, repo_root, platform_impl, allocator) catch |err| switch (err) {
-                error.MergeConflict => true,
+            // Create merge commit
+            createMergeCommit(git_path, current_commit, remote_commit, current_branch, branch, allocator, platform_impl) catch |err| switch (err) {
                 else => return err,
             };
-            
-            if (conflicts) {
-                try platform_impl.writeStderr("Automatic merge failed; fix conflicts and then commit the result.\n");
-                std.process.exit(1);
-            } else {
-                createMergeCommit(git_path, current_commit, remote_commit, current_branch, branch, allocator, platform_impl) catch |err| switch (err) {
-                    else => return err,
-                };
-                try platform_impl.writeStdout("Merge completed successfully.\n");
-            }
+            try platform_impl.writeStdout("Merge completed successfully.\n");
         }
     }
 }
@@ -9132,27 +9152,6 @@ fn copyObjectsForPush(allocator: std.mem.Allocator, src_git_dir: []const u8, dst
     const dst_pack_dir = try std.fmt.allocPrint(allocator, "{s}/objects/pack", .{dst_git_dir});
     defer allocator.free(dst_pack_dir);
     std.fs.cwd().makePath(dst_pack_dir) catch {};
-}
-
-fn runGitHook(allocator: std.mem.Allocator, git_path: []const u8, hook_name: []const u8) !void {
-    const hook_path = try std.fmt.allocPrint(allocator, "{s}/hooks/{s}", .{ git_path, hook_name });
-    defer allocator.free(hook_path);
-    
-    // Check if hook exists
-    std.fs.cwd().access(hook_path, .{}) catch return; // No hook = success
-    
-    // Execute the hook using /bin/sh
-    const argv = [_][]const u8{ "/bin/sh", hook_path };
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &argv,
-    }) catch return; // Can't run = skip
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-    
-    if (result.term == .Exited and result.term.Exited != 0) {
-        return error.HookFailed;
-    }
 }
 
 fn isValidRemoteName(name: []const u8) bool {
@@ -13283,14 +13282,8 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var all_refs = false;
     var graph = false;
     var no_walk = false;
-    var first_parent = false;
-    var max_age: ?i64 = null;
-    var min_age: ?i64 = null;
-    var max_parents: ?i32 = null;
-    var min_parents: ?i32 = null;
     var format_str: ?[]const u8 = null;
     var no_commit_header = false;
-    var not_mode = false;
     var include_refs = std.array_list.Managed([]const u8).init(allocator);
     defer include_refs.deinit();
     var exclude_refs = std.array_list.Managed([]const u8).init(allocator);
@@ -13308,32 +13301,6 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             topo_order = false; // date-order overrides topo
         } else if (std.mem.eql(u8, arg, "--author-date-order")) {
             topo_order = false; // author-date-order overrides topo
-        } else if (std.mem.eql(u8, arg, "--first-parent")) {
-            first_parent = true;
-        } else if (std.mem.eql(u8, arg, "--no-merges")) {
-            max_parents = 1;
-        } else if (std.mem.eql(u8, arg, "--merges")) {
-            min_parents = 2;
-        } else if (std.mem.startsWith(u8, arg, "--max-parents=")) {
-            max_parents = std.fmt.parseInt(i32, arg["--max-parents=".len..], 10) catch {
-                const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' is not an integer\n", .{arg["--max-parents=".len..]});
-                defer allocator.free(msg);
-                try platform_impl.writeStderr(msg);
-                std.process.exit(128);
-            };
-        } else if (std.mem.startsWith(u8, arg, "--min-parents=")) {
-            min_parents = std.fmt.parseInt(i32, arg["--min-parents=".len..], 10) catch {
-                const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' is not an integer\n", .{arg["--min-parents=".len..]});
-                defer allocator.free(msg);
-                try platform_impl.writeStderr(msg);
-                std.process.exit(128);
-            };
-        } else if (std.mem.startsWith(u8, arg, "--max-age=") or std.mem.startsWith(u8, arg, "--after=") or std.mem.startsWith(u8, arg, "--since=")) {
-            const eq_pos = std.mem.indexOf(u8, arg, "=").?;
-            max_age = std.fmt.parseInt(i64, arg[eq_pos + 1..], 10) catch null;
-        } else if (std.mem.startsWith(u8, arg, "--min-age=") or std.mem.startsWith(u8, arg, "--before=") or std.mem.startsWith(u8, arg, "--until=")) {
-            const eq_pos = std.mem.indexOf(u8, arg, "=").?;
-            min_age = std.fmt.parseInt(i64, arg[eq_pos + 1..], 10) catch null;
         } else if (std.mem.eql(u8, arg, "--objects") or std.mem.eql(u8, arg, "--objects-edge")) {
             show_objects = true;
         } else if (std.mem.eql(u8, arg, "--no-object-names")) {
@@ -13431,9 +13398,8 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 std.process.exit(128);
                 unreachable;
             };
-        } else if (std.mem.eql(u8, arg, "--not")) {
-            // Toggle: subsequent refs are excluded until next --not
-            not_mode = !not_mode;
+        } else if (std.mem.startsWith(u8, arg, "--not")) {
+            // Next positional arg is excluded
         } else if (std.mem.eql(u8, arg, "--")) {
             break; // End of revisions
         } else if (std.mem.startsWith(u8, arg, "--") and arg.len > 2 and std.ascii.isDigit(arg[2])) {
@@ -13474,11 +13440,7 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         } else if (arg.len > 0 and arg[0] == '^') {
             try exclude_refs.append(arg[1..]);
         } else {
-            if (not_mode) {
-                try exclude_refs.append(arg);
-            } else {
-                try include_refs.append(arg);
-            }
+            try include_refs.append(arg);
         }
     }
 
@@ -13622,17 +13584,13 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         var parents_list = std.array_list.Managed([]const u8).init(allocator);
         var commit_ts: i64 = 0;
         var author_ts: i64 = 0;
-        var got_first_parent = false;
         var clines = std.mem.splitSequence(u8, obj.data, "\n");
         while (clines.next()) |line| {
             if (std.mem.startsWith(u8, line, "parent ")) {
                 const parent = line[7..];
                 if (parent.len == 40) {
                     try parents_list.append(try allocator.dupe(u8, parent));
-                    if (!first_parent or !got_first_parent) {
-                        try queue.append(try allocator.dupe(u8, parent));
-                    }
-                    got_first_parent = true;
+                    try queue.append(try allocator.dupe(u8, parent));
                 }
             } else if (std.mem.startsWith(u8, line, "committer ")) {
                 commit_ts = parseTimestampFromLine(line) catch 0;
@@ -13641,56 +13599,12 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             } else if (line.len == 0) break;
         }
 
-        // Apply max_age filter (skip commits older than max_age)
-        if (max_age) |ma| {
-            if (commit_ts < ma) {
-                for (parents_list.items) |p| allocator.free(@constCast(p));
-                parents_list.deinit();
-                allocator.free(current);
-                continue;
-            }
-        }
-        // Apply min_age filter (skip commits newer than min_age)
-        if (min_age) |mi| {
-            if (commit_ts > mi) {
-                // Still walk parents but don't include this commit
-                for (parents_list.items) |p| allocator.free(@constCast(p));
-                parents_list.deinit();
-                allocator.free(current);
-                continue;
-            }
-        }
-
         try all_commits.append(.{
             .hash = current,
             .commit_ts = commit_ts,
             .author_ts = author_ts,
             .parents = try parents_list.toOwnedSlice(),
         });
-    }
-
-    // Apply parent count filters
-    if (max_parents != null or min_parents != null) {
-        var filtered = std.array_list.Managed(CommitInfo).init(allocator);
-        for (all_commits.items) |ci| {
-            const nparents: i32 = @intCast(ci.parents.len);
-            var keep = true;
-            if (max_parents) |mp| {
-                if (mp >= 0 and nparents > mp) keep = false;
-            }
-            if (min_parents) |mp2| {
-                if (mp2 >= 0 and nparents < mp2) keep = false;
-            }
-            if (keep) {
-                try filtered.append(ci);
-            } else {
-                allocator.free(ci.hash);
-                for (ci.parents) |p| allocator.free(@constCast(p));
-                allocator.free(ci.parents);
-            }
-        }
-        all_commits.deinit();
-        all_commits = filtered;
     }
 
     // Sort based on order mode
