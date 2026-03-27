@@ -1,7 +1,13 @@
-//! Compatibility shim for zlib operations using C zlib.
-
 const std = @import("std");
+const zlib = std.compress.zlib;
+pub fn decompress(reader: anytype, writer: anytype) !void { zlib.decompress(reader, writer) catch return error.InvalidInput; }
+pub fn compress(reader: anytype, writer: anytype, options: anytype) !void { _ = options; var ai = std.ArrayList(u8).init(std.heap.page_allocator); defer ai.deinit(); var b: [16384]u8 = undefined; while (true) { const n = reader.read(&b) catch break; if (n == 0) break; try ai.appendSlice(b[0..n]); } const cp = try compressSlice(std.heap.page_allocator, ai.items); defer std.heap.page_allocator.free(cp); writer.writeAll(cp) catch return error.CompressionFailed; }
+pub fn Decompressor(comptime RT: type) type { return zlib.Decompressor(RT); }
+pub fn decompressor(r: anytype) zlib.Decompressor(@TypeOf(r)) { return zlib.decompressor(r); }
+pub fn Compressor(comptime WT: type) type { return struct { const S = @This(); inner_writer: WT, buffer: std.ArrayList(u8), pub fn write(s: *S, d: []const u8) !usize { s.buffer.appendSlice(d) catch return error.CompressionFailed; return d.len; } pub fn finish(s: *S) !void { const cp = compressSlice(s.buffer.allocator, s.buffer.items) catch return error.CompressionFailed; defer s.buffer.allocator.free(cp); s.inner_writer.writeAll(cp) catch return error.CompressionFailed; } pub fn writer(s: *S) GW { return .{ .context = s }; } pub const GW = std.io.GenericWriter(*S, error{CompressionFailed}, wa); fn wa(s: *S, d: []const u8) error{CompressionFailed}!usize { return s.write(d) catch return error.CompressionFailed; } }; }
+pub fn compressorWriter(w: anytype, o: anytype) !Compressor(@TypeOf(w)) { _ = o; return .{ .inner_writer = w, .buffer = std.ArrayList(u8).init(std.heap.page_allocator) }; }
 const c = @cImport({ @cInclude("zlib.h"); });
+<<<<<<< HEAD
 
 pub fn decompress(reader: anytype, writer: anytype) !void {
     var all_input = std.array_list.Managed(u8).init(std.heap.page_allocator);
@@ -157,3 +163,8 @@ pub fn decompressSliceWithConsumed(allocator: std.mem.Allocator, input: []const 
     }
     return .{ .data = try output.toOwnedSlice(), .consumed = @as(usize, @intCast(stream.total_in)) };
 }
+=======
+pub fn compressSlice(a: std.mem.Allocator, i: []const u8) ![]u8 { const bd = c.compressBound(@intCast(i.len)); const o = try a.alloc(u8, @intCast(bd)); errdefer a.free(o); var dl: c.uLongf = @intCast(o.len); const r = c.compress2(o.ptr, &dl, i.ptr, @intCast(i.len), 6); if (r != c.Z_OK) return error.CompressionFailed; const rs = try a.dupe(u8, o[0..@intCast(dl)]); a.free(o); return rs; }
+pub fn decompressSlice(a: std.mem.Allocator, i: []const u8) ![]u8 { var o = std.ArrayList(u8).init(a); errdefer o.deinit(); var f = std.io.fixedBufferStream(i); var d = zlib.decompressor(f.reader()); var b2: [16384]u8 = undefined; while (true) { const n = d.read(&b2) catch return error.InvalidInput; if (n == 0) break; try o.appendSlice(b2[0..n]); } return o.toOwnedSlice(); }
+pub fn decompressSliceWithConsumed(a: std.mem.Allocator, i: []const u8) !struct { data: []u8, consumed: usize } { var s: c.z_stream = std.mem.zeroes(c.z_stream); s.next_in = @constCast(i.ptr); s.avail_in = @intCast(i.len); var r = c.inflateInit(&s); if (r != c.Z_OK) return error.InvalidInput; defer _ = c.inflateEnd(&s); var o = std.ArrayList(u8).init(a); errdefer o.deinit(); var b3: [16384]u8 = undefined; while (true) { s.next_out = &b3; s.avail_out = b3.len; r = c.inflate(&s, c.Z_NO_FLUSH); const h = b3.len - @as(usize, @intCast(s.avail_out)); if (h > 0) try o.appendSlice(b3[0..h]); if (r == c.Z_STREAM_END) break; if (r != c.Z_OK) return error.InvalidInput; } return .{ .data = try o.toOwnedSlice(), .consumed = @intCast(s.total_in) }; }
+>>>>>>> 0778fe0 (feat: comprehensive zig 0.13 compat + git fixes - rev-parse :path, reset --hard tree, diff --cached, checkout -b empty, nothing-to-commit (t7101, t7104, t7501, t7508))

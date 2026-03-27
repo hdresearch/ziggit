@@ -14,7 +14,7 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
     var rv: ?[]const u8 = null;
     var cf: ?[]const u8 = null;
     var abl: usize = 8;
-    var lr = std.array_list.Managed([]const u8).init(a);
+    var lr = std.ArrayList([]const u8).init(a);
     defer lr.deinit();
 
     while (args.next()) |arg| {
@@ -125,7 +125,7 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
 
     if (hh) |sh| {
         const cfc = gf(gp, sh, fp.?, a) catch null;
-        var cl2 = std.array_list.Managed([]const u8).init(a);
+        var cl2 = std.ArrayList([]const u8).init(a);
         defer cl2.deinit();
         if (cfc) |cc| {
             defer a.free(cc);
@@ -139,7 +139,7 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
     }
 
     // -L ranges
-    var oi = std.array_list.Managed(usize).init(a);
+    var oi = std.ArrayList(usize).init(a);
     defer oi.deinit();
     if (lr.items.len == 0) {
         for (0..lines.items.len) |i| try oi.append(i);
@@ -217,10 +217,10 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
         for (0..tl.len) |i| { if (m[i] == std.math.maxInt(usize)) ub[i] = false; }
     }
     const QE = struct { hash: []const u8, idx: []usize };
-    var q = std.array_list.Managed(QE).init(a);
+    var q = std.ArrayList(QE).init(a);
     defer { for (q.items) |qe| { a.free(qe.hash); a.free(qe.idx); } q.deinit(); }
     {
-        var ii = std.array_list.Managed(usize).init(a);
+        var ii = std.ArrayList(usize).init(a);
         defer ii.deinit();
         for (0..tl.len) |i| { if (ub[i]) try ii.append(i); }
         if (ii.items.len > 0) try q.append(.{ .hash = try a.dupe(u8, sh), .idx = try a.dupe(usize, ii.items) });
@@ -230,7 +230,7 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
         const cur = q.orderedRemove(0);
         defer a.free(cur.hash);
         defer a.free(cur.idx);
-        var act = std.array_list.Managed(usize).init(a);
+        var act = std.ArrayList(usize).init(a);
         defer act.deinit();
         for (cur.idx) |idx| { if (ub[idx]) try act.append(idx); }
         if (act.items.len == 0) continue;
@@ -238,7 +238,7 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
         defer a.free(cc);
         const info = B.parseInfo(cc, a) catch continue;
         defer B.freeInfo(info, a);
-        var pars = std.array_list.Managed([]const u8).init(a);
+        var pars = std.ArrayList([]const u8).init(a);
         defer { for (pars.items) |p| a.free(p); pars.deinit(); }
         {
             var li = std.mem.splitScalar(u8, cc, '\n');
@@ -277,7 +277,7 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
             defer pl.deinit();
             const t2p = try B.doLcs(a, tls.items, pl.items);
             defer a.free(t2p);
-            var pp = std.array_list.Managed(usize).init(a);
+            var pp = std.ArrayList(usize).init(a);
             defer pp.deinit();
             for (act.items) |idx| {
                 if (ub[idx] and t2t[idx] != std.math.maxInt(usize) and t2p[t2t[idx]] != std.math.maxInt(usize) and !fap[idx]) {
