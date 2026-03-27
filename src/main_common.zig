@@ -1506,6 +1506,33 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     };
     defer gitignore.deinit();
 
+    // Pre-compute HEAD tree hash and build flat index for O(1) blob lookups
+    var cached_head_tree: ?[]u8 = null;
+    if (current_commit) |cc| {
+        const commit_obj = objects.GitObject.load(cc, git_path, platform_impl, allocator) catch null;
+        if (commit_obj) |co| {
+            defer co.deinit(allocator);
+            var clines = std.mem.splitSequence(u8, co.data, "\n");
+            if (clines.next()) |tl| {
+                if (std.mem.startsWith(u8, tl, "tree ")) {
+                    cached_head_tree = allocator.dupe(u8, tl["tree ".len..]) catch null;
+                }
+            }
+        }
+    }
+    defer if (cached_head_tree) |h| allocator.free(h);
+
+    // Build flat map: path -> sha1 from HEAD tree (for fast staged detection)
+    var head_tree_map = std.StringHashMap([20]u8).init(allocator);
+    defer {
+        var kit = head_tree_map.keyIterator();
+        while (kit.next()) |key| allocator.free(@constCast(key.*));
+        head_tree_map.deinit();
+    }
+    if (cached_head_tree) |ht| {
+        buildTreeMap(ht, "", git_path, platform_impl, allocator, &head_tree_map) catch {};
+    }
+
     // Detect staged files vs modified files vs deleted files vs clean files
     var staged_files = std.array_list.Managed(index_mod.IndexEntry).init(allocator);
     var modified_files = std.array_list.Managed(index_mod.IndexEntry).init(allocator);
@@ -1567,8 +1594,14 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 try staged_files.append(entry);
             } else {
                 // File is in index and matches working directory.
-                // Check if it's different from what's in HEAD tree (i.e., staged)
-                const is_different_from_head = checkIfDifferentFromHEAD(entry, git_path, platform_impl, allocator) catch false;
+                // Check if it's different from HEAD tree using cached map (O(1))
+                const is_different_from_head = blk: {
+                    if (head_tree_map.get(entry.path)) |tree_sha1| {
+                        break :blk !std.mem.eql(u8, &tree_sha1, &entry.sha1);
+                    }
+                    // File not in HEAD tree - it's new (staged)
+                    break :blk current_commit != null;
+                };
                 
                 if (is_different_from_head) {
                     try staged_files.append(entry);
@@ -16189,4 +16222,50 @@ fn nativeCmdCheckAttr(_: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     _ = args;
     // Default: no attributes defined
     _ = platform_impl;
+}
+
+fn checkIfDifferentFromTree(entry: index_mod.IndexEntry, tree_hash: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !bool {
+    const tree_blob_hash = try lookupBlobInTree(tree_hash, entry.path, git_path, platform_impl, allocator);
+    if (tree_blob_hash) |hash_bytes| {
+        return !std.mem.eql(u8, &hash_bytes, &entry.sha1);
+    }
+    // File not found in tree - it's new, so it's staged
+    return true;
+}
+
+fn buildTreeMap(tree_hash: []const u8, prefix: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, map: *std.StringHashMap([20]u8)) !void {
+    const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch return;
+    defer tree_obj.deinit(allocator);
+    if (tree_obj.type != .tree) return;
+    
+    var i: usize = 0;
+    while (i < tree_obj.data.len) {
+        const space_pos = std.mem.indexOfScalarPos(u8, tree_obj.data, i, ' ') orelse break;
+        const mode_str = tree_obj.data[i..space_pos];
+        const null_pos = std.mem.indexOfScalarPos(u8, tree_obj.data, space_pos + 1, 0) orelse break;
+        const name = tree_obj.data[space_pos + 1 .. null_pos];
+        const hash_start = null_pos + 1;
+        if (hash_start + 20 > tree_obj.data.len) break;
+        const hash_bytes = tree_obj.data[hash_start .. hash_start + 20];
+        
+        const full_path = if (prefix.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, name })
+        else
+            try allocator.dupe(u8, name);
+        
+        if (std.mem.eql(u8, mode_str, "40000") or std.mem.eql(u8, mode_str, "040000")) {
+            // Directory - recurse
+            const sub_hash = try std.fmt.allocPrint(allocator, "{x}", .{hash_bytes[0..20].*});
+            defer allocator.free(sub_hash);
+            buildTreeMap(sub_hash, full_path, git_path, platform_impl, allocator, map) catch {};
+            allocator.free(full_path);
+        } else {
+            // File - store in map
+            var sha1: [20]u8 = undefined;
+            @memcpy(&sha1, hash_bytes[0..20]);
+            try map.put(full_path, sha1);
+        }
+        
+        i = hash_start + 20;
+    }
 }
