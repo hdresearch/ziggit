@@ -32031,13 +32031,22 @@ fn replayCommits(git_path: []const u8, repo_root: []const u8, commits: *std.arra
 
     if (!std.mem.eql(u8, branch_name, "HEAD")) {
         // Read the old branch hash for reflog
-        const old_branch_hash = blk: {
-            const orig_head_p = std.fmt.allocPrint(allocator, "{s}/ORIG_HEAD", .{git_path}) catch break :blk "0000000000000000000000000000000000000000";
-            defer allocator.free(orig_head_p);
-            const oh = platform_impl.fs.readFile(allocator, orig_head_p) catch break :blk "0000000000000000000000000000000000000000";
-            defer allocator.free(oh);
-            break :blk std.mem.trim(u8, oh, " \t\n\r");
-        };
+        var old_branch_hash_buf: [40]u8 = undefined;
+        var old_branch_hash: []const u8 = "0000000000000000000000000000000000000000";
+        {
+            const orig_head_p = std.fmt.allocPrint(allocator, "{s}/ORIG_HEAD", .{git_path}) catch "";
+            defer if (orig_head_p.len > 0) allocator.free(orig_head_p);
+            if (orig_head_p.len > 0) {
+                if (platform_impl.fs.readFile(allocator, orig_head_p)) |oh| {
+                    defer allocator.free(oh);
+                    const trimmed = std.mem.trim(u8, oh, " \t\n\r");
+                    if (trimmed.len == 40) {
+                        @memcpy(&old_branch_hash_buf, trimmed[0..40]);
+                        old_branch_hash = &old_branch_hash_buf;
+                    }
+                } else |_| {}
+            }
+        }
         // Update the original branch to point to new HEAD
         try refs.updateRef(git_path, branch_name, head_hash, platform_impl, allocator);
         // Write reflog for the branch
