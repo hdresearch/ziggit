@@ -200,7 +200,7 @@ pub const PackCache = struct {
     
     /// Validate all cached entries and remove stale ones
     pub fn cleanup(self: *Self) void {
-        var to_remove = std.array_list.Managed([]const u8).init(self.allocator);
+        var to_remove = std.ArrayList([]const u8).init(self.allocator);
         defer {
             for (to_remove.items) |key| {
                 self.allocator.free(key);
