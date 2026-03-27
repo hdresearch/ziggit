@@ -31314,18 +31314,13 @@ fn cmdFormatPatch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         try platform_impl.writeStderr("fatal: bad revision range\n");
         std.process.exit(128);
     };
-    defer if (base_hash) |bh| allocator.free(bh);
+    defer allocator.free(base_hash);
     
     const tip_hash = resolveRevision(git_path, tip_rev, platform_impl, allocator) catch {
         try platform_impl.writeStderr("fatal: bad revision range\n");
         std.process.exit(128);
     };
-    defer if (tip_hash) |th| allocator.free(th);
-    
-    if (base_hash == null or tip_hash == null) {
-        try platform_impl.writeStderr("fatal: bad revision range\n");
-        std.process.exit(128);
-    }
+    defer allocator.free(tip_hash);
 
     // Walk from tip back to base, collecting commits
     var commit_list = std.array_list.Managed([]const u8).init(allocator);
