@@ -19548,8 +19548,19 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                 modified = true;
             }
         } else if (std.mem.eql(u8, arg, "--show-index-version")) {
-            // Show the current index version
-            try platform_impl.writeStdout("2\n");
+            // Show the current index version - version 3 if any entries have extended flags
+            var has_extended = false;
+            for (idx.entries.items) |*entry| {
+                if (entry.flags & 0x4000 != 0) {
+                    has_extended = true;
+                    break;
+                }
+            }
+            if (has_extended) {
+                try platform_impl.writeStdout("3\n");
+            } else {
+                try platform_impl.writeStdout("2\n");
+            }
             return;
         } else if (std.mem.eql(u8, arg, "--index-version")) {
             _ = args.next(); // skip version number
@@ -19597,9 +19608,11 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                         if (skip_worktree) {
                             // Set skip-worktree in extended flags
                             entry.flags |= 0x4000; // CE_EXTENDED
+                            entry.extended_flags = (entry.extended_flags orelse 0) | 0x4000; // SKIP_WORKTREE bit
                         }
                         if (no_skip_worktree) {
                             entry.flags &= ~@as(u16, 0x4000);
+                            entry.extended_flags = null;
                         }
                         modified = true;
                         break;
