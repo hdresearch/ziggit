@@ -3676,8 +3676,79 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
             diff_output_mode = .raw;
         } else if (std.mem.eql(u8, arg, "--no-patch") or std.mem.eql(u8, arg, "-s")) {
             diff_output_mode = .no_patch;
-        } else if (std.mem.startsWith(u8, arg, "-")) {
-            // Accept but ignore flags for now
+        } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--patch") or std.mem.eql(u8, arg, "-u")) {
+            // default patch mode (already default)
+        } else if (std.mem.eql(u8, arg, "--no-pager")) {
+            // ignore
+        } else if (std.mem.eql(u8, arg, "-w") or std.mem.eql(u8, arg, "--ignore-all-space") or
+            std.mem.eql(u8, arg, "--ignore-space-at-eol") or std.mem.eql(u8, arg, "--ignore-space-change") or
+            std.mem.eql(u8, arg, "-b") or std.mem.eql(u8, arg, "--ignore-blank-lines"))
+        {
+            // whitespace options - accept but don't fully implement
+        } else if (std.mem.eql(u8, arg, "--check")) {
+            // whitespace check mode - accept but don't fully implement
+        } else if (std.mem.eql(u8, arg, "--full-index") or std.mem.eql(u8, arg, "--binary") or
+            std.mem.eql(u8, arg, "--abbrev") or std.mem.startsWith(u8, arg, "--abbrev=") or
+            std.mem.eql(u8, arg, "--no-renames") or std.mem.eql(u8, arg, "-M") or std.mem.startsWith(u8, arg, "-M") or
+            std.mem.eql(u8, arg, "-C") or std.mem.startsWith(u8, arg, "-C") or
+            std.mem.eql(u8, arg, "--find-copies-harder") or
+            std.mem.eql(u8, arg, "--color") or std.mem.startsWith(u8, arg, "--color=") or
+            std.mem.eql(u8, arg, "--no-color") or
+            std.mem.startsWith(u8, arg, "-U") or std.mem.startsWith(u8, arg, "--unified=") or
+            std.mem.startsWith(u8, arg, "--diff-filter=") or
+            std.mem.startsWith(u8, arg, "--submodule") or std.mem.startsWith(u8, arg, "--submodule=") or
+            std.mem.eql(u8, arg, "--compact-summary") or
+            std.mem.eql(u8, arg, "--patch-with-stat") or std.mem.eql(u8, arg, "--patch-with-raw") or
+            std.mem.eql(u8, arg, "--summary") or
+            std.mem.eql(u8, arg, "--dirstat") or std.mem.startsWith(u8, arg, "--dirstat=") or
+            std.mem.eql(u8, arg, "--cumulative") or std.mem.eql(u8, arg, "--dirstat-by-file") or
+            std.mem.startsWith(u8, arg, "-G") or std.mem.startsWith(u8, arg, "-S") or
+            std.mem.eql(u8, arg, "--pickaxe-regex") or std.mem.eql(u8, arg, "--pickaxe-all") or
+            std.mem.eql(u8, arg, "--relative") or std.mem.startsWith(u8, arg, "--relative=") or
+            std.mem.startsWith(u8, arg, "--diff-algorithm=") or
+            std.mem.eql(u8, arg, "--patience") or std.mem.eql(u8, arg, "--histogram") or std.mem.eql(u8, arg, "--minimal") or
+            std.mem.eql(u8, arg, "--indent-heuristic") or std.mem.eql(u8, arg, "--no-indent-heuristic") or
+            std.mem.startsWith(u8, arg, "--inter-hunk-context=") or
+            std.mem.startsWith(u8, arg, "--stat=") or std.mem.startsWith(u8, arg, "--stat-width=") or
+            std.mem.startsWith(u8, arg, "--stat-name-width=") or std.mem.startsWith(u8, arg, "--stat-count=") or
+            std.mem.startsWith(u8, arg, "--line-prefix=") or
+            std.mem.eql(u8, arg, "--function-context") or std.mem.eql(u8, arg, "--ext-diff") or std.mem.eql(u8, arg, "--no-ext-diff") or
+            std.mem.eql(u8, arg, "--textconv") or std.mem.eql(u8, arg, "--no-textconv") or
+            std.mem.eql(u8, arg, "--word-diff") or std.mem.startsWith(u8, arg, "--word-diff=") or
+            std.mem.startsWith(u8, arg, "--word-diff-regex=") or
+            std.mem.eql(u8, arg, "--text") or std.mem.eql(u8, arg, "-a") or
+            std.mem.eql(u8, arg, "--no-index") or std.mem.eql(u8, arg, "--ita-invisible-in-index") or
+            std.mem.eql(u8, arg, "--ita-visible-in-index") or
+            std.mem.eql(u8, arg, "-R") or
+            std.mem.startsWith(u8, arg, "--output=") or
+            std.mem.startsWith(u8, arg, "-O") or std.mem.startsWith(u8, arg, "--diff-filter=") or
+            std.mem.eql(u8, arg, "--follow") or std.mem.eql(u8, arg, "--no-follow") or
+            std.mem.eql(u8, arg, "--ignore-submodules") or std.mem.startsWith(u8, arg, "--ignore-submodules=") or
+            std.mem.eql(u8, arg, "--src-prefix") or std.mem.startsWith(u8, arg, "--src-prefix=") or
+            std.mem.eql(u8, arg, "--dst-prefix") or std.mem.startsWith(u8, arg, "--dst-prefix=") or
+            std.mem.eql(u8, arg, "--no-prefix") or
+            std.mem.eql(u8, arg, "--default-prefix") or
+            std.mem.eql(u8, arg, "--cc") or
+            std.mem.eql(u8, arg, "--combined-all-paths") or
+            std.mem.eql(u8, arg, "--merge-base") or
+            std.mem.eql(u8, arg, "--anchored") or std.mem.startsWith(u8, arg, "--anchored=") or
+            std.mem.startsWith(u8, arg, "--break-rewrites") or std.mem.startsWith(u8, arg, "-B") or
+            std.mem.eql(u8, arg, "--find-renames") or std.mem.startsWith(u8, arg, "--find-renames=") or
+            std.mem.eql(u8, arg, "--find-copies") or std.mem.startsWith(u8, arg, "--find-copies=") or
+            std.mem.eql(u8, arg, "--irreversible-delete") or std.mem.eql(u8, arg, "-D") or
+            std.mem.eql(u8, arg, "-l") or std.mem.startsWith(u8, arg, "-l") or
+            std.mem.eql(u8, arg, "--no-rename-empty") or std.mem.eql(u8, arg, "--rename-empty") or
+            std.mem.startsWith(u8, arg, "--rotate-to=") or std.mem.startsWith(u8, arg, "--skip-to=") or
+            std.mem.startsWith(u8, arg, "--ws-error-highlight=") or
+            std.mem.startsWith(u8, arg, "--max-depth=") or
+            std.mem.eql(u8, arg, "--") // catch-all for -- which is handled above
+        )
+        {
+            // Known flags - accept but may not fully implement
+        } else if (std.mem.startsWith(u8, arg, "-") or std.mem.startsWith(u8, arg, "--")) {
+            // Unknown option
+            try platform_impl.writeStderr("usage: git diff [<options>] [<commit>] [--] [<path>...]\n");
+            std.process.exit(129);
         } else {
             try positional.append(arg);
         }
