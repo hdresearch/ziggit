@@ -329,6 +329,9 @@ fn httpPostWithClientV2(allocator: std.mem.Allocator, existing_client: ?*std.htt
 }
 
 fn httpPostWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.http.Client, url: []const u8, body: []const u8, content_type: []const u8, v2: bool) ![]u8 {
+    const trace_timing = std.posix.getenv("ZIGGIT_TRACE_TIMING") != null;
+    var post_timer = if (trace_timing) std.time.Timer.start() catch null else null;
+
     const auth = try extractAuth(allocator, url);
     defer if (auth.needs_free) allocator.free(@constCast(auth.clean_url));
 
@@ -361,21 +364,50 @@ fn httpPostWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.h
     }) catch return error.HttpError;
     defer req.deinit();
 
+    if (trace_timing) {
+        if (post_timer) |*t| {
+            std.debug.print("[timing]       POST connect: {}ms\n", .{t.read() / std.time.ns_per_ms});
+            t.reset();
+        }
+    }
+
     req.transfer_encoding = .{ .content_length = body.len };
     var body_writer = req.sendBodyUnflushed(&server_header_buffer) catch return error.HttpError;
     body_writer.writer.writeAll(body) catch return error.HttpError;
     body_writer.end() catch return error.HttpError;
     req.connection.?.flush() catch return error.HttpError;
 
+    if (trace_timing) {
+        if (post_timer) |*t| {
+            std.debug.print("[timing]       POST send body ({} bytes): {}ms\n", .{ body.len, t.read() / std.time.ns_per_ms });
+            t.reset();
+        }
+    }
+
     var redirect_buf: [8192]u8 = undefined;
     var response = req.receiveHead(&redirect_buf) catch return error.HttpError;
+
+    if (trace_timing) {
+        if (post_timer) |*t| {
+            std.debug.print("[timing]       POST recv headers: {}ms\n", .{t.read() / std.time.ns_per_ms});
+            t.reset();
+        }
+    }
 
     if (response.head.status != .ok) return error.HttpError;
 
     // Read response body (use allocRemaining which handles chunked transfer correctly)
     // Use 256KB buffer to reduce number of read syscalls for pack data responses
     var transfer_buf3: [262144]u8 = undefined;
-    return response.reader(&transfer_buf3).allocRemaining(allocator, .limited(max_response_size)) catch return error.HttpError;
+    const result = response.reader(&transfer_buf3).allocRemaining(allocator, .limited(max_response_size)) catch return error.HttpError;
+
+    if (trace_timing) {
+        if (post_timer) |*t| {
+            std.debug.print("[timing]       POST recv body ({} bytes): {}ms\n", .{ result.len, t.read() / std.time.ns_per_ms });
+        }
+    }
+
+    return result;
 }
 
 // ============================================================================
@@ -1153,6 +1185,126 @@ fn clonePackShallowV2(allocator: std.mem.Allocator, client: *std.http.Client, ur
     };
 }
 
+/// Hybrid v1-refs + v2-fetch shallow clone: uses v1 GET info/refs (returns all
+/// refs in one response) to both warm TLS AND get ref hashes, then v2 POST fetch
+/// to get the pack. This saves one round-trip vs pure v2 (which needs separate
+/// POST ls-refs + POST fetch). Total: GET + POST = 2 round-trips.
+fn clonePackShallowHybrid(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, depth: u32) !CloneResult {
+    const trace_timing = std.posix.getenv("ZIGGIT_TRACE_TIMING") != null;
+    var net_timer = std.time.Timer.start() catch null;
+
+    var base = url;
+    while (base.len > 0 and base[base.len - 1] == '/') {
+        base = base[0 .. base.len - 1];
+    }
+
+    // Step 1: GET info/refs (v1 style) — warms TLS AND returns all ref hashes
+    const ref_url = try std.fmt.allocPrint(allocator, "{s}/info/refs?service=git-upload-pack", .{base});
+    defer allocator.free(ref_url);
+
+    const ref_body = try httpGetWithClient(allocator, client, ref_url);
+    defer allocator.free(ref_body);
+
+    const discovery = try parseRefDiscoveryResponse(allocator, ref_body);
+
+    if (trace_timing) {
+        if (net_timer) |*t| {
+            std.debug.print("[timing]   hybrid GET refs: {}ms, refs_count={}\n", .{ t.read() / std.time.ns_per_ms, discovery.refs.len });
+            t.reset();
+        }
+    }
+
+    // Step 2: Build wants — single-branch for shallow
+    var head_hash: ?Oid = null;
+    var head_branch: ?[]const u8 = null;
+    if (depth > 0) {
+        for (discovery.refs) |ref| {
+            if (std.mem.eql(u8, ref.name, "HEAD")) {
+                head_hash = ref.hash;
+                break;
+            }
+        }
+        if (head_hash) |hh| {
+            for (discovery.refs) |ref| {
+                if (std.mem.startsWith(u8, ref.name, "refs/heads/") and
+                    std.mem.eql(u8, &ref.hash, &hh))
+                {
+                    head_branch = ref.name;
+                    break;
+                }
+            }
+        }
+    }
+
+    var want_set = std.StringHashMap(void).init(allocator);
+    defer want_set.deinit();
+    var wants = std.array_list.Managed(Oid).init(allocator);
+    defer wants.deinit();
+
+    for (discovery.refs) |ref| {
+        const relevant = if (depth > 0) blk: {
+            if (std.mem.eql(u8, ref.name, "HEAD")) break :blk true;
+            if (head_branch) |hb| {
+                if (std.mem.eql(u8, ref.name, hb)) break :blk true;
+            }
+            break :blk false;
+        } else isCloneRelevantRef(ref.name);
+        if (!relevant) continue;
+        const hash_str = ref.hash;
+        if (!want_set.contains(&hash_str)) {
+            try want_set.put(try allocator.dupe(u8, &hash_str), {});
+            try wants.append(hash_str);
+        }
+    }
+    defer {
+        var it = want_set.keyIterator();
+        while (it.next()) |key| allocator.free(@constCast(key.*));
+    }
+
+    // Step 3: Try v2 fetch POST (TLS is warm from step 1)
+    // If v2 fetch fails, fall back to v1 fetch
+    const post_url = try std.fmt.allocPrint(allocator, "{s}/git-upload-pack", .{base});
+    defer allocator.free(post_url);
+
+    const fetch_body = try buildV2FetchRequest(allocator, wants.items, &.{}, depth);
+    defer allocator.free(fetch_body);
+
+    if (httpPostWithClientV2(allocator, client, post_url, fetch_body, "application/x-git-upload-pack-request")) |fetch_response| {
+        defer allocator.free(fetch_response);
+        if (parseV2FetchResponse(allocator, fetch_response)) |shallow_result| {
+            if (trace_timing) {
+                if (net_timer) |*t| {
+                    std.debug.print("[timing]   hybrid v2 fetch: {}ms, pack_size={}\n", .{ t.read() / std.time.ns_per_ms, shallow_result.pack_data.len });
+                }
+            }
+            return .{
+                .refs = discovery.refs,
+                .capabilities = discovery.capabilities,
+                .pack_data = shallow_result.pack_data,
+                .shallow_commits = shallow_result.shallow_commits,
+                .allocator = allocator,
+            };
+        } else |_| {}
+    } else |_| {}
+
+    // Fallback: v1 fetch
+    const shallow_result = try fetchPackShallowWithClient(allocator, client, url, wants.items, &.{}, depth);
+
+    if (trace_timing) {
+        if (net_timer) |*t| {
+            std.debug.print("[timing]   hybrid v1 fetch: {}ms, pack_size={}\n", .{ t.read() / std.time.ns_per_ms, shallow_result.pack_data.len });
+        }
+    }
+
+    return .{
+        .refs = discovery.refs,
+        .capabilities = discovery.capabilities,
+        .pack_data = shallow_result.pack_data,
+        .shallow_commits = shallow_result.shallow_commits,
+        .allocator = allocator,
+    };
+}
+
 /// Clone a repository with shallow depth support.
 /// When depth > 0, sends "deepen N" to the server for a shallow clone.
 /// Implements --single-branch behavior by default for shallow clones (like git does):
@@ -1161,12 +1313,16 @@ pub fn clonePackShallow(allocator: std.mem.Allocator, url: []const u8, depth: u3
     var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
 
-    // Try v2 first (ref-prefix filtering avoids downloading thousands of PR refs).
-    // For shallow clones of repos like express (3692 refs), v2 ls-refs with prefix
-    // filtering is dramatically faster than v1's GET /info/refs which returns all refs.
-    // Fall back to v1 if server doesn't support v2.
+    // Strategy selection for shallow clone:
+    // - ZIGGIT_FORCE_V1: pure v1 (GET info/refs + POST upload-pack v1)
+    // - ZIGGIT_FORCE_V2: pure v2 (POST ls-refs + POST fetch)
+    // - ZIGGIT_FORCE_HYBRID: hybrid (GET info/refs for refs + POST v2 fetch)
+    // - Default: try v2, fall back to v1
     if (std.posix.getenv("ZIGGIT_FORCE_V1") != null) {
         return clonePackShallowV1(allocator, &client, url, depth);
+    }
+    if (std.posix.getenv("ZIGGIT_FORCE_HYBRID") != null) {
+        return clonePackShallowHybrid(allocator, &client, url, depth);
     }
     return clonePackShallowV2(allocator, &client, url, depth) catch |e| {
         if (std.posix.getenv("ZIGGIT_TRACE_TIMING") != null)
