@@ -25997,11 +25997,7 @@ fn resolveToTree(allocator: std.mem.Allocator, ref_str: []const u8, git_path: []
 }
 
 fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, opts: *const DiffTreeOpts, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform) !bool {
-    const recursive = opts.recursive;
-    const show_patch = opts.show_patch;
     const show_root = opts.show_root;
-    const name_only = opts.name_only;
-    const name_status = opts.name_status;
     const no_commit_id = opts.no_commit_id;
     const quiet = opts.quiet;
     const git_path = findGitDirectory(allocator, platform_impl) catch {
@@ -26123,7 +26119,13 @@ const DiffTreeOpts = struct {
     
     fn hashSuffix(self: @This()) []const u8 {
         if (self.full_index) return "";
-        if (self.abbrev_len != null) return "...";
+        if (self.abbrev_len != null) {
+            // Check GIT_PRINT_SHA1_ELLIPSIS env var
+            if (std.posix.getenv("GIT_PRINT_SHA1_ELLIPSIS")) |v| {
+                if (std.mem.eql(u8, v, "yes")) return "...";
+            }
+            return "";
+        }
         return "";
     }
 };
@@ -26141,10 +26143,19 @@ fn isTreeMode(mode: []const u8) bool {
 }
 
 fn diffTreeWithEmpty(allocator: std.mem.Allocator, tree_hash_str: []const u8, recursive: bool, show_patch: bool, name_only: bool, name_status: bool, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
-    try diffTreeWithEmptyPrefix(allocator, tree_hash_str, "", recursive, show_patch, name_only, name_status, git_path, platform_impl);
+    const default_opts = DiffTreeOpts{ .recursive = recursive, .show_patch = show_patch, .name_only = name_only, .name_status = name_status };
+    try diffTreeWithEmptyPrefix(allocator, tree_hash_str, "", &default_opts, git_path, platform_impl);
 }
 
-fn diffTreeWithEmptyPrefix(allocator: std.mem.Allocator, tree_hash_str: []const u8, prefix: []const u8, recursive: bool, show_patch: bool, name_only: bool, name_status: bool, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
+fn diffTreeWithEmptyOpts(allocator: std.mem.Allocator, tree_hash_str: []const u8, opts: *const DiffTreeOpts, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
+    try diffTreeWithEmptyPrefix(allocator, tree_hash_str, "", opts, git_path, platform_impl);
+}
+
+fn diffTreeWithEmptyPrefix(allocator: std.mem.Allocator, tree_hash_str: []const u8, prefix: []const u8, opts: *const DiffTreeOpts, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
+    const recursive = opts.recursive;
+    const show_patch = opts.show_patch;
+    const name_only = opts.name_only;
+    const name_status = opts.name_status;
     const tree_obj = objects.GitObject.load(tree_hash_str, git_path, platform_impl, allocator) catch return;
     defer tree_obj.deinit(allocator);
     
@@ -26161,11 +26172,46 @@ fn diffTreeWithEmptyPrefix(allocator: std.mem.Allocator, tree_hash_str: []const 
         defer allocator.free(full_name);
         
         if (recursive and isTreeMode(entry.mode)) {
-            try diffTreeWithEmptyPrefix(allocator, entry.hash, full_name, recursive, show_patch, name_only, name_status, git_path, platform_impl);
+            try diffTreeWithEmptyPrefix(allocator, entry.hash, full_name, opts, git_path, platform_impl);
             continue;
         }
         
-        if (name_only) {
+        if (show_patch) {
+            // Generate unified diff for new file
+            const new_content = loadBlobContent(allocator, entry.hash, git_path, platform_impl) catch "";
+            defer if (new_content.len > 0) allocator.free(new_content);
+            var mbuf: [6]u8 = undefined;
+            const padded_mode = padMode6(&mbuf, entry.mode);
+            // full_index overrides abbrev for index line
+            const idx_zero = if (opts.full_index) zero_hash else if (opts.abbrev_len) |abl| zero_hash[0..@min(if (abl == 0) 7 else abl, zero_hash.len)] else zero_hash[0..7];
+            const idx_hash = if (opts.full_index) entry.hash else if (opts.abbrev_len) |abl| entry.hash[0..@min(if (abl == 0) 7 else abl, entry.hash.len)] else entry.hash[0..@min(7, entry.hash.len)];
+            const header = try std.fmt.allocPrint(allocator, "diff --git a/{s} b/{s}\nnew file mode {s}\nindex {s}..{s}\n--- /dev/null\n+++ b/{s}\n", .{ full_name, full_name, padded_mode, idx_zero, idx_hash, full_name });
+            defer allocator.free(header);
+            try platform_impl.writeStdout(header);
+            
+            // Output hunk header and content
+            if (new_content.len > 0) {
+                var line_count: usize = 0;
+                var iter = std.mem.splitScalar(u8, new_content, '\n');
+                while (iter.next()) |_| line_count += 1;
+                // Remove trailing empty line from count
+                if (new_content.len > 0 and new_content[new_content.len - 1] == '\n') line_count -= 1;
+                
+                const hunk_header = try std.fmt.allocPrint(allocator, "@@ -0,0 +1,{d} @@\n", .{line_count});
+                defer allocator.free(hunk_header);
+                try platform_impl.writeStdout(hunk_header);
+                
+                var line_iter = std.mem.splitScalar(u8, new_content, '\n');
+                var printed: usize = 0;
+                while (line_iter.next()) |line| {
+                    if (printed >= line_count) break;
+                    const line_out = try std.fmt.allocPrint(allocator, "+{s}\n", .{line});
+                    defer allocator.free(line_out);
+                    try platform_impl.writeStdout(line_out);
+                    printed += 1;
+                }
+            }
+        } else if (name_only) {
             const out = try std.fmt.allocPrint(allocator, "{s}\n", .{full_name});
             defer allocator.free(out);
             try platform_impl.writeStdout(out);
@@ -26175,7 +26221,10 @@ fn diffTreeWithEmptyPrefix(allocator: std.mem.Allocator, tree_hash_str: []const 
             try platform_impl.writeStdout(out);
         } else {
             var mbuf: [6]u8 = undefined;
-            const out = try std.fmt.allocPrint(allocator, ":000000 {s} {s} {s} A\t{s}\n", .{ padMode6(&mbuf, entry.mode), zero_hash, entry.hash, full_name });
+            const ah1 = opts.abbrevHash(zero_hash);
+            const ah2 = opts.abbrevHash(entry.hash);
+            const suf = opts.hashSuffix();
+            const out = try std.fmt.allocPrint(allocator, ":000000 {s} {s}{s} {s}{s} A\t{s}\n", .{ padMode6(&mbuf, entry.mode), ah1, suf, ah2, suf, full_name });
             defer allocator.free(out);
             try platform_impl.writeStdout(out);
         }
@@ -26291,7 +26340,11 @@ fn matchesPathspecs(path: []const u8, pathspecs: []const []const u8) bool {
     return false;
 }
 
-fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, prefix: []const u8, recursive: bool, show_patch: bool, name_only: bool, name_status: bool, quiet: bool, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform) !bool {
+fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, prefix: []const u8, opts: *const DiffTreeOpts, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform) !bool {
+    const recursive = opts.recursive;
+    const name_only = opts.name_only;
+    const name_status = opts.name_status;
+    const quiet = opts.quiet;
     const git_path = findGitDirectory(allocator, platform_impl) catch return false;
     defer allocator.free(git_path);
     
@@ -26345,7 +26398,7 @@ fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8, tr
         if (e1 != null and e2 != null) {
             if (std.mem.eql(u8, e1.?.hash, e2.?.hash) and std.mem.eql(u8, e1.?.mode, e2.?.mode)) continue;
             if (recursive and isTreeMode(e1.?.mode) and isTreeMode(e2.?.mode)) {
-                const sub = try diffTwoTreesFiltered(allocator, e1.?.hash, e2.?.hash, full_name, recursive, show_patch, name_only, name_status, quiet, pathspecs, platform_impl);
+                const sub = try diffTwoTreesFiltered(allocator, e1.?.hash, e2.?.hash, full_name, opts, pathspecs, platform_impl);
                 if (sub) had_diff = true;
                 continue;
             }
@@ -26363,7 +26416,8 @@ fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8, tr
                 } else {
                     var mb1: [6]u8 = undefined;
                     var mb2: [6]u8 = undefined;
-                    const out = try std.fmt.allocPrint(allocator, ":{s} {s} {s} {s} M\t{s}\n", .{ padMode6(&mb1, e1.?.mode), padMode6(&mb2, e2.?.mode), e1.?.hash, e2.?.hash, full_name });
+                    const suf = opts.hashSuffix();
+                    const out = try std.fmt.allocPrint(allocator, ":{s} {s} {s}{s} {s}{s} M\t{s}\n", .{ padMode6(&mb1, e1.?.mode), padMode6(&mb2, e2.?.mode), opts.abbrevHash(e1.?.hash), suf, opts.abbrevHash(e2.?.hash), suf, full_name });
                     defer allocator.free(out);
                     try platform_impl.writeStdout(out);
                 }
@@ -26382,7 +26436,8 @@ fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8, tr
                     try platform_impl.writeStdout(out);
                 } else {
                     var mb1: [6]u8 = undefined;
-                    const out = try std.fmt.allocPrint(allocator, ":{s} 000000 {s} {s} D\t{s}\n", .{ padMode6(&mb1, e1.?.mode), e1.?.hash, zero_hash, full_name });
+                    const suf = opts.hashSuffix();
+                    const out = try std.fmt.allocPrint(allocator, ":{s} 000000 {s}{s} {s}{s} D\t{s}\n", .{ padMode6(&mb1, e1.?.mode), opts.abbrevHash(e1.?.hash), suf, opts.abbrevHash(zero_hash), suf, full_name });
                     defer allocator.free(out);
                     try platform_impl.writeStdout(out);
                 }
@@ -26401,7 +26456,8 @@ fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8, tr
                     try platform_impl.writeStdout(out);
                 } else {
                     var mb2: [6]u8 = undefined;
-                    const out = try std.fmt.allocPrint(allocator, ":000000 {s} {s} {s} A\t{s}\n", .{ padMode6(&mb2, e2.?.mode), zero_hash, e2.?.hash, full_name });
+                    const suf = opts.hashSuffix();
+                    const out = try std.fmt.allocPrint(allocator, ":000000 {s} {s}{s} {s}{s} A\t{s}\n", .{ padMode6(&mb2, e2.?.mode), opts.abbrevHash(zero_hash), suf, opts.abbrevHash(e2.?.hash), suf, full_name });
                     defer allocator.free(out);
                     try platform_impl.writeStdout(out);
                 }
