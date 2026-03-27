@@ -8560,7 +8560,9 @@ fn outputConfigList(content: []const u8, source_path: []const u8, scope: []const
 
         if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
             const k = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
-            const v = std.mem.trim(u8, trimmed[eq_pos + 1 ..], " \t");
+            const raw_v = std.mem.trim(u8, trimmed[eq_pos + 1 ..], " \t");
+            // Strip inline comments (# or ; preceded by space, not inside quotes)
+            const v = stripInlineComment(raw_v);
             const full_key = if (current_section) |sec|
                 try std.fmt.allocPrint(allocator, "{s}.{s}", .{ sec, k })
             else
@@ -29310,4 +29312,23 @@ fn cmdRefs(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
         std.process.exit(1);
         unreachable;
     }
+}
+
+fn stripInlineComment(value: []const u8) []const u8 {
+    // Strip inline comments from config values
+    // Comments start with # or ; preceded by whitespace, not inside quotes
+    var in_quotes = false;
+    var i: usize = 0;
+    while (i < value.len) : (i += 1) {
+        if (value[i] == '"' and (i == 0 or value[i - 1] != '\\')) {
+            in_quotes = !in_quotes;
+        }
+        if (!in_quotes and (value[i] == '#' or value[i] == ';')) {
+            // Check if preceded by whitespace (or at start)
+            if (i == 0 or value[i - 1] == ' ' or value[i - 1] == '\t') {
+                return std.mem.trimRight(u8, value[0..i], " \t");
+            }
+        }
+    }
+    return value;
 }
