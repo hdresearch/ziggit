@@ -21776,27 +21776,75 @@ fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command_ind
 fn nativeCmdClean(_: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
     var force = false;
     var dry_run = false;
+    var clean_dirs = false;
+    var quiet = false;
+    var exclude_only = false; // -X: only remove ignored files
+    var no_gitignore = false; // -x: don't use .gitignore
+    var pathspecs = std.array_list.Managed([]const u8).init(std.heap.page_allocator);
+    defer pathspecs.deinit();
+    var seen_separator = false;
+    var interactive = false;
+    
     var i = command_index + 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
+        if (seen_separator) {
+            pathspecs.append(arg) catch {};
+        } else if (std.mem.eql(u8, arg, "--")) {
+            seen_separator = true;
+        } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
             force = true;
         } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--dry-run")) {
             dry_run = true;
-        } else if (std.mem.eql(u8, arg, "-d") or
-            std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet") or
-            std.mem.eql(u8, arg, "-x") or std.mem.eql(u8, arg, "-X"))
-        {
-            // Accepted flags (not fully implemented yet)
+        } else if (std.mem.eql(u8, arg, "-d")) {
+            clean_dirs = true;
+        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
+            quiet = true;
+        } else if (std.mem.eql(u8, arg, "-x")) {
+            no_gitignore = true;
+        } else if (std.mem.eql(u8, arg, "-X")) {
+            exclude_only = true;
+        } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--interactive")) {
+            interactive = true;
+        } else if (std.mem.eql(u8, arg, "-e") or std.mem.startsWith(u8, arg, "--exclude=")) {
+            // Skip exclude patterns for now
+            if (std.mem.eql(u8, arg, "-e")) i += 1;
         } else if (std.mem.eql(u8, arg, "-h")) {
             try platform_impl.writeStdout("usage: git clean [-d] [-f] [-n] [-q] [-x | -X] [--] [<pathspec>...]\n");
             std.process.exit(129);
+        } else if (arg.len > 1 and arg[0] == '-' and arg[1] != '-') {
+            // Handle combined flags like -fd, -df, etc.
+            for (arg[1..]) |c| {
+                switch (c) {
+                    'f' => force = true,
+                    'n' => dry_run = true,
+                    'd' => clean_dirs = true,
+                    'q' => quiet = true,
+                    'x' => no_gitignore = true,
+                    'X' => exclude_only = true,
+                    'i' => interactive = true,
+                    else => {},
+                }
+            }
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            pathspecs.append(arg) catch {};
         }
     }
 
-    if (!force and !dry_run) {
-        try platform_impl.writeStderr("fatal: clean.requireForce defaults to true and neither -i, -n, nor -f given; refusing to clean\n");
-        std.process.exit(128);
+    if (!force and !dry_run and !interactive) {
+        // Check clean.requireForce config
+        const allocator2 = std.heap.page_allocator;
+        const require_force = blk: {
+            if (readCfg(allocator2, "clean.requireforce", platform_impl)) |val| {
+                defer allocator2.free(val);
+                if (std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no")) break :blk false;
+            }
+            break :blk true;
+        };
+        if (require_force) {
+            try platform_impl.writeStderr("fatal: clean.requireForce defaults to true and neither -i, -n, nor -f given; refusing to clean\n");
+            std.process.exit(128);
+        }
     }
 
     const allocator = std.heap.page_allocator;
@@ -21814,21 +21862,62 @@ fn nativeCmdClean(_: std.mem.Allocator, args: [][]const u8, command_index: usize
     };
     defer idx.deinit();
     
-    // Get repo root
+    // Build a set of tracked directories
+    var tracked_dirs = std.StringHashMap(void).init(allocator);
+    defer tracked_dirs.deinit();
+    for (idx.entries.items) |ie| {
+        // Add all parent directories of tracked files
+        var p = ie.path;
+        while (std.fs.path.dirname(p)) |parent| {
+            if (parent.len == 0) break;
+            tracked_dirs.put(parent, {}) catch {};
+            p = parent;
+        }
+    }
+    
+    // Load gitignore
     const repo_root = std.fs.path.dirname(git_path) orelse ".";
+    var gitignore = gitignore_mod.GitIgnore.init(allocator);
+    defer gitignore.deinit();
+    if (!no_gitignore) {
+        const gitignore_path = std.fmt.allocPrint(allocator, "{s}/.gitignore", .{repo_root}) catch "";
+        defer if (gitignore_path.len > 0) allocator.free(gitignore_path);
+        if (gitignore_path.len > 0) {
+            if (platform_impl.fs.readFile(allocator, gitignore_path)) |content| {
+                defer allocator.free(content);
+                gitignore.addPatterns(content);
+            } else |_| {}
+        }
+        // Also load .git/info/exclude
+        const exclude_path = std.fmt.allocPrint(allocator, "{s}/info/exclude", .{git_path}) catch "";
+        defer if (exclude_path.len > 0) allocator.free(exclude_path);
+        if (exclude_path.len > 0) {
+            if (platform_impl.fs.readFile(allocator, exclude_path)) |content| {
+                defer allocator.free(content);
+                gitignore.addPatterns(content);
+            } else |_| {}
+        }
+    }
     
     // Walk the working tree and find untracked files
     var dir = std.fs.cwd().openDir(repo_root, .{ .iterate = true }) catch return;
     defer dir.close();
     
+    // Collect files to remove (sorted for consistent output)
+    var to_remove = std.array_list.Managed([]u8).init(allocator);
+    defer {
+        for (to_remove.items) |item| allocator.free(item);
+        to_remove.deinit();
+    }
+    
     var walker = dir.walk(allocator) catch return;
     defer walker.deinit();
     
     while (walker.next() catch null) |entry| {
-        if (entry.kind != .file) continue;
+        if (entry.kind != .file and entry.kind != .sym_link) continue;
         const path = entry.path;
         // Skip .git directory
-        if (std.mem.startsWith(u8, path, ".git/") or std.mem.eql(u8, path, ".git")) continue;
+        if (std.mem.startsWith(u8, path, ".git/") or std.mem.startsWith(u8, path, ".git\\") or std.mem.eql(u8, path, ".git")) continue;
         
         // Check if file is tracked (in index)
         var tracked = false;
@@ -21838,17 +21927,75 @@ fn nativeCmdClean(_: std.mem.Allocator, args: [][]const u8, command_index: usize
                 break;
             }
         }
+        if (tracked) continue;
         
-        if (!tracked) {
-            if (dry_run) {
+        // Check if file is in an untracked directory (requires -d)
+        if (!clean_dirs) {
+            const parent = std.fs.path.dirname(path) orelse "";
+            if (parent.len > 0 and !tracked_dirs.contains(parent)) continue;
+        }
+        
+        // Check gitignore
+        const is_ignored = !no_gitignore and gitignore.isIgnored(path);
+        
+        if (exclude_only) {
+            // -X: only remove ignored files
+            if (!is_ignored) continue;
+        } else {
+            // Normal: skip ignored files (unless -x)
+            if (is_ignored and !no_gitignore) continue;
+        }
+        
+        // Check pathspec filter
+        if (pathspecs.items.len > 0) {
+            var matches = false;
+            for (pathspecs.items) |ps| {
+                // Simple prefix/glob matching
+                const clean_ps = if (std.mem.endsWith(u8, ps, "/")) ps[0..ps.len-1] else ps;
+                if (std.mem.startsWith(u8, path, clean_ps) and (path.len == clean_ps.len or (path.len > clean_ps.len and path[clean_ps.len] == '/'))) {
+                    matches = true;
+                    break;
+                }
+                if (std.mem.eql(u8, path, clean_ps)) {
+                    matches = true;
+                    break;
+                }
+            }
+            if (!matches) continue;
+        }
+        
+        to_remove.append(allocator.dupe(u8, path) catch continue) catch {};
+    }
+    
+    // Sort for consistent output
+    std.mem.sort([]u8, to_remove.items, {}, struct {
+        fn cmp(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.cmp);
+    
+    // Remove files
+    for (to_remove.items) |path| {
+        if (dry_run) {
+            if (!quiet) {
                 const msg = std.fmt.allocPrint(allocator, "Would remove {s}\n", .{path}) catch continue;
                 defer allocator.free(msg);
                 platform_impl.writeStdout(msg) catch {};
-            } else {
+            }
+        } else {
+            if (!quiet) {
                 const msg = std.fmt.allocPrint(allocator, "Removing {s}\n", .{path}) catch continue;
                 defer allocator.free(msg);
                 platform_impl.writeStdout(msg) catch {};
-                dir.deleteFile(path) catch {};
+            }
+            dir.deleteFile(path) catch {};
+            // Try to remove empty parent directories
+            if (std.fs.path.dirname(path)) |parent| {
+                var p = parent;
+                while (p.len > 0) {
+                    dir.deleteDir(p) catch break;
+                    p = std.fs.path.dirname(p) orelse break;
+                }
             }
         }
     }
