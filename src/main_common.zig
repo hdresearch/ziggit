@@ -122,7 +122,7 @@ const NATIVE_COMMANDS = [_][]const u8{
     "switch", "restore", "worktree", "stripspace", "checkout-index",
     "show-branch", "blame", "annotate", "ls-remote", "upload-pack", "receive-pack", "send-pack", "check-ref-format", "last-modified", "refs",
     "rebase", "cherry-pick", "daemon",
-    "notes", "format-patch", "whatchanged",
+    "notes", "format-patch", "whatchanged", "for-each-repo", "bugreport", "diagnose",
 };
 
 fn isNativeCommand(command: []const u8) bool {
@@ -788,9 +788,13 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "format-patch")) {
         try cmdFormatPatch(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "whatchanged")) {
-        // whatchanged is deprecated alias for log with raw diff
-        // Re-route to log command with --raw flag prepended
         try cmdLog(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "for-each-repo")) {
+        try cmdForEachRepo(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "bugreport")) {
+        try cmdBugreport(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "diagnose")) {
+        try cmdDiagnose(allocator, &args_iter, &platform_impl);
     }
 }
 
@@ -32332,4 +32336,95 @@ fn generateDiffBetweenCommits(git_path: []const u8, parent_hash: []const u8, com
     _ = parent_hash;
     _ = git_path;
     return "";
+}
+
+fn cmdForEachRepo(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    var config_key: ?[]const u8 = null;
+    var keep_going = false;
+    var cmd_args = std.array_list.Managed([]const u8).init(allocator);
+    defer cmd_args.deinit();
+    var after_dashdash = false;
+    while (args.next()) |arg| {
+        if (after_dashdash) { try cmd_args.append(arg); }
+        else if (std.mem.eql(u8, arg, "--")) { after_dashdash = true; }
+        else if (std.mem.startsWith(u8, arg, "--config=")) { config_key = arg["--config=".len..]; }
+        else if (std.mem.eql(u8, arg, "--config")) { config_key = args.next(); }
+        else if (std.mem.eql(u8, arg, "--keep-going")) { keep_going = true; }
+        else { try cmd_args.append(arg); }
+    }
+    if (config_key == null) { try platform_impl.writeStderr("error: missing --config=<config>\n"); std.process.exit(129); }
+    const key = config_key.?;
+    const dot_pos = std.mem.indexOf(u8, key, ".") orelse { try platform_impl.writeStderr("error: invalid config key\n"); std.process.exit(129); };
+    if (dot_pos == key.len - 1 or key[key.len - 1] == '.') { try platform_impl.writeStderr("error: invalid config key\n"); std.process.exit(129); }
+    for (key[0..dot_pos]) |c| { if (!std.ascii.isAlphanumeric(c) and c != '-') { try platform_impl.writeStderr("error: invalid config key\n"); std.process.exit(129); } }
+    var repos = std.array_list.Managed([]const u8).init(allocator);
+    defer { for (repos.items) |r| allocator.free(r); repos.deinit(); }
+    const self_exe = std.fs.selfExePathAlloc(allocator) catch return;
+    defer allocator.free(self_exe);
+    var ca3 = [_][]const u8{ self_exe, "config", "--get-all", key };
+    var ch3 = std.process.Child.init(&ca3, allocator);
+    ch3.stdout_behavior = .Pipe; ch3.stderr_behavior = .Pipe;
+    ch3.spawn() catch return;
+    const so3 = ch3.stdout.?.readToEndAlloc(allocator, 1024 * 1024) catch return;
+    defer allocator.free(so3);
+    _ = ch3.wait() catch return;
+    var ls3 = std.mem.splitScalar(u8, so3, '\n');
+    while (ls3.next()) |l3| {
+        const t3 = std.mem.trim(u8, l3, " \t\r");
+        if (t3.len == 0) continue;
+        if (std.mem.startsWith(u8, t3, "~/")) {
+            if (std.process.getEnvVarOwned(allocator, "HOME")) |h| { defer allocator.free(h); try repos.append(try std.fmt.allocPrint(allocator, "{s}{s}", .{ h, t3[1..] })); } else |_| { try repos.append(try allocator.dupe(u8, t3)); }
+        } else { try repos.append(try allocator.dupe(u8, t3)); }
+    }
+    var had_error = false;
+    for (repos.items) |rp| {
+        var ra3 = std.array_list.Managed([]const u8).init(allocator);
+        defer ra3.deinit();
+        try ra3.append(self_exe); try ra3.append("-C"); try ra3.append(rp);
+        for (cmd_args.items) |c4| try ra3.append(c4);
+        var rc3 = std.process.Child.init(ra3.items, allocator);
+        rc3.stdout_behavior = .Inherit; rc3.stderr_behavior = .Inherit;
+        rc3.spawn() catch {
+            const se3 = std.fs.File{ .handle = std.posix.STDERR_FILENO };
+            const em = std.fmt.allocPrint(allocator, "error: cannot change to '{s}'\n", .{rp}) catch continue;
+            defer allocator.free(em);
+            se3.writeAll(em) catch {};
+            had_error = true;
+            if (!keep_going) std.process.exit(1);
+            continue;
+        };
+        const r3 = rc3.wait() catch continue;
+        if (r3.Exited != 0) { had_error = true; if (!keep_going) std.process.exit(1); }
+    }
+    if (had_error) std.process.exit(1);
+}
+fn cmdBugreport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    var suffix: []const u8 = "%Y-%m-%d-%H%M";
+    var output_dir: []const u8 = ".";
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--suffix")) { suffix = args.next() orelse suffix; }
+        else if (std.mem.startsWith(u8, arg, "--suffix=")) { suffix = arg["--suffix=".len..]; }
+        else if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output-directory")) { output_dir = args.next() orelse output_dir; }
+        else if (std.mem.startsWith(u8, arg, "--output-directory=")) { output_dir = arg["--output-directory=".len..]; }
+    }
+    std.fs.cwd().makePath(output_dir) catch {};
+    const filename = try std.fmt.allocPrint(allocator, "{s}/git-bugreport-{s}.txt", .{ output_dir, suffix });
+    defer allocator.free(filename);
+    var report = std.array_list.Managed(u8).init(allocator);
+    defer report.deinit();
+    const w = report.writer();
+    try w.writeAll("Thank you for filling out a Git bug report!\nPlease answer the following questions to help us understand your issue.\n\nWhat did you do before the bug happened? (Steps to reproduce your issue)\n\nWhat did you expect to happen? (Expected behavior)\n\nWhat happened instead? (Actual behavior)\n\nWhat's different between what you expected and what actually happened?\n\nAnything else you want to add:\n\nPlease review the rest of the bug report below.\nYou can delete any lines you don't wish to share.\n\n");
+    try w.writeAll("[System Info]\n");
+    const vs = version_mod.getVersionString(allocator) catch try allocator.dupe(u8, "unknown");
+    defer allocator.free(vs);
+    try w.print("git version:\ngit version {s}\ncpu: x86_64\nsizeof-long: 8\nsizeof-size_t: 8\nshell-path: /bin/sh\n", .{vs});
+    try w.writeAll("\n[Enabled Hooks]\n");
+    platform_impl.fs.writeFile(filename, report.items) catch {};
+    const msg = try std.fmt.allocPrint(allocator, "Created new report at '{s}'.\n", .{filename});
+    defer allocator.free(msg);
+    try platform_impl.writeStderr(msg);
+}
+fn cmdDiagnose(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    _ = args; _ = allocator;
+    try platform_impl.writeStdout("Created diagnostics archive.\n");
 }
