@@ -4206,6 +4206,12 @@ fn cmdMerge(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         std.process.exit(1);
     };
 
+    // Check if already up to date (target is ancestor of current)
+    if (std.mem.eql(u8, current_hash, target_hash) or (isAncestor(git_path, target_hash, current_hash, allocator, platform_impl) catch false)) {
+        try platform_impl.writeStdout("Already up to date.\n");
+        return;
+    }
+
     // Check if this is a fast-forward merge
     if (!no_ff and canFastForward(git_path, current_hash, target_hash, allocator, platform_impl)) {
         // Fast-forward merge
