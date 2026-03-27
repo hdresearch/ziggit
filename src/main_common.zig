@@ -1119,39 +1119,7 @@ fn matchPathspec(path: []const u8, pathspec: []const u8) bool {
     const use_literal = global_literal_pathspecs or global_noglob_pathspecs;
     const use_icase = global_icase_pathspecs;
 
-    if (!use_literal) {
-        // Glob mode (default or --glob-pathspecs)
-        var flags: u32 = 0;
-        if (global_glob_pathspecs) flags |= wildmatch_mod.WM_PATHNAME;
-        if (use_icase) flags |= wildmatch_mod.WM_CASEFOLD;
-
-        // Direct wildmatch
-        if (wildmatch_mod.wildmatch(pathspec, path, flags) == wildmatch_mod.WM_MATCH) return true;
-
-        // In pathspec context, ** always matches across directories even when
-        // not at a path boundary (e.g., "foo**" matches "foo/bar/baz").
-        // This differs from pure wildmatch where ** only works as globstar
-        // when properly bounded by / or at start/end.
-        if ((flags & wildmatch_mod.WM_PATHNAME) != 0 and std.mem.indexOf(u8, pathspec, "**") != null) {
-            const flags_no_path = flags & ~wildmatch_mod.WM_PATHNAME;
-            if (wildmatch_mod.wildmatch(pathspec, path, flags_no_path) == wildmatch_mod.WM_MATCH) return true;
-        }
-
-        // If pathspec has no glob chars, also try prefix match (pathspec is a directory prefix)
-        const has_glob_chars = std.mem.indexOfAny(u8, pathspec, "*?[\\") != null;
-        if (!has_glob_chars) {
-            if (use_icase) {
-                if (path.len > pathspec.len and path[pathspec.len] == '/' and
-                    eqlIgnoreCase(path[0..pathspec.len], pathspec)) return true;
-            } else {
-                if (std.mem.startsWith(u8, path, pathspec) and path.len > pathspec.len and path[pathspec.len] == '/') return true;
-            }
-        }
-
-        return false;
-    }
-
-    // Literal mode: no glob matching, just prefix matching
+    // Always try exact match and prefix match first (literal comparison)
     if (use_icase) {
         if (eqlIgnoreCase(path, pathspec)) return true;
         if (path.len > pathspec.len and path[pathspec.len] == '/' and
@@ -1160,6 +1128,26 @@ fn matchPathspec(path: []const u8, pathspec: []const u8) bool {
         if (std.mem.eql(u8, path, pathspec)) return true;
         if (std.mem.startsWith(u8, path, pathspec) and path.len > pathspec.len and path[pathspec.len] == '/') return true;
     }
+
+    if (use_literal) return false;
+
+    // Glob mode (default or --glob-pathspecs)
+    var flags: u32 = 0;
+    if (global_glob_pathspecs) flags |= wildmatch_mod.WM_PATHNAME;
+    if (use_icase) flags |= wildmatch_mod.WM_CASEFOLD;
+
+    // Direct wildmatch
+    if (wildmatch_mod.wildmatch(pathspec, path, flags) == wildmatch_mod.WM_MATCH) return true;
+
+    // In pathspec context, ** always matches across directories even when
+    // not at a path boundary (e.g., "foo**" matches "foo/bar/baz").
+    // This differs from pure wildmatch where ** only works as globstar
+    // when properly bounded by / or at start/end.
+    if ((flags & wildmatch_mod.WM_PATHNAME) != 0 and std.mem.indexOf(u8, pathspec, "**") != null) {
+        const flags_no_path = flags & ~wildmatch_mod.WM_PATHNAME;
+        if (wildmatch_mod.wildmatch(pathspec, path, flags_no_path) == wildmatch_mod.WM_MATCH) return true;
+    }
+
     return false;
 }
 
