@@ -9069,6 +9069,7 @@ fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var batch_mode = false;
     var batch_check = false;
     var batch_all = false;
+    var batch_format: ?[]const u8 = null;
     var follow_symlinks = false;
     var textconv = false;
     var filters = false;
@@ -9085,10 +9086,16 @@ fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             show_pretty = true;
         } else if (std.mem.eql(u8, arg, "-e")) {
             show_exists = true;
-        } else if (std.mem.eql(u8, arg, "--batch") or std.mem.startsWith(u8, arg, "--batch=")) {
+        } else if (std.mem.eql(u8, arg, "--batch")) {
             batch_mode = true;
-        } else if (std.mem.eql(u8, arg, "--batch-check") or std.mem.startsWith(u8, arg, "--batch-check=")) {
+        } else if (std.mem.startsWith(u8, arg, "--batch=")) {
+            batch_mode = true;
+            batch_format = arg["--batch=".len..];
+        } else if (std.mem.eql(u8, arg, "--batch-check")) {
             batch_check = true;
+        } else if (std.mem.startsWith(u8, arg, "--batch-check=")) {
+            batch_check = true;
+            batch_format = arg["--batch-check=".len..];
         } else if (std.mem.eql(u8, arg, "--batch-all-objects")) {
             batch_all = true;
         } else if (std.mem.eql(u8, arg, "--follow-symlinks")) {
@@ -9171,7 +9178,7 @@ fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
 
     if (batch_mode or batch_check) {
         // Batch mode: read object names from stdin
-        try catFileBatch(allocator, git_path, batch_mode, platform_impl);
+        try catFileBatch(allocator, git_path, batch_mode, batch_format, platform_impl);
         return;
     }
 
@@ -9274,7 +9281,7 @@ fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     }
 }
 
-fn catFileBatch(allocator: std.mem.Allocator, git_path: []const u8, full_content: bool, platform_impl: *const platform_mod.Platform) !void {
+fn catFileBatch(allocator: std.mem.Allocator, git_path: []const u8, full_content: bool, format: ?[]const u8, platform_impl: *const platform_mod.Platform) !void {
     const stdin_data = readStdin(allocator, 10 * 1024 * 1024) catch return;
     defer allocator.free(stdin_data);
     
@@ -9316,8 +9323,44 @@ fn catFileBatch(allocator: std.mem.Allocator, git_path: []const u8, full_content
             .commit => "commit",
             .tag => "tag",
         };
-        
-        if (full_content) {
+
+        if (format) |fmt| {
+            // Apply format string with %(field) substitution
+            var output = std.array_list.Managed(u8).init(allocator);
+            defer output.deinit();
+            var fi: usize = 0;
+            while (fi < fmt.len) {
+                if (fi + 1 < fmt.len and fmt[fi] == '%' and fmt[fi + 1] == '(') {
+                    const end = std.mem.indexOfPos(u8, fmt, fi + 2, ")") orelse {
+                        output.append(fmt[fi]) catch break;
+                        fi += 1;
+                        continue;
+                    };
+                    const field = fmt[fi + 2 .. end];
+                    if (std.mem.eql(u8, field, "objectname")) {
+                        output.appendSlice(obj_hash) catch break;
+                    } else if (std.mem.eql(u8, field, "objecttype")) {
+                        output.appendSlice(type_str) catch break;
+                    } else if (std.mem.eql(u8, field, "objectsize")) {
+                        const sz = std.fmt.allocPrint(allocator, "{d}", .{git_object.data.len}) catch break;
+                        defer allocator.free(sz);
+                        output.appendSlice(sz) catch break;
+                    } else if (std.mem.eql(u8, field, "rest")) {
+                        // rest of input after object name
+                    }
+                    fi = end + 1;
+                } else {
+                    output.append(fmt[fi]) catch break;
+                    fi += 1;
+                }
+            }
+            output.append('\n') catch {};
+            try platform_impl.writeStdout(output.items);
+            if (full_content) {
+                try platform_impl.writeStdout(git_object.data);
+                try platform_impl.writeStdout("\n");
+            }
+        } else if (full_content) {
             const header = try std.fmt.allocPrint(allocator, "{s} {s} {d}\n", .{ obj_hash, type_str, git_object.data.len });
             defer allocator.free(header);
             try platform_impl.writeStdout(header);
@@ -15584,11 +15627,14 @@ fn nativeCmdIndexPack(allocator: std.mem.Allocator, args: [][]const u8, command_
             if (i < args.len) output_path = args[i];
         } else if (std.mem.eql(u8, arg, "--strict") or std.mem.eql(u8, arg, "--fsck-objects")) {
             strict = true;
+        } else if (std.mem.startsWith(u8, arg, "--keep")) {
+            // --keep or --keep=<msg>: create .keep file
         } else if (std.mem.startsWith(u8, arg, "--index-version=") or
             std.mem.eql(u8, arg, "--fix-thin") or
             std.mem.eql(u8, arg, "--check-self-contained-and-connected") or
             std.mem.startsWith(u8, arg, "--threads=") or
-            std.mem.startsWith(u8, arg, "--max-input-size="))
+            std.mem.startsWith(u8, arg, "--max-input-size=") or
+            std.mem.startsWith(u8, arg, "--object-format="))
         {
             // Accepted flags
         } else if (std.mem.eql(u8, arg, "-h")) {
@@ -15608,7 +15654,11 @@ fn nativeCmdIndexPack(allocator: std.mem.Allocator, args: [][]const u8, command_
     var should_free_pack = false;
 
     if (stdin_mode) {
-        const git_dir = findGitDir() catch ".git";
+        const git_dir = findGitDir() catch {
+            try platform_impl.writeStderr("fatal: --stdin requires a git repository\n");
+            std.process.exit(128);
+            unreachable;
+        };
         const stdin = std.fs.File.stdin();
         pack_data = stdin.readToEndAlloc(allocator, 4 * 1024 * 1024 * 1024) catch {
             try platform_impl.writeStderr("fatal: error reading pack from stdin\n");
@@ -15680,6 +15730,28 @@ fn nativeCmdIndexPack(allocator: std.mem.Allocator, args: [][]const u8, command_
         defer if (output_path == null) allocator.free(idx_path);
 
         try generatePackIdxToFile(allocator, pack_data, idx_path);
+
+        // Create .keep file if --keep was specified
+        {
+            var ki = command_index + 1;
+            while (ki < args.len) : (ki += 1) {
+                if (std.mem.startsWith(u8, args[ki], "--keep")) {
+                    const keep_msg = if (std.mem.startsWith(u8, args[ki], "--keep="))
+                        args[ki]["--keep=".len..]
+                    else
+                        "";
+                    const keep_path = if (std.mem.endsWith(u8, pf, ".pack"))
+                        try std.fmt.allocPrint(allocator, "{s}keep", .{pf[0 .. pf.len - 4]})
+                    else
+                        try std.fmt.allocPrint(allocator, "{s}.keep", .{pf});
+                    defer allocator.free(keep_path);
+                    const keep_content = try std.fmt.allocPrint(allocator, "{s}\n", .{keep_msg});
+                    defer allocator.free(keep_content);
+                    std.fs.cwd().writeFile(.{ .sub_path = keep_path, .data = keep_content }) catch {};
+                    break;
+                }
+            }
+        }
     }
 
     if (should_free_pack) {
