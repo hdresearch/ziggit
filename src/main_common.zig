@@ -2482,6 +2482,18 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             else
                 try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd, file_path });
             defer allocator.free(full_file_path);
+            
+            // Convert to path relative to repo root
+            const repo_root_for_rel = std.fs.path.dirname(git_path) orelse ".";
+            const real_full = std.fs.cwd().realpathAlloc(allocator, full_file_path) catch try allocator.dupe(u8, full_file_path);
+            defer allocator.free(real_full);
+            const real_root = std.fs.cwd().realpathAlloc(allocator, repo_root_for_rel) catch try allocator.dupe(u8, repo_root_for_rel);
+            defer allocator.free(real_root);
+            // Compute relative path from repo root
+            const relative_file_path = if (std.mem.startsWith(u8, real_full, real_root) and real_full.len > real_root.len and real_full[real_root.len] == '/')
+                real_full[real_root.len + 1 ..]
+            else
+                file_path;
 
             // Check if path exists (including broken symlinks)
             const path_exists = blk: {
@@ -2500,16 +2512,16 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             // Check if it's a directory or file
             const metadata = std.fs.cwd().statFile(full_file_path) catch {
                 // If we can't stat it (e.g. broken symlink), try to add it
-                try addSingleFile(allocator, file_path, full_file_path, &index, git_path, platform_impl, cwd);
+                try addSingleFile(allocator, relative_file_path, full_file_path, &index, git_path, platform_impl, repo_root_for_rel);
                 continue;
             };
 
             if (metadata.kind == .directory) {
                 // Add directory recursively
-                try addDirectoryRecursively(allocator, cwd, file_path, &index, git_path, platform_impl);
+                try addDirectoryRecursively(allocator, repo_root_for_rel, relative_file_path, &index, git_path, platform_impl);
             } else {
                 // Add single file
-                try addSingleFile(allocator, file_path, full_file_path, &index, git_path, platform_impl, cwd);
+                try addSingleFile(allocator, relative_file_path, full_file_path, &index, git_path, platform_impl, repo_root_for_rel);
             }
         }
     }
