@@ -287,7 +287,23 @@ pub fn getRef(git_dir: []const u8, ref_name: []const u8, platform_impl: anytype,
 }
 
 pub fn updateRef(git_dir: []const u8, ref_name: []const u8, hash: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !void {
-    const ref_path = if (std.mem.startsWith(u8, ref_name, "refs/"))
+    // Handle HEAD specially: dereference the symbolic ref and update the target
+    const ref_path = if (std.mem.eql(u8, ref_name, "HEAD")) blk: {
+        const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir});
+        defer allocator.free(head_path);
+        const head_content = platform_impl.fs.readFile(allocator, head_path) catch {
+            // HEAD doesn't exist, write directly
+            break :blk try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir});
+        };
+        defer allocator.free(head_content);
+        const trimmed = std.mem.trim(u8, head_content, " \t\n\r");
+        if (std.mem.startsWith(u8, trimmed, "ref: ")) {
+            const target_ref = trimmed[5..];
+            break :blk try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, target_ref });
+        }
+        // HEAD is detached, write directly to HEAD
+        break :blk try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir});
+    } else if (std.mem.startsWith(u8, ref_name, "refs/"))
         try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_name })
     else
         try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_dir, ref_name });
