@@ -46,7 +46,7 @@ pub const DiffHunk = struct {
     old_count: u32,
     new_start: u32,
     new_count: u32,
-    lines: std.array_list.Managed(DiffLine),
+    lines: std.ArrayList(DiffLine),
 
     pub fn init(allocator: std.mem.Allocator) DiffHunk {
         return DiffHunk{
@@ -54,7 +54,7 @@ pub const DiffHunk = struct {
             .old_count = 0,
             .new_start = 0,
             .new_count = 0,
-            .lines = std.array_list.Managed(DiffLine).init(allocator),
+            .lines = std.ArrayList(DiffLine).init(allocator),
         };
     }
 
@@ -96,10 +96,10 @@ pub fn generateUnifiedDiff(old_content: []const u8, new_content: []const u8, fil
 }
 
 pub fn generateUnifiedDiffWithHashes(old_content: []const u8, new_content: []const u8, file_path: []const u8, old_hash: []const u8, new_hash: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    var old_lines = std.array_list.Managed([]const u8).init(allocator);
+    var old_lines = std.ArrayList([]const u8).init(allocator);
     defer old_lines.deinit();
     
-    var new_lines = std.array_list.Managed([]const u8).init(allocator);
+    var new_lines = std.ArrayList([]const u8).init(allocator);
     defer new_lines.deinit();
     
     // Split content into lines, preserving empty lines
@@ -114,7 +114,7 @@ pub fn generateUnifiedDiffWithHashes(old_content: []const u8, new_content: []con
     }
     
     // Generate diff using improved Myers algorithm
-    var hunks = std.array_list.Managed(DiffHunk).init(allocator);
+    var hunks = std.ArrayList(DiffHunk).init(allocator);
     defer {
         for (hunks.items) |*hunk| {
             hunk.deinit(allocator);
@@ -130,7 +130,7 @@ pub fn generateUnifiedDiffWithHashes(old_content: []const u8, new_content: []con
     }
     
     // Generate unified diff output
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
     
     const writer = result.writer();
@@ -158,7 +158,7 @@ pub fn generateUnifiedDiffWithHashes(old_content: []const u8, new_content: []con
     return try result.toOwnedSlice();
 }
 
-fn generateDiffHunks(old_lines: []const []const u8, new_lines: []const []const u8, hunks: *std.array_list.Managed(DiffHunk), allocator: std.mem.Allocator) !void {
+fn generateDiffHunks(old_lines: []const []const u8, new_lines: []const []const u8, hunks: *std.ArrayList(DiffHunk), allocator: std.mem.Allocator) !void {
     if (old_lines.len == 0 and new_lines.len == 0) return;
     
     // Use Myers diff algorithm to find the longest common subsequence
@@ -173,7 +173,7 @@ fn generateDiffHunks(old_lines: []const []const u8, new_lines: []const []const u
     try generateHunksFromEdits(old_lines, new_lines, edits.items, hunks, allocator);
 }
 
-fn findLCS(old_lines: []const []const u8, new_lines: []const []const u8, allocator: std.mem.Allocator) !std.array_list.Managed(usize) {
+fn findLCS(old_lines: []const []const u8, new_lines: []const []const u8, allocator: std.mem.Allocator) !std.ArrayList(usize) {
     const m = old_lines.len;
     const n = new_lines.len;
     
@@ -203,7 +203,7 @@ fn findLCS(old_lines: []const []const u8, new_lines: []const []const u8, allocat
     }
     
     // Backtrack to find LCS
-    var lcs = std.array_list.Managed(usize).init(allocator);
+    var lcs = std.ArrayList(usize).init(allocator);
     var i: usize = m;
     var j: usize = n;
     
@@ -222,8 +222,8 @@ fn findLCS(old_lines: []const []const u8, new_lines: []const []const u8, allocat
     return lcs;
 }
 
-fn generateEditScript(old_lines: []const []const u8, new_lines: []const []const u8, lcs: []const usize, allocator: std.mem.Allocator) !std.array_list.Managed(Edit) {
-    var edits = std.array_list.Managed(Edit).init(allocator);
+fn generateEditScript(old_lines: []const []const u8, new_lines: []const []const u8, lcs: []const usize, allocator: std.mem.Allocator) !std.ArrayList(Edit) {
+    var edits = std.ArrayList(Edit).init(allocator);
     
     var old_idx: usize = 0;
     var new_idx: usize = 0;
@@ -256,7 +256,7 @@ fn generateEditScript(old_lines: []const []const u8, new_lines: []const []const 
     return edits;
 }
 
-fn generateHunksFromEdits(old_lines: []const []const u8, new_lines: []const []const u8, edits: []const Edit, hunks: *std.array_list.Managed(DiffHunk), allocator: std.mem.Allocator) !void {
+fn generateHunksFromEdits(old_lines: []const []const u8, new_lines: []const []const u8, edits: []const Edit, hunks: *std.ArrayList(DiffHunk), allocator: std.mem.Allocator) !void {
     if (edits.len == 0) return;
     
     const context_lines = 3;
@@ -338,10 +338,10 @@ pub fn generateUnifiedDiffWithOptions(
     options: DiffOptions,
     allocator: std.mem.Allocator
 ) !struct { diff: []u8, stats: DiffStats } {
-    var old_lines = std.array_list.Managed([]const u8).init(allocator);
+    var old_lines = std.ArrayList([]const u8).init(allocator);
     defer old_lines.deinit();
     
-    var new_lines = std.array_list.Managed([]const u8).init(allocator);
+    var new_lines = std.ArrayList([]const u8).init(allocator);
     defer new_lines.deinit();
     
     // Preprocess content based on options
@@ -377,7 +377,7 @@ pub fn generateUnifiedDiffWithOptions(
     }
     
     // Generate diff hunks
-    var hunks = std.array_list.Managed(DiffHunk).init(allocator);
+    var hunks = std.ArrayList(DiffHunk).init(allocator);
     defer {
         for (hunks.items) |*hunk| {
             hunk.deinit(allocator);
@@ -405,7 +405,7 @@ pub fn generateUnifiedDiffWithOptions(
     }
     
     // Generate unified diff output
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
     
     const writer = result.writer();
@@ -436,7 +436,7 @@ pub fn generateUnifiedDiffWithOptions(
 fn generateDiffHunksWithOptions(
     old_lines: []const []const u8, 
     new_lines: []const []const u8, 
-    hunks: *std.array_list.Managed(DiffHunk), 
+    hunks: *std.ArrayList(DiffHunk), 
     options: DiffOptions,
     allocator: std.mem.Allocator
 ) !void {
@@ -459,7 +459,7 @@ fn findLCSWithOptions(
     new_lines: []const []const u8, 
     options: DiffOptions,
     allocator: std.mem.Allocator
-) !std.array_list.Managed(usize) {
+) !std.ArrayList(usize) {
     const m = old_lines.len;
     const n = new_lines.len;
     
@@ -489,7 +489,7 @@ fn findLCSWithOptions(
     }
     
     // Backtrack to find LCS
-    var lcs = std.array_list.Managed(usize).init(allocator);
+    var lcs = std.ArrayList(usize).init(allocator);
     var i: usize = m;
     var j: usize = n;
     
@@ -512,7 +512,7 @@ fn generateHunksFromEditsWithOptions(
     old_lines: []const []const u8, 
     new_lines: []const []const u8, 
     edits: []const Edit, 
-    hunks: *std.array_list.Managed(DiffHunk), 
+    hunks: *std.ArrayList(DiffHunk), 
     options: DiffOptions,
     allocator: std.mem.Allocator
 ) !void {
@@ -642,7 +642,7 @@ pub fn isBinary(content: []const u8) bool {
 
 /// Generate summary diff for binary files
 pub fn generateBinaryDiff(old_size: usize, new_size: usize, file_path: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
     
     const writer = result.writer();
@@ -658,9 +658,9 @@ pub fn generateBinaryDiff(old_size: usize, new_size: usize, file_path: []const u
 
 /// Generate word-level diff within a line
 pub fn generateWordDiff(old_line: []const u8, new_line: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    var old_words = std.array_list.Managed([]const u8).init(allocator);
+    var old_words = std.ArrayList([]const u8).init(allocator);
     defer old_words.deinit();
-    var new_words = std.array_list.Managed([]const u8).init(allocator);
+    var new_words = std.ArrayList([]const u8).init(allocator);
     defer new_words.deinit();
     
     // Split lines into words
@@ -683,7 +683,7 @@ pub fn generateWordDiff(old_line: []const u8, new_line: []const u8, allocator: s
     defer edits.deinit();
     
     // Build result with markup
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
     
     for (edits.items) |edit| {
@@ -710,7 +710,7 @@ pub fn generateWordDiff(old_line: []const u8, new_line: []const u8, allocator: s
 
 /// Apply a unified diff to content (simple implementation)
 pub fn applyDiff(original: []const u8, diff_content: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    var lines = std.array_list.Managed([]const u8).init(allocator);
+    var lines = std.ArrayList([]const u8).init(allocator);
     defer lines.deinit();
     
     // Split original content into lines
