@@ -2526,13 +2526,6 @@ const RegexEngine = struct {
     }
 
     fn matchAt(self: *RegexEngine, text: []const u8, start: usize) ?usize {
-        // NFA simulation using Thompson's algorithm
-        const State = struct {
-            pc: usize,
-            pos: usize,
-        };
-
-        // Use a simple recursive approach with memoization
         return self.nfaMatch(text, start, 0);
     }
 
@@ -2553,10 +2546,7 @@ const RegexEngine = struct {
             },
             .char_class => |cc| {
                 if (pos >= text.len) return null;
-                var tc = text[pos];
-                if (self.case_insensitive and !cc.negated) {
-                    // char class already expanded for case insensitive
-                }
+                const tc = text[pos];
                 if (cc.matches(tc)) {
                     return self.nfaMatch(text, pos + 1, pc + 1);
                 }
