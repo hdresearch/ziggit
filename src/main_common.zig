@@ -6509,7 +6509,7 @@ fn performThreeWayFileMerge(git_path: []const u8, base_files: *std.StringHashMap
                 try writeFileFromBlob(git_path, filename, current_hash.?, repo_root, allocator, platform_impl);
             } else if (base_hash != null) {
                 // Both sides modified - try content-level 3-way merge
-                const base_content = loadBlobForMerge(git_path, base_hash, allocator, platform_impl);
+                const base_content = loadBlobForMerge(git_path, base_hash.?, allocator, platform_impl);
                 defer if (base_content.len > 0) allocator.free(base_content);
                 const current_content = loadBlobForMerge(git_path, current_hash.?, allocator, platform_impl);
                 defer if (current_content.len > 0) allocator.free(current_content);
