@@ -13687,7 +13687,7 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     defer idx.deinit();
 
     const zero_oid = "0000000000000000000000000000000000000000";
-    var has_diff = false;
+    
 
     for (idx.entries.items) |entry| {
         // Build full path from repo root
@@ -13724,7 +13724,7 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                 defer allocator.free(line);
                 try platform_impl.writeStdout(line);
             }
-            has_diff = true;
+            
             continue;
         }
 
@@ -13797,13 +13797,11 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                 defer allocator.free(line);
                 try platform_impl.writeStdout(line);
             }
-            has_diff = true;
+            
         }
     }
 
-    if (has_diff) {
-        std.process.exit(1);
-    }
+    // diff-files is a plumbing command - always exit 0 unless --exit-code is used
 }
 
 // =============================================================================
