@@ -107,7 +107,7 @@ const NATIVE_COMMANDS = [_][]const u8{
     "verify-commit", "verify-tag", "mv", "stash", "apply",
     "column", "check-ignore", "check-attr",
     "switch", "restore", "worktree", "stripspace", "checkout-index",
-    "show-branch", "blame", "annotate", "ls-remote", "upload-pack", "receive-pack", "send-pack",
+    "show-branch", "blame", "annotate", "ls-remote", "upload-pack", "receive-pack", "send-pack", "check-ref-format",
 };
 
 fn isNativeCommand(command: []const u8) bool {
@@ -692,6 +692,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         defer allocator.free(emsg);
         try platform_impl.writeStderr(emsg);
         std.process.exit(128);
+    } else if (std.mem.eql(u8, command, "check-ref-format")) {
+        try cmdCheckRefFormat(allocator, &args_iter, &platform_impl);
     }
 }
 
@@ -23159,23 +23161,7 @@ fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8, tr
 
 const TreeEntryInfo = struct { mode: u32, hash: [20]u8 };
 
-fn checkRefFormatValid_crf(refname: []const u8, allow_onelevel: bool, refspec_pattern: bool, normalize: bool) bool {
-    _ = allow_onelevel;
-    _ = refspec_pattern;
-    _ = normalize;
-    if (refname.len == 0) return false;
-    // Basic validation: no double dots, no spaces, no control chars
-    for (refname) |ch| {
-        if (ch < 0x20 or ch == 0x7f or ch == ' ' or ch == '~' or ch == '^' or ch == ':' or ch == '\\') return false;
-    }
-    if (std.mem.indexOf(u8, refname, "..") != null) return false;
-    if (std.mem.indexOf(u8, refname, "/.") != null) return false;
-    if (std.mem.indexOf(u8, refname, "@{") != null) return false;
-    if (refname[refname.len - 1] == '.') return false;
-    if (refname[refname.len - 1] == '/') return false;
-    if (std.mem.endsWith(u8, refname, ".lock")) return false;
-    return true;
-}
+// checkRefFormatValid_crf is at end of file
 
 fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
     const allocator = std.heap.page_allocator;
@@ -26185,4 +26171,83 @@ fn readRefDirect(git_dir: []const u8, ref_name: []const u8, allocator: std.mem.A
         return null;
     }
     return null;
+}
+
+fn cmdCheckRefFormat(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    var allow_onelevel = false;
+    var refspec_pattern = false;
+    var normalize = false;
+    var no_allow_onelevel = false;
+    var branch_mode = false;
+    var refname: ?[]const u8 = null;
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--allow-onelevel")) { allow_onelevel = true; }
+        else if (std.mem.eql(u8, arg, "--no-allow-onelevel")) { no_allow_onelevel = true; }
+        else if (std.mem.eql(u8, arg, "--refspec-pattern")) { refspec_pattern = true; }
+        else if (std.mem.eql(u8, arg, "--normalize")) { normalize = true; }
+        else if (std.mem.eql(u8, arg, "--branch")) { branch_mode = true; }
+        else if (std.mem.eql(u8, arg, "--print")) { normalize = true; }
+        else if (arg.len > 0 and arg[0] != '-') { if (refname == null) refname = arg; }
+    }
+    if (branch_mode) {
+        const name = refname orelse { std.process.exit(128); unreachable; };
+        if (name.len > 2 and name[0] == '@' and name[1] == '{' and name[name.len - 1] == '}') {
+            try platform_impl.writeStderr("fatal: no previous branch\n"); std.process.exit(128); unreachable;
+        }
+        if (name.len > 0 and name[0] == '-') {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' is not a valid branch name\n", .{name});
+            defer allocator.free(msg); try platform_impl.writeStderr(msg); std.process.exit(128); unreachable;
+        }
+        const output = try std.fmt.allocPrint(allocator, "{s}\n", .{name});
+        defer allocator.free(output); try platform_impl.writeStdout(output); return;
+    }
+    const name = refname orelse { std.process.exit(1); unreachable; };
+    if (normalize) {
+        const nrm = normalizeRefName_crf(allocator, name, allow_onelevel, refspec_pattern) catch { std.process.exit(1); unreachable; };
+        defer allocator.free(nrm);
+        const output = try std.fmt.allocPrint(allocator, "{s}\n", .{nrm});
+        defer allocator.free(output); try platform_impl.writeStdout(output); return;
+    }
+    if (!checkRefFormatValid_crf(name, allow_onelevel, no_allow_onelevel, refspec_pattern)) { std.process.exit(1); unreachable; }
+}
+
+fn normalizeRefName_crf(allocator: std.mem.Allocator, name: []const u8, allow_onelevel: bool, refspec_pattern: bool) ![]u8 {
+    if (name.len == 0) return error.InvalidRefName;
+    var buf: [4096]u8 = undefined;
+    var pos: usize = 0;
+    var prev_slash = true;
+    for (name) |ch| {
+        if (ch == '/') { if (!prev_slash) { if (pos >= buf.len) return error.InvalidRefName; buf[pos] = '/'; pos += 1; } prev_slash = true; }
+        else { prev_slash = false; if (pos >= buf.len) return error.InvalidRefName; buf[pos] = ch; pos += 1; }
+    }
+    while (pos > 0 and buf[pos - 1] == '/') pos -= 1;
+    if (pos == 0) return error.InvalidRefName;
+    if (!checkRefFormatValid_crf(buf[0..pos], allow_onelevel, false, refspec_pattern)) return error.InvalidRefName;
+    return try allocator.dupe(u8, buf[0..pos]);
+}
+
+fn checkRefFormatValid_crf(name: []const u8, allow_onelevel: bool, no_allow_onelevel: bool, refspec_pattern: bool) bool {
+    if (name.len == 0) return false;
+    if (name.len == 1 and name[0] == '/') return false;
+    const has_slash = std.mem.indexOfScalar(u8, name, '/') != null;
+    if (!has_slash and !allow_onelevel) return false;
+    if (!has_slash and no_allow_onelevel) return false;
+    var star_count: usize = 0;
+    var it = std.mem.splitScalar(u8, name, '/');
+    while (it.next()) |component| {
+        if (component.len == 0) return false;
+        if (component[0] == '.') return false;
+        if (std.mem.endsWith(u8, component, ".lock")) return false;
+        for (component, 0..) |ch, ci| {
+            if (ch < 0x20 or ch == 0x7f) return false;
+            if (ch == ' ' or ch == '~' or ch == '^' or ch == ':' or ch == '[' or ch == '\\') return false;
+            if (ch == '?') return false;
+            if (ch == '*') { if (!refspec_pattern) return false; star_count += 1; if (star_count > 1) return false; }
+            if (ch == '@' and ci + 1 < component.len and component[ci + 1] == '{') return false;
+        }
+        if (std.mem.indexOf(u8, component, "..") != null) return false;
+    }
+    if (name[name.len - 1] == '/') return false;
+    if (name[name.len - 1] == '.') return false;
+    return true;
 }
