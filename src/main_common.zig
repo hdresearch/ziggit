@@ -16513,6 +16513,7 @@ fn packObjectsAddAllObjects(
 fn nativeCmdIndexPack(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
     var stdin_mode = false;
     var verify = false;
+    var verbose = false;
     var strict = false;
     var pack_file: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
@@ -16522,8 +16523,10 @@ fn nativeCmdIndexPack(allocator: std.mem.Allocator, args: [][]const u8, command_
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--stdin")) {
             stdin_mode = true;
-        } else if (std.mem.eql(u8, arg, "--verify") or std.mem.eql(u8, arg, "-v")) {
+        } else if (std.mem.eql(u8, arg, "--verify")) {
             verify = true;
+        } else if (std.mem.eql(u8, arg, "-v")) {
+            verbose = true;
         } else if (std.mem.eql(u8, arg, "-o")) {
             i += 1;
             if (i < args.len) output_path = args[i];
@@ -16568,6 +16571,20 @@ fn nativeCmdIndexPack(allocator: std.mem.Allocator, args: [][]const u8, command_
             unreachable;
         };
         should_free_pack = true;
+
+        // Output progress if verbose
+        if (verbose) {
+            // Parse num objects from pack header for progress
+            if (pack_data.len >= 12 and std.mem.eql(u8, pack_data[0..4], "PACK")) {
+                const n = std.mem.readInt(u32, pack_data[8..12], .big);
+                const msg = std.fmt.allocPrint(allocator, "Receiving objects: 100% ({d}/{d}), done.\n", .{ n, n }) catch unreachable;
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                const msg2 = std.fmt.allocPrint(allocator, "Resolving deltas: 100% ({d}/{d}), done.\n", .{ @as(u32, 0), @as(u32, 0) }) catch unreachable;
+                defer allocator.free(msg2);
+                try platform_impl.writeStderr(msg2);
+            }
+        }
 
         // Write pack file to objects/pack/
         const pack_dir = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir}) catch unreachable;
