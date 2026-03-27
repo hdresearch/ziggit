@@ -4111,9 +4111,17 @@ fn cmdMerge(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     var branch_to_merge: ?[]const u8 = null;
     var squash = false;
     var no_commit = false;
+    var strategy: ?[]const u8 = null;
 
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "-m")) {
+        if (std.mem.eql(u8, arg, "-s")) {
+            strategy = args.next();
+        } else if (std.mem.startsWith(u8, arg, "--strategy=")) {
+            strategy = arg["--strategy=".len..];
+        } else if (std.mem.eql(u8, arg, "-X") or std.mem.startsWith(u8, arg, "--strategy-option")) {
+            // Skip strategy options
+            if (std.mem.eql(u8, arg, "-X")) _ = args.next();
+        } else if (std.mem.eql(u8, arg, "-m")) {
             merge_message = args.next() orelse {
                 try platform_impl.writeStderr("fatal: option '-m' requires a value\n");
                 std.process.exit(128);
@@ -4209,6 +4217,35 @@ fn cmdMerge(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     // Check if already up to date (target is ancestor of current)
     if (std.mem.eql(u8, current_hash, target_hash) or (isAncestor(git_path, target_hash, current_hash, allocator, platform_impl) catch false)) {
         try platform_impl.writeStdout("Already up to date.\n");
+        return;
+    }
+
+    // Handle -s ours strategy: keep our tree, create merge commit
+    if (strategy != null and std.mem.eql(u8, strategy.?, "ours")) {
+        const current_obj = objects.GitObject.load(current_hash, git_path, platform_impl, allocator) catch {
+            try platform_impl.writeStderr("fatal: unable to read current commit\n");
+            std.process.exit(1);
+        };
+        defer current_obj.deinit(allocator);
+        const our_tree = extractHeaderField(current_obj.data, "tree");
+        if (our_tree.len == 0) {
+            try platform_impl.writeStderr("fatal: unable to find tree\n");
+            std.process.exit(1);
+        }
+        const actual_msg = merge_message orelse
+            try std.fmt.allocPrint(allocator, "Merge branch '{s}'", .{merge_target});
+        defer if (merge_message == null) allocator.free(actual_msg);
+        const author_str = getAuthorString(allocator) catch try allocator.dupe(u8, "Unknown <unknown@unknown>");
+        defer allocator.free(author_str);
+        const committer_str = getCommitterString(allocator) catch try allocator.dupe(u8, "Unknown <unknown@unknown>");
+        defer allocator.free(committer_str);
+        const parents = [_][]const u8{ current_hash, target_hash };
+        const commit_obj = try objects.createCommitObject(our_tree, &parents, author_str, committer_str, actual_msg, allocator);
+        defer commit_obj.deinit(allocator);
+        const new_hash = try commit_obj.store(git_path, platform_impl, allocator);
+        defer allocator.free(new_hash);
+        try refs.updateRef(git_path, current_branch, new_hash, platform_impl, allocator);
+        try platform_impl.writeStdout("Merge made by the 'ours' strategy.\n");
         return;
     }
 
