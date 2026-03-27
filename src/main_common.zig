@@ -3285,16 +3285,12 @@ fn showStagedDiff(index: *const index_mod.Index, git_path: []const u8, platform_
             try platform_impl.writeStdout(diff_output);
         }
     } else {
-        // Compare index entries against HEAD tree
-        // Get the tree from HEAD commit
-        const head_tree = getHeadTree(git_path, current_commit.?, platform_impl, allocator) catch null;
-        
         for (index.entries.items) |entry| {
             const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
             defer allocator.free(index_hash);
             
             // Check if this file exists in HEAD tree with same hash
-            const head_hash = if (head_tree) |ht| getTreeEntryHash(ht, entry.path, git_path, platform_impl, allocator) catch null else null;
+            const head_hash = getTreeEntryHashFromCommit(git_path, current_commit.?, entry.path, allocator) catch null;
             defer if (head_hash) |hh| allocator.free(hh);
             
             const is_same = if (head_hash) |hh| std.mem.eql(u8, index_hash, hh) else false;
@@ -3324,31 +3320,76 @@ fn showStagedDiff(index: *const index_mod.Index, git_path: []const u8, platform_
     return has_diff;
 }
 
-fn getHeadTree(git_path: []const u8, commit_hash: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]const u8 {
-    _ = platform_impl;
-    // Read commit object to get tree hash
+fn readGitObjectContent(git_path: []const u8, hex_hash: []const u8, allocator: std.mem.Allocator) ![]u8 {
     const objects_dir = try std.fmt.allocPrint(allocator, "{s}/objects", .{git_path});
     defer allocator.free(objects_dir);
-    // Convert hex hash to bytes
     var hash_bytes: [20]u8 = undefined;
-    _ = std.fmt.hexToBytes(&hash_bytes, commit_hash) catch return error.InvalidHash;
-    const obj = objects.readObject(allocator, objects_dir, &hash_bytes) catch return error.ObjectNotFound;
-    defer allocator.free(obj);
-    // Parse "tree <hash>\n" from commit object
-    if (std.mem.startsWith(u8, obj, "tree ")) {
-        const newline = std.mem.indexOf(u8, obj, "\n") orelse return error.InvalidCommit;
-        return try allocator.dupe(u8, obj[5..newline]);
+    _ = std.fmt.hexToBytes(&hash_bytes, hex_hash) catch return error.InvalidHash;
+    const raw = objects.readObject(allocator, objects_dir, &hash_bytes) catch return error.ObjectNotFound;
+    defer allocator.free(raw);
+    // Skip the header "type size\0"
+    if (std.mem.indexOf(u8, raw, "\x00")) |null_pos| {
+        return try allocator.dupe(u8, raw[null_pos + 1 ..]);
     }
-    return error.InvalidCommit;
+    return try allocator.dupe(u8, raw);
 }
 
-fn getTreeEntryHash(tree_hash: []const u8, path: []const u8, git_path: []const u8, _platform_impl: *const platform_mod.Platform, _allocator: std.mem.Allocator) ![]u8 {
-    _ = _platform_impl;
-    _ = _allocator;
-    _ = git_path;
-    _ = tree_hash;
-    _ = path;
-    return error.NotImplemented;
+fn getTreeEntryHashFromCommit(git_path: []const u8, commit_hash: []const u8, file_path: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    // Read the commit to get the tree hash
+    const commit_content = readGitObjectContent(git_path, commit_hash, allocator) catch return error.ObjectNotFound;
+    defer allocator.free(commit_content);
+    
+    // Parse "tree <hash>\n" from commit
+    if (!std.mem.startsWith(u8, commit_content, "tree ")) return error.InvalidCommit;
+    const newline = std.mem.indexOf(u8, commit_content, "\n") orelse return error.InvalidCommit;
+    const tree_hash = commit_content[5..newline];
+    
+    // Now walk the tree to find the entry
+    return getTreeEntryHashByPath(git_path, tree_hash, file_path, allocator);
+}
+
+fn getTreeEntryHashByPath(git_path: []const u8, tree_hash: []const u8, file_path: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    // Read the tree object
+    const tree_content = readGitObjectContent(git_path, tree_hash, allocator) catch return error.ObjectNotFound;
+    defer allocator.free(tree_content);
+    
+    // Split file_path into first component and rest
+    const sep = std.mem.indexOf(u8, file_path, "/");
+    const first_component = if (sep) |s| file_path[0..s] else file_path;
+    const rest = if (sep) |s| file_path[s + 1 ..] else null;
+    
+    // Parse binary tree format: "mode name\0<20-byte-hash>"
+    var pos: usize = 0;
+    while (pos < tree_content.len) {
+        // Find space (between mode and name)
+        const space = std.mem.indexOf(u8, tree_content[pos..], " ") orelse break;
+        pos += space + 1;
+        
+        // Find null byte (end of name)
+        const null_pos = std.mem.indexOf(u8, tree_content[pos..], "\x00") orelse break;
+        const name = tree_content[pos .. pos + null_pos];
+        pos += null_pos + 1;
+        
+        // Read 20-byte hash
+        if (pos + 20 > tree_content.len) break;
+        const entry_hash_bytes = tree_content[pos .. pos + 20];
+        pos += 20;
+        
+        if (std.mem.eql(u8, name, first_component)) {
+            // Convert hash bytes to hex
+            var hex_buf: [40]u8 = undefined;
+            _ = std.fmt.bufPrint(&hex_buf, "{x}", .{entry_hash_bytes[0..20].*}) catch return error.InvalidHash;
+            
+            if (rest) |remaining_path| {
+                // Need to recurse into subtree
+                return getTreeEntryHashByPath(git_path, &hex_buf, remaining_path, allocator);
+            } else {
+                return try allocator.dupe(u8, &hex_buf);
+            }
+        }
+    }
+    
+    return error.EntryNotFound;
 }
 
 fn getIndexedFileContent(entry: index_mod.IndexEntry, allocator: std.mem.Allocator) ![]u8 {
@@ -9484,15 +9525,15 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             defer allocator.free(parsed);
             if (std.mem.indexOfScalar(u8, parsed, ' ')) |sp| {
                 timestamp = std.fmt.parseInt(i64, parsed[0..sp], 10) catch timestamp;
-                tz_str = parsed[sp + 1 ..];
+                // Copy timezone to tz_buf to avoid use-after-free
+                const tz_part = parsed[sp + 1 ..];
+                const copy_len = @min(tz_part.len, tz_buf.len);
+                @memcpy(tz_buf[0..copy_len], tz_part[0..copy_len]);
+                tz_str = tz_buf[0..copy_len];
             } else {
                 timestamp = std.fmt.parseInt(i64, parsed, 10) catch timestamp;
             }
         } else {
-            // Compute local timezone offset
-            const epoch_secs = std.posix.timespec{ .sec = timestamp, .nsec = 0 };
-            const utc_result = std.time.epoch.EpochSeconds{ .secs = @intCast(@as(u64, @intCast(epoch_secs.sec))) };
-            _ = utc_result;
             // Default to +0000 if we can't determine timezone
             _ = std.fmt.bufPrint(&tz_buf, "+0000", .{}) catch {};
             tz_str = tz_buf[0..5];
