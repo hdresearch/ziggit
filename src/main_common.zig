@@ -13186,8 +13186,12 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var all_refs = false;
     var graph = false;
     var no_walk = false;
+    var first_parent = false;
+    var max_age: ?i64 = null;
+    var min_age: ?i64 = null;
     var format_str: ?[]const u8 = null;
     var no_commit_header = false;
+    var not_mode = false;
     var include_refs = std.array_list.Managed([]const u8).init(allocator);
     defer include_refs.deinit();
     var exclude_refs = std.array_list.Managed([]const u8).init(allocator);
@@ -13205,6 +13209,14 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             topo_order = false; // date-order overrides topo
         } else if (std.mem.eql(u8, arg, "--author-date-order")) {
             topo_order = false; // author-date-order overrides topo
+        } else if (std.mem.eql(u8, arg, "--first-parent")) {
+            first_parent = true;
+        } else if (std.mem.startsWith(u8, arg, "--max-age=") or std.mem.startsWith(u8, arg, "--after=") or std.mem.startsWith(u8, arg, "--since=")) {
+            const eq_pos = std.mem.indexOf(u8, arg, "=").?;
+            max_age = std.fmt.parseInt(i64, arg[eq_pos + 1..], 10) catch null;
+        } else if (std.mem.startsWith(u8, arg, "--min-age=") or std.mem.startsWith(u8, arg, "--before=") or std.mem.startsWith(u8, arg, "--until=")) {
+            const eq_pos = std.mem.indexOf(u8, arg, "=").?;
+            min_age = std.fmt.parseInt(i64, arg[eq_pos + 1..], 10) catch null;
         } else if (std.mem.eql(u8, arg, "--objects") or std.mem.eql(u8, arg, "--objects-edge")) {
             show_objects = true;
         } else if (std.mem.eql(u8, arg, "--no-object-names")) {
@@ -13302,8 +13314,9 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 std.process.exit(128);
                 unreachable;
             };
-        } else if (std.mem.startsWith(u8, arg, "--not")) {
-            // Next positional arg is excluded
+        } else if (std.mem.eql(u8, arg, "--not")) {
+            // Toggle: subsequent refs are excluded until next --not
+            not_mode = !not_mode;
         } else if (std.mem.eql(u8, arg, "--")) {
             break; // End of revisions
         } else if (std.mem.startsWith(u8, arg, "--") and arg.len > 2 and std.ascii.isDigit(arg[2])) {
@@ -13344,7 +13357,11 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         } else if (arg.len > 0 and arg[0] == '^') {
             try exclude_refs.append(arg[1..]);
         } else {
-            try include_refs.append(arg);
+            if (not_mode) {
+                try exclude_refs.append(arg);
+            } else {
+                try include_refs.append(arg);
+            }
         }
     }
 
@@ -13488,19 +13505,43 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         var parents_list = std.array_list.Managed([]const u8).init(allocator);
         var commit_ts: i64 = 0;
         var author_ts: i64 = 0;
+        var got_first_parent = false;
         var clines = std.mem.splitSequence(u8, obj.data, "\n");
         while (clines.next()) |line| {
             if (std.mem.startsWith(u8, line, "parent ")) {
                 const parent = line[7..];
                 if (parent.len == 40) {
                     try parents_list.append(try allocator.dupe(u8, parent));
-                    try queue.append(try allocator.dupe(u8, parent));
+                    if (!first_parent or !got_first_parent) {
+                        try queue.append(try allocator.dupe(u8, parent));
+                    }
+                    got_first_parent = true;
                 }
             } else if (std.mem.startsWith(u8, line, "committer ")) {
                 commit_ts = parseTimestampFromLine(line) catch 0;
             } else if (std.mem.startsWith(u8, line, "author ")) {
                 author_ts = parseTimestampFromLine(line) catch 0;
             } else if (line.len == 0) break;
+        }
+
+        // Apply max_age filter (skip commits older than max_age)
+        if (max_age) |ma| {
+            if (commit_ts < ma) {
+                for (parents_list.items) |p| allocator.free(@constCast(p));
+                parents_list.deinit();
+                allocator.free(current);
+                continue;
+            }
+        }
+        // Apply min_age filter (skip commits newer than min_age)
+        if (min_age) |mi| {
+            if (commit_ts > mi) {
+                // Still walk parents but don't include this commit
+                for (parents_list.items) |p| allocator.free(@constCast(p));
+                parents_list.deinit();
+                allocator.free(current);
+                continue;
+            }
         }
 
         try all_commits.append(.{
