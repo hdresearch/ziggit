@@ -539,9 +539,18 @@ pub const Index = struct {
         
         const writer = buffer.writer();
 
+        // Determine version: use v3 if any entry has extended flags
+        var version: u32 = 2;
+        for (self.entries.items) |entry| {
+            if (entry.extended_flags != null) {
+                version = 3;
+                break;
+            }
+        }
+
         // Write header
         try writer.writeAll("DIRC");
-        try writer.writeInt(u32, 2, .big); // Version 2
+        try writer.writeInt(u32, version, .big);
         try writer.writeInt(u32, @intCast(self.entries.items.len), .big);
 
         // Write entries
