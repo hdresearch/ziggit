@@ -8641,30 +8641,30 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                 defer allocator.free(output);
                 try platform_impl.writeStdout(output);
             } else {
-                // For gitdir links (paths that don't end with .git), output as-is
-                // For normal .git dirs, output relative to cwd
-                const is_dotgit = std.mem.endsWith(u8, git_path, "/.git") or std.mem.eql(u8, git_path, ".git");
-                if (is_dotgit) {
-                    const cwd = try platform_impl.fs.getCwd(allocator);
-                    defer allocator.free(cwd);
-                    if (std.mem.startsWith(u8, git_path, cwd) and git_path.len > cwd.len) {
-                        const rel = git_path[cwd.len..];
-                        const trimmed_rel = if (rel.len > 0 and rel[0] == '/') rel[1..] else rel;
-                        if (trimmed_rel.len > 0) {
-                            const output = try std.fmt.allocPrint(allocator, "{s}\n", .{trimmed_rel});
-                            defer allocator.free(output);
-                            try platform_impl.writeStdout(output);
-                        } else {
-                            try platform_impl.writeStdout(".git\n");
-                        }
-                    } else {
-                        const output = try std.fmt.allocPrint(allocator, "{s}\n", .{git_path});
-                        defer allocator.free(output);
-                        try platform_impl.writeStdout(output);
-                    }
+                const cwd = try platform_impl.fs.getCwd(allocator);
+                defer allocator.free(cwd);
+                const real_git = std.fs.cwd().realpathAlloc(allocator, git_path) catch try allocator.dupe(u8, git_path);
+                defer allocator.free(real_git);
+                const real_cwd = std.fs.cwd().realpathAlloc(allocator, cwd) catch try allocator.dupe(u8, cwd);
+                defer allocator.free(real_cwd);
+                
+                // If CWD IS the git dir, output "."
+                if (std.mem.eql(u8, real_cwd, real_git)) {
+                    try platform_impl.writeStdout(".\n");
+                } else if (std.mem.startsWith(u8, real_cwd, real_git) and real_cwd.len > real_git.len and real_cwd[real_git.len] == '/') {
+                    // Inside git dir - output absolute path to git dir
+                    const output = try std.fmt.allocPrint(allocator, "{s}\n", .{real_git});
+                    defer allocator.free(output);
+                    try platform_impl.writeStdout(output);
+                } else if (std.mem.startsWith(u8, real_git, real_cwd) and real_git.len > real_cwd.len and real_git[real_cwd.len] == '/') {
+                    // Git dir is a subdirectory of CWD - output relative path
+                    const rel = real_git[real_cwd.len + 1..];
+                    const output = try std.fmt.allocPrint(allocator, "{s}\n", .{rel});
+                    defer allocator.free(output);
+                    try platform_impl.writeStdout(output);
                 } else {
-                    // Gitdir link target or bare repo - output as-is
-                    const output = try std.fmt.allocPrint(allocator, "{s}\n", .{git_path});
+                    // Output absolute path
+                    const output = try std.fmt.allocPrint(allocator, "{s}\n", .{real_git});
                     defer allocator.free(output);
                     try platform_impl.writeStdout(output);
                 }
