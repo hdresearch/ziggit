@@ -34,7 +34,7 @@ fn ZlibFromSlice(comptime adapter_buf_size: usize) type {
 }
 
 /// Read all decompressed bytes from a Reader into a buffer, chunk by chunk.
-fn readAllFromReader(reader: *std.Io.Reader, chunk_buf: []u8, hasher: ?*std.crypto.hash.Sha1, output: ?*std.ArrayList(u8)) !usize {
+fn readAllFromReader(reader: *std.Io.Reader, chunk_buf: []u8, hasher: ?*std.crypto.hash.Sha1, output: ?*std.array_list.Managed(u8)) !usize {
     var total: usize = 0;
     while (true) {
         var bufs = [_][]u8{chunk_buf};
@@ -106,7 +106,7 @@ pub fn decompressHashAndCapture(
     compressed_data: []const u8,
     git_type: []const u8,
     object_size: usize,
-    output: *std.ArrayList(u8),
+    output: *std.array_list.Managed(u8),
 ) !DecompressHashResult {
     var sha_hasher = std.crypto.hash.Sha1.init(.{});
 
@@ -169,7 +169,7 @@ pub fn hashGitObject(git_type: []const u8, data: []const u8) [20]u8 {
 /// Uses C zlib for performance.
 pub fn decompressInto(
     compressed_data: []const u8,
-    output: *std.ArrayList(u8),
+    output: *std.array_list.Managed(u8),
 ) !struct { decompressed_size: usize, bytes_consumed: usize } {
     // Use zlib streaming
     var stream: c.z_stream = std.mem.zeroes(c.z_stream);
