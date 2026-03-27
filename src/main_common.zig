@@ -8684,12 +8684,16 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
 
     var annotated = false;
     var message: ?[]const u8 = null;
+    var message_from_m = false;
+    var message_from_f = false;
     var tag_name: ?[]const u8 = null;
     var delete_mode = false;
     var list_mode = false;
     var force = false;
     var delete_names = std.array_list.Managed([]const u8).init(allocator);
     defer delete_names.deinit();
+    var list_patterns = std.array_list.Managed([]const u8).init(allocator);
+    defer list_patterns.deinit();
     var target_ref: ?[]const u8 = null;
 
     // Parse arguments
@@ -8700,26 +8704,50 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             delete_mode = true;
         } else if (std.mem.eql(u8, arg, "-l") or std.mem.eql(u8, arg, "--list")) {
             list_mode = true;
+            // -l can be followed by a pattern (same arg or next args)
+            // patterns are collected as positional args below
         } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
             force = true;
         } else if (std.mem.eql(u8, arg, "-m")) {
+            if (message_from_f) {
+                try platform_impl.writeStderr("fatal: only one of -m or -F can be used.\n");
+                std.process.exit(1);
+                unreachable;
+            }
             message = args.next() orelse {
                 try platform_impl.writeStderr("error: option '-m' requires a value\n");
                 std.process.exit(129);
             };
+            message_from_m = true;
             annotated = true;
         } else if (std.mem.eql(u8, arg, "-F")) {
+            if (message_from_m) {
+                try platform_impl.writeStderr("fatal: only one of -m or -F can be used.\n");
+                std.process.exit(1);
+                unreachable;
+            }
             const fname = args.next() orelse {
                 try platform_impl.writeStderr("error: option '-F' requires a value\n");
                 std.process.exit(129);
             };
-            message = std.fs.cwd().readFileAlloc(allocator, fname, 10 * 1024 * 1024) catch {
-                const msg = try std.fmt.allocPrint(allocator, "fatal: could not open '{s}'\n", .{fname});
-                defer allocator.free(msg);
-                try platform_impl.writeStderr(msg);
-                std.process.exit(128);
-                unreachable;
-            };
+            if (std.mem.eql(u8, fname, "-")) {
+                // Read from stdin
+                const stdin = std.fs.File.stdin();
+                message = stdin.readToEndAlloc(allocator, 10 * 1024 * 1024) catch {
+                    try platform_impl.writeStderr("fatal: could not read from stdin\n");
+                    std.process.exit(128);
+                    unreachable;
+                };
+            } else {
+                message = std.fs.cwd().readFileAlloc(allocator, fname, 10 * 1024 * 1024) catch {
+                    const msg = try std.fmt.allocPrint(allocator, "fatal: could not open '{s}'\n", .{fname});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(128);
+                    unreachable;
+                };
+            }
+            message_from_f = true;
             annotated = true;
         } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--sign") or std.mem.eql(u8, arg, "-u")) {
             annotated = true; // GPG signing implies annotated
@@ -8750,6 +8778,8 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             if (delete_mode) {
                 try delete_names.append(arg);
+            } else if (list_mode) {
+                try list_patterns.append(arg);
             } else if (tag_name == null) {
                 tag_name = arg;
             } else if (target_ref == null) {
@@ -8792,8 +8822,17 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     }
 
     if (tag_name == null or list_mode) {
-        // List tags, optionally filtered by pattern
-        const pattern = tag_name; // tag_name is the pattern in list mode
+        // List tags, optionally filtered by patterns
+        // Collect all patterns (from -l args and tag_name if set in list mode)
+        const patterns = if (list_patterns.items.len > 0)
+            list_patterns.items
+        else if (tag_name) |tn|
+            @as([]const []const u8, &[_][]const u8{tn})
+        else
+            @as([]const []const u8, &[_][]const u8{});
+        
+        const has_patterns = patterns.len > 0;
+        
         const tags_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags", .{git_path});
         defer allocator.free(tags_path);
         
@@ -8813,13 +8852,16 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         
         var iterator = tags_dir.iterate();
         while (iterator.next() catch null) |entry| {
-            if (entry.kind == .file) {
-                // Apply pattern filter if present
-                if (pattern) |pat| {
-                    if (!globMatch(entry.name, pat)) continue;
+            if (entry.kind == .directory) continue;
+            // Apply pattern filter if present
+            if (has_patterns) {
+                var matched = false;
+                for (patterns) |pat| {
+                    if (globMatch(entry.name, pat)) { matched = true; break; }
                 }
-                try tag_list.append(try allocator.dupe(u8, entry.name));
+                if (!matched) continue;
             }
+            try tag_list.append(try allocator.dupe(u8, entry.name));
         }
         
         // Also check packed-refs for tags
@@ -8834,8 +8876,12 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
                     const ref_name = line[space_idx + 1 ..];
                     if (std.mem.startsWith(u8, ref_name, "refs/tags/")) {
                         const tag_short = ref_name["refs/tags/".len..];
-                        if (pattern) |pat| {
-                            if (!globMatch(tag_short, pat)) continue;
+                        if (has_patterns) {
+                            var matched = false;
+                            for (patterns) |pat| {
+                                if (globMatch(tag_short, pat)) { matched = true; break; }
+                            }
+                            if (!matched) continue;
                         }
                         // Check not already in list
                         var already = false;
@@ -8961,14 +9007,77 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             std.process.exit(1);
         }
         
-        // Create annotated tag object
-        const tagger_name = resolveAuthorName(allocator, git_path) catch "A U Thor";
-        defer if (!std.mem.eql(u8, tagger_name, "A U Thor")) allocator.free(tagger_name);
-        const tagger_email = resolveAuthorEmail(allocator, git_path) catch "author@example.com";
-        defer if (!std.mem.eql(u8, tagger_email, "author@example.com")) allocator.free(tagger_email);
-        const timestamp = std.time.timestamp();
+        // Create annotated tag object - use committer identity (not author)
+        const tagger_name = if (std.posix.getenv("GIT_COMMITTER_NAME")) |n| n
+            else if (std.posix.getenv("GIT_AUTHOR_NAME")) |n| n
+            else (resolveAuthorName(allocator, git_path) catch "A U Thor");
+        const tagger_email = if (std.posix.getenv("GIT_COMMITTER_EMAIL")) |e| e
+            else if (std.posix.getenv("GIT_AUTHOR_EMAIL")) |e| e
+            else (resolveAuthorEmail(allocator, git_path) catch "author@example.com");
+
+        // Resolve timestamp and timezone
+        var timestamp: i64 = std.time.timestamp();
+        var tz_str: []const u8 = "+0000";
+        var tz_buf: [6]u8 = undefined;
+        if (std.posix.getenv("GIT_COMMITTER_DATE")) |date_str| {
+            // Parse git date formats: "@<epoch> <tz>" or "<epoch> <tz>"
+            const trimmed_date = std.mem.trim(u8, date_str, " \t");
+            const start: usize = if (trimmed_date.len > 0 and trimmed_date[0] == '@') 1 else 0;
+            const rest = trimmed_date[start..];
+            if (std.mem.indexOfScalar(u8, rest, ' ')) |sp| {
+                timestamp = std.fmt.parseInt(i64, rest[0..sp], 10) catch timestamp;
+                tz_str = rest[sp + 1 ..];
+            } else {
+                timestamp = std.fmt.parseInt(i64, rest, 10) catch timestamp;
+            }
+        } else {
+            // Compute local timezone offset
+            const epoch_secs = std.posix.timespec{ .sec = timestamp, .nsec = 0 };
+            const utc_result = std.time.epoch.EpochSeconds{ .secs = @intCast(@as(u64, @intCast(epoch_secs.sec))) };
+            _ = utc_result;
+            // Default to +0000 if we can't determine timezone
+            _ = std.fmt.bufPrint(&tz_buf, "+0000", .{}) catch {};
+            tz_str = tz_buf[0..5];
+        }
         
-        const tag_content = try std.fmt.allocPrint(allocator, "object {s}\ntype commit\ntag {s}\ntagger {s} <{s}> {d} +0000\n\n{s}\n", .{ commit_hash, tag_name.?, tagger_name, tagger_email, timestamp, message.? });
+        // Clean up message: strip comments, leading/trailing blanks, trailing whitespace per line
+        var msg_lines_arr = std.array_list.Managed([]const u8).init(allocator);
+        defer msg_lines_arr.deinit();
+        {
+            var msg_lines = std.mem.splitScalar(u8, message.?, '\n');
+            while (msg_lines.next()) |mline| {
+                if (mline.len > 0 and mline[0] == '#') continue;
+                // Strip trailing whitespace from line
+                const stripped = std.mem.trimRight(u8, mline, " \t\r");
+                try msg_lines_arr.append(stripped);
+            }
+        }
+        // Remove trailing empty lines
+        while (msg_lines_arr.items.len > 0 and msg_lines_arr.items[msg_lines_arr.items.len - 1].len == 0) {
+            _ = msg_lines_arr.pop();
+        }
+        // Remove leading empty lines
+        var lead_skip: usize = 0;
+        while (lead_skip < msg_lines_arr.items.len and msg_lines_arr.items[lead_skip].len == 0) {
+            lead_skip += 1;
+        }
+        // Build final message
+        var cleaned_msg = std.array_list.Managed(u8).init(allocator);
+        defer cleaned_msg.deinit();
+        for (msg_lines_arr.items[lead_skip..]) |mline| {
+            try cleaned_msg.appendSlice(mline);
+            try cleaned_msg.append('\n');
+        }
+        // Remove trailing newline (we'll add it in the format)
+        if (cleaned_msg.items.len > 0 and cleaned_msg.items[cleaned_msg.items.len - 1] == '\n') {
+            _ = cleaned_msg.pop();
+        }
+        const final_msg = cleaned_msg.items;
+
+        const tag_content = if (final_msg.len == 0)
+            try std.fmt.allocPrint(allocator, "object {s}\ntype commit\ntag {s}\ntagger {s} <{s}> {d} {s}\n\n", .{ commit_hash, tag_name.?, tagger_name, tagger_email, timestamp, tz_str })
+        else
+            try std.fmt.allocPrint(allocator, "object {s}\ntype commit\ntag {s}\ntagger {s} <{s}> {d} {s}\n\n{s}\n", .{ commit_hash, tag_name.?, tagger_name, tagger_email, timestamp, tz_str, final_msg });
         defer allocator.free(tag_content);
         
         // Hash and write tag object
