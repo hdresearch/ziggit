@@ -31408,7 +31408,7 @@ fn cmdFormatPatch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         
         // Extract commit info
         const author_line = extractHeaderField(obj.data, "author");
-        const commit_msg = extractCommitMessage(obj.data);
+        const commit_msg = if (std.mem.indexOf(u8, obj.data, "\n\n")) |pos| obj.data[pos + 2 ..] else obj.data;
         const first_line = if (std.mem.indexOf(u8, commit_msg, "\n")) |nl| commit_msg[0..nl] else commit_msg;
         
         // Parse author
