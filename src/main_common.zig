@@ -6910,12 +6910,17 @@ fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     defer pull_positionals.deinit();
     var no_rebase = false;
     var do_rebase = false;
+    var pull_strategy: ?[]const u8 = null;
     
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--no-rebase")) {
             no_rebase = true;
         } else if (std.mem.eql(u8, arg, "--rebase")) {
             do_rebase = true;
+        } else if (std.mem.eql(u8, arg, "-s")) {
+            pull_strategy = args.next();
+        } else if (std.mem.startsWith(u8, arg, "--strategy=")) {
+            pull_strategy = arg["--strategy=".len..];
         } else if (std.mem.eql(u8, arg, "--log") or std.mem.startsWith(u8, arg, "--log=") or 
                    std.mem.eql(u8, arg, "--no-log") or std.mem.eql(u8, arg, "--ff-only") or
                    std.mem.eql(u8, arg, "--no-ff") or std.mem.eql(u8, arg, "--ff") or
@@ -7071,6 +7076,33 @@ fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     // Check if we need to merge (if commits are different)
     if (std.mem.eql(u8, current_commit, remote_commit)) {
         try platform_impl.writeStdout("Already up to date.\n");
+    } else if (pull_strategy != null and std.mem.eql(u8, pull_strategy.?, "ours")) {
+        // "ours" strategy: keep our tree, just create merge commit
+        const current_obj = objects.GitObject.load(current_commit, git_path, platform_impl, allocator) catch {
+            try platform_impl.writeStderr("fatal: unable to read current commit\n");
+            std.process.exit(1);
+        };
+        defer current_obj.deinit(allocator);
+        const our_tree = extractHeaderField(current_obj.data, "tree");
+        if (our_tree.len == 0) {
+            try platform_impl.writeStderr("fatal: unable to find tree\n");
+            std.process.exit(1);
+        }
+        const current_branch = try refs.getCurrentBranch(git_path, platform_impl, allocator);
+        defer allocator.free(current_branch);
+        const merge_msg = try buildMergeMessage(branch, current_branch, git_path, allocator, platform_impl);
+        defer allocator.free(merge_msg);
+        const author_str = getAuthorString(allocator) catch try allocator.dupe(u8, "Unknown <unknown@unknown>");
+        defer allocator.free(author_str);
+        const committer_str = getCommitterString(allocator) catch try allocator.dupe(u8, "Unknown <unknown@unknown>");
+        defer allocator.free(committer_str);
+        const parents = [_][]const u8{ current_commit, remote_commit };
+        const commit_obj = try objects.createCommitObject(our_tree, &parents, author_str, committer_str, merge_msg, allocator);
+        defer commit_obj.deinit(allocator);
+        const new_hash = try commit_obj.store(git_path, platform_impl, allocator);
+        defer allocator.free(new_hash);
+        try refs.updateRef(git_path, current_branch, new_hash, platform_impl, allocator);
+        try platform_impl.writeStdout("Merge made by the 'ours' strategy.\n");
     } else {
         // Perform merge
         try platform_impl.writeStdout("Merging changes...\n");
