@@ -8528,11 +8528,21 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             // -n<num> for listing annotation lines
         } else if (std.mem.startsWith(u8, arg, "--contains") or std.mem.startsWith(u8, arg, "--no-contains") or
             std.mem.startsWith(u8, arg, "--merged") or std.mem.startsWith(u8, arg, "--no-merged") or
-            std.mem.startsWith(u8, arg, "--sort=") or std.mem.startsWith(u8, arg, "--format=") or
-            std.mem.startsWith(u8, arg, "--points-at") or std.mem.eql(u8, arg, "--create-reflog") or
+            std.mem.startsWith(u8, arg, "--points-at") or std.mem.startsWith(u8, arg, "--with") or
+            std.mem.startsWith(u8, arg, "--without") or std.mem.startsWith(u8, arg, "--no-with"))
+        {
+            list_mode = true; // These imply list mode
+            // Value may be after = or as next arg; just skip next if no =
+            if (std.mem.indexOfScalar(u8, arg, '=') == null) {
+                // Consume next arg as value (e.g. --contains HEAD)
+                _ = args.next();
+            }
+        } else if (std.mem.startsWith(u8, arg, "--sort=") or std.mem.startsWith(u8, arg, "--format=") or
+            std.mem.eql(u8, arg, "--create-reflog") or std.mem.eql(u8, arg, "--no-sort") or
             std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--ignore-case") or
             std.mem.eql(u8, arg, "--column") or std.mem.eql(u8, arg, "--no-column") or
-            std.mem.eql(u8, arg, "--color") or std.mem.startsWith(u8, arg, "--color="))
+            std.mem.eql(u8, arg, "--color") or std.mem.startsWith(u8, arg, "--color=") or
+            std.mem.eql(u8, arg, "--omit-empty"))
         {
             // Accepted options (not fully implemented)
         } else if (!std.mem.startsWith(u8, arg, "-")) {
