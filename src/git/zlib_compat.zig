@@ -4,7 +4,7 @@ const std = @import("std");
 const c = @cImport({ @cInclude("zlib.h"); });
 
 pub fn decompress(reader: anytype, writer: anytype) !void {
-    var all_input = std.ArrayList(u8).init(std.heap.page_allocator);
+    var all_input = std.array_list.Managed(u8).init(std.heap.page_allocator);
     defer all_input.deinit();
     var buf: [16384]u8 = undefined;
     while (true) {
@@ -19,7 +19,7 @@ pub fn decompress(reader: anytype, writer: anytype) !void {
 
 pub fn compress(reader: anytype, writer: anytype, options: anytype) !void {
     _ = options;
-    var all_input = std.ArrayList(u8).init(std.heap.page_allocator);
+    var all_input = std.array_list.Managed(u8).init(std.heap.page_allocator);
     defer all_input.deinit();
     var buf: [16384]u8 = undefined;
     while (true) {
@@ -79,7 +79,7 @@ pub fn Compressor(comptime WriterType: type) type {
     return struct {
         const Self = @This();
         inner_writer: WriterType,
-        buffer: std.ArrayList(u8),
+        buffer: std.array_list.Managed(u8),
         pub fn write(self: *Self, data: []const u8) !usize {
             self.buffer.appendSlice(data) catch return error.CompressionFailed;
             return data.len;
@@ -99,7 +99,7 @@ pub fn Compressor(comptime WriterType: type) type {
 
 pub fn compressorWriter(writer: anytype, options: anytype) !Compressor(@TypeOf(writer)) {
     _ = options;
-    return .{ .inner_writer = writer, .buffer = std.ArrayList(u8).init(std.heap.page_allocator) };
+    return .{ .inner_writer = writer, .buffer = std.array_list.Managed(u8).init(std.heap.page_allocator) };
 }
 
 pub fn compressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
@@ -121,7 +121,7 @@ pub fn decompressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     var ret = c.inflateInit(&stream);
     if (ret != c.Z_OK) return error.InvalidInput;
     defer _ = c.inflateEnd(&stream);
-    var output = std.ArrayList(u8).init(allocator);
+    var output = std.array_list.Managed(u8).init(allocator);
     errdefer output.deinit();
     var buf: [16384]u8 = undefined;
     while (true) {
@@ -143,7 +143,7 @@ pub fn decompressSliceWithConsumed(allocator: std.mem.Allocator, input: []const 
     var ret = c.inflateInit(&stream);
     if (ret != c.Z_OK) return error.InvalidInput;
     defer _ = c.inflateEnd(&stream);
-    var output = std.ArrayList(u8).init(allocator);
+    var output = std.array_list.Managed(u8).init(allocator);
     errdefer output.deinit();
     var buf: [16384]u8 = undefined;
     while (true) {
