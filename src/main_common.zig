@@ -387,6 +387,40 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                     } else |_| {}
                 }
             }
+            // Also check PATH for git-<command>
+            const path_env = std.posix.getenv("PATH") orelse "";
+            if (path_env.len > 0) {
+                const git_cmd_name = std.fmt.allocPrint(allocator, "git-{s}", .{command}) catch null;
+                if (git_cmd_name) |gcn| {
+                    defer allocator.free(gcn);
+                    var path_iter = std.mem.splitScalar(u8, path_env, ':');
+                    while (path_iter.next()) |dir| {
+                        if (dir.len == 0) continue;
+                        const full_cmd = std.fmt.allocPrint(allocator, "{s}/{s}", .{dir, gcn}) catch continue;
+                        defer allocator.free(full_cmd);
+                        if (std.fs.cwd().access(full_cmd, .{})) |_| {
+                            // Found external command in PATH
+                            var argv2 = std.array_list.Managed([]const u8).init(allocator);
+                            defer argv2.deinit();
+                            argv2.append(full_cmd) catch continue;
+                            var ri3: usize = command_index + 1;
+                            while (ri3 < all_original_args.items.len) : (ri3 += 1) {
+                                argv2.append(all_original_args.items[ri3]) catch continue;
+                            }
+                            var child2 = std.process.Child.init(argv2.items, allocator);
+                            child2.stdin_behavior = .Inherit;
+                            child2.stdout_behavior = .Inherit;
+                            child2.stderr_behavior = .Inherit;
+                            _ = child2.spawn() catch continue;
+                            const result2 = child2.wait() catch { std.process.exit(128); };
+                            switch (result2) {
+                                .Exited => |code| std.process.exit(code),
+                                else => std.process.exit(128),
+                            }
+                        } else |_| {}
+                    }
+                }
+            }
             // Command not found - error (pure Zig, no git forwarding)
             const error_msg = std.fmt.allocPrint(allocator, "ziggit: '{s}' is not a ziggit command. See 'ziggit --help'.\n", .{command}) catch "ziggit: invalid command. See 'ziggit --help'.\n";
             defer if (error_msg.ptr != "ziggit: invalid command. See 'ziggit --help'.\n".ptr) allocator.free(error_msg);
