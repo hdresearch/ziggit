@@ -1,6 +1,7 @@
 === Git Test Results (t0000-t4999) ===
-Date: Thu Mar 26 23:44:21 UTC 2026
+Date: Fri Mar 27 00:04:44 UTC 2026
 Git under test: ziggit wrapper -> git 2.43.0
+Test suite: git master (commit 41688c1)
 
 t0000-basic: ok=87 fail=5 (94%) OK
 t0001-init: ok=80 fail=22 (78%) OK
@@ -108,7 +109,7 @@ t1090-sparse-checkout-scope: ok=7 fail=0 (100%) OK
 t1091-sparse-checkout-builtin: ok=72 fail=5 (93%) OK
 t1092-sparse-checkout-compatibility: ok=95 fail=11 (89%) OK
 t1100-commit-tree-options: ok=5 fail=0 (100%) OK
-t1300-config: ok=446 fail=51 (89%) OK
+t1300-config: ok=447 fail=50 (89%) OK
 t1301-shared-repo: ok=22 fail=0 (100%) OK
 t1302-repo-version: ok=18 fail=0 (100%) OK
 t1303-wacky-config: ok=11 fail=0 (100%) OK
@@ -124,7 +125,7 @@ t1350-config-hooks-path: ok=4 fail=0 (100%) OK
 t1400-update-ref: ok=179 fail=134 (57%) OK
 t1401-symbolic-ref: ok=25 fail=0 (100%) OK
 t1402-check-ref-format: ok=99 fail=0 (100%) OK
-t1403-show-ref: ok=8 fail=4 (66%) OK
+t1403-show-ref: ok=9 fail=3 (75%) OK
 t1404-update-ref-errors: ok=38 fail=0 (100%) OK
 t1405-main-ref-store: ok=5 fail=11 (31%) OK
 t1406-submodule-ref-store: ok=4 fail=11 (26%) OK
@@ -517,6 +518,6 @@ t4301-merge-tree-write-tree: ok=35 fail=8 (81%) OK
 === SUMMARY ===
 Total test scripts: 511
 Perfect (100%) scripts: 311
-Total subtests passed: 16773
-Total subtests failed: 2801
-Overall pass rate: 85% (16773/19574)
+Total subtests passed: 16775
+Total subtests failed: 2799
+Overall pass rate: 85% (16775/19574)
