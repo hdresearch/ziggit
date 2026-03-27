@@ -11499,35 +11499,65 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         std.fs.cwd().writeFile(.{ .sub_path = config_path, .data = new_config.items }) catch {};
 
     } else if (std.mem.eql(u8, first_arg.?, "-d") or std.mem.eql(u8, first_arg.?, "-D")) {
-        // Delete branch
-        const branch_name = args.next() orelse {
+        // Delete branch - may have -r flag and/or multiple branch names
+        var is_remote = false;
+        var names_to_delete = std.array_list.Managed([]const u8).init(allocator);
+        defer names_to_delete.deinit();
+        while (args.next()) |darg| {
+            if (std.mem.eql(u8, darg, "-r") or std.mem.eql(u8, darg, "--remotes")) {
+                is_remote = true;
+            } else {
+                try names_to_delete.append(darg);
+            }
+        }
+        if (names_to_delete.items.len == 0) {
             try platform_impl.writeStderr("fatal: branch name required\n");
             std.process.exit(128);
-        };
+        }
 
         const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch "master";
         defer allocator.free(current_branch);
 
-        if (std.mem.eql(u8, branch_name, current_branch)) {
-            const msg = try std.fmt.allocPrint(allocator, "error: cannot delete branch '{s}' used by worktree at '{s}'\n", .{ branch_name, "." });
-            defer allocator.free(msg);
-            try platform_impl.writeStderr(msg);
-            std.process.exit(1);
-        }
-
-        refs.deleteBranch(git_path, branch_name, platform_impl, allocator) catch |err| switch (err) {
-            error.FileNotFound => {
-                const msg = try std.fmt.allocPrint(allocator, "error: branch '{s}' not found.\n", .{branch_name});
+        for (names_to_delete.items) |branch_name| {
+            if (!is_remote and std.mem.eql(u8, branch_name, current_branch)) {
+                const msg = try std.fmt.allocPrint(allocator, "error: cannot delete branch '{s}' used by worktree at '{s}'\n", .{ branch_name, "." });
                 defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
                 std.process.exit(1);
-            },
-            else => return err,
-        };
+            }
 
-        const success_msg = try std.fmt.allocPrint(allocator, "Deleted branch {s}.\n", .{branch_name});
-        defer allocator.free(success_msg);
-        try platform_impl.writeStdout(success_msg);
+            if (is_remote) {
+                // Delete remote tracking branch
+                const ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}", .{ git_path, branch_name });
+                defer allocator.free(ref_path);
+                std.fs.cwd().deleteFile(ref_path) catch |err| switch (err) {
+                    error.FileNotFound => {
+                        // Try packed-refs
+                        const msg = try std.fmt.allocPrint(allocator, "error: remote-tracking branch '{s}' not found.\n", .{branch_name});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                        std.process.exit(1);
+                    },
+                    else => return err,
+                };
+                const success_msg = try std.fmt.allocPrint(allocator, "Deleted remote-tracking branch {s}.\n", .{branch_name});
+                defer allocator.free(success_msg);
+                try platform_impl.writeStdout(success_msg);
+            } else {
+                refs.deleteBranch(git_path, branch_name, platform_impl, allocator) catch |err| switch (err) {
+                    error.FileNotFound => {
+                        const msg = try std.fmt.allocPrint(allocator, "error: branch '{s}' not found.\n", .{branch_name});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                        std.process.exit(1);
+                    },
+                    else => return err,
+                };
+                const success_msg = try std.fmt.allocPrint(allocator, "Deleted branch {s}.\n", .{branch_name});
+                defer allocator.free(success_msg);
+                try platform_impl.writeStdout(success_msg);
+            }
+        }
     } else if (std.mem.eql(u8, first_arg.?, "-m") or std.mem.eql(u8, first_arg.?, "-M")) {
         // Rename branch
         const arg1 = args.next() orelse {
