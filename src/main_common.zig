@@ -11922,6 +11922,9 @@ fn formatPersonDateWithFormat(person_line: []const u8, date_fmt: []const u8, all
     if (std.mem.eql(u8, date_fmt, "short")) {
         return formatTimestampShort(timestamp, tz_str, allocator) catch return "";
     }
+    if (std.mem.eql(u8, date_fmt, "local")) {
+        return formatTimestampNoTZ(timestamp, "+0000", allocator) catch return "";
+    }
     if (std.mem.eql(u8, date_fmt, "unix")) {
         return ts_str;
     }
