@@ -1920,9 +1920,16 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             else
                 merge_val;
 
-            const upstream_ref = try std.fmt.allocPrint(allocator, "refs/remotes/{s}/{s}", .{ remote_val, short_merge });
+            const is_local = std.mem.eql(u8, remote_val, ".");
+            const upstream_ref = if (is_local)
+                try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{short_merge})
+            else
+                try std.fmt.allocPrint(allocator, "refs/remotes/{s}/{s}", .{ remote_val, short_merge });
             defer allocator.free(upstream_ref);
-            const upstream_display_name = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ remote_val, short_merge });
+            const upstream_display_name = if (is_local)
+                try allocator.dupe(u8, short_merge)
+            else
+                try std.fmt.allocPrint(allocator, "{s}/{s}", .{ remote_val, short_merge });
             defer allocator.free(upstream_display_name);
 
             // Resolve upstream ref to commit hash
@@ -1932,15 +1939,25 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 
             // Compare commits: count ahead/behind
             if (std.mem.eql(u8, current_commit.?, upstream_hash)) {
-                const up_msg = try std.fmt.allocPrint(allocator, "Your branch is up to date with '{s}'.\n", .{upstream_display_name});
+                const up_msg = try std.fmt.allocPrint(allocator, "Your branch is up to date with '{s}'.\n\n", .{upstream_display_name});
                 defer allocator.free(up_msg);
                 try platform_impl.writeStdout(up_msg);
             } else {
-                // Simple check: is upstream reachable from HEAD? Is HEAD reachable from upstream?
-                // For now just show the tracking info without ahead/behind counts
-                const up_msg = try std.fmt.allocPrint(allocator, "Your branch and '{s}' have diverged.\n", .{upstream_display_name});
-                defer allocator.free(up_msg);
-                try platform_impl.writeStdout(up_msg);
+                const ahead_count = countUnreachable(git_path, current_commit.?, upstream_hash, allocator, platform_impl);
+                const behind_count = countUnreachable(git_path, upstream_hash, current_commit.?, allocator, platform_impl);
+                if (ahead_count > 0 and behind_count > 0) {
+                    const up_msg = try std.fmt.allocPrint(allocator, "Your branch and '{s}' have diverged,\nand have {d} and {d} different commits each, respectively.\n  (use \"git pull\" if you want to integrate the remote branch with yours)\n\n", .{upstream_display_name, ahead_count, behind_count});
+                    defer allocator.free(up_msg);
+                    try platform_impl.writeStdout(up_msg);
+                } else if (ahead_count > 0) {
+                    const up_msg = try std.fmt.allocPrint(allocator, "Your branch is ahead of '{s}' by {d} commit{s}.\n  (use \"git push\" to publish your local commits)\n\n", .{upstream_display_name, ahead_count, if (ahead_count > 1) "s" else ""});
+                    defer allocator.free(up_msg);
+                    try platform_impl.writeStdout(up_msg);
+                } else if (behind_count > 0) {
+                    const up_msg = try std.fmt.allocPrint(allocator, "Your branch is behind '{s}' by {d} commit{s}, and can be fast-forwarded.\n  (use \"git pull\" to update your local branch)\n\n", .{upstream_display_name, behind_count, if (behind_count > 1) "s" else ""});
+                    defer allocator.free(up_msg);
+                    try platform_impl.writeStdout(up_msg);
+                }
             }
         }
         
