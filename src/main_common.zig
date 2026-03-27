@@ -12114,34 +12114,39 @@ fn resolveReflogEntry(git_path: []const u8, ref_name: []const u8, n: u32, alloca
     if (!content_valid) return error.NotFound;
     defer allocator.free(content);
 
-    // Collect all entries (each line has: old_hash new_hash ...)
-    var entries = std.array_list.Managed([]const u8).init(allocator);
-    defer entries.deinit();
+    // Count entries and find the right one
+    // @{0} is most recent (last line), @{1} is previous, etc.
+    var line_count: u32 = 0;
+    {
+        var count_iter = std.mem.splitScalar(u8, content, '\n');
+        while (count_iter.next()) |line| {
+            if (line.len >= 40) line_count += 1;
+        }
+    }
+    
+    if (line_count == 0) return error.NotFound;
+    if (n >= line_count) return error.NotFound;
 
+    const target_idx = line_count - 1 - n;
+    var current_idx: u32 = 0;
     var reflog_lines = std.mem.splitScalar(u8, content, '\n');
     while (reflog_lines.next()) |line| {
-        if (line.len >= 40) {
-            entries.append(line) catch {};
+        if (line.len < 40) continue;
+        if (current_idx == target_idx) {
+            // Parse: the new_hash is at position 41..81
+            if (line.len >= 81) {
+                const new_hash = line[41..81];
+                if (isValidHash(new_hash)) {
+                    return try allocator.dupe(u8, new_hash);
+                }
+            }
+            // Fallback: try first 40 chars
+            if (isValidHash(line[0..40])) {
+                return try allocator.dupe(u8, line[0..40]);
+            }
+            return error.NotFound;
         }
-    }
-
-    // @{0} is most recent (last entry), @{1} is previous, etc.
-    if (entries.items.len == 0) return error.NotFound;
-    if (n >= entries.items.len) return error.NotFound;
-
-    const idx = entries.items.len - 1 - n;
-    const entry = entries.items[idx];
-
-    // Parse: the new_hash is at position 41..81
-    if (entry.len >= 81) {
-        const new_hash = entry[41..81];
-        if (isValidHash(new_hash)) {
-            return try allocator.dupe(u8, new_hash);
-        }
-    }
-    // Fallback: try first 40 chars
-    if (entry.len >= 40 and isValidHash(entry[0..40])) {
-        return try allocator.dupe(u8, entry[0..40]);
+        current_idx += 1;
     }
 
     return error.NotFound;
