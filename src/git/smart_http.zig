@@ -1031,12 +1031,8 @@ fn parseV2FetchResponse(allocator: std.mem.Allocator, data: []const u8) !Shallow
             continue;
         }
 
-        if (std.mem.startsWith(u8, payload, "NAK")) continue;
-        if (std.mem.startsWith(u8, payload, "ACK")) continue;
-        if (std.mem.startsWith(u8, payload, "ready")) continue;
-
         if (in_packfile) {
-            // Side-band demuxing
+            // Side-band demuxing (hot path — skip all prefix checks)
             const channel = payload[0];
             if (channel == 1) {
                 try pack_data.appendSlice(payload[1..]);
@@ -1045,7 +1041,12 @@ fn parseV2FetchResponse(allocator: std.mem.Allocator, data: []const u8) !Shallow
             } else if (channel == 3) {
                 return error.SideBandError;
             }
+            continue;
         }
+
+        if (std.mem.startsWith(u8, payload, "NAK")) continue;
+        if (std.mem.startsWith(u8, payload, "ACK")) continue;
+        if (std.mem.startsWith(u8, payload, "ready")) continue;
     }
 
     const pack_result = try pack_data.toOwnedSlice();
