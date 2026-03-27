@@ -5528,7 +5528,7 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         // For SSH and git:// protocols, show error (SSH transport not yet fully integrated into clone)
         if (std.mem.startsWith(u8, url.?, "ssh://") or std.mem.startsWith(u8, url.?, "git://") or
             (std.mem.indexOf(u8, url.?, ":") != null and std.mem.indexOf(u8, url.?, "/") != null and
-             (std.mem.indexOf(u8, url.?, ":").? < std.mem.indexOf(u8, url.?, "/").?) and !std.mem.startsWith(u8, url.?, "/")))
+             (std.mem.indexOf(u8, url.?, ":").? < std.mem.indexOf(u8, url.?, "/").?) and !std.mem.startsWith(u8, url.?, "/") and !std.mem.startsWith(u8, url.?, "file://")))
         {
             try platform_impl.writeStderr("fatal: SSH/git:// clone not yet supported natively\n");
             std.process.exit(128);
