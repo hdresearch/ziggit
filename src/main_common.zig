@@ -9640,6 +9640,10 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         // Write new branch ref
         const new_ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, new_name });
         defer allocator.free(new_ref_path);
+        // Create parent directories if needed (for branch names with slashes)
+        if (std.fs.path.dirname(new_ref_path)) |parent_dir| {
+            std.fs.cwd().makePath(parent_dir) catch {};
+        }
         try std.fs.cwd().writeFile(.{ .sub_path = new_ref_path, .data = old_hash });
 
         // Delete old branch ref (if different name)
