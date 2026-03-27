@@ -522,14 +522,17 @@ fn forwardConfigToGit(allocator: std.mem.Allocator, all_args: [][]const u8, comm
             const rest_start = subcmd_index + 1;
             
             if (std.mem.eql(u8, subcmd, "set")) {
-                // git config set [--all] [--append] [--comment=...] [--flags] <key> <value>
-                // → git config [--replace-all] [--add] [--flags] <key> <value>
+                // git config set [--all] [--append] [--comment=...] [--value=<pattern>] [--flags] <key> <value>
+                // → git config [--replace-all] [--add] [--flags] <key> <value> [<value-pattern>]
                 // Translate new-style flags for git 2.43 compat
                 var set_has_all = false;
+                var set_value_pattern: ?[]const u8 = null;
                 for (all_args[rest_start..]) |a| {
                     if (std.mem.eql(u8, a, "--all")) {
                         set_has_all = true;
-                        break;
+                    }
+                    if (std.mem.startsWith(u8, a, "--value=")) {
+                        set_value_pattern = a[8..];
                     }
                 }
                 if (set_has_all) {
@@ -549,11 +552,15 @@ fn forwardConfigToGit(allocator: std.mem.Allocator, all_args: [][]const u8, comm
                             std.process.exit(1);
                         }
                         continue;
-                    } else if (std.mem.eql(u8, arg, "--value")) {
-                        continue; // --value is git 2.46+, strip it
+                    } else if (std.mem.startsWith(u8, arg, "--value=") or std.mem.eql(u8, arg, "--value")) {
+                        continue; // handled via set_value_pattern
                     } else {
                         try new_args.append(arg);
                     }
+                }
+                // Append value-pattern at end if present (for old-style: git config <key> <value> <pattern>)
+                if (set_value_pattern) |vp| {
+                    try new_args.append(vp);
                 }
             } else if (std.mem.eql(u8, subcmd, "get")) {
                 // git config get [--all] [--regexp] [--value=<pattern>] [--url=<url>] [--flags] <key>
