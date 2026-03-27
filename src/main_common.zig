@@ -22493,9 +22493,42 @@ fn nativeCmdCheckIgnore(allocator: std.mem.Allocator, args: *platform_mod.ArgIte
         gitignore_mod.GitIgnore.init(allocator);
     defer gitignore.deinit();
     
+    const cwd = try platform_impl.fs.getCwd(allocator);
+    defer allocator.free(cwd);
+    
     var found_any = false;
     for (paths.items) |path| {
-        if (gitignore.isIgnored(path)) {
+        // Resolve path relative to repo root
+        var check_path: []const u8 = path;
+        var allocated_check_path: ?[]u8 = null;
+        defer if (allocated_check_path) |p| allocator.free(p);
+        
+        if (std.mem.eql(u8, path, ".")) {
+            // "." means current directory - resolve to path relative to repo root
+            if (cwd.len > repo_root.len and std.mem.startsWith(u8, cwd, repo_root) and cwd[repo_root.len] == '/') {
+                check_path = cwd[repo_root.len + 1..];
+            }
+        } else if (!std.fs.path.isAbsolute(path)) {
+            // Resolve relative to cwd then make relative to repo root
+            if (cwd.len > repo_root.len and std.mem.startsWith(u8, cwd, repo_root) and cwd[repo_root.len] == '/') {
+                const prefix = cwd[repo_root.len + 1..];
+                allocated_check_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{prefix, path});
+                check_path = allocated_check_path.?;
+            }
+        }
+        
+        // Try matching with and without trailing slash for directories
+        const is_dir = blk: {
+            const full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{repo_root, check_path});
+            defer allocator.free(full);
+            var dir = std.fs.cwd().openDir(full, .{}) catch break :blk false;
+            dir.close();
+            break :blk true;
+        };
+        
+        const matched = gitignore.isIgnoredPath(check_path, is_dir);
+        
+        if (matched) {
             found_any = true;
             if (!quiet) {
                 if (verbose) {
