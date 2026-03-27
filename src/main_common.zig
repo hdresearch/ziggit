@@ -17918,12 +17918,31 @@ fn nativeCmdVar(_: std.mem.Allocator, args: [][]const u8, command_index: usize, 
     const rest = args[command_index + 1 ..];
     
     if (rest.len == 0 or std.mem.eql(u8, rest[0], "-l")) {
-        // List all variables
-        try outputVar(allocator, "GIT_COMMITTER_IDENT", platform_impl);
-        try outputVar(allocator, "GIT_AUTHOR_IDENT", platform_impl);
-        try outputVar(allocator, "GIT_EDITOR", platform_impl);
-        try outputVar(allocator, "GIT_PAGER", platform_impl);
-        try outputVar(allocator, "GIT_DEFAULT_BRANCH", platform_impl);
+        // List all variables with name=value format
+        const var_names = [_][]const u8{
+            "GIT_COMMITTER_IDENT", "GIT_AUTHOR_IDENT", "GIT_EDITOR",
+            "GIT_SEQUENCE_EDITOR", "GIT_PAGER", "GIT_DEFAULT_BRANCH",
+            "GIT_SHELL_PATH",
+        };
+        for (var_names) |vn| {
+            if (getVarValue(allocator, vn)) |val| {
+                defer allocator.free(val);
+                const line = try std.fmt.allocPrint(allocator, "{s}={s}\n", .{ vn, val });
+                defer allocator.free(line);
+                try platform_impl.writeStdout(line);
+            } else |_| {}
+        }
+        // Also list config entries
+        const git_path_opt2 = findGitDirectory(allocator, platform_impl) catch null;
+        defer if (git_path_opt2) |gp| allocator.free(gp);
+        if (git_path_opt2) |gp| {
+            const cfg_path = try std.fmt.allocPrint(allocator, "{s}/config", .{gp});
+            defer allocator.free(cfg_path);
+            if (platform_impl.fs.readFile(allocator, cfg_path)) |cfg_data| {
+                defer allocator.free(cfg_data);
+                try listConfigEntries(cfg_data, platform_impl, allocator);
+            } else |_| {}
+        }
         return;
     }
     
@@ -17957,6 +17976,68 @@ fn outputVar(allocator: std.mem.Allocator, var_name: []const u8, platform_impl: 
     try platform_impl.writeStdout(out);
 }
 
+fn listConfigEntries(config_data: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+    // Parse INI-style config and output key=value pairs
+    var current_section: ?[]const u8 = null;
+    var current_subsection: ?[]const u8 = null;
+    var section_buf: [256]u8 = undefined;
+    var subsection_buf: [256]u8 = undefined;
+    var lines = std.mem.splitScalar(u8, config_data, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') continue;
+        
+        if (trimmed[0] == '[') {
+            // Section header
+            if (std.mem.indexOf(u8, trimmed, "\"")) |q1| {
+                // Subsection: [section "subsection"]
+                const sect = std.mem.trim(u8, trimmed[1..q1], " \t");
+                if (std.mem.indexOf(u8, trimmed[q1+1..], "\"")) |q2| {
+                    const subsect = trimmed[q1+1..q1+1+q2];
+                    const lower_sect = sect[0..@min(sect.len, 255)];
+                    for (lower_sect, 0..) |c, ci| {
+                        section_buf[ci] = std.ascii.toLower(c);
+                    }
+                    current_section = section_buf[0..lower_sect.len];
+                    @memcpy(subsection_buf[0..@min(subsect.len, 255)], subsect[0..@min(subsect.len, 255)]);
+                    current_subsection = subsection_buf[0..@min(subsect.len, 255)];
+                }
+            } else {
+                // Simple section: [section]
+                const end = std.mem.indexOf(u8, trimmed, "]") orelse continue;
+                const sect = std.mem.trim(u8, trimmed[1..end], " \t");
+                const lower_sect = sect[0..@min(sect.len, 255)];
+                for (lower_sect, 0..) |c, ci| {
+                    section_buf[ci] = std.ascii.toLower(c);
+                }
+                current_section = section_buf[0..lower_sect.len];
+                current_subsection = null;
+            }
+        } else if (current_section) |sect| {
+            // Key = value line
+            if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
+                const key = std.mem.trim(u8, trimmed[0..eq], " \t");
+                const val = std.mem.trim(u8, trimmed[eq+1..], " \t");
+                var key_lower_buf: [256]u8 = undefined;
+                for (key[0..@min(key.len, 255)], 0..) |c, ki| {
+                    key_lower_buf[ki] = std.ascii.toLower(c);
+                }
+                const key_lower = key_lower_buf[0..@min(key.len, 255)];
+                
+                if (current_subsection) |subsect| {
+                    const out = try std.fmt.allocPrint(allocator, "{s}.{s}.{s}={s}\n", .{ sect, subsect, key_lower, val });
+                    defer allocator.free(out);
+                    try platform_impl.writeStdout(out);
+                } else {
+                    const out = try std.fmt.allocPrint(allocator, "{s}.{s}={s}\n", .{ sect, key_lower, val });
+                    defer allocator.free(out);
+                    try platform_impl.writeStdout(out);
+                }
+            }
+        }
+    }
+}
+
 fn getVarValue(allocator: std.mem.Allocator, var_name: []const u8) ![]u8 {
     if (std.mem.eql(u8, var_name, "GIT_AUTHOR_IDENT") or std.mem.eql(u8, var_name, "GIT_COMMITTER_IDENT")) {
         const prefix = if (std.mem.eql(u8, var_name, "GIT_AUTHOR_IDENT")) "GIT_AUTHOR" else "GIT_COMMITTER";
@@ -17975,7 +18056,14 @@ fn getVarValue(allocator: std.mem.Allocator, var_name: []const u8) ![]u8 {
             std.process.getEnvVarOwned(allocator, "PAGER") catch
             allocator.dupe(u8, "less");
     } else if (std.mem.eql(u8, var_name, "GIT_DEFAULT_BRANCH")) {
+        // Check GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+        if (std.process.getEnvVarOwned(allocator, "GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME") catch null) |env_val| {
+            if (env_val.len > 0) return env_val;
+            allocator.free(env_val);
+        }
         return allocator.dupe(u8, "master");
+    } else if (std.mem.eql(u8, var_name, "GIT_SHELL_PATH")) {
+        return allocator.dupe(u8, "/bin/sh");
     }
     return error.UnknownVariable;
 }
