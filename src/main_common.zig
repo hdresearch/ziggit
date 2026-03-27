@@ -541,7 +541,14 @@ fn forwardConfigToGit(allocator: std.mem.Allocator, all_args: [][]const u8, comm
                     } else if (std.mem.eql(u8, arg, "--append")) {
                         try new_args.append("--add");
                     } else if (std.mem.startsWith(u8, arg, "--comment")) {
-                        continue; // --comment is git 2.45+, strip it for 2.43
+                        // --comment is git 2.45+, strip it for 2.43
+                        // But if comment contains newline, error like newer git does
+                        const comment_val = if (std.mem.indexOf(u8, arg, "=")) |eq_pos| arg[eq_pos + 1 ..] else "";
+                        if (std.mem.indexOf(u8, comment_val, "\n") != null) {
+                            try platform_impl.writeStderr("error: invalid comment character: '\\n'\n");
+                            std.process.exit(1);
+                        }
+                        continue;
                     } else if (std.mem.eql(u8, arg, "--value")) {
                         continue; // --value is git 2.46+, strip it
                     } else {
