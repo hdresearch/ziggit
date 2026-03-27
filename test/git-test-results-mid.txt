@@ -17,8 +17,8 @@ FULLY PASSING TESTS (12 scripts, 88 individual tests):
   t4141-apply-too-large.sh         1/1  ALL PASSED
 
 NEAR-PASSING (1-2 failures):
-  t3003-ls-files-exclude.sh        6/7  (86%) - needs -i -c --exclude-standard
-  t3104-ls-tree-format.sh         17/19 (89%) - needs submodule setup
+  t3003-ls-files-exclude.sh        6/7  (86%)
+  t3104-ls-tree-format.sh         17/19 (89%)
   t4004-diff-rename-symlink.sh     3/4  (75%)
   t4024-diff-optimize-common.sh    1/2  (50%)
   t4025-hunk-header.sh             1/2  (50%)
@@ -34,6 +34,7 @@ KEY IMPLEMENTATIONS:
   - ls-files --no-empty-directory
   - ls-files absolute path pathspec normalization
   - ls-files glob pathspec matching (*, ?)
+  - ls-files C-quoting for special characters in filenames
   - git add symlink support (broken symlinks)
   - Index write padding fix (NUL terminator alignment)
   - Index long path support (>0xFFF bytes)
@@ -41,3 +42,4 @@ KEY IMPLEMENTATIONS:
   - findUntrackedDirEntries() for --directory mode
   - Nested git repo detection in untracked file scanning
   - Symlink handling in untracked file scanning
+  - Merge conflict file markers (<<<<<<< HEAD / ======= / >>>>>>>)
