@@ -11625,6 +11625,33 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             all_refs = true;
         } else if (std.mem.eql(u8, arg, "--stdin")) {
             // Read refs from stdin
+            const stdin_data = blk: {
+                var buf = std.array_list.Managed(u8).init(allocator);
+                var tmp: [4096]u8 = undefined;
+                while (true) {
+                    const n = std.posix.read(0, &tmp) catch break;
+                    if (n == 0) break;
+                    buf.appendSlice(tmp[0..n]) catch break;
+                }
+                break :blk buf.toOwnedSlice() catch "";
+            };
+            defer if (stdin_data.len > 0) allocator.free(stdin_data);
+            var stdin_lines = std.mem.splitScalar(u8, stdin_data, '\n');
+            while (stdin_lines.next()) |line| {
+                const trimmed = std.mem.trim(u8, line, " \t\r");
+                if (trimmed.len == 0) continue;
+                if (std.mem.indexOf(u8, trimmed, "..") != null) {
+                    const dot_pos = std.mem.indexOf(u8, trimmed, "..").?;
+                    const from_ref = if (dot_pos == 0) "HEAD" else trimmed[0..dot_pos];
+                    const to_ref = if (dot_pos + 2 >= trimmed.len) "HEAD" else trimmed[dot_pos + 2 ..];
+                    try exclude_refs.append(from_ref);
+                    try include_refs.append(to_ref);
+                } else if (trimmed.len > 0 and trimmed[0] == '^') {
+                    try exclude_refs.append(trimmed[1..]);
+                } else {
+                    try include_refs.append(trimmed);
+                }
+            }
         } else if (std.mem.eql(u8, arg, "--quiet")) {
             // Suppress output (but still set exit code)
         } else if (std.mem.eql(u8, arg, "--no-walk") or std.mem.startsWith(u8, arg, "--no-walk=")) {
