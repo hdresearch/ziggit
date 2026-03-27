@@ -9628,12 +9628,15 @@ fn configUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, allo
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r\n");
 
-        if (trimmed.len > 0 and trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']') {
-            if (current_section_str) |s| allocator.free(s);
-            current_section_str = parseSectionHeader(trimmed, allocator) catch null;
+        if (trimmed.len > 0 and trimmed[0] == '[') {
+            const close = std.mem.indexOfScalar(u8, trimmed, ']');
+            if (close) |cp| {
+                if (current_section_str) |s| allocator.free(s);
+                current_section_str = parseSectionHeader(trimmed[0 .. cp + 1], allocator) catch null;
+            }
         }
 
-        const in_section = if (current_section_str) |cs| std.ascii.eqlIgnoreCase(cs, section_part) else false;
+        const in_section = if (current_section_str) |cs| sectionMatchesKey(cs, section_part) else false;
         var skip = false;
         if (in_section) {
             if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
@@ -9644,12 +9647,14 @@ fn configUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, allo
                     if (unset_all or found_count == 1) {
                         skip = true;
                         // Also skip continuation lines (ending with \)
-                        if (line.len > 0 and line[line.len - 1] == '\\') {
-                            // skip continuation lines
-                            while (lines.next()) |cont_line| {
-                                const ct = std.mem.trim(u8, cont_line, " \t\r\n");
-                                _ = ct;
-                                if (cont_line.len == 0 or cont_line[cont_line.len - 1] != '\\') break;
+                        {
+                            const rtrim = std.mem.trimRight(u8, line, " \t\r");
+                            if (rtrim.len > 0 and rtrim[rtrim.len - 1] == '\\') {
+                                // skip continuation lines
+                                while (lines.next()) |cont_line| {
+                                    const ct = std.mem.trimRight(u8, cont_line, " \t\r");
+                                    if (ct.len == 0 or ct[ct.len - 1] != '\\') break;
+                                }
                             }
                         }
                     }
@@ -9663,9 +9668,12 @@ fn configUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, allo
         }
     }
 
-    // Remove trailing extra newline
-    if (result.items.len > 0 and content.len > 0 and content[content.len - 1] != '\n') {
+    // Preserve original trailing newline behavior
+    while (result.items.len > 0 and result.items[result.items.len - 1] == '\n') {
         _ = result.pop();
+    }
+    if (content.len > 0 and content[content.len - 1] == '\n') {
+        try result.append('\n');
     }
 
     if (!found) {
@@ -9782,9 +9790,12 @@ fn configRemoveSection(cfg_path: []const u8, section_name: []const u8, allocator
         std.process.exit(128);
     }
 
-    // Remove trailing extra newline
-    if (result.items.len > 0 and content.len > 0 and content[content.len - 1] != '\n') {
+    // Preserve original trailing newline behavior
+    while (result.items.len > 0 and result.items[result.items.len - 1] == '\n') {
         _ = result.pop();
+    }
+    if (content.len > 0 and content[content.len - 1] == '\n') {
+        try result.append('\n');
     }
 
     try platform_impl.fs.writeFile(cfg_path, result.items);
