@@ -251,7 +251,7 @@ pub const GitDiagnostics = struct {
         // Check each index entry
         for (idx.entries.items) |entry| {
             // Verify the blob object exists
-            const hash_str = try std.fmt.allocPrint(self.allocator, "{s}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
+            const hash_str = try std.fmt.allocPrint(self.allocator, "{x}", .{&entry.sha1});
             defer self.allocator.free(hash_str);
             
             const blob_obj = objects.GitObject.load(hash_str, self.git_dir, self.platform_impl, self.allocator) catch {
