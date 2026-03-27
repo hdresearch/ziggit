@@ -8549,8 +8549,8 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     // Handle delete mode
     if (delete_mode) {
         if (delete_names.items.len == 0) {
-            try platform_impl.writeStderr("fatal: tag name required\n");
-            std.process.exit(128);
+            // No names to delete — this is not an error in git
+            return;
         }
         for (delete_names.items) |del_name| {
             const tag_ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags/{s}", .{ git_path, del_name });
@@ -8579,8 +8579,9 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         return;
     }
 
-    if (tag_name == null) {
-        // No tag name specified, list all tags
+    if (tag_name == null or list_mode) {
+        // List tags, optionally filtered by pattern
+        const pattern = tag_name; // tag_name is the pattern in list mode
         const tags_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags", .{git_path});
         defer allocator.free(tags_path);
         
@@ -8601,9 +8602,41 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         var iterator = tags_dir.iterate();
         while (iterator.next() catch null) |entry| {
             if (entry.kind == .file) {
+                // Apply pattern filter if present
+                if (pattern) |pat| {
+                    if (!globMatch(entry.name, pat)) continue;
+                }
                 try tag_list.append(try allocator.dupe(u8, entry.name));
             }
         }
+        
+        // Also check packed-refs for tags
+        const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_path});
+        defer allocator.free(packed_refs_path);
+        if (std.fs.cwd().readFileAlloc(allocator, packed_refs_path, 10 * 1024 * 1024)) |packed_content| {
+            defer allocator.free(packed_content);
+            var lines = std.mem.splitScalar(u8, packed_content, '\n');
+            while (lines.next()) |line| {
+                if (line.len == 0 or line[0] == '#' or line[0] == '^') continue;
+                if (std.mem.indexOfScalar(u8, line, ' ')) |space_idx| {
+                    const ref_name = line[space_idx + 1 ..];
+                    if (std.mem.startsWith(u8, ref_name, "refs/tags/")) {
+                        const tag_short = ref_name["refs/tags/".len..];
+                        if (pattern) |pat| {
+                            if (!globMatch(tag_short, pat)) continue;
+                        }
+                        // Check not already in list
+                        var already = false;
+                        for (tag_list.items) |existing| {
+                            if (std.mem.eql(u8, existing, tag_short)) { already = true; break; }
+                        }
+                        if (!already) {
+                            try tag_list.append(try allocator.dupe(u8, tag_short));
+                        }
+                    }
+                }
+            }
+        } else |_| {}
         
         // Sort tags alphabetically
         std.sort.pdq([]u8, tag_list.items, {}, struct {
