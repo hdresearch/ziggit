@@ -2545,29 +2545,26 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         } else |_| {}
     }
 
-    // Create commit object
-    const timestamp = std.time.timestamp();
-    const tz_offset = getTimezoneOffset(timestamp);
-    const tz_sign: u8 = if (tz_offset < 0) '-' else '+';
-    const tz_abs: u32 = @intCast(if (tz_offset < 0) -tz_offset else tz_offset);
-    const tz_hours = tz_abs / 3600;
-    const tz_minutes = (tz_abs % 3600) / 60;
-
-    // Resolve author/committer identity
-    const author_name_fallback: []const u8 = "ziggit";
-    const author_name = resolveAuthorName(allocator, git_path) catch author_name_fallback;
-    defer if (author_name.ptr != author_name_fallback.ptr) allocator.free(author_name);
-    const author_email_fallback: []const u8 = "ziggit@example.com";
-    const author_email = resolveAuthorEmail(allocator, git_path) catch author_email_fallback;
-    defer if (author_email.ptr != author_email_fallback.ptr) allocator.free(author_email);
-    const committer_name = resolveCommitterName(allocator, git_path, author_name) catch author_name;
-    defer if (committer_name.ptr != author_name.ptr) allocator.free(committer_name);
-    const committer_email = resolveCommitterEmail(allocator, git_path, author_email) catch author_email;
-    defer if (committer_email.ptr != author_email.ptr) allocator.free(committer_email);
-
-    const author_info = try std.fmt.allocPrint(allocator, "{s} <{s}> {d} {c}{d:0>2}{d:0>2}", .{ author_name, author_email, timestamp, tz_sign, tz_hours, tz_minutes });
+    // Create commit object - use GIT_AUTHOR_DATE/GIT_COMMITTER_DATE if set
+    const author_info = getAuthorString(allocator) catch blk: {
+        const timestamp = std.time.timestamp();
+        const tz_offset = getTimezoneOffset(timestamp);
+        const tz_sign: u8 = if (tz_offset < 0) '-' else '+';
+        const tz_abs: u32 = @intCast(if (tz_offset < 0) -tz_offset else tz_offset);
+        const tz_hours = tz_abs / 3600;
+        const tz_minutes = (tz_abs % 3600) / 60;
+        break :blk try std.fmt.allocPrint(allocator, "Unknown <unknown@unknown> {d} {c}{d:0>2}{d:0>2}", .{ timestamp, tz_sign, tz_hours, tz_minutes });
+    };
     defer allocator.free(author_info);
-    const committer_info = try std.fmt.allocPrint(allocator, "{s} <{s}> {d} {c}{d:0>2}{d:0>2}", .{ committer_name, committer_email, timestamp, tz_sign, tz_hours, tz_minutes });
+    const committer_info = getCommitterString(allocator) catch blk: {
+        const timestamp = std.time.timestamp();
+        const tz_offset = getTimezoneOffset(timestamp);
+        const tz_sign: u8 = if (tz_offset < 0) '-' else '+';
+        const tz_abs: u32 = @intCast(if (tz_offset < 0) -tz_offset else tz_offset);
+        const tz_hours = tz_abs / 3600;
+        const tz_minutes = (tz_abs % 3600) / 60;
+        break :blk try std.fmt.allocPrint(allocator, "Unknown <unknown@unknown> {d} {c}{d:0>2}{d:0>2}", .{ timestamp, tz_sign, tz_hours, tz_minutes });
+    };
     defer allocator.free(committer_info);
 
     const commit_object = try objects.createCommitObject(
@@ -16512,7 +16509,41 @@ fn getRefField(field: []const u8, refname: []const u8, objectname: []const u8, o
         return " ";
     }
 
-    if (std.mem.startsWith(u8, field, "upstream") or std.mem.startsWith(u8, field, "push")) return "";
+    if (std.mem.startsWith(u8, field, "upstream")) {
+        const upstream_ref = resolveUpstreamRef(refname, allocator) catch return "";
+        if (upstream_ref.len == 0) return "";
+        if (std.mem.eql(u8, field, "upstream")) return upstream_ref;
+        if (std.mem.eql(u8, field, "upstream:short")) {
+            if (std.mem.startsWith(u8, upstream_ref, "refs/remotes/")) return upstream_ref["refs/remotes/".len..];
+            return upstream_ref;
+        }
+        if (std.mem.startsWith(u8, field, "upstream:lstrip=") or std.mem.startsWith(u8, field, "upstream:strip=")) {
+            const eq = std.mem.indexOfScalar(u8, field, '=') orelse return upstream_ref;
+            return applyLstrip(upstream_ref, field[eq + 1 ..]);
+        }
+        if (std.mem.startsWith(u8, field, "upstream:rstrip=")) {
+            return applyRstrip(upstream_ref, field["upstream:rstrip=".len..]);
+        }
+        // track/trackshort/nobracket - return empty for now
+        return "";
+    }
+    if (std.mem.startsWith(u8, field, "push")) {
+        const push_ref = resolvePushRef(refname, allocator) catch return "";
+        if (push_ref.len == 0) return "";
+        if (std.mem.eql(u8, field, "push")) return push_ref;
+        if (std.mem.eql(u8, field, "push:short")) {
+            if (std.mem.startsWith(u8, push_ref, "refs/remotes/")) return push_ref["refs/remotes/".len..];
+            return push_ref;
+        }
+        if (std.mem.startsWith(u8, field, "push:lstrip=") or std.mem.startsWith(u8, field, "push:strip=")) {
+            const eq = std.mem.indexOfScalar(u8, field, '=') orelse return push_ref;
+            return applyLstrip(push_ref, field[eq + 1 ..]);
+        }
+        if (std.mem.startsWith(u8, field, "push:rstrip=")) {
+            return applyRstrip(push_ref, field["push:rstrip=".len..]);
+        }
+        return "";
+    }
 
     if (std.mem.startsWith(u8, field, "contents")) {
         const message = extractObjectMessage(data);
@@ -16664,6 +16695,97 @@ fn formatTimestamp(timestamp: i64, tz_str: []const u8, allocator: std.mem.Alloca
     const wn = [7][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
     const mn = [12][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
     return std.fmt.allocPrint(allocator, "{s} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} {d} {s}", .{ wn[wday_u], mn[mon], day, hour, minute, second, y, tz_str });
+}
+
+/// Resolve the upstream tracking ref for a branch ref
+fn resolveUpstreamRef(refname: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+    // Only works for refs/heads/<branch>
+    if (!std.mem.startsWith(u8, refname, "refs/heads/")) return "";
+    const branch = refname["refs/heads/".len..];
+    const git_dir = findGitDir() catch return "";
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_dir});
+    defer allocator.free(config_path);
+    const config_data = std.fs.cwd().readFileAlloc(allocator, config_path, 1024 * 1024) catch return "";
+    defer allocator.free(config_data);
+
+    // Find branch.<branch>.remote and branch.<branch>.merge
+    const remote = findConfigValue(config_data, "branch", branch, "remote") orelse return "";
+    const merge = findConfigValue(config_data, "branch", branch, "merge") orelse return "";
+
+    // merge is like "refs/heads/main", convert to "refs/remotes/<remote>/main"
+    if (std.mem.startsWith(u8, merge, "refs/heads/")) {
+        const branch_name = merge["refs/heads/".len..];
+        return try std.fmt.allocPrint(allocator, "refs/remotes/{s}/{s}", .{ remote, branch_name });
+    }
+    return "";
+}
+
+/// Resolve the push remote ref for a branch ref
+fn resolvePushRef(refname: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+    if (!std.mem.startsWith(u8, refname, "refs/heads/")) return "";
+    const branch = refname["refs/heads/".len..];
+    const git_dir = findGitDir() catch return "";
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_dir});
+    defer allocator.free(config_path);
+    const config_data = std.fs.cwd().readFileAlloc(allocator, config_path, 1024 * 1024) catch return "";
+    defer allocator.free(config_data);
+
+    // Find remote.pushdefault or branch.<branch>.pushremote
+    var push_remote = findConfigValue(config_data, "branch", branch, "pushremote");
+    if (push_remote == null) push_remote = findConfigValue(config_data, "remote", null, "pushdefault");
+    if (push_remote == null) push_remote = findConfigValue(config_data, "branch", branch, "remote");
+    const remote = push_remote orelse return "";
+
+    // push.default=current means push to same branch name
+    return try std.fmt.allocPrint(allocator, "refs/remotes/{s}/{s}", .{ remote, branch });
+}
+
+/// Find a config value in git config data
+fn findConfigValue(config_data: []const u8, section: []const u8, subsection: ?[]const u8, key: []const u8) ?[]const u8 {
+    var in_section = false;
+    var lines = std.mem.splitScalar(u8, config_data, '\n');
+    var last_val: ?[]const u8 = null;
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') continue;
+        if (trimmed[0] == '[') {
+            in_section = false;
+            // Parse [section "subsection"] or [section]
+            if (std.mem.indexOfScalar(u8, trimmed, ']')) |close| {
+                const header = trimmed[1..close];
+                if (subsection) |sub| {
+                    // Look for [section "subsection"]
+                    if (std.mem.indexOfScalar(u8, header, '"')) |q1| {
+                        const sec = std.mem.trim(u8, header[0..q1], " \t");
+                        if (std.mem.lastIndexOfScalar(u8, header, '"')) |q2| {
+                            if (q2 > q1) {
+                                const sub_val = header[q1 + 1 .. q2];
+                                if (std.ascii.eqlIgnoreCase(sec, section) and std.mem.eql(u8, sub_val, sub)) {
+                                    in_section = true;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Look for [section] (no subsection)
+                    const sec = std.mem.trim(u8, header, " \t");
+                    if (std.mem.indexOfScalar(u8, sec, '"') == null and std.ascii.eqlIgnoreCase(sec, section)) {
+                        in_section = true;
+                    }
+                }
+            }
+        } else if (in_section) {
+            // key = value
+            if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq| {
+                const k = std.mem.trim(u8, trimmed[0..eq], " \t");
+                const v = std.mem.trim(u8, trimmed[eq + 1 ..], " \t");
+                if (std.ascii.eqlIgnoreCase(k, key)) {
+                    last_val = v;
+                }
+            }
+        }
+    }
+    return last_val;
 }
 
 fn sanitizeSubject(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
