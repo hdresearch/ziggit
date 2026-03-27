@@ -3595,6 +3595,7 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     var cached = false;
     var quiet = false;
     var exit_code = false;
+    var diff_output_mode: enum { patch, stat, shortstat, numstat, name_only, name_status, raw, no_patch } = .patch;
     var positional = std.array_list.Managed([]const u8).init(allocator);
     defer positional.deinit();
     var pathspec_args = std.array_list.Managed([]const u8).init(allocator);
@@ -3615,6 +3616,20 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
             exit_code = true;
         } else if (std.mem.eql(u8, arg, "--exit-code")) {
             exit_code = true;
+        } else if (std.mem.eql(u8, arg, "--stat") or std.mem.startsWith(u8, arg, "--stat=")) {
+            diff_output_mode = .stat;
+        } else if (std.mem.eql(u8, arg, "--shortstat")) {
+            diff_output_mode = .shortstat;
+        } else if (std.mem.eql(u8, arg, "--numstat")) {
+            diff_output_mode = .numstat;
+        } else if (std.mem.eql(u8, arg, "--name-only")) {
+            diff_output_mode = .name_only;
+        } else if (std.mem.eql(u8, arg, "--name-status")) {
+            diff_output_mode = .name_status;
+        } else if (std.mem.eql(u8, arg, "--raw")) {
+            diff_output_mode = .raw;
+        } else if (std.mem.eql(u8, arg, "--no-patch") or std.mem.eql(u8, arg, "-s")) {
+            diff_output_mode = .no_patch;
         } else if (std.mem.startsWith(u8, arg, "-")) {
             // Accept but ignore flags for now
         } else {
@@ -3623,10 +3638,12 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     }
     
     // Handle commit-to-commit diff, or treat as pathspecs if unresolvable
+    var single_ref: ?[]const u8 = null;
     if (positional.items.len >= 1) {
         var ref1: []const u8 = undefined;
         var ref2: []const u8 = undefined;
         var have_two_refs = false;
+        var have_one_ref = false;
         var pos_as_pathspec = false;
         
         if (std.mem.indexOf(u8, positional.items[0], "..")) |dot_pos| {
@@ -3645,8 +3662,12 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
                         allocator.free(t2);
                         for (positional.items[2..]) |p| try pathspec_args.append(p);
                     } else { allocator.free(t1); pos_as_pathspec = true; }
-                } else { ref1 = positional.items[0]; ref2 = "HEAD"; have_two_refs = true; }
-                if (!pos_as_pathspec and !have_two_refs) allocator.free(t1);
+                } else {
+                    // Single ref: compare that ref to working tree (or index if --cached)
+                    have_one_ref = true;
+                    single_ref = positional.items[0];
+                }
+                if (!pos_as_pathspec and !have_two_refs and !have_one_ref) allocator.free(t1);
             } else { pos_as_pathspec = true; }
         }
         if (pos_as_pathspec) { for (positional.items) |p| try pathspec_args.append(p); }
@@ -3685,17 +3706,800 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     defer allocator.free(cwd);
     
     var has_diff = false;
-    if (cached) {
-        // Show differences between index and HEAD (staged changes)
-        has_diff = showStagedDiff(&index, git_path, platform_impl, allocator, quiet) catch false;
+    const use_stat = diff_output_mode == .stat or diff_output_mode == .shortstat or diff_output_mode == .numstat or diff_output_mode == .name_only or diff_output_mode == .name_status or diff_output_mode == .raw or diff_output_mode == .no_patch;
+    if (use_stat) {
+        // Collect diff entries for stat/name output
+        var diff_entries = std.array_list.Managed(DiffStatEntry).init(allocator);
+        defer {
+            for (diff_entries.items) |e| {
+                allocator.free(e.path);
+            }
+            diff_entries.deinit();
+        }
+        if (single_ref) |sref| {
+            // Compare ref tree to working tree (or index if cached)
+            has_diff = collectRefDiffEntries(sref, &index, cwd, git_path, platform_impl, allocator, &diff_entries, cached) catch false;
+        } else if (cached) {
+            has_diff = collectStagedDiffEntries(&index, git_path, platform_impl, allocator, &diff_entries) catch false;
+        } else {
+            has_diff = collectWorkingTreeDiffEntries(&index, cwd, git_path, platform_impl, allocator, &diff_entries) catch false;
+        }
+        try outputDiffEntries(diff_entries.items, diff_output_mode, platform_impl, allocator);
     } else {
-        // Show differences between working tree and index
-        has_diff = showWorkingTreeDiff(&index, cwd, platform_impl, allocator, quiet) catch false;
+        if (single_ref) |sref| {
+            // Compare ref tree to working tree
+            const tree_hash = resolveToTree(allocator, sref, git_path, platform_impl) catch {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: bad revision '{s}'\n", .{sref});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            };
+            defer allocator.free(tree_hash);
+            // For now, compare tree to index and show patch
+            // Get HEAD tree for comparison
+            has_diff = showRefToWorkingTreeDiff(sref, &index, cwd, git_path, platform_impl, allocator, quiet, cached) catch false;
+        } else if (cached) {
+            // Show differences between index and HEAD (staged changes)
+            has_diff = showStagedDiff(&index, git_path, platform_impl, allocator, quiet) catch false;
+        } else {
+            // Show differences between working tree and index
+            has_diff = showWorkingTreeDiff(&index, cwd, platform_impl, allocator, quiet) catch false;
+        }
     }
     
     if (exit_code and has_diff) {
         std.process.exit(1);
     }
+}
+
+fn outputDiffEntries(diff_entries: []const DiffStatEntry, diff_output_mode: anytype, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+    if (diff_output_mode == .stat) {
+        try formatDiffStat(diff_entries, platform_impl, allocator);
+    } else if (diff_output_mode == .shortstat) {
+        try formatDiffShortStat(diff_entries, platform_impl, allocator);
+    } else if (diff_output_mode == .numstat) {
+        try formatDiffNumStat(diff_entries, platform_impl, allocator);
+    } else if (diff_output_mode == .name_only) {
+        for (diff_entries) |e| {
+            const line = try std.fmt.allocPrint(allocator, "{s}\n", .{e.path});
+            defer allocator.free(line);
+            try platform_impl.writeStdout(line);
+        }
+    } else if (diff_output_mode == .name_status) {
+        for (diff_entries) |e| {
+            const status_char: u8 = if (e.is_new) 'A' else if (e.is_deleted) 'D' else 'M';
+            const line = try std.fmt.allocPrint(allocator, "{c}\t{s}\n", .{ status_char, e.path });
+            defer allocator.free(line);
+            try platform_impl.writeStdout(line);
+        }
+    } else if (diff_output_mode == .raw) {
+        for (diff_entries) |e| {
+            const status_char: u8 = if (e.is_new) 'A' else if (e.is_deleted) 'D' else 'M';
+            const zero_oid = "0000000000000000000000000000000000000000";
+            const old_mode_str: []const u8 = if (e.is_new) "000000" else "100644";
+            const new_mode_str: []const u8 = if (e.is_deleted) "000000" else "100644";
+            const old_hash = if (e.is_new) zero_oid else e.old_hash;
+            const new_hash = if (e.is_deleted) zero_oid else e.new_hash;
+            const line = try std.fmt.allocPrint(allocator, ":{s} {s} {s} {s} {c}\t{s}\n", .{ old_mode_str, new_mode_str, old_hash, new_hash, status_char, e.path });
+            defer allocator.free(line);
+            try platform_impl.writeStdout(line);
+        }
+    }
+    // no_patch: no output
+}
+
+fn collectRefDiffEntries(ref_name: []const u8, index: *const index_mod.Index, cwd: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, entries: *std.array_list.Managed(DiffStatEntry), is_cached: bool) !bool {
+    // Get the tree for the ref
+    const tree_hash = resolveToTree(allocator, ref_name, git_path, platform_impl) catch return false;
+    defer allocator.free(tree_hash);
+
+    // Walk the tree to get all entries
+    var tree_entries_map = std.StringHashMap(TreeEntryInfo).init(allocator);
+    defer {
+        var kit = tree_entries_map.keyIterator();
+        while (kit.next()) |k| allocator.free(k.*);
+        tree_entries_map.deinit();
+    }
+    try walkTreeForDiffIndex(allocator, git_path, tree_hash, "", &tree_entries_map, platform_impl);
+
+    var has_diff = false;
+
+    if (is_cached) {
+        // Compare ref tree to index
+        for (index.entries.items) |entry| {
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
+            defer allocator.free(index_hash);
+
+            if (tree_entries_map.get(entry.path)) |te| {
+                var old_hash_buf: [40]u8 = undefined;
+                _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&te.hash}) catch unreachable;
+                if (!std.mem.eql(u8, &old_hash_buf, index_hash) or te.mode != entry.mode) {
+                    has_diff = true;
+                    const old_content = readBlobContent(allocator, git_path, &old_hash_buf, platform_impl) catch "";
+                    defer if (old_content.len > 0) allocator.free(old_content);
+                    const new_content = getIndexedFileContent(entry, allocator) catch "";
+                    defer if (new_content.len > 0) allocator.free(new_content);
+                    var ins: usize = 0;
+                    var dels: usize = 0;
+                    if (te.mode != entry.mode and std.mem.eql(u8, old_content, new_content)) {
+                        // mode-only change
+                    } else {
+                        countInsertionsDeletions(old_content, new_content, &ins, &dels);
+                    }
+                    try entries.append(.{
+                        .path = try allocator.dupe(u8, entry.path),
+                        .insertions = ins, .deletions = dels,
+                        .is_binary = isBinaryContent(old_content) or isBinaryContent(new_content),
+                        .is_new = false, .is_deleted = false,
+                        .old_hash = try allocator.dupe(u8, &old_hash_buf),
+                        .new_hash = try allocator.dupe(u8, index_hash),
+                    });
+                }
+            } else {
+                has_diff = true;
+                const new_content = getIndexedFileContent(entry, allocator) catch "";
+                defer if (new_content.len > 0) allocator.free(new_content);
+                var lines: usize = 0;
+                if (new_content.len > 0) {
+                    var it = std.mem.splitScalar(u8, new_content, '\n');
+                    while (it.next()) |_| lines += 1;
+                    if (new_content[new_content.len - 1] == '\n') lines -= 1;
+                }
+                try entries.append(.{
+                    .path = try allocator.dupe(u8, entry.path),
+                    .insertions = lines, .deletions = 0,
+                    .is_binary = isBinaryContent(new_content),
+                    .is_new = true, .is_deleted = false,
+                    .old_hash = try allocator.dupe(u8, "0000000000000000000000000000000000000000"),
+                    .new_hash = try allocator.dupe(u8, index_hash),
+                });
+            }
+        }
+        // Check for deletions (in tree but not in index)
+        var tree_it = tree_entries_map.iterator();
+        while (tree_it.next()) |kv| {
+            var found = false;
+            for (index.entries.items) |entry| {
+                if (std.mem.eql(u8, entry.path, kv.key_ptr.*)) { found = true; break; }
+            }
+            if (!found) {
+                has_diff = true;
+                var old_hash_buf: [40]u8 = undefined;
+                _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&kv.value_ptr.hash}) catch unreachable;
+                const old_content = readBlobContent(allocator, git_path, &old_hash_buf, platform_impl) catch "";
+                defer if (old_content.len > 0) allocator.free(old_content);
+                var lines: usize = 0;
+                if (old_content.len > 0) {
+                    var it = std.mem.splitScalar(u8, old_content, '\n');
+                    while (it.next()) |_| lines += 1;
+                    if (old_content[old_content.len - 1] == '\n') lines -= 1;
+                }
+                try entries.append(.{
+                    .path = try allocator.dupe(u8, kv.key_ptr.*),
+                    .insertions = 0, .deletions = lines,
+                    .is_binary = isBinaryContent(old_content),
+                    .is_new = false, .is_deleted = true,
+                    .old_hash = try allocator.dupe(u8, &old_hash_buf),
+                    .new_hash = try allocator.dupe(u8, "0000000000000000000000000000000000000000"),
+                });
+            }
+        }
+    } else {
+        // Compare ref tree to working tree
+        // First collect all working tree files that are tracked
+        var seen_paths = std.StringHashMap(void).init(allocator);
+        defer seen_paths.deinit();
+
+        for (index.entries.items) |entry| {
+            const full_path = if (std.fs.path.isAbsolute(entry.path))
+                try allocator.dupe(u8, entry.path)
+            else
+                try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd, entry.path });
+            defer allocator.free(full_path);
+
+            const current_content = platform_impl.fs.readFile(allocator, full_path) catch "";
+            defer if (current_content.len > 0) allocator.free(current_content);
+
+            const file_exists = current_content.len > 0 or (platform_impl.fs.exists(full_path) catch false);
+            
+            try seen_paths.put(try allocator.dupe(u8, entry.path), {});
+
+            if (tree_entries_map.get(entry.path)) |te| {
+                var old_hash_buf: [40]u8 = undefined;
+                _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&te.hash}) catch unreachable;
+                const old_content = readBlobContent(allocator, git_path, &old_hash_buf, platform_impl) catch "";
+                defer if (old_content.len > 0) allocator.free(old_content);
+
+                if (file_exists) {
+                    if (!std.mem.eql(u8, old_content, current_content)) {
+                        has_diff = true;
+                        var ins: usize = 0;
+                        var dels: usize = 0;
+                        countInsertionsDeletions(old_content, current_content, &ins, &dels);
+                        const blob = objects.createBlobObject(current_content, allocator) catch continue;
+                        defer blob.deinit(allocator);
+                        const new_hash = blob.hash(allocator) catch continue;
+                        defer allocator.free(new_hash);
+                        try entries.append(.{
+                            .path = try allocator.dupe(u8, entry.path),
+                            .insertions = ins, .deletions = dels,
+                            .is_binary = isBinaryContent(old_content) or isBinaryContent(current_content),
+                            .is_new = false, .is_deleted = false,
+                            .old_hash = try allocator.dupe(u8, &old_hash_buf),
+                            .new_hash = try allocator.dupe(u8, new_hash),
+                        });
+                    }
+                } else {
+                    // File deleted
+                    has_diff = true;
+                    var lines: usize = 0;
+                    if (old_content.len > 0) {
+                        var it = std.mem.splitScalar(u8, old_content, '\n');
+                        while (it.next()) |_| lines += 1;
+                        if (old_content[old_content.len - 1] == '\n') lines -= 1;
+                    }
+                    try entries.append(.{
+                        .path = try allocator.dupe(u8, entry.path),
+                        .insertions = 0, .deletions = lines,
+                        .is_binary = isBinaryContent(old_content),
+                        .is_new = false, .is_deleted = true,
+                        .old_hash = try allocator.dupe(u8, &old_hash_buf),
+                        .new_hash = try allocator.dupe(u8, "0000000000000000000000000000000000000000"),
+                    });
+                }
+            } else if (file_exists) {
+                // New file
+                has_diff = true;
+                var lines: usize = 0;
+                if (current_content.len > 0) {
+                    var it = std.mem.splitScalar(u8, current_content, '\n');
+                    while (it.next()) |_| lines += 1;
+                    if (current_content[current_content.len - 1] == '\n') lines -= 1;
+                }
+                const blob = objects.createBlobObject(current_content, allocator) catch continue;
+                defer blob.deinit(allocator);
+                const new_hash = blob.hash(allocator) catch continue;
+                defer allocator.free(new_hash);
+                try entries.append(.{
+                    .path = try allocator.dupe(u8, entry.path),
+                    .insertions = lines, .deletions = 0,
+                    .is_binary = isBinaryContent(current_content),
+                    .is_new = true, .is_deleted = false,
+                    .old_hash = try allocator.dupe(u8, "0000000000000000000000000000000000000000"),
+                    .new_hash = try allocator.dupe(u8, new_hash),
+                });
+            }
+        }
+
+        // Check for entries in tree but not in index (deleted before staging)
+        var tree_it = tree_entries_map.iterator();
+        while (tree_it.next()) |kv| {
+            if (!seen_paths.contains(kv.key_ptr.*)) {
+                has_diff = true;
+                var old_hash_buf: [40]u8 = undefined;
+                _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&kv.value_ptr.hash}) catch unreachable;
+                const old_content = readBlobContent(allocator, git_path, &old_hash_buf, platform_impl) catch "";
+                defer if (old_content.len > 0) allocator.free(old_content);
+                var lines: usize = 0;
+                if (old_content.len > 0) {
+                    var it = std.mem.splitScalar(u8, old_content, '\n');
+                    while (it.next()) |_| lines += 1;
+                    if (old_content[old_content.len - 1] == '\n') lines -= 1;
+                }
+                try entries.append(.{
+                    .path = try allocator.dupe(u8, kv.key_ptr.*),
+                    .insertions = 0, .deletions = lines,
+                    .is_binary = isBinaryContent(old_content),
+                    .is_new = false, .is_deleted = true,
+                    .old_hash = try allocator.dupe(u8, &old_hash_buf),
+                    .new_hash = try allocator.dupe(u8, "0000000000000000000000000000000000000000"),
+                });
+            }
+        }
+    }
+    return has_diff;
+}
+
+fn showRefToWorkingTreeDiff(ref_name: []const u8, index: *const index_mod.Index, cwd: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, quiet: bool, is_cached: bool) !bool {
+    // For now, collect entries and show patch-style output
+    var diff_entries = std.array_list.Managed(DiffStatEntry).init(allocator);
+    defer {
+        for (diff_entries.items) |e| allocator.free(e.path);
+        diff_entries.deinit();
+    }
+    const has_diff = try collectRefDiffEntries(ref_name, index, cwd, git_path, platform_impl, allocator, &diff_entries, is_cached);
+    if (quiet) return has_diff;
+
+    // Generate patch output for each entry
+    const tree_hash = resolveToTree(allocator, ref_name, git_path, platform_impl) catch return false;
+    defer allocator.free(tree_hash);
+    var tree_entries_map = std.StringHashMap(TreeEntryInfo).init(allocator);
+    defer {
+        var kit = tree_entries_map.keyIterator();
+        while (kit.next()) |k| allocator.free(k.*);
+        tree_entries_map.deinit();
+    }
+    try walkTreeForDiffIndex(allocator, git_path, tree_hash, "", &tree_entries_map, platform_impl);
+
+    for (diff_entries.items) |de| {
+        // Get old content from tree
+        const old_content = if (de.is_new) try allocator.dupe(u8, "") else blk: {
+            if (tree_entries_map.get(de.path)) |te| {
+                var hash_buf: [40]u8 = undefined;
+                _ = std.fmt.bufPrint(&hash_buf, "{x}", .{&te.hash}) catch unreachable;
+                break :blk readBlobContent(allocator, git_path, &hash_buf, platform_impl) catch try allocator.dupe(u8, "");
+            } else break :blk try allocator.dupe(u8, "");
+        };
+        defer allocator.free(old_content);
+
+        // Get new content
+        const new_content = if (de.is_deleted) try allocator.dupe(u8, "") else if (is_cached) blk: {
+            // Find in index
+            for (index.entries.items) |entry| {
+                if (std.mem.eql(u8, entry.path, de.path)) {
+                    break :blk getIndexedFileContent(entry, allocator) catch try allocator.dupe(u8, "");
+                }
+            }
+            break :blk try allocator.dupe(u8, "");
+        } else blk: {
+            const full_path = if (std.fs.path.isAbsolute(de.path))
+                try allocator.dupe(u8, de.path)
+            else
+                try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd, de.path });
+            defer allocator.free(full_path);
+            break :blk platform_impl.fs.readFile(allocator, full_path) catch try allocator.dupe(u8, "");
+        };
+        defer allocator.free(new_content);
+
+        const short_old = de.old_hash[0..@min(7, de.old_hash.len)];
+        const short_new = de.new_hash[0..@min(7, de.new_hash.len)];
+        const diff_output = diff_mod.generateUnifiedDiffWithHashes(old_content, new_content, de.path, short_old, short_new, allocator) catch continue;
+        defer allocator.free(diff_output);
+        try platform_impl.writeStdout(diff_output);
+    }
+
+    return has_diff;
+}
+
+const DiffStatEntry = struct {
+    path: []const u8,
+    insertions: usize,
+    deletions: usize,
+    is_binary: bool,
+    is_new: bool,
+    is_deleted: bool,
+    old_hash: []const u8,
+    new_hash: []const u8,
+};
+
+fn collectWorkingTreeDiffEntries(index: *const index_mod.Index, cwd: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, entries: *std.array_list.Managed(DiffStatEntry)) !bool {
+    _ = git_path;
+    var has_diff = false;
+    for (index.entries.items) |entry| {
+        const full_path = if (std.fs.path.isAbsolute(entry.path))
+            try allocator.dupe(u8, entry.path)
+        else
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd, entry.path });
+        defer allocator.free(full_path);
+
+        if (platform_impl.fs.exists(full_path) catch false) {
+            const current_content = platform_impl.fs.readFile(allocator, full_path) catch continue;
+            defer allocator.free(current_content);
+
+            const blob = try objects.createBlobObject(current_content, allocator);
+            defer blob.deinit(allocator);
+            const current_hash = try blob.hash(allocator);
+            defer allocator.free(current_hash);
+
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
+            defer allocator.free(index_hash);
+
+            if (!std.mem.eql(u8, current_hash, index_hash)) {
+                has_diff = true;
+                const indexed_content = getIndexedFileContent(entry, allocator) catch "";
+                defer if (indexed_content.len > 0) allocator.free(indexed_content);
+
+                var ins: usize = 0;
+                var dels: usize = 0;
+                countInsertionsDeletions(indexed_content, current_content, &ins, &dels);
+
+                try entries.append(.{
+                    .path = try allocator.dupe(u8, entry.path),
+                    .insertions = ins,
+                    .deletions = dels,
+                    .is_binary = isBinaryContent(current_content) or isBinaryContent(indexed_content),
+                    .is_new = false,
+                    .is_deleted = false,
+                    .old_hash = try allocator.dupe(u8, index_hash),
+                    .new_hash = try allocator.dupe(u8, current_hash),
+                });
+            }
+        } else {
+            has_diff = true;
+            const indexed_content = getIndexedFileContent(entry, allocator) catch "";
+            defer if (indexed_content.len > 0) allocator.free(indexed_content);
+
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
+            defer allocator.free(index_hash);
+
+            var lines: usize = 0;
+            if (indexed_content.len > 0) {
+                var it = std.mem.splitScalar(u8, indexed_content, '\n');
+                while (it.next()) |_| lines += 1;
+                if (indexed_content[indexed_content.len - 1] == '\n') lines -= 1;
+            }
+
+            try entries.append(.{
+                .path = try allocator.dupe(u8, entry.path),
+                .insertions = 0,
+                .deletions = lines,
+                .is_binary = isBinaryContent(indexed_content),
+                .is_new = false,
+                .is_deleted = true,
+                .old_hash = try allocator.dupe(u8, index_hash),
+                .new_hash = try allocator.dupe(u8, "0000000000000000000000000000000000000000"),
+            });
+        }
+    }
+    return has_diff;
+}
+
+fn collectStagedDiffEntries(index: *const index_mod.Index, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, entries: *std.array_list.Managed(DiffStatEntry)) !bool {
+    var has_diff = false;
+
+    // Get HEAD tree
+    const head_commit = refs.getCurrentCommit(git_path, platform_impl, allocator) catch return false;
+    if (head_commit == null) {
+        // No HEAD - all index entries are new
+        for (index.entries.items) |entry| {
+            has_diff = true;
+            const content = getIndexedFileContent(entry, allocator) catch "";
+            defer if (content.len > 0) allocator.free(content);
+            var lines: usize = 0;
+            if (content.len > 0) {
+                var it = std.mem.splitScalar(u8, content, '\n');
+                while (it.next()) |_| lines += 1;
+                if (content[content.len - 1] == '\n') lines -= 1;
+            }
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
+            defer allocator.free(index_hash);
+            try entries.append(.{
+                .path = try allocator.dupe(u8, entry.path),
+                .insertions = lines,
+                .deletions = 0,
+                .is_binary = isBinaryContent(content),
+                .is_new = true,
+                .is_deleted = false,
+                .old_hash = try allocator.dupe(u8, "0000000000000000000000000000000000000000"),
+                .new_hash = try allocator.dupe(u8, index_hash),
+            });
+        }
+        return has_diff;
+    }
+    defer allocator.free(head_commit.?);
+
+    const tree_hash = resolveToTree(allocator, head_commit.?, git_path, platform_impl) catch return false;
+    defer allocator.free(tree_hash);
+
+    var tree_entries_map = std.StringHashMap(TreeEntryInfo).init(allocator);
+    defer {
+        var kit = tree_entries_map.keyIterator();
+        while (kit.next()) |k| allocator.free(k.*);
+        tree_entries_map.deinit();
+    }
+    try walkTreeForDiffIndex(allocator, git_path, tree_hash, "", &tree_entries_map, platform_impl);
+
+    for (index.entries.items) |entry| {
+        const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
+        defer allocator.free(index_hash);
+
+        if (tree_entries_map.get(entry.path)) |te| {
+            var old_hash_buf: [40]u8 = undefined;
+            _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&te.hash}) catch unreachable;
+            if (!std.mem.eql(u8, &old_hash_buf, index_hash) or te.mode != entry.mode) {
+                has_diff = true;
+                const old_content = readBlobContent(allocator, git_path, &old_hash_buf, platform_impl) catch "";
+                defer if (old_content.len > 0) allocator.free(old_content);
+                const new_content = getIndexedFileContent(entry, allocator) catch "";
+                defer if (new_content.len > 0) allocator.free(new_content);
+
+                var ins: usize = 0;
+                var dels: usize = 0;
+                if (te.mode != entry.mode and std.mem.eql(u8, old_content, new_content)) {
+                    // Mode-only change
+                } else {
+                    countInsertionsDeletions(old_content, new_content, &ins, &dels);
+                }
+
+                try entries.append(.{
+                    .path = try allocator.dupe(u8, entry.path),
+                    .insertions = ins,
+                    .deletions = dels,
+                    .is_binary = isBinaryContent(old_content) or isBinaryContent(new_content),
+                    .is_new = false,
+                    .is_deleted = false,
+                    .old_hash = try allocator.dupe(u8, &old_hash_buf),
+                    .new_hash = try allocator.dupe(u8, index_hash),
+                });
+            }
+        } else {
+            has_diff = true;
+            const new_content = getIndexedFileContent(entry, allocator) catch "";
+            defer if (new_content.len > 0) allocator.free(new_content);
+            var lines: usize = 0;
+            if (new_content.len > 0) {
+                var it = std.mem.splitScalar(u8, new_content, '\n');
+                while (it.next()) |_| lines += 1;
+                if (new_content[new_content.len - 1] == '\n') lines -= 1;
+            }
+            try entries.append(.{
+                .path = try allocator.dupe(u8, entry.path),
+                .insertions = lines,
+                .deletions = 0,
+                .is_binary = isBinaryContent(new_content),
+                .is_new = true,
+                .is_deleted = false,
+                .old_hash = try allocator.dupe(u8, "0000000000000000000000000000000000000000"),
+                .new_hash = try allocator.dupe(u8, index_hash),
+            });
+        }
+    }
+
+    // Check for deletions
+    var tree_it = tree_entries_map.iterator();
+    while (tree_it.next()) |kv| {
+        var found = false;
+        for (index.entries.items) |entry| {
+            if (std.mem.eql(u8, entry.path, kv.key_ptr.*)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            has_diff = true;
+            var old_hash_buf: [40]u8 = undefined;
+            _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&kv.value_ptr.hash}) catch unreachable;
+            const old_content = readBlobContent(allocator, git_path, &old_hash_buf, platform_impl) catch "";
+            defer if (old_content.len > 0) allocator.free(old_content);
+            var lines: usize = 0;
+            if (old_content.len > 0) {
+                var it = std.mem.splitScalar(u8, old_content, '\n');
+                while (it.next()) |_| lines += 1;
+                if (old_content[old_content.len - 1] == '\n') lines -= 1;
+            }
+            try entries.append(.{
+                .path = try allocator.dupe(u8, kv.key_ptr.*),
+                .insertions = 0,
+                .deletions = lines,
+                .is_binary = isBinaryContent(old_content),
+                .is_new = false,
+                .is_deleted = true,
+                .old_hash = try allocator.dupe(u8, &old_hash_buf),
+                .new_hash = try allocator.dupe(u8, "0000000000000000000000000000000000000000"),
+            });
+        }
+    }
+
+    return has_diff;
+}
+
+fn countInsertionsDeletions(old_content: []const u8, new_content: []const u8, insertions: *usize, deletions: *usize) void {
+    // Count lines in old and new
+    var old_lines = std.array_list.Managed([]const u8).init(std.heap.page_allocator);
+    defer old_lines.deinit();
+    var new_lines = std.array_list.Managed([]const u8).init(std.heap.page_allocator);
+    defer new_lines.deinit();
+
+    var old_it = std.mem.splitScalar(u8, old_content, '\n');
+    while (old_it.next()) |line| old_lines.append(line) catch {};
+    var new_it = std.mem.splitScalar(u8, new_content, '\n');
+    while (new_it.next()) |line| new_lines.append(line) catch {};
+
+    // Remove trailing empty string from split
+    if (old_lines.items.len > 0 and old_lines.items[old_lines.items.len - 1].len == 0 and old_content.len > 0 and old_content[old_content.len - 1] == '\n') {
+        _ = old_lines.pop();
+    }
+    if (new_lines.items.len > 0 and new_lines.items[new_lines.items.len - 1].len == 0 and new_content.len > 0 and new_content[new_content.len - 1] == '\n') {
+        _ = new_lines.pop();
+    }
+
+    // Simple LCS-based diff count
+    const old_len = old_lines.items.len;
+    const new_len = new_lines.items.len;
+
+    if (old_len == 0) {
+        insertions.* = new_len;
+        deletions.* = 0;
+        return;
+    }
+    if (new_len == 0) {
+        insertions.* = 0;
+        deletions.* = old_len;
+        return;
+    }
+
+    // Use a simple approach: count matching lines using LCS length
+    // LCS via O(min(m,n)) space DP
+    const lcs_len = computeLCSLength(old_lines.items, new_lines.items);
+    deletions.* = old_len - lcs_len;
+    insertions.* = new_len - lcs_len;
+}
+
+fn computeLCSLength(a: []const []const u8, b: []const []const u8) usize {
+    if (a.len == 0 or b.len == 0) return 0;
+
+    // Use the shorter sequence for the DP row
+    const short = if (a.len <= b.len) a else b;
+    const long = if (a.len <= b.len) b else a;
+
+    const row = std.heap.page_allocator.alloc(usize, short.len + 1) catch return 0;
+    defer std.heap.page_allocator.free(row);
+    @memset(row, 0);
+
+    for (long) |long_line| {
+        var prev: usize = 0;
+        for (short, 0..) |short_line, j| {
+            const temp = row[j + 1];
+            if (std.mem.eql(u8, long_line, short_line)) {
+                row[j + 1] = prev + 1;
+            } else {
+                row[j + 1] = @max(row[j + 1], row[j]);
+            }
+            prev = temp;
+        }
+    }
+    return row[short.len];
+}
+
+fn isBinaryContent(content: []const u8) bool {
+    const check_len = @min(content.len, 8000);
+    for (content[0..check_len]) |c| {
+        if (c == 0) return true;
+    }
+    return false;
+}
+
+fn readBlobContent(allocator: std.mem.Allocator, git_path: []const u8, hash_hex: []const u8, platform_impl: *const platform_mod.Platform) ![]const u8 {
+    _ = platform_impl;
+    return readGitObjectContent(git_path, hash_hex, allocator) catch return error.FileNotFound;
+}
+
+fn formatDiffStat(diff_entries: []const DiffStatEntry, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+    if (diff_entries.len == 0) return;
+
+    // Find max path length and max change count for formatting
+    var max_path_len: usize = 0;
+    var max_changes: usize = 0;
+    for (diff_entries) |e| {
+        if (e.path.len > max_path_len) max_path_len = e.path.len;
+        const total = e.insertions + e.deletions;
+        if (total > max_changes) max_changes = total;
+    }
+
+    // Cap the bar width
+    const terminal_width: usize = 80;
+    // " path | N ++++----\n"
+    const num_width = countDigitsUsize(max_changes);
+    const overhead = 3 + num_width + 1; // " | " + num + " "
+    var bar_max: usize = if (terminal_width > max_path_len + overhead + 2) terminal_width - max_path_len - overhead else 10;
+    if (bar_max < 1) bar_max = 1;
+
+    var total_ins: usize = 0;
+    var total_dels: usize = 0;
+    var files_changed: usize = 0;
+
+    for (diff_entries) |e| {
+        files_changed += 1;
+        total_ins += e.insertions;
+        total_dels += e.deletions;
+
+        if (e.is_binary) {
+            const line = try std.fmt.allocPrint(allocator, " {s} | Bin\n", .{e.path});
+            defer allocator.free(line);
+            try platform_impl.writeStdout(line);
+        } else {
+            const total = e.insertions + e.deletions;
+            if (total == 0) {
+                // Mode-only change
+                const line = try std.fmt.allocPrint(allocator, " {s} | 0\n", .{e.path});
+                defer allocator.free(line);
+                try platform_impl.writeStdout(line);
+            } else {
+                // Scale the bar
+                var plus_count = e.insertions;
+                var minus_count = e.deletions;
+                if (total > bar_max) {
+                    plus_count = (e.insertions * bar_max + total - 1) / total;
+                    minus_count = bar_max - plus_count;
+                    if (e.deletions > 0 and minus_count == 0) {
+                        minus_count = 1;
+                        if (plus_count > 1) plus_count -= 1;
+                    }
+                    if (e.insertions > 0 and plus_count == 0) {
+                        plus_count = 1;
+                        if (minus_count > 1) minus_count -= 1;
+                    }
+                }
+
+                var bar_buf: [256]u8 = undefined;
+                var bar_idx: usize = 0;
+                var i: usize = 0;
+                while (i < plus_count and bar_idx < bar_buf.len) : (i += 1) {
+                    bar_buf[bar_idx] = '+';
+                    bar_idx += 1;
+                }
+                i = 0;
+                while (i < minus_count and bar_idx < bar_buf.len) : (i += 1) {
+                    bar_buf[bar_idx] = '-';
+                    bar_idx += 1;
+                }
+
+                // Pad path
+                const padding = if (max_path_len > e.path.len) max_path_len - e.path.len else 0;
+                var pad_buf: [256]u8 = undefined;
+                const pad_len = @min(padding, pad_buf.len);
+                @memset(pad_buf[0..pad_len], ' ');
+
+                const line = try std.fmt.allocPrint(allocator, " {s}{s} | {d} {s}\n", .{ e.path, pad_buf[0..pad_len], total, bar_buf[0..bar_idx] });
+                defer allocator.free(line);
+                try platform_impl.writeStdout(line);
+            }
+        }
+    }
+
+    // Summary line
+    try formatDiffStatSummary(files_changed, total_ins, total_dels, platform_impl, allocator);
+}
+
+fn formatDiffShortStat(diff_entries: []const DiffStatEntry, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+    if (diff_entries.len == 0) return;
+
+    var total_ins: usize = 0;
+    var total_dels: usize = 0;
+    for (diff_entries) |e| {
+        total_ins += e.insertions;
+        total_dels += e.deletions;
+    }
+    try formatDiffStatSummary(diff_entries.len, total_ins, total_dels, platform_impl, allocator);
+}
+
+fn formatDiffNumStat(diff_entries: []const DiffStatEntry, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+    for (diff_entries) |e| {
+        if (e.is_binary) {
+            const line = try std.fmt.allocPrint(allocator, "-\t-\t{s}\n", .{e.path});
+            defer allocator.free(line);
+            try platform_impl.writeStdout(line);
+        } else {
+            const line = try std.fmt.allocPrint(allocator, "{d}\t{d}\t{s}\n", .{ e.insertions, e.deletions, e.path });
+            defer allocator.free(line);
+            try platform_impl.writeStdout(line);
+        }
+    }
+}
+
+fn formatDiffStatSummary(files_changed: usize, total_ins: usize, total_dels: usize, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+    var parts = std.array_list.Managed(u8).init(allocator);
+    defer parts.deinit();
+
+    const w = parts.writer();
+    try w.writeAll(" ");
+    try w.print("{d} file{s} changed", .{ files_changed, if (files_changed != 1) "s" else "" });
+    if (total_ins > 0) {
+        try w.print(", {d} insertion{s}(+)", .{ total_ins, if (total_ins != 1) "s" else "" });
+    }
+    if (total_dels > 0) {
+        try w.print(", {d} deletion{s}(-)", .{ total_dels, if (total_dels != 1) "s" else "" });
+    }
+    try w.writeAll("\n");
+    try platform_impl.writeStdout(parts.items);
+}
+
+fn countDigitsUsize(n: usize) usize {
+    if (n == 0) return 1;
+    var count: usize = 0;
+    var v = n;
+    while (v > 0) : (v /= 10) count += 1;
+    return count;
 }
 
 fn cmdDiffNoIndex(allocator: std.mem.Allocator, diff_args: []const []const u8, platform_impl: *const platform_mod.Platform) !void {
