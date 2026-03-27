@@ -18003,7 +18003,7 @@ fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, comman
     try pack_data.appendSlice(&checksum);
 
     if (stdout_mode) {
-        const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
+        const stdout = std.fs.File.stdout();
         stdout.writeAll(pack_data.items) catch {};
     } else if (base_name) |name| {
         var hash_hex: [40]u8 = undefined;
