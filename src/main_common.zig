@@ -12006,6 +12006,34 @@ pub fn resolveRevision(git_path: []const u8, rev: []const u8, platform_impl: *co
         return resolveCommitByMessage(git_path, pattern, platform_impl, allocator) catch return error.BadRevision;
     }
 
+    // Handle :<path> and :<n>:<path> syntax - look up blob in index
+    if (rev.len > 1 and rev[0] == ':' and rev[1] != '/') {
+        const after_colon = rev[1..];
+        // Check for :<n>:<path> format (stage number)
+        var target_stage: u2 = 0;
+        var target_path: []const u8 = after_colon;
+        if (after_colon.len >= 2 and after_colon[0] >= '0' and after_colon[0] <= '3' and after_colon[1] == ':') {
+            target_stage = @intCast(after_colon[0] - '0');
+            target_path = after_colon[2..];
+        }
+        // Read index and find the entry
+        var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch return error.BadRevision;
+        defer idx.deinit();
+        for (idx.entries.items) |entry| {
+            const entry_stage: u2 = @intCast((entry.flags >> 12) & 0x3);
+            if (std.mem.eql(u8, entry.path, target_path) and entry_stage == target_stage) {
+                var hex_buf: [40]u8 = undefined;
+                const hex_chars = "0123456789abcdef";
+                for (entry.sha1, 0..) |byte, bi| {
+                    hex_buf[bi * 2] = hex_chars[byte >> 4];
+                    hex_buf[bi * 2 + 1] = hex_chars[byte & 0x0f];
+                }
+                return allocator.dupe(u8, &hex_buf);
+            }
+        }
+        return error.BadRevision;
+    }
+
     // Handle <rev>:<path> syntax
     if (findRevColonPath(rev)) |colon_pos| {
         const rev_part = rev[0..colon_pos];
