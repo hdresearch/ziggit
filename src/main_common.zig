@@ -1002,6 +1002,22 @@ fn translateCommandFlags(allocator: std.mem.Allocator, all_args: [][]const u8, c
         return new_args;
     }
 
+    // Strip --no-path-walk and --path-walk (git 2.46+ feature for pack-objects)
+    if (std.mem.eql(u8, command, "pack-objects") or
+        std.mem.eql(u8, command, "repack"))
+    {
+        var new_args = std.array_list.Managed([]const u8).init(allocator);
+        for (all_args) |arg| {
+            if (std.mem.eql(u8, arg, "--no-path-walk") or
+                std.mem.eql(u8, arg, "--path-walk"))
+            {
+                continue; // Strip these flags
+            }
+            try new_args.append(arg);
+        }
+        return new_args.toOwnedSlice();
+    }
+
     // Handle commit --template with :(optional) prefix (git 2.46+ feature)
     if (std.mem.eql(u8, command, "commit")) {
         return translateCommitFlags(allocator, all_args, command_index);
