@@ -1346,6 +1346,287 @@ fn clonePackShallowHybrid(allocator: std.mem.Allocator, client: *std.http.Client
     };
 }
 
+/// Build a v2 fetch request body using want-ref (by name) instead of want (by OID).
+/// This eliminates the need for a separate ls-refs round-trip.
+fn buildV2FetchRequestWithWantRef(allocator: std.mem.Allocator, want_refs: []const []const u8, depth: u32) ![]u8 {
+    var body = std.array_list.Managed(u8).init(allocator);
+    errdefer body.deinit();
+
+    // Command header
+    const cmd_lines = [_][]const u8{
+        "command=fetch\n",
+        "agent=ziggit/0.1\n",
+        "object-format=sha1\n",
+    };
+    for (cmd_lines) |line| {
+        const pkt_len = line.len + 4;
+        var hdr: [4]u8 = undefined;
+        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
+        try body.appendSlice(&hdr);
+        try body.appendSlice(line);
+    }
+
+    // Delimiter
+    try body.appendSlice("0001");
+
+    // Arguments
+    const args = [_][]const u8{
+        "thin-pack\n",
+        "no-progress\n",
+        "ofs-delta\n",
+    };
+    for (args) |arg| {
+        const pkt_len = arg.len + 4;
+        var hdr: [4]u8 = undefined;
+        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
+        try body.appendSlice(&hdr);
+        try body.appendSlice(arg);
+    }
+
+    // Depth
+    if (depth > 0) {
+        var deepen_buf: [64]u8 = undefined;
+        const deepen_line = std.fmt.bufPrint(&deepen_buf, "deepen {d}\n", .{depth}) catch unreachable;
+        const pkt_len = deepen_line.len + 4;
+        var hdr: [4]u8 = undefined;
+        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
+        try body.appendSlice(&hdr);
+        try body.appendSlice(deepen_line);
+    }
+
+    // want-ref lines (by name, server resolves OID)
+    for (want_refs) |ref_name| {
+        var line_buf: [256]u8 = undefined;
+        const line = std.fmt.bufPrint(&line_buf, "want-ref {s}\n", .{ref_name}) catch unreachable;
+        const pkt_len = line.len + 4;
+        var hdr: [4]u8 = undefined;
+        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
+        try body.appendSlice(&hdr);
+        try body.appendSlice(line);
+    }
+
+    // done
+    {
+        const line = "done\n";
+        const pkt_len = line.len + 4;
+        var hdr: [4]u8 = undefined;
+        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
+        try body.appendSlice(&hdr);
+        try body.appendSlice(line);
+    }
+
+    // Flush
+    try body.appendSlice("0000");
+
+    return body.toOwnedSlice();
+}
+
+/// Extended shallow fetch result that also includes resolved wanted-refs.
+const WantRefFetchResult = struct {
+    pack_data: []u8,
+    shallow_commits: []Oid,
+    refs: []Ref,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *WantRefFetchResult) void {
+        self.allocator.free(self.pack_data);
+        self.allocator.free(self.shallow_commits);
+        for (self.refs) |ref| self.allocator.free(ref.name);
+        self.allocator.free(self.refs);
+    }
+};
+
+/// Parse v2 fetch response that includes wanted-refs section.
+/// Returns pack data, shallow commits, AND resolved ref OIDs.
+fn parseV2FetchResponseWithRefs(allocator: std.mem.Allocator, data: []const u8) !WantRefFetchResult {
+    var pack_data = std.array_list.Managed(u8).init(allocator);
+    try pack_data.ensureTotalCapacity(data.len * 9 / 10);
+    errdefer pack_data.deinit();
+    var shallow_commits = std.array_list.Managed(Oid).init(allocator);
+    errdefer shallow_commits.deinit();
+    var refs = std.array_list.Managed(Ref).init(allocator);
+    errdefer {
+        for (refs.items) |ref| allocator.free(ref.name);
+        refs.deinit();
+    }
+
+    var offset: usize = 0;
+    var in_packfile = false;
+    var in_wanted_refs = false;
+
+    while (offset < data.len) {
+        const result = parsePktLine(data[offset..]) catch break;
+        offset += result.consumed;
+
+        if (result.pkt.line_type == .flush) continue;
+        if (result.pkt.line_type == .delim) {
+            // Delimiter resets section context
+            in_wanted_refs = false;
+            continue;
+        }
+
+        const payload = result.pkt.data;
+        if (payload.len == 0) continue;
+
+        // Section markers
+        if (std.mem.startsWith(u8, payload, "shallow-info")) continue;
+        if (std.mem.startsWith(u8, payload, "acknowledgments")) continue;
+        if (std.mem.startsWith(u8, payload, "wanted-refs\n") or std.mem.eql(u8, payload, "wanted-refs")) {
+            in_wanted_refs = true;
+            continue;
+        }
+        if (std.mem.startsWith(u8, payload, "packfile\n") or std.mem.eql(u8, payload, "packfile")) {
+            in_wanted_refs = false;
+            in_packfile = true;
+            continue;
+        }
+
+        // Parse wanted-refs entries: "<oid> <refname>\n"
+        if (in_wanted_refs) {
+            var line = payload;
+            if (line.len > 0 and line[line.len - 1] == '\n') line = line[0 .. line.len - 1];
+            if (line.len >= 42) { // 40 hex + space + at least 1 char name
+                const hash = line[0..40];
+                const ref_name = line[41..];
+                try refs.append(.{
+                    .hash = hash[0..40].*,
+                    .name = try allocator.dupe(u8, ref_name),
+                });
+            }
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, payload, "shallow ")) {
+            const rest = payload["shallow ".len..];
+            const hash_str = if (rest.len > 0 and rest[rest.len - 1] == '\n')
+                rest[0 .. rest.len - 1]
+            else
+                rest;
+            if (hash_str.len >= 40) {
+                try shallow_commits.append(hash_str[0..40].*);
+            }
+            continue;
+        }
+
+        if (in_packfile) {
+            const channel = payload[0];
+            if (channel == 1) {
+                try pack_data.appendSlice(payload[1..]);
+            } else if (channel == 2) {
+                continue;
+            } else if (channel == 3) {
+                return error.SideBandError;
+            }
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, payload, "NAK")) continue;
+        if (std.mem.startsWith(u8, payload, "ACK")) continue;
+        if (std.mem.startsWith(u8, payload, "ready")) continue;
+    }
+
+    const pack_result = try pack_data.toOwnedSlice();
+    if (pack_result.len == 0) {
+        allocator.free(pack_result);
+        return error.NoPackData;
+    }
+
+    var final_pack = pack_result;
+    if (pack_result.len < 4 or !std.mem.eql(u8, pack_result[0..4], "PACK")) {
+        if (std.mem.indexOf(u8, pack_result, "PACK")) |pack_start| {
+            if (pack_start > 0) {
+                final_pack = try allocator.dupe(u8, pack_result[pack_start..]);
+                allocator.free(pack_result);
+            }
+        }
+    }
+
+    return .{
+        .pack_data = final_pack,
+        .shallow_commits = try shallow_commits.toOwnedSlice(),
+        .refs = try refs.toOwnedSlice(),
+        .allocator = allocator,
+    };
+}
+
+/// Single-round-trip v2 shallow clone using want-ref.
+/// Sends a single POST with want-ref HEAD, server resolves the OID and returns
+/// both the wanted-refs mapping and the pack data. Eliminates the ls-refs round-trip.
+fn clonePackShallowV2SingleRT(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, depth: u32) !CloneResult {
+    const trace_timing = std.posix.getenv("ZIGGIT_TRACE_TIMING") != null;
+    var net_timer = std.time.Timer.start() catch null;
+
+    var base = url;
+    while (base.len > 0 and base[base.len - 1] == '/') {
+        base = base[0 .. base.len - 1];
+    }
+
+    const post_url = try std.fmt.allocPrint(allocator, "{s}/git-upload-pack", .{base});
+    defer allocator.free(post_url);
+
+    // For shallow single-branch clone, just want-ref HEAD.
+    // For full clone, want-ref all standard refs (but that's less common).
+    const want_refs = [_][]const u8{"HEAD"};
+    const fetch_body = try buildV2FetchRequestWithWantRef(allocator, &want_refs, depth);
+    defer allocator.free(fetch_body);
+
+    const fetch_response = try httpPostWithClientV2(allocator, client, post_url, fetch_body, "application/x-git-upload-pack-request");
+    defer allocator.free(fetch_response);
+
+    const wantref_result = try parseV2FetchResponseWithRefs(allocator, fetch_response);
+
+    if (trace_timing) {
+        if (net_timer) |*t| {
+            std.debug.print("[timing]   v2 single-RT fetch: {}ms, pack_size={}, refs={}\n", .{ t.read() / std.time.ns_per_ms, wantref_result.pack_data.len, wantref_result.refs.len });
+        }
+    }
+
+    // Build the refs list for the caller. wanted-refs gives us the branch ref;
+    // we also need to synthesize HEAD pointing to the same hash.
+    var all_refs = std.array_list.Managed(Ref).init(allocator);
+    errdefer {
+        for (all_refs.items) |ref| allocator.free(ref.name);
+        all_refs.deinit();
+    }
+
+    // Add HEAD
+    var head_hash: ?Oid = null;
+    for (wantref_result.refs) |ref| {
+        if (std.mem.eql(u8, ref.name, "HEAD")) {
+            head_hash = ref.hash;
+        }
+        try all_refs.append(.{
+            .hash = ref.hash,
+            .name = try allocator.dupe(u8, ref.name),
+        });
+    }
+
+    // If we got HEAD in wanted-refs but no branch ref, that's fine —
+    // the caller will figure out the branch from HEAD's hash.
+    // If wanted-refs didn't include HEAD explicitly (some servers return
+    // the resolved branch ref instead), add a HEAD entry.
+    if (head_hash == null and wantref_result.refs.len > 0) {
+        // Use the first ref's hash as HEAD
+        head_hash = wantref_result.refs[0].hash;
+        try all_refs.append(.{
+            .hash = wantref_result.refs[0].hash,
+            .name = try allocator.dupe(u8, "HEAD"),
+        });
+    }
+
+    // Free the wantref_result refs (we duped what we need)
+    for (wantref_result.refs) |ref| allocator.free(ref.name);
+    allocator.free(wantref_result.refs);
+
+    return .{
+        .refs = try all_refs.toOwnedSlice(),
+        .capabilities = try allocator.dupe(u8, ""),
+        .pack_data = wantref_result.pack_data,
+        .shallow_commits = wantref_result.shallow_commits,
+        .allocator = allocator,
+    };
+}
+
 /// Clone a repository with shallow depth support.
 /// When depth > 0, sends "deepen N" to the server for a shallow clone.
 /// Implements --single-branch behavior by default for shallow clones (like git does):
@@ -1356,14 +1637,18 @@ pub fn clonePackShallow(allocator: std.mem.Allocator, url: []const u8, depth: u3
 
     // Strategy selection for shallow clone:
     // - ZIGGIT_FORCE_V1: pure v1 (GET info/refs + POST upload-pack v1)
-    // - ZIGGIT_FORCE_V2: pure v2 (POST ls-refs + POST fetch)
+    // - ZIGGIT_FORCE_V2: pure v2 (POST ls-refs + POST fetch, 2 round-trips)
     // - ZIGGIT_FORCE_HYBRID: hybrid (GET info/refs for refs + POST v2 fetch)
-    // - Default: try v2, fall back to v1
+    // - ZIGGIT_FORCE_SINGLE_RT: single-round-trip v2 with want-ref (requires server support)
+    // - Default: v2 (2 round-trips), fall back to v1
     if (std.posix.getenv("ZIGGIT_FORCE_V1") != null) {
         return clonePackShallowV1(allocator, &client, url, depth);
     }
     if (std.posix.getenv("ZIGGIT_FORCE_HYBRID") != null) {
         return clonePackShallowHybrid(allocator, &client, url, depth);
+    }
+    if (std.posix.getenv("ZIGGIT_FORCE_SINGLE_RT") != null) {
+        return clonePackShallowV2SingleRT(allocator, &client, url, depth);
     }
     return clonePackShallowV2(allocator, &client, url, depth) catch |e| {
         if (std.posix.getenv("ZIGGIT_TRACE_TIMING") != null)
