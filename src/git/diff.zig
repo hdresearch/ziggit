@@ -91,6 +91,17 @@ const Edit = struct {
     new_index: usize,
 };
 
+fn writeHunkHeader(writer: anytype, old_start: usize, old_count: usize, new_start: usize, new_count: usize) !void {
+    // Git format: omit count when it's 1, show 0 explicitly
+    try writer.writeAll("@@ -");
+    try writer.print("{}", .{old_start});
+    if (old_count != 1) try writer.print(",{}", .{old_count});
+    try writer.writeAll(" +");
+    try writer.print("{}", .{new_start});
+    if (new_count != 1) try writer.print(",{}", .{new_count});
+    try writer.writeAll(" @@\n");
+}
+
 pub fn generateUnifiedDiff(old_content: []const u8, new_content: []const u8, file_path: []const u8, allocator: std.mem.Allocator) ![]u8 {
     return generateUnifiedDiffWithHashes(old_content, new_content, file_path, "0000000", "1111111", allocator);
 }
@@ -149,7 +160,7 @@ pub fn generateUnifiedDiffWithHashes(old_content: []const u8, new_content: []con
     
     // Hunks
     for (hunks.items) |hunk| {
-        try writer.print("@@ -{},{} +{},{} @@\n", .{ hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count });
+        try writeHunkHeader(writer, hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count);
         
         for (hunk.lines.items) |line| {
             const prefix = switch (line.type) {
@@ -424,7 +435,7 @@ pub fn generateUnifiedDiffWithOptions(
     
     // Hunks
     for (hunks.items) |hunk| {
-        try writer.print("@@ -{},{} +{},{} @@\n", .{ hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count });
+        try writeHunkHeader(writer, hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count);
         
         for (hunk.lines.items) |line| {
             const prefix = switch (line.type) {
