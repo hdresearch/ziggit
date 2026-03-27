@@ -29200,7 +29200,6 @@ fn cmdLastModified(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
     var rev: ?[]const u8 = null;
     var lm_paths = std.array_list.Managed([]const u8).init(allocator);
     defer lm_paths.deinit();
-    var rev_count: usize = 0;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-r")) {
@@ -29216,21 +29215,44 @@ fn cmdLastModified(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
             try platform_impl.writeStderr(msg);
             std.process.exit(128);
         } else {
-            if (rev == null) { rev = arg; rev_count += 1; }
-            else { rev_count += 1; }
+            // Could be rev or path - collect for later disambiguation
+            try lm_paths.append(arg);
         }
     }
 
-    if (rev_count > 1) {
-        try platform_impl.writeStderr("last-modified can only operate on one commit at a time\n");
-        std.process.exit(128);
-    }
+    // Disambiguate: first positional arg might be a rev
+    // Try to resolve it; if it fails, treat as path
 
     const git_path = findGitDirectory(allocator, platform_impl) catch {
         try platform_impl.writeStderr("fatal: not a git repository\n");
         std.process.exit(128);
     };
     defer allocator.free(git_path);
+
+    // Try to resolve first positional arg as revision
+    if (lm_paths.items.len > 0 and rev == null) {
+        const first_arg = lm_paths.items[0];
+        const resolved_try = resolveRevision(git_path, first_arg, platform_impl, allocator) catch null;
+        if (resolved_try) |r| {
+            allocator.free(r);
+            rev = first_arg;
+            // Remove from paths
+            _ = lm_paths.orderedRemove(0);
+        }
+    }
+
+    // Check for multiple revisions
+    if (rev != null and lm_paths.items.len > 0) {
+        // Check if any remaining args look like revisions
+        for (lm_paths.items) |p| {
+            const r2 = resolveRevision(git_path, p, platform_impl, allocator) catch null;
+            if (r2) |r| {
+                allocator.free(r);
+                try platform_impl.writeStderr("last-modified can only operate on one commit at a time\n");
+                std.process.exit(128);
+            }
+        }
+    }
 
     const commit_hash: []u8 = blk: {
         if (rev) |r| {
