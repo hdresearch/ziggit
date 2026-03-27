@@ -17269,6 +17269,27 @@ fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, command
         unreachable;
     };
 
+    // Validate format atoms
+    {
+        var vidx: usize = 0;
+        while (vidx < format.len) {
+            if (format[vidx] == '%' and vidx + 1 < format.len and format[vidx + 1] == '(') {
+                if (std.mem.indexOfScalar(u8, format[vidx..], ')')) |close| {
+                    const field = format[vidx + 2 .. vidx + close];
+                    if (!isValidFormatAtom(field)) {
+                        const msg = try std.fmt.allocPrint(allocator, "fatal: unknown field name: {s}\n", .{field});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                        std.process.exit(1);
+                    }
+                    vidx += close + 1;
+                    continue;
+                }
+            }
+            vidx += 1;
+        }
+    }
+
     // Collect all refs
     var ref_list = std.array_list.Managed(RefEntry).init(allocator);
     defer {
@@ -17668,6 +17689,28 @@ fn getRefField(field: []const u8, refname: []const u8, objectname: []const u8, o
     }
 
     return "";
+}
+
+fn isValidFormatAtom(field: []const u8) bool {
+    const valid_atoms = [_][]const u8{
+        "refname", "objectname", "objecttype", "objectsize", "deltabase",
+        "tree", "parent", "numparent", "object", "type", "tag",
+        "author", "authorname", "authoremail", "authordate",
+        "committer", "committername", "committeremail", "committerdate",
+        "tagger", "taggername", "taggeremail", "taggerdate",
+        "creator", "creatordate",
+        "subject", "body", "contents", "raw", "HEAD",
+        "upstream", "push", "*objectname", "*objecttype", "*raw", "*deltabase",
+        "*objectsize", "if", "then", "else", "end", "align", "color",
+        "ahead-behind", "describe", "rest", "trailers", "signature",
+        "symref", "worktreepath", "flag", "path",
+    };
+    for (valid_atoms) |atom| {
+        if (std.mem.eql(u8, field, atom)) return true;
+        if (std.mem.startsWith(u8, field, atom) and field.len > atom.len and field[atom.len] == ':')
+            return true;
+    }
+    return false;
 }
 
 fn applyLstrip(refname: []const u8, n_str: []const u8) []const u8 {
