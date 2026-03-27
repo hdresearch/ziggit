@@ -17251,13 +17251,32 @@ fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, command
             i += 1;
             if (i < args.len) count_limit = std.fmt.parseInt(usize, args[i], 10) catch null;
         } else if (std.mem.eql(u8, arg, "--shell") or std.mem.eql(u8, arg, "-s")) {
+            if (quoting_style != .none) {
+                try platform_impl.writeStderr("error: more than one quoting style?\n");
+                std.process.exit(1);
+            }
             quoting_style = .shell;
         } else if (std.mem.eql(u8, arg, "--perl") or std.mem.eql(u8, arg, "-p")) {
+            if (quoting_style != .none) {
+                try platform_impl.writeStderr("error: more than one quoting style?\n");
+                std.process.exit(1);
+            }
             quoting_style = .perl;
         } else if (std.mem.eql(u8, arg, "--python")) {
+            if (quoting_style != .none) {
+                try platform_impl.writeStderr("error: more than one quoting style?\n");
+                std.process.exit(1);
+            }
             quoting_style = .python;
         } else if (std.mem.eql(u8, arg, "--tcl")) {
+            if (quoting_style != .none) {
+                try platform_impl.writeStderr("error: more than one quoting style?\n");
+                std.process.exit(1);
+            }
             quoting_style = .tcl;
+        } else if (std.mem.startsWith(u8, arg, "--exclude=") or std.mem.eql(u8, arg, "--exclude")) {
+            // Exclude pattern - skip for now
+            if (std.mem.eql(u8, arg, "--exclude")) { i += 1; }
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             try patterns.append(arg);
         }
