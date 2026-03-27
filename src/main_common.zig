@@ -17125,6 +17125,7 @@ fn nativeCmdCountObjects(allocator: std.mem.Allocator, args: [][]const u8, comma
 
 fn nativeCmdShowRef(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
     var verify = false;
+    var exists_mode = false;
     var quiet = false;
     var heads = false;
     var tags = false;
@@ -17140,6 +17141,8 @@ fn nativeCmdShowRef(allocator: std.mem.Allocator, args: [][]const u8, command_in
         if (std.mem.eql(u8, arg, "-h")) {
             try platform_impl.writeStdout("usage: git show-ref [--head] [-d | --dereference] [-s | --hash[=<n>]] [--verify] [-q | --quiet] [--tags] [--heads] [--] [<pattern>...]\n");
             std.process.exit(129);
+        } else if (std.mem.eql(u8, arg, "--exists")) {
+            exists_mode = true;
         } else if (std.mem.eql(u8, arg, "--verify")) {
             verify = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
@@ -17174,6 +17177,50 @@ fn nativeCmdShowRef(allocator: std.mem.Allocator, args: [][]const u8, command_in
         unreachable;
     };
 
+    if (exists_mode) {
+        // --exists mode: check if a single ref exists, exit 0 if yes, 2 if no
+        if (patterns.items.len < 1) {
+            try platform_impl.writeStderr("error: --exists requires a ref argument\n");
+            std.process.exit(129);
+            unreachable;
+        }
+        const ref_name = patterns.items[0];
+        // Check if the ref file or packed-ref entry exists (even dangling symrefs count)
+        const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_name });
+        defer allocator.free(ref_path);
+        if (std.fs.cwd().access(ref_path, .{})) |_| {
+            // Check if it's a directory (directories are not refs)
+            const stat = std.fs.cwd().statFile(ref_path) catch return; // can't stat, assume it exists
+            if (stat.kind == .directory) {
+                try platform_impl.writeStderr("error: reference does not exist\n");
+                std.process.exit(2);
+                unreachable;
+            }
+            return; // exists (even if symref is dangling)
+        } else |_| {
+            // Check packed-refs
+            const packed_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir});
+            defer allocator.free(packed_path);
+            const packed_data = platform_impl.fs.readFile(allocator, packed_path) catch {
+                try platform_impl.writeStderr("error: reference does not exist\n");
+                std.process.exit(2);
+                unreachable;
+            };
+            defer allocator.free(packed_data);
+            var lines = std.mem.splitScalar(u8, packed_data, '\n');
+            while (lines.next()) |line| {
+                if (line.len == 0 or line[0] == '#') continue;
+                if (line.len >= 41 and line[40] == ' ') {
+                    const packed_ref = std.mem.trim(u8, line[41..], " \t\r");
+                    if (std.mem.eql(u8, packed_ref, ref_name)) return; // exists in packed-refs
+                }
+            }
+            try platform_impl.writeStderr("error: reference does not exist\n");
+            std.process.exit(2);
+            unreachable;
+        }
+    }
+    
     if (verify) {
         // Verify mode: check specific refs
         var found_any = false;
@@ -25500,4 +25547,40 @@ fn t5FindSingle(allocator: std.mem.Allocator, git_dir: []const u8) ?[]u8 {
         if (std.mem.startsWith(u8, lt, "[remote \"")) { const rest = lt["[remote \"".len..];
             if (std.mem.indexOf(u8, rest, "\"")) |end| { if (count == 0) first = allocator.dupe(u8, rest[0..end]) catch return null; count += 1; if (count > 1) { if (first) |f| allocator.free(f); return null; } } } }
     if (count == 1) return first; if (first) |f| allocator.free(f); return null;
+}
+
+fn readRefDirect(git_dir: []const u8, ref_name: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !?[]u8 {
+    var current_ref = try allocator.dupe(u8, ref_name);
+    defer allocator.free(current_ref);
+    var depth: u32 = 0;
+    while (depth < 20) : (depth += 1) {
+        const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, current_ref });
+        defer allocator.free(ref_path);
+        const content = platform_impl.fs.readFile(allocator, ref_path) catch {
+            const packed_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir});
+            defer allocator.free(packed_path);
+            const packed_data = platform_impl.fs.readFile(allocator, packed_path) catch return null;
+            defer allocator.free(packed_data);
+            var lines = std.mem.splitScalar(u8, packed_data, '\n');
+            while (lines.next()) |line| {
+                if (line.len == 0 or line[0] == '#') continue;
+                if (line.len >= 41 and line[40] == ' ') {
+                    const packed_ref = std.mem.trim(u8, line[41..], " \t\r");
+                    if (std.mem.eql(u8, packed_ref, current_ref)) return try allocator.dupe(u8, line[0..40]);
+                }
+            }
+            return null;
+        };
+        defer allocator.free(content);
+        const trimmed = std.mem.trim(u8, content, " \t\r\n");
+        if (std.mem.startsWith(u8, trimmed, "ref: ")) {
+            const target = trimmed["ref: ".len..];
+            allocator.free(current_ref);
+            current_ref = try allocator.dupe(u8, target);
+            continue;
+        }
+        if (trimmed.len >= 40) return try allocator.dupe(u8, trimmed[0..40]);
+        return null;
+    }
+    return null;
 }
