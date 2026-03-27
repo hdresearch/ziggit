@@ -5675,6 +5675,10 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 
     // Handle write: git config <key> <value> OR git config set <key> <value>
     if (do_set or do_add or (!do_get and !do_get_all and !do_get_regexp and !do_unset and !do_unset_all and positionals.items.len >= 2 and !std.mem.startsWith(u8, positionals.items[0], "-"))) {
+        if (positionals.items.len < 2) {
+            try platform_impl.writeStderr("error: wrong number of arguments, should be 2\n");
+            std.process.exit(2);
+        }
         const key = positionals.items[0];
         const value = positionals.items[1];
         
@@ -7841,6 +7845,7 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     var no_revs = false;
     var flags_only = false;
     var no_flags = false;
+    var path_format_absolute = false;
     var positional_args = std.array_list.Managed([]const u8).init(allocator);
     defer positional_args.deinit();
 
@@ -7867,6 +7872,13 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             no_flags = true;
         } else if (std.mem.eql(u8, arg, "--sq")) {
             // Ignore for now (shell quoting)
+        } else if (std.mem.eql(u8, arg, "--path-format=absolute")) {
+            path_format_absolute = true;
+        } else if (std.mem.eql(u8, arg, "--path-format=relative")) {
+            path_format_absolute = false;
+        } else if (std.mem.eql(u8, arg, "--path-format")) {
+            try platform_impl.writeStderr("fatal: --path-format requires a value\n");
+            std.process.exit(129);
         } else {
             try positional_args.append(arg);
         }
@@ -7901,22 +7913,31 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                 std.process.exit(128);
             };
             defer allocator.free(git_path);
-            const cwd = try platform_impl.fs.getCwd(allocator);
-            defer allocator.free(cwd);
-            if (std.mem.startsWith(u8, git_path, cwd) and git_path.len > cwd.len) {
-                const rel = git_path[cwd.len..];
-                const trimmed = if (rel.len > 0 and rel[0] == '/') rel[1..] else rel;
-                if (trimmed.len > 0) {
-                    const output = try std.fmt.allocPrint(allocator, "{s}\n", .{trimmed});
-                    defer allocator.free(output);
-                    try platform_impl.writeStdout(output);
-                } else {
-                    try platform_impl.writeStdout(".git\n");
-                }
-            } else {
-                const output = try std.fmt.allocPrint(allocator, "{s}\n", .{git_path});
+            if (path_format_absolute) {
+                // Always output absolute path
+                const abs = std.fs.cwd().realpathAlloc(allocator, git_path) catch try allocator.dupe(u8, git_path);
+                defer allocator.free(abs);
+                const output = try std.fmt.allocPrint(allocator, "{s}\n", .{abs});
                 defer allocator.free(output);
                 try platform_impl.writeStdout(output);
+            } else {
+                const cwd = try platform_impl.fs.getCwd(allocator);
+                defer allocator.free(cwd);
+                if (std.mem.startsWith(u8, git_path, cwd) and git_path.len > cwd.len) {
+                    const rel = git_path[cwd.len..];
+                    const trimmed_rel = if (rel.len > 0 and rel[0] == '/') rel[1..] else rel;
+                    if (trimmed_rel.len > 0) {
+                        const output = try std.fmt.allocPrint(allocator, "{s}\n", .{trimmed_rel});
+                        defer allocator.free(output);
+                        try platform_impl.writeStdout(output);
+                    } else {
+                        try platform_impl.writeStdout(".git\n");
+                    }
+                } else {
+                    const output = try std.fmt.allocPrint(allocator, "{s}\n", .{git_path});
+                    defer allocator.free(output);
+                    try platform_impl.writeStdout(output);
+                }
             }
             return;
         } else if (std.mem.eql(u8, arg, "--git-common-dir")) {
@@ -8041,10 +8062,29 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             try platform_impl.writeStdout(output);
             return;
         } else if (std.mem.eql(u8, arg, "--git-path")) {
-            // Needs next arg but we handle it inline
-            continue;
-        } else if (std.mem.eql(u8, arg, "--show-object-format")) {
+            // --git-path <path> - resolve path relative to GIT_DIR
+            // The next positional should be the path component
+            continue; // The path will be the next arg, handled below
+        } else if (std.mem.eql(u8, arg, "--show-object-format") or std.mem.startsWith(u8, arg, "--show-object-format=")) {
             try platform_impl.writeStdout("sha1\n");
+            return;
+        } else if (std.mem.eql(u8, arg, "--show-ref-format")) {
+            try platform_impl.writeStdout("files\n");
+            return;
+        } else if (std.mem.eql(u8, arg, "--is-shallow-repository")) {
+            // Check for shallow file
+            if (findGitDirectory(allocator, platform_impl) catch null) |gp_shallow| {
+                defer allocator.free(gp_shallow);
+                const shallow_path = try std.fmt.allocPrint(allocator, "{s}/shallow", .{gp_shallow});
+                defer allocator.free(shallow_path);
+                if (platform_impl.fs.exists(shallow_path) catch false) {
+                    try platform_impl.writeStdout("true\n");
+                } else {
+                    try platform_impl.writeStdout("false\n");
+                }
+            } else {
+                try platform_impl.writeStdout("false\n");
+            }
             return;
         }
     }
