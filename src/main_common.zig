@@ -28493,6 +28493,7 @@ fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
     var update_stat = false;
     var prefix: ?[]const u8 = null;
     var no_create = false;
+    var temp_mode = false;
     var stdin_mode = false;
     var stdin_z = false;
     var paths = std.array_list.Managed([]const u8).init(allocator);
@@ -28508,7 +28509,7 @@ fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
         } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--no-create")) {
             no_create = true;
         } else if (std.mem.eql(u8, arg, "--temp")) {
-            // temp mode - not fully supported yet
+            temp_mode = true;
         } else if (std.mem.startsWith(u8, arg, "--prefix=")) {
             prefix = arg["--prefix=".len..];
         } else if (std.mem.eql(u8, arg, "--prefix")) {
@@ -28592,6 +28593,7 @@ fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
 
     var did_update_stat = false;
     var has_errors = false;
+    var temp_counter: u32 = 0;
 
     for (idx.entries.items) |*entry| {
         // Skip higher stages (unmerged) unless specifically requested
@@ -28623,8 +28625,8 @@ fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
             try allocator.dupe(u8, entry_path);
         defer allocator.free(out_path);
 
-        // Check if file exists and we need -f to overwrite
-        if (!force) {
+        // Check if file exists and we need -f to overwrite (skip for temp mode)
+        if (!force and !temp_mode) {
             if (std.fs.cwd().access(out_path, .{})) |_| {
                 // File exists - report error and track failure
                 const emsg = std.fmt.allocPrint(allocator, "error: {s} already exists, no checkout\n", .{entry_path}) catch "error: file already exists\n";
@@ -28634,7 +28636,7 @@ fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
             } else |_| {}
         }
 
-        if (no_create) continue;
+        if (no_create and !temp_mode) continue;
 
         // Load the blob content
         var hash_buf: [40]u8 = undefined;
@@ -28649,6 +28651,30 @@ fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
         defer obj.deinit(allocator);
 
         const content = obj.data;
+
+        // Temp mode: write to a temporary file and output mapping
+        if (temp_mode) {
+            const stage_num = (entry.flags >> 12) & 0x3;
+            // Create temp file with unique name
+            var temp_name_buf: [256]u8 = undefined;
+            const final_name = std.fmt.bufPrint(&temp_name_buf, ".merge_file_{s}_{d}", .{ hash_buf[0..8], temp_counter }) catch continue;
+            temp_counter += 1;
+            const temp_file = std.fs.cwd().createFile(final_name, .{}) catch continue;
+            defer temp_file.close();
+            temp_file.writeAll(content) catch continue;
+            // Output: tempfile\tpath
+            if (stage_num == 0) {
+                const tmsg = std.fmt.allocPrint(allocator, "{s}\t{s}\n", .{ final_name, entry_path }) catch continue;
+                defer allocator.free(tmsg);
+                platform_impl.writeStdout(tmsg) catch {};
+            } else {
+                // For unmerged stages, output with stage info
+                const tmsg = std.fmt.allocPrint(allocator, "{s}\t{s}\n", .{ final_name, entry_path }) catch continue;
+                defer allocator.free(tmsg);
+                platform_impl.writeStdout(tmsg) catch {};
+            }
+            continue;
+        }
 
         // When force, remove any existing file/dir that conflicts
         if (force) {
