@@ -508,7 +508,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     }
 
     // Commands with native ziggit implementations
-    if (std.mem.eql(u8, command, "init")) {
+    if (std.mem.eql(u8, command, "init") or std.mem.eql(u8, command, "init-db")) {
         // Check for global --bare flag
         var global_bare = false;
         for (all_original_args.items[0..command_index]) |ga| {
