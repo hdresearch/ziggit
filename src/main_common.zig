@@ -12125,7 +12125,19 @@ fn resolveReflogEntry(git_path: []const u8, ref_name: []const u8, n: u32, alloca
     }
     
     if (line_count == 0) return error.NotFound;
-    if (n >= line_count) return error.NotFound;
+    // For @{N} where N >= line_count, check if we can use old hash of first entry
+    if (n >= line_count) {
+        if (n == line_count) {
+            // Return the OLD hash from the oldest reflog entry
+            var first_iter = std.mem.splitScalar(u8, content, '\n');
+            while (first_iter.next()) |line| {
+                if (line.len >= 40 and isValidHash(line[0..40])) {
+                    return try allocator.dupe(u8, line[0..40]);
+                }
+            }
+        }
+        return error.NotFound;
+    }
 
     const target_idx = line_count - 1 - n;
     var current_idx: u32 = 0;
