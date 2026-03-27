@@ -27936,20 +27936,9 @@ fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8, tr
                     defer if (old_content.len > 0) allocator.free(old_content);
                     const new_content = loadBlobContent(allocator, e2.?.hash, git_path, platform_impl) catch "";
                     defer if (new_content.len > 0) allocator.free(new_content);
-                    var mb1: [6]u8 = undefined;
-                    var mb2: [6]u8 = undefined;
-                    const pm1 = padMode6(&mb1, e1.?.mode);
-                    const pm2 = padMode6(&mb2, e2.?.mode);
                     const idx_h1 = if (opts.full_index) e1.?.hash else e1.?.hash[0..@min(7, e1.?.hash.len)];
                     const idx_h2 = if (opts.full_index) e2.?.hash else e2.?.hash[0..@min(7, e2.?.hash.len)];
-                    const mode_changed = !std.mem.eql(u8, pm1, pm2);
-                    const header = if (mode_changed)
-                        try std.fmt.allocPrint(allocator, "diff --git a/{s} b/{s}\nold mode {s}\nnew mode {s}\nindex {s}..{s}\n--- a/{s}\n+++ b/{s}\n", .{ full_name, full_name, pm1, pm2, idx_h1, idx_h2, full_name, full_name })
-                    else
-                        try std.fmt.allocPrint(allocator, "diff --git a/{s} b/{s}\nindex {s}..{s} {s}\n--- a/{s}\n+++ b/{s}\n", .{ full_name, full_name, idx_h1, idx_h2, pm1, full_name, full_name });
-                    defer allocator.free(header);
-                    try platform_impl.writeStdout(header);
-                    const diff_out = diff_mod.generateUnifiedDiff(old_content, new_content, full_name, allocator) catch "";
+                    const diff_out = diff_mod.generateUnifiedDiffWithHashes(old_content, new_content, full_name, idx_h1, idx_h2, allocator) catch "";
                     defer if (diff_out.len > 0) allocator.free(diff_out);
                     if (diff_out.len > 0) try platform_impl.writeStdout(diff_out);
                 } else {
