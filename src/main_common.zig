@@ -8564,6 +8564,27 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
 
             // Handle delete refspec  :branch
             if (rs.len > 0 and rs[0] == ':') {
+                // Empty :  means push matching (all branches that exist on both sides)
+                if (rs.len == 1) {
+                    // Push matching: for each local branch, if it exists on remote, push it
+                    const heads_dir = try std.fmt.allocPrint(allocator, "{s}/refs/heads", .{git_path});
+                    defer allocator.free(heads_dir);
+                    var dir2 = std.fs.cwd().openDir(heads_dir, .{ .iterate = true }) catch continue;
+                    defer dir2.close();
+                    var iter2 = dir2.iterate();
+                    while (iter2.next() catch null) |entry2| {
+                        if (entry2.kind != .file) continue;
+                        // Check if branch exists on remote
+                        const remote_ref_check = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ remote_git_dir, entry2.name });
+                        defer allocator.free(remote_ref_check);
+                        if (std.fs.cwd().access(remote_ref_check, .{})) {
+                            const rspec = try std.fmt.allocPrint(allocator, "refs/heads/{s}:refs/heads/{s}", .{ entry2.name, entry2.name });
+                            defer allocator.free(rspec);
+                            pushRefspec(allocator, git_path, remote_git_dir, rspec, force_this, dry_run, quiet, platform_impl) catch {};
+                        } else |_| {}
+                    }
+                    continue;
+                }
                 // Delete remote ref
                 const remote_ref_name = rs[1..];
                 const full_ref = if (std.mem.startsWith(u8, remote_ref_name, "refs/"))
@@ -8576,10 +8597,16 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
                     const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ remote_git_dir, full_ref });
                     defer allocator.free(ref_path);
                     std.fs.cwd().deleteFile(ref_path) catch {
-                        const msg = try std.fmt.allocPrint(allocator, "error: unable to delete '{s}': remote ref does not exist\n", .{full_ref});
-                        defer allocator.free(msg);
-                        try platform_impl.writeStderr(msg);
+                        // Also try packed-refs
                     };
+                    // Also delete local tracking ref
+                    const branch_name = if (std.mem.startsWith(u8, remote_ref_name, "refs/heads/"))
+                        remote_ref_name["refs/heads/".len..]
+                    else
+                        remote_ref_name;
+                    const tracking_ref = try std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}/{s}", .{ git_path, remote, branch_name });
+                    defer allocator.free(tracking_ref);
+                    std.fs.cwd().deleteFile(tracking_ref) catch {};
                 }
                 if (!quiet) {
                     const msg = try std.fmt.allocPrint(allocator, " - [deleted]         {s}\n", .{remote_ref_name});
@@ -8634,7 +8661,37 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
         }
     }
 
-    // Update remote tracking refs
+    // Update remote tracking refs - sync refs/remotes/<remote>/* with what remote has
+    if (!dry_run and remote_url_allocated) {
+        // Read all remote refs and update tracking
+        const remote_heads_dir = std.fmt.allocPrint(allocator, "{s}/refs/heads", .{remote_git_dir}) catch null;
+        defer if (remote_heads_dir) |d| allocator.free(d);
+        if (remote_heads_dir) |rhd| {
+            var rdir = std.fs.cwd().openDir(rhd, .{ .iterate = true }) catch null;
+            if (rdir) |*rd| {
+                defer rd.close();
+                var riter = rd.iterate();
+                while (riter.next() catch null) |rentry| {
+                    if (rentry.kind != .file) continue;
+                    const rref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ rhd, rentry.name }) catch continue;
+                    defer allocator.free(rref_path);
+                    if (std.fs.cwd().readFileAlloc(allocator, rref_path, 256)) |rval| {
+                        defer allocator.free(rval);
+                        const rh = std.mem.trim(u8, rval, " \t\r\n");
+                        const tracking_path = std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}/{s}", .{ git_path, remote, rentry.name }) catch continue;
+                        defer allocator.free(tracking_path);
+                        if (std.fs.path.dirname(tracking_path)) |dir| std.fs.cwd().makePath(dir) catch {};
+                        const tf = std.fs.cwd().createFile(tracking_path, .{}) catch continue;
+                        defer tf.close();
+                        const thl = std.fmt.allocPrint(allocator, "{s}\n", .{rh}) catch continue;
+                        defer allocator.free(thl);
+                        tf.writeAll(thl) catch {};
+                    } else |_| {}
+                }
+            }
+        }
+    }
+
     if (set_upstream) {
         // TODO: update branch.<name>.remote and branch.<name>.merge
     }
