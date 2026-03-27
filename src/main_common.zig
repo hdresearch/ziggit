@@ -16013,6 +16013,10 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                 try setIndexEntryMode(&idx, path, 0o100644);
                 modified = true;
             }
+        } else if (std.mem.eql(u8, arg, "--show-index-version")) {
+            // Show the current index version
+            try platform_impl.writeStdout("2\n");
+            return;
         } else if (std.mem.eql(u8, arg, "--index-version")) {
             _ = args.next(); // skip version number
         } else if (std.mem.eql(u8, arg, "--")) {
