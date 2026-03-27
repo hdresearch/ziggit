@@ -6,17 +6,14 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption(bool, "enable_git_fallback", enable_git_fallback);
     const exe_optimize: std.builtin.OptimizeMode = if (optimize == .Debug) .ReleaseFast else optimize;
-    const mod = b.createModule(.{
+    const exe = b.addExecutable(.{
+        .name = "ziggit",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = exe_optimize,
     });
-    mod.addOptions("build_options", options);
-    mod.linkSystemLibrary("z", .{});
-    mod.link_libc = true;
-    const exe = b.addExecutable(.{
-        .name = "ziggit",
-        .root_module = mod,
-    });
+    exe.root_module.addOptions("build_options", options);
+    exe.linkLibC();
+    exe.linkSystemLibrary("z");
     b.installArtifact(exe);
 }
