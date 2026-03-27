@@ -209,27 +209,103 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         return;
     }
     
-    const command = all_original_args.items[command_index];
+    var command = all_original_args.items[command_index];
     
-    // Check if this is a native command
-    if (!isNativeCommand(command)) {
-        // Not a native command, forward to git with all arguments
-        if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
-            // Translate newer flags to older equivalents for specific commands
-            const translated_args = try translateCommandFlags(allocator, all_original_args.items, command_index);
-            // Use stderr translation for commands with known message differences
-            if (needsStderrTranslation(command)) {
-                try forwardToGitWithStderrTranslation(allocator, translated_args, &platform_impl);
-            } else {
-                try forwardToGit(allocator, translated_args, &platform_impl);
+    // Check if this is a native command; if not, try alias resolution (with loop detection)
+    var alias_depth: u32 = 0;
+    while (!isNativeCommand(command) and alias_depth < 10) : (alias_depth += 1) {
+        // Try to resolve as an alias from git config
+        const alias_value = try resolveAlias(allocator, command, &platform_impl);
+        if (alias_value) |alias_cmd| {
+            defer allocator.free(alias_cmd);
+            // Parse the alias value into words and rebuild args
+            // If alias starts with '!', it's a shell command - not supported natively
+            if (alias_cmd.len > 0 and alias_cmd[0] == '!') {
+                // Shell alias: execute via /bin/sh -c
+                const shell_cmd = alias_cmd[1..];
+                // Append remaining args to the shell command
+                var full_cmd = std.array_list.Managed(u8).init(allocator);
+                defer full_cmd.deinit();
+                try full_cmd.appendSlice(shell_cmd);
+                var ri: usize = command_index + 1;
+                while (ri < all_original_args.items.len) : (ri += 1) {
+                    try full_cmd.append(' ');
+                    try full_cmd.appendSlice(all_original_args.items[ri]);
+                }
+                var child = std.process.Child.init(&.{ "/bin/sh", "-c", full_cmd.items }, allocator);
+                child.stdin_behavior = .Inherit;
+                child.stdout_behavior = .Inherit;
+                child.stderr_behavior = .Inherit;
+                _ = child.spawn() catch {
+                    try platform_impl.writeStderr("fatal: failed to run shell alias\n");
+                    std.process.exit(128);
+                };
+                const result = child.wait() catch {
+                    std.process.exit(128);
+                };
+                switch (result) {
+                    .Exited => |code| std.process.exit(code),
+                    else => std.process.exit(128),
+                }
+                return;
             }
-            return;
+            // Split alias into words
+            var alias_words = std.array_list.Managed([]const u8).init(allocator);
+            defer alias_words.deinit();
+            var word_iter = std.mem.tokenizeAny(u8, alias_cmd, " \t");
+            while (word_iter.next()) |word| {
+                try alias_words.append(try allocator.dupe(u8, word));
+            }
+            if (alias_words.items.len > 0) {
+                // Rebuild all_original_args: global flags + alias words + remaining args
+                var new_args = std.array_list.Managed([]const u8).init(allocator);
+                defer new_args.deinit();
+                // Copy global flags (before command_index)
+                for (all_original_args.items[0..command_index]) |ga| {
+                    try new_args.append(ga);
+                }
+                // Add expanded alias words
+                for (alias_words.items) |aw| {
+                    try new_args.append(aw);
+                }
+                // Add remaining args after the alias command
+                var ri2: usize = command_index + 1;
+                while (ri2 < all_original_args.items.len) : (ri2 += 1) {
+                    try new_args.append(all_original_args.items[ri2]);
+                }
+                // Replace all_original_args content
+                all_original_args.clearRetainingCapacity();
+                for (new_args.items) |a| {
+                    try all_original_args.append(a);
+                }
+                // Re-find command_index (same position, but now the command is the alias expansion)
+                command = all_original_args.items[command_index];
+                // Continue the while loop to check if the expanded command is native or needs further alias resolution
+            }
         } else {
-            const error_msg = std.fmt.allocPrint(allocator, "ziggit: '{s}' is not a ziggit command. See 'ziggit --help'.\n", .{command}) catch "ziggit: invalid command. See 'ziggit --help'.\n";
-            defer if (error_msg.ptr != "ziggit: invalid command. See 'ziggit --help'.\n".ptr) allocator.free(error_msg);
-            try platform_impl.writeStderr(error_msg);
-            std.process.exit(1);
+            // No alias found - give error
+            if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
+                const translated_args = try translateCommandFlags(allocator, all_original_args.items, command_index);
+                if (needsStderrTranslation(command)) {
+                    try forwardToGitWithStderrTranslation(allocator, translated_args, &platform_impl);
+                } else {
+                    try forwardToGit(allocator, translated_args, &platform_impl);
+                }
+                return;
+            } else {
+                const error_msg = std.fmt.allocPrint(allocator, "ziggit: '{s}' is not a ziggit command. See 'ziggit --help'.\n", .{command}) catch "ziggit: invalid command. See 'ziggit --help'.\n";
+                defer if (error_msg.ptr != "ziggit: invalid command. See 'ziggit --help'.\n".ptr) allocator.free(error_msg);
+                try platform_impl.writeStderr(error_msg);
+                std.process.exit(1);
+            }
         }
+    }
+    // Check for alias loop (depth exceeded)
+    if (alias_depth >= 10 and !isNativeCommand(command)) {
+        const loop_msg = try std.fmt.allocPrint(allocator, "fatal: alias loop detected: expansion of '{s}' does not terminate\n", .{all_original_args.items[command_index]});
+        defer allocator.free(loop_msg);
+        try platform_impl.writeStderr(loop_msg);
+        std.process.exit(128);
     }
     
     // Determine if this command is handled natively (NOT forwarded to real git)
@@ -1645,11 +1721,12 @@ fn showUsage(platform_impl: *const platform_mod.Platform) !void {
 fn cmdInit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform, global_bare: bool) !void {
     var bare = global_bare;
     var template_dir: ?[]const u8 = null;
+    var template_dir_set = false;
     var work_dir: ?[]const u8 = null;
     var initial_branch: ?[]const u8 = null;
     var quiet = false;
     var separate_git_dir: ?[]const u8 = null;
-    _ = &separate_git_dir;
+    var shared: ?[]const u8 = null;
     
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--bare")) {
@@ -1658,14 +1735,22 @@ fn cmdInit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
             quiet = true;
         } else if (std.mem.startsWith(u8, arg, "--template=")) {
             template_dir = arg["--template=".len..];
+            template_dir_set = true;
         } else if (std.mem.eql(u8, arg, "--template")) {
             template_dir = args.next();
+            template_dir_set = true;
         } else if (std.mem.startsWith(u8, arg, "--initial-branch=")) {
             initial_branch = arg["--initial-branch=".len..];
         } else if (std.mem.eql(u8, arg, "--initial-branch") or std.mem.eql(u8, arg, "-b")) {
             initial_branch = args.next();
         } else if (std.mem.startsWith(u8, arg, "--separate-git-dir=")) {
             separate_git_dir = arg["--separate-git-dir=".len..];
+        } else if (std.mem.eql(u8, arg, "--separate-git-dir")) {
+            separate_git_dir = args.next();
+        } else if (std.mem.startsWith(u8, arg, "--shared=")) {
+            shared = arg["--shared=".len..];
+        } else if (std.mem.eql(u8, arg, "--shared")) {
+            shared = args.next();
         } else if (std.mem.startsWith(u8, arg, "--object-format=") or
                    std.mem.startsWith(u8, arg, "--ref-format=")) {
             // Silently accept for now (only sha1/files supported)
@@ -1674,10 +1759,52 @@ fn cmdInit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
         }
     }
     
-    // If no directory specified, use current directory
+    // Check GIT_WORK_TREE
+    const env_work_tree = std.process.getEnvVarOwned(allocator, "GIT_WORK_TREE") catch null;
+    defer if (env_work_tree) |w| allocator.free(w);
+    
+    // Check GIT_DIR environment variable
+    const env_git_dir = std.process.getEnvVarOwned(allocator, "GIT_DIR") catch null;
+    defer if (env_git_dir) |g| allocator.free(g);
+    
+    if (env_work_tree != null) {
+        if (bare) {
+            try platform_impl.writeStderr("fatal: GIT_WORK_TREE (or --work-tree=<directory>) not allowed in combination with '--(bare|shared)'\n");
+            std.process.exit(128);
+        }
+        // GIT_WORK_TREE + GIT_DIR together is OK (sets up worktree in separate location)
+        // But GIT_WORK_TREE without GIT_DIR during init should fail
+        if (env_git_dir == null) {
+            try platform_impl.writeStderr("fatal: GIT_WORK_TREE (or --work-tree=<directory>) not allowed without GIT_DIR being set\n");
+            std.process.exit(128);
+        }
+    }
+    
+    // Check --separate-git-dir + --bare incompatibility
+    if (separate_git_dir != null and bare) {
+        try platform_impl.writeStderr("fatal: --separate-git-dir and --bare are incompatible\n");
+        std.process.exit(128);
+    }
+    
+    // Check --separate-git-dir + implicit bare (GIT_DIR=.) incompatibility 
+    if (separate_git_dir != null and env_git_dir != null) {
+        // When GIT_DIR is set, it's implicitly bare-like, incompatible with --separate-git-dir
+        try platform_impl.writeStderr("fatal: --separate-git-dir incompatible with bare repository\n");
+        std.process.exit(128);
+    }
+    
+    // If GIT_DIR is set, use it as the git directory instead of default
     const target_dir = work_dir orelse ".";
     
-    try initRepository(target_dir, bare, template_dir, initial_branch, quiet, allocator, platform_impl);
+    if (env_git_dir) |git_dir_env| {
+        // Use GIT_DIR as the git directory
+        try initRepositoryWithGitDir(target_dir, git_dir_env, bare, template_dir, template_dir_set, initial_branch, quiet, shared, allocator, platform_impl);
+    } else if (separate_git_dir) |sep_dir| {
+        // Create repo with separate git dir
+        try initRepositoryWithSeparateGitDir(target_dir, sep_dir, template_dir, template_dir_set, initial_branch, quiet, shared, allocator, platform_impl);
+    } else {
+        try initRepository(target_dir, bare, template_dir, template_dir_set, initial_branch, quiet, shared, allocator, platform_impl);
+    }
 }
 
 fn copyTemplateDir(git_dir: []const u8, template_path: []const u8, allocator: std.mem.Allocator) !void {
@@ -1711,7 +1838,213 @@ fn copyTemplateDir(git_dir: []const u8, template_path: []const u8, allocator: st
     }
 }
 
-fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8, initial_branch: ?[]const u8, quiet: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+fn initRepositoryWithGitDir(work_dir: []const u8, git_dir_path: []const u8, bare: bool, template_dir: ?[]const u8, template_dir_set: bool, initial_branch: ?[]const u8, quiet: bool, shared: ?[]const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    // Check if GIT_WORK_TREE is also set  
+    const env_work_tree = std.process.getEnvVarOwned(allocator, "GIT_WORK_TREE") catch null;
+    defer if (env_work_tree) |w| allocator.free(w);
+    
+    // When both GIT_DIR and GIT_WORK_TREE are set, create non-bare repo with worktree
+    if (env_work_tree) |wt| {
+        _ = work_dir;
+        try initRepositoryInDir(git_dir_path, false, template_dir, template_dir_set, initial_branch, quiet, shared, allocator, platform_impl);
+        // Set core.worktree in config
+        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_dir_path});
+        defer allocator.free(config_path);
+        if (platform_impl.fs.readFile(allocator, config_path)) |existing| {
+            defer allocator.free(existing);
+            // Insert worktree before the closing of [core] section
+            const abs_wt = std.fs.cwd().realpathAlloc(allocator, wt) catch try allocator.dupe(u8, wt);
+            defer allocator.free(abs_wt);
+            const new_config = try std.fmt.allocPrint(allocator, "{s}\tworktree = {s}\n", .{ existing, abs_wt });
+            defer allocator.free(new_config);
+            try platform_impl.fs.writeFile(config_path, new_config);
+        } else |_| {}
+    } else {
+        _ = work_dir;
+        // When GIT_DIR is set without GIT_WORK_TREE
+        // Heuristic: if GIT_DIR ends with .git, treat as bare
+        const is_bare = bare or std.mem.endsWith(u8, git_dir_path, ".git");
+        try initRepositoryInDir(git_dir_path, is_bare, template_dir, template_dir_set, initial_branch, quiet, shared, allocator, platform_impl);
+    }
+}
+
+fn initRepositoryWithSeparateGitDir(work_dir: []const u8, git_dir_path: []const u8, template_dir: ?[]const u8, template_dir_set: bool, initial_branch: ?[]const u8, quiet: bool, shared: ?[]const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    // Create the git directory
+    try initRepositoryInDir(git_dir_path, false, template_dir, template_dir_set, initial_branch, quiet, shared, allocator, platform_impl);
+    
+    // Create the work tree directory
+    createDirectoryRecursive(work_dir, platform_impl, allocator) catch |err| switch (err) {
+        error.AlreadyExists => {},
+        else => return err,
+    };
+    
+    // Write .git file in work_dir pointing to the separate git dir
+    const abs_git_dir = std.fs.cwd().realpathAlloc(allocator, git_dir_path) catch try allocator.dupe(u8, git_dir_path);
+    defer allocator.free(abs_git_dir);
+    
+    const git_file_path = try std.fmt.allocPrint(allocator, "{s}/.git", .{work_dir});
+    defer allocator.free(git_file_path);
+    const git_file_content = try std.fmt.allocPrint(allocator, "gitdir: {s}\n", .{abs_git_dir});
+    defer allocator.free(git_file_content);
+    try platform_impl.fs.writeFile(git_file_path, git_file_content);
+    
+    // Set core.worktree in the git dir config
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_dir_path});
+    defer allocator.free(config_path);
+    const abs_work = std.fs.cwd().realpathAlloc(allocator, work_dir) catch try allocator.dupe(u8, work_dir);
+    defer allocator.free(abs_work);
+    
+    // Read existing config and add worktree
+    if (platform_impl.fs.readFile(allocator, config_path)) |existing| {
+        defer allocator.free(existing);
+        // Add worktree to core section
+        const new_config = try std.fmt.allocPrint(allocator, "{s}\tworktree = {s}\n", .{ existing, abs_work });
+        defer allocator.free(new_config);
+        try platform_impl.fs.writeFile(config_path, new_config);
+    } else |_| {}
+}
+
+fn initRepositoryInDir(git_dir: []const u8, bare: bool, template_dir: ?[]const u8, template_dir_set: bool, initial_branch: ?[]const u8, quiet: bool, shared: ?[]const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    // Create the directory structure
+    createDirectoryRecursive(git_dir, platform_impl, allocator) catch |err| switch (err) {
+        error.AlreadyExists => {},
+        else => return err,
+    };
+    
+    // Check if already exists
+    const head_check_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir});
+    defer allocator.free(head_check_path);
+    
+    if (platform_impl.fs.exists(head_check_path) catch false) {
+        const abs_path = std.fs.cwd().realpathAlloc(allocator, git_dir) catch try allocator.dupe(u8, git_dir);
+        defer allocator.free(abs_path);
+        if (!quiet) {
+            const msg = try std.fmt.allocPrint(allocator, "Reinitialized existing Git repository in {s}/\n", .{abs_path});
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
+        }
+        return;
+    }
+    
+    // Create subdirectories
+    const subdirs = [_][]const u8{
+        "objects", "refs", "refs/heads", "refs/tags", "hooks", "info",
+    };
+    for (subdirs) |subdir| {
+        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, subdir });
+        defer allocator.free(full_path);
+        std.fs.cwd().makePath(full_path) catch {};
+    }
+    
+    // Create HEAD
+    const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir});
+    defer allocator.free(head_path);
+    const default_branch = if (initial_branch) |ib|
+        try allocator.dupe(u8, ib)
+    else
+        std.process.getEnvVarOwned(allocator, "GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME") catch try allocator.dupe(u8, "master");
+    defer allocator.free(default_branch);
+    const head_content = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{default_branch});
+    defer allocator.free(head_content);
+    try platform_impl.fs.writeFile(head_path, head_content);
+    
+    // Create config
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_dir});
+    defer allocator.free(config_path);
+    
+    var config_buf = std.array_list.Managed(u8).init(allocator);
+    defer config_buf.deinit();
+    try config_buf.appendSlice("[core]\n");
+    try config_buf.appendSlice("\trepositoryformatversion = 0\n");
+    try config_buf.appendSlice("\tfilemode = true\n");
+    if (bare) {
+        try config_buf.appendSlice("\tbare = true\n");
+    } else {
+        try config_buf.appendSlice("\tbare = false\n");
+    }
+    try config_buf.appendSlice("\tlogallrefupdates = true\n");
+    if (shared) |s| {
+        const shared_line = try std.fmt.allocPrint(allocator, "\tsharedRepository = {s}\n", .{s});
+        defer allocator.free(shared_line);
+        try config_buf.appendSlice(shared_line);
+    }
+    try platform_impl.fs.writeFile(config_path, config_buf.items);
+    
+    // Create description
+    const desc_path = try std.fmt.allocPrint(allocator, "{s}/description", .{git_dir});
+    defer allocator.free(desc_path);
+    try platform_impl.fs.writeFile(desc_path, "Unnamed repository; edit this file 'description' to name the repository.\n");
+    
+    // Copy template directory contents (unless --template= was set to empty)
+    if (!template_dir_set or (template_dir != null and template_dir.?.len > 0)) {
+        var effective_template: ?[]const u8 = null;
+        var template_needs_free = false;
+        
+        if (template_dir) |td| {
+            effective_template = td;
+        } else {
+            // Check GIT_TEMPLATE_DIR env
+            effective_template = std.process.getEnvVarOwned(allocator, "GIT_TEMPLATE_DIR") catch null;
+            if (effective_template != null) {
+                template_needs_free = true;
+            } else {
+                // Check init.templatedir from global config
+                const home_dir = std.process.getEnvVarOwned(allocator, "HOME") catch null;
+                defer if (home_dir) |h| allocator.free(h);
+                if (home_dir) |home| {
+                    const global_config_path = try std.fmt.allocPrint(allocator, "{s}/.gitconfig", .{home});
+                    defer allocator.free(global_config_path);
+                    if (platform_impl.fs.readFile(allocator, global_config_path)) |gcfg| {
+                        defer allocator.free(gcfg);
+                        if (parseConfigValue(gcfg, "init.templatedir", allocator) catch null) |tmpl_val| {
+                            // Handle ~ expansion
+                            if (tmpl_val.len > 0 and tmpl_val[0] == '~') {
+                                const expanded = try std.fmt.allocPrint(allocator, "{s}{s}", .{ home, tmpl_val[1..] });
+                                allocator.free(tmpl_val);
+                                effective_template = expanded;
+                            } else {
+                                effective_template = tmpl_val;
+                            }
+                            template_needs_free = true;
+                        }
+                    } else |_| {}
+                }
+            }
+        }
+        defer if (template_needs_free) if (effective_template) |et| allocator.free(et);
+        
+        if (effective_template) |tmpl_dir| {
+            if (tmpl_dir.len > 0) {
+                copyTemplateDir(git_dir, tmpl_dir, allocator) catch {};
+            }
+        }
+    }
+    
+    // Create info/exclude if not provided by template
+    const exclude_path = try std.fmt.allocPrint(allocator, "{s}/info/exclude", .{git_dir});
+    defer allocator.free(exclude_path);
+    if (!template_dir_set or (template_dir != null and template_dir.?.len > 0)) {
+        if (!(std.fs.cwd().access(exclude_path, .{}) catch null != null)) {
+            platform_impl.fs.writeFile(exclude_path, "# git ls-files --others --exclude-from=.git/info/exclude\n# Lines that start with '#' are comments.\n") catch {};
+        }
+    }
+    
+    // Print success
+    const abs_path = std.fs.cwd().realpathAlloc(allocator, git_dir) catch try allocator.dupe(u8, git_dir);
+    defer allocator.free(abs_path);
+    if (!quiet) {
+        const msg = try std.fmt.allocPrint(allocator, "Initialized empty Git repository in {s}/\n", .{abs_path});
+        defer allocator.free(msg);
+        try platform_impl.writeStdout(msg);
+    }
+}
+
+fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8, template_dir_set: bool, initial_branch: ?[]const u8, quiet: bool, shared: ?[]const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    // Create the target directory if it doesn't exist (recursively)
+    createDirectoryRecursive(path, platform_impl, allocator) catch |err| switch (err) {
+        error.AlreadyExists => {},
+        else => return err,
+    };
     
     const git_dir = if (bare) 
         try allocator.dupe(u8, path)
@@ -1719,104 +2052,7 @@ fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8, initi
         try std.fmt.allocPrint(allocator, "{s}/.git", .{path});
     defer allocator.free(git_dir);
     
-    // Create the target directory if it doesn't exist (recursively)
-    createDirectoryRecursive(path, platform_impl, allocator) catch |err| switch (err) {
-        error.AlreadyExists => {},
-        else => return err,
-    };
-
-    // Check if git repository already exists by looking for HEAD file
-    const head_check_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir});
-    defer allocator.free(head_check_path);
-    
-    if (platform_impl.fs.exists(head_check_path) catch false) {
-        const msg = try std.fmt.allocPrint(allocator, "Reinitialized existing Git repository in {s}/\n", .{git_dir});
-        defer allocator.free(msg);
-        try platform_impl.writeStdout(msg);
-        return;
-    }
-
-    // Create .git directory structure (only if it doesn't already exist as a directory)
-    platform_impl.fs.makeDir(git_dir) catch |err| switch (err) {
-        error.AlreadyExists => {}, // Directory exists, that's fine
-        else => return err,
-    };
-
-    // Create subdirectories
-    const subdirs = [_][]const u8{
-        "objects", "refs", "refs/heads", "refs/tags", "hooks", "info"
-    };
-
-    for (subdirs) |subdir| {
-        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, subdir });
-        defer allocator.free(full_path);
-        
-        try platform_impl.fs.makeDir(full_path);
-    }
-
-    // Create HEAD file - respect --initial-branch, init.defaultBranch, GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
-    const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir});
-    defer allocator.free(head_path);
-    const default_branch = if (initial_branch) |ib|
-        try allocator.dupe(u8, ib)
-    else
-        std.process.getEnvVarOwned(allocator, "GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => try allocator.dupe(u8, "master"),
-            else => try allocator.dupe(u8, "master"),
-        };
-    defer allocator.free(default_branch);
-    const head_content = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{default_branch});
-    defer allocator.free(head_content);
-    try platform_impl.fs.writeFile(head_path, head_content);
-
-    // Create config file
-    const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_dir});
-    defer allocator.free(config_path);
-    const config_content = if (bare)
-        "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n\tlogallrefupdates = true\n"
-    else
-        "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n"
-    ;
-    try platform_impl.fs.writeFile(config_path, config_content);
-
-    // Create description file
-    const desc_path = try std.fmt.allocPrint(allocator, "{s}/description", .{git_dir});
-    defer allocator.free(desc_path);
-    try platform_impl.fs.writeFile(desc_path, "Unnamed repository; edit this file 'description' to name the repository.\n");
-
-    // Copy template directory contents
-    const effective_template = template_dir orelse
-        (std.process.getEnvVarOwned(allocator, "GIT_TEMPLATE_DIR") catch null);
-    if (effective_template) |tmpl_dir| {
-        defer if (template_dir == null) allocator.free(tmpl_dir);
-        copyTemplateDir(git_dir, tmpl_dir, allocator) catch {};
-    }
-
-    // Create info/exclude if not provided by template
-    const exclude_path = try std.fmt.allocPrint(allocator, "{s}/info/exclude", .{git_dir});
-    defer allocator.free(exclude_path);
-    if (!(std.fs.cwd().access(exclude_path, .{}) catch null != null)) {
-        platform_impl.fs.writeFile(exclude_path, "# git ls-files --others --exclude-from=.git/info/exclude\n# Lines that start with '#' are comments.\n") catch {};
-    }
-
-    // Get absolute, normalized path for the success message (git always prints absolute paths)
-    const abs_path = std.fs.cwd().realpathAlloc(allocator, path) catch blk: {
-        if (std.fs.path.isAbsolute(path))
-            break :blk try allocator.dupe(u8, path);
-        const cwd = try platform_impl.fs.getCwd(allocator);
-        defer allocator.free(cwd);
-        break :blk try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd, path });
-    };
-    defer allocator.free(abs_path);
-
-    if (!quiet) {
-        const success_msg = if (bare)
-            try std.fmt.allocPrint(allocator, "Initialized empty Git repository in {s}/\n", .{abs_path})
-        else
-            try std.fmt.allocPrint(allocator, "Initialized empty Git repository in {s}/.git/\n", .{abs_path});
-        defer allocator.free(success_msg);
-        try platform_impl.writeStdout(success_msg);
-    }
+    try initRepositoryInDir(git_dir, bare, template_dir, template_dir_set, initial_branch, quiet, shared, allocator, platform_impl);
 }
 
 fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform, original_args: [][]const u8) !void {
@@ -2244,6 +2480,64 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             try platform_impl.writeStdout("Untracked files not listed (use -u option to show untracked files)\n");
         }
     }
+}
+
+/// Resolve a git alias by looking up alias.<name> in config files.
+/// Returns the alias value (caller must free), or null if not found.
+fn resolveAlias(allocator: std.mem.Allocator, name: []const u8, platform_impl: *const platform_mod.Platform) !?[]u8 {
+    const alias_key = try std.fmt.allocPrint(allocator, "alias.{s}", .{name});
+    defer allocator.free(alias_key);
+    
+    // Search config sources in order: local (.git/config), global (~/.gitconfig), system (/etc/gitconfig)
+    // Last value wins in git, but for aliases we want first match (local > global > system)
+    
+    // Try local config (.git/config)
+    if (findGitDirectory(allocator, platform_impl)) |git_path| {
+        defer allocator.free(git_path);
+        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+        defer allocator.free(config_path);
+        if (platform_impl.fs.readFile(allocator, config_path)) |content| {
+            defer allocator.free(content);
+            if (parseConfigValue(content, alias_key, allocator) catch null) |val| {
+                return val;
+            }
+        } else |_| {}
+    } else |_| {}
+    
+    // Try global config (~/.gitconfig)
+    if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
+        defer allocator.free(home);
+        const global_config = try std.fmt.allocPrint(allocator, "{s}/.gitconfig", .{home});
+        defer allocator.free(global_config);
+        if (platform_impl.fs.readFile(allocator, global_config)) |content| {
+            defer allocator.free(content);
+            if (parseConfigValue(content, alias_key, allocator) catch null) |val| {
+                return val;
+            }
+        } else |_| {}
+        
+        // Try XDG config
+        const xdg_config = try std.fmt.allocPrint(allocator, "{s}/.config/git/config", .{home});
+        defer allocator.free(xdg_config);
+        if (platform_impl.fs.readFile(allocator, xdg_config)) |content| {
+            defer allocator.free(content);
+            if (parseConfigValue(content, alias_key, allocator) catch null) |val| {
+                return val;
+            }
+        } else |_| {}
+    } else |_| {}
+    
+    // Try system config
+    {
+        if (platform_impl.fs.readFile(allocator, "/etc/gitconfig")) |content| {
+            defer allocator.free(content);
+            if (parseConfigValue(content, alias_key, allocator) catch null) |val| {
+                return val;
+            }
+        } else |_| {}
+    }
+    
+    return null;
 }
 
 fn findGitDirectory(allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
@@ -5680,6 +5974,39 @@ fn parseConfigValue(config_content: []const u8, key: []const u8, allocator: std.
             const parsed = try parseConfigSectionHeader(trimmed, allocator);
             current_section = parsed.section;
             current_subsection = parsed.subsection;
+            
+            // Check for inline key-value after section header: [section] key = value
+            const close_bracket = std.mem.indexOf(u8, trimmed, "]") orelse continue;
+            const after_bracket = std.mem.trim(u8, trimmed[close_bracket + 1 ..], " \t");
+            if (after_bracket.len == 0) continue;
+            // If there's content after the bracket, treat it as a key=value line
+            // Fall through to the key=value parsing below with after_bracket as the line
+            if (std.mem.indexOf(u8, after_bracket, "=")) |inline_eq_pos| {
+                const inline_raw_key = std.mem.trim(u8, after_bracket[0..inline_eq_pos], " \t");
+                const inline_raw_value = after_bracket[inline_eq_pos + 1 ..];
+                
+                var inline_value_buf = std.array_list.Managed(u8).init(allocator);
+                defer inline_value_buf.deinit();
+                try appendConfigValuePart(&inline_value_buf, inline_raw_value);
+                
+                const inline_section_matches = if (current_section) |cs|
+                    std.ascii.eqlIgnoreCase(cs, parsed_key.section)
+                else
+                    false;
+                
+                const inline_subsection_matches = if (parsed_key.subsection) |ps| blk: {
+                    if (current_subsection) |css| {
+                        break :blk std.mem.eql(u8, css, ps);
+                    }
+                    break :blk false;
+                } else (current_subsection == null);
+                
+                if (inline_section_matches and inline_subsection_matches and 
+                    std.ascii.eqlIgnoreCase(inline_raw_key, parsed_key.variable)) {
+                    if (last_value) |lv| allocator.free(lv);
+                    last_value = try inline_value_buf.toOwnedSlice();
+                }
+            }
             continue;
         }
         
