@@ -3554,8 +3554,16 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             std.process.exit(128);
         };
 
-        // Create new branch
-        refs.createBranch(git_path, branch_name, null, platform_impl, allocator) catch |err| switch (err) {
+        // Get optional start point - resolve it to a hash
+        const start_point_arg = args.next();
+        var resolved_start: ?[]const u8 = null;
+        if (start_point_arg) |sp| {
+            resolved_start = resolveRevision(git_path, sp, platform_impl, allocator) catch null;
+        }
+        defer if (resolved_start) |r| allocator.free(@constCast(r));
+
+        // Create new branch at start point (or current HEAD)
+        refs.createBranch(git_path, branch_name, resolved_start orelse start_point_arg, platform_impl, allocator) catch |err| switch (err) {
             error.NoCommitsYet => {
                 try platform_impl.writeStderr("fatal: not a valid object name: 'master'\n");
                 std.process.exit(128);
@@ -3574,6 +3582,15 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             try platform_impl.writeStderr(msg);
             std.process.exit(1);
         };
+
+        // If start_point was specified, checkout the tree of that commit
+        if (start_point_arg != null) {
+            const commit_hash = refs.resolveRef(git_path, try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name}), platform_impl, allocator) catch null;
+            if (commit_hash) |ch| {
+                defer allocator.free(ch);
+                checkoutCommitTree(git_path, ch, allocator, platform_impl) catch {};
+            }
+        }
 
         const success_msg = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
         defer allocator.free(success_msg);
