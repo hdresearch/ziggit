@@ -10229,6 +10229,8 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var reverse = false;
     var topo_order = false;
     var show_objects = false;
+    var no_object_names = false;
+    var in_commit_order = false;
     var all_refs = false;
     var graph = false;
     var no_walk = false;
@@ -10249,6 +10251,10 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             // Accept but use default ordering
         } else if (std.mem.eql(u8, arg, "--objects") or std.mem.eql(u8, arg, "--objects-edge")) {
             show_objects = true;
+        } else if (std.mem.eql(u8, arg, "--no-object-names")) {
+            no_object_names = true;
+        } else if (std.mem.eql(u8, arg, "--in-commit-order")) {
+            in_commit_order = true;
         } else if (std.mem.eql(u8, arg, "--all")) {
             all_refs = true;
         } else if (std.mem.eql(u8, arg, "--stdin")) {
@@ -10491,21 +10497,180 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         defer allocator.free(count_output);
         try platform_impl.writeStdout(count_output);
     } else {
-        if (reverse) {
-            var ri: usize = final_results.len;
-            while (ri > 0) {
-                ri -= 1;
-                const out = try std.fmt.allocPrint(allocator, "{s}\n", .{final_results[ri]});
-                defer allocator.free(out);
-                try platform_impl.writeStdout(out);
+        // Track objects already emitted for --objects dedup
+        var emitted_objects = std.StringHashMap(void).init(allocator);
+        defer emitted_objects.deinit();
+
+        // Collect deferred objects (trees/blobs) for non-in-commit-order mode
+        var deferred_objects = std.array_list.Managed([]const u8).init(allocator);
+        defer {
+            for (deferred_objects.items) |s| allocator.free(@constCast(s));
+            deferred_objects.deinit();
+        }
+
+        const items = if (reverse) blk: {
+            // Reverse into a temporary array
+            var rev_items = try allocator.alloc([]u8, final_results.len);
+            for (final_results, 0..) |h, idx| {
+                rev_items[final_results.len - 1 - idx] = h;
             }
-        } else {
-            for (final_results) |h| {
-                const out = try std.fmt.allocPrint(allocator, "{s}\n", .{h});
-                defer allocator.free(out);
-                try platform_impl.writeStdout(out);
+            break :blk rev_items;
+        } else final_results;
+        defer if (reverse) allocator.free(items);
+
+        for (items) |h| {
+            // Output the commit hash
+            const out = try std.fmt.allocPrint(allocator, "{s}\n", .{h});
+            defer allocator.free(out);
+            try platform_impl.writeStdout(out);
+            try emitted_objects.put(h, {});
+
+            // If --objects, walk the tree
+            if (show_objects) {
+                const obj = objects.GitObject.load(h, git_path, platform_impl, allocator) catch continue;
+                defer obj.deinit(allocator);
+                if (obj.type != .commit) continue;
+
+                // Extract tree hash from commit
+                if (std.mem.indexOf(u8, obj.data, "tree ")) |tree_pos| {
+                    if (tree_pos == 0 or obj.data[tree_pos - 1] == '\n') {
+                        const tree_hash = obj.data[tree_pos + 5 ..][0..40];
+                        if (in_commit_order) {
+                            try revListWalkTree(allocator, git_path, tree_hash, "", no_object_names, &emitted_objects, platform_impl);
+                        } else {
+                            try revListCollectTree(allocator, git_path, tree_hash, "", no_object_names, &emitted_objects, &deferred_objects, platform_impl);
+                        }
+                    }
+                }
             }
         }
+
+        // Output deferred objects
+        for (deferred_objects.items) |line| {
+            try platform_impl.writeStdout(line);
+        }
+    }
+}
+
+/// Walk a tree recursively and output all tree/blob objects (inline for --in-commit-order)
+fn revListWalkTree(allocator: std.mem.Allocator, git_path: []const u8, tree_hash: []const u8, prefix: []const u8, no_names: bool, emitted: *std.StringHashMap(void), platform_impl: *const platform_mod.Platform) !void {
+    if (emitted.contains(tree_hash)) return;
+    try emitted.put(try allocator.dupe(u8, tree_hash), {});
+
+    // Output the tree itself
+    if (no_names or prefix.len == 0) {
+        const out = try std.fmt.allocPrint(allocator, "{s}\n", .{tree_hash});
+        defer allocator.free(out);
+        try platform_impl.writeStdout(out);
+    } else {
+        const out = try std.fmt.allocPrint(allocator, "{s} {s}\n", .{ tree_hash, prefix });
+        defer allocator.free(out);
+        try platform_impl.writeStdout(out);
+    }
+
+    // Load and parse tree object
+    const obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch return;
+    defer obj.deinit(allocator);
+    if (obj.type != .tree) return;
+
+    // Parse tree entries: each entry is "<mode> <name>\0<20-byte-sha1>"
+    var pos: usize = 0;
+    while (pos < obj.data.len) {
+        // Find space after mode
+        const space_pos = std.mem.indexOfScalarPos(u8, obj.data, pos, ' ') orelse break;
+        // Find null after name
+        const null_pos = std.mem.indexOfScalarPos(u8, obj.data, space_pos + 1, 0) orelse break;
+        const mode = obj.data[pos..space_pos];
+        const name = obj.data[space_pos + 1 .. null_pos];
+        if (null_pos + 21 > obj.data.len) break;
+        const raw_hash = obj.data[null_pos + 1 .. null_pos + 21];
+
+        // Convert binary hash to hex
+        var hex_hash: [40]u8 = undefined;
+        for (raw_hash, 0..) |b, bi| {
+            _ = std.fmt.bufPrint(hex_hash[bi * 2 .. bi * 2 + 2], "{x:0>2}", .{b}) catch break;
+        }
+
+        const full_path = if (prefix.len == 0)
+            try allocator.dupe(u8, name)
+        else
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, name });
+        defer allocator.free(full_path);
+
+        const is_tree = std.mem.eql(u8, mode, "40000");
+        if (is_tree) {
+            try revListWalkTree(allocator, git_path, &hex_hash, full_path, no_names, emitted, platform_impl);
+        } else {
+            if (!emitted.contains(&hex_hash)) {
+                try emitted.put(try allocator.dupe(u8, &hex_hash), {});
+                if (no_names) {
+                    const out = try std.fmt.allocPrint(allocator, "{s}\n", .{hex_hash});
+                    defer allocator.free(out);
+                    try platform_impl.writeStdout(out);
+                } else {
+                    const out = try std.fmt.allocPrint(allocator, "{s} {s}\n", .{ hex_hash, full_path });
+                    defer allocator.free(out);
+                    try platform_impl.writeStdout(out);
+                }
+            }
+        }
+
+        pos = null_pos + 21;
+    }
+}
+
+/// Collect tree/blob objects into deferred list (for default order: commits first, then objects)
+fn revListCollectTree(allocator: std.mem.Allocator, git_path: []const u8, tree_hash: []const u8, prefix: []const u8, no_names: bool, emitted: *std.StringHashMap(void), deferred: *std.array_list.Managed([]const u8), platform_impl: *const platform_mod.Platform) !void {
+    if (emitted.contains(tree_hash)) return;
+    try emitted.put(try allocator.dupe(u8, tree_hash), {});
+
+    // Output the tree itself
+    const tree_line = if (no_names or prefix.len == 0)
+        try std.fmt.allocPrint(allocator, "{s}\n", .{tree_hash})
+    else
+        try std.fmt.allocPrint(allocator, "{s} {s}\n", .{ tree_hash, prefix });
+    try deferred.append(tree_line);
+
+    // Load and parse tree object
+    const obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch return;
+    defer obj.deinit(allocator);
+    if (obj.type != .tree) return;
+
+    var pos: usize = 0;
+    while (pos < obj.data.len) {
+        const space_pos = std.mem.indexOfScalarPos(u8, obj.data, pos, ' ') orelse break;
+        const null_pos = std.mem.indexOfScalarPos(u8, obj.data, space_pos + 1, 0) orelse break;
+        const mode = obj.data[pos..space_pos];
+        const name = obj.data[space_pos + 1 .. null_pos];
+        if (null_pos + 21 > obj.data.len) break;
+        const raw_hash = obj.data[null_pos + 1 .. null_pos + 21];
+
+        var hex_hash: [40]u8 = undefined;
+        for (raw_hash, 0..) |b, bi| {
+            _ = std.fmt.bufPrint(hex_hash[bi * 2 .. bi * 2 + 2], "{x:0>2}", .{b}) catch break;
+        }
+
+        const full_path = if (prefix.len == 0)
+            try allocator.dupe(u8, name)
+        else
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, name });
+        defer allocator.free(full_path);
+
+        const is_tree = std.mem.eql(u8, mode, "40000");
+        if (is_tree) {
+            try revListCollectTree(allocator, git_path, &hex_hash, full_path, no_names, emitted, deferred, platform_impl);
+        } else {
+            if (!emitted.contains(&hex_hash)) {
+                try emitted.put(try allocator.dupe(u8, &hex_hash), {});
+                const blob_line = if (no_names)
+                    try std.fmt.allocPrint(allocator, "{s}\n", .{hex_hash})
+                else
+                    try std.fmt.allocPrint(allocator, "{s} {s}\n", .{ hex_hash, full_path });
+                try deferred.append(blob_line);
+            }
+        }
+
+        pos = null_pos + 21;
     }
 }
 
