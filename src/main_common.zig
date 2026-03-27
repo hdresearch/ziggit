@@ -7271,6 +7271,7 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     var no_full_name = false;
     var object_only = false;
     var has_format = false;
+    var format_str: ?[]const u8 = null;
     var treeish: ?[]const u8 = null;
     var pathspecs = std.array_list.Managed([]const u8).init(allocator);
     defer pathspecs.deinit();
@@ -7302,6 +7303,7 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
             object_only = true;
         } else if (std.mem.startsWith(u8, arg, "--format=")) {
             has_format = true;
+            format_str = arg["--format=".len..];
         } else if (std.mem.eql(u8, arg, "--abbrev")) {
             abbrev_len = 7; // default abbrev length
         } else if (std.mem.startsWith(u8, arg, "--abbrev=")) {
@@ -7513,7 +7515,14 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
         defer allocator.free(quoted_path);
         const display_path = quoted_path;
 
-        if (object_only) {
+        if (format_str) |fmt| {
+            // Custom format string
+            const formatted = try formatLsTreeEntry(allocator, fmt, entry, display_hash, display_path, git_path, platform_impl);
+            defer allocator.free(formatted);
+            const output = try std.fmt.allocPrint(allocator, "{s}{s}", .{ formatted, line_end });
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+        } else if (object_only) {
             const output = try std.fmt.allocPrint(allocator, "{s}{s}", .{ display_hash, line_end });
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
@@ -7801,6 +7810,86 @@ fn cQuotePath(allocator: std.mem.Allocator, path: []const u8, quote_high_bytes: 
         }
     }
     try result.append('"');
+    return try allocator.dupe(u8, result.items);
+}
+
+fn formatLsTreeEntry(
+    allocator: std.mem.Allocator,
+    fmt: []const u8,
+    entry: OutputEntry,
+    display_hash: []const u8,
+    display_path: []const u8,
+    git_path: []const u8,
+    platform_impl: *const platform_mod.Platform,
+) ![]u8 {
+    var result = std.array_list.Managed(u8).init(allocator);
+    var i: usize = 0;
+    while (i < fmt.len) {
+        if (fmt[i] == '%' and i + 1 < fmt.len) {
+            if (fmt[i + 1] == '(') {
+              if (std.mem.indexOf(u8, fmt[i..], ")")) |close_offset| {
+                const placeholder = fmt[i + 2 .. i + close_offset];
+                if (std.mem.eql(u8, placeholder, "objectmode")) {
+                    try result.appendSlice(entry.mode);
+                } else if (std.mem.eql(u8, placeholder, "objecttype")) {
+                    try result.appendSlice(entry.obj_type);
+                } else if (std.mem.eql(u8, placeholder, "objectname")) {
+                    try result.appendSlice(display_hash);
+                } else if (std.mem.eql(u8, placeholder, "objectsize")) {
+                    if (std.mem.eql(u8, entry.obj_type, "tree") or std.mem.eql(u8, entry.obj_type, "commit")) {
+                        try result.append('-');
+                    } else {
+                        const obj = objects.GitObject.load(entry.hash, git_path, platform_impl, allocator) catch {
+                            try result.append('-');
+                            i += close_offset + 1;
+                            continue;
+                        };
+                        defer obj.deinit(allocator);
+                        const sz = try std.fmt.allocPrint(allocator, "{d}", .{obj.data.len});
+                        defer allocator.free(sz);
+                        try result.appendSlice(sz);
+                    }
+                } else if (std.mem.eql(u8, placeholder, "objectsize:padded")) {
+                    if (std.mem.eql(u8, entry.obj_type, "tree") or std.mem.eql(u8, entry.obj_type, "commit")) {
+                        try result.appendSlice("      -");
+                    } else {
+                        const obj = objects.GitObject.load(entry.hash, git_path, platform_impl, allocator) catch {
+                            try result.appendSlice("      -");
+                            i += close_offset + 1;
+                            continue;
+                        };
+                        defer obj.deinit(allocator);
+                        const sz = try std.fmt.allocPrint(allocator, "{d:>7}", .{obj.data.len});
+                        defer allocator.free(sz);
+                        try result.appendSlice(sz);
+                    }
+                } else if (std.mem.eql(u8, placeholder, "path")) {
+                    try result.appendSlice(display_path);
+                }
+                i += close_offset + 1;
+              } else {
+                try result.append(fmt[i]);
+                i += 1;
+              }
+            } else if (fmt[i + 1] == 'x' and i + 3 < fmt.len) {
+                // Hex escape: %xNN
+                const hex_str = fmt[i + 2 .. i + 4];
+                const byte = std.fmt.parseInt(u8, hex_str, 16) catch {
+                    try result.append('%');
+                    i += 1;
+                    continue;
+                };
+                try result.append(byte);
+                i += 4;
+            } else {
+                try result.append(fmt[i]);
+                i += 1;
+            }
+        } else {
+            try result.append(fmt[i]);
+            i += 1;
+        }
+    }
     return try allocator.dupe(u8, result.items);
 }
 
