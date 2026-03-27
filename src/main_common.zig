@@ -338,6 +338,34 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 // Continue the while loop to check if the expanded command is native or needs further alias resolution
             }
         } else {
+            // Check if command exists as git-<cmd> in exec path
+            const exec_path = std.posix.getenv("GIT_EXEC_PATH") orelse "";
+            if (exec_path.len > 0) {
+                const ext_cmd = std.fmt.allocPrint(allocator, "{s}/git-{s}", .{exec_path, command}) catch null;
+                if (ext_cmd) |ec| {
+                    defer allocator.free(ec);
+                    if (std.fs.cwd().access(ec, .{})) |_| {
+                        // External command found - execute it
+                        var argv = std.array_list.Managed([]const u8).init(allocator);
+                        defer argv.deinit();
+                        try argv.append(ec);
+                        var ri: usize = command_index + 1;
+                        while (ri < all_original_args.items.len) : (ri += 1) {
+                            try argv.append(all_original_args.items[ri]);
+                        }
+                        var child = std.process.Child.init(argv.items, allocator);
+                        child.stdin_behavior = .Inherit;
+                        child.stdout_behavior = .Inherit;
+                        child.stderr_behavior = .Inherit;
+                        _ = child.spawn() catch { std.process.exit(128); };
+                        const result = child.wait() catch { std.process.exit(128); };
+                        switch (result) {
+                            .Exited => |code| std.process.exit(code),
+                            else => std.process.exit(128),
+                        }
+                    } else |_| {}
+                }
+            }
             // Command not found - error (pure Zig, no git forwarding)
             const error_msg = std.fmt.allocPrint(allocator, "ziggit: '{s}' is not a ziggit command. See 'ziggit --help'.\n", .{command}) catch "ziggit: invalid command. See 'ziggit --help'.\n";
             defer if (error_msg.ptr != "ziggit: invalid command. See 'ziggit --help'.\n".ptr) allocator.free(error_msg);
