@@ -7259,6 +7259,7 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     var name_status = false;
     var long_format = false;
     var null_terminated = false;
+    var abbrev_len: ?usize = null;
     var full_tree = false;
     var no_full_name = false;
     var object_only = false;
@@ -7295,9 +7296,10 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
         } else if (std.mem.startsWith(u8, arg, "--format=")) {
             has_format = true;
         } else if (std.mem.eql(u8, arg, "--abbrev")) {
-            // Accept but ignore
+            abbrev_len = 7; // default abbrev length
         } else if (std.mem.startsWith(u8, arg, "--abbrev=")) {
-            // Accept but ignore
+            const val = arg["--abbrev=".len..];
+            abbrev_len = std.fmt.parseInt(usize, val, 10) catch 7;
         } else if (std.mem.eql(u8, arg, "--")) {
             // Everything after -- is a pathspec
             i += 1;
@@ -7386,10 +7388,23 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
         for (adjusted_pathspecs.items) |ps| allocator.free(@constCast(ps));
         adjusted_pathspecs.deinit();
     }
+    var no_path_restriction = false;
     if (prefix_str.len > 0 and pathspecs.items.len > 0) {
         for (pathspecs.items) |ps| {
-            const adjusted = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix_str, ps });
-            try adjusted_pathspecs.append(adjusted);
+            // Resolve relative paths like ../
+            const combined = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix_str, ps });
+            defer allocator.free(combined);
+            const normalized = try normalizePath(allocator, combined);
+            if (normalized.len == 0) {
+                allocator.free(normalized);
+                // Path resolved to root - no restriction
+                no_path_restriction = true;
+                for (adjusted_pathspecs.items) |existing| allocator.free(@constCast(existing));
+                adjusted_pathspecs.clearRetainingCapacity();
+                break;
+            } else {
+                try adjusted_pathspecs.append(normalized);
+            }
         }
     } else if (prefix_str.len > 0 and pathspecs.items.len == 0) {
         // When no pathspecs given but in a subdirectory, restrict to prefix
@@ -7398,7 +7413,28 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     }
 
     // Use adjusted pathspecs if we have them, otherwise original
-    const effective_pathspecs = if (adjusted_pathspecs.items.len > 0) &adjusted_pathspecs else &pathspecs;
+    // Check for --full-tree with ../ pathspec (should error)
+    if (full_tree) {
+        for (pathspecs.items) |ps| {
+            if (std.mem.startsWith(u8, ps, "../") or std.mem.eql(u8, ps, "..")) {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: {s}: '{s}' is outside repository\n", .{ ps, ps });
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+                unreachable;
+            }
+        }
+    }
+
+    // Use empty pathspecs when path resolved to root (show everything)
+    var empty_pathspecs = std.array_list.Managed([]const u8).init(allocator);
+    defer empty_pathspecs.deinit();
+    const effective_pathspecs = if (no_path_restriction)
+        &empty_pathspecs
+    else if (adjusted_pathspecs.items.len > 0)
+        &adjusted_pathspecs
+    else
+        &pathspecs;
 
     // Resolve tree-ish to a tree hash
     const tree_hash = resolveTreeish(git_path, treeish.?, platform_impl, allocator) catch {
@@ -7434,6 +7470,11 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     // Output
     const line_end: []const u8 = if (null_terminated) "\x00" else "\n";
     for (output_entries.items) |entry| {
+        // Apply hash abbreviation
+        const display_hash = if (abbrev_len) |abl|
+            entry.hash[0..@min(abl, entry.hash.len)]
+        else
+            entry.hash;
         // When --no-full-name, strip the prefix from output paths
         const display_path = if (no_full_name and prefix_str.len > 0 and
             std.mem.startsWith(u8, entry.full_path, prefix_str) and
@@ -7443,7 +7484,7 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
             entry.full_path;
 
         if (object_only) {
-            const output = try std.fmt.allocPrint(allocator, "{s}{s}", .{ entry.hash, line_end });
+            const output = try std.fmt.allocPrint(allocator, "{s}{s}", .{ display_hash, line_end });
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
         } else if (name_only) {
@@ -7452,7 +7493,7 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
             try platform_impl.writeStdout(output);
         } else if (long_format) {
             // Long format: mode type size\thash\tpath
-            const size_str = if (std.mem.eql(u8, entry.obj_type, "tree"))
+            const size_str = if (std.mem.eql(u8, entry.obj_type, "tree") or std.mem.eql(u8, entry.obj_type, "commit"))
                 try allocator.dupe(u8, "      -")
             else blk: {
                 // Load the object to get its size
@@ -7463,11 +7504,11 @@ fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
                 break :blk try std.fmt.allocPrint(allocator, "{d:>7}", .{obj.data.len});
             };
             defer allocator.free(size_str);
-            const output = try std.fmt.allocPrint(allocator, "{s} {s} {s} {s}\t{s}{s}", .{ entry.mode, entry.obj_type, entry.hash, size_str, display_path, line_end });
+            const output = try std.fmt.allocPrint(allocator, "{s} {s} {s} {s}\t{s}{s}", .{ entry.mode, entry.obj_type, display_hash, size_str, display_path, line_end });
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
         } else {
-            const output = try std.fmt.allocPrint(allocator, "{s} {s} {s}\t{s}{s}", .{ entry.mode, entry.obj_type, entry.hash, display_path, line_end });
+            const output = try std.fmt.allocPrint(allocator, "{s} {s} {s}\t{s}{s}", .{ entry.mode, entry.obj_type, display_hash, display_path, line_end });
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
         }
@@ -7521,12 +7562,14 @@ fn walkTree(
             try allocator.dupe(u8, entry.name);
 
         const is_tree = std.mem.eql(u8, entry.obj_type, "tree");
+        const is_submodule = std.mem.eql(u8, entry.obj_type, "commit");
+        const is_directory_like = is_tree or is_submodule;
 
         // Check pathspec filtering
         if (pathspecs.items.len > 0) {
             var matches = false;
             for (pathspecs.items) |pathspec| {
-                if (pathMatchesSpec(full_path, pathspec, is_tree)) {
+                if (pathMatchesSpec(full_path, pathspec, is_directory_like)) {
                     matches = true;
                     break;
                 }
@@ -7603,8 +7646,8 @@ fn walkTree(
                 }
             }
         } else {
-            // Blob entry
-            if (!only_trees) {
+            // Blob or submodule entry
+            if (!only_trees or is_submodule) {
                 try output.append(OutputEntry{
                     .mode = try allocator.dupe(u8, entry.mode),
                     .obj_type = entry.obj_type,
@@ -7691,6 +7734,40 @@ fn pathMatchesSpec(path: []const u8, spec: []const u8, is_tree: bool) bool {
 }
 
 /// Check if pathspec starts with the given prefix (for tree recursion)
+/// Normalize a path by resolving . and .. components
+fn normalizePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var components = std.array_list.Managed([]const u8).init(allocator);
+    defer components.deinit();
+
+    // Handle trailing slash
+    const has_trailing_slash = std.mem.endsWith(u8, path, "/");
+    const clean_path = if (has_trailing_slash) path[0 .. path.len - 1] else path;
+
+    var iter = std.mem.splitScalar(u8, clean_path, '/');
+    while (iter.next()) |component| {
+        if (component.len == 0 or std.mem.eql(u8, component, ".")) continue;
+        if (std.mem.eql(u8, component, "..")) {
+            if (components.items.len > 0) {
+                _ = components.pop();
+            }
+            continue;
+        }
+        try components.append(component);
+    }
+
+    if (components.items.len == 0) return try allocator.dupe(u8, "");
+
+    // Join components
+    var result = std.array_list.Managed(u8).init(allocator);
+    for (components.items, 0..) |comp, idx| {
+        if (idx > 0) try result.append('/');
+        try result.appendSlice(comp);
+    }
+    if (has_trailing_slash) try result.append('/');
+
+    return try allocator.dupe(u8, result.items);
+}
+
 fn pathSpecStartsWith(spec: []const u8, prefix: []const u8) bool {
     const clean_spec = if (std.mem.endsWith(u8, spec, "/")) spec[0 .. spec.len - 1] else spec;
     if (clean_spec.len <= prefix.len) return false;
