@@ -9257,7 +9257,8 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     defer allocator.free(git_path);
 
     var do_count = false;
-    var max_count: ?u32 = null;
+    var max_count: ?i64 = null;
+    var skip_count: u32 = 0;
     var reverse = false;
     var topo_order = false;
     var show_objects = false;
@@ -9293,17 +9294,69 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         } else if (std.mem.eql(u8, arg, "--graph")) {
             graph = true;
         } else if (std.mem.startsWith(u8, arg, "--max-count=")) {
-            max_count = std.fmt.parseInt(u32, arg[12..], 10) catch null;
+            max_count = std.fmt.parseInt(i64, arg[12..], 10) catch {
+                const msg = std.fmt.allocPrint(allocator, "fatal: '{s}': not an integer\n", .{arg[12..]}) catch return;
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+                unreachable;
+            };
         } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--max-count")) {
             if (args.next()) |count_str| {
-                max_count = std.fmt.parseInt(u32, count_str, 10) catch null;
+                max_count = std.fmt.parseInt(i64, count_str, 10) catch {
+                    const msg = std.fmt.allocPrint(allocator, "fatal: '{s}': not an integer\n", .{count_str}) catch return;
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(128);
+                    unreachable;
+                };
+            }
+        } else if (std.mem.startsWith(u8, arg, "-n")) {
+            // -n<N> form (e.g. -n1)
+            max_count = std.fmt.parseInt(i64, arg[2..], 10) catch {
+                const msg = std.fmt.allocPrint(allocator, "fatal: '{s}': not an integer\n", .{arg[2..]}) catch return;
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+                unreachable;
+            };
+        } else if (std.mem.startsWith(u8, arg, "--skip=")) {
+            skip_count = std.fmt.parseInt(u32, arg[7..], 10) catch {
+                const msg = std.fmt.allocPrint(allocator, "fatal: '{s}': not an integer\n", .{arg[7..]}) catch return;
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+                unreachable;
+            };
+        } else if (std.mem.eql(u8, arg, "--skip")) {
+            if (args.next()) |skip_str| {
+                skip_count = std.fmt.parseInt(u32, skip_str, 10) catch {
+                    const msg = std.fmt.allocPrint(allocator, "fatal: '{s}': not an integer\n", .{skip_str}) catch return;
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(128);
+                    unreachable;
+                };
             }
         } else if (std.mem.startsWith(u8, arg, "-") and arg.len > 1 and std.ascii.isDigit(arg[1])) {
-            max_count = std.fmt.parseInt(u32, arg[1..], 10) catch null;
+            max_count = std.fmt.parseInt(i64, arg[1..], 10) catch {
+                const msg = std.fmt.allocPrint(allocator, "fatal: '{s}': not an integer\n", .{arg[1..]}) catch return;
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+                unreachable;
+            };
         } else if (std.mem.startsWith(u8, arg, "--not")) {
             // Next positional arg is excluded
         } else if (std.mem.eql(u8, arg, "--")) {
             break; // End of revisions
+        } else if (std.mem.startsWith(u8, arg, "--") and arg.len > 2 and std.ascii.isDigit(arg[2])) {
+            // --1 etc are not valid options
+            const msg = std.fmt.allocPrint(allocator, "error: unknown option `{s}'\n", .{arg[2..]}) catch return;
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+            unreachable;
         } else if (std.mem.startsWith(u8, arg, "--")) {
             // Skip unknown flags
         } else if (std.mem.indexOf(u8, arg, "..") != null) {
@@ -9432,7 +9485,7 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         try result.append(try allocator.dupe(u8, current));
 
         if (max_count) |mc| {
-            if (result.items.len >= mc) break;
+            if (mc >= 0 and result.items.len >= @as(usize, @intCast(mc)) + @as(usize, skip_count)) break;
         }
 
         // Load commit and add parents to queue
@@ -9451,21 +9504,36 @@ fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         }
     }
 
+    // Apply skip
+    const skipped_results = if (skip_count > 0 and skip_count < result.items.len)
+        result.items[skip_count..]
+    else if (skip_count >= result.items.len)
+        result.items[0..0]
+    else
+        result.items;
+
+    // Apply max_count to output (negative means unlimited)
+    const final_results = if (max_count) |mc| blk: {
+        if (mc < 0) break :blk skipped_results;
+        const limit = @as(usize, @intCast(mc));
+        break :blk if (limit < skipped_results.len) skipped_results[0..limit] else skipped_results;
+    } else skipped_results;
+
     if (do_count) {
-        const count_output = try std.fmt.allocPrint(allocator, "{d}\n", .{result.items.len});
+        const count_output = try std.fmt.allocPrint(allocator, "{d}\n", .{final_results.len});
         defer allocator.free(count_output);
         try platform_impl.writeStdout(count_output);
     } else {
         if (reverse) {
-            var ri: usize = result.items.len;
+            var ri: usize = final_results.len;
             while (ri > 0) {
                 ri -= 1;
-                const out = try std.fmt.allocPrint(allocator, "{s}\n", .{result.items[ri]});
+                const out = try std.fmt.allocPrint(allocator, "{s}\n", .{final_results[ri]});
                 defer allocator.free(out);
                 try platform_impl.writeStdout(out);
             }
         } else {
-            for (result.items) |h| {
+            for (final_results) |h| {
                 const out = try std.fmt.allocPrint(allocator, "{s}\n", .{h});
                 defer allocator.free(out);
                 try platform_impl.writeStdout(out);
