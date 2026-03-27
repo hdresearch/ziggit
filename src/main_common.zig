@@ -26190,11 +26190,11 @@ fn outputStatForEmptyTree(allocator: std.mem.Allocator, tree_hash_str: []const u
     // Output each file stat line
     for (files.items) |f| {
         const padding = max_name_len - f.name.len;
-        var pad_buf = try allocator.alloc(u8, padding);
+        const pad_buf = try allocator.alloc(u8, padding);
         defer allocator.free(pad_buf);
         @memset(pad_buf, ' ');
         
-        var plus_buf = try allocator.alloc(u8, f.lines);
+        const plus_buf = try allocator.alloc(u8, f.lines);
         defer allocator.free(plus_buf);
         @memset(plus_buf, '+');
         
