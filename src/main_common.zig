@@ -5803,6 +5803,7 @@ fn cmdMerge(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     var squash = false;
     var no_commit = false;
     var strategy: ?[]const u8 = null;
+    var merge_signoff = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-s")) {
@@ -5830,6 +5831,50 @@ fn cmdMerge(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             squash = true;
         } else if (std.mem.eql(u8, arg, "--no-commit")) {
             no_commit = true;
+        } else if (std.mem.eql(u8, arg, "--signoff")) {
+            merge_signoff = true;
+        } else if (std.mem.eql(u8, arg, "--no-signoff")) {
+            merge_signoff = false;
+        } else if (std.mem.eql(u8, arg, "--no-edit") or std.mem.eql(u8, arg, "--edit")) {
+            // Accept
+        } else if (std.mem.eql(u8, arg, "--stat") or std.mem.eql(u8, arg, "--no-stat") or std.mem.eql(u8, arg, "-n")) {
+            // Accept
+        } else if (std.mem.eql(u8, arg, "--log") or std.mem.eql(u8, arg, "--no-log") or std.mem.startsWith(u8, arg, "--log=")) {
+            // Accept
+        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
+            // Accept
+        } else if (std.mem.eql(u8, arg, "--ff") or std.mem.eql(u8, arg, "--progress") or std.mem.eql(u8, arg, "--no-progress")) {
+            // Accept
+        } else if (std.mem.eql(u8, arg, "--abort")) {
+            const merge_head2 = try std.fmt.allocPrint(allocator, "{s}/MERGE_HEAD", .{git_path});
+            defer allocator.free(merge_head2);
+            const mh_exists = if (std.fs.cwd().access(merge_head2, .{})) |_| true else |_| false;
+            if (!mh_exists) {
+                try platform_impl.writeStderr("fatal: There is no merge to abort (MERGE_HEAD missing).\n");
+                std.process.exit(128);
+            }
+            if (refs.getCurrentCommit(git_path, platform_impl, allocator) catch null) |hh| {
+                defer allocator.free(hh);
+                resetIndex(git_path, hh, platform_impl, allocator) catch {};
+                checkoutCommitTree(git_path, hh, allocator, platform_impl) catch {};
+            }
+            std.fs.cwd().deleteFile(merge_head2) catch {};
+            const mm2 = try std.fmt.allocPrint(allocator, "{s}/MERGE_MSG", .{git_path});
+            defer allocator.free(mm2);
+            std.fs.cwd().deleteFile(mm2) catch {};
+            return;
+        } else if (std.mem.eql(u8, arg, "--continue")) {
+            return;
+        } else if (std.mem.startsWith(u8, arg, "--") and arg.len > 2) {
+            const err_msg = try std.fmt.allocPrint(allocator, "error: unknown option `{s}'\n", .{arg[2..]});
+            defer allocator.free(err_msg);
+            try platform_impl.writeStderr(err_msg);
+            std.process.exit(128);
+        } else if (arg.len > 0 and arg[0] == '-' and !std.mem.eql(u8, arg, "--")) {
+            const err_msg = try std.fmt.allocPrint(allocator, "error: unknown switch `{c}'\n", .{arg[1]});
+            defer allocator.free(err_msg);
+            try platform_impl.writeStderr(err_msg);
+            std.process.exit(128);
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             branch_to_merge = arg;
         }
@@ -6007,7 +6052,7 @@ fn cmdMerge(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             defer allocator.free(success_msg);
             try platform_impl.writeStdout(success_msg);
         } else {
-            try performThreeWayMerge(git_path, current_hash, target_hash, current_branch, merge_target, merge_message, no_commit, squash, allocator, platform_impl);
+            try performThreeWayMerge(git_path, current_hash, target_hash, current_branch, merge_target, merge_message, no_commit, squash, merge_signoff, allocator, platform_impl);
         }
     }
 }
@@ -6147,7 +6192,7 @@ fn writeMergeState(git_path: []const u8, target_hash: []const u8, merge_msg_text
     try platform_impl.fs.writeFile(merge_mode_path, "");
 }
 
-fn performThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_hash: []const u8, current_branch: []const u8, target_branch: []const u8, merge_message: ?[]const u8, no_commit: bool, squash: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+fn performThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_hash: []const u8, current_branch: []const u8, target_branch: []const u8, merge_message: ?[]const u8, no_commit: bool, squash: bool, merge_signoff: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     // Find common base (merge base) - simplified implementation
     const merge_base = findMergeBase(git_path, current_hash, target_hash, allocator, platform_impl) catch try allocator.dupe(u8, current_hash);
     defer allocator.free(merge_base);
@@ -6184,8 +6229,20 @@ fn performThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_h
         }
         try platform_impl.writeStdout("Automatic merge went well; stopped before committing as requested\n");
     } else {
-        // Create merge commit
-        try createMergeCommitWithMsg(git_path, current_hash, target_hash, current_branch, target_branch, merge_message, allocator, platform_impl);
+        // Create merge commit - add signoff if requested
+        var final_merge_msg = merge_message;
+        if (merge_signoff) {
+            const base_msg = merge_message orelse try buildMergeMessage(target_branch, current_branch, git_path, allocator, platform_impl);
+            const committer_str2 = getCommitterString(allocator) catch null;
+            if (committer_str2) |cs| {
+                defer allocator.free(cs);
+                const gt = std.mem.lastIndexOf(u8, cs, ">") orelse cs.len;
+                const ne = cs[0..@min(gt + 1, cs.len)];
+                final_merge_msg = try std.fmt.allocPrint(allocator, "{s}\n\nSigned-off-by: {s}", .{base_msg, ne});
+                if (merge_message == null) allocator.free(base_msg);
+            }
+        }
+        try createMergeCommitWithMsg(git_path, current_hash, target_hash, current_branch, target_branch, final_merge_msg, allocator, platform_impl);
         try platform_impl.writeStdout("Merge made by the 'ort' strategy.\n");
     }
 }
