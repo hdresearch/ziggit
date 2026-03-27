@@ -312,7 +312,7 @@ fn httpGetWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.ht
 
     if (response.head.status != .ok) return error.HttpError;
 
-    var transfer_buf: [16384]u8 = undefined;
+    var transfer_buf: [65536]u8 = undefined;
     return response.reader(&transfer_buf).allocRemaining(allocator, .limited(max_response_size)) catch return error.HttpError;
 }
 
@@ -373,7 +373,8 @@ fn httpPostWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.h
     if (response.head.status != .ok) return error.HttpError;
 
     // Read response body (use allocRemaining which handles chunked transfer correctly)
-    var transfer_buf3: [65536]u8 = undefined;
+    // Use 256KB buffer to reduce number of read syscalls for pack data responses
+    var transfer_buf3: [262144]u8 = undefined;
     return response.reader(&transfer_buf3).allocRemaining(allocator, .limited(max_response_size)) catch return error.HttpError;
 }
 
