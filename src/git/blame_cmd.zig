@@ -31,7 +31,7 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
             if (abl < 4) abl = 4;
             if (abl > 40) abl = 40;
         }
-        else if (std.mem.eql(u8, arg, "-l")) { abl = 40; }
+        else if (std.mem.eql(u8, arg, "-l") or std.mem.eql(u8, arg, "--no-abbrev")) { abl = 40; }
         else if (std.mem.startsWith(u8, arg, "-L")) {
             try lr.append(if (arg.len > 2) arg[2..] else (args.next() orelse ""));
         }
@@ -84,8 +84,11 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
 
     var hh: ?[]const u8 = null;
     defer if (hh) |h| a.free(h);
-    if (rv) |r| { hh = refs.resolveRef(gp, r, pi, a) catch null; }
-    else { hh = refs.resolveRef(gp, "HEAD", pi, a) catch null; }
+    if (rv) |r| {
+        // Handle ^REV syntax (boundary commit)
+        const actual_rev = if (r.len > 0 and r[0] == '^') r[1..] else r;
+        hh = mc.resolveRevision(gp, actual_rev, pi, a) catch (refs.resolveRef(gp, actual_rev, pi, a) catch null);
+    } else { hh = refs.resolveRef(gp, "HEAD", pi, a) catch null; }
 
     var fc: []const u8 = "";
     var fca = false;
@@ -174,7 +177,13 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
                         };
                     } else {
                         if (ss[0] == '-') { try pi.writeStderr("fatal: -L invalid line range\n"); std.process.exit(128); }
-                        s = std.fmt.parseInt(usize, ss, 10) catch 1;
+                        s = std.fmt.parseInt(usize, ss, 10) catch {
+                            try pi.writeStderr("fatal: -L: invalid line number: ");
+                            try pi.writeStderr(ss);
+                            try pi.writeStderr("\n");
+                            std.process.exit(128);
+                            unreachable;
+                        };
                     }
                 }
                 if (ess.len > 0) {
@@ -200,7 +209,13 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
                             unreachable;
                         };
                     } else {
-                        e = std.fmt.parseInt(usize, ess, 10) catch lines.items.len;
+                        e = std.fmt.parseInt(usize, ess, 10) catch {
+                            try pi.writeStderr("fatal: -L: invalid line number: ");
+                            try pi.writeStderr(ess);
+                            try pi.writeStderr("\n");
+                            std.process.exit(128);
+                            unreachable;
+                        };
                         if (e == 0) { try pi.writeStderr("fatal: -L invalid line range\n"); std.process.exit(128); }
                     }
                 }
@@ -221,7 +236,13 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
                     e = lines.items.len;
                 } else {
                     if (rs[0] == '-') { try pi.writeStderr("fatal: -L invalid line range\n"); std.process.exit(128); }
-                    s = std.fmt.parseInt(usize, rs, 10) catch 1;
+                    s = std.fmt.parseInt(usize, rs, 10) catch {
+                        try pi.writeStderr("fatal: -L: invalid line number: ");
+                        try pi.writeStderr(rs);
+                        try pi.writeStderr("\n");
+                        std.process.exit(128);
+                        unreachable;
+                    };
                     // Single line number without comma: s must be <= nlines
                     if (s > lines.items.len) {
                         try pi.writeStderr("fatal: file ");
