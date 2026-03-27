@@ -1139,13 +1139,26 @@ fn matchPathspec(path: []const u8, pathspec: []const u8) bool {
     // Direct wildmatch
     if (wildmatch_mod.wildmatch(pathspec, path, flags) == wildmatch_mod.WM_MATCH) return true;
 
-    // In pathspec context, ** always matches across directories even when
-    // not at a path boundary (e.g., "foo**" matches "foo/bar/baz").
-    // This differs from pure wildmatch where ** only works as globstar
-    // when properly bounded by / or at start/end.
-    if ((flags & wildmatch_mod.WM_PATHNAME) != 0 and std.mem.indexOf(u8, pathspec, "**") != null) {
-        const flags_no_path = flags & ~wildmatch_mod.WM_PATHNAME;
-        if (wildmatch_mod.wildmatch(pathspec, path, flags_no_path) == wildmatch_mod.WM_MATCH) return true;
+    // In pathspec context with --glob-pathspecs, trailing ** (e.g., "foo**")
+    // matches everything under the prefix, equivalent to "foo/**".
+    // This is because git's pathspec processing treats ** at end as globstar
+    // even when not preceded by /.
+    if ((flags & wildmatch_mod.WM_PATHNAME) != 0 and pathspec.len >= 2 and
+        std.mem.endsWith(u8, pathspec, "**"))
+    {
+        // Find the prefix before the trailing **
+        const prefix = pathspec[0 .. pathspec.len - 2];
+        // Check if prefix (without **) matches as a directory prefix + /**
+        const new_pattern_len = prefix.len + 3; // prefix + "/**"
+        if (new_pattern_len <= 4096) {
+            var buf: [4096]u8 = undefined;
+            @memcpy(buf[0..prefix.len], prefix);
+            buf[prefix.len] = '/';
+            buf[prefix.len + 1] = '*';
+            buf[prefix.len + 2] = '*';
+            const new_pattern = buf[0..new_pattern_len];
+            if (wildmatch_mod.wildmatch(new_pattern, path, flags) == wildmatch_mod.WM_MATCH) return true;
+        }
     }
 
     return false;
