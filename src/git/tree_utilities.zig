@@ -73,7 +73,7 @@ pub const TreeEntry = struct {
 
 /// Parse a git tree object into structured entries
 pub fn parseTreeObject(tree_data: []const u8, allocator: std.mem.Allocator) ![]TreeEntry {
-    var entries = std.array_list.Managed(TreeEntry).init(allocator);
+    var entries = std.ArrayList(TreeEntry).init(allocator);
     defer entries.deinit();
     
     var pos: usize = 0;
@@ -252,12 +252,12 @@ pub fn TreeWalker(comptime PlatformImpl: type) type {
 
 /// Simple visitor that collects all file paths
 pub const FileCollector = struct {
-    files: std.array_list.Managed([]const u8),
+    files: std.ArrayList([]const u8),
     allocator: std.mem.Allocator,
     
     pub fn init(allocator: std.mem.Allocator) FileCollector {
         return FileCollector{
-            .files = std.array_list.Managed([]const u8).init(allocator),
+            .files = std.ArrayList([]const u8).init(allocator),
             .allocator = allocator,
         };
     }
@@ -294,7 +294,7 @@ pub fn createTreeObject(entries: []const TreeEntry, allocator: std.mem.Allocator
         }
     }.lessThan);
     
-    var content = std.array_list.Managed(u8).init(allocator);
+    var content = std.ArrayList(u8).init(allocator);
     defer content.deinit();
     
     for (sorted_entries) |entry| {

@@ -4,13 +4,13 @@ const config = @import("config.zig");
 /// Advanced git configuration management with enhanced features
 pub const AdvancedGitConfig = struct {
     base_config: config.GitConfig,
-    file_paths: std.array_list.Managed([]const u8),
+    file_paths: std.ArrayList([]const u8),
     last_loaded: i64,
     
     pub fn init(allocator: std.mem.Allocator) AdvancedGitConfig {
         return AdvancedGitConfig{
             .base_config = config.GitConfig.init(allocator),
-            .file_paths = std.array_list.Managed([]const u8).init(allocator),
+            .file_paths = std.ArrayList([]const u8).init(allocator),
             .last_loaded = 0,
         };
     }
@@ -105,11 +105,11 @@ pub const AdvancedGitConfig = struct {
     }
     
     /// Get all remote configurations
-    pub fn getAllRemotes(self: AdvancedGitConfig, allocator: std.mem.Allocator) !std.array_list.Managed(RemoteConfig) {
-        var remotes = std.array_list.Managed(RemoteConfig).init(allocator);
+    pub fn getAllRemotes(self: AdvancedGitConfig, allocator: std.mem.Allocator) !std.ArrayList(RemoteConfig) {
+        var remotes = std.ArrayList(RemoteConfig).init(allocator);
         
         // Collect all remote sections
-        var remote_names = std.array_list.Managed([]const u8).init(allocator);
+        var remote_names = std.ArrayList([]const u8).init(allocator);
         defer {
             for (remote_names.items) |name| {
                 allocator.free(name);
@@ -154,11 +154,11 @@ pub const AdvancedGitConfig = struct {
     }
     
     /// Get all branch configurations
-    pub fn getAllBranches(self: AdvancedGitConfig, allocator: std.mem.Allocator) !std.array_list.Managed(BranchConfig) {
-        var branches = std.array_list.Managed(BranchConfig).init(allocator);
+    pub fn getAllBranches(self: AdvancedGitConfig, allocator: std.mem.Allocator) !std.ArrayList(BranchConfig) {
+        var branches = std.ArrayList(BranchConfig).init(allocator);
         
         // Collect all branch sections
-        var branch_names = std.array_list.Managed([]const u8).init(allocator);
+        var branch_names = std.ArrayList([]const u8).init(allocator);
         defer {
             for (branch_names.items) |name| {
                 allocator.free(name);
@@ -203,8 +203,8 @@ pub const AdvancedGitConfig = struct {
     }
     
     /// Validate configuration for common issues
-    pub fn validate(self: AdvancedGitConfig, allocator: std.mem.Allocator) !std.array_list.Managed(ConfigIssue) {
-        var issues = std.array_list.Managed(ConfigIssue).init(allocator);
+    pub fn validate(self: AdvancedGitConfig, allocator: std.mem.Allocator) !std.ArrayList(ConfigIssue) {
+        var issues = std.ArrayList(ConfigIssue).init(allocator);
         
         // Check required user configuration
         if (self.base_config.getUserName() == null) {
