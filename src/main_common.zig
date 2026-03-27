@@ -2505,31 +2505,17 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     }
     defer index.deinit();
 
-    // Check if there's anything to commit - compare index tree to HEAD tree
-    if (!allow_empty) {
-        const new_tree = try buildRecursiveTree(allocator, index.entries.items, "", git_path, platform_impl);
-        defer allocator.free(new_tree);
-        var has_changes = true;
-        if (refs.getCurrentCommit(git_path, platform_impl, allocator) catch null) |head_h| {
-            defer allocator.free(head_h);
-            if (objects.GitObject.load(head_h, git_path, platform_impl, allocator)) |head_obj| {
-                defer head_obj.deinit(allocator);
-                const head_tree = extractHeaderField(head_obj.data, "tree");
-                if (std.mem.eql(u8, new_tree, head_tree)) has_changes = false;
-            } else |_| {}
-        } else {
-            // No HEAD - has changes if index is not empty
-            if (index.entries.items.len == 0) has_changes = false;
-        }
-        if (!has_changes and !amend) {
-            const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch "master";
-            defer allocator.free(current_branch);
-            const branch_msg = try std.fmt.allocPrint(allocator, "On branch {s}\n", .{current_branch});
-            defer allocator.free(branch_msg);
-            try platform_impl.writeStderr(branch_msg);
-            try platform_impl.writeStderr("nothing to commit, working tree clean\n");
-            std.process.exit(1);
-        }
+    // Check if there's anything to commit
+    if (index.entries.items.len == 0 and !allow_empty) {
+        const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch "master";
+        defer allocator.free(current_branch);
+        
+        const branch_msg = try std.fmt.allocPrint(allocator, "On branch {s}\n", .{current_branch});
+        defer allocator.free(branch_msg);
+        try platform_impl.writeStderr(branch_msg);
+        
+        try platform_impl.writeStderr("nothing to commit, working tree clean\n");
+        std.process.exit(1);
     }
 
     // Create recursive tree objects from index entries (handles nested directories)
@@ -10904,7 +10890,6 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var z_terminator = false;
     var killed_flag = false;
     var tag_flag = false;
-    var verbose_flag = false;
     var resolve_undo_flag = false;
     var deduplicate_flag = false;
     var eol_flag = false;
@@ -10950,9 +10935,6 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--ignored")) {
             ignored_flag = true;
         } else if (std.mem.eql(u8, arg, "-t")) {
-            tag_flag = true;
-        } else if (std.mem.eql(u8, arg, "-v")) {
-            verbose_flag = true;
             tag_flag = true;
         } else if (std.mem.eql(u8, arg, "-k") or std.mem.eql(u8, arg, "--killed")) {
             killed_flag = true;
@@ -11234,9 +11216,9 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 const quoted = try cQuotePath(allocator, entry.path, true);
                 defer allocator.free(quoted);
                 const tag_prefix: []const u8 = if (tag_flag) blk_tag: {
+                    // Skip-worktree check: CE_EXTENDED flag and skip_worktree in extended_flags
                     const has_skip_wt = if (entry.extended_flags) |ef| (ef & 0x4000 != 0) else (entry.flags & 0x4000 != 0);
-                    const is_assume_unchanged = (entry.flags & 0x8000) != 0;
-                    if (has_skip_wt) break :blk_tag "S " else if (verbose_flag and is_assume_unchanged) break :blk_tag "h " else break :blk_tag "H ";
+                    if (has_skip_wt) break :blk_tag "S " else break :blk_tag "H ";
                 } else "";
                 const output = try std.fmt.allocPrint(allocator, "{s}{o} {s} {d}\t{s}\n", .{ tag_prefix, entry.mode, hash_str, stage_num, quoted });
                 defer allocator.free(output);
@@ -11246,8 +11228,7 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 defer allocator.free(quoted);
                 const tag_prefix: []const u8 = if (tag_flag) blk_tag2: {
                     const has_skip_wt = if (entry.extended_flags) |ef| (ef & 0x4000 != 0) else (entry.flags & 0x4000 != 0);
-                    const is_assume_unchanged2 = (entry.flags & 0x8000) != 0;
-                    if (has_skip_wt) break :blk_tag2 "S " else if (verbose_flag and is_assume_unchanged2) break :blk_tag2 "h " else break :blk_tag2 "H ";
+                    if (has_skip_wt) break :blk_tag2 "S " else break :blk_tag2 "H ";
                 } else "";
                 const output = try std.fmt.allocPrint(allocator, "{s}{s}\n", .{ tag_prefix, quoted });
                 defer allocator.free(output);
@@ -16885,18 +16866,7 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     var df_suppress = false;
     var df_show_raw = false;
     var df_patch_with_raw = false;
-    var df_pathspecs = std.array_list.Managed([]const u8).init(allocator);
-    defer df_pathspecs.deinit();
-    var df_seen_dashdash = false;
     while (args.next()) |arg| {
-        if (df_seen_dashdash) {
-            try df_pathspecs.append(arg);
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--")) {
-            df_seen_dashdash = true;
-            continue;
-        }
         if (std.mem.eql(u8, arg, "--name-only")) {
             name_only = true;
             df_suppress = false;
@@ -16949,21 +16919,6 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     var has_diffs = false;
 
     for (idx.entries.items) |entry| {
-        // Skip assume-unchanged entries
-        if ((entry.flags & 0x8000) != 0) continue;
-
-        // Filter by pathspecs
-        if (df_pathspecs.items.len > 0) {
-            var path_matches = false;
-            for (df_pathspecs.items) |ps| {
-                if (std.mem.eql(u8, entry.path, ps) or std.mem.startsWith(u8, entry.path, ps)) {
-                    path_matches = true;
-                    break;
-                }
-            }
-            if (!path_matches) continue;
-        }
-
         // Build full path from repo root
         const full_path = if (repo_root.len > 0 and !std.mem.eql(u8, repo_root, "."))
             try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path })
@@ -17428,7 +17383,6 @@ fn nativeCmdCountObjects(allocator: std.mem.Allocator, args: [][]const u8, comma
 
 fn nativeCmdShowRef(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
     var verify = false;
-    var exists_mode = false;
     var quiet = false;
     var heads = false;
     var tags = false;
@@ -17444,8 +17398,6 @@ fn nativeCmdShowRef(allocator: std.mem.Allocator, args: [][]const u8, command_in
         if (std.mem.eql(u8, arg, "-h")) {
             try platform_impl.writeStdout("usage: git show-ref [--head] [-d | --dereference] [-s | --hash[=<n>]] [--verify] [-q | --quiet] [--tags] [--heads] [--] [<pattern>...]\n");
             std.process.exit(129);
-        } else if (std.mem.eql(u8, arg, "--exists")) {
-            exists_mode = true;
         } else if (std.mem.eql(u8, arg, "--verify")) {
             verify = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
@@ -17480,55 +17432,11 @@ fn nativeCmdShowRef(allocator: std.mem.Allocator, args: [][]const u8, command_in
         unreachable;
     };
 
-    if (exists_mode) {
-        // --exists mode: check if a single ref exists, exit 0 if yes, 2 if no
-        if (patterns.items.len < 1) {
-            try platform_impl.writeStderr("error: --exists requires a ref argument\n");
-            std.process.exit(129);
-            unreachable;
-        }
-        const ref_name = patterns.items[0];
-        // Check if the ref file or packed-ref entry exists (even dangling symrefs count)
-        const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_name });
-        defer allocator.free(ref_path);
-        if (std.fs.cwd().access(ref_path, .{})) |_| {
-            // Check if it's a directory (directories are not refs)
-            const stat = std.fs.cwd().statFile(ref_path) catch return; // can't stat, assume it exists
-            if (stat.kind == .directory) {
-                try platform_impl.writeStderr("error: reference does not exist\n");
-                std.process.exit(2);
-                unreachable;
-            }
-            return; // exists (even if symref is dangling)
-        } else |_| {
-            // Check packed-refs
-            const packed_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir});
-            defer allocator.free(packed_path);
-            const packed_data = platform_impl.fs.readFile(allocator, packed_path) catch {
-                try platform_impl.writeStderr("error: reference does not exist\n");
-                std.process.exit(2);
-                unreachable;
-            };
-            defer allocator.free(packed_data);
-            var lines = std.mem.splitScalar(u8, packed_data, '\n');
-            while (lines.next()) |line| {
-                if (line.len == 0 or line[0] == '#') continue;
-                if (line.len >= 41 and line[40] == ' ') {
-                    const packed_ref = std.mem.trim(u8, line[41..], " \t\r");
-                    if (std.mem.eql(u8, packed_ref, ref_name)) return; // exists in packed-refs
-                }
-            }
-            try platform_impl.writeStderr("error: reference does not exist\n");
-            std.process.exit(2);
-            unreachable;
-        }
-    }
-    
     if (verify) {
-        // Verify mode: check specific refs
+        // Verify mode: check specific refs (read direct ref value, no tag dereferencing)
         var found_any = false;
         for (patterns.items) |pattern| {
-            const resolved = refs.resolveRef(git_dir, pattern, platform_impl, allocator) catch {
+            const hash = readRefDirect(git_dir, pattern, allocator, platform_impl) catch {
                 if (!quiet) {
                     const msg = std.fmt.allocPrint(allocator, "fatal: '{s}' - not a valid ref\n", .{pattern}) catch continue;
                     defer allocator.free(msg);
@@ -17536,17 +17444,17 @@ fn nativeCmdShowRef(allocator: std.mem.Allocator, args: [][]const u8, command_in
                 }
                 continue;
             };
-            if (resolved) |hash| {
-                defer allocator.free(hash);
+            if (hash) |h| {
+                defer allocator.free(h);
                 found_any = true;
                 if (!quiet) {
-                    const end = @min(hash_len, hash.len);
+                    const end = @min(hash_len, h.len);
                     if (hash_only) {
-                        const output = std.fmt.allocPrint(allocator, "{s}\n", .{hash[0..end]}) catch continue;
+                        const output = std.fmt.allocPrint(allocator, "{s}\n", .{h[0..end]}) catch continue;
                         defer allocator.free(output);
                         try platform_impl.writeStdout(output);
                     } else {
-                        const output = std.fmt.allocPrint(allocator, "{s} {s}\n", .{ hash[0..end], pattern }) catch continue;
+                        const output = std.fmt.allocPrint(allocator, "{s} {s}\n", .{ h[0..end], pattern }) catch continue;
                         defer allocator.free(output);
                         try platform_impl.writeStdout(output);
                     }
@@ -25855,28 +25763,36 @@ fn t5FindSingle(allocator: std.mem.Allocator, git_dir: []const u8) ?[]u8 {
 }
 
 fn readRefDirect(git_dir: []const u8, ref_name: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !?[]u8 {
+    // Read a ref directly from the filesystem, following symrefs but not dereferencing tags
     var current_ref = try allocator.dupe(u8, ref_name);
     defer allocator.free(current_ref);
+    
     var depth: u32 = 0;
     while (depth < 20) : (depth += 1) {
         const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, current_ref });
         defer allocator.free(ref_path);
+        
         const content = platform_impl.fs.readFile(allocator, ref_path) catch {
+            // Try packed-refs
             const packed_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir});
             defer allocator.free(packed_path);
             const packed_data = platform_impl.fs.readFile(allocator, packed_path) catch return null;
             defer allocator.free(packed_data);
+            
             var lines = std.mem.splitScalar(u8, packed_data, '\n');
             while (lines.next()) |line| {
                 if (line.len == 0 or line[0] == '#') continue;
                 if (line.len >= 41 and line[40] == ' ') {
                     const packed_ref = std.mem.trim(u8, line[41..], " \t\r");
-                    if (std.mem.eql(u8, packed_ref, current_ref)) return try allocator.dupe(u8, line[0..40]);
+                    if (std.mem.eql(u8, packed_ref, current_ref)) {
+                        return try allocator.dupe(u8, line[0..40]);
+                    }
                 }
             }
             return null;
         };
         defer allocator.free(content);
+        
         const trimmed = std.mem.trim(u8, content, " \t\r\n");
         if (std.mem.startsWith(u8, trimmed, "ref: ")) {
             const target = trimmed["ref: ".len..];
@@ -25884,7 +25800,10 @@ fn readRefDirect(git_dir: []const u8, ref_name: []const u8, allocator: std.mem.A
             current_ref = try allocator.dupe(u8, target);
             continue;
         }
-        if (trimmed.len >= 40) return try allocator.dupe(u8, trimmed[0..40]);
+        
+        if (trimmed.len >= 40) {
+            return try allocator.dupe(u8, trimmed[0..40]);
+        }
         return null;
     }
     return null;
