@@ -11709,19 +11709,17 @@ fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 
     var verbose = false;
     var subcommand: ?[]const u8 = null;
+    var positionals = std.array_list.Managed([]const u8).init(allocator);
+    defer positionals.deinit();
 
     // Parse arguments
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
             verbose = true;
-        } else if (subcommand == null) {
+        } else if (subcommand == null and !std.mem.startsWith(u8, arg, "-")) {
             subcommand = arg;
         } else {
-            // Additional arguments for add/remove/etc. For now, fall back to git
-            const msg = try std.fmt.allocPrint(allocator, "ziggit: remote subcommand '{s}' not fully implemented yet\n", .{subcommand.?});
-            defer allocator.free(msg);
-            try platform_impl.writeStderr(msg);
-            std.process.exit(1);
+            try positionals.append(arg);
         }
     }
 
@@ -11731,9 +11729,297 @@ fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             verbose = true;
         }
         try listRemotes(git_path, verbose, platform_impl, allocator);
+    } else if (std.mem.eql(u8, subcommand.?, "add")) {
+        // git remote add <name> <url>
+        if (positionals.items.len < 2) {
+            try platform_impl.writeStderr("usage: git remote add <name> <url>\n");
+            std.process.exit(1);
+        }
+        const name = positionals.items[0];
+        const url = positionals.items[1];
+
+        // Append to config file
+        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+        defer allocator.free(config_path);
+
+        // Check if remote already exists
+        const existing = platform_impl.fs.readFile(allocator, config_path) catch try allocator.dupe(u8, "");
+        defer allocator.free(existing);
+
+        const remote_section = try std.fmt.allocPrint(allocator, "[remote \"{s}\"]", .{name});
+        defer allocator.free(remote_section);
+
+        if (std.mem.indexOf(u8, existing, remote_section) != null) {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: remote {s} already exists.\n", .{name});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(3);
+        }
+
+        const section = try std.fmt.allocPrint(allocator, "\n[remote \"{s}\"]\n\turl = {s}\n\tfetch = +refs/heads/*:refs/remotes/{s}/*\n", .{ name, url, name });
+        defer allocator.free(section);
+
+        const f = std.fs.cwd().openFile(config_path, .{ .mode = .write_only }) catch {
+            // Create the config file
+            const cf = std.fs.cwd().createFile(config_path, .{}) catch {
+                try platform_impl.writeStderr("fatal: could not open config file\n");
+                std.process.exit(128);
+            };
+            defer cf.close();
+            cf.writeAll(section) catch {};
+            return;
+        };
+        defer f.close();
+        f.seekFromEnd(0) catch {};
+        f.writeAll(section) catch {};
+    } else if (std.mem.eql(u8, subcommand.?, "remove") or std.mem.eql(u8, subcommand.?, "rm")) {
+        // git remote remove <name>
+        if (positionals.items.len < 1) {
+            try platform_impl.writeStderr("usage: git remote remove <name>\n");
+            std.process.exit(1);
+        }
+        const name = positionals.items[0];
+        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+        defer allocator.free(config_path);
+
+        const existing = platform_impl.fs.readFile(allocator, config_path) catch {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: No such remote: '{s}'\n", .{name});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(2);
+            unreachable;
+        };
+        defer allocator.free(existing);
+
+        const remote_header = try std.fmt.allocPrint(allocator, "[remote \"{s}\"]", .{name});
+        defer allocator.free(remote_header);
+
+        if (std.mem.indexOf(u8, existing, remote_header) == null) {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: No such remote: '{s}'\n", .{name});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(2);
+        }
+
+        // Remove the section
+        var result = std.array_list.Managed(u8).init(allocator);
+        defer result.deinit();
+        var in_remove_section = false;
+        var lines = std.mem.splitScalar(u8, existing, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (std.mem.startsWith(u8, trimmed, "[remote \"") and std.mem.endsWith(u8, trimmed, "\"]")) {
+                const sec_name = trimmed["[remote \"".len .. trimmed.len - "\"]".len];
+                if (std.mem.eql(u8, sec_name, name)) {
+                    in_remove_section = true;
+                    continue;
+                } else {
+                    in_remove_section = false;
+                }
+            } else if (std.mem.startsWith(u8, trimmed, "[") and in_remove_section) {
+                in_remove_section = false;
+            }
+            if (!in_remove_section) {
+                try result.appendSlice(line);
+                try result.append('\n');
+            }
+        }
+        // Also remove branch.<name> sections that reference this remote
+        platform_impl.fs.writeFile(config_path, result.items) catch {};
+
+        // Remove remote tracking refs
+        const remote_refs_dir = try std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}", .{ git_path, name });
+        defer allocator.free(remote_refs_dir);
+        std.fs.cwd().deleteTree(remote_refs_dir) catch {};
+    } else if (std.mem.eql(u8, subcommand.?, "set-url")) {
+        // git remote set-url <name> <newurl>
+        if (positionals.items.len < 2) {
+            try platform_impl.writeStderr("usage: git remote set-url <name> <newurl>\n");
+            std.process.exit(1);
+        }
+        const name = positionals.items[0];
+        const new_url = positionals.items[1];
+
+        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+        defer allocator.free(config_path);
+        const existing = platform_impl.fs.readFile(allocator, config_path) catch {
+            try platform_impl.writeStderr("fatal: could not read config\n");
+            std.process.exit(128);
+            unreachable;
+        };
+        defer allocator.free(existing);
+
+        var result = std.array_list.Managed(u8).init(allocator);
+        defer result.deinit();
+        var in_target_section = false;
+        var url_replaced = false;
+        var lines = std.mem.splitScalar(u8, existing, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (std.mem.startsWith(u8, trimmed, "[remote \"") and std.mem.endsWith(u8, trimmed, "\"]")) {
+                const sec_name = trimmed["[remote \"".len .. trimmed.len - "\"]".len];
+                in_target_section = std.mem.eql(u8, sec_name, name);
+            } else if (std.mem.startsWith(u8, trimmed, "[") and !std.mem.startsWith(u8, trimmed, "[remote \"")) {
+                in_target_section = false;
+            }
+            if (in_target_section and std.mem.startsWith(u8, trimmed, "url = ")) {
+                const new_line = try std.fmt.allocPrint(allocator, "\turl = {s}", .{new_url});
+                defer allocator.free(new_line);
+                try result.appendSlice(new_line);
+                url_replaced = true;
+            } else {
+                try result.appendSlice(line);
+            }
+            try result.append('\n');
+        }
+        if (!url_replaced) {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: No such remote '{s}'\n", .{name});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(2);
+        }
+        platform_impl.fs.writeFile(config_path, result.items) catch {};
+    } else if (std.mem.eql(u8, subcommand.?, "rename")) {
+        // git remote rename <old> <new>
+        if (positionals.items.len < 2) {
+            try platform_impl.writeStderr("usage: git remote rename <old> <new>\n");
+            std.process.exit(1);
+        }
+        const old_name = positionals.items[0];
+        const new_name = positionals.items[1];
+
+        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+        defer allocator.free(config_path);
+        const existing = platform_impl.fs.readFile(allocator, config_path) catch {
+            try platform_impl.writeStderr("fatal: could not read config\n");
+            std.process.exit(128);
+            unreachable;
+        };
+        defer allocator.free(existing);
+
+        const old_header = try std.fmt.allocPrint(allocator, "[remote \"{s}\"]", .{old_name});
+        defer allocator.free(old_header);
+        if (std.mem.indexOf(u8, existing, old_header) == null) {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: No such remote: '{s}'\n", .{old_name});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(2);
+        }
+
+        // Replace remote name in config
+        const new_header = try std.fmt.allocPrint(allocator, "[remote \"{s}\"]", .{new_name});
+        defer allocator.free(new_header);
+
+        // Simple string replacement for the section header
+        var result = std.array_list.Managed(u8).init(allocator);
+        defer result.deinit();
+        var rest: []const u8 = existing;
+        while (std.mem.indexOf(u8, rest, old_header)) |idx| {
+            try result.appendSlice(rest[0..idx]);
+            try result.appendSlice(new_header);
+            rest = rest[idx + old_header.len ..];
+        }
+        try result.appendSlice(rest);
+        platform_impl.fs.writeFile(config_path, result.items) catch {};
+
+        // Rename refs directory
+        const old_refs = try std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}", .{ git_path, old_name });
+        defer allocator.free(old_refs);
+        const new_refs = try std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}", .{ git_path, new_name });
+        defer allocator.free(new_refs);
+        std.fs.cwd().rename(old_refs, new_refs) catch {};
+    } else if (std.mem.eql(u8, subcommand.?, "show")) {
+        // Basic show - list URL for remote
+        if (positionals.items.len < 1) {
+            try listRemotes(git_path, verbose, platform_impl, allocator);
+        } else {
+            const name = positionals.items[0];
+            const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+            defer allocator.free(config_path);
+            const existing = platform_impl.fs.readFile(allocator, config_path) catch {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: No such remote '{s}'\n", .{name});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(2);
+                unreachable;
+            };
+            defer allocator.free(existing);
+
+            const remote_header = try std.fmt.allocPrint(allocator, "[remote \"{s}\"]", .{name});
+            defer allocator.free(remote_header);
+            if (std.mem.indexOf(u8, existing, remote_header)) |_| {
+                const header_msg = try std.fmt.allocPrint(allocator, "* remote {s}\n", .{name});
+                defer allocator.free(header_msg);
+                try platform_impl.writeStdout(header_msg);
+
+                // Find URL
+                var in_section = false;
+                var lines = std.mem.splitScalar(u8, existing, '\n');
+                while (lines.next()) |line| {
+                    const trimmed = std.mem.trim(u8, line, " \t\r");
+                    if (std.mem.startsWith(u8, trimmed, "[remote \"")) {
+                        const sn = trimmed["[remote \"".len .. trimmed.len - "\"]".len];
+                        in_section = std.mem.eql(u8, sn, name);
+                    } else if (std.mem.startsWith(u8, trimmed, "[")) {
+                        in_section = false;
+                    }
+                    if (in_section and std.mem.startsWith(u8, trimmed, "url = ")) {
+                        const url_line = try std.fmt.allocPrint(allocator, "  Fetch URL: {s}\n  Push  URL: {s}\n", .{ trimmed["url = ".len..], trimmed["url = ".len..] });
+                        defer allocator.free(url_line);
+                        try platform_impl.writeStdout(url_line);
+                    }
+                }
+            } else {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: No such remote '{s}'\n", .{name});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(2);
+            }
+        }
+    } else if (std.mem.eql(u8, subcommand.?, "get-url")) {
+        // git remote get-url <name>
+        if (positionals.items.len < 1) {
+            try platform_impl.writeStderr("usage: git remote get-url <name>\n");
+            std.process.exit(1);
+        }
+        const name = positionals.items[0];
+        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+        defer allocator.free(config_path);
+        const existing = platform_impl.fs.readFile(allocator, config_path) catch {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: No such remote '{s}'\n", .{name});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(2);
+            unreachable;
+        };
+        defer allocator.free(existing);
+
+        var in_section = false;
+        var found = false;
+        var lines = std.mem.splitScalar(u8, existing, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (std.mem.startsWith(u8, trimmed, "[remote \"") and std.mem.endsWith(u8, trimmed, "\"]")) {
+                const sn = trimmed["[remote \"".len .. trimmed.len - "\"]".len];
+                in_section = std.mem.eql(u8, sn, name);
+            } else if (std.mem.startsWith(u8, trimmed, "[")) {
+                in_section = false;
+            }
+            if (in_section and std.mem.startsWith(u8, trimmed, "url = ")) {
+                const url_out = try std.fmt.allocPrint(allocator, "{s}\n", .{trimmed["url = ".len..]});
+                defer allocator.free(url_out);
+                try platform_impl.writeStdout(url_out);
+                found = true;
+            }
+        }
+        if (!found) {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: No such remote '{s}'\n", .{name});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(2);
+        }
     } else {
-        // For now, unsupported subcommands
-        const msg = try std.fmt.allocPrint(allocator, "ziggit: remote subcommand '{s}' not implemented yet\n", .{subcommand.?});
+        const msg = try std.fmt.allocPrint(allocator, "error: Unknown subcommand: {s}\n", .{subcommand.?});
         defer allocator.free(msg);
         try platform_impl.writeStderr(msg);
         std.process.exit(1);
