@@ -26166,9 +26166,11 @@ fn diffTreeWithEmpty(allocator: std.mem.Allocator, tree_hash_str: []const u8, re
     try diffTreeWithEmptyPrefix(allocator, tree_hash_str, "", &default_opts, git_path, platform_impl);
 }
 
+const FileStatEntry = struct { name: []const u8, lines: usize };
+
 fn outputStatForEmptyTree(allocator: std.mem.Allocator, tree_hash_str: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
     // Collect all files and their line counts
-    var files = std.array_list.Managed(struct { name: []const u8, lines: usize }).init(allocator);
+    var files = std.array_list.Managed(FileStatEntry).init(allocator);
     defer {
         for (files.items) |f| allocator.free(f.name);
         files.deinit();
@@ -26212,7 +26214,7 @@ fn outputStatForEmptyTree(allocator: std.mem.Allocator, tree_hash_str: []const u
     try platform_impl.writeStdout(summary);
 }
 
-fn collectFilesFromTree(allocator: std.mem.Allocator, tree_hash_str: []const u8, prefix: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, files: *std.array_list.Managed(struct { name: []const u8, lines: usize })) !void {
+fn collectFilesFromTree(allocator: std.mem.Allocator, tree_hash_str: []const u8, prefix: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, files: *std.array_list.Managed(FileStatEntry)) !void {
     const tree_obj = objects.GitObject.load(tree_hash_str, git_path, platform_impl, allocator) catch return;
     defer tree_obj.deinit(allocator);
     
