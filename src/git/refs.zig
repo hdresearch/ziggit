@@ -309,11 +309,16 @@ pub fn updateRef(git_dir: []const u8, ref_name: []const u8, hash: []const u8, pl
         try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_dir, ref_name });
     defer allocator.free(ref_path);
 
-    // Create parent directory if it doesn't exist
+    // Create parent directory if it doesn't exist (recursively for nested refs like a/b/c)
     const parent_dir = std.fs.path.dirname(ref_path).?;
-    platform_impl.fs.makeDir(parent_dir) catch |err| switch (err) {
-        error.AlreadyExists => {},
-        else => return err,
+    std.fs.cwd().makePath(parent_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => {
+            platform_impl.fs.makeDir(parent_dir) catch |err2| switch (err2) {
+                error.AlreadyExists => {},
+                else => return err2,
+            };
+        },
     };
 
     const content = try std.fmt.allocPrint(allocator, "{s}\n", .{hash});
