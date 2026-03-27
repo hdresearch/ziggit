@@ -25264,9 +25264,56 @@ fn nativeCmdShowBranch(allocator: std.mem.Allocator, args: [][]const u8, command
         }
         try nativeCmdMergeBase(allocator, new_args.items, 1, platform_impl);
     } else {
-        // Full show-branch is complex, provide minimal output
-        try platform_impl.writeStderr("error: show-branch without --merge-base is not yet implemented\n");
-        std.process.exit(1);
+        // Basic show-branch: list all local branches with their tip commits
+        const git_path = findGitDirectory(allocator, platform_impl) catch {
+            try platform_impl.writeStderr("fatal: not a git repository\n");
+            std.process.exit(128);
+        };
+        defer allocator.free(git_path);
+
+        // Get list of branches
+        const refs_heads_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads", .{git_path});
+        defer allocator.free(refs_heads_path);
+
+        var branches = std.array_list.Managed([]const u8).init(allocator);
+        defer {
+            for (branches.items) |b| allocator.free(b);
+            branches.deinit();
+        }
+
+        if (std.fs.cwd().openDir(refs_heads_path, .{ .iterate = true })) |*dir_handle| {
+            defer @constCast(dir_handle).close();
+            var dir_iter = dir_handle.iterate();
+            while (dir_iter.next() catch null) |entry| {
+                if (entry.kind == .file) {
+                    try branches.append(try allocator.dupe(u8, entry.name));
+                }
+            }
+        } else |_| {}
+
+        // Get current branch
+        const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch try allocator.dupe(u8, "");
+        defer allocator.free(current_branch);
+        const short_current = if (std.mem.startsWith(u8, current_branch, "refs/heads/")) current_branch["refs/heads/".len..] else current_branch;
+
+        // Print branch headers
+        for (branches.items, 0..) |branch_name, idx| {
+            _ = idx;
+            const marker: u8 = if (std.mem.eql(u8, branch_name, short_current)) '*' else '!';
+            const commit_hash = refs.getBranchCommit(git_path, branch_name, platform_impl, allocator) catch null;
+            defer if (commit_hash) |ch| allocator.free(ch);
+            var msg: []const u8 = "";
+            var msg_owned = false;
+            if (commit_hash) |ch| {
+                msg = getCommitMessage(git_path, ch, allocator, platform_impl) catch "";
+                msg_owned = msg.len > 0;
+            }
+            defer if (msg_owned) allocator.free(@constCast(msg));
+            const first_line = if (std.mem.indexOf(u8, msg, "\n")) |nl| msg[0..nl] else msg;
+            const line = try std.fmt.allocPrint(allocator, " {c} [{s}] {s}\n", .{ marker, branch_name, std.mem.trim(u8, first_line, " \t\r\n") });
+            defer allocator.free(line);
+            try platform_impl.writeStdout(line);
+        }
     }
 }
 
