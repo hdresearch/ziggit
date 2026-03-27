@@ -13483,37 +13483,17 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
 // Phase 2: Pure Zig implementations of previously non-native commands
 // =============================================================================
 
-fn objectExistsCheck(git_dir: []const u8, hash_hex: *const [40]u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) bool {
-    // Check for loose object: objects/ab/cdef...
+fn objectExistsCheck(git_dir: []const u8, hash_hex: *const [40]u8, platform_impl: anytype, allocator: std.mem.Allocator) bool {
+    // Check for loose object first (fast stat)
     const obj_path = std.fmt.allocPrint(allocator, "{s}/objects/{s}/{s}", .{ git_dir, hash_hex[0..2], hash_hex[2..] }) catch return false;
     defer allocator.free(obj_path);
-    if (platform_impl.fs.exists(obj_path) catch false) return true;
-
-    // Check packed objects
-    const pack_dir_path = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir}) catch return false;
-    defer allocator.free(pack_dir_path);
-    
-    // Convert hex to bytes
-    var hash_bytes: [20]u8 = undefined;
-    for (0..20) |i| {
-        hash_bytes[i] = std.fmt.parseInt(u8, hash_hex[i * 2 .. i * 2 + 2], 16) catch return false;
-    }
-    
-    // Scan .idx files
-    var dir = std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true }) catch return false;
-    defer dir.close();
-    var iter = dir.iterate();
-    while (iter.next() catch null) |dir_entry| {
-        if (std.mem.endsWith(u8, dir_entry.name, ".idx")) {
-            const idx_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir_path, dir_entry.name }) catch continue;
-            defer allocator.free(idx_path);
-            if (platform_impl.fs.readFile(allocator, idx_path)) |idx_data| {
-                defer allocator.free(idx_data);
-                if (objects.findOffsetInIdx(idx_data, hash_bytes) != null) return true;
-            } else |_| {}
-        }
-    }
-    return false;
+    std.fs.cwd().access(obj_path, .{}) catch {
+        // Not a loose object — try to load from pack (will use cache)
+        const obj = objects.GitObject.load(hash_hex, git_dir, platform_impl, allocator) catch return false;
+        obj.deinit(allocator);
+        return true;
+    };
+    return true;
 }
 
 fn findGitDir() ![]const u8 {
