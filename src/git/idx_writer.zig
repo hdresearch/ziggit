@@ -255,20 +255,16 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
             const comp_start = pos;
             const in_avail = content_end - comp_start;
 
-            // Try libdeflate first for delta skip
+            // For OFS_DELTA, we only need the compressed length (not the data).
+            // Use libdeflate only if buffer is already large enough; otherwise
+            // use zlib streaming with fixed chunk_buf to avoid growing decomp_buf.
             var actual_in: usize = 0;
             var skip_ok = false;
 
-            if (decompressor) |d| {
-                // Ensure decomp buffer is large enough
-                if (hdr.size > decomp_buf_cap) {
-                    allocator.free(decomp_buf_ptr);
-                    decomp_buf_cap = hdr.size;
-                    decomp_buf_ptr = try allocator.alloc(u8, decomp_buf_cap);
-                }
+            if (decompressor != null and hdr.size <= decomp_buf_cap) {
                 var actual_out: usize = 0;
                 const ret = ld.libdeflate_zlib_decompress_ex(
-                    d,
+                    decompressor.?,
                     @ptrCast(pack_data[comp_start..].ptr),
                     in_avail,
                     @ptrCast(decomp_buf_ptr.ptr),
@@ -281,10 +277,8 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
                 }
             }
 
-            if (skip_ok) {
-                pos = comp_start + actual_in;
-            } else {
-                // Fallback to zlib
+            if (!skip_ok) {
+                // Use zlib streaming with fixed buffer — avoids large alloc for delta skip
                 if (zc.inflateReset(&zstream) != zc.Z_OK) {
                     records[obj_idx] = emptyRecord(obj_start);
                     obj_idx += 1;
@@ -308,8 +302,10 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
                     continue;
                 }
                 actual_in = @intCast(zstream.total_in);
-                pos = comp_start + actual_in;
+                skip_ok = true;
             }
+
+            pos = comp_start + actual_in;
 
             records[obj_idx] = .{
                 .offset = obj_start,
@@ -340,19 +336,14 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
             const comp_start = pos;
             const in_avail = content_end - comp_start;
 
-            // Try libdeflate first
+            // For REF_DELTA, we only need compressed length — same strategy as OFS_DELTA.
             var actual_in: usize = 0;
             var skip_ok = false;
 
-            if (decompressor) |d| {
-                if (hdr.size > decomp_buf_cap) {
-                    allocator.free(decomp_buf_ptr);
-                    decomp_buf_cap = hdr.size;
-                    decomp_buf_ptr = try allocator.alloc(u8, decomp_buf_cap);
-                }
+            if (decompressor != null and hdr.size <= decomp_buf_cap) {
                 var actual_out: usize = 0;
                 const ret = ld.libdeflate_zlib_decompress_ex(
-                    d,
+                    decompressor.?,
                     @ptrCast(pack_data[comp_start..].ptr),
                     in_avail,
                     @ptrCast(decomp_buf_ptr.ptr),
@@ -365,10 +356,7 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
                 }
             }
 
-            if (skip_ok) {
-                pos = comp_start + actual_in;
-            } else {
-                // Fallback to zlib
+            if (!skip_ok) {
                 if (zc.inflateReset(&zstream) != zc.Z_OK) {
                     records[obj_idx] = emptyRecord(obj_start);
                     obj_idx += 1;
@@ -392,8 +380,10 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
                     continue;
                 }
                 actual_in = @intCast(zstream.total_in);
-                pos = comp_start + actual_in;
+                skip_ok = true;
             }
+
+            pos = comp_start + actual_in;
 
             records[obj_idx] = .{
                 .offset = obj_start,
