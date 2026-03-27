@@ -25394,7 +25394,7 @@ fn nativeCmdUnpackObjects(allocator: std.mem.Allocator, args: [][]const u8, comm
         if (obj_type == 7 and base_hash != null) {
             // REF_DELTA: resolve using base object hash
             var hex: [40]u8 = undefined;
-            for (base_hash, 0..) |b, bi| {
+            for (base_hash.?, 0..) |b, bi| {
                 _ = std.fmt.bufPrint(hex[bi * 2 .. bi * 2 + 2], "{x:0>2}", .{b}) catch continue;
             }
             if (objects.GitObject.load(&hex, git_dir, platform_impl, allocator)) |base_obj| {
