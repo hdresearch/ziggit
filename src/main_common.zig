@@ -26074,6 +26074,51 @@ fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, recur
     return false;
 }
 
+const DiffTreeOpts = struct {
+    recursive: bool = false,
+    show_patch: bool = false,
+    show_root: bool = false,
+    name_only: bool = false,
+    name_status: bool = false,
+    no_commit_id: bool = false,
+    quiet: bool = false,
+    abbrev_len: ?usize = null,
+    full_index: bool = false,
+    show_stat: bool = false,
+    show_summary: bool = false,
+    show_raw: bool = true,
+    patch_with_stat: bool = false,
+    patch_with_raw: bool = false,
+    show_shortstat: bool = false,
+    show_pretty: bool = false,
+    pretty_fmt: ?[]const u8 = null,
+    show_cc: bool = false,
+    show_combined: bool = false,
+    show_m: bool = false,
+    first_parent: bool = false,
+    show_notes: bool = false,
+    format_str: ?[]const u8 = null,
+    compact_summary: bool = false,
+    reverse_diff: bool = false,
+    stdin_mode: bool = false,
+    line_prefix: []const u8 = "",
+    
+    fn abbrevHash(self: @This(), hash: []const u8) []const u8 {
+        if (self.full_index) return hash;
+        if (self.abbrev_len) |abl| {
+            const len = if (abl == 0) 7 else abl;
+            return hash[0..@min(len, hash.len)];
+        }
+        return hash;
+    }
+    
+    fn hashSuffix(self: @This()) []const u8 {
+        if (self.full_index) return "";
+        if (self.abbrev_len != null) return "...";
+        return "";
+    }
+};
+
 fn padMode6(buf: *[6]u8, mode: []const u8) []const u8 {
     if (mode.len >= 6) return mode[0..6];
     const pad_len = 6 - mode.len;
