@@ -17313,6 +17313,11 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
 
     const zero_oid = "0000000000000000000000000000000000000000";
     var has_diffs = false;
+    // For --patch-with-raw: collect raw lines and patch output separately
+    var pwr_raw_buf = std.array_list.Managed(u8).init(allocator);
+    defer pwr_raw_buf.deinit();
+    var pwr_patch_buf = std.array_list.Managed(u8).init(allocator);
+    defer pwr_patch_buf.deinit();
 
     for (idx.entries.items) |entry| {
         // Skip assume-unchanged entries
@@ -17365,7 +17370,7 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                 if (!df_patch or df_patch_with_raw or df_show_raw) {
                     const line = try std.fmt.allocPrint(allocator, ":{o:0>6} 000000 {s} {s} D\t{s}\n", .{ entry.mode, &hash_buf, zero_oid, entry.path });
                     defer allocator.free(line);
-                    try platform_impl.writeStdout(line);
+                    if (df_patch_with_raw) { try pwr_raw_buf.appendSlice(line); } else { try platform_impl.writeStdout(line); }
                 }
                 if (df_patch) {
                     const indexed_content = getIndexedFileContent(entry, allocator) catch "";
@@ -17401,7 +17406,7 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                             try out.appendSlice("\\\\ No newline at end of file\n");
                         }
                     }
-                    try platform_impl.writeStdout(out.items);
+                    if (df_patch_with_raw) { try pwr_patch_buf.appendSlice(out.items); } else { try platform_impl.writeStdout(out.items); }
                 }
             }
             continue;
@@ -17477,7 +17482,7 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                 if (!df_patch or df_patch_with_raw or df_show_raw) {
                     const line = try std.fmt.allocPrint(allocator, ":{o:0>6} {o:0>6} {s} {s} M\t{s}\n", .{ entry.mode, wt_mode, &hash_buf, zero_oid, entry.path });
                     defer allocator.free(line);
-                    try platform_impl.writeStdout(line);
+                    if (df_patch_with_raw) { try pwr_raw_buf.appendSlice(line); } else { try platform_impl.writeStdout(line); }
                 }
                 if (df_patch) {
                     const indexed_content = getIndexedFileContent(entry, allocator) catch "";
@@ -17526,12 +17531,18 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                             }
                         }
                     }
-                    try platform_impl.writeStdout(out.items);
+                    if (df_patch_with_raw) { try pwr_patch_buf.appendSlice(out.items); } else { try platform_impl.writeStdout(out.items); }
                 }
             }
         }
     }
 
+    // Output collected patch-with-raw buffers
+    if (df_patch_with_raw and pwr_raw_buf.items.len > 0) {
+        try platform_impl.writeStdout(pwr_raw_buf.items);
+        try platform_impl.writeStdout("\n");
+        if (pwr_patch_buf.items.len > 0) try platform_impl.writeStdout(pwr_patch_buf.items);
+    }
     if (exit_code and has_diffs) {
         std.process.exit(1);
     }
