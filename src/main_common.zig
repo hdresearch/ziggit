@@ -4143,6 +4143,78 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     };
     defer allocator.free(git_path);
 
+    // Handle `checkout -` (switch to previous branch)
+    if (std.mem.eql(u8, first_arg, "-")) {
+        // Read the previous branch from the reflog or ORIG_HEAD
+        // In git, `-` refers to @{-1} which is the previous branch from the reflog
+        // For simplicity, we'll check ORIG_HEAD first, then try the reflog
+        const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+        defer allocator.free(head_path);
+        const orig_head_path = try std.fmt.allocPrint(allocator, "{s}/ORIG_HEAD", .{git_path});
+        defer allocator.free(orig_head_path);
+        
+        // Try reading the HEAD reflog for the previous branch
+        const reflog_path = try std.fmt.allocPrint(allocator, "{s}/logs/HEAD", .{git_path});
+        defer allocator.free(reflog_path);
+        if (std.fs.cwd().readFileAlloc(allocator, reflog_path, 10 * 1024 * 1024)) |reflog| {
+            defer allocator.free(reflog);
+            // Parse reflog entries from bottom up to find the previous branch
+            var prev_branch: ?[]const u8 = null;
+            var lines = std.mem.splitScalar(u8, reflog, '\n');
+            var last_line: ?[]const u8 = null;
+            var second_last: ?[]const u8 = null;
+            while (lines.next()) |line| {
+                if (line.len == 0) continue;
+                second_last = last_line;
+                last_line = line;
+            }
+            // The second-to-last entry's "to" field or checkout message tells us the previous branch
+            if (second_last) |sl| {
+                // Format: old_hash new_hash Author <email> timestamp \tcheckout: moving from X to Y
+                if (std.mem.indexOf(u8, sl, "moving from ")) |from_idx| {
+                    const after_from = sl[from_idx + "moving from ".len..];
+                    if (std.mem.indexOf(u8, after_from, " to ")) |to_idx| {
+                        prev_branch = after_from[0..to_idx];
+                    }
+                }
+            }
+            // If we can't find a reflog entry, try last entry
+            if (prev_branch == null and last_line != null) {
+                const ll = last_line.?;
+                if (std.mem.indexOf(u8, ll, "moving from ")) |from_idx| {
+                    const after_from = ll[from_idx + "moving from ".len..];
+                    if (std.mem.indexOf(u8, after_from, " to ")) |to_idx| {
+                        prev_branch = after_from[0..to_idx];
+                    }
+                }
+            }
+            
+            if (prev_branch) |pb| {
+                // Recursively call checkout with the previous branch name
+                // Write ORIG_HEAD or just update HEAD
+                const ref_content = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{pb});
+                defer allocator.free(ref_content);
+                platform_impl.fs.writeFile(head_path, ref_content) catch {};
+                
+                const msg = try std.fmt.allocPrint(allocator, "Switched to branch '{s}'\n", .{pb});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                
+                // Update working tree
+                const ref_name = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{pb});
+                defer allocator.free(ref_name);
+                if (refs.resolveRef(git_path, ref_name, platform_impl, allocator) catch null) |commit_hash| {
+                    defer allocator.free(commit_hash);
+                    checkoutCommitTree(git_path, commit_hash, allocator, platform_impl) catch {};
+                }
+                return;
+            }
+        } else |_| {}
+        
+        try platform_impl.writeStderr("error: pathspec '-' did not match any file(s) known to git\n");
+        std.process.exit(1);
+    }
+    
     // Check if this is --orphan flag (create orphan branch)
     if (std.mem.eql(u8, first_arg, "--orphan")) {
         const branch_name = args.next() orelse {
