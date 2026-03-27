@@ -653,6 +653,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmdStripspace(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "show-branch")) {
         try nativeCmdShowBranch(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "checkout-index")) {
+        try cmdCheckoutIndex(allocator, &args_iter, &platform_impl);
     }
 }
 
@@ -2275,6 +2277,7 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     if (!has_files) {
         try platform_impl.writeStderr("Nothing specified, nothing added.\n");
         try platform_impl.writeStderr("hint: Maybe you wanted to say 'git add .'?\n");
+        try platform_impl.writeStderr("hint: Disable this message with \"git config set advice.addEmptyPathspec false\"\n");
         return;
     }
 
@@ -14866,11 +14869,16 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     // diff-files: compare index against working tree
     var name_only = false;
     var name_status = false;
+    var exit_code = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--name-only")) {
             name_only = true;
         } else if (std.mem.eql(u8, arg, "--name-status")) {
             name_status = true;
+        } else if (std.mem.eql(u8, arg, "--exit-code")) {
+            exit_code = true;
+        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
+            exit_code = true;
         }
     }
     const git_dir = findGitDirectory(allocator, platform_impl) catch {
@@ -14886,7 +14894,7 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     defer idx.deinit();
 
     const zero_oid = "0000000000000000000000000000000000000000";
-    
+    var has_diffs = false;
 
     for (idx.entries.items) |entry| {
         // Build full path from repo root
@@ -14908,6 +14916,7 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
 
         if (!file_exists) {
             // File deleted
+            has_diffs = true;
             var hash_buf: [40]u8 = undefined;
             _ = std.fmt.bufPrint(&hash_buf, "{x}", .{entry.sha1}) catch unreachable;
             if (name_only) {
@@ -14981,6 +14990,7 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         }
 
         if (modified) {
+            has_diffs = true;
             var hash_buf: [40]u8 = undefined;
             _ = std.fmt.bufPrint(&hash_buf, "{x}", .{entry.sha1}) catch unreachable;
             if (name_only) {
@@ -15000,7 +15010,9 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         }
     }
 
-    // diff-files is a plumbing command - always exit 0 unless --exit-code is used
+    if (exit_code and has_diffs) {
+        std.process.exit(1);
+    }
 }
 
 // =============================================================================
@@ -22080,4 +22092,197 @@ fn cmdStripspace(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     }
     
     try platform_impl.writeStdout(result.items);
+}
+
+fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    var force = false;
+    var all = false;
+    var update_stat = false;
+    var prefix: ?[]const u8 = null;
+    var no_create = false;
+    var stdin_mode = false;
+    var stdin_z = false;
+    var paths = std.array_list.Managed([]const u8).init(allocator);
+    defer paths.deinit();
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
+            force = true;
+        } else if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--all")) {
+            all = true;
+        } else if (std.mem.eql(u8, arg, "-u")) {
+            update_stat = true;
+        } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--no-create")) {
+            no_create = true;
+        } else if (std.mem.eql(u8, arg, "--temp")) {
+            // temp mode - not fully supported yet
+        } else if (std.mem.startsWith(u8, arg, "--prefix=")) {
+            prefix = arg["--prefix=".len..];
+        } else if (std.mem.eql(u8, arg, "--prefix")) {
+            prefix = args.next();
+        } else if (std.mem.startsWith(u8, arg, "--stage=")) {
+            // stage selection - not fully supported yet
+        } else if (std.mem.eql(u8, arg, "--stage")) {
+            _ = args.next();
+        } else if (std.mem.eql(u8, arg, "--stdin")) {
+            stdin_mode = true;
+        } else if (std.mem.eql(u8, arg, "-z")) {
+            stdin_z = true;
+        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
+            // quiet mode
+        } else if (std.mem.eql(u8, arg, "--")) {
+            while (args.next()) |p| {
+                try paths.append(p);
+            }
+        } else if (arg.len > 0 and arg[0] != '-') {
+            try paths.append(arg);
+        }
+    }
+
+    const git_dir = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+        unreachable;
+    };
+    defer allocator.free(git_dir);
+
+    const repo_root = std.fs.path.dirname(git_dir) orelse ".";
+
+    var idx = index_mod.Index.load(git_dir, platform_impl, allocator) catch {
+        try platform_impl.writeStderr("fatal: unable to read index\n");
+        std.process.exit(128);
+        unreachable;
+    };
+    defer idx.deinit();
+
+    // Read paths from stdin if requested
+    if (stdin_mode) {
+        const stdin_data = readStdin(allocator, 10 * 1024 * 1024) catch "";
+        defer allocator.free(stdin_data);
+        if (stdin_z) {
+            var it = std.mem.splitScalar(u8, stdin_data, 0);
+            while (it.next()) |p| {
+                if (p.len > 0) try paths.append(try allocator.dupe(u8, p));
+            }
+        } else {
+            var it = std.mem.splitScalar(u8, stdin_data, '\n');
+            while (it.next()) |p| {
+                if (p.len > 0) try paths.append(try allocator.dupe(u8, p));
+            }
+        }
+    }
+
+    var did_update_stat = false;
+
+    for (idx.entries.items) |*entry| {
+        // Skip higher stages (unmerged) unless specifically requested
+        const stage = (entry.flags >> 12) & 0x3;
+        if (stage != 0) continue;
+
+        const entry_path = entry.path;
+
+        // If not --all, check if this path is requested
+        if (!all and paths.items.len > 0) {
+            var found = false;
+            for (paths.items) |p| {
+                if (std.mem.eql(u8, p, entry_path)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) continue;
+        } else if (!all) {
+            continue;
+        }
+
+        // Build output path
+        const out_path = if (prefix) |pfx|
+            try std.fmt.allocPrint(allocator, "{s}{s}", .{ pfx, entry_path })
+        else if (repo_root.len > 0 and !std.mem.eql(u8, repo_root, "."))
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry_path })
+        else
+            try allocator.dupe(u8, entry_path);
+        defer allocator.free(out_path);
+
+        // Check if file exists and we need -f to overwrite
+        if (!force) {
+            if (std.fs.cwd().access(out_path, .{})) |_| {
+                continue; // File exists, skip without -f
+            } else |_| {}
+        }
+
+        if (no_create) continue;
+
+        // Load the blob content
+        var hash_buf: [40]u8 = undefined;
+        _ = std.fmt.bufPrint(&hash_buf, "{x}", .{entry.sha1}) catch continue;
+
+        const obj = objects.GitObject.load(&hash_buf, git_dir, platform_impl, allocator) catch {
+            const msg = std.fmt.allocPrint(allocator, "error: unable to read sha1 file of {s} ({s})\n", .{ entry_path, &hash_buf }) catch continue;
+            defer allocator.free(msg);
+            platform_impl.writeStderr(msg) catch {};
+            continue;
+        };
+        defer obj.deinit(allocator);
+
+        const content = obj.data;
+
+        // Create parent directories
+        if (std.fs.path.dirname(out_path)) |dir| {
+            std.fs.cwd().makePath(dir) catch {};
+        }
+
+        const is_symlink = (entry.mode & 0o170000) == 0o120000;
+        const is_executable = (entry.mode & 0o100) != 0;
+
+        if (is_symlink) {
+            // Remove existing file/symlink first
+            std.fs.cwd().deleteFile(out_path) catch {};
+            std.fs.cwd().symLink(content, out_path, .{}) catch |err| {
+                const msg = std.fmt.allocPrint(allocator, "error: unable to create symlink {s}: {}\n", .{ entry_path, err }) catch continue;
+                defer allocator.free(msg);
+                platform_impl.writeStderr(msg) catch {};
+                continue;
+            };
+        } else {
+            // Write regular file
+            const file = std.fs.cwd().createFile(out_path, .{}) catch |err| {
+                const msg = std.fmt.allocPrint(allocator, "error: unable to create file {s}: {}\n", .{ entry_path, err }) catch continue;
+                defer allocator.free(msg);
+                platform_impl.writeStderr(msg) catch {};
+                continue;
+            };
+            defer file.close();
+            file.writeAll(content) catch continue;
+
+            if (is_executable) {
+                const st = file.stat() catch continue;
+                const new_mode = st.mode | 0o111;
+                std.posix.fchmod(file.handle, new_mode) catch {};
+            }
+        }
+
+        // Update stat info in index if -u flag
+        if (update_stat) {
+            if (std.fs.cwd().statFile(out_path)) |stat_result| {
+                const mtime_s: u32 = @intCast(@max(0, @divTrunc(stat_result.mtime, std.time.ns_per_s)));
+                const mtime_ns: u32 = @intCast(@max(0, @rem(stat_result.mtime, std.time.ns_per_s)));
+                const ctime_s: u32 = @intCast(@max(0, @divTrunc(stat_result.ctime, std.time.ns_per_s)));
+                const ctime_ns: u32 = @intCast(@max(0, @rem(stat_result.ctime, std.time.ns_per_s)));
+                entry.mtime_sec = mtime_s;
+                entry.mtime_nsec = mtime_ns;
+                entry.ctime_sec = ctime_s;
+                entry.ctime_nsec = ctime_ns;
+                entry.size = @intCast(@min(stat_result.size, std.math.maxInt(u32)));
+                entry.ino = @intCast(stat_result.inode);
+                entry.dev = 0;
+                did_update_stat = true;
+            } else |_| {}
+        }
+    }
+
+    // Save index if stat info was updated
+    if (did_update_stat) {
+        idx.save(git_dir, platform_impl) catch {};
+    }
 }
