@@ -1231,10 +1231,8 @@ fn initRepositoryWithGitDir(work_dir: []const u8, git_dir_path: []const u8, bare
         } else |_| {}
     } else {
         _ = work_dir;
-        // When GIT_DIR is set without GIT_WORK_TREE
-        // Heuristic: if GIT_DIR ends with .git, treat as bare
-        const is_bare = bare or std.mem.endsWith(u8, git_dir_path, ".git");
-        try initRepositoryInDir(git_dir_path, is_bare, template_dir, template_dir_set, initial_branch, quiet, shared, allocator, platform_impl);
+        // When GIT_DIR is set without GIT_WORK_TREE, use explicit --bare flag
+        try initRepositoryInDir(git_dir_path, bare, template_dir, template_dir_set, initial_branch, quiet, shared, allocator, platform_impl);
     }
 }
 
