@@ -102,15 +102,21 @@ pub fn generateUnifiedDiffWithHashes(old_content: []const u8, new_content: []con
     var new_lines = std.array_list.Managed([]const u8).init(allocator);
     defer new_lines.deinit();
     
-    // Split content into lines, preserving empty lines
+    // Split content into lines; strip trailing empty element from newline-terminated content
     var old_iter = std.mem.splitSequence(u8, old_content, "\n");
     while (old_iter.next()) |line| {
         try old_lines.append(line);
+    }
+    if (old_lines.items.len > 0 and old_content.len > 0 and old_content[old_content.len - 1] == '\n') {
+        _ = old_lines.pop();
     }
     
     var new_iter = std.mem.splitSequence(u8, new_content, "\n");
     while (new_iter.next()) |line| {
         try new_lines.append(line);
+    }
+    if (new_lines.items.len > 0 and new_content.len > 0 and new_content[new_content.len - 1] == '\n') {
+        _ = new_lines.pop();
     }
     
     // Generate diff using improved Myers algorithm

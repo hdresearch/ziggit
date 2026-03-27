@@ -16300,15 +16300,45 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     var name_only = false;
     var name_status = false;
     var exit_code = false;
+    var df_patch = false;
+    var df_suppress = false;
+    var df_show_raw = false;
+    var df_patch_with_raw = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--name-only")) {
             name_only = true;
+            df_suppress = false;
         } else if (std.mem.eql(u8, arg, "--name-status")) {
             name_status = true;
+            df_suppress = false;
         } else if (std.mem.eql(u8, arg, "--exit-code")) {
             exit_code = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             exit_code = true;
+        } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "-u") or std.mem.eql(u8, arg, "--patch")) {
+            df_patch = true;
+            df_suppress = false;
+        } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--no-patch")) {
+            df_suppress = true;
+            df_patch = false;
+            df_patch_with_raw = false;
+            df_show_raw = false;
+            name_only = false;
+            name_status = false;
+        } else if (std.mem.eql(u8, arg, "--raw")) {
+            df_show_raw = true;
+            df_suppress = false;
+        } else if (std.mem.eql(u8, arg, "--patch-with-raw")) {
+            df_patch = true;
+            df_patch_with_raw = true;
+            df_suppress = false;
+        } else if (std.mem.eql(u8, arg, "--patch-with-stat") or std.mem.eql(u8, arg, "--stat") or
+            std.mem.eql(u8, arg, "--numstat") or std.mem.eql(u8, arg, "--shortstat") or
+            std.mem.eql(u8, arg, "--summary") or std.mem.eql(u8, arg, "--dirstat") or
+            std.mem.eql(u8, arg, "--cumulative") or std.mem.eql(u8, arg, "--dirstat-by-file") or
+            std.mem.eql(u8, arg, "--compact-summary"))
+        {
+            df_suppress = false;
         }
     }
     const git_dir = findGitDirectory(allocator, platform_impl) catch {
@@ -16347,6 +16377,7 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         if (!file_exists) {
             // File deleted
             has_diffs = true;
+            if (df_suppress) continue;
             var hash_buf: [40]u8 = undefined;
             _ = std.fmt.bufPrint(&hash_buf, "{x}", .{&entry.sha1}) catch unreachable;
             if (name_only) {
@@ -16358,11 +16389,48 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                 defer allocator.free(line);
                 try platform_impl.writeStdout(line);
             } else {
-                const line = try std.fmt.allocPrint(allocator, ":{o:0>6} 000000 {s} {s} D\t{s}\n", .{ entry.mode, &hash_buf, zero_oid, entry.path });
-                defer allocator.free(line);
-                try platform_impl.writeStdout(line);
+                if (!df_patch or df_patch_with_raw or df_show_raw) {
+                    const line = try std.fmt.allocPrint(allocator, ":{o:0>6} 000000 {s} {s} D\t{s}\n", .{ entry.mode, &hash_buf, zero_oid, entry.path });
+                    defer allocator.free(line);
+                    try platform_impl.writeStdout(line);
+                }
+                if (df_patch) {
+                    const indexed_content = getIndexedFileContent(entry, allocator) catch "";
+                    defer if (indexed_content.len > 0) allocator.free(indexed_content);
+                    var out = std.array_list.Managed(u8).init(allocator);
+                    defer out.deinit();
+                    try out.appendSlice("diff --git a/");
+                    try out.appendSlice(entry.path);
+                    try out.appendSlice(" b/");
+                    try out.appendSlice(entry.path);
+                    try out.appendSlice("\n");
+                    const mode_str = try std.fmt.allocPrint(allocator, "deleted file mode {o:0>6}\n", .{entry.mode});
+                    defer allocator.free(mode_str);
+                    try out.appendSlice(mode_str);
+                    try out.appendSlice("--- a/");
+                    try out.appendSlice(entry.path);
+                    try out.appendSlice("\n+++ /dev/null\n");
+                    if (indexed_content.len > 0) {
+                        var liter = std.mem.splitScalar(u8, indexed_content, '\n');
+                        var lines_arr = std.array_list.Managed([]const u8).init(allocator);
+                        defer lines_arr.deinit();
+                        while (liter.next()) |ln| try lines_arr.append(ln);
+                        if (lines_arr.items.len > 0 and indexed_content[indexed_content.len - 1] == '\n') _ = lines_arr.pop();
+                        const hh = try std.fmt.allocPrint(allocator, "@@ -1,{d} +0,0 @@\n", .{lines_arr.items.len});
+                        defer allocator.free(hh);
+                        try out.appendSlice(hh);
+                        for (lines_arr.items) |ln| {
+                            try out.append('-');
+                            try out.appendSlice(ln);
+                            try out.append('\n');
+                        }
+                        if (indexed_content[indexed_content.len - 1] != '\n') {
+                            try out.appendSlice("\\\\ No newline at end of file\n");
+                        }
+                    }
+                    try platform_impl.writeStdout(out.items);
+                }
             }
-            
             continue;
         }
 
@@ -16421,6 +16489,7 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
 
         if (modified) {
             has_diffs = true;
+            if (df_suppress) continue;
             var hash_buf: [40]u8 = undefined;
             _ = std.fmt.bufPrint(&hash_buf, "{x}", .{&entry.sha1}) catch unreachable;
             if (name_only) {
@@ -16432,11 +16501,61 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                 defer allocator.free(line);
                 try platform_impl.writeStdout(line);
             } else {
-                const line = try std.fmt.allocPrint(allocator, ":{o:0>6} {o:0>6} {s} {s} M\t{s}\n", .{ entry.mode, wt_mode, &hash_buf, zero_oid, entry.path });
-                defer allocator.free(line);
-                try platform_impl.writeStdout(line);
+                if (!df_patch or df_patch_with_raw or df_show_raw) {
+                    const line = try std.fmt.allocPrint(allocator, ":{o:0>6} {o:0>6} {s} {s} M\t{s}\n", .{ entry.mode, wt_mode, &hash_buf, zero_oid, entry.path });
+                    defer allocator.free(line);
+                    try platform_impl.writeStdout(line);
+                }
+                if (df_patch) {
+                    const indexed_content = getIndexedFileContent(entry, allocator) catch "";
+                    defer if (indexed_content.len > 0) allocator.free(indexed_content);
+                    const wt_content = blk: {
+                        if (is_symlink_on_disk) {
+                            const lt = std.fs.cwd().readLink(full_path, &link_buf) catch break :blk try allocator.dupe(u8, "");
+                            break :blk try allocator.dupe(u8, lt);
+                        }
+                        break :blk platform_impl.fs.readFile(allocator, full_path) catch try allocator.dupe(u8, "");
+                    };
+                    defer allocator.free(wt_content);
+                    var out = std.array_list.Managed(u8).init(allocator);
+                    defer out.deinit();
+                    try out.appendSlice("diff --git a/");
+                    try out.appendSlice(entry.path);
+                    try out.appendSlice(" b/");
+                    try out.appendSlice(entry.path);
+                    try out.appendSlice("\n");
+                    if (entry.mode != wt_mode) {
+                        const old_m = try std.fmt.allocPrint(allocator, "old mode {o:0>6}\n", .{entry.mode});
+                        defer allocator.free(old_m);
+                        try out.appendSlice(old_m);
+                        const new_m = try std.fmt.allocPrint(allocator, "new mode {o:0>6}\n", .{wt_mode});
+                        defer allocator.free(new_m);
+                        try out.appendSlice(new_m);
+                    }
+                    if (!std.mem.eql(u8, indexed_content, wt_content)) {
+                        if (diff_mod.isBinary(indexed_content) or diff_mod.isBinary(wt_content)) {
+                            try out.appendSlice("Binary files differ\n");
+                        } else {
+                            try out.appendSlice("--- a/");
+                            try out.appendSlice(entry.path);
+                            try out.appendSlice("\n+++ b/");
+                            try out.appendSlice(entry.path);
+                            try out.appendSlice("\n");
+                            const diff_output = diff_mod.generateUnifiedDiffWithHashes(indexed_content, wt_content, entry.path, hash_buf[0..7], zero_oid[0..7], allocator) catch {
+                                try platform_impl.writeStdout(out.items);
+                                continue;
+                            };
+                            defer allocator.free(diff_output);
+                            if (std.mem.indexOf(u8, diff_output, "\n@@")) |hs| {
+                                try out.appendSlice(diff_output[hs + 1 ..]);
+                            } else if (std.mem.startsWith(u8, diff_output, "@@")) {
+                                try out.appendSlice(diff_output);
+                            }
+                        }
+                    }
+                    try platform_impl.writeStdout(out.items);
+                }
             }
-            
         }
     }
 
@@ -22054,17 +22173,173 @@ fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8, tr
 }
 
 
+const TreeEntryInfo = struct { mode: u32, hash: [20]u8 };
+
 fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
-    // diff-index compares a tree with the index
-    // Basic stub: exit 0 (no differences) when invoked without complex args
+    const allocator = std.heap.page_allocator;
     const rest = args[command_index + 1 ..];
+    var cached = false;
+    var exit_code_flag = false;
+    var patch_mode = false;
+    var suppress_output = false;
+    var tree_ish: ?[]const u8 = null;
+    var pathspecs = std.array_list.Managed([]const u8).init(allocator);
+    defer pathspecs.deinit();
+    var seen_dashdash = false;
+
     for (rest) |arg| {
-        if (std.mem.eql(u8, arg, "-h")) {
+        if (seen_dashdash) {
+            try pathspecs.append(arg);
+        } else if (std.mem.eql(u8, arg, "-h")) {
             try platform_impl.writeStdout("usage: git diff-index [<options>] <tree-ish> [<path>...]\n");
             std.process.exit(129);
+        } else if (std.mem.eql(u8, arg, "--cached") or std.mem.eql(u8, arg, "--staged")) {
+            cached = true;
+        } else if (std.mem.eql(u8, arg, "--exit-code")) {
+            exit_code_flag = true;
+        } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--patch")) {
+            patch_mode = true;
+        } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--no-patch")) {
+            suppress_output = true;
+            patch_mode = false;
+        } else if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
+            suppress_output = true;
+            exit_code_flag = true;
+        } else if (std.mem.eql(u8, arg, "--")) {
+            seen_dashdash = true;
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            if (tree_ish == null) {
+                tree_ish = arg;
+            } else {
+                try pathspecs.append(arg);
+            }
         }
     }
-    // Default: no differences (exit 0)
+
+    if (tree_ish == null) return;
+
+    const git_dir = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository\n");
+        std.process.exit(128);
+        unreachable;
+    };
+    defer allocator.free(git_dir);
+
+    var idx = index_mod.Index.load(git_dir, platform_impl, allocator) catch return;
+    defer idx.deinit();
+
+    const tree_hash = resolveToTree(allocator, tree_ish.?, git_dir, platform_impl) catch return;
+    defer allocator.free(tree_hash);
+
+    var tree_entries = std.StringHashMap(TreeEntryInfo).init(allocator);
+    defer {
+        var kit = tree_entries.keyIterator();
+        while (kit.next()) |k| allocator.free(k.*);
+        tree_entries.deinit();
+    }
+    try walkTreeForDiffIndex(allocator, git_dir, tree_hash, "", &tree_entries, platform_impl);
+
+    const zero_oid = "0000000000000000000000000000000000000000";
+    var has_diffs = false;
+
+    for (idx.entries.items) |entry| {
+        if (pathspecs.items.len > 0) {
+            var matches = false;
+            for (pathspecs.items) |ps| {
+                if (std.mem.eql(u8, entry.path, ps) or std.mem.startsWith(u8, entry.path, ps)) {
+                    matches = true;
+                    break;
+                }
+            }
+            if (!matches) continue;
+        }
+
+        if (tree_entries.get(entry.path)) |te| {
+            if (!std.mem.eql(u8, &te.hash, &entry.sha1) or te.mode != entry.mode) {
+                has_diffs = true;
+                var old_hash_buf: [40]u8 = undefined;
+                _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&te.hash}) catch unreachable;
+                var new_hash_buf: [40]u8 = undefined;
+                _ = std.fmt.bufPrint(&new_hash_buf, "{x}", .{&entry.sha1}) catch unreachable;
+                const line = try std.fmt.allocPrint(allocator, ":{o:0>6} {o:0>6} {s} {s} M\t{s}\n", .{ te.mode, entry.mode, &old_hash_buf, &new_hash_buf, entry.path });
+                defer allocator.free(line);
+                try platform_impl.writeStdout(line);
+            }
+        } else {
+            has_diffs = true;
+            var new_hash_buf: [40]u8 = undefined;
+            _ = std.fmt.bufPrint(&new_hash_buf, "{x}", .{&entry.sha1}) catch unreachable;
+            const line = try std.fmt.allocPrint(allocator, ":000000 {o:0>6} {s} {s} A\t{s}\n", .{ entry.mode, zero_oid, &new_hash_buf, entry.path });
+            defer allocator.free(line);
+            try platform_impl.writeStdout(line);
+        }
+    }
+
+    var tree_it = tree_entries.iterator();
+    while (tree_it.next()) |kv| {
+        var found = false;
+        for (idx.entries.items) |entry| {
+            if (std.mem.eql(u8, entry.path, kv.key_ptr.*)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            if (pathspecs.items.len > 0) {
+                var matches = false;
+                for (pathspecs.items) |ps| {
+                    if (std.mem.eql(u8, kv.key_ptr.*, ps) or std.mem.startsWith(u8, kv.key_ptr.*, ps)) {
+                        matches = true;
+                        break;
+                    }
+                }
+                if (!matches) continue;
+            }
+            has_diffs = true;
+            var old_hash_buf: [40]u8 = undefined;
+            _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&kv.value_ptr.hash}) catch unreachable;
+            const line = try std.fmt.allocPrint(allocator, ":{o:0>6} 000000 {s} {s} D\t{s}\n", .{ kv.value_ptr.mode, &old_hash_buf, zero_oid, kv.key_ptr.* });
+            defer allocator.free(line);
+            try platform_impl.writeStdout(line);
+        }
+    }
+
+    if (exit_code_flag and has_diffs) {
+        std.process.exit(1);
+    }
+}
+
+fn walkTreeForDiffIndex(allocator: std.mem.Allocator, git_dir: []const u8, tree_hash: []const u8, prefix: []const u8, entries: *std.StringHashMap(TreeEntryInfo), platform_impl: *const platform_mod.Platform) !void {
+    const git_object = objects.GitObject.load(tree_hash, git_dir, platform_impl, allocator) catch return;
+    defer git_object.deinit(allocator);
+    if (git_object.type != .tree) return;
+
+    var pos: usize = 0;
+    while (pos < git_object.data.len) {
+        const space_pos = std.mem.indexOfScalar(u8, git_object.data[pos..], ' ') orelse break;
+        const mode_str = git_object.data[pos .. pos + space_pos];
+        pos += space_pos + 1;
+        const null_pos = std.mem.indexOfScalar(u8, git_object.data[pos..], 0) orelse break;
+        const name = git_object.data[pos .. pos + null_pos];
+        pos += null_pos + 1;
+        if (pos + 20 > git_object.data.len) break;
+        var hash: [20]u8 = undefined;
+        @memcpy(&hash, git_object.data[pos .. pos + 20]);
+        pos += 20;
+        const mode = std.fmt.parseInt(u32, mode_str, 8) catch continue;
+        const full_path = if (prefix.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, name })
+        else
+            try allocator.dupe(u8, name);
+        if ((mode & 0o170000) == 0o040000) {
+            defer allocator.free(full_path);
+            var sub_hash_hex: [40]u8 = undefined;
+            _ = std.fmt.bufPrint(&sub_hash_hex, "{x}", .{&hash}) catch continue;
+            try walkTreeForDiffIndex(allocator, git_dir, &sub_hash_hex, full_path, entries, platform_impl);
+        } else {
+            try entries.put(full_path, .{ .mode = mode, .hash = hash });
+        }
+    }
 }
 
 fn nativeCmdShowIndex(_: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
