@@ -52,6 +52,7 @@ const NATIVE_COMMANDS = [_][]const u8{
     "count-objects", "show-ref", "for-each-ref", "verify-pack", "update-server-info",
     "mktree", "name-rev", "fsck", "gc", "prune", "repack", "pack-objects",
     "index-pack", "reflog", "clean", "mktag",
+    "merge-base", "unpack-objects",
 };
 
 fn isNativeCommand(command: []const u8) bool {
@@ -257,7 +258,9 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         std.mem.eql(u8, command, "index-pack") or
         std.mem.eql(u8, command, "reflog") or
         std.mem.eql(u8, command, "clean") or
-        std.mem.eql(u8, command, "symbolic-ref");
+        std.mem.eql(u8, command, "symbolic-ref") or
+        std.mem.eql(u8, command, "merge-base") or
+        std.mem.eql(u8, command, "unpack-objects");
 
     // Process global flags and execute
     var arg_index: usize = 0;
@@ -521,6 +524,10 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try nativeCmdReflog(allocator, all_original_args.items, command_index, &platform_impl);
     } else if (std.mem.eql(u8, command, "clean")) {
         try nativeCmdClean(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "merge-base")) {
+        try nativeCmdMergeBase(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "unpack-objects")) {
+        try nativeCmdUnpackObjects(allocator, all_original_args.items, command_index, &platform_impl);
     }
 }
 
@@ -1674,6 +1681,10 @@ fn cmdInit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     var initial_branch: ?[]const u8 = null;
     var quiet = false;
     var separate_git_dir: ?[]const u8 = null;
+<<<<<<< Updated upstream
+=======
+    _ = &separate_git_dir;
+>>>>>>> Stashed changes
     
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--bare")) {
@@ -1735,7 +1746,9 @@ fn copyTemplateDir(git_dir: []const u8, template_path: []const u8, allocator: st
     }
 }
 
-fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8, initial_branch: ?[]const u8, quiet: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8, initial_branch: ?[]const u8, _quiet: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    _ = _quiet;
+    _ = initial_branch;
     
     const git_dir = if (bare) 
         try allocator.dupe(u8, path)
@@ -12578,4 +12591,611 @@ fn nativeCmdClean(_: std.mem.Allocator, args: [][]const u8, command_index: usize
         std.process.exit(128);
         unreachable;
     };
+}
+
+fn isAllHex(s: []const u8) bool {
+    for (s) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return s.len > 0;
+}
+
+fn expandAbbrevHash(allocator: std.mem.Allocator, git_dir: []const u8, abbrev: []const u8) ![]u8 {
+    if (abbrev.len < 4) return error.TooShort;
+    const prefix = abbrev[0..2];
+    const rest_prefix = abbrev[2..];
+    const subdir_path = std.fmt.allocPrint(allocator, "{s}/objects/{s}", .{ git_dir, prefix }) catch return error.OutOfMemory;
+    defer allocator.free(subdir_path);
+
+    var dir = std.fs.cwd().openDir(subdir_path, .{ .iterate = true }) catch return error.NotFound;
+    defer dir.close();
+
+    var match: ?[40]u8 = null;
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind == .file and entry.name.len == 38 and std.mem.startsWith(u8, entry.name, rest_prefix)) {
+            if (match != null) return error.AmbiguousHash;
+            var full: [40]u8 = undefined;
+            @memcpy(full[0..2], prefix);
+            @memcpy(full[2..], entry.name[0..38]);
+            match = full;
+        }
+    }
+
+    if (match) |m| {
+        return try allocator.dupe(u8, &m);
+    }
+    return error.NotFound;
+}
+
+fn nativeCmdMergeBase(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    var all_mode = false;
+    var is_ancestor = false;
+    var independent = false;
+    var fork_point = false;
+    var octopus = false;
+    var commits = std.array_list.Managed([]const u8).init(allocator);
+    defer commits.deinit();
+
+    var i = command_index + 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "-a")) {
+            all_mode = true;
+        } else if (std.mem.eql(u8, arg, "--is-ancestor")) {
+            is_ancestor = true;
+        } else if (std.mem.eql(u8, arg, "--independent")) {
+            independent = true;
+        } else if (std.mem.eql(u8, arg, "--fork-point")) {
+            fork_point = true;
+        } else if (std.mem.eql(u8, arg, "--octopus")) {
+            octopus = true;
+        } else if (std.mem.eql(u8, arg, "-h")) {
+            try platform_impl.writeStdout("usage: git merge-base [-a | --all] <commit> <commit>...\n   or: git merge-base [-a | --all] --octopus <commit>...\n   or: git merge-base --independent <commit>...\n   or: git merge-base --is-ancestor <commit> <commit>\n   or: git merge-base --fork-point <ref> [<commit>]\n");
+            std.process.exit(129);
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            try commits.append(arg);
+        }
+    }
+
+    const git_dir = findGitDir() catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+        unreachable;
+    };
+
+    // Resolve all commit arguments to hashes
+    var resolved = std.array_list.Managed([]const u8).init(allocator);
+    defer {
+        for (resolved.items) |h| allocator.free(h);
+        resolved.deinit();
+    }
+    for (commits.items) |c| {
+        // Check if it's already a full hex SHA
+        const hash = if (c.len == 40 and isAllHex(c))
+            try allocator.dupe(u8, c)
+        else if (refs.resolveRef(git_dir, c, platform_impl, allocator) catch null) |h|
+            h
+        else blk: {
+            // Try abbreviated hash - check objects dir
+            if (c.len >= 4 and isAllHex(c)) {
+                if (expandAbbrevHash(allocator, git_dir, c)) |expanded| {
+                    break :blk expanded;
+                } else |_| {}
+            }
+            const msg = std.fmt.allocPrint(allocator, "fatal: Not a valid object name {s}\n", .{c}) catch unreachable;
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+            unreachable;
+        };
+        try resolved.append(hash);
+    }
+
+    if (is_ancestor) {
+        if (resolved.items.len != 2) {
+            try platform_impl.writeStderr("usage: git merge-base --is-ancestor <commit> <commit>\n");
+            std.process.exit(129);
+        }
+        // Check if first is ancestor of second
+        var ancestors = std.StringHashMap(void).init(allocator);
+        defer {
+            var it = ancestors.iterator();
+            while (it.next()) |entry| allocator.free(entry.key_ptr.*);
+            ancestors.deinit();
+        }
+        try collectAncestors(git_dir, resolved.items[1], &ancestors, allocator, platform_impl);
+        if (ancestors.contains(resolved.items[0])) {
+            // Is ancestor - exit 0
+            return;
+        } else {
+            std.process.exit(1);
+        }
+    }
+
+    if (independent) {
+        // Find commits that are not ancestors of any other commit in the list
+        // For each commit, check if it's an ancestor of any other
+        var indep = std.array_list.Managed([]const u8).init(allocator);
+        defer indep.deinit();
+
+        for (resolved.items, 0..) |commit_hash, ci| {
+            var is_reachable = false;
+            for (resolved.items, 0..) |other_hash, oi| {
+                if (ci == oi) continue;
+                // Check if commit_hash is ancestor of other_hash
+                var ancestors = std.StringHashMap(void).init(allocator);
+                defer {
+                    var it = ancestors.iterator();
+                    while (it.next()) |entry| allocator.free(entry.key_ptr.*);
+                    ancestors.deinit();
+                }
+                try collectAncestors(git_dir, other_hash, &ancestors, allocator, platform_impl);
+                if (ancestors.contains(commit_hash)) {
+                    is_reachable = true;
+                    break;
+                }
+            }
+            if (!is_reachable) {
+                try indep.append(commit_hash);
+            }
+        }
+
+        for (indep.items, 0..) |h, hi| {
+            if (hi > 0) try platform_impl.writeStdout(" ");
+            const out = std.fmt.allocPrint(allocator, "{s}", .{h}) catch continue;
+            defer allocator.free(out);
+            try platform_impl.writeStdout(out);
+        }
+        if (indep.items.len > 0) try platform_impl.writeStdout("\n");
+        return;
+    }
+
+    if (fork_point) {
+        // Simplified fork-point: find merge-base between commit and ref tip
+        if (resolved.items.len < 1) {
+            try platform_impl.writeStderr("usage: git merge-base --fork-point <ref> [<commit>]\n");
+            std.process.exit(129);
+        }
+        // Use HEAD as second commit if not specified
+        const second = if (resolved.items.len >= 2) resolved.items[1] else blk: {
+            const head = refs.resolveRef(git_dir, "HEAD", platform_impl, allocator) catch {
+                std.process.exit(1);
+                unreachable;
+            };
+            break :blk head orelse {
+                std.process.exit(1);
+                unreachable;
+            };
+        };
+        const mb = findMergeBase(git_dir, resolved.items[0], second, allocator, platform_impl) catch {
+            std.process.exit(1);
+            unreachable;
+        };
+        defer allocator.free(mb);
+        const out = std.fmt.allocPrint(allocator, "{s}\n", .{mb}) catch unreachable;
+        defer allocator.free(out);
+        try platform_impl.writeStdout(out);
+        return;
+    }
+
+    if (octopus) {
+        // Octopus merge base: find merge base of all commits iteratively
+        if (resolved.items.len < 2) {
+            try platform_impl.writeStderr("fatal: Not enough arguments\n");
+            std.process.exit(128);
+            unreachable;
+        }
+        var current = try allocator.dupe(u8, resolved.items[0]);
+        var j: usize = 1;
+        while (j < resolved.items.len) : (j += 1) {
+            const mb = findMergeBase(git_dir, current, resolved.items[j], allocator, platform_impl) catch {
+                std.process.exit(1);
+                unreachable;
+            };
+            allocator.free(current);
+            current = mb;
+        }
+        defer allocator.free(current);
+        const out = std.fmt.allocPrint(allocator, "{s}\n", .{current}) catch unreachable;
+        defer allocator.free(out);
+        try platform_impl.writeStdout(out);
+        return;
+    }
+
+    // Default: find merge base between two commits
+    if (resolved.items.len < 2) {
+        try platform_impl.writeStderr("usage: git merge-base [-a | --all] <commit> <commit>...\n");
+        std.process.exit(128);
+        unreachable;
+    }
+
+    if (all_mode) {
+        // Find all merge bases
+        const bases = try findAllMergeBases(git_dir, resolved.items[0], resolved.items[1], allocator, platform_impl);
+        defer {
+            for (bases) |b| allocator.free(b);
+            allocator.free(bases);
+        }
+        for (bases) |b| {
+            const out = std.fmt.allocPrint(allocator, "{s}\n", .{b}) catch continue;
+            defer allocator.free(out);
+            try platform_impl.writeStdout(out);
+        }
+        if (bases.len == 0) std.process.exit(1);
+    } else {
+        // For multiple commits, find merge-base iteratively (pairwise)
+        var current = try allocator.dupe(u8, resolved.items[0]);
+        var j: usize = 1;
+        while (j < resolved.items.len) : (j += 1) {
+            const mb = findMergeBase(git_dir, current, resolved.items[j], allocator, platform_impl) catch {
+                std.process.exit(1);
+                unreachable;
+            };
+            allocator.free(current);
+            current = mb;
+        }
+        defer allocator.free(current);
+        const out = std.fmt.allocPrint(allocator, "{s}\n", .{current}) catch unreachable;
+        defer allocator.free(out);
+        try platform_impl.writeStdout(out);
+    }
+}
+
+/// Find all merge bases between two commits (not just the first one found)
+fn findAllMergeBases(git_dir: []const u8, hash1: []const u8, hash2: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![][]const u8 {
+    // Collect ancestors of both commits
+    var ancestors1 = std.StringHashMap(void).init(allocator);
+    defer {
+        var it = ancestors1.iterator();
+        while (it.next()) |entry| allocator.free(entry.key_ptr.*);
+        ancestors1.deinit();
+    }
+    var ancestors2 = std.StringHashMap(void).init(allocator);
+    defer {
+        var it = ancestors2.iterator();
+        while (it.next()) |entry| allocator.free(entry.key_ptr.*);
+        ancestors2.deinit();
+    }
+
+    try collectAncestors(git_dir, hash1, &ancestors1, allocator, platform_impl);
+    try collectAncestors(git_dir, hash2, &ancestors2, allocator, platform_impl);
+
+    // Common ancestors are the intersection
+    var common = std.array_list.Managed([]const u8).init(allocator);
+    defer common.deinit();
+
+    var it = ancestors1.iterator();
+    while (it.next()) |entry| {
+        if (ancestors2.contains(entry.key_ptr.*)) {
+            try common.append(try allocator.dupe(u8, entry.key_ptr.*));
+        }
+    }
+
+    // Filter out non-maximal: remove any common ancestor that is itself
+    // an ancestor of another common ancestor
+    var result = std.array_list.Managed([]const u8).init(allocator);
+    defer result.deinit();
+
+    for (common.items) |candidate| {
+        var is_ancestor_of_other = false;
+        for (common.items) |other| {
+            if (std.mem.eql(u8, candidate, other)) continue;
+            // Check if candidate is ancestor of other
+            var other_ancestors = std.StringHashMap(void).init(allocator);
+            defer {
+                var oit = other_ancestors.iterator();
+                while (oit.next()) |oe| allocator.free(oe.key_ptr.*);
+                other_ancestors.deinit();
+            }
+            try collectAncestors(git_dir, other, &other_ancestors, allocator, platform_impl);
+            if (other_ancestors.contains(candidate)) {
+                is_ancestor_of_other = true;
+                break;
+            }
+        }
+        if (!is_ancestor_of_other) {
+            try result.append(try allocator.dupe(u8, candidate));
+        }
+    }
+
+    // Free common list entries not in result
+    for (common.items) |c| allocator.free(c);
+
+    return try result.toOwnedSlice();
+}
+
+fn nativeCmdUnpackObjects(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    var dry_run = false;
+    var strict = false;
+    var quiet = false;
+
+    var i = command_index + 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-n")) {
+            dry_run = true;
+        } else if (std.mem.eql(u8, arg, "--strict")) {
+            strict = true;
+        } else if (std.mem.eql(u8, arg, "-q")) {
+            quiet = true;
+        } else if (std.mem.eql(u8, arg, "-r")) {
+            // recover - accepted
+        } else if (std.mem.startsWith(u8, arg, "--max-input-size=")) {
+            // accepted
+        } else if (std.mem.eql(u8, arg, "-h")) {
+            try platform_impl.writeStdout("usage: git unpack-objects [-n] [-q] [-r] [--strict]\n");
+            std.process.exit(129);
+        }
+    }
+
+    const git_dir = findGitDir() catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+        unreachable;
+    };
+
+    // Read pack data from stdin
+    const stdin_file = std.fs.File.stdin();
+    const pack_data = stdin_file.readToEndAlloc(allocator, 4 * 1024 * 1024 * 1024) catch {
+        try platform_impl.writeStderr("fatal: error reading pack data from stdin\n");
+        std.process.exit(128);
+        unreachable;
+    };
+    defer allocator.free(pack_data);
+
+    // Validate pack header
+    if (pack_data.len < 12) {
+        try platform_impl.writeStderr("fatal: pack too short\n");
+        std.process.exit(128);
+        unreachable;
+    }
+    if (!std.mem.eql(u8, pack_data[0..4], "PACK")) {
+        try platform_impl.writeStderr("fatal: bad pack header\n");
+        std.process.exit(128);
+        unreachable;
+    }
+
+    const version = std.mem.readInt(u32, pack_data[4..8], .big);
+    if (version != 2 and version != 3) {
+        const msg = std.fmt.allocPrint(allocator, "fatal: unknown pack file version {d}\n", .{version}) catch unreachable;
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        std.process.exit(128);
+        unreachable;
+    }
+
+    const num_objects = std.mem.readInt(u32, pack_data[8..12], .big);
+
+    if (!quiet) {
+        const msg = std.fmt.allocPrint(allocator, "Unpacking {d} objects: ", .{num_objects}) catch unreachable;
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+    }
+
+    const zlib_compat = @import("git/zlib_compat.zig");
+    const objects_dir = std.fmt.allocPrint(allocator, "{s}/objects", .{git_dir}) catch unreachable;
+    defer allocator.free(objects_dir);
+
+    var pos: usize = 12;
+    var unpacked: usize = 0;
+    var obj_idx: u32 = 0;
+    while (obj_idx < num_objects and pos < pack_data.len -| 20) : (obj_idx += 1) {
+        const entry_start = pos;
+        _ = entry_start;
+
+        // Parse variable-length object header
+        var c = pack_data[pos];
+        pos += 1;
+        const obj_type: u8 = (c >> 4) & 0x07;
+        var obj_size: u64 = c & 0x0F;
+        var shift: u6 = 4;
+        while (c & 0x80 != 0 and pos < pack_data.len) {
+            c = pack_data[pos];
+            pos += 1;
+            obj_size |= @as(u64, c & 0x7F) << shift;
+            shift +|= 7;
+        }
+
+        var base_hash: ?[20]u8 = null;
+        var base_offset: ?u64 = null;
+
+        if (obj_type == 6) {
+            // OFS_DELTA
+            c = pack_data[pos];
+            pos += 1;
+            var offset: u64 = c & 0x7F;
+            while (c & 0x80 != 0 and pos < pack_data.len) {
+                c = pack_data[pos];
+                pos += 1;
+                offset = ((offset + 1) << 7) | (c & 0x7F);
+            }
+            base_offset = offset;
+        } else if (obj_type == 7) {
+            // REF_DELTA
+            if (pos + 20 > pack_data.len) break;
+            base_hash = pack_data[pos..][0..20].*;
+            pos += 20;
+        }
+
+        // Decompress the object data
+        const compressed = pack_data[pos..@min(pack_data.len -| 20, pack_data.len)];
+        var fbs = std.io.fixedBufferStream(compressed);
+        var decompressor = zlib_compat.decompressor(fbs.reader());
+        var content = std.array_list.Managed(u8).init(allocator);
+        defer content.deinit();
+        {
+            var buf: [8192]u8 = undefined;
+            while (true) {
+                const n = decompressor.read(&buf) catch break;
+                if (n == 0) break;
+                content.appendSlice(buf[0..n]) catch break;
+            }
+        }
+        pos += fbs.pos;
+
+        // Determine actual object type and content (resolve deltas)
+        var final_type: u8 = obj_type;
+        var final_content: []const u8 = content.items;
+        var resolved_content: ?[]u8 = null;
+
+        if (obj_type == 7 and base_hash != null) {
+            // REF_DELTA: resolve using base object hash
+            var hex: [40]u8 = undefined;
+            for (base_hash.?, 0..) |b, bi| {
+                _ = std.fmt.bufPrint(hex[bi * 2 .. bi * 2 + 2], "{x:0>2}", .{b}) catch continue;
+            }
+            if (objects.GitObject.load(&hex, git_dir, platform_impl, allocator)) |base_obj| {
+                defer base_obj.deinit(allocator);
+                final_type = switch (base_obj.type) {
+                    .commit => 1,
+                    .tree => 2,
+                    .blob => 3,
+                    .tag => 4,
+                };
+                resolved_content = applyDelta(allocator, base_obj.data, content.items) catch null;
+                if (resolved_content) |rc| final_content = rc;
+            } else |_| {
+                if (strict) {
+                    try platform_impl.writeStderr("error: could not resolve delta base\n");
+                    std.process.exit(1);
+                }
+                continue;
+            }
+        } else if (obj_type == 6) {
+            // OFS_DELTA: would need to track previous objects by offset
+            // For now, skip - this is a simplified implementation
+        }
+        defer if (resolved_content) |rc| allocator.free(rc);
+
+        if (final_type >= 1 and final_type <= 4 and !dry_run) {
+            const type_str: []const u8 = switch (final_type) {
+                1 => "commit",
+                2 => "tree",
+                3 => "blob",
+                4 => "tag",
+                else => continue,
+            };
+
+            // Compute SHA1 hash
+            const header = std.fmt.allocPrint(allocator, "{s} {d}\x00", .{ type_str, final_content.len }) catch continue;
+            defer allocator.free(header);
+            var hasher = std.crypto.hash.Sha1.init(.{});
+            hasher.update(header);
+            hasher.update(final_content);
+            const sha = hasher.finalResult();
+
+            var hash_hex: [40]u8 = undefined;
+            for (sha, 0..) |b, bi| {
+                _ = std.fmt.bufPrint(hash_hex[bi * 2 .. bi * 2 + 2], "{x:0>2}", .{b}) catch continue;
+            }
+
+            // Check if object already exists
+            const obj_dir = std.fmt.allocPrint(allocator, "{s}/{s}", .{ objects_dir, hash_hex[0..2] }) catch continue;
+            defer allocator.free(obj_dir);
+            const obj_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ obj_dir, hash_hex[2..] }) catch continue;
+            defer allocator.free(obj_path);
+
+            if (std.fs.cwd().statFile(obj_path)) |_| {
+                // Already exists
+                unpacked += 1;
+                continue;
+            } else |_| {}
+
+            // Create directory
+            std.fs.cwd().makePath(obj_dir) catch continue;
+
+            // Compress and write object
+            var obj_data = std.array_list.Managed(u8).init(allocator);
+            defer obj_data.deinit();
+            {
+                var comp = zlib_compat.compressorWriter(obj_data.writer(), .{}) catch continue;
+                _ = comp.write(header) catch continue;
+                _ = comp.write(final_content) catch continue;
+                comp.finish() catch continue;
+            }
+
+            std.fs.cwd().writeFile(.{ .sub_path = obj_path, .data = obj_data.items }) catch continue;
+            unpacked += 1;
+        } else if (final_type >= 1 and final_type <= 4) {
+            unpacked += 1;
+        }
+    }
+
+    if (!quiet) {
+        const msg = std.fmt.allocPrint(allocator, "{d}, done.\n", .{unpacked}) catch unreachable;
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+    }
+}
+
+/// Apply a git delta to a base object, producing the result
+fn applyDelta(allocator: std.mem.Allocator, base: []const u8, delta: []const u8) ![]u8 {
+    if (delta.len < 4) return error.InvalidDelta;
+
+    var pos: usize = 0;
+
+    // Read base size (variable-length encoding)
+    var base_size: u64 = 0;
+    var shift: u6 = 0;
+    while (pos < delta.len) {
+        const c = delta[pos];
+        pos += 1;
+        base_size |= @as(u64, c & 0x7F) << shift;
+        shift +|= 7;
+        if (c & 0x80 == 0) break;
+    }
+
+    // Read result size
+    var result_size: u64 = 0;
+    shift = 0;
+    while (pos < delta.len) {
+        const c = delta[pos];
+        pos += 1;
+        result_size |= @as(u64, c & 0x7F) << shift;
+        shift +|= 7;
+        if (c & 0x80 == 0) break;
+    }
+
+    if (base_size != base.len) return error.BaseSizeMismatch;
+
+    var result = try std.array_list.Managed(u8).initCapacity(allocator, @intCast(result_size));
+    errdefer result.deinit();
+
+    while (pos < delta.len) {
+        const cmd = delta[pos];
+        pos += 1;
+
+        if (cmd & 0x80 != 0) {
+            // Copy from base
+            var copy_offset: u64 = 0;
+            var copy_size: u64 = 0;
+
+            if (cmd & 0x01 != 0) { copy_offset = delta[pos]; pos += 1; }
+            if (cmd & 0x02 != 0) { copy_offset |= @as(u64, delta[pos]) << 8; pos += 1; }
+            if (cmd & 0x04 != 0) { copy_offset |= @as(u64, delta[pos]) << 16; pos += 1; }
+            if (cmd & 0x08 != 0) { copy_offset |= @as(u64, delta[pos]) << 24; pos += 1; }
+
+            if (cmd & 0x10 != 0) { copy_size = delta[pos]; pos += 1; }
+            if (cmd & 0x20 != 0) { copy_size |= @as(u64, delta[pos]) << 8; pos += 1; }
+            if (cmd & 0x40 != 0) { copy_size |= @as(u64, delta[pos]) << 16; pos += 1; }
+
+            if (copy_size == 0) copy_size = 0x10000;
+
+            const start: usize = @intCast(copy_offset);
+            const end: usize = @intCast(copy_offset + copy_size);
+            if (end > base.len) return error.CopyOutOfBounds;
+            try result.appendSlice(base[start..end]);
+        } else if (cmd != 0) {
+            // Insert new data
+            const size: usize = cmd;
+            if (pos + size > delta.len) return error.InsertOutOfBounds;
+            try result.appendSlice(delta[pos .. pos + size]);
+            pos += size;
+        } else {
+            return error.InvalidDeltaCmd;
+        }
+    }
+
+    return try result.toOwnedSlice();
 }
