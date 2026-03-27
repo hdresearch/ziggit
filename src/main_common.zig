@@ -7180,6 +7180,21 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             defer allocator.free(content);
             try outputConfigList(content, source.path, source.scope, null_terminator, show_names, show_origin, show_scope, allocator, platform_impl);
         }
+        // Also show -c overrides
+        if (global_config_overrides) |overrides| {
+            for (overrides.items) |ov| {
+                const term: []const u8 = if (null_terminator) "\x00" else "\n";
+                if (show_names) {
+                    const output = try std.fmt.allocPrint(allocator, "{s}{s}", .{ ov.key, term });
+                    defer allocator.free(output);
+                    try platform_impl.writeStdout(output);
+                } else {
+                    const output = try std.fmt.allocPrint(allocator, "{s}={s}{s}", .{ ov.key, ov.value, term });
+                    defer allocator.free(output);
+                    try platform_impl.writeStdout(output);
+                }
+            }
+        }
         return;
     }
 
