@@ -3561,9 +3561,18 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
 
         // Create new branch
         refs.createBranch(git_path, branch_name, null, platform_impl, allocator) catch |err| switch (err) {
-            error.NoCommitsYet => {
-                try platform_impl.writeStderr("fatal: not a valid object name: 'master'\n");
-                std.process.exit(128);
+            error.NoCommitsYet, error.RefNotFound, error.FileNotFound => {
+                // On empty repo, just update HEAD to point to the new branch
+                const head_path3 = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+                defer allocator.free(head_path3);
+                const ref_content3 = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{branch_name});
+                defer allocator.free(ref_content3);
+                platform_impl.fs.writeFile(head_path3, ref_content3) catch {};
+                
+                const success_msg3 = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
+                defer allocator.free(success_msg3);
+                try platform_impl.writeStderr(success_msg3);
+                return;
             },
             error.InvalidStartPoint => {
                 try platform_impl.writeStderr("fatal: not a valid object name\n");
