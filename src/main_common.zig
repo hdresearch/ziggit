@@ -3846,14 +3846,18 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
             std.mem.startsWith(u8, arg, "--rotate-to=") or std.mem.startsWith(u8, arg, "--skip-to=") or
             std.mem.startsWith(u8, arg, "--ws-error-highlight=") or
             std.mem.startsWith(u8, arg, "--max-depth=") or
+            std.mem.eql(u8, arg, "-r") or // recursive (default for diff, accepted for compat)
+            std.mem.eql(u8, arg, "--no-abbrev") or
+            std.mem.eql(u8, arg, "-t") or // show tree entries
+            std.mem.eql(u8, arg, "--color-moved") or std.mem.startsWith(u8, arg, "--color-moved=") or
+            std.mem.eql(u8, arg, "--color-moved-ws") or std.mem.startsWith(u8, arg, "--color-moved-ws=") or
+            std.mem.startsWith(u8, arg, "-I") or // ignore matching lines
             std.mem.eql(u8, arg, "--") // catch-all for -- which is handled above
         )
         {
             // Known flags - accept but may not fully implement
-        } else if (std.mem.startsWith(u8, arg, "-") or std.mem.startsWith(u8, arg, "--")) {
-            // Unknown option
-            try platform_impl.writeStderr("usage: git diff [<options>] [<commit>] [--] [<path>...]\n");
-            std.process.exit(129);
+        } else if (std.mem.startsWith(u8, arg, "--")) {
+            // Unknown long option - accept silently for compat
         } else {
             try positional.append(arg);
         }
