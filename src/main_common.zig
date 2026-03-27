@@ -1782,7 +1782,7 @@ fn cmdInit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     
     // Check --separate-git-dir + --bare incompatibility
     if (separate_git_dir != null and bare) {
-        try platform_impl.writeStderr("fatal: --separate-git-dir and --bare are incompatible\n");
+        try platform_impl.writeStderr("fatal: options '--separate-git-dir' and '--bare' cannot be used together\n");
         std.process.exit(128);
     }
     
@@ -1797,8 +1797,13 @@ fn cmdInit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     const target_dir = work_dir orelse ".";
     
     if (env_git_dir) |git_dir_env| {
-        // Use GIT_DIR as the git directory
-        try initRepositoryWithGitDir(target_dir, git_dir_env, bare, template_dir, template_dir_set, initial_branch, quiet, shared, allocator, platform_impl);
+        // When --bare and a positional directory is given, the positional arg overrides GIT_DIR
+        if (bare and work_dir != null) {
+            try initRepository(target_dir, bare, template_dir, template_dir_set, initial_branch, quiet, shared, allocator, platform_impl);
+        } else {
+            // Use GIT_DIR as the git directory
+            try initRepositoryWithGitDir(target_dir, git_dir_env, bare, template_dir, template_dir_set, initial_branch, quiet, shared, allocator, platform_impl);
+        }
     } else if (separate_git_dir) |sep_dir| {
         // Create repo with separate git dir
         try initRepositoryWithSeparateGitDir(target_dir, sep_dir, template_dir, template_dir_set, initial_branch, quiet, shared, allocator, platform_impl);
@@ -1928,7 +1933,7 @@ fn initRepositoryInDir(git_dir: []const u8, bare: bool, template_dir: ?[]const u
     
     // Create subdirectories
     const subdirs = [_][]const u8{
-        "objects", "refs", "refs/heads", "refs/tags", "hooks", "info",
+        "objects", "objects/info", "objects/pack", "refs", "refs/heads", "refs/tags", "hooks", "info",
     };
     for (subdirs) |subdir| {
         const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, subdir });
