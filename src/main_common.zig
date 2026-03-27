@@ -2260,12 +2260,63 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     const cwd = try platform_impl.fs.getCwd(allocator);
     defer allocator.free(cwd);
 
+    // Pre-scan for --all/-A flag
+    var add_all = false;
+    var update_mode = false;
+    var intent_to_add = false;
+    var force_add = false;
+    var dry_run = false;
+    var collected_paths = std.array_list.Managed([]const u8).init(allocator);
+    defer collected_paths.deinit();
+    while (args.next()) |raw_arg| {
+        if (std.mem.eql(u8, raw_arg, "--")) {
+            // rest are paths
+            while (args.next()) |p| try collected_paths.append(p);
+            break;
+        } else if (std.mem.eql(u8, raw_arg, "--all") or std.mem.eql(u8, raw_arg, "-A")) {
+            add_all = true;
+        } else if (std.mem.eql(u8, raw_arg, "--update") or std.mem.eql(u8, raw_arg, "-u")) {
+            update_mode = true;
+        } else if (std.mem.eql(u8, raw_arg, "--intent-to-add") or std.mem.eql(u8, raw_arg, "-N")) {
+            intent_to_add = true;
+        } else if (std.mem.eql(u8, raw_arg, "--force") or std.mem.eql(u8, raw_arg, "-f")) {
+            force_add = true;
+        } else if (std.mem.eql(u8, raw_arg, "--dry-run") or std.mem.eql(u8, raw_arg, "-n")) {
+            dry_run = true;
+        } else if (std.mem.eql(u8, raw_arg, "--verbose") or std.mem.eql(u8, raw_arg, "-v")) {
+            // verbose mode - accept silently
+        } else if (std.mem.eql(u8, raw_arg, "--refresh")) {
+            // refresh mode - accept silently
+        } else if (std.mem.eql(u8, raw_arg, "--ignore-errors") or std.mem.eql(u8, raw_arg, "--ignore-missing") or
+            std.mem.eql(u8, raw_arg, "--no-warn-embedded-repo") or std.mem.eql(u8, raw_arg, "--renormalize") or
+            std.mem.eql(u8, raw_arg, "--sparse") or std.mem.eql(u8, raw_arg, "--no-all") or
+            std.mem.eql(u8, raw_arg, "--edit") or std.mem.eql(u8, raw_arg, "-e") or
+            std.mem.eql(u8, raw_arg, "--patch") or std.mem.eql(u8, raw_arg, "-p") or
+            std.mem.eql(u8, raw_arg, "--interactive") or std.mem.eql(u8, raw_arg, "-i"))
+        {
+            // Accept known flags silently
+        } else if (std.mem.startsWith(u8, raw_arg, "--chmod=") or std.mem.startsWith(u8, raw_arg, "--pathspec-from-file") or
+            std.mem.startsWith(u8, raw_arg, "--pathspec-file-nul"))
+        {
+            // Accept known options
+        } else if (raw_arg.len > 0 and raw_arg[0] == '-') {
+            // Unknown flags - skip
+        } else {
+            try collected_paths.append(raw_arg);
+        }
+    }
+    // These flags are parsed but not fully implemented yet
+    if (intent_to_add) {}
+    if (dry_run) {}
+    if (force_add) {}
+
+    // If --all or -u and no paths, default to "."
+    if ((add_all or update_mode) and collected_paths.items.len == 0) {
+        try collected_paths.append(".");
+    }
+
     // Process all file arguments
-    while (args.next()) |file_path| {
-        // Skip "--" separator (used to separate options from paths)
-        if (std.mem.eql(u8, file_path, "--")) continue;
-        // Skip flags like -n, -v, -f, --force, etc.
-        if (file_path.len > 0 and file_path[0] == '-') continue;
+    for (collected_paths.items) |file_path| {
         has_files = true;
         
         // Handle special cases like "." for current directory
@@ -2316,6 +2367,30 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         try platform_impl.writeStderr("hint: Maybe you wanted to say 'git add .'?\n");
         try platform_impl.writeStderr("hint: Disable this message with \"git config set advice.addEmptyPathspec false\"\n");
         return;
+    }
+
+    // When --all or --update, remove index entries for deleted files
+    if (add_all or update_mode) {
+        const repo_root = std.fs.path.dirname(git_path) orelse ".";
+        var i: usize = 0;
+        while (i < index.entries.items.len) {
+            const entry = index.entries.items[i];
+            const full_path = if (repo_root.len > 0 and !std.mem.eql(u8, repo_root, "."))
+                std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path }) catch { i += 1; continue; }
+            else
+                allocator.dupe(u8, entry.path) catch { i += 1; continue; };
+            defer allocator.free(full_path);
+            const exists = blk: {
+                std.fs.cwd().access(full_path, .{}) catch break :blk false;
+                break :blk true;
+            };
+            if (!exists) {
+                index.entries.items[i].deinit(allocator);
+                _ = index.entries.orderedRemove(i);
+            } else {
+                i += 1;
+            }
+        }
     }
 
     // Save index
@@ -22840,6 +22915,8 @@ fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_index: u
     var exit_code_flag = false;
     var patch_mode = false;
     var suppress_output = false;
+    var name_status = false;
+    var name_only = false;
     var tree_ish: ?[]const u8 = null;
     var pathspecs = std.array_list.Managed([]const u8).init(allocator);
     defer pathspecs.deinit();
@@ -22863,6 +22940,12 @@ fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_index: u
         } else if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
             suppress_output = true;
             exit_code_flag = true;
+        } else if (std.mem.eql(u8, arg, "--name-status")) {
+            name_status = true;
+        } else if (std.mem.eql(u8, arg, "--name-only")) {
+            name_only = true;
+        } else if (std.mem.eql(u8, arg, "--diff-filter") or std.mem.startsWith(u8, arg, "--diff-filter=")) {
+            // Accept but don't fully implement
         } else if (std.mem.eql(u8, arg, "--")) {
             seen_dashdash = true;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
@@ -22919,7 +23002,12 @@ fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_index: u
                 _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&te.hash}) catch unreachable;
                 var new_hash_buf: [40]u8 = undefined;
                 _ = std.fmt.bufPrint(&new_hash_buf, "{x}", .{&entry.sha1}) catch unreachable;
-                const line = try std.fmt.allocPrint(allocator, ":{o:0>6} {o:0>6} {s} {s} M\t{s}\n", .{ te.mode, entry.mode, &old_hash_buf, &new_hash_buf, entry.path });
+                const line = if (name_status)
+                    try std.fmt.allocPrint(allocator, "M\t{s}\n", .{entry.path})
+                else if (name_only)
+                    try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path})
+                else
+                    try std.fmt.allocPrint(allocator, ":{o:0>6} {o:0>6} {s} {s} M\t{s}\n", .{ te.mode, entry.mode, &old_hash_buf, &new_hash_buf, entry.path });
                 defer allocator.free(line);
                 try platform_impl.writeStdout(line);
             }
@@ -22927,7 +23015,12 @@ fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_index: u
             has_diffs = true;
             var new_hash_buf: [40]u8 = undefined;
             _ = std.fmt.bufPrint(&new_hash_buf, "{x}", .{&entry.sha1}) catch unreachable;
-            const line = try std.fmt.allocPrint(allocator, ":000000 {o:0>6} {s} {s} A\t{s}\n", .{ entry.mode, zero_oid, &new_hash_buf, entry.path });
+            const line = if (name_status)
+                try std.fmt.allocPrint(allocator, "A\t{s}\n", .{entry.path})
+            else if (name_only)
+                try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path})
+            else
+                try std.fmt.allocPrint(allocator, ":000000 {o:0>6} {s} {s} A\t{s}\n", .{ entry.mode, zero_oid, &new_hash_buf, entry.path });
             defer allocator.free(line);
             try platform_impl.writeStdout(line);
         }
@@ -22956,7 +23049,12 @@ fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_index: u
             has_diffs = true;
             var old_hash_buf: [40]u8 = undefined;
             _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&kv.value_ptr.hash}) catch unreachable;
-            const line = try std.fmt.allocPrint(allocator, ":{o:0>6} 000000 {s} {s} D\t{s}\n", .{ kv.value_ptr.mode, &old_hash_buf, zero_oid, kv.key_ptr.* });
+            const line = if (name_status)
+                try std.fmt.allocPrint(allocator, "D\t{s}\n", .{kv.key_ptr.*})
+            else if (name_only)
+                try std.fmt.allocPrint(allocator, "{s}\n", .{kv.key_ptr.*})
+            else
+                try std.fmt.allocPrint(allocator, ":{o:0>6} 000000 {s} {s} D\t{s}\n", .{ kv.value_ptr.mode, &old_hash_buf, zero_oid, kv.key_ptr.* });
             defer allocator.free(line);
             try platform_impl.writeStdout(line);
         }
