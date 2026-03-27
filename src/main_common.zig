@@ -6501,15 +6501,15 @@ fn performThreeWayFileMerge(git_path: []const u8, base_files: *std.StringHashMap
             if (std.mem.eql(u8, current_hash.?, target_hash.?)) {
                 // No change needed - both have same content
                 try writeFileFromBlob(git_path, filename, current_hash.?, repo_root, allocator, platform_impl);
-            } else if (base_hash != null and std.mem.eql(u8, base_hash.?, current_hash.?)) {
+            } else if (base_hash != null and std.mem.eql(u8, base_hash, current_hash.?)) {
                 // Only target changed - take target
                 try writeFileFromBlob(git_path, filename, target_hash.?, repo_root, allocator, platform_impl);
-            } else if (base_hash != null and std.mem.eql(u8, base_hash.?, target_hash.?)) {
+            } else if (base_hash != null and std.mem.eql(u8, base_hash, target_hash.?)) {
                 // Only current changed - keep current
                 try writeFileFromBlob(git_path, filename, current_hash.?, repo_root, allocator, platform_impl);
             } else if (base_hash != null) {
                 // Both sides modified - try content-level 3-way merge
-                const base_content = loadBlobForMerge(git_path, base_hash.?, allocator, platform_impl);
+                const base_content = loadBlobForMerge(git_path, base_hash, allocator, platform_impl);
                 defer if (base_content.len > 0) allocator.free(base_content);
                 const current_content = loadBlobForMerge(git_path, current_hash.?, allocator, platform_impl);
                 defer if (current_content.len > 0) allocator.free(current_content);
@@ -25394,7 +25394,7 @@ fn nativeCmdUnpackObjects(allocator: std.mem.Allocator, args: [][]const u8, comm
         if (obj_type == 7 and base_hash != null) {
             // REF_DELTA: resolve using base object hash
             var hex: [40]u8 = undefined;
-            for (base_hash.?, 0..) |b, bi| {
+            for (base_hash, 0..) |b, bi| {
                 _ = std.fmt.bufPrint(hex[bi * 2 .. bi * 2 + 2], "{x:0>2}", .{b}) catch continue;
             }
             if (objects.GitObject.load(&hex, git_dir, platform_impl, allocator)) |base_obj| {
@@ -31329,10 +31329,10 @@ fn cmdFormatPatch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         commit_list.deinit();
     }
 
-    var current = try allocator.dupe(u8, tip_hash.?);
+    var current = try allocator.dupe(u8, tip_hash);
     var walk_count: usize = 0;
     while (walk_count < 1000) : (walk_count += 1) {
-        if (std.mem.eql(u8, current, base_hash.?)) {
+        if (std.mem.eql(u8, current, base_hash)) {
             allocator.free(current);
             break;
         }
