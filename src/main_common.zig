@@ -2427,7 +2427,35 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     const current_branch = try refs.getCurrentBranch(git_path, platform_impl, allocator);
     defer allocator.free(current_branch);
     
+    // Get old hash before updating
+    const old_commit_hash = refs.resolveRef(git_path, current_branch, platform_impl, allocator) catch null;
+    defer if (old_commit_hash) |h| allocator.free(h);
+    
     try refs.updateRef(git_path, current_branch, commit_hash, platform_impl, allocator);
+    
+    // Write reflog entries for both the branch and HEAD
+    {
+        const zero_h = "0000000000000000000000000000000000000000";
+        const old_h = old_commit_hash orelse zero_h;
+        
+        // Determine reflog message
+        const reflog_msg = if (amend)
+            "commit (amend): "
+        else if (old_commit_hash == null)
+            "commit (initial): "
+        else if (parent_hashes.items.len > 1)
+            "commit (merge): "
+        else
+            "commit: ";
+        
+        const full_reflog_msg = try std.fmt.allocPrint(allocator, "{s}{s}", .{ reflog_msg, std.mem.trim(u8, message orelse "", " \t\n\r") });
+        defer allocator.free(full_reflog_msg);
+        
+        // Write reflog for branch
+        writeReflogEntry(git_path, current_branch, old_h, commit_hash, full_reflog_msg, allocator, platform_impl) catch {};
+        // Write reflog for HEAD
+        writeReflogEntry(git_path, "HEAD", old_h, commit_hash, full_reflog_msg, allocator, platform_impl) catch {};
+    }
 
     // After a successful commit, the index should remain but be consistent with the new commit
     // We don't clear the index, but we save it to ensure it's properly persisted
