@@ -4606,8 +4606,35 @@ fn performThreeWayFileMerge(git_path: []const u8, base_files: *std.StringHashMap
             if (std.mem.eql(u8, current_hash.?, target_hash.?)) {
                 // No change needed - both have same content
                 try writeFileFromBlob(git_path, filename, current_hash.?, repo_root, allocator, platform_impl);
+            } else if (base_hash != null and std.mem.eql(u8, base_hash.?, current_hash.?)) {
+                // Only target changed - take target
+                try writeFileFromBlob(git_path, filename, target_hash.?, repo_root, allocator, platform_impl);
+            } else if (base_hash != null and std.mem.eql(u8, base_hash.?, target_hash.?)) {
+                // Only current changed - keep current
+                try writeFileFromBlob(git_path, filename, current_hash.?, repo_root, allocator, platform_impl);
+            } else if (base_hash != null) {
+                // Both sides modified - try content-level 3-way merge
+                const base_content = loadBlobForMerge(git_path, base_hash.?, allocator, platform_impl);
+                defer if (base_content.len > 0) allocator.free(base_content);
+                const current_content = loadBlobForMerge(git_path, current_hash.?, allocator, platform_impl);
+                defer if (current_content.len > 0) allocator.free(current_content);
+                const target_content = loadBlobForMerge(git_path, target_hash.?, allocator, platform_impl);
+                defer if (target_content.len > 0) allocator.free(target_content);
+
+                if (try threeWayContentMerge(base_content, current_content, target_content, allocator)) |merged| {
+                    defer allocator.free(merged);
+                    const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, filename });
+                    defer allocator.free(file_path);
+                    if (std.fs.path.dirname(file_path)) |parent_dir| {
+                        std.fs.cwd().makePath(parent_dir) catch {};
+                    }
+                    try platform_impl.fs.writeFile(file_path, merged);
+                } else {
+                    conflicts_found = true;
+                    try createConflictFile(git_path, filename, base_hash, current_hash.?, target_hash.?, repo_root, allocator, platform_impl);
+                }
             } else {
-                // Conflict: both sides modified the file
+                // No base - both added - conflict
                 conflicts_found = true;
                 try createConflictFile(git_path, filename, base_hash, current_hash.?, target_hash.?, repo_root, allocator, platform_impl);
             }
@@ -4615,6 +4642,148 @@ fn performThreeWayFileMerge(git_path: []const u8, base_files: *std.StringHashMap
     }
     
     return conflicts_found;
+}
+
+/// Load blob content from a hash for merge
+fn loadBlobForMerge(git_path: []const u8, blob_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) []const u8 {
+    const blob_obj = objects.GitObject.load(blob_hash, git_path, platform_impl, allocator) catch return "";
+    defer blob_obj.deinit(allocator);
+    if (blob_obj.type != .blob) return "";
+    return allocator.dupe(u8, blob_obj.data) catch return "";
+}
+
+/// Perform a simple 3-way content merge. Returns merged content or null if conflict.
+fn threeWayContentMerge(base: []const u8, ours: []const u8, theirs: []const u8, allocator: std.mem.Allocator) !?[]const u8 {
+    // Split into lines
+    const base_lines = splitLines(base, allocator) catch return null;
+    defer allocator.free(base_lines);
+    const ours_lines = splitLines(ours, allocator) catch return null;
+    defer allocator.free(ours_lines);
+    const theirs_lines = splitLines(theirs, allocator) catch return null;
+    defer allocator.free(theirs_lines);
+
+    // Simple approach: compute hunks of changes from base->ours and base->theirs
+    // If changes don't overlap, merge them
+    var result = std.array_list.Managed(u8).init(allocator);
+    errdefer result.deinit();
+
+    var bi: usize = 0; // base index
+    var oi: usize = 0; // ours index
+    var ti: usize = 0; // theirs index
+
+    while (bi < base_lines.len or oi < ours_lines.len or ti < theirs_lines.len) {
+        // Check if both sides match base at current position
+        const base_line = if (bi < base_lines.len) base_lines[bi] else null;
+        const ours_line = if (oi < ours_lines.len) ours_lines[oi] else null;
+        const theirs_line = if (ti < theirs_lines.len) theirs_lines[ti] else null;
+
+        if (base_line != null and ours_line != null and theirs_line != null and
+            std.mem.eql(u8, base_line.?, ours_line.?) and std.mem.eql(u8, base_line.?, theirs_line.?))
+        {
+            // All three match - take the line
+            try result.appendSlice(base_line.?);
+            try result.append('\n');
+            bi += 1;
+            oi += 1;
+            ti += 1;
+        } else if (base_line != null and ours_line != null and std.mem.eql(u8, base_line.?, ours_line.?) and
+            (theirs_line == null or !std.mem.eql(u8, base_line.?, theirs_line.?)))
+        {
+            // Ours matches base but theirs doesn't - take theirs' change
+            if (theirs_line) |tl| {
+                // Check if theirs deleted this line or changed it
+                // Look ahead in theirs to see if base_line appears later
+                if (findLineInSlice(theirs_lines[ti..], base_line.?)) |offset| {
+                    // Theirs inserted lines before this one
+                    var j: usize = 0;
+                    while (j < offset) : (j += 1) {
+                        try result.appendSlice(theirs_lines[ti + j]);
+                        try result.append('\n');
+                    }
+                    ti += offset;
+                    // Don't advance bi/oi yet - they still need to match
+                } else {
+                    // Theirs changed this line
+                    try result.appendSlice(tl);
+                    try result.append('\n');
+                    bi += 1;
+                    oi += 1;
+                    ti += 1;
+                }
+            } else {
+                // Theirs ran out - this line was deleted in theirs
+                bi += 1;
+                oi += 1;
+            }
+        } else if (base_line != null and theirs_line != null and std.mem.eql(u8, base_line.?, theirs_line.?) and
+            (ours_line == null or !std.mem.eql(u8, base_line.?, ours_line.?)))
+        {
+            // Theirs matches base but ours doesn't - take ours' change
+            if (ours_line) |ol| {
+                if (findLineInSlice(ours_lines[oi..], base_line.?)) |offset| {
+                    var j: usize = 0;
+                    while (j < offset) : (j += 1) {
+                        try result.appendSlice(ours_lines[oi + j]);
+                        try result.append('\n');
+                    }
+                    oi += offset;
+                } else {
+                    try result.appendSlice(ol);
+                    try result.append('\n');
+                    bi += 1;
+                    oi += 1;
+                    ti += 1;
+                }
+            } else {
+                bi += 1;
+                ti += 1;
+            }
+        } else if (base_line == null and ours_line != null and theirs_line == null) {
+            // Past base, ours has extra lines
+            try result.appendSlice(ours_line.?);
+            try result.append('\n');
+            oi += 1;
+        } else if (base_line == null and ours_line == null and theirs_line != null) {
+            // Past base, theirs has extra lines
+            try result.appendSlice(theirs_line.?);
+            try result.append('\n');
+            ti += 1;
+        } else if (base_line == null and ours_line != null and theirs_line != null) {
+            if (std.mem.eql(u8, ours_line.?, theirs_line.?)) {
+                try result.appendSlice(ours_line.?);
+                try result.append('\n');
+                oi += 1;
+                ti += 1;
+            } else {
+                return null; // Conflict
+            }
+        } else {
+            // Both sides changed - conflict
+            return null;
+        }
+    }
+
+    const slice = try result.toOwnedSlice();
+    return slice;
+}
+
+fn splitLines(text: []const u8, allocator: std.mem.Allocator) ![][]const u8 {
+    if (text.len == 0) return try allocator.alloc([]const u8, 0);
+    var lines = std.array_list.Managed([]const u8).init(allocator);
+    var iter = std.mem.splitScalar(u8, text, '\n');
+    while (iter.next()) |line| {
+        // Skip trailing empty line from final newline
+        if (line.len == 0 and iter.peek() == null) break;
+        try lines.append(line);
+    }
+    return lines.toOwnedSlice();
+}
+
+fn findLineInSlice(lines: []const []const u8, target: []const u8) ?usize {
+    for (lines, 0..) |line, i| {
+        if (std.mem.eql(u8, line, target)) return i;
+    }
+    return null;
 }
 
 /// Write a file from a blob hash
