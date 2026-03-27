@@ -287,9 +287,15 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
     var lnw: usize = 1;
     { var nn = lines.items.len; while (nn >= 10) : (nn /= 10) lnw += 1; }
 
+    var seen_hashes = std.StringHashMap(void).init(a);
+    defer seen_hashes.deinit();
     for (oi.items) |i| {
         const e = es[i]; const line = lines.items[i]; const ln = i + 1;
-        if (sp or slp) { try oP(pi, a, e, line, ln, i == 0 or slp, fp.?); }
+        if (sp or slp) {
+            const first_time = !seen_hashes.contains(&e.commit_hash);
+            if (first_time) seen_hashes.put(&e.commit_hash, {}) catch {};
+            try oP(pi, a, e, line, ln, first_time or slp, fp.?);
+        }
         else if (col) { try oC(pi, a, e, line, ln, se, srt, mal, lnw, abl); }
         else { try oD(pi, a, e, line, ln, se, srt, mal, lnw, abl); }
     }
