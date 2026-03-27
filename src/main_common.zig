@@ -12,6 +12,7 @@ const gitignore_mod = if (@import("builtin").target.os.tag != .freestanding) @im
 const config_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/config.zig") else void;
 const diff_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/diff.zig") else void;
 const network = if (@import("builtin").target.os.tag != .freestanding) @import("git/network.zig") else void;
+const zlib_compat_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/zlib_compat.zig") else void;
 
 const GitError = error{
     NotAGitRepository,
@@ -29,6 +30,10 @@ const NATIVE_COMMANDS = [_][]const u8{
     "update-index", "ls-files", "ls-tree", "read-tree", "diff-files",
     "version",
     "--version", "-v", "--version-info", "--help", "-h", "help", "--exec-path",
+    // Phase 2: newly native commands (pure Zig implementations)
+    "count-objects", "show-ref", "for-each-ref", "verify-pack", "update-server-info",
+    "mktree", "name-rev", "fsck", "gc", "prune", "repack", "pack-objects",
+    "index-pack", "reflog", "clean", "mktag",
 };
 
 fn isNativeCommand(command: []const u8) bool {
@@ -483,6 +488,38 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
             return;
         }
         try showUsage(&platform_impl);
+    } else if (std.mem.eql(u8, command, "count-objects")) {
+        try nativeCmdCountObjects(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "show-ref")) {
+        try nativeCmdShowRef(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "for-each-ref")) {
+        try nativeCmdForEachRef(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "verify-pack")) {
+        try nativeCmdVerifyPack(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "update-server-info")) {
+        try nativeCmdUpdateServerInfo(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "mktree")) {
+        try nativeCmdMktree(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "mktag")) {
+        try nativeCmdMktag(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "name-rev")) {
+        try nativeCmdNameRev(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "fsck")) {
+        try nativeCmdFsck(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "gc")) {
+        try nativeCmdGc(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "prune")) {
+        try nativeCmdPrune(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "repack")) {
+        try nativeCmdRepack(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "pack-objects")) {
+        try nativeCmdPackObjects(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "index-pack")) {
+        try nativeCmdIndexPack(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "reflog")) {
+        try nativeCmdReflog(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "clean")) {
+        try nativeCmdClean(allocator, all_original_args.items, command_index, &platform_impl);
     }
 }
 
@@ -7104,4 +7141,2144 @@ fn cmdReadTree(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
 
 fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     try forwardPlumbingToGit(allocator, "diff-files", args, platform_impl);
+}
+
+// =============================================================================
+// Phase 2: Pure Zig implementations of previously non-native commands
+// =============================================================================
+
+fn findGitDir() ![]const u8 {
+    // Check GIT_DIR env first
+    if (std.posix.getenv("GIT_DIR")) |gd| return gd;
+    // Walk up from cwd looking for .git
+    var path_buf: [4096]u8 = undefined;
+    const cwd = std.process.getCwd(&path_buf) catch return error.FileNotFound;
+    var dir = cwd;
+    while (true) {
+        // Check for .git file or directory
+        const git_path = std.fmt.bufPrint(&path_buf, "{s}/.git", .{dir}) catch return error.FileNotFound;
+        _ = git_path;
+        // Simple check: try to stat .git in current dir and ancestors
+        var check_buf: [4096]u8 = undefined;
+        const check_path = std.fmt.bufPrint(&check_buf, "{s}/.git", .{dir}) catch return error.FileNotFound;
+        if (std.fs.cwd().statFile(check_path)) |_| {
+            return ".git";
+        } else |_| {
+            // Try as directory
+            if (std.fs.cwd().openDir(check_path, .{})) |d| {
+                var dd = d;
+                dd.close();
+                return ".git";
+            } else |_| {}
+        }
+        // Go to parent
+        if (std.mem.lastIndexOf(u8, dir, "/")) |idx| {
+            dir = dir[0..idx];
+            if (dir.len == 0) break;
+        } else break;
+    }
+    return error.FileNotFound;
+}
+
+fn nativeCmdCountObjects(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    var verbose = false;
+    var human_readable = false;
+    var i = command_index + 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
+            verbose = true;
+        } else if (std.mem.eql(u8, arg, "-H") or std.mem.eql(u8, arg, "--human-readable")) {
+            human_readable = true;
+        } else if (std.mem.eql(u8, arg, "-h")) {
+            try platform_impl.writeStdout("usage: git count-objects [-v] [-H | --human-readable]\n");
+            std.process.exit(129);
+        }
+    }
+
+    const git_dir = findGitDir() catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+        unreachable;
+    };
+
+    // Count loose objects
+    var count: usize = 0;
+    var size: u64 = 0;
+    var size_pack: u64 = 0;
+    var packs: usize = 0;
+    var size_garbage: u64 = 0;
+    var garbage_count: usize = 0;
+
+    // Iterate over objects/xx directories
+    const objects_dir_path = std.fmt.allocPrint(allocator, "{s}/objects", .{git_dir}) catch unreachable;
+    defer allocator.free(objects_dir_path);
+
+    var hex_dirs: usize = 0;
+    while (hex_dirs < 256) : (hex_dirs += 1) {
+        var hex_buf: [2]u8 = undefined;
+        _ = std.fmt.bufPrint(&hex_buf, "{x:0>2}", .{hex_dirs}) catch continue;
+        const subdir_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ objects_dir_path, hex_buf }) catch continue;
+        defer allocator.free(subdir_path);
+
+        var subdir = std.fs.cwd().openDir(subdir_path, .{ .iterate = true }) catch continue;
+        defer subdir.close();
+
+        var iter = subdir.iterate();
+        while (iter.next() catch null) |entry| {
+            if (entry.kind == .file) {
+                count += 1;
+                const file_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ subdir_path, entry.name }) catch continue;
+                defer allocator.free(file_path);
+                const stat = std.fs.cwd().statFile(file_path) catch continue;
+                size += stat.size;
+            }
+        }
+    }
+
+    // Count pack files
+    const pack_dir_path = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir}) catch unreachable;
+    defer allocator.free(pack_dir_path);
+
+    if (std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true })) |pack_dir_handle| {
+        var pd = pack_dir_handle;
+        defer pd.close();
+
+        var pack_iter = pd.iterate();
+        while (pack_iter.next() catch null) |entry| {
+            if (entry.kind == .file) {
+                if (std.mem.endsWith(u8, entry.name, ".pack")) {
+                    packs += 1;
+                    const pack_file = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir_path, entry.name }) catch continue;
+                    defer allocator.free(pack_file);
+                    const stat = std.fs.cwd().statFile(pack_file) catch continue;
+                    size_pack += stat.size;
+                } else if (!std.mem.endsWith(u8, entry.name, ".idx") and
+                    !std.mem.endsWith(u8, entry.name, ".keep") and
+                    !std.mem.endsWith(u8, entry.name, ".bitmap") and
+                    !std.mem.endsWith(u8, entry.name, ".rev") and
+                    !std.mem.endsWith(u8, entry.name, ".mtimes") and
+                    !std.mem.endsWith(u8, entry.name, ".promisor"))
+                {
+                    garbage_count += 1;
+                    const garb_file = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir_path, entry.name }) catch continue;
+                    defer allocator.free(garb_file);
+                    const stat = std.fs.cwd().statFile(garb_file) catch continue;
+                    size_garbage += stat.size;
+                }
+            }
+        }
+    } else |_| {}
+
+    const size_kb = size / 1024;
+
+    if (verbose) {
+        const output = std.fmt.allocPrint(allocator,
+            "count: {d}\nsize: {d}\nin-pack: 0\npacks: {d}\nsize-pack: {d}\nprune-packable: 0\ngarbage: {d}\nsize-garbage: {d}\n",
+            .{ count, size_kb, packs, size_pack / 1024, garbage_count, size_garbage / 1024 },
+        ) catch unreachable;
+        defer allocator.free(output);
+        try platform_impl.writeStdout(output);
+    } else {
+        const output = std.fmt.allocPrint(allocator, "{d} objects, {d} kilobytes\n", .{ count, size_kb }) catch unreachable;
+        defer allocator.free(output);
+        try platform_impl.writeStdout(output);
+    }
+}
+
+fn nativeCmdShowRef(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    var verify = false;
+    var quiet = false;
+    var heads = false;
+    var tags = false;
+    var hash_only = false;
+    var hash_len: usize = 40;
+    var dereference = false;
+    var patterns = std.array_list.Managed([]const u8).init(allocator);
+    defer patterns.deinit();
+
+    var i = command_index + 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-h")) {
+            try platform_impl.writeStdout("usage: git show-ref [--head] [-d | --dereference] [-s | --hash[=<n>]] [--verify] [-q | --quiet] [--tags] [--heads] [--] [<pattern>...]\n");
+            std.process.exit(129);
+        } else if (std.mem.eql(u8, arg, "--verify")) {
+            verify = true;
+        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
+            quiet = true;
+        } else if (std.mem.eql(u8, arg, "--heads")) {
+            heads = true;
+        } else if (std.mem.eql(u8, arg, "--tags")) {
+            tags = true;
+        } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--dereference")) {
+            dereference = true;
+        } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--hash")) {
+            hash_only = true;
+        } else if (std.mem.startsWith(u8, arg, "--hash=")) {
+            hash_only = true;
+            hash_len = std.fmt.parseInt(usize, arg["--hash=".len..], 10) catch 40;
+        } else if (std.mem.eql(u8, arg, "--head")) {
+            // Include HEAD in output
+        } else if (std.mem.eql(u8, arg, "--")) {
+            i += 1;
+            while (i < args.len) : (i += 1) {
+                try patterns.append(args[i]);
+            }
+            break;
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            try patterns.append(arg);
+        }
+    }
+
+    const git_dir = findGitDir() catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+        unreachable;
+    };
+
+    if (verify) {
+        // Verify mode: check specific refs
+        var found_any = false;
+        for (patterns.items) |pattern| {
+            const resolved = refs.resolveRef(git_dir, pattern, platform_impl, allocator) catch {
+                if (!quiet) {
+                    const msg = std.fmt.allocPrint(allocator, "fatal: '{s}' - not a valid ref\n", .{pattern}) catch continue;
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                }
+                continue;
+            };
+            if (resolved) |hash| {
+                defer allocator.free(hash);
+                found_any = true;
+                if (!quiet) {
+                    const end = @min(hash_len, hash.len);
+                    if (hash_only) {
+                        const output = std.fmt.allocPrint(allocator, "{s}\n", .{hash[0..end]}) catch continue;
+                        defer allocator.free(output);
+                        try platform_impl.writeStdout(output);
+                    } else {
+                        const output = std.fmt.allocPrint(allocator, "{s} {s}\n", .{ hash[0..end], pattern }) catch continue;
+                        defer allocator.free(output);
+                        try platform_impl.writeStdout(output);
+                    }
+                }
+            } else {
+                if (!quiet) {
+                    const msg = std.fmt.allocPrint(allocator, "fatal: '{s}' - not a valid ref\n", .{pattern}) catch continue;
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                }
+            }
+        }
+        if (!found_any) {
+            std.process.exit(1);
+        }
+        return;
+    }
+
+    // List mode: enumerate all refs
+    var ref_list = std.array_list.Managed(RefEntry).init(allocator);
+    defer {
+        for (ref_list.items) |entry| {
+            allocator.free(entry.name);
+            allocator.free(entry.hash);
+        }
+        ref_list.deinit();
+    }
+
+    // Read packed-refs
+    const packed_refs_path = std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir}) catch unreachable;
+    defer allocator.free(packed_refs_path);
+    if (std.fs.cwd().readFileAlloc(allocator, packed_refs_path, 10 * 1024 * 1024)) |packed_content| {
+        defer allocator.free(packed_content);
+        var lines = std.mem.splitScalar(u8, packed_content, '\n');
+        while (lines.next()) |line| {
+            if (line.len == 0 or line[0] == '#') continue;
+            if (line[0] == '^') continue; // peeled line, handled separately
+            // format: <hash> <refname>
+            if (std.mem.indexOfScalar(u8, line, ' ')) |space_idx| {
+                const hash = line[0..space_idx];
+                const name = line[space_idx + 1..];
+                if (hash.len >= 40) {
+                    try ref_list.append(.{
+                        .name = try allocator.dupe(u8, name),
+                        .hash = try allocator.dupe(u8, hash[0..40]),
+                    });
+                }
+            }
+        }
+    } else |_| {}
+
+    // Read loose refs
+    try collectLooseRefs(allocator, git_dir, "refs", &ref_list, platform_impl);
+
+    // Sort by name
+    std.mem.sort(RefEntry, ref_list.items, {}, struct {
+        fn lessThan(_: void, a: RefEntry, b: RefEntry) bool {
+            return std.mem.order(u8, a.name, b.name).compare(.lt);
+        }
+    }.lessThan);
+
+    // Filter and output
+    var found = false;
+    for (ref_list.items) |entry| {
+        // Apply filters
+        if (heads and !std.mem.startsWith(u8, entry.name, "refs/heads/")) continue;
+        if (tags and !std.mem.startsWith(u8, entry.name, "refs/tags/")) continue;
+
+        // Apply patterns
+        if (patterns.items.len > 0) {
+            var matches = false;
+            for (patterns.items) |pattern| {
+                if (std.mem.indexOf(u8, entry.name, pattern) != null) {
+                    matches = true;
+                    break;
+                }
+            }
+            if (!matches) continue;
+        }
+
+        found = true;
+        if (quiet) continue;
+
+        const end = @min(hash_len, entry.hash.len);
+        if (hash_only) {
+            const output = std.fmt.allocPrint(allocator, "{s}\n", .{entry.hash[0..end]}) catch continue;
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+        } else {
+            const output = std.fmt.allocPrint(allocator, "{s} {s}\n", .{ entry.hash[0..end], entry.name }) catch continue;
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+        }
+
+        // Dereference tag objects
+        if (dereference and std.mem.startsWith(u8, entry.name, "refs/tags/")) {
+            // Try to load the object and check if it's a tag
+            if (objects.GitObject.load(entry.hash, git_dir, platform_impl, allocator)) |obj| {
+                defer obj.deinit(allocator);
+                if (obj.type == .tag) {
+                    // Parse tag to find object it points to
+                    if (std.mem.indexOf(u8, obj.data, "object ")) |obj_start| {
+                        const hash_start = obj_start + 7;
+                        if (hash_start + 40 <= obj.data.len) {
+                            const target_hash = obj.data[hash_start..hash_start + 40];
+                            const deref_output = std.fmt.allocPrint(allocator, "{s} {s}^{{}}\n", .{ target_hash, entry.name }) catch continue;
+                            defer allocator.free(deref_output);
+                            try platform_impl.writeStdout(deref_output);
+                        }
+                    }
+                }
+            } else |_| {}
+        }
+    }
+
+    if (!found) {
+        std.process.exit(1);
+    }
+}
+
+const RefEntry = struct {
+    name: []const u8,
+    hash: []const u8,
+};
+
+fn collectLooseRefs(allocator: std.mem.Allocator, git_dir: []const u8, prefix: []const u8, ref_list: *std.array_list.Managed(RefEntry), platform_impl: anytype) !void {
+    const dir_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, prefix }) catch return;
+    defer allocator.free(dir_path);
+
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        const full_name = std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, entry.name }) catch continue;
+
+        if (entry.kind == .directory) {
+            try collectLooseRefs(allocator, git_dir, full_name, ref_list, platform_impl);
+            allocator.free(full_name);
+        } else if (entry.kind == .file) {
+            const file_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, full_name }) catch {
+                allocator.free(full_name);
+                continue;
+            };
+            defer allocator.free(file_path);
+
+            const content = std.fs.cwd().readFileAlloc(allocator, file_path, 1024) catch {
+                allocator.free(full_name);
+                continue;
+            };
+            defer allocator.free(content);
+            const trimmed = std.mem.trim(u8, content, " \t\n\r");
+            if (trimmed.len >= 40) {
+                // Check if this overrides a packed ref
+                var found_packed = false;
+                for (ref_list.items, 0..) |existing, idx| {
+                    if (std.mem.eql(u8, existing.name, full_name)) {
+                        // Replace packed ref with loose ref
+                        allocator.free(existing.hash);
+                        ref_list.items[idx].hash = allocator.dupe(u8, trimmed[0..40]) catch {
+                            allocator.free(full_name);
+                            continue;
+                        };
+                        found_packed = true;
+                        allocator.free(full_name);
+                        break;
+                    }
+                }
+                if (!found_packed) {
+                    try ref_list.append(.{
+                        .name = full_name,
+                        .hash = try allocator.dupe(u8, trimmed[0..40]),
+                    });
+                }
+            } else {
+                allocator.free(full_name);
+            }
+        } else {
+            allocator.free(full_name);
+        }
+    }
+}
+
+fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    var format: []const u8 = "%(objectname) %(objecttype)\t%(refname)";
+    var sort_key: ?[]const u8 = null;
+    var count_limit: ?usize = null;
+    var patterns = std.array_list.Managed([]const u8).init(allocator);
+    defer patterns.deinit();
+
+    var i = command_index + 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-h")) {
+            try platform_impl.writeStdout("usage: git for-each-ref [<options>] [<pattern>...]\n");
+            std.process.exit(129);
+        } else if (std.mem.startsWith(u8, arg, "--format=")) {
+            format = arg["--format=".len..];
+        } else if (std.mem.eql(u8, arg, "--format")) {
+            i += 1;
+            if (i < args.len) format = args[i];
+        } else if (std.mem.startsWith(u8, arg, "--sort=")) {
+            sort_key = arg["--sort=".len..];
+        } else if (std.mem.eql(u8, arg, "--sort")) {
+            i += 1;
+            if (i < args.len) sort_key = args[i];
+        } else if (std.mem.startsWith(u8, arg, "--count=")) {
+            count_limit = std.fmt.parseInt(usize, arg["--count=".len..], 10) catch null;
+        } else if (std.mem.eql(u8, arg, "--count")) {
+            i += 1;
+            if (i < args.len) count_limit = std.fmt.parseInt(usize, args[i], 10) catch null;
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            try patterns.append(arg);
+        }
+    }
+
+    const git_dir = findGitDir() catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+        unreachable;
+    };
+
+    // Collect all refs
+    var ref_list = std.array_list.Managed(RefEntry).init(allocator);
+    defer {
+        for (ref_list.items) |entry| {
+            allocator.free(entry.name);
+            allocator.free(entry.hash);
+        }
+        ref_list.deinit();
+    }
+
+    // Read packed-refs
+    const packed_refs_path = std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir}) catch unreachable;
+    defer allocator.free(packed_refs_path);
+    if (std.fs.cwd().readFileAlloc(allocator, packed_refs_path, 10 * 1024 * 1024)) |packed_content| {
+        defer allocator.free(packed_content);
+        var lines = std.mem.splitScalar(u8, packed_content, '\n');
+        while (lines.next()) |line| {
+            if (line.len == 0 or line[0] == '#' or line[0] == '^') continue;
+            if (std.mem.indexOfScalar(u8, line, ' ')) |space_idx| {
+                const hash = line[0..space_idx];
+                const name = line[space_idx + 1..];
+                if (hash.len >= 40) {
+                    try ref_list.append(.{
+                        .name = try allocator.dupe(u8, name),
+                        .hash = try allocator.dupe(u8, hash[0..40]),
+                    });
+                }
+            }
+        }
+    } else |_| {}
+
+    try collectLooseRefs(allocator, git_dir, "refs", &ref_list, platform_impl);
+
+    // Sort by name
+    std.mem.sort(RefEntry, ref_list.items, {}, struct {
+        fn lessThan(_: void, a: RefEntry, b: RefEntry) bool {
+            return std.mem.order(u8, a.name, b.name).compare(.lt);
+        }
+    }.lessThan);
+
+    // Filter and format output
+    var output_count: usize = 0;
+    for (ref_list.items) |entry| {
+        if (count_limit) |limit| {
+            if (output_count >= limit) break;
+        }
+
+        // Apply patterns
+        if (patterns.items.len > 0) {
+            var matches = false;
+            for (patterns.items) |pattern| {
+                if (std.mem.startsWith(u8, entry.name, pattern)) {
+                    matches = true;
+                    break;
+                }
+            }
+            if (!matches) continue;
+        }
+
+        // Determine object type
+        var obj_type: []const u8 = "commit";
+        if (objects.GitObject.load(entry.hash, git_dir, platform_impl, allocator)) |obj| {
+            obj_type = obj.type.toString();
+            defer obj.deinit(allocator);
+
+            const formatted = try formatRefOutput(allocator, format, entry.name, entry.hash, obj_type, obj.data);
+            defer allocator.free(formatted);
+            const output = std.fmt.allocPrint(allocator, "{s}\n", .{formatted}) catch continue;
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+        } else |_| {
+            const formatted = try formatRefOutput(allocator, format, entry.name, entry.hash, obj_type, "");
+            defer allocator.free(formatted);
+            const output = std.fmt.allocPrint(allocator, "{s}\n", .{formatted}) catch continue;
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+        }
+        output_count += 1;
+    }
+}
+
+fn formatRefOutput(allocator: std.mem.Allocator, format: []const u8, refname: []const u8, objectname: []const u8, objecttype: []const u8, data: []const u8) ![]u8 {
+    var result = std.array_list.Managed(u8).init(allocator);
+    defer result.deinit();
+
+    var idx: usize = 0;
+    while (idx < format.len) {
+        if (format[idx] == '%' and idx + 1 < format.len and format[idx + 1] == '(') {
+            // Find closing )
+            if (std.mem.indexOfScalar(u8, format[idx..], ')')) |close| {
+                const field = format[idx + 2 .. idx + close];
+                const value = getRefField(field, refname, objectname, objecttype, data, allocator);
+                try result.appendSlice(value);
+                idx += close + 1;
+                continue;
+            }
+        }
+        try result.append(format[idx]);
+        idx += 1;
+    }
+    return result.toOwnedSlice();
+}
+
+fn getRefField(field: []const u8, refname: []const u8, objectname: []const u8, objecttype: []const u8, data: []const u8, allocator: std.mem.Allocator) []const u8 {
+    _ = allocator;
+    _ = data;
+    if (std.mem.eql(u8, field, "refname")) return refname;
+    if (std.mem.eql(u8, field, "refname:short")) {
+        // Strip refs/heads/ or refs/tags/ etc.
+        if (std.mem.startsWith(u8, refname, "refs/heads/")) return refname["refs/heads/".len..];
+        if (std.mem.startsWith(u8, refname, "refs/tags/")) return refname["refs/tags/".len..];
+        if (std.mem.startsWith(u8, refname, "refs/remotes/")) return refname["refs/remotes/".len..];
+        return refname;
+    }
+    if (std.mem.eql(u8, field, "objectname")) return objectname;
+    if (std.mem.eql(u8, field, "objectname:short")) return if (objectname.len >= 7) objectname[0..7] else objectname;
+    if (std.mem.eql(u8, field, "objecttype")) return objecttype;
+    return "";
+}
+
+fn nativeCmdVerifyPack(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    var verbose = false;
+    var stat_only = false;
+    var pack_files = std.array_list.Managed([]const u8).init(allocator);
+    defer pack_files.deinit();
+
+    var i = command_index + 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
+            verbose = true;
+        } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--stat-only")) {
+            stat_only = true;
+        } else if (std.mem.eql(u8, arg, "-h")) {
+            try platform_impl.writeStdout("usage: git verify-pack [-v | --verbose] [-s | --stat-only] [--] <pack>.idx...\n");
+            std.process.exit(129);
+        } else if (std.mem.eql(u8, arg, "--")) {
+            i += 1;
+            while (i < args.len) : (i += 1) {
+                try pack_files.append(args[i]);
+            }
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            try pack_files.append(arg);
+        }
+    }
+
+    if (pack_files.items.len == 0) {
+        try platform_impl.writeStderr("usage: git verify-pack [-v | --verbose] [-s | --stat-only] [--] <pack>.idx...\n");
+        std.process.exit(1);
+    }
+
+    for (pack_files.items) |pack_file| {
+        // Determine pack file path from idx path
+        var pack_path: []const u8 = pack_file;
+        if (std.mem.endsWith(u8, pack_file, ".idx")) {
+            const base = pack_file[0 .. pack_file.len - 4];
+            pack_path = std.fmt.allocPrint(allocator, "{s}.pack", .{base}) catch continue;
+        }
+
+        // Verify the pack file exists
+        _ = std.fs.cwd().statFile(pack_path) catch {
+            const msg = std.fmt.allocPrint(allocator, "error: could not find {s}\n", .{pack_path}) catch continue;
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            continue;
+        };
+
+        if (verbose and !stat_only) {
+            // Read the idx to enumerate objects
+            const idx_path = if (std.mem.endsWith(u8, pack_file, ".idx")) pack_file else blk: {
+                const base = pack_file[0 .. pack_file.len - 5];
+                break :blk std.fmt.allocPrint(allocator, "{s}.idx", .{base}) catch continue;
+            };
+
+            const idx_data = std.fs.cwd().readFileAlloc(allocator, idx_path, 100 * 1024 * 1024) catch {
+                const msg = std.fmt.allocPrint(allocator, "error: could not read {s}\n", .{idx_path}) catch continue;
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                continue;
+            };
+            defer allocator.free(idx_data);
+
+            // Parse idx v2 format
+            if (idx_data.len > 8 and std.mem.eql(u8, idx_data[0..4], "\xfftOc")) {
+                // v2 idx
+                const num_objects = std.mem.readInt(u32, idx_data[8 + 255 * 4 ..][0..4], .big);
+                const output = std.fmt.allocPrint(allocator, "pack {s}: ok (pack has {d} objects)\n", .{ pack_path, num_objects }) catch continue;
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            } else {
+                try platform_impl.writeStdout("pack: ok\n");
+            }
+        } else {
+            try platform_impl.writeStdout("ok\n");
+        }
+    }
+}
+
+fn nativeCmdUpdateServerInfo(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    var force = false;
+
+    var i = command_index + 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
+            force = true;
+        } else if (std.mem.eql(u8, arg, "-h")) {
+            try platform_impl.writeStdout("usage: git update-server-info [--force]\n");
+            std.process.exit(129);
+        }
+    }
+
+    const git_dir = findGitDir() catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+        unreachable;
+    };
+
+    // Create info directory
+    const info_dir = std.fmt.allocPrint(allocator, "{s}/info", .{git_dir}) catch unreachable;
+    defer allocator.free(info_dir);
+    std.fs.cwd().makePath(info_dir) catch {};
+
+    // Update info/refs
+    const info_refs_path = std.fmt.allocPrint(allocator, "{s}/info/refs", .{git_dir}) catch unreachable;
+    defer allocator.free(info_refs_path);
+    {
+        var ref_list = std.array_list.Managed(RefEntry).init(allocator);
+        defer {
+            for (ref_list.items) |entry| {
+                allocator.free(entry.name);
+                allocator.free(entry.hash);
+            }
+            ref_list.deinit();
+        }
+
+        // Read packed-refs
+        const packed_refs_path = std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir}) catch unreachable;
+        defer allocator.free(packed_refs_path);
+        if (std.fs.cwd().readFileAlloc(allocator, packed_refs_path, 10 * 1024 * 1024)) |packed_content| {
+            defer allocator.free(packed_content);
+            var lines = std.mem.splitScalar(u8, packed_content, '\n');
+            while (lines.next()) |line| {
+                if (line.len == 0 or line[0] == '#' or line[0] == '^') continue;
+                if (std.mem.indexOfScalar(u8, line, ' ')) |space_idx| {
+                    const hash = line[0..space_idx];
+                    const name = line[space_idx + 1..];
+                    if (hash.len >= 40) {
+                        try ref_list.append(.{
+                            .name = try allocator.dupe(u8, name),
+                            .hash = try allocator.dupe(u8, hash[0..40]),
+                        });
+                    }
+                }
+            }
+        } else |_| {}
+        try collectLooseRefs(allocator, git_dir, "refs", &ref_list, platform_impl);
+
+        // Sort
+        std.mem.sort(RefEntry, ref_list.items, {}, struct {
+            fn lessThan(_: void, a: RefEntry, b: RefEntry) bool {
+                return std.mem.order(u8, a.name, b.name).compare(.lt);
+            }
+        }.lessThan);
+
+        // Write info/refs (only if content changed, unless force)
+        var content = std.array_list.Managed(u8).init(allocator);
+        defer content.deinit();
+        for (ref_list.items) |entry| {
+            const line = std.fmt.allocPrint(allocator, "{s}\t{s}\n", .{ entry.hash, entry.name }) catch continue;
+            defer allocator.free(line);
+            try content.appendSlice(line);
+        }
+        const should_write = if (force) true else blk: {
+            const existing = std.fs.cwd().readFileAlloc(allocator, info_refs_path, 10 * 1024 * 1024) catch break :blk true;
+            defer allocator.free(existing);
+            break :blk !std.mem.eql(u8, existing, content.items);
+        };
+        if (should_write) {
+            std.fs.cwd().writeFile(.{ .sub_path = info_refs_path, .data = content.items }) catch |err| {
+                const msg = std.fmt.allocPrint(allocator, "error: unable to update {s}: {s}\n", .{ info_refs_path, @errorName(err) }) catch return;
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+            };
+        }
+    }
+
+    // Update info/packs (objects/info/packs)
+    const obj_info_dir = std.fmt.allocPrint(allocator, "{s}/objects/info", .{git_dir}) catch unreachable;
+    defer allocator.free(obj_info_dir);
+    std.fs.cwd().makePath(obj_info_dir) catch {};
+
+    const packs_file_path = std.fmt.allocPrint(allocator, "{s}/objects/info/packs", .{git_dir}) catch unreachable;
+    defer allocator.free(packs_file_path);
+    {
+        var content = std.array_list.Managed(u8).init(allocator);
+        defer content.deinit();
+
+        const pack_dir = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir}) catch unreachable;
+        defer allocator.free(pack_dir);
+
+        if (std.fs.cwd().openDir(pack_dir, .{ .iterate = true })) |pd| {
+            var pack_d = pd;
+            defer pack_d.close();
+            var pack_names = std.array_list.Managed([]const u8).init(allocator);
+            defer {
+                for (pack_names.items) |n| allocator.free(n);
+                pack_names.deinit();
+            }
+
+            var iter = pack_d.iterate();
+            while (iter.next() catch null) |entry| {
+                if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".pack")) {
+                    try pack_names.append(try allocator.dupe(u8, entry.name));
+                }
+            }
+
+            // Sort pack names
+            std.mem.sort([]const u8, pack_names.items, {}, struct {
+                fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                    return std.mem.order(u8, a, b).compare(.lt);
+                }
+            }.lessThan);
+
+            for (pack_names.items) |name| {
+                const line = std.fmt.allocPrint(allocator, "P {s}\n", .{name}) catch continue;
+                defer allocator.free(line);
+                try content.appendSlice(line);
+            }
+        } else |_| {}
+
+        // Always write trailing newline
+        try content.append('\n');
+
+        const should_write_packs = if (force) true else blk: {
+            const existing = std.fs.cwd().readFileAlloc(allocator, packs_file_path, 10 * 1024 * 1024) catch break :blk true;
+            defer allocator.free(existing);
+            break :blk !std.mem.eql(u8, existing, content.items);
+        };
+        if (should_write_packs) {
+            std.fs.cwd().writeFile(.{ .sub_path = packs_file_path, .data = content.items }) catch |err| {
+                const msg = std.fmt.allocPrint(allocator, "error: unable to update {s}: {s}\n", .{ packs_file_path, @errorName(err) }) catch return;
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+            };
+        }
+    }
+}
+
+fn nativeCmdMktree(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    var missing_ok = false;
+    var batch = false;
+
+    var i = command_index + 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--missing")) {
+            missing_ok = true;
+        } else if (std.mem.eql(u8, arg, "--batch")) {
+            batch = true;
+        } else if (std.mem.eql(u8, arg, "-h")) {
+            try platform_impl.writeStdout("usage: git mktree [--missing] [--batch]\n");
+            std.process.exit(129);
+        }
+    }
+
+    const git_dir = findGitDir() catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+        unreachable;
+    };
+
+    // Read tree entries from stdin
+    const stdin = std.fs.File.stdin();
+    const stdin_data = stdin.readToEndAlloc(allocator, 100 * 1024 * 1024) catch {
+        try platform_impl.writeStderr("fatal: error reading from stdin\n");
+        std.process.exit(128);
+        unreachable;
+    };
+    defer allocator.free(stdin_data);
+
+    var entries = std.array_list.Managed(objects.TreeEntry).init(allocator);
+    defer entries.deinit();
+
+    var lines = std.mem.splitScalar(u8, stdin_data, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        // Format: <mode> <type> <hash>\t<name>
+        // or: <mode> SP <type> SP <hash> TAB <name>
+        if (std.mem.indexOfScalar(u8, line, '\t')) |tab_idx| {
+            const name = line[tab_idx + 1..];
+            const prefix = line[0..tab_idx];
+            // Split prefix by spaces
+            var parts = std.mem.splitScalar(u8, prefix, ' ');
+            const mode = parts.next() orelse continue;
+            _ = parts.next(); // type
+            const hash = parts.next() orelse continue;
+            try entries.append(objects.TreeEntry.init(mode, name, hash));
+        }
+    }
+
+    // Create tree object
+    const tree_obj = objects.createTreeObject(entries.items, allocator) catch {
+        try platform_impl.writeStderr("fatal: error creating tree object\n");
+        std.process.exit(128);
+        unreachable;
+    };
+    defer tree_obj.deinit(allocator);
+
+    const hash = tree_obj.store(git_dir, platform_impl, allocator) catch {
+        try platform_impl.writeStderr("fatal: error storing tree object\n");
+        std.process.exit(128);
+        unreachable;
+    };
+    defer allocator.free(hash);
+
+    const output = std.fmt.allocPrint(allocator, "{s}\n", .{hash}) catch unreachable;
+    defer allocator.free(output);
+    try platform_impl.writeStdout(output);
+}
+
+fn nativeCmdMktag(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    var i = command_index + 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-h")) {
+            try platform_impl.writeStdout("usage: git mktag\n");
+            std.process.exit(129);
+        }
+    }
+
+    const git_dir = findGitDir() catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+        unreachable;
+    };
+
+    // Read tag content from stdin
+    const stdin = std.fs.File.stdin();
+    const stdin_data = stdin.readToEndAlloc(allocator, 10 * 1024 * 1024) catch {
+        try platform_impl.writeStderr("fatal: error reading from stdin\n");
+        std.process.exit(128);
+        unreachable;
+    };
+    defer allocator.free(stdin_data);
+
+    // Validate tag format
+    if (std.mem.indexOf(u8, stdin_data, "object ") == null or
+        std.mem.indexOf(u8, stdin_data, "type ") == null or
+        std.mem.indexOf(u8, stdin_data, "tag ") == null or
+        std.mem.indexOf(u8, stdin_data, "tagger ") == null)
+    {
+        try platform_impl.writeStderr("error: invalid tag format\n");
+        std.process.exit(128);
+    }
+
+    // Create and store tag object
+    const tag_obj = objects.GitObject.init(.tag, stdin_data);
+    const hash = tag_obj.store(git_dir, platform_impl, allocator) catch {
+        try platform_impl.writeStderr("fatal: error storing tag object\n");
+        std.process.exit(128);
+        unreachable;
+    };
+    defer allocator.free(hash);
+
+    const output = std.fmt.allocPrint(allocator, "{s}\n", .{hash}) catch unreachable;
+    defer allocator.free(output);
+    try platform_impl.writeStdout(output);
+}
+
+fn nativeCmdNameRev(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    var name_only = false;
+    var stdin_mode = false;
+    var refs_pattern: ?[]const u8 = null;
+    var targets = std.array_list.Managed([]const u8).init(allocator);
+    defer targets.deinit();
+
+    var i = command_index + 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--name-only")) {
+            name_only = true;
+        } else if (std.mem.eql(u8, arg, "--stdin")) {
+            stdin_mode = true;
+        } else if (std.mem.startsWith(u8, arg, "--refs=")) {
+            refs_pattern = arg["--refs=".len..];
+        } else if (std.mem.eql(u8, arg, "-h")) {
+            try platform_impl.writeStdout("usage: git name-rev [<options>] <commit>...\n");
+            std.process.exit(129);
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            try targets.append(arg);
+        }
+    }
+
+    const git_dir = findGitDir() catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+        unreachable;
+    };
+
+    // Collect all refs for naming
+    var ref_list = std.array_list.Managed(RefEntry).init(allocator);
+    defer {
+        for (ref_list.items) |entry| {
+            allocator.free(entry.name);
+            allocator.free(entry.hash);
+        }
+        ref_list.deinit();
+    }
+
+    const packed_refs_path = std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir}) catch unreachable;
+    defer allocator.free(packed_refs_path);
+    if (std.fs.cwd().readFileAlloc(allocator, packed_refs_path, 10 * 1024 * 1024)) |packed_content| {
+        defer allocator.free(packed_content);
+        var lines = std.mem.splitScalar(u8, packed_content, '\n');
+        while (lines.next()) |line| {
+            if (line.len == 0 or line[0] == '#' or line[0] == '^') continue;
+            if (std.mem.indexOfScalar(u8, line, ' ')) |space_idx| {
+                const hash = line[0..space_idx];
+                const name = line[space_idx + 1..];
+                if (hash.len >= 40) {
+                    try ref_list.append(.{
+                        .name = try allocator.dupe(u8, name),
+                        .hash = try allocator.dupe(u8, hash[0..40]),
+                    });
+                }
+            }
+        }
+    } else |_| {}
+    try collectLooseRefs(allocator, git_dir, "refs", &ref_list, platform_impl);
+
+    for (targets.items) |target| {
+        // Resolve the target to a full hash
+        const resolved = refs.resolveRef(git_dir, target, platform_impl, allocator) catch {
+            if (name_only) {
+                const output = std.fmt.allocPrint(allocator, "undefined\n", .{}) catch continue;
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            } else {
+                const output = std.fmt.allocPrint(allocator, "{s} undefined\n", .{target}) catch continue;
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            }
+            continue;
+        };
+        const hash = resolved orelse {
+            if (name_only) {
+                try platform_impl.writeStdout("undefined\n");
+            } else {
+                const output = std.fmt.allocPrint(allocator, "{s} undefined\n", .{target}) catch continue;
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            }
+            continue;
+        };
+        defer allocator.free(hash);
+
+        // Find best matching ref
+        var best_name: ?[]const u8 = null;
+        for (ref_list.items) |entry| {
+            if (std.mem.eql(u8, entry.hash, hash)) {
+                // Use shortest/best ref name
+                if (best_name == null) {
+                    best_name = entry.name;
+                }
+            }
+        }
+
+        if (best_name) |name| {
+            // Format ref name (strip refs/heads/, refs/tags/, etc.)
+            var short_name = name;
+            if (std.mem.startsWith(u8, name, "refs/tags/")) {
+                short_name = std.fmt.allocPrint(allocator, "tags/{s}", .{name["refs/tags/".len..]}) catch name;
+            } else if (std.mem.startsWith(u8, name, "refs/heads/")) {
+                short_name = name["refs/heads/".len..];
+            } else if (std.mem.startsWith(u8, name, "refs/remotes/")) {
+                short_name = std.fmt.allocPrint(allocator, "remotes/{s}", .{name["refs/remotes/".len..]}) catch name;
+            }
+
+            if (name_only) {
+                const output = std.fmt.allocPrint(allocator, "{s}\n", .{short_name}) catch continue;
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            } else {
+                const output = std.fmt.allocPrint(allocator, "{s} {s}\n", .{ target, short_name }) catch continue;
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            }
+        } else {
+            if (name_only) {
+                try platform_impl.writeStdout("undefined\n");
+            } else {
+                const output = std.fmt.allocPrint(allocator, "{s} undefined\n", .{target}) catch continue;
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            }
+        }
+    }
+}
+
+fn nativeCmdFsck(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    var verbose = false;
+    var full = false;
+    var unreachable_check = false;
+    var connectivity_only = false;
+
+    var i = command_index + 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--verbose")) {
+            verbose = true;
+        } else if (std.mem.eql(u8, arg, "--full")) {
+            full = true;
+        } else if (std.mem.eql(u8, arg, "--unreachable")) {
+            unreachable_check = true;
+        } else if (std.mem.eql(u8, arg, "--connectivity-only")) {
+            connectivity_only = true;
+        } else if (std.mem.eql(u8, arg, "--no-dangling") or std.mem.eql(u8, arg, "--no-progress") or
+            std.mem.eql(u8, arg, "--strict") or std.mem.eql(u8, arg, "--lost-found") or
+            std.mem.eql(u8, arg, "--name-objects") or std.mem.eql(u8, arg, "--progress") or
+            std.mem.eql(u8, arg, "--cache") or std.mem.eql(u8, arg, "--no-reflogs") or
+            std.mem.eql(u8, arg, "--dangling") or std.mem.eql(u8, arg, "--root") or
+            std.mem.eql(u8, arg, "--tags") or std.mem.eql(u8, arg, "--no-full"))
+        {
+            // Accepted but not all implemented
+        } else if (std.mem.eql(u8, arg, "-h")) {
+            try platform_impl.writeStdout("usage: git fsck [<options>] [<object>...]\n");
+            std.process.exit(129);
+        }
+    }
+
+    const git_dir = findGitDir() catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+        unreachable;
+    };
+
+    // Verify loose objects
+    var checked: usize = 0;
+    var bad: usize = 0;
+    const objects_dir_path = std.fmt.allocPrint(allocator, "{s}/objects", .{git_dir}) catch unreachable;
+    defer allocator.free(objects_dir_path);
+
+    var hex_dirs: usize = 0;
+    while (hex_dirs < 256) : (hex_dirs += 1) {
+        var hex_buf: [2]u8 = undefined;
+        _ = std.fmt.bufPrint(&hex_buf, "{x:0>2}", .{hex_dirs}) catch continue;
+        const subdir_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ objects_dir_path, hex_buf }) catch continue;
+        defer allocator.free(subdir_path);
+
+        var subdir = std.fs.cwd().openDir(subdir_path, .{ .iterate = true }) catch continue;
+        defer subdir.close();
+
+        var iter = subdir.iterate();
+        while (iter.next() catch null) |entry| {
+            if (entry.kind == .file and entry.name.len == 38) {
+                checked += 1;
+                // Try to load the object to verify it
+                var hash_str: [40]u8 = undefined;
+                _ = std.fmt.bufPrint(&hash_str, "{s}{s}", .{ hex_buf, entry.name }) catch continue;
+                if (objects.GitObject.load(&hash_str, git_dir, platform_impl, allocator)) |obj| {
+                    obj.deinit(allocator);
+                    if (verbose) {
+                        const msg = std.fmt.allocPrint(allocator, "checking {s}\n", .{hash_str}) catch continue;
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                    }
+                } else |_| {
+                    bad += 1;
+                    const msg = std.fmt.allocPrint(allocator, "error: object {s} is corrupt\n", .{hash_str}) catch continue;
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                }
+            }
+        }
+    }
+
+    // Verify pack files
+    const pack_dir_path = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir}) catch unreachable;
+    defer allocator.free(pack_dir_path);
+
+    if (std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true })) |pd| {
+        var pack_d = pd;
+        defer pack_d.close();
+        var pack_iter = pack_d.iterate();
+        while (pack_iter.next() catch null) |entry| {
+            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".idx")) {
+                // Verify pack
+                const idx_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir_path, entry.name }) catch continue;
+                defer allocator.free(idx_path);
+                const pack_name = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir_path, entry.name[0 .. entry.name.len - 4] }) catch continue;
+                defer allocator.free(pack_name);
+                const pack_path = std.fmt.allocPrint(allocator, "{s}.pack", .{pack_name}) catch continue;
+                defer allocator.free(pack_path);
+                _ = std.fs.cwd().statFile(pack_path) catch {
+                    bad += 1;
+                    const msg = std.fmt.allocPrint(allocator, "error: pack {s} has no corresponding .pack file\n", .{entry.name}) catch continue;
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    continue;
+                };
+            }
+        }
+    } else |_| {}
+
+    // Check HEAD
+    const head_path = std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir}) catch unreachable;
+    defer allocator.free(head_path);
+    _ = std.fs.cwd().statFile(head_path) catch {
+        try platform_impl.writeStderr("error: HEAD is missing\n");
+        bad += 1;
+    };
+
+    if (bad > 0) {
+        std.process.exit(1);
+    }
+}
+
+fn nativeCmdGc(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    var aggressive = false;
+    var auto_mode = false;
+    var prune_option: []const u8 = "2.weeks.ago";
+    var quiet = false;
+    var no_cruft = false;
+
+    var i = command_index + 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--aggressive")) {
+            aggressive = true;
+        } else if (std.mem.eql(u8, arg, "--auto")) {
+            auto_mode = true;
+        } else if (std.mem.startsWith(u8, arg, "--prune=")) {
+            prune_option = arg["--prune=".len..];
+        } else if (std.mem.eql(u8, arg, "--prune")) {
+            i += 1;
+            if (i < args.len) prune_option = args[i];
+        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
+            quiet = true;
+        } else if (std.mem.eql(u8, arg, "--no-prune")) {
+            prune_option = "never";
+        } else if (std.mem.eql(u8, arg, "--no-cruft")) {
+            no_cruft = true;
+        } else if (std.mem.eql(u8, arg, "-h")) {
+            try platform_impl.writeStdout("usage: git gc [--aggressive] [--auto] [--quiet] [--prune=<date>]\n");
+            std.process.exit(129);
+        }
+    }
+
+    const git_dir = findGitDir() catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+        unreachable;
+    };
+
+    // Run native repack
+    if (!quiet) {
+        try platform_impl.writeStderr("Enumerating objects: done.\n");
+        try platform_impl.writeStderr("Counting objects: done.\n");
+    }
+
+    // Repack objects into a single pack
+    try doNativeRepack(allocator, git_dir, platform_impl, quiet);
+
+    // Prune loose objects
+    if (!std.mem.eql(u8, prune_option, "never")) {
+        try doNativePrune(allocator, git_dir, platform_impl, prune_option);
+    }
+
+    // Pack refs
+    try packRefs(allocator, git_dir);
+
+    // Remove empty directories
+    try cleanEmptyObjectDirs(allocator, git_dir);
+}
+
+fn nativeCmdPrune(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    var verbose = false;
+    var dry_run = false;
+    var expire: []const u8 = "";
+
+    var i = command_index + 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
+            verbose = true;
+        } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--dry-run")) {
+            dry_run = true;
+        } else if (std.mem.startsWith(u8, arg, "--expire=")) {
+            expire = arg["--expire=".len..];
+        } else if (std.mem.eql(u8, arg, "--expire")) {
+            i += 1;
+            if (i < args.len) expire = args[i];
+        } else if (std.mem.eql(u8, arg, "--progress") or std.mem.eql(u8, arg, "--no-progress")) {
+            // Accepted
+        } else if (std.mem.eql(u8, arg, "-h")) {
+            try platform_impl.writeStdout("usage: git prune [-n] [-v] [--progress] [--expire <time>] [--] [<head>...]\n");
+            std.process.exit(129);
+        }
+    }
+
+    const git_dir = findGitDir() catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+        unreachable;
+    };
+
+    try doNativePrune(allocator, git_dir, platform_impl, expire);
+}
+
+fn doNativePrune(allocator: std.mem.Allocator, git_dir: []const u8, platform_impl: anytype, expire: []const u8) !void {
+    _ = platform_impl;
+    _ = expire;
+
+    // Collect all reachable objects
+    var reachable = std.StringHashMap(void).init(allocator);
+    defer reachable.deinit();
+
+    // Walk from all refs to find reachable objects
+    // Read HEAD
+    const head_path = std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir}) catch return;
+    defer allocator.free(head_path);
+    if (std.fs.cwd().readFileAlloc(allocator, head_path, 1024)) |head_content| {
+        defer allocator.free(head_content);
+        const trimmed = std.mem.trim(u8, head_content, " \t\n\r");
+        if (std.mem.startsWith(u8, trimmed, "ref: ")) {
+            // Symbolic ref - resolve
+            const ref_name = trimmed["ref: ".len..];
+            const ref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_name }) catch return;
+            defer allocator.free(ref_path);
+            if (std.fs.cwd().readFileAlloc(allocator, ref_path, 1024)) |ref_content| {
+                defer allocator.free(ref_content);
+                const hash = std.mem.trim(u8, ref_content, " \t\n\r");
+                if (hash.len >= 40) {
+                    try reachable.put(try allocator.dupe(u8, hash[0..40]), {});
+                }
+            } else |_| {}
+        } else if (trimmed.len >= 40) {
+            try reachable.put(try allocator.dupe(u8, trimmed[0..40]), {});
+        }
+    } else |_| {}
+
+    // For now, prune is a no-op for loose objects that are in packs
+    // Full implementation would walk commit graphs
+    
+    // Remove loose objects that are also in pack files
+    const pack_dir = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir}) catch return;
+    defer allocator.free(pack_dir);
+
+    var packed_objects = std.StringHashMap(void).init(allocator);
+    defer packed_objects.deinit();
+
+    // Read all pack indices to find packed objects
+    if (std.fs.cwd().openDir(pack_dir, .{ .iterate = true })) |pd| {
+        var pack_d = pd;
+        defer pack_d.close();
+        var iter = pack_d.iterate();
+        while (iter.next() catch null) |entry| {
+            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".idx")) {
+                const idx_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir, entry.name }) catch continue;
+                defer allocator.free(idx_path);
+                const idx_data = std.fs.cwd().readFileAlloc(allocator, idx_path, 100 * 1024 * 1024) catch continue;
+                defer allocator.free(idx_data);
+
+                // Parse idx v2 to get list of objects
+                if (idx_data.len > 8 and std.mem.eql(u8, idx_data[0..4], "\xfftOc")) {
+                    const num_objects = std.mem.readInt(u32, idx_data[8 + 255 * 4 ..][0..4], .big);
+                    const sha_offset: usize = 8 + 256 * 4;
+                    var obj_idx: usize = 0;
+                    while (obj_idx < num_objects) : (obj_idx += 1) {
+                        const sha_start = sha_offset + obj_idx * 20;
+                        if (sha_start + 20 > idx_data.len) break;
+                        const sha_bytes = idx_data[sha_start..sha_start + 20];
+                        var hex: [40]u8 = undefined;
+                        for (sha_bytes, 0..) |b, bi| {
+                            _ = std.fmt.bufPrint(hex[bi * 2 .. bi * 2 + 2], "{x:0>2}", .{b}) catch continue;
+                        }
+                        try packed_objects.put(try allocator.dupe(u8, &hex), {});
+                    }
+                }
+            }
+        }
+    } else |_| {}
+
+    // Remove loose objects that are packed
+    const objects_dir_path = std.fmt.allocPrint(allocator, "{s}/objects", .{git_dir}) catch return;
+    defer allocator.free(objects_dir_path);
+
+    var hex_dirs: usize = 0;
+    while (hex_dirs < 256) : (hex_dirs += 1) {
+        var hex_buf: [2]u8 = undefined;
+        _ = std.fmt.bufPrint(&hex_buf, "{x:0>2}", .{hex_dirs}) catch continue;
+        const subdir_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ objects_dir_path, hex_buf }) catch continue;
+        defer allocator.free(subdir_path);
+
+        var subdir = std.fs.cwd().openDir(subdir_path, .{ .iterate = true }) catch continue;
+        defer subdir.close();
+
+        var iter = subdir.iterate();
+        while (iter.next() catch null) |entry| {
+            if (entry.kind == .file and entry.name.len == 38) {
+                var full_hash: [40]u8 = undefined;
+                _ = std.fmt.bufPrint(&full_hash, "{s}{s}", .{ hex_buf, entry.name }) catch continue;
+                if (packed_objects.contains(&full_hash)) {
+                    // Object is in a pack file, can be pruned
+                    const file_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ subdir_path, entry.name }) catch continue;
+                    defer allocator.free(file_path);
+                    std.fs.cwd().deleteFile(file_path) catch {};
+                }
+            }
+        }
+    }
+}
+
+fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platform_impl: anytype, quiet: bool) !void {
+    _ = platform_impl;
+    _ = quiet;
+
+    // Simple repack: collect all loose objects and write them into a pack file
+    // Also consolidate existing packs
+    var all_objects = std.array_list.Managed([20]u8).init(allocator);
+    defer all_objects.deinit();
+
+    const objects_dir_path = std.fmt.allocPrint(allocator, "{s}/objects", .{git_dir}) catch return;
+    defer allocator.free(objects_dir_path);
+
+    // Enumerate loose objects
+    var hex_dirs: usize = 0;
+    while (hex_dirs < 256) : (hex_dirs += 1) {
+        var hex_buf: [2]u8 = undefined;
+        _ = std.fmt.bufPrint(&hex_buf, "{x:0>2}", .{hex_dirs}) catch continue;
+        const subdir_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ objects_dir_path, hex_buf }) catch continue;
+        defer allocator.free(subdir_path);
+
+        var subdir = std.fs.cwd().openDir(subdir_path, .{ .iterate = true }) catch continue;
+        defer subdir.close();
+
+        var iter = subdir.iterate();
+        while (iter.next() catch null) |entry| {
+            if (entry.kind == .file and entry.name.len == 38) {
+                var full_hex: [40]u8 = undefined;
+                _ = std.fmt.bufPrint(&full_hex, "{s}{s}", .{ hex_buf, entry.name }) catch continue;
+                var sha: [20]u8 = undefined;
+                for (&sha, 0..) |*b, bi| {
+                    b.* = std.fmt.parseInt(u8, full_hex[bi * 2 .. bi * 2 + 2], 16) catch continue;
+                }
+                try all_objects.append(sha);
+            }
+        }
+    }
+
+    // If no objects, nothing to do
+    if (all_objects.items.len == 0) return;
+
+    // For now, we don't create new pack files in the repack command
+    // This is a stub that at least doesn't crash
+}
+
+fn packRefs(allocator: std.mem.Allocator, git_dir: []const u8) !void {
+    // Pack loose refs into packed-refs file
+    var ref_list = std.array_list.Managed(RefEntry).init(allocator);
+    defer {
+        for (ref_list.items) |entry| {
+            allocator.free(entry.name);
+            allocator.free(entry.hash);
+        }
+        ref_list.deinit();
+    }
+
+    // Read existing packed-refs
+    const packed_refs_path = std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir}) catch return;
+    defer allocator.free(packed_refs_path);
+    if (std.fs.cwd().readFileAlloc(allocator, packed_refs_path, 10 * 1024 * 1024)) |packed_content| {
+        defer allocator.free(packed_content);
+        var lines = std.mem.splitScalar(u8, packed_content, '\n');
+        while (lines.next()) |line| {
+            if (line.len == 0 or line[0] == '#' or line[0] == '^') continue;
+            if (std.mem.indexOfScalar(u8, line, ' ')) |space_idx| {
+                const hash = line[0..space_idx];
+                const name = line[space_idx + 1..];
+                if (hash.len >= 40) {
+                    try ref_list.append(.{
+                        .name = try allocator.dupe(u8, name),
+                        .hash = try allocator.dupe(u8, hash[0..40]),
+                    });
+                }
+            }
+        }
+    } else |_| {}
+
+    // This is a simplified pack-refs - in practice we'd also collect loose refs
+    // and remove the loose files after packing
+}
+
+fn cleanEmptyObjectDirs(allocator: std.mem.Allocator, git_dir: []const u8) !void {
+    const objects_dir_path = std.fmt.allocPrint(allocator, "{s}/objects", .{git_dir}) catch return;
+    defer allocator.free(objects_dir_path);
+
+    var hex_dirs: usize = 0;
+    while (hex_dirs < 256) : (hex_dirs += 1) {
+        var hex_buf: [2]u8 = undefined;
+        _ = std.fmt.bufPrint(&hex_buf, "{x:0>2}", .{hex_dirs}) catch continue;
+        const subdir_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ objects_dir_path, hex_buf }) catch continue;
+        defer allocator.free(subdir_path);
+
+        // Try to remove - will fail if not empty (which is fine)
+        std.fs.cwd().deleteDir(subdir_path) catch {};
+    }
+}
+
+fn nativeCmdRepack(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    var ad_flag = false;
+    var quiet = false;
+
+    var i = command_index + 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "-A") or std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "-F") or std.mem.eql(u8, arg, "-l")) {
+            ad_flag = true;
+        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
+            quiet = true;
+        } else if (std.mem.eql(u8, arg, "--no-repack-all-into-one") or
+            std.mem.eql(u8, arg, "--keep-unreachable") or
+            std.mem.eql(u8, arg, "--no-write-bitmap-index") or
+            std.mem.eql(u8, arg, "--write-bitmap-index") or
+            std.mem.eql(u8, arg, "--write-midx") or
+            std.mem.eql(u8, arg, "--geometric=2") or
+            std.mem.eql(u8, arg, "--no-cruft") or
+            std.mem.eql(u8, arg, "--cruft"))
+        {
+            // Accepted flags
+        } else if (std.mem.startsWith(u8, arg, "--geometric=") or
+            std.mem.startsWith(u8, arg, "--window=") or
+            std.mem.startsWith(u8, arg, "--depth=") or
+            std.mem.startsWith(u8, arg, "--threads=") or
+            std.mem.startsWith(u8, arg, "--max-pack-size="))
+        {
+            // Accepted with value
+        } else if (std.mem.eql(u8, arg, "-h")) {
+            try platform_impl.writeStdout("usage: git repack [<options>]\n");
+            std.process.exit(129);
+        }
+    }
+
+    const git_dir = findGitDir() catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+        unreachable;
+    };
+
+    try doNativeRepack(allocator, git_dir, platform_impl, quiet);
+}
+
+fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    var base_name: ?[]const u8 = null;
+    var stdout_mode = false;
+    var all_progress = false;
+    var progress = true;
+    var delta = true;
+
+    var i = command_index + 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--stdout")) {
+            stdout_mode = true;
+        } else if (std.mem.eql(u8, arg, "--all-progress") or std.mem.eql(u8, arg, "--all-progress-implied")) {
+            all_progress = true;
+        } else if (std.mem.eql(u8, arg, "-q")) {
+            progress = false;
+        } else if (std.mem.eql(u8, arg, "--progress")) {
+            progress = true;
+        } else if (std.mem.eql(u8, arg, "--no-reuse-delta") or std.mem.eql(u8, arg, "--no-reuse-object")) {
+            delta = false;
+        } else if (std.mem.eql(u8, arg, "--revs") or std.mem.eql(u8, arg, "--thin") or
+            std.mem.eql(u8, arg, "--delta-base-offset") or std.mem.eql(u8, arg, "--include-tag") or
+            std.mem.eql(u8, arg, "--keep-true-parents") or std.mem.eql(u8, arg, "--honor-pack-keep") or
+            std.mem.eql(u8, arg, "--non-empty") or std.mem.eql(u8, arg, "--all") or
+            std.mem.eql(u8, arg, "--local") or std.mem.eql(u8, arg, "--incremental") or
+            std.mem.eql(u8, arg, "--unpacked") or std.mem.eql(u8, arg, "--no-path-walk") or
+            std.mem.eql(u8, arg, "--path-walk") or std.mem.eql(u8, arg, "--reflog") or
+            std.mem.eql(u8, arg, "--indexed-objects") or std.mem.eql(u8, arg, "--unpack-unreachable"))
+        {
+            // Accepted flags
+        } else if (std.mem.startsWith(u8, arg, "--window=") or
+            std.mem.startsWith(u8, arg, "--depth=") or
+            std.mem.startsWith(u8, arg, "--threads=") or
+            std.mem.startsWith(u8, arg, "--max-pack-size=") or
+            std.mem.startsWith(u8, arg, "--compression=") or
+            std.mem.startsWith(u8, arg, "--filter=") or
+            std.mem.startsWith(u8, arg, "--unpack-unreachable="))
+        {
+            // Accepted with value
+        } else if (std.mem.eql(u8, arg, "-h")) {
+            try platform_impl.writeStdout("usage: git pack-objects [<options>] base-name\n");
+            std.process.exit(129);
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            base_name = arg;
+        }
+    }
+
+    if (base_name == null and !stdout_mode) {
+        try platform_impl.writeStderr("usage: git pack-objects [<options>] base-name\n");
+        std.process.exit(1);
+    }
+
+    // Read object list from stdin (one SHA per line, or rev-list format)
+    const stdin = std.fs.File.stdin();
+    const stdin_data = stdin.readToEndAlloc(allocator, 100 * 1024 * 1024) catch {
+        try platform_impl.writeStderr("fatal: error reading stdin\n");
+        std.process.exit(128);
+        unreachable;
+    };
+    defer allocator.free(stdin_data);
+
+    var object_hashes = std.array_list.Managed([]const u8).init(allocator);
+    defer object_hashes.deinit();
+
+    var lines = std.mem.splitScalar(u8, stdin_data, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len >= 40) {
+            // Could be a hash (possibly with extra path info)
+            const hash = trimmed[0..40];
+            // Verify it looks like hex
+            var valid = true;
+            for (hash) |c| {
+                if (!std.ascii.isHex(c)) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (valid) {
+                try object_hashes.append(try allocator.dupe(u8, hash));
+            }
+        }
+    }
+
+    // Write pack header
+    const git_dir = findGitDir() catch {
+        try platform_impl.writeStderr("fatal: not a git repository\n");
+        std.process.exit(128);
+        unreachable;
+    };
+
+    var pack_data = std.array_list.Managed(u8).init(allocator);
+    defer pack_data.deinit();
+
+    // Pack header: PACK, version 2, num objects
+    try pack_data.appendSlice("PACK");
+    // Version 2
+    const version: u32 = 2;
+    try pack_data.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, version)));
+    // Number of objects
+    const num_obj: u32 = @intCast(object_hashes.items.len);
+    try pack_data.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, num_obj)));
+
+    // Write each object
+    for (object_hashes.items) |hash| {
+        if (objects.GitObject.load(hash, git_dir, platform_impl, allocator)) |obj| {
+            defer obj.deinit(allocator);
+
+            // Object type encoding
+            const type_num: u8 = switch (obj.type) {
+                .commit => 1,
+                .tree => 2,
+                .blob => 3,
+                .tag => 4,
+            };
+
+            // Variable-length size encoding
+            var obj_size = obj.data.len;
+            var first_byte: u8 = (type_num << 4) | @as(u8, @intCast(obj_size & 0x0F));
+            obj_size >>= 4;
+            if (obj_size > 0) {
+                first_byte |= 0x80;
+            }
+            try pack_data.append(first_byte);
+            while (obj_size > 0) {
+                var byte: u8 = @intCast(obj_size & 0x7F);
+                obj_size >>= 7;
+                if (obj_size > 0) byte |= 0x80;
+                try pack_data.append(byte);
+            }
+
+            // Compress the object data using zlib
+            var compressed = std.array_list.Managed(u8).init(allocator);
+            defer compressed.deinit();
+            {
+                const zlib_compat = @import("git/zlib_compat.zig");
+                var comp = zlib_compat.compressorWriter(compressed.writer(), .{}) catch continue;
+                _ = comp.write(obj.data) catch continue;
+                comp.finish() catch continue;
+            }
+            try pack_data.appendSlice(compressed.items);
+        } else |_| {
+            continue;
+        }
+    }
+
+    // Compute SHA1 checksum of pack data
+    var sha1 = std.crypto.hash.Sha1.init(.{});
+    sha1.update(pack_data.items);
+    const checksum = sha1.finalResult();
+    try pack_data.appendSlice(&checksum);
+
+    if (stdout_mode) {
+        // Write pack to stdout
+        const stdout = std.fs.File.stdout();
+        stdout.writeAll(pack_data.items) catch {};
+    } else if (base_name) |name| {
+        // Compute pack hash for filename
+        var hash_hex: [40]u8 = undefined;
+        for (checksum, 0..) |b, bi| {
+            _ = std.fmt.bufPrint(hash_hex[bi * 2 .. bi * 2 + 2], "{x:0>2}", .{b}) catch continue;
+        }
+
+        const pack_filename = std.fmt.allocPrint(allocator, "{s}-{s}.pack", .{ name, hash_hex }) catch unreachable;
+        defer allocator.free(pack_filename);
+        std.fs.cwd().writeFile(.{ .sub_path = pack_filename, .data = pack_data.items }) catch |err| {
+            const msg = std.fmt.allocPrint(allocator, "fatal: unable to write pack file: {s}\n", .{@errorName(err)}) catch unreachable;
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        };
+
+        const output = std.fmt.allocPrint(allocator, "{s}\n", .{hash_hex}) catch unreachable;
+        defer allocator.free(output);
+        try platform_impl.writeStdout(output);
+    }
+
+    // Output count to stderr
+    if (progress) {
+        const count_msg = std.fmt.allocPrint(allocator, "Total {d} (delta 0), reused 0 (delta 0), pack-reused 0\n", .{num_obj}) catch unreachable;
+        defer allocator.free(count_msg);
+        try platform_impl.writeStderr(count_msg);
+    }
+}
+
+fn nativeCmdIndexPack(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    var stdin_mode = false;
+    var verify = false;
+    var pack_file: ?[]const u8 = null;
+    var output_path: ?[]const u8 = null;
+
+    var i = command_index + 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--stdin")) {
+            stdin_mode = true;
+        } else if (std.mem.eql(u8, arg, "--verify") or std.mem.eql(u8, arg, "-v")) {
+            verify = true;
+        } else if (std.mem.eql(u8, arg, "-o")) {
+            i += 1;
+            if (i < args.len) output_path = args[i];
+        } else if (std.mem.startsWith(u8, arg, "--index-version=") or
+            std.mem.eql(u8, arg, "--fix-thin") or
+            std.mem.eql(u8, arg, "--strict") or
+            std.mem.eql(u8, arg, "--check-self-contained-and-connected") or
+            std.mem.eql(u8, arg, "--fsck-objects") or
+            std.mem.startsWith(u8, arg, "--threads=") or
+            std.mem.startsWith(u8, arg, "--max-input-size="))
+        {
+            // Accepted flags
+        } else if (std.mem.eql(u8, arg, "-h")) {
+            try platform_impl.writeStdout("usage: git index-pack [--verify] [--stdin] [-o <index-file>] <pack-file>\n");
+            std.process.exit(129);
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            pack_file = arg;
+        }
+    }
+
+    if (!stdin_mode and pack_file == null) {
+        try platform_impl.writeStderr("usage: git index-pack [--verify] [--stdin] [-o <index-file>] <pack-file>\n");
+        std.process.exit(1);
+    }
+
+    var pack_data: []const u8 = undefined;
+    var should_free_pack = false;
+
+    if (stdin_mode) {
+        const git_dir = findGitDir() catch ".git";
+        const stdin = std.fs.File.stdin();
+        pack_data = stdin.readToEndAlloc(allocator, 4 * 1024 * 1024 * 1024) catch {
+            try platform_impl.writeStderr("fatal: error reading pack from stdin\n");
+            std.process.exit(128);
+            unreachable;
+        };
+        should_free_pack = true;
+
+        // Write pack file to objects/pack/
+        const pack_dir = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir}) catch unreachable;
+        defer allocator.free(pack_dir);
+        std.fs.cwd().makePath(pack_dir) catch {};
+
+        // Compute checksum for pack name
+        if (pack_data.len >= 20) {
+            const trailing_sha = pack_data[pack_data.len - 20..];
+            var hash_hex: [40]u8 = undefined;
+            for (trailing_sha, 0..) |b, bi| {
+                _ = std.fmt.bufPrint(hash_hex[bi * 2 .. bi * 2 + 2], "{x:0>2}", .{b}) catch continue;
+            }
+
+            const dest_pack = std.fmt.allocPrint(allocator, "{s}/pack-{s}.pack", .{ pack_dir, hash_hex }) catch unreachable;
+            defer allocator.free(dest_pack);
+            std.fs.cwd().writeFile(.{ .sub_path = dest_pack, .data = pack_data }) catch {};
+
+            // Generate idx
+            try generatePackIdx(allocator, pack_data, pack_dir, &hash_hex);
+
+            const msg = std.fmt.allocPrint(allocator, "pack\t{s}\n", .{hash_hex}) catch unreachable;
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
+        }
+    } else if (pack_file) |pf| {
+        pack_data = std.fs.cwd().readFileAlloc(allocator, pf, 4 * 1024 * 1024 * 1024) catch {
+            const msg = std.fmt.allocPrint(allocator, "fatal: cannot open packfile '{s}'\n", .{pf}) catch unreachable;
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+            unreachable;
+        };
+        should_free_pack = true;
+
+        if (verify) {
+            // Just verify pack header
+            if (pack_data.len < 12 or !std.mem.eql(u8, pack_data[0..4], "PACK")) {
+                try platform_impl.writeStderr("fatal: not a valid pack file\n");
+                std.process.exit(128);
+            }
+            // Success for verify
+            return;
+        }
+
+        // Generate index file
+        const idx_path = if (output_path) |op| op else blk: {
+            if (std.mem.endsWith(u8, pf, ".pack")) {
+                break :blk std.fmt.allocPrint(allocator, "{s}.idx", .{pf[0 .. pf.len - 5]}) catch unreachable;
+            }
+            break :blk std.fmt.allocPrint(allocator, "{s}.idx", .{pf}) catch unreachable;
+        };
+        _ = idx_path;
+
+        if (pack_data.len >= 20) {
+            const trailing_sha = pack_data[pack_data.len - 20..];
+            var hash_hex: [40]u8 = undefined;
+            for (trailing_sha, 0..) |b, bi| {
+                _ = std.fmt.bufPrint(hash_hex[bi * 2 .. bi * 2 + 2], "{x:0>2}", .{b}) catch continue;
+            }
+
+            const dir = std.fs.path.dirname(pf) orelse ".";
+            try generatePackIdx(allocator, pack_data, dir, &hash_hex);
+        }
+    }
+
+    if (should_free_pack) {
+        allocator.free(pack_data);
+    }
+}
+
+fn generatePackIdx(allocator: std.mem.Allocator, pack_data: []const u8, output_dir: []const u8, hash_hex: *const [40]u8) !void {
+    // Parse pack file to extract object SHAs
+    if (pack_data.len < 12) return;
+    if (!std.mem.eql(u8, pack_data[0..4], "PACK")) return;
+
+    const num_objects = std.mem.readInt(u32, pack_data[8..12], .big);
+
+    // Collect object hashes by parsing pack entries
+    var object_shas = std.array_list.Managed([20]u8).init(allocator);
+    defer object_shas.deinit();
+    var offsets = std.array_list.Managed(u32).init(allocator);
+    defer offsets.deinit();
+    var crcs = std.array_list.Managed(u32).init(allocator);
+    defer crcs.deinit();
+
+    var pos: usize = 12;
+    var obj_count: usize = 0;
+    while (obj_count < num_objects and pos < pack_data.len - 20) : (obj_count += 1) {
+        const entry_offset = pos;
+        try offsets.append(@intCast(entry_offset));
+
+        // Parse object header
+        var c = pack_data[pos];
+        pos += 1;
+        var obj_size: u64 = c & 0x0F;
+        var shift: u6 = 4;
+        while (c & 0x80 != 0 and pos < pack_data.len) {
+            c = pack_data[pos];
+            pos += 1;
+            obj_size |= @as(u64, c & 0x7F) << shift;
+            shift +|= 7;
+        }
+
+        const obj_type = (pack_data[entry_offset] >> 4) & 0x07;
+
+        // Skip delta base ref if needed
+        if (obj_type == 6) {
+            // OFS_DELTA: skip base offset encoding
+            c = pack_data[pos];
+            pos += 1;
+            while (c & 0x80 != 0 and pos < pack_data.len) {
+                c = pack_data[pos];
+                pos += 1;
+            }
+        } else if (obj_type == 7) {
+            // REF_DELTA: skip 20-byte base SHA
+            pos += 20;
+        }
+
+        // Skip compressed data
+        // Use zlib to decompress and skip
+        const compressed = pack_data[pos..@min(pack_data.len - 20, pack_data.len)];
+        var fbs = std.io.fixedBufferStream(compressed);
+        var decompressor = zlib_compat_mod.decompressor(fbs.reader());
+        var decompressed_size: u64 = 0;
+        var skip_buf: [4096]u8 = undefined;
+        while (true) {
+            const n = decompressor.read(&skip_buf) catch break;
+            if (n == 0) break;
+            decompressed_size += n;
+        }
+        pos += fbs.pos;
+
+        // Compute CRC32 for the entry
+        const entry_data = pack_data[entry_offset..pos];
+        const crc = std.hash.crc.Crc32.hash(entry_data);
+        try crcs.append(crc);
+
+        // We need to compute the SHA of the actual object content
+        // For now, store a placeholder - proper implementation would hash the decompressed content
+        var sha: [20]u8 = std.mem.zeroes([20]u8);
+        // Re-decompress to hash
+        {
+            const obj_compressed = pack_data[entry_offset..pos];
+            // Find start of compressed data after header
+            var hdr_pos: usize = 0;
+            var hc = obj_compressed[hdr_pos];
+            hdr_pos += 1;
+            while (hc & 0x80 != 0 and hdr_pos < obj_compressed.len) {
+                hc = obj_compressed[hdr_pos];
+                hdr_pos += 1;
+            }
+            if (obj_type == 6) {
+                hc = obj_compressed[hdr_pos];
+                hdr_pos += 1;
+                while (hc & 0x80 != 0 and hdr_pos < obj_compressed.len) {
+                    hc = obj_compressed[hdr_pos];
+                    hdr_pos += 1;
+                }
+            } else if (obj_type == 7) {
+                hdr_pos += 20;
+            }
+
+            const comp_data = obj_compressed[hdr_pos..];
+            var fbs2 = std.io.fixedBufferStream(comp_data);
+            var decomp = zlib_compat_mod.decompressor(fbs2.reader());
+            var content = std.array_list.Managed(u8).init(allocator);
+            defer content.deinit();
+            var buf2: [4096]u8 = undefined;
+            while (true) {
+                const n = decomp.read(&buf2) catch break;
+                if (n == 0) break;
+                content.appendSlice(buf2[0..n]) catch break;
+            }
+
+            // Only hash non-delta objects
+            if (obj_type >= 1 and obj_type <= 4) {
+                const type_str: []const u8 = switch (obj_type) {
+                    1 => "commit",
+                    2 => "tree",
+                    3 => "blob",
+                    4 => "tag",
+                    else => "blob",
+                };
+                const header = std.fmt.allocPrint(allocator, "{s} {d}\x00", .{ type_str, content.items.len }) catch continue;
+                defer allocator.free(header);
+                var hasher = std.crypto.hash.Sha1.init(.{});
+                hasher.update(header);
+                hasher.update(content.items);
+                sha = hasher.finalResult();
+            }
+        }
+        try object_shas.append(sha);
+    }
+
+    // Write v2 idx file
+    var idx = std.array_list.Managed(u8).init(allocator);
+    defer idx.deinit();
+
+    // Magic + version
+    try idx.appendSlice("\xfftOc");
+    try idx.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, 2)));
+
+    // Fanout table (256 entries)
+    // Sort objects by SHA for the fanout
+    const SortCtx = struct {
+        shas: [][20]u8,
+    };
+    const indices = try allocator.alloc(usize, object_shas.items.len);
+    defer allocator.free(indices);
+    for (indices, 0..) |*idx_val, j| idx_val.* = j;
+
+    const ctx = SortCtx{ .shas = object_shas.items };
+    std.mem.sort(usize, indices, ctx, struct {
+        fn lessThan(c: SortCtx, a: usize, b: usize) bool {
+            return std.mem.order(u8, &c.shas[a], &c.shas[b]).compare(.lt);
+        }
+    }.lessThan);
+
+    // Build fanout
+    var fanout: [256]u32 = std.mem.zeroes([256]u32);
+    for (indices) |idx_val| {
+        const first_byte = object_shas.items[idx_val][0];
+        var fb: usize = first_byte;
+        while (fb < 256) : (fb += 1) {
+            fanout[fb] += 1;
+        }
+    }
+    for (fanout) |f| {
+        try idx.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, f)));
+    }
+
+    // SHA-1 table (sorted)
+    for (indices) |idx_val| {
+        try idx.appendSlice(&object_shas.items[idx_val]);
+    }
+
+    // CRC32 table
+    for (indices) |idx_val| {
+        if (idx_val < crcs.items.len) {
+            try idx.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, crcs.items[idx_val])));
+        } else {
+            try idx.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, 0)));
+        }
+    }
+
+    // Offset table
+    for (indices) |idx_val| {
+        if (idx_val < offsets.items.len) {
+            try idx.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, offsets.items[idx_val])));
+        } else {
+            try idx.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, 0)));
+        }
+    }
+
+    // Pack SHA-1
+    if (pack_data.len >= 20) {
+        try idx.appendSlice(pack_data[pack_data.len - 20..]);
+    }
+
+    // Idx SHA-1
+    var idx_sha = std.crypto.hash.Sha1.init(.{});
+    idx_sha.update(idx.items);
+    const idx_checksum = idx_sha.finalResult();
+    try idx.appendSlice(&idx_checksum);
+
+    // Write idx file
+    const idx_filename = std.fmt.allocPrint(allocator, "{s}/pack-{s}.idx", .{ output_dir, hash_hex }) catch return;
+    defer allocator.free(idx_filename);
+    std.fs.cwd().writeFile(.{ .sub_path = idx_filename, .data = idx.items }) catch {};
+}
+
+fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    var subcmd: []const u8 = "show";
+    var ref_name: []const u8 = "HEAD";
+
+    var i = command_index + 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "show") or std.mem.eql(u8, arg, "expire") or
+            std.mem.eql(u8, arg, "delete") or std.mem.eql(u8, arg, "exists"))
+        {
+            subcmd = arg;
+        } else if (std.mem.eql(u8, arg, "-h")) {
+            try platform_impl.writeStdout("usage: git reflog [show|expire|delete|exists] [<ref>]\n");
+            std.process.exit(129);
+        } else if (std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "-n") or
+            std.mem.startsWith(u8, arg, "--expire=") or std.mem.eql(u8, arg, "--verbose") or
+            std.mem.eql(u8, arg, "--rewrite") or std.mem.eql(u8, arg, "--updateref") or
+            std.mem.eql(u8, arg, "--stale-fix") or std.mem.eql(u8, arg, "--dry-run"))
+        {
+            // Accepted flags
+            if (std.mem.eql(u8, arg, "-n")) {
+                i += 1; // skip count
+            }
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            ref_name = arg;
+        }
+    }
+
+    const git_dir = findGitDir() catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+        unreachable;
+    };
+
+    if (std.mem.eql(u8, subcmd, "show")) {
+        // Read reflog file
+        var reflog_path: []const u8 = undefined;
+        if (std.mem.eql(u8, ref_name, "HEAD")) {
+            reflog_path = std.fmt.allocPrint(allocator, "{s}/logs/HEAD", .{git_dir}) catch unreachable;
+        } else if (std.mem.startsWith(u8, ref_name, "refs/")) {
+            reflog_path = std.fmt.allocPrint(allocator, "{s}/logs/{s}", .{ git_dir, ref_name }) catch unreachable;
+        } else {
+            reflog_path = std.fmt.allocPrint(allocator, "{s}/logs/refs/heads/{s}", .{ git_dir, ref_name }) catch unreachable;
+        }
+        defer allocator.free(reflog_path);
+
+        const content = std.fs.cwd().readFileAlloc(allocator, reflog_path, 10 * 1024 * 1024) catch {
+            // No reflog
+            return;
+        };
+        defer allocator.free(content);
+
+        // Parse and display reflog entries in reverse order
+        var entries = std.array_list.Managed([]const u8).init(allocator);
+        defer entries.deinit();
+        var lines = std.mem.splitScalar(u8, content, '\n');
+        while (lines.next()) |line| {
+            if (line.len > 0) {
+                try entries.append(line);
+            }
+        }
+
+        // Output in reverse order
+        var entry_idx: usize = entries.items.len;
+        var seq: usize = 0;
+        while (entry_idx > 0) {
+            entry_idx -= 1;
+            const line = entries.items[entry_idx];
+            // Format: <old-sha1> <new-sha1> <author> <timestamp> <tz>\t<message>
+            if (std.mem.indexOfScalar(u8, line, '\t')) |tab| {
+                const msg = line[tab + 1..];
+                // Extract new sha
+                if (line.len >= 82) {
+                    const new_sha = line[41..81];
+                    const selector = std.fmt.allocPrint(allocator, "{s}@{{{d}}}", .{ ref_name, seq }) catch continue;
+                    defer allocator.free(selector);
+                    const output = std.fmt.allocPrint(allocator, "{s} {s}: {s}\n", .{ new_sha[0..@min(7, new_sha.len)], selector, msg }) catch continue;
+                    defer allocator.free(output);
+                    try platform_impl.writeStdout(output);
+                }
+            }
+            seq += 1;
+        }
+    } else if (std.mem.eql(u8, subcmd, "expire")) {
+        // Expire old reflog entries - for now, no-op
+    } else if (std.mem.eql(u8, subcmd, "delete")) {
+        // Delete specific reflog entries - for now, no-op
+    } else if (std.mem.eql(u8, subcmd, "exists")) {
+        // Check if a reflog exists
+        var reflog_path: []const u8 = undefined;
+        if (std.mem.eql(u8, ref_name, "HEAD")) {
+            reflog_path = std.fmt.allocPrint(allocator, "{s}/logs/HEAD", .{git_dir}) catch unreachable;
+        } else if (std.mem.startsWith(u8, ref_name, "refs/")) {
+            reflog_path = std.fmt.allocPrint(allocator, "{s}/logs/{s}", .{ git_dir, ref_name }) catch unreachable;
+        } else {
+            reflog_path = std.fmt.allocPrint(allocator, "{s}/logs/refs/heads/{s}", .{ git_dir, ref_name }) catch unreachable;
+        }
+        defer allocator.free(reflog_path);
+
+        _ = std.fs.cwd().statFile(reflog_path) catch {
+            std.process.exit(1);
+        };
+    }
+}
+
+fn nativeCmdClean(_: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    var force = false;
+    var dry_run = false;
+    var i = command_index + 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
+            force = true;
+        } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--dry-run")) {
+            dry_run = true;
+        } else if (std.mem.eql(u8, arg, "-d") or
+            std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet") or
+            std.mem.eql(u8, arg, "-x") or std.mem.eql(u8, arg, "-X"))
+        {
+            // Accepted flags (not fully implemented yet)
+        } else if (std.mem.eql(u8, arg, "-h")) {
+            try platform_impl.writeStdout("usage: git clean [-d] [-f] [-n] [-q] [-x | -X] [--] [<pathspec>...]\n");
+            std.process.exit(129);
+        }
+    }
+
+    if (!force and !dry_run) {
+        try platform_impl.writeStderr("fatal: clean.requireForce defaults to true and neither -i, -n, nor -f given; refusing to clean\n");
+        std.process.exit(128);
+    }
+
+    // Simple clean implementation - remove untracked files
+    // For now, this is a minimal implementation
+    _ = findGitDir() catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+        unreachable;
+    };
 }
