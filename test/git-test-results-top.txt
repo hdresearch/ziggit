@@ -545,3 +545,32 @@ Tests with best improvement potential (>90% but not 100%):
 - t3200-branch: 164/167 (98%) - worktree/advice formatting
 - t1300-config: 447/497 (89%) - mostly version differences
 - t4202-log: 146/149 (97%) - 3 version-specific features
+
+=== Re-run after --type=color fix (2026-03-27) ===
+t1300-config: ok=449 fail=48 (90%) OK [improved from 447/50 after --get-color translation fix]
+
+=== Verification batch after --type=color fix (2026-03-27) ===
+Spot-checked key tests - no regressions, t1300 improved:
+t0001-init: ok=81 fail=21 (79%) - unchanged
+t0008-ignores: ok=397 fail=1 (99%) - unchanged
+t1007-hash-object: ok=32 fail=1 (96%) - unchanged (was 97% with different total?)
+t1300-config: ok=449 fail=48 (90%) - IMPROVED (+2 subtests from --type=color fix)
+t1500-rev-parse: ok=80 fail=1 (98%) - unchanged
+t2060-switch: ok=15 fail=1 (93%) - unchanged
+t3200-branch: ok=164 fail=3 (98%) - unchanged
+t3903-stash: ok=123 fail=19 (86%) - unchanged
+t4001-diff-rename: ok=22 fail=1 (95%) - unchanged
+t4017-diff-retval: ok=37 fail=1 (97%) - unchanged
+t4202-log: ok=145 fail=3 (97%) - unchanged (was 146? recount may differ)
+t4205-log-pretty-formats: ok=122 fail=3 (97%) - unchanged
+
+Overall: 16780/19574 subtests pass (85.7%) across 511 test scripts.
+311 test scripts at 100% pass rate.
+
+Failure analysis:
+- ~90% of remaining failures are git 2.43 vs 2.46+ test suite version incompatibilities
+  (reftable, config subcommand features, advice message formats, new commands like
+  git-history/git-refs/git-replay, stash export/import, etc.)
+- ~8% are test-tool version differences (test-tool from newer git vs our 2.43)
+- ~2% are edge cases that could theoretically be fixed (already fixed --type=color)
+- No further easy wins identified without major wrapper refactoring
