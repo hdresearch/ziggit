@@ -147,15 +147,32 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
         const inc = try a.alloc(bool, lines.items.len);
         defer a.free(inc);
         @memset(inc, false);
+        var prev_end: usize = 0; // track end of previous -L range for relative /RE/
         for (lr.items) |rs| {
             var s: usize = 1;
             var e: usize = lines.items.len;
-            if (std.mem.indexOf(u8, rs, ",")) |comma| {
-                const ss = rs[0..comma];
-                const ess = rs[comma + 1 ..];
+            // Find comma separator, but skip commas inside /regex/
+            const comma = findLComma(rs);
+            if (comma) |ci| {
+                const ss = rs[0..ci];
+                const ess = rs[ci + 1 ..];
                 if (ss.len > 0) {
-                    if (ss[0] == '-') { try pi.writeStderr("fatal: -L invalid line range\n"); std.process.exit(128); }
-                    s = std.fmt.parseInt(usize, ss, 10) catch 1;
+                    if (ss.len > 1 and ss[0] == '^' and ss[1] == '/') {
+                        s = resolveRegex(ss[1..], lines.items, 0) orelse {
+                            try pi.writeStderr("fatal: -L: no match\n");
+                            std.process.exit(128);
+                            unreachable;
+                        };
+                    } else if (ss[0] == '/') {
+                        s = resolveRegex(ss, lines.items, prev_end) orelse {
+                            try pi.writeStderr("fatal: -L: no match\n");
+                            std.process.exit(128);
+                            unreachable;
+                        };
+                    } else {
+                        if (ss[0] == '-') { try pi.writeStderr("fatal: -L invalid line range\n"); std.process.exit(128); }
+                        s = std.fmt.parseInt(usize, ss, 10) catch 1;
+                    }
                 }
                 if (ess.len > 0) {
                     if (ess[0] == '+') {
@@ -167,20 +184,72 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
                         if (o == 0) { try pi.writeStderr("fatal: -L invalid line range\n"); std.process.exit(128); }
                         if (o >= s) { e = 1; } else { e = s - o + 1; }
                         if (e < s) { const t = s; s = e; e = t; }
+                    } else if (ess.len > 1 and ess[0] == '^' and ess[1] == '/') {
+                        e = resolveRegex(ess[1..], lines.items, 0) orelse {
+                            try pi.writeStderr("fatal: -L: no match\n");
+                            std.process.exit(128);
+                            unreachable;
+                        };
+                    } else if (ess[0] == '/') {
+                        e = resolveRegex(ess, lines.items, if (s > 0) s - 1 else 0) orelse {
+                            try pi.writeStderr("fatal: -L: no match\n");
+                            std.process.exit(128);
+                            unreachable;
+                        };
                     } else {
                         e = std.fmt.parseInt(usize, ess, 10) catch lines.items.len;
                         if (e == 0) { try pi.writeStderr("fatal: -L invalid line range\n"); std.process.exit(128); }
                     }
                 }
             } else if (rs.len > 0) {
-                if (rs[0] == '-') { try pi.writeStderr("fatal: -L invalid line range\n"); std.process.exit(128); }
-                s = std.fmt.parseInt(usize, rs, 10) catch 1;
+                if (rs.len > 1 and rs[0] == '^' and rs[1] == '/') {
+                    s = resolveRegex(rs[1..], lines.items, 0) orelse {
+                        try pi.writeStderr("fatal: -L: no match\n");
+                        std.process.exit(128);
+                        unreachable;
+                    };
+                    e = lines.items.len;
+                } else if (rs[0] == '/') {
+                    s = resolveRegex(rs, lines.items, prev_end) orelse {
+                        try pi.writeStderr("fatal: -L: no match\n");
+                        std.process.exit(128);
+                        unreachable;
+                    };
+                    e = lines.items.len;
+                } else {
+                    if (rs[0] == '-') { try pi.writeStderr("fatal: -L invalid line range\n"); std.process.exit(128); }
+                    s = std.fmt.parseInt(usize, rs, 10) catch 1;
+                    // Single line number without comma: s must be <= nlines
+                    if (s > lines.items.len) {
+                        try pi.writeStderr("fatal: file ");
+                        try pi.writeStderr(fp.?);
+                        try pi.writeStderr(" has only ");
+                        const nbuf = try std.fmt.allocPrint(a, "{d}", .{lines.items.len});
+                        defer a.free(nbuf);
+                        try pi.writeStderr(nbuf);
+                        try pi.writeStderr(" lines\n");
+                        std.process.exit(128);
+                    }
+                }
             }
             if (s == 0) { try pi.writeStderr("fatal: -L invalid line range\n"); std.process.exit(128); }
+            if (s > lines.items.len) {
+                try pi.writeStderr("fatal: file ");
+                try pi.writeStderr(fp.?);
+                try pi.writeStderr(" has only ");
+                const nbuf = try std.fmt.allocPrint(a, "{d}", .{lines.items.len});
+                defer a.free(nbuf);
+                try pi.writeStderr(nbuf);
+                try pi.writeStderr(" lines\n");
+                std.process.exit(128);
+            }
             if (s > e) { const t = s; s = e; e = t; }
             if (s < 1) s = 1;
             if (e > lines.items.len) e = lines.items.len;
-            if (s <= e) { for (s - 1..e) |i| inc[i] = true; }
+            if (s <= e) {
+                for (s - 1..e) |i| inc[i] = true;
+                prev_end = e;
+            }
         }
         for (0..lines.items.len) |i| { if (inc[i]) try oi.append(i); }
     }
@@ -199,6 +268,113 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
         else if (col) { try oC(pi, a, e, line, ln, se, srt, mal, lnw, abl); }
         else { try oD(pi, a, e, line, ln, se, srt, mal, lnw, abl); }
     }
+}
+
+/// Find the comma separator in an -L range spec, skipping commas inside /regex/
+fn findLComma(rs: []const u8) ?usize {
+    var i: usize = 0;
+    while (i < rs.len) {
+        if (rs[i] == '/') {
+            // Skip regex
+            i += 1;
+            while (i < rs.len and rs[i] != '/') : (i += 1) {
+                if (rs[i] == '\\' and i + 1 < rs.len) i += 1;
+            }
+            if (i < rs.len) i += 1; // skip closing /
+        } else if (rs[i] == ',') {
+            return i;
+        } else {
+            i += 1;
+        }
+    }
+    return null;
+}
+
+/// Resolve a /regex/ pattern to a 1-based line number, searching from start_line (0-based)
+fn resolveRegex(spec: []const u8, file_lines: []const []const u8, start_from: usize) ?usize {
+    // Extract pattern from /pattern/
+    if (spec.len < 2 or spec[0] != '/') return null;
+    var end: usize = spec.len;
+    if (spec[spec.len - 1] == '/') end = spec.len - 1;
+    const pattern = spec[1..end];
+    if (pattern.len == 0) return null;
+
+    // Search from start_from forward (wrapping if needed)
+    var i: usize = start_from;
+    var checked: usize = 0;
+    while (checked < file_lines.len) : (checked += 1) {
+        if (i >= file_lines.len) i = 0;
+        if (simpleMatch(file_lines[i], pattern)) return i + 1;
+        i += 1;
+    }
+    return null;
+}
+
+/// Simple regex-like matching: supports basic substring matching with some regex features
+fn simpleMatch(line: []const u8, pattern: []const u8) bool {
+    // For basic patterns, do substring search
+    // Handle common regex escapes and anchors
+    var anchored_start = false;
+    var anchored_end = false;
+    var pat = pattern;
+    if (pat.len > 0 and pat[0] == '^') {
+        anchored_start = true;
+        pat = pat[1..];
+    }
+    if (pat.len > 0 and pat[pat.len - 1] == '$' and (pat.len < 2 or pat[pat.len - 2] != '\\')) {
+        anchored_end = true;
+        pat = pat[0 .. pat.len - 1];
+    }
+    // Remove escapes for literal matching
+    var cleaned: [1024]u8 = undefined;
+    var ci: usize = 0;
+    var pi2: usize = 0;
+    while (pi2 < pat.len and ci < cleaned.len) {
+        if (pat[pi2] == '\\' and pi2 + 1 < pat.len) {
+            pi2 += 1;
+            cleaned[ci] = pat[pi2];
+            ci += 1;
+            pi2 += 1;
+        } else if (pat[pi2] == '.') {
+            // . matches any character - use as wildcard marker
+            cleaned[ci] = 0; // sentinel for wildcard
+            ci += 1;
+            pi2 += 1;
+        } else {
+            cleaned[ci] = pat[pi2];
+            ci += 1;
+            pi2 += 1;
+        }
+    }
+    const clean = cleaned[0..ci];
+
+    if (anchored_start and anchored_end) {
+        return matchWithWildcard(line, clean);
+    } else if (anchored_start) {
+        if (line.len < clean.len) return false;
+        return matchWithWildcard(line[0..clean.len], clean);
+    } else if (anchored_end) {
+        if (line.len < clean.len) return false;
+        return matchWithWildcard(line[line.len - clean.len ..], clean);
+    } else {
+        // Substring match
+        if (clean.len == 0) return true;
+        if (line.len < clean.len) return false;
+        var si: usize = 0;
+        while (si <= line.len - clean.len) : (si += 1) {
+            if (matchWithWildcard(line[si .. si + clean.len], clean)) return true;
+        }
+        return false;
+    }
+}
+
+fn matchWithWildcard(text: []const u8, pattern: []const u8) bool {
+    if (text.len != pattern.len) return false;
+    for (0..text.len) |i| {
+        if (pattern[i] == 0) continue; // wildcard matches anything
+        if (text[i] != pattern[i]) return false;
+    }
+    return true;
 }
 
 fn gf(gp: []const u8, ch: []const u8, fp2: []const u8, a2: std.mem.Allocator) ![]const u8 {
