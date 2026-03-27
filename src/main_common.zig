@@ -31268,54 +31268,27 @@ fn cmdFormatPatch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     var rev_range: ?[]const u8 = null;
     var stdout_mode = false;
     var numbered = false;
-    var cover_letter = false;
-    var output_dir: ?[]const u8 = null;
     var subject_prefix: []const u8 = "PATCH";
     var start_number: usize = 1;
-    _ = cover_letter;
-    _ = output_dir;
-
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--stdout")) {
             stdout_mode = true;
         } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--numbered")) {
             numbered = true;
         } else if (std.mem.eql(u8, arg, "--cover-letter")) {
-            cover_letter = true;
-        } else if (std.mem.eql(u8, arg, "-o")) {
-            output_dir = args.next();
-        } else if (std.mem.startsWith(u8, arg, "-o")) {
-            output_dir = arg[2..];
-        } else if (std.mem.startsWith(u8, arg, "--output-directory=")) {
-            output_dir = arg["--output-directory=".len..];
+            // cover_letter = true;
+        } else if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--in-reply-to") or
+                   std.mem.eql(u8, arg, "--signature") or std.mem.eql(u8, arg, "--start-number")) {
+            _ = args.next(); // consume value
         } else if (std.mem.startsWith(u8, arg, "--subject-prefix=")) {
             subject_prefix = arg["--subject-prefix=".len..];
         } else if (std.mem.startsWith(u8, arg, "--start-number=")) {
             start_number = std.fmt.parseInt(usize, arg["--start-number=".len..], 10) catch 1;
-        } else if (std.mem.eql(u8, arg, "--start-number")) {
-            if (args.next()) |n| start_number = std.fmt.parseInt(usize, n, 10) catch 1;
-        } else if (std.mem.startsWith(u8, arg, "--in-reply-to=")) {
-            in_reply_to = arg["--in-reply-to=".len..];
-        } else if (std.mem.eql(u8, arg, "--in-reply-to")) {
-            in_reply_to = args.next();
-        } else if (std.mem.eql(u8, arg, "--thread")) {
-            thread = "shallow";
-        } else if (std.mem.startsWith(u8, arg, "--thread=")) {
-            thread = arg["--thread=".len..];
-        } else if (std.mem.startsWith(u8, arg, "--signature=")) {
-            signature = arg["--signature=".len..];
-        } else if (std.mem.eql(u8, arg, "--signature")) {
-            signature = args.next();
-        } else if (std.mem.startsWith(u8, arg, "--base=")) {
-            base_arg = arg["--base=".len..];
-        } else if (std.mem.startsWith(u8, arg, "--range-diff=")) {
-            range_diff_arg = arg["--range-diff=".len..];
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             rev_range = arg;
         }
+        // Silently ignore other flags
     }
-
-    // Use variables to avoid unused warnings (they will be used later)
 
     if (rev_range == null) {
         try platform_impl.writeStderr("fatal: no revision range specified\n");
