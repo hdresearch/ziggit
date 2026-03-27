@@ -5127,6 +5127,41 @@ fn performLocalClone(
             }
         } else |_| {}
 
+        // Create refs/remotes/origin/HEAD symbolic ref pointing to default branch
+        {
+            const remote_head_path = try std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}/HEAD", .{ dst_git_dir, remote_name });
+            defer allocator.free(remote_head_path);
+            const remote_head_content = try std.fmt.allocPrint(allocator, "ref: refs/remotes/{s}/{s}\n", .{ remote_name, default_branch });
+            defer allocator.free(remote_head_content);
+            const rhf = std.fs.cwd().createFile(remote_head_path, .{}) catch null;
+            if (rhf) |f| {
+                defer f.close();
+                f.writeAll(remote_head_content) catch {};
+            }
+        }
+
+        // Validate -b branch exists if specified
+        if (branch != null) {
+            if (branch_map.get(checkout_branch) == null) {
+                if (branch_map.count() == 0) {
+                    // Empty repo
+                    const msg = try std.fmt.allocPrint(allocator, "fatal: you do not appear to have cloned an empty repository.\nwarning: You appear to have cloned an empty repository.\n", .{});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    // Clean up the created directory
+                    std.fs.cwd().deleteTree(target_dir) catch {};
+                    std.process.exit(128);
+                } else {
+                    const msg = try std.fmt.allocPrint(allocator, "fatal: Remote branch {s} not found in upstream origin\n", .{checkout_branch});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    // Clean up the created directory
+                    std.fs.cwd().deleteTree(target_dir) catch {};
+                    std.process.exit(128);
+                }
+            }
+        }
+
         // Create local branch from the checkout branch
         const branch_hash = branch_map.get(checkout_branch) orelse blk: {
             // Try default_branch if checkout_branch not found
