@@ -1090,13 +1090,21 @@ fn scanDirectoryForUntrackedFiles(
 
 /// Match a pathspec against a path, using global pathspec flags.
 /// Used by ls-files with --glob-pathspecs, --icase-pathspecs, etc.
+///
+/// Git pathspec matching behavior:
+/// - Default (no flags): glob matching where * matches everything including /
+/// - --glob-pathspecs: glob matching where * does NOT match / (WM_PATHNAME)
+/// - --literal-pathspecs: no glob matching, literal/prefix only
+/// - --noglob-pathspecs: same as literal
+/// - --icase-pathspecs: case-insensitive matching
 fn matchPathspec(path: []const u8, pathspec: []const u8) bool {
-    const use_glob = global_glob_pathspecs and !global_literal_pathspecs;
+    const use_literal = global_literal_pathspecs or global_noglob_pathspecs;
     const use_icase = global_icase_pathspecs;
 
-    if (use_glob) {
-        // In glob mode, use wildmatch for pattern matching
-        var flags: u32 = wildmatch_mod.WM_PATHNAME;
+    if (!use_literal) {
+        // Glob mode (default or --glob-pathspecs)
+        var flags: u32 = 0;
+        if (global_glob_pathspecs) flags |= wildmatch_mod.WM_PATHNAME;
         if (use_icase) flags |= wildmatch_mod.WM_CASEFOLD;
 
         // Direct wildmatch
@@ -1105,13 +1113,10 @@ fn matchPathspec(path: []const u8, pathspec: []const u8) bool {
         // If pathspec has no glob chars, also try prefix match (pathspec is a directory prefix)
         const has_glob_chars = std.mem.indexOfAny(u8, pathspec, "*?[\\") != null;
         if (!has_glob_chars) {
-            // Exact match or prefix match
             if (use_icase) {
-                if (eqlIgnoreCase(path, pathspec)) return true;
                 if (path.len > pathspec.len and path[pathspec.len] == '/' and
                     eqlIgnoreCase(path[0..pathspec.len], pathspec)) return true;
             } else {
-                if (std.mem.eql(u8, path, pathspec)) return true;
                 if (std.mem.startsWith(u8, path, pathspec) and path.len > pathspec.len and path[pathspec.len] == '/') return true;
             }
         }
@@ -1119,7 +1124,7 @@ fn matchPathspec(path: []const u8, pathspec: []const u8) bool {
         return false;
     }
 
-    // Non-glob mode: literal/prefix matching
+    // Literal mode: no glob matching, just prefix matching
     if (use_icase) {
         if (eqlIgnoreCase(path, pathspec)) return true;
         if (path.len > pathspec.len and path[pathspec.len] == '/' and
