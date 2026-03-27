@@ -18879,13 +18879,59 @@ fn nativeCmdClean(_: std.mem.Allocator, args: [][]const u8, command_index: usize
         std.process.exit(128);
     }
 
-    // Simple clean implementation - remove untracked files
-    // For now, this is a minimal implementation
-    _ = findGitDir() catch {
+    const allocator = std.heap.page_allocator;
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
         try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
         std.process.exit(128);
         unreachable;
     };
+    defer allocator.free(git_path);
+    
+    // Load index to know which files are tracked
+    var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch |err| switch (err) {
+        error.FileNotFound => index_mod.Index.init(allocator),
+        else => return,
+    };
+    defer idx.deinit();
+    
+    // Get repo root
+    const repo_root = std.fs.path.dirname(git_path) orelse ".";
+    
+    // Walk the working tree and find untracked files
+    var dir = std.fs.cwd().openDir(repo_root, .{ .iterate = true }) catch return;
+    defer dir.close();
+    
+    var walker = dir.walk(allocator) catch return;
+    defer walker.deinit();
+    
+    while (walker.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        const path = entry.path;
+        // Skip .git directory
+        if (std.mem.startsWith(u8, path, ".git/") or std.mem.eql(u8, path, ".git")) continue;
+        
+        // Check if file is tracked (in index)
+        var tracked = false;
+        for (idx.entries.items) |ie| {
+            if (std.mem.eql(u8, ie.path, path)) {
+                tracked = true;
+                break;
+            }
+        }
+        
+        if (!tracked) {
+            if (dry_run) {
+                const msg = std.fmt.allocPrint(allocator, "Would remove {s}\n", .{path}) catch continue;
+                defer allocator.free(msg);
+                platform_impl.writeStdout(msg) catch {};
+            } else {
+                const msg = std.fmt.allocPrint(allocator, "Removing {s}\n", .{path}) catch continue;
+                defer allocator.free(msg);
+                platform_impl.writeStdout(msg) catch {};
+                dir.deleteFile(path) catch {};
+            }
+        }
+    }
 }
 
 fn isAllHex(s: []const u8) bool {
