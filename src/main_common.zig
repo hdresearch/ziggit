@@ -10399,6 +10399,67 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         } else if (std.mem.eql(u8, arg, "--local-env-vars")) {
             try platform_impl.writeStdout("GIT_DIR\nGIT_WORK_TREE\nGIT_OBJECT_DIRECTORY\nGIT_INDEX_FILE\nGIT_GRAFT_FILE\nGIT_COMMON_DIR\n");
             return;
+        } else if (std.mem.eql(u8, arg, "--resolve-git-dir")) {
+            arg_i += 1;
+            if (arg_i >= all_args.items.len) {
+                try platform_impl.writeStderr("fatal: --resolve-git-dir requires an argument\n");
+                std.process.exit(1);
+                unreachable;
+            }
+            const path = all_args.items[arg_i];
+            // If path is a file, read its contents (gitfile)
+            const content = platform_impl.fs.readFile(allocator, path) catch {
+                // Check if path is a directory with HEAD
+                const head_path = std.fmt.allocPrint(allocator, "{s}/HEAD", .{path}) catch {
+                    std.process.exit(1);
+                    unreachable;
+                };
+                defer allocator.free(head_path);
+                _ = std.fs.cwd().statFile(head_path) catch {
+                    try platform_impl.writeStderr("fatal: not a gitdir '");
+                    try platform_impl.writeStderr(path);
+                    try platform_impl.writeStderr("'\n");
+                    std.process.exit(1);
+                    unreachable;
+                };
+                const output = try std.fmt.allocPrint(allocator, "{s}\n", .{path});
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+                return;
+            };
+            defer allocator.free(content);
+            const trimmed = std.mem.trim(u8, content, " \t\r\n");
+            if (std.mem.startsWith(u8, trimmed, "gitdir: ")) {
+                const gitdir = trimmed["gitdir: ".len..];
+                // Resolve relative to the directory containing the gitfile
+                if (std.fs.path.isAbsolute(gitdir)) {
+                    const output = try std.fmt.allocPrint(allocator, "{s}\n", .{gitdir});
+                    defer allocator.free(output);
+                    try platform_impl.writeStdout(output);
+                } else {
+                    const dir = std.fs.path.dirname(path) orelse ".";
+                    const resolved = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, gitdir });
+                    defer allocator.free(resolved);
+                    // Normalize the path
+                    var real_buf: [4096]u8 = undefined;
+                    const real = std.fs.cwd().realpath(resolved, &real_buf) catch {
+                        const output = try std.fmt.allocPrint(allocator, "{s}\n", .{resolved});
+                        defer allocator.free(output);
+                        try platform_impl.writeStdout(output);
+                        return;
+                    };
+                    const output = try std.fmt.allocPrint(allocator, "{s}\n", .{real});
+                    defer allocator.free(output);
+                    try platform_impl.writeStdout(output);
+                }
+            } else {
+                try platform_impl.writeStderr("fatal: not a gitdir '");
+                try platform_impl.writeStderr(path);
+                try platform_impl.writeStderr("'\n");
+                std.process.exit(1);
+                unreachable;
+            }
+            return;
         } else if (std.mem.eql(u8, arg, "--path-format=absolute")) {
             path_format_absolute = true;
         } else if (std.mem.eql(u8, arg, "--path-format=relative")) {
