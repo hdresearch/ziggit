@@ -9837,15 +9837,35 @@ fn cmdDescribe(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     // Parse arguments
     var tags = false;
     var abbrev_zero = false;
+    var exact_match = false;
+    var contains = false;
+    var all = false;
+    var target_rev: ?[]const u8 = null;
     
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--tags")) {
             tags = true;
         } else if (std.mem.eql(u8, arg, "--abbrev=0")) {
             abbrev_zero = true;
+        } else if (std.mem.eql(u8, arg, "--exact-match")) {
+            exact_match = true;
+        } else if (std.mem.eql(u8, arg, "--contains")) {
+            contains = true;
+        } else if (std.mem.eql(u8, arg, "--all")) {
+            all = true;
+        } else if (std.mem.eql(u8, arg, "--long")) {
+            // long format is default when not exact match
+        } else if (std.mem.eql(u8, arg, "--always")) {
+            // always show abbreviated hash
+        } else if (std.mem.eql(u8, arg, "--dirty")) {
+            // ignore for now
+        } else if (std.mem.startsWith(u8, arg, "--abbrev=")) {
+            // handle other abbrev values
+            if (std.mem.eql(u8, arg, "--abbrev=0")) abbrev_zero = true;
+        } else if (arg.len > 0 and arg[0] != '-') {
+            target_rev = arg;
         }
     }
-
     // Find .git directory first
     const git_path = findGitDirectory(allocator, platform_impl) catch {
         try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
@@ -9853,19 +9873,33 @@ fn cmdDescribe(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     };
     defer allocator.free(git_path);
 
-    // Get current HEAD commit
-    const head_hash = refs.getCurrentCommit(git_path, platform_impl, allocator) catch |err| switch (err) {
-        else => {
-            try platform_impl.writeStderr("fatal: no commits yet\n");
-            std.process.exit(128);
+    // Get target commit (HEAD or specified rev)
+    const head_hash: []u8 = blk: {
+        if (target_rev) |rev| {
+            const resolved = refs.resolveRef(git_path, rev, platform_impl, allocator) catch {
+                try platform_impl.writeStderr("fatal: not a valid object name\n");
+                std.process.exit(128);
+                unreachable;
+            };
+            break :blk resolved orelse {
+                try platform_impl.writeStderr("fatal: not a valid object name\n");
+                std.process.exit(128);
+                unreachable;
+            };
+        } else {
+            const h = refs.getCurrentCommit(git_path, platform_impl, allocator) catch {
+                try platform_impl.writeStderr("fatal: no commits yet\n");
+                std.process.exit(128);
+                unreachable;
+            };
+            break :blk h orelse {
+                try platform_impl.writeStderr("fatal: no commits yet\n");
+                std.process.exit(128);
+                unreachable;
+            };
         }
     };
-    defer if (head_hash) |hash| allocator.free(hash);
-    
-    if (head_hash == null) {
-        try platform_impl.writeStderr("fatal: no commits yet\n");
-        std.process.exit(128);
-    }
+    defer allocator.free(head_hash);
 
     // Read all tags from refs/tags/*
     const tags_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags", .{git_path});
@@ -9937,10 +9971,62 @@ fn cmdDescribe(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     }
     
     // Walk HEAD commit chain backward looking for a match with any tag
-    const result = findTagInHistoryWithDistance(git_path, head_hash.?, &tag_map, tags, allocator, platform_impl) catch null;
+    // Also check packed-refs for tags
+    const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_path});
+    defer allocator.free(packed_refs_path);
+    if (platform_impl.fs.readFile(allocator, packed_refs_path)) |packed_content| {
+        defer allocator.free(packed_content);
+        var plines = std.mem.splitScalar(u8, packed_content, '\n');
+        while (plines.next()) |pline| {
+            if (pline.len == 0 or pline[0] == '#' or pline[0] == '^') continue;
+            // Format: <hash> <refname>
+            if (pline.len >= 41 and pline[40] == ' ') {
+                const ref_name = pline[41..];
+                if (std.mem.startsWith(u8, ref_name, "refs/tags/")) {
+                    const tag_name = ref_name["refs/tags/".len..];
+                    // Skip if we already have this tag from loose refs
+                    if (tag_map.contains(tag_name)) continue;
+                    
+                    const tag_hash = pline[0..40];
+                    // Resolve the tag to a commit
+                    const commit_hash = resolve_blk: {
+                        const tag_obj = objects.GitObject.load(tag_hash, git_path, platform_impl, allocator) catch {
+                            break :resolve_blk allocator.dupe(u8, tag_hash) catch continue;
+                        };
+                        defer tag_obj.deinit(allocator);
+                        
+                        if (tag_obj.type == .tag) {
+                            break :resolve_blk parseTagObject(tag_obj.data, allocator) catch {
+                                break :resolve_blk allocator.dupe(u8, tag_hash) catch continue;
+                            };
+                        } else if (tag_obj.type == .commit) {
+                            if (!tags) continue;
+                            break :resolve_blk allocator.dupe(u8, tag_hash) catch continue;
+                        } else {
+                            continue;
+                        }
+                    };
+                    tag_map.put(allocator.dupe(u8, tag_name) catch continue, commit_hash) catch continue;
+                }
+            }
+        }
+    } else |_| {}
+
+    if (tag_map.count() == 0 and !all) {
+        try platform_impl.writeStderr("fatal: No names found, cannot describe anything.\n");
+        std.process.exit(128);
+    }
+    
+    const result = findTagInHistoryWithDistance(git_path, head_hash, &tag_map, tags, allocator, platform_impl) catch null;
 
     if (result) |r| {
         defer allocator.free(r.tag_name);
+        if (exact_match and r.distance != 0) {
+            try platform_impl.writeStderr("fatal: no tag exactly matches '");
+            try platform_impl.writeStderr(head_hash[0..@min(7, head_hash.len)]);
+            try platform_impl.writeStderr("'\n");
+            std.process.exit(128);
+        }
         if (r.distance == 0) {
             const output = try std.fmt.allocPrint(allocator, "{s}\n", .{r.tag_name});
             defer allocator.free(output);
@@ -9950,12 +10036,18 @@ fn cmdDescribe(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
         } else {
-            const short_hash = head_hash.?[0..@min(7, head_hash.?.len)];
+            const short_hash = head_hash[0..@min(7, head_hash.len)];
             const output = try std.fmt.allocPrint(allocator, "{s}-{d}-g{s}\n", .{ r.tag_name, r.distance, short_hash });
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
         }
     } else {
+        if (exact_match) {
+            try platform_impl.writeStderr("fatal: no tag exactly matches '");
+            try platform_impl.writeStderr(head_hash[0..@min(7, head_hash.len)]);
+            try platform_impl.writeStderr("'\n");
+            std.process.exit(128);
+        }
         try platform_impl.writeStderr("fatal: No names found, cannot describe anything.\n");
         std.process.exit(128);
     }
