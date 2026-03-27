@@ -7008,23 +7008,37 @@ fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     var remote_commit_owned = false;
     
     if (remote_is_path) {
-        // Read FETCH_HEAD
-        const fetch_head_path = try std.fmt.allocPrint(allocator, "{s}/FETCH_HEAD", .{git_path});
-        defer allocator.free(fetch_head_path);
-        if (std.fs.cwd().readFileAlloc(allocator, fetch_head_path, 4096)) |fh_content| {
-            defer allocator.free(fh_content);
-            // FETCH_HEAD format: <hash>\t\tbranch '<name>' of <url>
-            const first_line = if (std.mem.indexOf(u8, fh_content, "\n")) |nl| fh_content[0..nl] else fh_content;
-            if (first_line.len >= 40) {
-                remote_commit = try allocator.dupe(u8, first_line[0..40]);
-                remote_commit_owned = true;
-            } else {
+        // For path-based remotes, resolve the branch from the source repo directly
+        const lp = if (std.mem.startsWith(u8, remote_url, "file://")) remote_url["file://".len..] else remote_url;
+        const source_git_dir = resolveSourceGitDir(allocator, lp) catch null;
+        defer if (source_git_dir) |sgd| allocator.free(sgd);
+        const sgd = source_git_dir orelse git_path;
+        
+        // Try to resolve the branch from the source repo
+        var resolved_from_source = false;
+        if (refs.getBranchCommit(sgd, branch, platform_impl, allocator) catch null) |hash| {
+            remote_commit = hash;
+            remote_commit_owned = true;
+            resolved_from_source = true;
+        }
+        if (!resolved_from_source) {
+            // Fallback: read FETCH_HEAD
+            const fetch_head_path = try std.fmt.allocPrint(allocator, "{s}/FETCH_HEAD", .{git_path});
+            defer allocator.free(fetch_head_path);
+            if (std.fs.cwd().readFileAlloc(allocator, fetch_head_path, 4096)) |fh_content| {
+                defer allocator.free(fh_content);
+                const first_line = if (std.mem.indexOf(u8, fh_content, "\n")) |nl| fh_content[0..nl] else fh_content;
+                if (first_line.len >= 40) {
+                    remote_commit = try allocator.dupe(u8, first_line[0..40]);
+                    remote_commit_owned = true;
+                } else {
+                    try platform_impl.writeStderr("fatal: couldn't find remote ref\n");
+                    std.process.exit(1);
+                }
+            } else |_| {
                 try platform_impl.writeStderr("fatal: couldn't find remote ref\n");
                 std.process.exit(1);
             }
-        } else |_| {
-            try platform_impl.writeStderr("fatal: couldn't find remote ref\n");
-            std.process.exit(1);
         }
     } else {
         const remote_branch = try std.fmt.allocPrint(allocator, "remotes/{s}/{s}", .{remote, branch});
