@@ -70,8 +70,20 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         var read_idx: usize = 0;
         while (read_idx < all_original_args.items.len) {
             const arg = all_original_args.items[read_idx];
-            if (std.mem.startsWith(u8, arg, "--ref-format=") or
-                std.mem.eql(u8, arg, "--no-advice") or
+            if (std.mem.startsWith(u8, arg, "--ref-format=")) {
+                const ref_fmt_val = arg["--ref-format=".len..];
+                if (std.mem.eql(u8, ref_fmt_val, "files")) {
+                    // Strip --ref-format=files (git 2.46+ feature, 2.43 only supports files)
+                    read_idx += 1;
+                    continue;
+                } else {
+                    // Unknown ref format - emit error like git 2.53 does
+                    const err_msg = std.fmt.allocPrint(allocator, "fatal: unknown ref storage format '{s}'\n", .{ref_fmt_val}) catch "fatal: unknown ref storage format\n";
+                    platform_impl.writeStderr(err_msg) catch {};
+                    std.process.exit(128);
+                }
+            }
+            if (std.mem.eql(u8, arg, "--no-advice") or
                 std.mem.eql(u8, arg, "--i-still-use-this")) {
                 // Strip these flags (git 2.46+ features not in git 2.43)
                 read_idx += 1;
@@ -371,7 +383,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     // Commands that forward to real git for full compatibility
     } else if (std.mem.eql(u8, command, "clone")) {
         // Use our native clone implementation (supports --depth for shallow clones)
-        try cmdClone(allocator, &args_iter, &platform_impl);
+        try cmdClone(allocator, &args_iter, &platform_impl, all_original_args.items);
     } else if (std.mem.eql(u8, command, "rev-parse")) {
         // Intercept rev-parse for --show-ref-format (git 2.45+)
         if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
@@ -3855,7 +3867,7 @@ fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     }
 }
 
-fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform, all_original_args: [][]const u8) !void {
     if (@import("builtin").target.os.tag == .freestanding) {
         try platform_impl.writeStderr("clone: not supported in freestanding mode\n");
         return;
@@ -4063,35 +4075,7 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     if (is_bare) {
         // This shouldn't be reached for HTTPS (handled above), only non-HTTPS bare clones
         if (build_options.enable_git_fallback) {
-            var git_args = std.array_list.Managed([]const u8).init(allocator);
-            defer git_args.deinit();
-
-            try git_args.append(findRealGit());
-            try git_args.append("clone");
-
-            for (all_args.items) |arg| {
-                try git_args.append(arg);
-            }
-
-            var child = std.process.Child.init(git_args.items, allocator);
-            child.stdin_behavior = .Inherit;
-            child.stdout_behavior = .Inherit;
-            child.stderr_behavior = .Inherit;
-            const result = child.spawnAndWait() catch |err| {
-                const msg = try std.fmt.allocPrint(allocator, "fatal: failed to execute git: {}\n", .{err});
-                defer allocator.free(msg);
-                try platform_impl.writeStderr(msg);
-                std.process.exit(128);
-            };
-
-            switch (result) {
-                .Exited => |code| {
-                    if (code != 0) std.process.exit(@intCast(code));
-                },
-                .Signal => |_| std.process.exit(128),
-                .Stopped => |_| std.process.exit(128),
-                .Unknown => |_| std.process.exit(1),
-            }
+            try forwardToGit(allocator, all_original_args, platform_impl);
             return;
         } else {
             try platform_impl.writeStderr("fatal: non-HTTPS clone not supported without git fallback\n");
@@ -4148,31 +4132,7 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     // For non-HTTP URLs (local paths, ssh://, git://), forward to real git early
     if (!(std.mem.startsWith(u8, url.?, "https://") or std.mem.startsWith(u8, url.?, "http://"))) {
         if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
-            var git_args = std.array_list.Managed([]const u8).init(allocator);
-            defer git_args.deinit();
-            try git_args.append(findRealGit());
-            try git_args.append("clone");
-            for (all_args.items) |arg| {
-                try git_args.append(arg);
-            }
-            var child = std.process.Child.init(git_args.items, allocator);
-            child.stdin_behavior = .Inherit;
-            child.stdout_behavior = .Inherit;
-            child.stderr_behavior = .Inherit;
-            const result = child.spawnAndWait() catch |err| {
-                const fmsg = try std.fmt.allocPrint(allocator, "fatal: failed to execute git: {}\n", .{err});
-                defer allocator.free(fmsg);
-                try platform_impl.writeStderr(fmsg);
-                std.process.exit(128);
-            };
-            switch (result) {
-                .Exited => |code| {
-                    if (code != 0) std.process.exit(@intCast(code));
-                },
-                .Signal => |_| std.process.exit(128),
-                .Stopped => |_| std.process.exit(128),
-                .Unknown => |_| std.process.exit(1),
-            }
+            try forwardToGit(allocator, all_original_args, platform_impl);
             return;
         }
     }
