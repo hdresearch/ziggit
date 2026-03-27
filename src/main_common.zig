@@ -12559,21 +12559,33 @@ fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platform_im
     // If no objects at all, nothing to do
     if (object_hashes.items.len == 0) return;
 
-    // Build pack data
+    // Build pack data, tracking offsets and SHA-1s for idx generation
     var pack_data = std.array_list.Managed(u8).init(allocator);
     defer pack_data.deinit();
+
+    var pack_entries = std.array_list.Managed(PackIdxEntry).init(allocator);
+    defer pack_entries.deinit();
 
     // Pack header
     try pack_data.appendSlice("PACK");
     const version: u32 = 2;
     try pack_data.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, version)));
-    const num_obj: u32 = @intCast(object_hashes.items.len);
-    try pack_data.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, num_obj)));
+    // We'll patch the object count after writing (some objects may fail to load)
+    const count_offset = pack_data.items.len;
+    try pack_data.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, 0)));
 
     // Write each object
     for (object_hashes.items) |hash| {
         if (objects.GitObject.load(hash, git_dir, platform_impl, allocator)) |obj| {
             defer obj.deinit(allocator);
+
+            // Parse hex hash to binary SHA
+            var sha_bytes: [20]u8 = undefined;
+            for (&sha_bytes, 0..) |*b, bi| {
+                b.* = std.fmt.parseInt(u8, hash[bi * 2 .. bi * 2 + 2], 16) catch 0;
+            }
+
+            const entry_offset: u32 = @intCast(pack_data.items.len);
             const type_num: u8 = switch (obj.type) {
                 .commit => 1,
                 .tree => 2,
@@ -12595,12 +12607,22 @@ fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platform_im
             const compressed = zlib_compat_mod.compressSlice(allocator, obj.data) catch continue;
             defer allocator.free(compressed);
             try pack_data.appendSlice(compressed);
+
+            // CRC32 over the entire entry (header + compressed data)
+            const entry_data = pack_data.items[entry_offset..];
+            const crc = std.hash.crc.Crc32.hash(entry_data);
+
+            try pack_entries.append(.{ .sha = sha_bytes, .offset = entry_offset, .crc = crc });
         } else |_| {
             continue;
         }
     }
 
-    // Compute SHA1 checksum
+    // Patch actual object count
+    const actual_count: u32 = @intCast(pack_entries.items.len);
+    @memcpy(pack_data.items[count_offset..][0..4], &std.mem.toBytes(std.mem.nativeToBig(u32, actual_count)));
+
+    // Compute SHA1 checksum of pack data
     var sha1 = std.crypto.hash.Sha1.init(.{});
     sha1.update(pack_data.items);
     const checksum = sha1.finalResult();
@@ -12616,8 +12638,8 @@ fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platform_im
     defer allocator.free(pack_filename);
     std.fs.cwd().writeFile(.{ .sub_path = pack_filename, .data = pack_data.items }) catch return;
 
-    // Generate idx
-    try generatePackIdx(allocator, pack_data.items, pack_dir, &hash_hex);
+    // Generate idx directly from tracked entries (no re-parsing needed)
+    try generatePackIdxFromEntries(allocator, pack_entries.items, &checksum, pack_dir, &hash_hex);
 
     // Delete old pack files
     for (existing_packs.items) |old_idx| {
@@ -13038,6 +13060,76 @@ fn nativeCmdIndexPack(allocator: std.mem.Allocator, args: [][]const u8, command_
     if (should_free_pack) {
         allocator.free(pack_data);
     }
+}
+
+const PackIdxEntry = struct { sha: [20]u8, offset: u32, crc: u32 };
+
+fn generatePackIdxFromEntries(allocator: std.mem.Allocator, entries: []const PackIdxEntry, pack_checksum: *const [20]u8, output_dir: []const u8, hash_hex: *const [40]u8) !void {
+    const n = entries.len;
+
+    // Sort entries by SHA-1
+    const indices = try allocator.alloc(usize, n);
+    defer allocator.free(indices);
+    for (indices, 0..) |*idx_val, j| idx_val.* = j;
+
+    const SortCtx = struct {
+        e: []const PackIdxEntry,
+    };
+    const ctx = SortCtx{ .e = entries };
+    std.mem.sort(usize, indices, ctx, struct {
+        fn lessThan(c: SortCtx, a: usize, b: usize) bool {
+            return std.mem.order(u8, &c.e[a].sha, &c.e[b].sha).compare(.lt);
+        }
+    }.lessThan);
+
+    var idx = std.array_list.Managed(u8).init(allocator);
+    defer idx.deinit();
+
+    // Magic + version
+    try idx.appendSlice("\xfftOc");
+    try idx.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, 2)));
+
+    // Fanout table (256 entries)
+    var fanout: [256]u32 = std.mem.zeroes([256]u32);
+    for (indices) |idx_val| {
+        const first_byte = entries[idx_val].sha[0];
+        var fb: usize = first_byte;
+        while (fb < 256) : (fb += 1) {
+            fanout[fb] += 1;
+        }
+    }
+    for (fanout) |f| {
+        try idx.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, f)));
+    }
+
+    // SHA-1 table (sorted)
+    for (indices) |idx_val| {
+        try idx.appendSlice(&entries[idx_val].sha);
+    }
+
+    // CRC32 table
+    for (indices) |idx_val| {
+        try idx.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, entries[idx_val].crc)));
+    }
+
+    // 4-byte offset table
+    for (indices) |idx_val| {
+        try idx.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, entries[idx_val].offset)));
+    }
+
+    // Pack checksum
+    try idx.appendSlice(pack_checksum);
+
+    // Idx checksum
+    var idx_sha = std.crypto.hash.Sha1.init(.{});
+    idx_sha.update(idx.items);
+    const idx_checksum = idx_sha.finalResult();
+    try idx.appendSlice(&idx_checksum);
+
+    // Write idx file
+    const idx_filename = std.fmt.allocPrint(allocator, "{s}/pack-{s}.idx", .{ output_dir, hash_hex }) catch return;
+    defer allocator.free(idx_filename);
+    std.fs.cwd().writeFile(.{ .sub_path = idx_filename, .data = idx.items }) catch {};
 }
 
 fn generatePackIdx(allocator: std.mem.Allocator, pack_data: []const u8, output_dir: []const u8, hash_hex: *const [40]u8) !void {
