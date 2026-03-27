@@ -19414,10 +19414,18 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                 allocator.dupe(u8, entry.path) catch continue;
             defer allocator.free(full_path);
 
-            // Check if file exists
+            // Check if file exists (use lstatFile for symlinks to avoid following them)
+            var link_buf: [4096]u8 = undefined;
+            const is_symlink_entry = (entry.mode & 0o170000) == 0o120000;
             const file_exists = blk: {
-                std.fs.cwd().access(full_path, .{}) catch break :blk false;
-                break :blk true;
+                if (is_symlink_entry) {
+                    // For symlink entries, check if the symlink itself exists (don't follow)
+                    _ = std.fs.cwd().readLink(full_path, &link_buf) catch break :blk false;
+                    break :blk true;
+                } else {
+                    std.fs.cwd().access(full_path, .{}) catch break :blk false;
+                    break :blk true;
+                }
             };
             if (!file_exists) {
                 if (!ignore_missing) {
@@ -19430,16 +19438,16 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             }
 
             // Check if it's a symlink
-            var link_buf: [4096]u8 = undefined;
             if (std.fs.cwd().readLink(full_path, &link_buf)) |link_target| {
                 entry.size = @intCast(link_target.len);
-                if (std.fs.cwd().statFile(full_path)) |stat| {
-                    entry.ctime_sec = @intCast(@max(0, @divTrunc(stat.ctime, std.time.ns_per_s)));
-                    entry.ctime_nsec = @intCast(@max(0, @rem(stat.ctime, std.time.ns_per_s)));
-                    entry.mtime_sec = @intCast(@max(0, @divTrunc(stat.mtime, std.time.ns_per_s)));
-                    entry.mtime_nsec = @intCast(@max(0, @rem(stat.mtime, std.time.ns_per_s)));
-                    entry.ino = @intCast(stat.inode);
-                } else |_| {}
+                // Use fstatat with SYMLINK_NOFOLLOW for proper symlink stat
+                const full_path_z = std.posix.toPosixPath(full_path) catch continue;
+                const lstat = std.posix.fstatat(std.posix.AT.FDCWD, &full_path_z, std.posix.AT.SYMLINK_NOFOLLOW) catch continue;
+                entry.ctime_sec = @intCast(@max(0, lstat.ctime().sec));
+                entry.ctime_nsec = @intCast(@max(0, lstat.ctime().nsec));
+                entry.mtime_sec = @intCast(@max(0, lstat.mtime().sec));
+                entry.mtime_nsec = @intCast(@max(0, lstat.mtime().nsec));
+                entry.ino = @intCast(lstat.ino);
             } else |_| {
                 // Regular file - check if content changed
                 if (std.fs.cwd().statFile(full_path)) |stat| {
