@@ -33,12 +33,12 @@ pub const ConfigEntry = struct {
 
 /// Git configuration parser
 pub const GitConfig = struct {
-    entries: std.ArrayList(ConfigEntry),
+    entries: std.array_list.Managed(ConfigEntry),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) GitConfig {
         return GitConfig{
-            .entries = std.ArrayList(ConfigEntry).init(allocator),
+            .entries = std.array_list.Managed(ConfigEntry).init(allocator),
             .allocator = allocator,
         };
     }
@@ -189,7 +189,7 @@ pub const GitConfig = struct {
 
     /// Get all values for a config key (for multi-value configs)
     pub fn getAll(self: GitConfig, section: []const u8, subsection: ?[]const u8, name: []const u8, allocator: std.mem.Allocator) ![][]const u8 {
-        var values = std.ArrayList([]const u8).init(allocator);
+        var values = std.array_list.Managed([]const u8).init(allocator);
         
         for (self.entries.items) |entry| {
             if (entry.matches(section, subsection, name)) {
@@ -452,7 +452,7 @@ fn parseBooleanValue(value: []const u8) ?bool {
 
 /// Write config back to string format
 pub fn toString(self: GitConfig, allocator: std.mem.Allocator) ![]u8 {
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     defer result.deinit();
     
     var current_section: ?[]const u8 = null;
@@ -569,7 +569,7 @@ pub fn getBranchUpstream(self: GitConfig, branch_name: []const u8) ?[]const u8 {
 
 /// Validate configuration values
 pub fn validateConfig(self: GitConfig, allocator: std.mem.Allocator) ![][]const u8 {
-    var issues = std.ArrayList([]const u8).init(allocator);
+    var issues = std.array_list.Managed([]const u8).init(allocator);
     
     // Check for required user configuration
     if (self.getUserName() == null) {
@@ -616,7 +616,7 @@ pub fn validateConfig(self: GitConfig, allocator: std.mem.Allocator) ![][]const 
 
 /// Get all remotes configured in the repository
 pub fn getAllRemotes(self: GitConfig, allocator: std.mem.Allocator) ![][]const u8 {
-    var remotes = std.ArrayList([]const u8).init(allocator);
+    var remotes = std.array_list.Managed([]const u8).init(allocator);
     
     for (self.entries.items) |entry| {
         if (std.mem.eql(u8, entry.section, "remote") and entry.subsection != null) {
@@ -642,7 +642,7 @@ pub fn getAllRemotes(self: GitConfig, allocator: std.mem.Allocator) ![][]const u
 
 /// Get all configured branches with their remote tracking information
 pub fn getAllBranches(self: GitConfig, allocator: std.mem.Allocator) ![]BranchInfo {
-    var branches = std.ArrayList(BranchInfo).init(allocator);
+    var branches = std.array_list.Managed(BranchInfo).init(allocator);
     
     for (self.entries.items) |entry| {
         if (std.mem.eql(u8, entry.section, "branch") and entry.subsection != null) {
@@ -986,14 +986,14 @@ pub const ConfigValidationResult = struct {
     is_valid: bool = false,
     total_entries: usize = 0,
     section_count: usize = 0,
-    errors: std.ArrayList([]const u8),
-    warnings: std.ArrayList([]const u8),
+    errors: std.array_list.Managed([]const u8),
+    warnings: std.array_list.Managed([]const u8),
     allocator: std.mem.Allocator,
     
     pub fn init(allocator: std.mem.Allocator) ConfigValidationResult {
         return ConfigValidationResult{
-            .errors = std.ArrayList([]const u8).init(allocator),
-            .warnings = std.ArrayList([]const u8).init(allocator),
+            .errors = std.array_list.Managed([]const u8).init(allocator),
+            .warnings = std.array_list.Managed([]const u8).init(allocator),
             .allocator = allocator,
         };
     }
