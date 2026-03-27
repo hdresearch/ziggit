@@ -14362,8 +14362,41 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                         try platform_impl.writeStderr(err_msg2);
                         std.process.exit(128);
                     };
+                    // Check if existing entry is a symlink and core.symlinks=false
+                    var old_mode: u32 = 0;
+                    for (idx.entries.items) |entry| {
+                        if (std.mem.eql(u8, entry.path, arg)) {
+                            old_mode = entry.mode;
+                            break;
+                        }
+                    }
                     // Update existing entry with current file stat
                     idx.add(arg, arg, platform_impl, git_dir) catch {};
+                    // If old entry was a symlink (120000) and core.symlinks=false,
+                    // preserve the symlink mode
+                    if (old_mode == 0o120000) {
+                        const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_dir}) catch null;
+                        if (config_path) |cp| {
+                            defer allocator.free(cp);
+                            const cfg = platform_impl.fs.readFile(allocator, cp) catch null;
+                            if (cfg) |cfg_data| {
+                                defer allocator.free(cfg_data);
+                                const symlinks_val = parseConfigValue(cfg_data, "core.symlinks", allocator) catch null;
+                                const is_symlinks_false = if (symlinks_val) |sv| blk: {
+                                    defer allocator.free(sv);
+                                    break :blk std.mem.eql(u8, sv, "false");
+                                } else false;
+                                if (is_symlinks_false) {
+                                    for (idx.entries.items) |*entry| {
+                                        if (std.mem.eql(u8, entry.path, arg)) {
+                                            entry.mode = 0o120000;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     modified = true;
                 }
             }
