@@ -3,7 +3,7 @@ const interface = @import("interface.zig");
 
 fn getArgsImpl(allocator: std.mem.Allocator) !interface.ArgIterator {
     var args = std.process.args();
-    var arg_list = std.ArrayList([]const u8).init(allocator);
+    var arg_list = std.array_list.Managed([]const u8).init(allocator);
     defer arg_list.deinit();
     
     while (args.next()) |arg| {
@@ -18,14 +18,14 @@ fn getArgsImpl(allocator: std.mem.Allocator) !interface.ArgIterator {
 }
 
 fn writeStdoutImpl(data: []const u8) !void {
-    std.io.getStdOut().writeAll(data) catch |err| switch (err) {
+    std.fs.File.stdout().writeAll(data) catch |err| switch (err) {
         error.BrokenPipe => return, // Ignore broken pipe (e.g., piped to head/less)
         else => return err,
     };
 }
 
 fn writeStderrImpl(data: []const u8) !void {
-    std.io.getStdErr().writeAll(data) catch |err| switch (err) {
+    std.fs.File.stderr().writeAll(data) catch |err| switch (err) {
         error.BrokenPipe => return, // Ignore broken pipe (e.g., piped to head/less)
         else => return err,
     };
@@ -73,7 +73,7 @@ fn readDirImpl(allocator: std.mem.Allocator, path: []const u8) ![][]u8 {
     };
     defer dir.close();
     
-    var entries = std.ArrayList([]u8).init(allocator);
+    var entries = std.array_list.Managed([]u8).init(allocator);
     defer entries.deinit();
     
     var iterator = dir.iterate();
