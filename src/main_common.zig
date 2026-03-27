@@ -5345,8 +5345,14 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             std.process.exit(128);
         };
         
-        // Get optional start point
-        const start_point = args.next();
+        // Get optional start point, resolve it
+        const start_point_raw = args.next();
+        var resolved_start_B: ?[]u8 = null;
+        defer if (resolved_start_B) |r| allocator.free(r);
+        const start_point: ?[]const u8 = if (start_point_raw) |sp| blk: {
+            resolved_start_B = resolveRevision(git_path, sp, platform_impl, allocator) catch null;
+            break :blk if (resolved_start_B) |r| r else sp;
+        } else null;
         
         // Delete existing branch if it exists (reset)
         const ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, branch_name });
