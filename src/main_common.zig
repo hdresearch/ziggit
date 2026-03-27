@@ -26590,9 +26590,9 @@ fn outputPrettyCommitHeader(allocator: std.mem.Allocator, commit_hash: []const u
         try platform_impl.writeStdout(out2);
         
         // Parse and format date
-        const date_str = parseAuthorDate(author_line, allocator);
+        const date_str = parseAuthorDateGitFmt(author_line, allocator);
         defer if (date_str) |d| allocator.free(d);
-        const out3 = try std.fmt.allocPrint(allocator, "Date:   {s}\n", .{ date_str orelse "Thu, 1 Jan 1970 00:00:00 +0000" });
+        const out3 = try std.fmt.allocPrint(allocator, "Date:   {s}\n", .{ date_str orelse "Thu Jan 1 00:00:00 1970 +0000" });
         defer allocator.free(out3);
         try platform_impl.writeStdout(out3);
         
@@ -32588,6 +32588,19 @@ fn parseAuthorEmail(author_line: []const u8) []const u8 {
     return "unknown@unknown";
 }
 
+fn parseAuthorDateGitFmt(author_line: []const u8, allocator: std.mem.Allocator) ?[]u8 {
+    if (std.mem.indexOf(u8, author_line, "> ")) |gt| {
+        const rest = author_line[gt + 2 ..];
+        if (std.mem.indexOf(u8, rest, " ")) |sp| {
+            const ts_str = rest[0..sp];
+            const tz = rest[sp + 1 ..];
+            const timestamp = std.fmt.parseInt(i64, ts_str, 10) catch return null;
+            return formatGitDate(timestamp, tz, allocator) catch return null;
+        }
+    }
+    return null;
+}
+
 fn parseAuthorDate(author_line: []const u8, allocator: std.mem.Allocator) ?[]u8 {
     // Author line: "Name <email> timestamp timezone"
     if (std.mem.indexOf(u8, author_line, "> ")) |gt| {
@@ -32601,6 +32614,50 @@ fn parseAuthorDate(author_line: []const u8, allocator: std.mem.Allocator) ?[]u8 
         }
     }
     return null;
+}
+
+fn formatGitDate(timestamp: i64, tz: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    // Git default date format: "Day Mon DD HH:MM:SS YYYY +ZZZZ"
+    // Apply timezone offset to get local time
+    var tz_offset_seconds: i64 = 0;
+    if (tz.len >= 5) {
+        const sign: i64 = if (tz[0] == '-') -1 else 1;
+        const hrs = std.fmt.parseInt(i64, tz[1..3], 10) catch 0;
+        const mins = std.fmt.parseInt(i64, tz[3..5], 10) catch 0;
+        tz_offset_seconds = sign * (hrs * 3600 + mins * 60);
+    }
+    const adj_timestamp = timestamp + tz_offset_seconds;
+    const epoch_seconds = @as(u64, @intCast(if (adj_timestamp < 0) 0 else adj_timestamp));
+    const days_since_epoch = epoch_seconds / 86400;
+    const time_of_day = epoch_seconds % 86400;
+    const hours = time_of_day / 3600;
+    const minutes = (time_of_day % 3600) / 60;
+    const seconds = time_of_day % 60;
+    
+    const dow = (days_since_epoch + 4) % 7;
+    const dow_names = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    const mon_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    
+    var y: i64 = 1970;
+    var remaining = @as(i64, @intCast(days_since_epoch));
+    while (true) {
+        const leap: i64 = if (@mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0)) @as(i64, 1) else @as(i64, 0);
+        const year_days: i64 = 365 + leap;
+        if (remaining < year_days) break;
+        remaining -= year_days;
+        y += 1;
+    }
+    const leap: i64 = if (@mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0)) @as(i64, 1) else @as(i64, 0);
+    const month_days = [_]i64{ 31, 28 + leap, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    var m: usize = 0;
+    while (m < 12) : (m += 1) {
+        if (remaining < month_days[m]) break;
+        remaining -= month_days[m];
+    }
+    
+    return std.fmt.allocPrint(allocator, "{s} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} {d} {s}", .{
+        dow_names[dow], mon_names[m], remaining + 1, hours, minutes, seconds, y, tz,
+    });
 }
 
 fn formatRfc2822Date(timestamp: i64, tz: []const u8, allocator: std.mem.Allocator) ![]u8 {
