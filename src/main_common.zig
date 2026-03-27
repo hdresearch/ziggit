@@ -26654,19 +26654,22 @@ fn nativeCmdCheckAttr(allocator: std.mem.Allocator, args: *platform_mod.ArgItera
             }
         }
 
-        // Load directory-specific .gitattributes
+        // Load directory-specific .gitattributes from each directory in path
         var dir_rules = std.array_list.Managed(AttrRule).init(allocator);
         defer {
             for (dir_rules.items) |*rule| rule.deinit(allocator);
             dir_rules.deinit();
         }
         if (!cached) {
-            // Load .gitattributes from each directory in the path
-            const dir = std.fs.path.dirname(check_path);
-            if (dir) |d| {
-                if (d.len > 0) {
-                    try loadAttrFile(allocator, repo_root, d, platform_impl, &dir_rules);
+            // Walk up the path hierarchy loading .gitattributes from each dir
+            // e.g. for "a/b/d/g", load a/.gitattributes, a/b/.gitattributes, a/b/d/.gitattributes
+            var remaining = check_path;
+            while (std.mem.indexOf(u8, remaining, "/")) |slash_pos| {
+                const subdir = check_path[0 .. @intFromPtr(remaining.ptr) - @intFromPtr(check_path.ptr) + slash_pos];
+                if (subdir.len > 0) {
+                    try loadAttrFile(allocator, repo_root, subdir, platform_impl, &dir_rules);
                 }
+                remaining = remaining[slash_pos + 1 ..];
             }
         }
 
