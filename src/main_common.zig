@@ -4991,6 +4991,7 @@ fn performLocalClone(
     branch: ?[]const u8,
     origin_name: ?[]const u8,
     platform_impl: *const platform_mod.Platform,
+    is_shared: bool,
 ) !void {
     // Resolve source git directory
     const src_git_dir = try resolveSourceGitDir(allocator, source_url);
@@ -5023,12 +5024,30 @@ fn performLocalClone(
         std.fs.cwd().makePath(full_path) catch {};
     }
 
-    // Copy objects (loose objects + pack files)
+    // Copy or share objects (loose objects + pack files)
     const src_objects = try std.fmt.allocPrint(allocator, "{s}/objects", .{src_git_dir});
     defer allocator.free(src_objects);
     const dst_objects = try std.fmt.allocPrint(allocator, "{s}/objects", .{dst_git_dir});
     defer allocator.free(dst_objects);
-    try copyDirectoryRecursive(allocator, src_objects, dst_objects);
+
+    if (is_shared) {
+        // Create alternates file pointing to source objects
+        const alt_dir = try std.fmt.allocPrint(allocator, "{s}/objects/info", .{dst_git_dir});
+        defer allocator.free(alt_dir);
+        std.fs.cwd().makePath(alt_dir) catch {};
+        const alt_path = try std.fmt.allocPrint(allocator, "{s}/objects/info/alternates", .{dst_git_dir});
+        defer allocator.free(alt_path);
+        const abs_src_objects = std.fs.cwd().realpathAlloc(allocator, src_objects) catch try allocator.dupe(u8, src_objects);
+        defer allocator.free(abs_src_objects);
+        {
+            const f = try std.fs.cwd().createFile(alt_path, .{});
+            defer f.close();
+            try f.writeAll(abs_src_objects);
+            try f.writeAll("\n");
+        }
+    } else {
+        try copyDirectoryRecursive(allocator, src_objects, dst_objects);
+    }
 
     // Copy packed-refs if it exists
     const src_packed_refs = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{src_git_dir});
@@ -5352,13 +5371,15 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     // Check flags
     var is_bare = false;
     var is_no_checkout = false;
+    var is_shared = false;
     var clone_depth: u32 = 0;
     {
         var i: usize = 0;
         while (i < all_args.items.len) : (i += 1) {
             const arg = all_args.items[i];
             if (std.mem.eql(u8, arg, "--bare")) is_bare = true;
-            if (std.mem.eql(u8, arg, "--no-checkout")) is_no_checkout = true;
+            if (std.mem.eql(u8, arg, "--no-checkout") or std.mem.eql(u8, arg, "-n")) is_no_checkout = true;
+            if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--shared")) is_shared = true;
             if (std.mem.eql(u8, arg, "--depth")) {
                 if (i + 1 < all_args.items.len) {
                     clone_depth = std.fmt.parseInt(u32, all_args.items[i + 1], 10) catch 0;
@@ -5582,7 +5603,7 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
                 defer allocator.free(bare_msg);
                 try platform_impl.writeStderr(bare_msg);
 
-                try performLocalClone(allocator, burl, bfinal_target, true, false, null, null, platform_impl);
+                try performLocalClone(allocator, burl, bfinal_target, true, false, null, null, platform_impl, false);
                 return;
             }
         }
@@ -5678,7 +5699,7 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         defer allocator.free(clone_msg);
         try platform_impl.writeStderr(clone_msg);
 
-        performLocalClone(allocator, url.?, final_target_dir, false, is_no_checkout, clone_branch, clone_origin, platform_impl) catch |err| {
+        performLocalClone(allocator, url.?, final_target_dir, false, is_no_checkout, clone_branch, clone_origin, platform_impl, is_shared) catch |err| {
             // Clean up on failure
             std.fs.cwd().deleteTree(final_target_dir) catch {};
             const emsg = try std.fmt.allocPrint(allocator, "fatal: {}\n", .{err});
@@ -15230,6 +15251,57 @@ fn nativeCmdCountObjects(allocator: std.mem.Allocator, args: [][]const u8, comma
         ) catch unreachable;
         defer allocator.free(output);
         try platform_impl.writeStdout(output);
+
+        // Show alternates from info/alternates (recursively)
+        {
+            var visited = std.StringHashMap(void).init(allocator);
+            defer {
+                var vit = visited.iterator();
+                while (vit.next()) |entry| allocator.free(entry.key_ptr.*);
+                visited.deinit();
+            }
+            var to_visit = std.ArrayListUnmanaged([]const u8){};
+            defer {
+                for (to_visit.items) |item| allocator.free(item);
+                to_visit.deinit(allocator);
+            }
+
+            // Start with this repo's objects dir
+            const start_obj_dir = std.fmt.allocPrint(allocator, "{s}/objects", .{git_dir}) catch unreachable;
+            try to_visit.append(allocator, start_obj_dir);
+
+            while (to_visit.items.len > 0) {
+                const obj_dir = to_visit.orderedRemove(0);
+                defer allocator.free(obj_dir);
+
+                const info_alt = std.fmt.allocPrint(allocator, "{s}/info/alternates", .{obj_dir}) catch continue;
+                defer allocator.free(info_alt);
+                const alt_content = std.fs.cwd().readFileAlloc(allocator, info_alt, 1024 * 1024) catch continue;
+                defer allocator.free(alt_content);
+                var alt_lines = std.mem.splitScalar(u8, alt_content, '\n');
+                while (alt_lines.next()) |aline| {
+                    const atrimmed = std.mem.trim(u8, aline, " \t\r");
+                    if (atrimmed.len == 0) continue;
+                    // Resolve relative paths
+                    const abs_alt = if (!std.fs.path.isAbsolute(atrimmed)) blk: {
+                        const rel = std.fmt.allocPrint(allocator, "{s}/{s}", .{ obj_dir, atrimmed }) catch continue;
+                        defer allocator.free(rel);
+                        break :blk std.fs.cwd().realpathAlloc(allocator, rel) catch continue;
+                    } else std.fs.cwd().realpathAlloc(allocator, atrimmed) catch try allocator.dupe(u8, atrimmed);
+                    defer allocator.free(abs_alt);
+
+                    if (visited.contains(abs_alt)) continue;
+                    try visited.put(try allocator.dupe(u8, abs_alt), {});
+
+                    const alt_out = std.fmt.allocPrint(allocator, "alternate: {s}\n", .{abs_alt}) catch continue;
+                    defer allocator.free(alt_out);
+                    try platform_impl.writeStdout(alt_out);
+
+                    // Queue for recursive visiting
+                    try to_visit.append(allocator, try allocator.dupe(u8, abs_alt));
+                }
+            }
+        }
     } else {
         const output = std.fmt.allocPrint(allocator, "{d} objects, {d} kilobytes\n", .{ count, size_kb }) catch unreachable;
         defer allocator.free(output);
