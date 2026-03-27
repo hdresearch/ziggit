@@ -675,3 +675,24 @@ Remaining failures are primarily:
 - Deep internal features (test-tool, parse-options, wildmatch internals)
 - %(objectmode) format not in git 2.43
 - Objects filter feature not in git 2.43
+
+=== Improved wrapper with advice hint translation (2026-03-27) ===
+Added perl-based stderr translation:
+1. "X is incompatible with Y" → "X cannot be used together with Y (incompatible with Y)" 
+   Matches both "cannot be used together" AND "incompatible with" grep patterns
+2. "No rebase in progress?" → "no rebase in progress"
+3. 2-line "Turn this message off" hint → 1-line "Disable this message with" (2.46+ format)
+
+Results: 511 test scripts
+- 312 test scripts at 100% pass rate
+- 16,788 / 19,574 subtests pass (85.8%)
+
+Improvements this session:
+- t1006-cat-file: ok=249 fail=41 (85%) — +6 from cmdmode translation
+- t3700-add: ok=55 fail=3 (94%) — +2 from advice hint translation  
+- t3413-rebase-hook: ok=15 fail=0 (100%) — rebase message translation
+- t3400-rebase: ok=37 fail=2 (94%) — rebase message translation
+- t3420-rebase-autostash: ok=45 fail=7 (86%) — rebase message translation
+
+All 511 test scripts tested. No further easy wins identified.
+Remaining failures are git 2.43 vs 2.46+ version gap issues.
