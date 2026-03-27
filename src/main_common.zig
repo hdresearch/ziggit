@@ -2224,21 +2224,10 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     defer allocator.free(cwd);
 
     // Process all file arguments
-    var update_mode = false;
-    var all_mode = false;
     while (args.next()) |file_path| {
         // Skip "--" separator (used to separate options from paths)
         if (std.mem.eql(u8, file_path, "--")) continue;
-        // Handle specific flags
-        if (std.mem.eql(u8, file_path, "-u") or std.mem.eql(u8, file_path, "--update")) {
-            update_mode = true;
-            continue;
-        }
-        if (std.mem.eql(u8, file_path, "-A") or std.mem.eql(u8, file_path, "--all") or std.mem.eql(u8, file_path, "--no-ignore-removal")) {
-            all_mode = true;
-            continue;
-        }
-        // Skip other flags like -n, -v, -f, --force, etc.
+        // Skip flags like -n, -v, -f, --force, etc.
         if (file_path.len > 0 and file_path[0] == '-') continue;
         has_files = true;
         
@@ -2285,65 +2274,6 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         }
     }
 
-    if (update_mode or all_mode) {
-        // -u: update all tracked files (add modifications and deletions)
-        // -A: like -u but also adds untracked files
-        const repo_root = std.fs.path.dirname(git_path) orelse ".";
-        
-        // Update existing index entries (modified or deleted tracked files)
-        var i: usize = 0;
-        while (i < index.entries.items.len) {
-            const entry = index.entries.items[i];
-            const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path });
-            defer allocator.free(full_path);
-            
-            if (platform_impl.fs.exists(full_path) catch false) {
-                // File exists - check if modified
-                const current_content = platform_impl.fs.readFile(allocator, full_path) catch {
-                    i += 1;
-                    continue;
-                };
-                defer allocator.free(current_content);
-                
-                const blob = objects.createBlobObject(current_content, allocator) catch {
-                    i += 1;
-                    continue;
-                };
-                defer blob.deinit(allocator);
-                
-                // Write the blob to objects
-                const hash = blob.hash(allocator) catch {
-                    i += 1;
-                    continue;
-                };
-                defer allocator.free(hash);
-                
-                const stored_hash = try blob.store(git_path, platform_impl, allocator);
-                allocator.free(stored_hash);
-                
-                // Update index entry with new hash
-                var new_sha1: [20]u8 = undefined;
-                _ = std.fmt.hexToBytes(&new_sha1, hash) catch {
-                    i += 1;
-                    continue;
-                };
-                index.entries.items[i].sha1 = new_sha1;
-                
-                // Update stat info
-                if (std.fs.cwd().statFile(full_path)) |stat| {
-                    index.entries.items[i].size = @intCast(stat.size);
-                } else |_| {}
-            } else {
-                // File deleted - remove from index
-                _ = index.entries.orderedRemove(i);
-                continue; // Don't increment i
-            }
-            i += 1;
-        }
-        
-        has_files = true;
-    }
-    
     if (!has_files) {
         try platform_impl.writeStderr("Nothing specified, nothing added.\n");
         try platform_impl.writeStderr("hint: Maybe you wanted to say 'git add .'?\n");
@@ -2366,15 +2296,26 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     var amend = false;
     var add_all = false;
     var quiet = false;
+    var msg_source: enum { none, m_flag, f_flag, c_flag } = .none;
 
     // Parse arguments
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-m")) {
+            if (msg_source == .f_flag or msg_source == .c_flag) {
+                try platform_impl.writeStderr("fatal: Option -m cannot be combined with -F or -C/-c\n");
+                std.process.exit(128);
+            }
+            msg_source = .m_flag;
             message = args.next() orelse {
                 try platform_impl.writeStderr("error: option `-m' requires a value\n");
                 std.process.exit(129);
             };
         } else if (std.mem.startsWith(u8, arg, "-m")) {
+            if (msg_source == .f_flag or msg_source == .c_flag) {
+                try platform_impl.writeStderr("fatal: Option -m cannot be combined with -F or -C/-c\n");
+                std.process.exit(128);
+            }
+            msg_source = .m_flag;
             message = arg[2..];
         } else if (std.mem.eql(u8, arg, "-a")) {
             add_all = true;
@@ -2394,6 +2335,11 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         } else if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
             quiet = true;
         } else if (std.mem.eql(u8, arg, "-F") or std.mem.eql(u8, arg, "--file")) {
+            if (msg_source == .m_flag or msg_source == .c_flag) {
+                try platform_impl.writeStderr("fatal: Option -F cannot be combined with -m or -C/-c\n");
+                std.process.exit(128);
+            }
+            msg_source = .f_flag;
             const file_path = args.next() orelse {
                 try platform_impl.writeStderr("error: option '-F' requires a value\n");
                 std.process.exit(129);
@@ -2422,6 +2368,11 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 std.process.exit(128);
             };
         } else if (std.mem.eql(u8, arg, "-C") or std.mem.eql(u8, arg, "--reuse-message")) {
+            if (msg_source == .m_flag or msg_source == .f_flag) {
+                try platform_impl.writeStderr("fatal: Option -C cannot be combined with -m or -F\n");
+                std.process.exit(128);
+            }
+            msg_source = .c_flag;
             // Reuse message from another commit
             const commit_ref = args.next() orelse {
                 try platform_impl.writeStderr("error: option '-C' requires a value\n");
@@ -3561,18 +3512,9 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
 
         // Create new branch
         refs.createBranch(git_path, branch_name, null, platform_impl, allocator) catch |err| switch (err) {
-            error.NoCommitsYet, error.RefNotFound, error.FileNotFound => {
-                // On empty repo, just update HEAD to point to the new branch
-                const head_path3 = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
-                defer allocator.free(head_path3);
-                const ref_content3 = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{branch_name});
-                defer allocator.free(ref_content3);
-                platform_impl.fs.writeFile(head_path3, ref_content3) catch {};
-                
-                const success_msg3 = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
-                defer allocator.free(success_msg3);
-                try platform_impl.writeStderr(success_msg3);
-                return;
+            error.NoCommitsYet => {
+                try platform_impl.writeStderr("fatal: not a valid object name: 'master'\n");
+                std.process.exit(128);
             },
             error.InvalidStartPoint => {
                 try platform_impl.writeStderr("fatal: not a valid object name\n");
@@ -6028,7 +5970,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             do_unset = true;
         } else if (std.mem.eql(u8, arg, "--unset-all")) {
             do_unset_all = true;
-        } else if (std.mem.eql(u8, arg, "--add") or std.mem.eql(u8, arg, "--append")) {
+        } else if (std.mem.eql(u8, arg, "--add")) {
             do_add = true;
         } else if (std.mem.eql(u8, arg, "--remove-section")) {
             do_remove_section = true;
@@ -8224,109 +8166,6 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         if (new_hash) |nh| {
             writeReflogEntry(git_path, std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name}) catch "", "0000000000000000000000000000000000000000", nh, "branch: Created from HEAD", allocator, platform_impl) catch {};
         }
-    } else if (std.mem.startsWith(u8, first_arg.?, "--set-upstream-to=")) {
-        // Set upstream tracking branch
-        const upstream = first_arg.?["--set-upstream-to=".len..];
-        const branch_name = args.next() orelse blk: {
-            break :blk refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
-                try platform_impl.writeStderr("fatal: could not determine current branch\n");
-                std.process.exit(128);
-            };
-        };
-        // Write tracking config
-        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
-        defer allocator.free(config_path);
-        
-        // Parse remote and branch from upstream (e.g., "origin/main" -> remote=origin, merge=refs/heads/main)
-        // Or just a local branch name (e.g., "upstream" -> remote=., merge=refs/heads/upstream)
-        var remote: []const u8 = ".";
-        var merge_ref: []const u8 = undefined;
-        if (std.mem.indexOf(u8, upstream, "/")) |slash| {
-            remote = upstream[0..slash];
-            const remote_branch = upstream[slash + 1..];
-            merge_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{remote_branch});
-        } else {
-            merge_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{upstream});
-        }
-        
-        // Append config section
-        var config_content = std.array_list.Managed(u8).init(allocator);
-        defer config_content.deinit();
-        if (platform_impl.fs.readFile(allocator, config_path)) |existing| {
-            defer allocator.free(existing);
-            try config_content.appendSlice(existing);
-        } else |_| {}
-        
-        // Remove existing branch config section if present
-        const section_header = try std.fmt.allocPrint(allocator, "[branch \"{s}\"]", .{branch_name});
-        defer allocator.free(section_header);
-        
-        // Add new section
-        if (config_content.items.len > 0 and config_content.items[config_content.items.len - 1] != '\n') {
-            try config_content.append('\n');
-        }
-        try config_content.appendSlice(section_header);
-        try config_content.append('\n');
-        const remote_line = try std.fmt.allocPrint(allocator, "\tremote = {s}\n", .{remote});
-        defer allocator.free(remote_line);
-        try config_content.appendSlice(remote_line);
-        const merge_line = try std.fmt.allocPrint(allocator, "\tmerge = {s}\n", .{merge_ref});
-        defer allocator.free(merge_line);
-        try config_content.appendSlice(merge_line);
-        
-        try platform_impl.fs.writeFile(config_path, config_content.items);
-        
-        const msg = try std.fmt.allocPrint(allocator, "branch '{s}' set up to track '{s}'.\n", .{ branch_name, upstream });
-        defer allocator.free(msg);
-        try platform_impl.writeStdout(msg);
-    } else if (std.mem.eql(u8, first_arg.?, "--set-upstream-to") or std.mem.eql(u8, first_arg.?, "-u")) {
-        const upstream = args.next() orelse {
-            try platform_impl.writeStderr("fatal: option '--set-upstream-to' requires a value\n");
-            std.process.exit(128);
-        };
-        const branch_name = args.next() orelse blk: {
-            break :blk refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
-                try platform_impl.writeStderr("fatal: could not determine current branch\n");
-                std.process.exit(128);
-            };
-        };
-        // Same logic as above - set tracking config
-        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
-        defer allocator.free(config_path);
-        var remote: []const u8 = ".";
-        var merge_ref: []const u8 = undefined;
-        if (std.mem.indexOf(u8, upstream, "/")) |slash| {
-            remote = upstream[0..slash];
-            const remote_branch = upstream[slash + 1..];
-            merge_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{remote_branch});
-        } else {
-            merge_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{upstream});
-        }
-        var config_content = std.array_list.Managed(u8).init(allocator);
-        defer config_content.deinit();
-        if (platform_impl.fs.readFile(allocator, config_path)) |existing| {
-            defer allocator.free(existing);
-            try config_content.appendSlice(existing);
-        } else |_| {}
-        if (config_content.items.len > 0 and config_content.items[config_content.items.len - 1] != '\n') {
-            try config_content.append('\n');
-        }
-        const section_header = try std.fmt.allocPrint(allocator, "[branch \"{s}\"]\n\tremote = {s}\n\tmerge = {s}\n", .{ branch_name, remote, merge_ref });
-        defer allocator.free(section_header);
-        try config_content.appendSlice(section_header);
-        try platform_impl.fs.writeFile(config_path, config_content.items);
-        const msg = try std.fmt.allocPrint(allocator, "branch '{s}' set up to track '{s}'.\n", .{ branch_name, upstream });
-        defer allocator.free(msg);
-        try platform_impl.writeStdout(msg);
-    } else if (std.mem.eql(u8, first_arg.?, "--show-current")) {
-        const current = refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
-            try platform_impl.writeStdout("\n");
-            return;
-        };
-        defer allocator.free(current);
-        const out = try std.fmt.allocPrint(allocator, "{s}\n", .{current});
-        defer allocator.free(out);
-        try platform_impl.writeStdout(out);
     } else {
         // Create new branch
         const branch_name = first_arg.?;
@@ -10859,7 +10698,7 @@ fn getObjectSize(allocator: std.mem.Allocator, git_path: []const u8, sha1: *cons
     defer allocator.free(compressed);
 
     // Decompress to find the size in the header
-    const decompressed = zlib_compat_mod.decompressSlice(allocator, compressed, 1024 * 1024) catch return error.DecompressError;
+    const decompressed = zlib_compat_mod.decompressSlice(allocator, compressed) catch return error.DecompressError;
     defer allocator.free(decompressed);
 
     // Parse header: "type size\0content..."
@@ -19891,11 +19730,21 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
     var name_only = false;
     var name_status = false;
     var no_commit_id = false;
+    var quiet = false;
     var tree_refs = std.array_list.Managed([]const u8).init(allocator);
     defer tree_refs.deinit();
+    var pathspecs = std.array_list.Managed([]const u8).init(allocator);
+    defer pathspecs.deinit();
+    var seen_dashdash = false;
     
     for (rest) |arg| {
-        if (std.mem.eql(u8, arg, "-r")) {
+        if (seen_dashdash) {
+            try pathspecs.append(arg);
+        } else if (std.mem.eql(u8, arg, "--")) {
+            seen_dashdash = true;
+        } else if (std.mem.eql(u8, arg, "-r")) {
+            recursive = true;
+        } else if (std.mem.eql(u8, arg, "-t")) {
             recursive = true;
         } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--patch") or std.mem.eql(u8, arg, "-u")) {
             show_patch = true;
@@ -19908,13 +19757,19 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
             name_status = true;
         } else if (std.mem.eql(u8, arg, "--no-commit-id")) {
             no_commit_id = true;
+        } else if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
+            quiet = true;
         } else if (std.mem.eql(u8, arg, "-h")) {
             try platform_impl.writeStdout("usage: git diff-tree [<options>] <tree-ish> [<tree-ish>] [<path>...]\n");
             std.process.exit(129);
-        } else if (arg.len > 0 and arg[0] != '-') {
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            // skip unknown flags
+        } else {
             try tree_refs.append(arg);
         }
     }
+    
+    var had_diff = false;
     
     if (tree_refs.items.len == 0) {
         // Read commit hashes from stdin
@@ -19924,13 +19779,11 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
         while (line_it.next()) |line| {
             const trimmed = std.mem.trim(u8, line, " \t\r");
             if (trimmed.len == 0) continue;
-            diffTreeForCommit(allocator, trimmed, recursive, show_patch, show_root, name_only, name_status, no_commit_id, platform_impl) catch {};
+            const d = diffTreeForCommit(allocator, trimmed, recursive, show_patch, show_root, name_only, name_status, no_commit_id, quiet, pathspecs.items, platform_impl) catch false;
+            if (d) had_diff = true;
         }
-        return;
-    }
-    
-    if (tree_refs.items.len == 1) {
-        try diffTreeForCommit(allocator, tree_refs.items[0], recursive, show_patch, show_root, name_only, name_status, no_commit_id, platform_impl);
+    } else if (tree_refs.items.len == 1) {
+        had_diff = try diffTreeForCommit(allocator, tree_refs.items[0], recursive, show_patch, show_root, name_only, name_status, no_commit_id, quiet, pathspecs.items, platform_impl);
     } else {
         // Resolve both refs to tree hashes
         const git_path = findGitDirectory(allocator, platform_impl) catch {
@@ -19952,7 +19805,11 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
             std.process.exit(128);
         };
         defer allocator.free(tree2);
-        try diffTwoTrees(allocator, tree1, tree2, "", recursive, show_patch, name_only, name_status, platform_impl);
+        had_diff = try diffTwoTreesFiltered(allocator, tree1, tree2, "", recursive, show_patch, name_only, name_status, quiet, pathspecs.items, platform_impl);
+    }
+    
+    if (had_diff) {
+        std.process.exit(1);
     }
 }
 
@@ -19980,7 +19837,7 @@ fn resolveToTree(allocator: std.mem.Allocator, ref_str: []const u8, git_path: []
     }
 }
 
-fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, recursive: bool, show_patch: bool, show_root: bool, name_only: bool, name_status: bool, no_commit_id: bool, platform_impl: *const platform_mod.Platform) !void {
+fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, recursive: bool, show_patch: bool, show_root: bool, name_only: bool, name_status: bool, no_commit_id: bool, quiet: bool, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform) !bool {
     const git_path = findGitDirectory(allocator, platform_impl) catch {
         try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
         std.process.exit(128);
@@ -20010,22 +19867,25 @@ fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, recur
         }
     }
     
-    const this_tree = tree_hash orelse return;
+    const this_tree = tree_hash orelse return false;
     
     if (parent_hash == null) {
         if (show_root) {
-            if (!no_commit_id) {
+            if (!quiet and !no_commit_id) {
                 const id_line = try std.fmt.allocPrint(allocator, "{s}\n", .{commit_hash});
                 defer allocator.free(id_line);
                 try platform_impl.writeStdout(id_line);
             }
-            try diffTreeWithEmpty(allocator, this_tree, recursive, show_patch, name_only, name_status, git_path, platform_impl);
+            if (!quiet) {
+                try diffTreeWithEmpty(allocator, this_tree, recursive, show_patch, name_only, name_status, git_path, platform_impl);
+            }
+            return true;
         }
-        return;
+        return false;
     }
     
     // Get parent tree
-    const parent_obj = objects.GitObject.load(parent_hash.?, git_path, platform_impl, allocator) catch return;
+    const parent_obj = objects.GitObject.load(parent_hash.?, git_path, platform_impl, allocator) catch return false;
     defer parent_obj.deinit(allocator);
     
     var parent_tree: ?[]const u8 = null;
@@ -20039,16 +19899,20 @@ fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, recur
     }
     
     if (parent_tree) |pt| {
-        // Only output if trees differ
-        if (!std.mem.eql(u8, pt, this_tree)) {
-            if (!no_commit_id) {
-                const id_line = try std.fmt.allocPrint(allocator, "{s}\n", .{commit_hash});
-                defer allocator.free(id_line);
-                try platform_impl.writeStdout(id_line);
+        const has_diff = try diffTwoTreesFiltered(allocator, pt, this_tree, "", recursive, show_patch, name_only, name_status, true, pathspecs, platform_impl);
+        if (has_diff) {
+            if (!quiet) {
+                if (!no_commit_id) {
+                    const id_line = try std.fmt.allocPrint(allocator, "{s}\n", .{commit_hash});
+                    defer allocator.free(id_line);
+                    try platform_impl.writeStdout(id_line);
+                }
+                _ = try diffTwoTreesFiltered(allocator, pt, this_tree, "", recursive, show_patch, name_only, name_status, false, pathspecs, platform_impl);
             }
-            try diffTwoTrees(allocator, pt, this_tree, "", recursive, show_patch, name_only, name_status, platform_impl);
+            return true;
         }
     }
+    return false;
 }
 
 fn diffTreeWithEmpty(allocator: std.mem.Allocator, tree_hash_str: []const u8, recursive: bool, show_patch: bool, name_only: bool, name_status: bool, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
@@ -20082,18 +19946,28 @@ fn diffTreeWithEmpty(allocator: std.mem.Allocator, tree_hash_str: []const u8, re
     }
 }
 
-fn diffTwoTrees(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, prefix: []const u8, recursive: bool, show_patch: bool, name_only: bool, name_status: bool, platform_impl: *const platform_mod.Platform) !void {
-    const git_path = findGitDirectory(allocator, platform_impl) catch return;
+fn matchesPathspecs(path: []const u8, pathspecs: []const []const u8) bool {
+    if (pathspecs.len == 0) return true;
+    for (pathspecs) |ps| {
+        if (std.mem.eql(u8, path, ps)) return true;
+        if (std.mem.startsWith(u8, path, ps) and path.len > ps.len and path[ps.len] == '/') return true;
+        if (std.mem.startsWith(u8, ps, path) and ps.len > path.len and ps[path.len] == '/') return true;
+    }
+    return false;
+}
+
+fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, prefix: []const u8, recursive: bool, show_patch: bool, name_only: bool, name_status: bool, quiet: bool, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform) !bool {
+    const git_path = findGitDirectory(allocator, platform_impl) catch return false;
     defer allocator.free(git_path);
     
-    const tree1_obj = objects.GitObject.load(tree1_hash, git_path, platform_impl, allocator) catch return;
+    const tree1_obj = objects.GitObject.load(tree1_hash, git_path, platform_impl, allocator) catch return false;
     defer tree1_obj.deinit(allocator);
-    const tree2_obj = objects.GitObject.load(tree2_hash, git_path, platform_impl, allocator) catch return;
+    const tree2_obj = objects.GitObject.load(tree2_hash, git_path, platform_impl, allocator) catch return false;
     defer tree2_obj.deinit(allocator);
     
-    var entries1 = tree_mod.parseTree(tree1_obj.data, allocator) catch return;
+    var entries1 = tree_mod.parseTree(tree1_obj.data, allocator) catch return false;
     defer entries1.deinit();
-    var entries2 = tree_mod.parseTree(tree2_obj.data, allocator) catch return;
+    var entries2 = tree_mod.parseTree(tree2_obj.data, allocator) catch return false;
     defer entries2.deinit();
     
     const zero_hash = "0000000000000000000000000000000000000000";
@@ -20122,6 +19996,7 @@ fn diffTwoTrees(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash
         }
     }.cmp);
     
+    var had_diff = false;
     for (name_list.items) |name| {
         const e1 = map1.get(name);
         const e2 = map2.get(name);
@@ -20135,53 +20010,68 @@ fn diffTwoTrees(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash
         if (e1 != null and e2 != null) {
             if (std.mem.eql(u8, e1.?.hash, e2.?.hash) and std.mem.eql(u8, e1.?.mode, e2.?.mode)) continue;
             if (recursive and std.mem.eql(u8, e1.?.mode, "040000") and std.mem.eql(u8, e2.?.mode, "040000")) {
-                try diffTwoTrees(allocator, e1.?.hash, e2.?.hash, full_name, recursive, show_patch, name_only, name_status, platform_impl);
+                const sub = try diffTwoTreesFiltered(allocator, e1.?.hash, e2.?.hash, full_name, recursive, show_patch, name_only, name_status, quiet, pathspecs, platform_impl);
+                if (sub) had_diff = true;
                 continue;
             }
-            if (name_only) {
-                const out = try std.fmt.allocPrint(allocator, "{s}\n", .{full_name});
-                defer allocator.free(out);
-                try platform_impl.writeStdout(out);
-            } else if (name_status) {
-                const out = try std.fmt.allocPrint(allocator, "M\t{s}\n", .{full_name});
-                defer allocator.free(out);
-                try platform_impl.writeStdout(out);
-            } else {
-                const out = try std.fmt.allocPrint(allocator, ":{s} {s} {s} {s} M\t{s}\n", .{ e1.?.mode, e2.?.mode, e1.?.hash, e2.?.hash, full_name });
-                defer allocator.free(out);
-                try platform_impl.writeStdout(out);
+            if (!matchesPathspecs(full_name, pathspecs)) continue;
+            had_diff = true;
+            if (!quiet) {
+                if (name_only) {
+                    const out = try std.fmt.allocPrint(allocator, "{s}\n", .{full_name});
+                    defer allocator.free(out);
+                    try platform_impl.writeStdout(out);
+                } else if (name_status) {
+                    const out = try std.fmt.allocPrint(allocator, "M\t{s}\n", .{full_name});
+                    defer allocator.free(out);
+                    try platform_impl.writeStdout(out);
+                } else {
+                    const out = try std.fmt.allocPrint(allocator, ":{s} {s} {s} {s} M\t{s}\n", .{ e1.?.mode, e2.?.mode, e1.?.hash, e2.?.hash, full_name });
+                    defer allocator.free(out);
+                    try platform_impl.writeStdout(out);
+                }
             }
         } else if (e1 != null and e2 == null) {
-            if (name_only) {
-                const out = try std.fmt.allocPrint(allocator, "{s}\n", .{full_name});
-                defer allocator.free(out);
-                try platform_impl.writeStdout(out);
-            } else if (name_status) {
-                const out = try std.fmt.allocPrint(allocator, "D\t{s}\n", .{full_name});
-                defer allocator.free(out);
-                try platform_impl.writeStdout(out);
-            } else {
-                const out = try std.fmt.allocPrint(allocator, ":{s} 000000 {s} {s} D\t{s}\n", .{ e1.?.mode, e1.?.hash, zero_hash, full_name });
-                defer allocator.free(out);
-                try platform_impl.writeStdout(out);
+            if (!matchesPathspecs(full_name, pathspecs)) continue;
+            had_diff = true;
+            if (!quiet) {
+                if (name_only) {
+                    const out = try std.fmt.allocPrint(allocator, "{s}\n", .{full_name});
+                    defer allocator.free(out);
+                    try platform_impl.writeStdout(out);
+                } else if (name_status) {
+                    const out = try std.fmt.allocPrint(allocator, "D\t{s}\n", .{full_name});
+                    defer allocator.free(out);
+                    try platform_impl.writeStdout(out);
+                } else {
+                    const out = try std.fmt.allocPrint(allocator, ":{s} 000000 {s} {s} D\t{s}\n", .{ e1.?.mode, e1.?.hash, zero_hash, full_name });
+                    defer allocator.free(out);
+                    try platform_impl.writeStdout(out);
+                }
             }
         } else if (e2 != null) {
-            if (name_only) {
-                const out = try std.fmt.allocPrint(allocator, "{s}\n", .{full_name});
-                defer allocator.free(out);
-                try platform_impl.writeStdout(out);
-            } else if (name_status) {
-                const out = try std.fmt.allocPrint(allocator, "A\t{s}\n", .{full_name});
-                defer allocator.free(out);
-                try platform_impl.writeStdout(out);
-            } else {
-                const out = try std.fmt.allocPrint(allocator, ":000000 {s} {s} {s} A\t{s}\n", .{ e2.?.mode, zero_hash, e2.?.hash, full_name });
-                defer allocator.free(out);
-                try platform_impl.writeStdout(out);
+            if (!matchesPathspecs(full_name, pathspecs)) continue;
+            had_diff = true;
+            if (!quiet) {
+                if (name_only) {
+                    const out = try std.fmt.allocPrint(allocator, "{s}\n", .{full_name});
+                    defer allocator.free(out);
+                    try platform_impl.writeStdout(out);
+                } else if (name_status) {
+                    const out = try std.fmt.allocPrint(allocator, "A\t{s}\n", .{full_name});
+                    defer allocator.free(out);
+                    try platform_impl.writeStdout(out);
+                } else {
+                    const out = try std.fmt.allocPrint(allocator, ":000000 {s} {s} {s} A\t{s}\n", .{ e2.?.mode, zero_hash, e2.?.hash, full_name });
+                    defer allocator.free(out);
+                    try platform_impl.writeStdout(out);
+                }
             }
         }
     }
+    return had_diff;
 }
+
 
 fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
     // diff-index compares a tree with the index
