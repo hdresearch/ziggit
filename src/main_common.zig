@@ -3429,6 +3429,36 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     };
     defer allocator.free(git_path);
 
+    // Check if this is --orphan flag (create orphan branch)
+    if (std.mem.eql(u8, first_arg, "--orphan")) {
+        const branch_name = args.next() orelse {
+            try platform_impl.writeStderr("fatal: option '--orphan' requires a value\n");
+            std.process.exit(128);
+        };
+
+        // Set HEAD to point to the new branch (which doesn't exist yet)
+        const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+        defer allocator.free(head_path);
+        const ref_content = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{branch_name});
+        defer allocator.free(ref_content);
+        platform_impl.fs.writeFile(head_path, ref_content) catch |err| {
+            const msg = try std.fmt.allocPrint(allocator, "error: failed to create orphan branch: {}\n", .{err});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(1);
+        };
+
+        // Remove the index to start fresh
+        const index_path = try std.fmt.allocPrint(allocator, "{s}/index", .{git_path});
+        defer allocator.free(index_path);
+        std.fs.cwd().deleteFile(index_path) catch {};
+
+        const success_msg = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
+        defer allocator.free(success_msg);
+        try platform_impl.writeStderr(success_msg);
+        return;
+    }
+
     // Check if this is a -b flag (create new branch)
     if (std.mem.eql(u8, first_arg, "-b")) {
         const branch_name = args.next() orelse {
@@ -7402,107 +7432,701 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     }
 }
 
+/// Resolve any object hash by prefix (not just commits). Returns full 40-char hash.
+fn resolveObjectByPrefix(git_path: []const u8, hash_prefix: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
+    // Full hash - verify it exists
+    if (hash_prefix.len == 40 and isValidHexString(hash_prefix)) {
+        const obj = objects.GitObject.load(hash_prefix, git_path, platform_impl, allocator) catch return error.ObjectNotFound;
+        obj.deinit(allocator);
+        return try allocator.dupe(u8, hash_prefix);
+    }
+
+    if (hash_prefix.len < 4 or !isValidHexString(hash_prefix)) return error.ObjectNotFound;
+
+    // Short hash - scan objects directory
+    const dir_name = hash_prefix[0..2];
+    const file_prefix = hash_prefix[2..];
+    const subdir_path = try std.fmt.allocPrint(allocator, "{s}/objects/{s}", .{ git_path, dir_name });
+    defer allocator.free(subdir_path);
+
+    var found_hash: ?[]u8 = null;
+    errdefer if (found_hash) |h| allocator.free(h);
+
+    // Scan loose objects
+    if (std.fs.cwd().openDir(subdir_path, .{ .iterate = true })) |*dir_ptr| {
+        var dir = dir_ptr.*;
+        defer dir.close();
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            if (entry.kind != .file) continue;
+            if (std.mem.startsWith(u8, entry.name, file_prefix)) {
+                if (found_hash != null) {
+                    allocator.free(found_hash.?);
+                    return error.AmbiguousObject;
+                }
+                found_hash = try std.fmt.allocPrint(allocator, "{s}{s}", .{ dir_name, entry.name });
+            }
+        }
+    } else |_| {}
+
+    // Also scan pack files for prefix matches
+    if (found_hash == null) {
+        // Try loading the object directly - pack files are searched by GitObject.load
+        const obj = objects.GitObject.load(hash_prefix, git_path, platform_impl, allocator) catch {
+            return found_hash orelse error.ObjectNotFound;
+        };
+        obj.deinit(allocator);
+        // If load succeeded with a prefix, it found it
+        return try allocator.dupe(u8, hash_prefix);
+    }
+
+    return found_hash orelse error.ObjectNotFound;
+}
+
+/// Resolve a revision string like HEAD, HEAD~3, HEAD^2, v1.0^{commit}, branch_name, etc.
+/// Returns the 40-char hash of the resolved object.
+fn resolveRevision(git_path: []const u8, rev: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
+    // Handle ^{type} peel suffix: e.g. "v1.0^{commit}" or "HEAD^{tree}"
+    if (std.mem.indexOf(u8, rev, "^{")) |peel_start| {
+        if (std.mem.indexOfScalar(u8, rev[peel_start..], '}')) |close_offset| {
+            const base_rev = rev[0..peel_start];
+            const peel_type = rev[peel_start + 2 .. peel_start + close_offset];
+            const base_hash = try resolveRevision(git_path, base_rev, platform_impl, allocator);
+            defer allocator.free(base_hash);
+            return peelObject(git_path, base_hash, peel_type, platform_impl, allocator);
+        }
+    }
+
+    // Handle ^0 (shorthand for ^{commit})
+    if (std.mem.endsWith(u8, rev, "^0")) {
+        const base_rev = rev[0 .. rev.len - 2];
+        const base_hash = try resolveRevision(git_path, base_rev, platform_impl, allocator);
+        defer allocator.free(base_hash);
+        return peelObject(git_path, base_hash, "commit", platform_impl, allocator);
+    }
+
+    // Find the last ~ or ^ operator (handle from right to left for chaining)
+    // We need to find the rightmost operator that's not inside ^{}
+    var split_pos: ?usize = null;
+    var i_rev: usize = rev.len;
+    while (i_rev > 0) {
+        i_rev -= 1;
+        const c = rev[i_rev];
+        if (c == '~') {
+            split_pos = i_rev;
+            break;
+        }
+        if (c == '^') {
+            // Make sure it's not ^{ which we handled above
+            if (i_rev + 1 < rev.len and rev[i_rev + 1] == '{') continue;
+            split_pos = i_rev;
+            break;
+        }
+    }
+
+    if (split_pos) |pos| {
+        const base_rev = rev[0..pos];
+        const op = rev[pos];
+        const suffix = rev[pos + 1 ..];
+
+        const base_hash = try resolveRevision(git_path, base_rev, platform_impl, allocator);
+        defer allocator.free(base_hash);
+
+        if (op == '~') {
+            const n: u32 = if (suffix.len == 0) 1 else std.fmt.parseInt(u32, suffix, 10) catch return error.BadRevision;
+            return walkFirstParent(git_path, base_hash, n, platform_impl, allocator);
+        } else { // '^'
+            const n: u32 = if (suffix.len == 0) 1 else std.fmt.parseInt(u32, suffix, 10) catch return error.BadRevision;
+            return getNthParent(git_path, base_hash, n, platform_impl, allocator);
+        }
+    }
+
+    // No operators - resolve as a ref name or hash
+    // Try as full or abbreviated hash
+    if (rev.len >= 4 and isValidHexString(rev)) {
+        if (resolveObjectByPrefix(git_path, rev, platform_impl, allocator)) |hash| {
+            return hash;
+        } else |_| {}
+    }
+
+    // Try HEAD
+    if (std.mem.eql(u8, rev, "HEAD") or std.mem.eql(u8, rev, "@")) {
+        const head_commit = refs.getCurrentCommit(git_path, platform_impl, allocator) catch return error.BadRevision;
+        return head_commit orelse error.BadRevision;
+    }
+
+    // Try refs/heads/<rev>
+    {
+        const ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, rev });
+        defer allocator.free(ref_path);
+        if (platform_impl.fs.readFile(allocator, ref_path)) |content| {
+            defer allocator.free(content);
+            const hash = std.mem.trim(u8, content, " \t\n\r");
+            if (hash.len == 40 and isValidHexString(hash)) return try allocator.dupe(u8, hash);
+        } else |_| {}
+    }
+
+    // Try refs/tags/<rev>
+    {
+        const ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags/{s}", .{ git_path, rev });
+        defer allocator.free(ref_path);
+        if (platform_impl.fs.readFile(allocator, ref_path)) |content| {
+            defer allocator.free(content);
+            const hash = std.mem.trim(u8, content, " \t\n\r");
+            if (hash.len == 40 and isValidHexString(hash)) return try allocator.dupe(u8, hash);
+        } else |_| {}
+    }
+
+    // Try refs/remotes/<rev>
+    {
+        const ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}", .{ git_path, rev });
+        defer allocator.free(ref_path);
+        if (platform_impl.fs.readFile(allocator, ref_path)) |content| {
+            defer allocator.free(content);
+            const hash = std.mem.trim(u8, content, " \t\n\r");
+            if (hash.len == 40 and isValidHexString(hash)) return try allocator.dupe(u8, hash);
+        } else |_| {}
+    }
+
+    // Try refs/<rev> directly
+    {
+        const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, rev });
+        defer allocator.free(ref_path);
+        if (platform_impl.fs.readFile(allocator, ref_path)) |content| {
+            defer allocator.free(content);
+            const trimmed = std.mem.trim(u8, content, " \t\n\r");
+            if (std.mem.startsWith(u8, trimmed, "ref: ")) {
+                // Symbolic ref - recurse
+                const target = trimmed[5..];
+                return resolveRevision(git_path, target, platform_impl, allocator);
+            }
+            if (trimmed.len == 40 and isValidHexString(trimmed)) return try allocator.dupe(u8, trimmed);
+        } else |_| {}
+    }
+
+    // Try packed-refs
+    {
+        const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_path});
+        defer allocator.free(packed_refs_path);
+        if (platform_impl.fs.readFile(allocator, packed_refs_path)) |packed_content| {
+            defer allocator.free(packed_content);
+            // Try different ref prefixes in packed-refs
+            const prefixes = [_][]const u8{ "refs/heads/", "refs/tags/", "refs/remotes/", "" };
+            for (prefixes) |prefix| {
+                const full_ref = try std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, rev });
+                defer allocator.free(full_ref);
+                var lines = std.mem.splitSequence(u8, packed_content, "\n");
+                while (lines.next()) |line| {
+                    const trimmed = std.mem.trim(u8, line, " \t\r");
+                    if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == '^') continue;
+                    // Format: <hash> <refname>
+                    if (trimmed.len > 41 and trimmed[40] == ' ') {
+                        const ref_name = trimmed[41..];
+                        if (std.mem.eql(u8, ref_name, full_ref)) {
+                            const hash = trimmed[0..40];
+                            if (isValidHexString(hash)) return try allocator.dupe(u8, hash);
+                        }
+                    }
+                }
+            }
+        } else |_| {}
+    }
+
+    return error.BadRevision;
+}
+
+/// Peel an object to a target type (e.g., peel tag to commit, commit to tree)
+fn peelObject(git_path: []const u8, hash: []const u8, target_type: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
+    var current_hash = try allocator.dupe(u8, hash);
+    var depth: u32 = 0;
+    while (depth < 20) : (depth += 1) {
+        const obj = objects.GitObject.load(current_hash, git_path, platform_impl, allocator) catch {
+            allocator.free(current_hash);
+            return error.ObjectNotFound;
+        };
+        defer obj.deinit(allocator);
+
+        const obj_type_str: []const u8 = switch (obj.type) {
+            .commit => "commit",
+            .tree => "tree",
+            .blob => "blob",
+            .tag => "tag",
+        };
+
+        // Empty target_type means peel to non-tag
+        if (target_type.len == 0) {
+            if (obj.type != .tag) return current_hash;
+        } else if (std.mem.eql(u8, obj_type_str, target_type)) {
+            return current_hash;
+        }
+
+        // Peel one level
+        if (obj.type == .tag) {
+            // Parse tag to find target
+            const target_hash = parseTagObject(obj.data, allocator) catch {
+                allocator.free(current_hash);
+                return error.ObjectNotFound;
+            };
+            allocator.free(current_hash);
+            current_hash = target_hash;
+        } else if (obj.type == .commit and std.mem.eql(u8, target_type, "tree")) {
+            // Get tree from commit
+            var lines = std.mem.splitSequence(u8, obj.data, "\n");
+            while (lines.next()) |line| {
+                if (std.mem.startsWith(u8, line, "tree ")) {
+                    const tree_hash = line[5..];
+                    if (tree_hash.len == 40) {
+                        allocator.free(current_hash);
+                        return try allocator.dupe(u8, tree_hash);
+                    }
+                }
+            }
+            allocator.free(current_hash);
+            return error.ObjectNotFound;
+        } else {
+            allocator.free(current_hash);
+            return error.ObjectNotFound;
+        }
+    }
+    allocator.free(current_hash);
+    return error.ObjectNotFound;
+}
+
+/// Walk N first-parents from a commit (for ~ operator)
+fn walkFirstParent(git_path: []const u8, start_hash: []const u8, steps: u32, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
+    var current_hash = try allocator.dupe(u8, start_hash);
+    var s: u32 = 0;
+    while (s < steps) : (s += 1) {
+        const obj = objects.GitObject.load(current_hash, git_path, platform_impl, allocator) catch {
+            allocator.free(current_hash);
+            return error.BadRevision;
+        };
+        defer obj.deinit(allocator);
+        if (obj.type != .commit) {
+            allocator.free(current_hash);
+            return error.BadRevision;
+        }
+        var lines = std.mem.splitSequence(u8, obj.data, "\n");
+        var parent: ?[]const u8 = null;
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "parent ")) {
+                parent = line[7..];
+                break;
+            }
+            if (line.len == 0) break;
+        }
+        if (parent) |p| {
+            allocator.free(current_hash);
+            current_hash = try allocator.dupe(u8, p);
+        } else {
+            allocator.free(current_hash);
+            return error.BadRevision;
+        }
+    }
+    return current_hash;
+}
+
+/// Get the Nth parent of a commit (for ^ operator). ^1 = first parent, ^2 = second parent.
+fn getNthParent(git_path: []const u8, hash: []const u8, n: u32, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
+    if (n == 0) {
+        // ^0 means the commit itself (peel to commit)
+        return peelObject(git_path, hash, "commit", platform_impl, allocator);
+    }
+    const obj = objects.GitObject.load(hash, git_path, platform_impl, allocator) catch return error.BadRevision;
+    defer obj.deinit(allocator);
+    if (obj.type != .commit) return error.BadRevision;
+
+    var lines = std.mem.splitSequence(u8, obj.data, "\n");
+    var parent_idx: u32 = 0;
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "parent ")) {
+            parent_idx += 1;
+            if (parent_idx == n) {
+                return try allocator.dupe(u8, line[7..]);
+            }
+        }
+        if (line.len == 0) break;
+    }
+    return error.BadRevision;
+}
+
 fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     if (@import("builtin").target.os.tag == .freestanding) {
         try platform_impl.writeStderr("rev-parse: not supported in freestanding mode\n");
         return;
     }
 
-    // Find .git directory first
+    // Collect all args
+    var all_args = std.array_list.Managed([]const u8).init(allocator);
+    defer all_args.deinit();
+    while (args.next()) |arg| {
+        try all_args.append(arg);
+    }
+
+    if (all_args.items.len == 0) {
+        // git rev-parse with no args outputs nothing and exits 0
+        return;
+    }
+
+    // Parse flags
+    var verify = false;
+    var quiet = false;
+    var short: ?u8 = null; // --short[=N]
+    var symbolic_full_name = false;
+    var abbrev_ref = false;
+    var revs_only = false;
+    var no_revs = false;
+    var flags_only = false;
+    var no_flags = false;
+    var positional_args = std.array_list.Managed([]const u8).init(allocator);
+    defer positional_args.deinit();
+
+    for (all_args.items) |arg| {
+        if (std.mem.eql(u8, arg, "--verify")) {
+            verify = true;
+        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
+            quiet = true;
+        } else if (std.mem.eql(u8, arg, "--short")) {
+            short = 7;
+        } else if (std.mem.startsWith(u8, arg, "--short=")) {
+            short = std.fmt.parseInt(u8, arg[8..], 10) catch 7;
+        } else if (std.mem.eql(u8, arg, "--symbolic-full-name")) {
+            symbolic_full_name = true;
+        } else if (std.mem.eql(u8, arg, "--abbrev-ref")) {
+            abbrev_ref = true;
+        } else if (std.mem.eql(u8, arg, "--revs-only")) {
+            revs_only = true;
+        } else if (std.mem.eql(u8, arg, "--no-revs")) {
+            no_revs = true;
+        } else if (std.mem.eql(u8, arg, "--flags")) {
+            flags_only = true;
+        } else if (std.mem.eql(u8, arg, "--no-flags")) {
+            no_flags = true;
+        } else if (std.mem.eql(u8, arg, "--sq")) {
+            // Ignore for now (shell quoting)
+        } else {
+            try positional_args.append(arg);
+        }
+    }
+
+    // Handle info queries that don't need refs resolution
+    for (positional_args.items) |arg| {
+        if (std.mem.eql(u8, arg, "--show-toplevel")) {
+            const git_path = findGitDirectory(allocator, platform_impl) catch {
+                try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+                std.process.exit(128);
+            };
+            defer allocator.free(git_path);
+            // Check if this is a bare repo
+            const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+            defer allocator.free(config_path);
+            if (platform_impl.fs.readFile(allocator, config_path)) |cfg| {
+                defer allocator.free(cfg);
+                if (std.mem.indexOf(u8, cfg, "bare = true") != null) {
+                    try platform_impl.writeStderr("fatal: this operation must be run in a work tree\n");
+                    std.process.exit(128);
+                }
+            } else |_| {}
+            const repo_root = std.fs.path.dirname(git_path) orelse git_path;
+            const output = try std.fmt.allocPrint(allocator, "{s}\n", .{repo_root});
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+            return;
+        } else if (std.mem.eql(u8, arg, "--git-dir")) {
+            const git_path = findGitDirectory(allocator, platform_impl) catch {
+                try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+                std.process.exit(128);
+            };
+            defer allocator.free(git_path);
+            const cwd = try platform_impl.fs.getCwd(allocator);
+            defer allocator.free(cwd);
+            if (std.mem.startsWith(u8, git_path, cwd) and git_path.len > cwd.len) {
+                const rel = git_path[cwd.len..];
+                const trimmed = if (rel.len > 0 and rel[0] == '/') rel[1..] else rel;
+                if (trimmed.len > 0) {
+                    const output = try std.fmt.allocPrint(allocator, "{s}\n", .{trimmed});
+                    defer allocator.free(output);
+                    try platform_impl.writeStdout(output);
+                } else {
+                    try platform_impl.writeStdout(".git\n");
+                }
+            } else {
+                const output = try std.fmt.allocPrint(allocator, "{s}\n", .{git_path});
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            }
+            return;
+        } else if (std.mem.eql(u8, arg, "--git-common-dir")) {
+            const git_path = findGitDirectory(allocator, platform_impl) catch {
+                try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+                std.process.exit(128);
+            };
+            defer allocator.free(git_path);
+            const cwd = try platform_impl.fs.getCwd(allocator);
+            defer allocator.free(cwd);
+            if (std.mem.startsWith(u8, git_path, cwd) and git_path.len > cwd.len) {
+                const rel = git_path[cwd.len..];
+                const trimmed = if (rel.len > 0 and rel[0] == '/') rel[1..] else rel;
+                if (trimmed.len > 0) {
+                    const output = try std.fmt.allocPrint(allocator, "{s}\n", .{trimmed});
+                    defer allocator.free(output);
+                    try platform_impl.writeStdout(output);
+                } else {
+                    try platform_impl.writeStdout(".git\n");
+                }
+            } else {
+                const output = try std.fmt.allocPrint(allocator, "{s}\n", .{git_path});
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            }
+            return;
+        } else if (std.mem.eql(u8, arg, "--is-inside-work-tree")) {
+            const git_path = findGitDirectory(allocator, platform_impl) catch {
+                try platform_impl.writeStdout("false\n");
+                return;
+            };
+            defer allocator.free(git_path);
+            // Check bare
+            const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+            defer allocator.free(config_path);
+            if (platform_impl.fs.readFile(allocator, config_path)) |cfg| {
+                defer allocator.free(cfg);
+                if (std.mem.indexOf(u8, cfg, "bare = true") != null) {
+                    try platform_impl.writeStdout("false\n");
+                    return;
+                }
+            } else |_| {}
+            try platform_impl.writeStdout("true\n");
+            return;
+        } else if (std.mem.eql(u8, arg, "--is-inside-git-dir")) {
+            try platform_impl.writeStdout("false\n");
+            return;
+        } else if (std.mem.eql(u8, arg, "--is-bare-repository")) {
+            const git_path = findGitDirectory(allocator, platform_impl) catch {
+                try platform_impl.writeStdout("false\n");
+                return;
+            };
+            defer allocator.free(git_path);
+            const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+            defer allocator.free(config_path);
+            if (platform_impl.fs.readFile(allocator, config_path)) |cfg| {
+                defer allocator.free(cfg);
+                if (std.mem.indexOf(u8, cfg, "bare = true") != null) {
+                    try platform_impl.writeStdout("true\n");
+                    return;
+                }
+            } else |_| {}
+            try platform_impl.writeStdout("false\n");
+            return;
+        } else if (std.mem.eql(u8, arg, "--show-cdup")) {
+            const git_path = findGitDirectory(allocator, platform_impl) catch {
+                try platform_impl.writeStderr("fatal: not a git repository\n");
+                std.process.exit(128);
+            };
+            defer allocator.free(git_path);
+            const repo_root = std.fs.path.dirname(git_path) orelse git_path;
+            const cwd = try platform_impl.fs.getCwd(allocator);
+            defer allocator.free(cwd);
+            if (std.mem.eql(u8, cwd, repo_root)) {
+                try platform_impl.writeStdout("\n");
+            } else if (std.mem.startsWith(u8, cwd, repo_root)) {
+                const rel = cwd[repo_root.len + 1 ..];
+                var depth: usize = 1;
+                for (rel) |c| {
+                    if (c == '/') depth += 1;
+                }
+                var buf = std.array_list.Managed(u8).init(allocator);
+                defer buf.deinit();
+                var d: usize = 0;
+                while (d < depth) : (d += 1) {
+                    try buf.appendSlice("../");
+                }
+                try buf.append('\n');
+                try platform_impl.writeStdout(buf.items);
+            } else {
+                try platform_impl.writeStdout("\n");
+            }
+            return;
+        } else if (std.mem.eql(u8, arg, "--show-prefix")) {
+            const git_path = findGitDirectory(allocator, platform_impl) catch {
+                try platform_impl.writeStderr("fatal: not a git repository\n");
+                std.process.exit(128);
+            };
+            defer allocator.free(git_path);
+            const repo_root = std.fs.path.dirname(git_path) orelse git_path;
+            const cwd = try platform_impl.fs.getCwd(allocator);
+            defer allocator.free(cwd);
+            if (std.mem.eql(u8, cwd, repo_root)) {
+                try platform_impl.writeStdout("\n");
+            } else if (std.mem.startsWith(u8, cwd, repo_root)) {
+                const prefix = cwd[repo_root.len + 1 ..];
+                const output = try std.fmt.allocPrint(allocator, "{s}/\n", .{prefix});
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            } else {
+                try platform_impl.writeStdout("\n");
+            }
+            return;
+        } else if (std.mem.eql(u8, arg, "--absolute-git-dir")) {
+            const git_path = findGitDirectory(allocator, platform_impl) catch {
+                try platform_impl.writeStderr("fatal: not a git repository\n");
+                std.process.exit(128);
+            };
+            defer allocator.free(git_path);
+            const output = try std.fmt.allocPrint(allocator, "{s}\n", .{git_path});
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+            return;
+        } else if (std.mem.eql(u8, arg, "--git-path")) {
+            // Needs next arg but we handle it inline
+            continue;
+        } else if (std.mem.eql(u8, arg, "--show-object-format")) {
+            try platform_impl.writeStdout("sha1\n");
+            return;
+        }
+    }
+
+    // If verify mode with no positional args that look like revisions
+    if (verify) {
+        // --verify expects exactly one revision argument
+        var rev_arg: ?[]const u8 = null;
+        for (positional_args.items) |arg| {
+            if (std.mem.startsWith(u8, arg, "--")) continue;
+            if (rev_arg != null) {
+                if (!quiet) {
+                    try platform_impl.writeStderr("fatal: Needed a single revision\n");
+                }
+                std.process.exit(128);
+            }
+            rev_arg = arg;
+        }
+        if (rev_arg == null) {
+            if (!quiet) {
+                try platform_impl.writeStderr("fatal: Needed a single revision\n");
+            }
+            std.process.exit(128);
+        }
+
+        const git_path = findGitDirectory(allocator, platform_impl) catch {
+            if (!quiet) {
+                try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+            }
+            std.process.exit(128);
+        };
+        defer allocator.free(git_path);
+
+        const hash = resolveRevision(git_path, rev_arg.?, platform_impl, allocator) catch {
+            if (!quiet) {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: Needed a single revision\n", .{});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+            }
+            std.process.exit(128);
+        };
+        defer allocator.free(hash);
+
+        if (short) |n| {
+            const s = if (n > 40) @as(u8, 40) else n;
+            const out = try std.fmt.allocPrint(allocator, "{s}\n", .{hash[0..s]});
+            defer allocator.free(out);
+            try platform_impl.writeStdout(out);
+        } else {
+            const out = try std.fmt.allocPrint(allocator, "{s}\n", .{hash});
+            defer allocator.free(out);
+            try platform_impl.writeStdout(out);
+        }
+        return;
+    }
+
+    // Non-verify mode: process each positional arg
     const git_path = findGitDirectory(allocator, platform_impl) catch {
         try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
         std.process.exit(128);
     };
     defer allocator.free(git_path);
 
-    const first_arg = args.next() orelse {
-        try platform_impl.writeStderr("fatal: arguments required\n");
-        std.process.exit(128);
-    };
+    for (positional_args.items) |arg| {
+        // Skip flags already processed
+        if (std.mem.startsWith(u8, arg, "--")) {
+            if (!revs_only and !no_flags) {
+                // Output non-rev flags
+                if (flags_only or no_revs) {
+                    const out = try std.fmt.allocPrint(allocator, "{s}\n", .{arg});
+                    defer allocator.free(out);
+                    try platform_impl.writeStdout(out);
+                }
+            }
+            continue;
+        }
 
-    if (std.mem.eql(u8, first_arg, "HEAD")) {
-        // rev-parse HEAD: read .git/HEAD, if it starts with "ref: ", read that ref file, print the 40-char hash
-        const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
-        defer allocator.free(head_path);
-        
-        const head_content = platform_impl.fs.readFile(allocator, head_path) catch |err| {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: unable to read HEAD: {}\n", .{err});
-            defer allocator.free(msg);
-            try platform_impl.writeStderr(msg);
-            std.process.exit(128);
-        };
-        defer allocator.free(head_content);
-        
-        const head_trimmed = std.mem.trim(u8, head_content, " \t\n\r");
-        
-        if (std.mem.startsWith(u8, head_trimmed, "ref: ")) {
-            // It's a symbolic ref, read the actual ref file
-            const ref_path = head_trimmed[5..]; // Skip "ref: "
-            const ref_file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{git_path, ref_path});
-            defer allocator.free(ref_file_path);
-            
-            const ref_content = platform_impl.fs.readFile(allocator, ref_file_path) catch {
-                // Ref file doesn't exist — matches git behavior for empty repos
-                try platform_impl.writeStderr("fatal: ambiguous argument 'HEAD': unknown revision or path not in the working tree.\n");
-                std.process.exit(128);
-            };
-            defer allocator.free(ref_content);
-            
-            const hash = std.mem.trim(u8, ref_content, " \t\n\r");
-            if (hash.len == 40) {
-                const output = try std.fmt.allocPrint(allocator, "{s}\n", .{hash});
-                defer allocator.free(output);
-                try platform_impl.writeStdout(output);
-            } else {
-                try platform_impl.writeStderr("fatal: bad object HEAD\n");
-                std.process.exit(128);
+        if (no_revs) continue; // Skip revision args
+
+        // Handle --symbolic-full-name for HEAD
+        if (symbolic_full_name) {
+            if (std.mem.eql(u8, arg, "HEAD")) {
+                const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+                defer allocator.free(head_path);
+                if (platform_impl.fs.readFile(allocator, head_path)) |content| {
+                    defer allocator.free(content);
+                    const trimmed = std.mem.trim(u8, content, " \t\n\r");
+                    if (std.mem.startsWith(u8, trimmed, "ref: ")) {
+                        const out = try std.fmt.allocPrint(allocator, "{s}\n", .{trimmed[5..]});
+                        defer allocator.free(out);
+                        try platform_impl.writeStdout(out);
+                        continue;
+                    }
+                } else |_| {}
             }
-        } else if (head_trimmed.len == 40) {
-            // It's a direct hash
-            const output = try std.fmt.allocPrint(allocator, "{s}\n", .{head_trimmed});
-            defer allocator.free(output);
-            try platform_impl.writeStdout(output);
-        } else {
-            try platform_impl.writeStderr("fatal: bad object HEAD\n");
+        }
+
+        // Handle --abbrev-ref
+        if (abbrev_ref) {
+            if (std.mem.eql(u8, arg, "HEAD")) {
+                const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+                defer allocator.free(head_path);
+                if (platform_impl.fs.readFile(allocator, head_path)) |content| {
+                    defer allocator.free(content);
+                    const trimmed = std.mem.trim(u8, content, " \t\n\r");
+                    if (std.mem.startsWith(u8, trimmed, "ref: refs/heads/")) {
+                        const branch = trimmed["ref: refs/heads/".len..];
+                        const out = try std.fmt.allocPrint(allocator, "{s}\n", .{branch});
+                        defer allocator.free(out);
+                        try platform_impl.writeStdout(out);
+                        continue;
+                    } else if (std.mem.startsWith(u8, trimmed, "ref: ")) {
+                        const out = try std.fmt.allocPrint(allocator, "{s}\n", .{trimmed[5..]});
+                        defer allocator.free(out);
+                        try platform_impl.writeStdout(out);
+                        continue;
+                    } else {
+                        try platform_impl.writeStdout("HEAD\n");
+                        continue;
+                    }
+                } else |_| {}
+            }
+        }
+
+        // Try to resolve as revision
+        if (resolveRevision(git_path, arg, platform_impl, allocator)) |hash| {
+            defer allocator.free(hash);
+            if (short) |n| {
+                const s = if (n > 40) @as(u8, 40) else n;
+                const out = try std.fmt.allocPrint(allocator, "{s}\n", .{hash[0..s]});
+                defer allocator.free(out);
+                try platform_impl.writeStdout(out);
+            } else {
+                const out = try std.fmt.allocPrint(allocator, "{s}\n", .{hash});
+                defer allocator.free(out);
+                try platform_impl.writeStdout(out);
+            }
+        } else |_| {
+            if (!quiet) {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\nUse '--' to separate paths from revisions, like this:\n'git <command> [<revision>...] -- [<file>...]'\n", .{arg});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+            }
             std.process.exit(128);
         }
-    } else if (std.mem.eql(u8, first_arg, "--show-toplevel")) {
-        // rev-parse --show-toplevel: walk up from cwd looking for .git dir, print that path
-        const repo_root = std.fs.path.dirname(git_path) orelse git_path;
-        const output = try std.fmt.allocPrint(allocator, "{s}\n", .{repo_root});
-        defer allocator.free(output);
-        try platform_impl.writeStdout(output);
-    } else if (std.mem.eql(u8, first_arg, "--git-dir")) {
-        // rev-parse --git-dir: print the .git dir path relative to current working directory
-        const cwd = try platform_impl.fs.getCwd(allocator);
-        defer allocator.free(cwd);
-        
-        // Check if git_path is in the current working directory
-        if (std.mem.startsWith(u8, git_path, cwd)) {
-            const relative_path = git_path[cwd.len..];
-            const trimmed_path = if (relative_path.len > 0 and relative_path[0] == '/') 
-                relative_path[1..] 
-            else 
-                relative_path;
-            
-            if (trimmed_path.len > 0) {
-                const output = try std.fmt.allocPrint(allocator, "{s}\n", .{trimmed_path});
-                defer allocator.free(output);
-                try platform_impl.writeStdout(output);
-            } else {
-                try platform_impl.writeStdout(".git\n");
-            }
-        } else {
-            // Not in current dir, use absolute path
-            const output = try std.fmt.allocPrint(allocator, "{s}\n", .{git_path});
-            defer allocator.free(output);
-            try platform_impl.writeStdout(output);
-        }
-    } else {
-        const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\n", .{first_arg});
-        defer allocator.free(msg);
-        try platform_impl.writeStderr(msg);
-        std.process.exit(128);
     }
 }
 
