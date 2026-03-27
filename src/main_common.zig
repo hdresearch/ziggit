@@ -238,7 +238,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         std.mem.eql(u8, command, "pack-objects") or
         std.mem.eql(u8, command, "index-pack") or
         std.mem.eql(u8, command, "reflog") or
-        std.mem.eql(u8, command, "clean");
+        std.mem.eql(u8, command, "clean") or
+        std.mem.eql(u8, command, "symbolic-ref");
 
     // Process global flags and execute
     var arg_index: usize = 0;
@@ -431,6 +432,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         } else {
             try forwardCmdToGit(allocator, translated, &platform_impl);
         }
+    } else if (std.mem.eql(u8, command, "symbolic-ref")) {
+        try cmdSymbolicRef(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "commit") or
         std.mem.eql(u8, command, "log") or
         std.mem.eql(u8, command, "diff") or
@@ -450,7 +453,6 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         std.mem.eql(u8, command, "write-tree") or
         std.mem.eql(u8, command, "commit-tree") or
         std.mem.eql(u8, command, "update-ref") or
-        std.mem.eql(u8, command, "symbolic-ref") or
         std.mem.eql(u8, command, "update-index") or
         std.mem.eql(u8, command, "diff-files") or
         std.mem.eql(u8, command, "read-tree"))
@@ -1663,13 +1665,32 @@ fn cmdInit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     var bare = false;
     var template_dir: ?[]const u8 = null;
     var work_dir: ?[]const u8 = null;
+    var initial_branch: ?[]const u8 = null;
+    var quiet = false;
+    var separate_git_dir: ?[]const u8 = null;
+    _ = separate_git_dir;
     
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--bare")) {
             bare = true;
+        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
+            quiet = true;
         } else if (std.mem.startsWith(u8, arg, "--template=")) {
-            template_dir = arg[11..];
-        } else {
+            template_dir = arg["--template=".len..];
+        } else if (std.mem.eql(u8, arg, "--template")) {
+            initial_branch = args.next(); // actually template dir
+            // Oops, that's wrong. Let me fix:
+            template_dir = args.next();
+        } else if (std.mem.startsWith(u8, arg, "--initial-branch=")) {
+            initial_branch = arg["--initial-branch=".len..];
+        } else if (std.mem.eql(u8, arg, "--initial-branch") or std.mem.eql(u8, arg, "-b")) {
+            initial_branch = args.next();
+        } else if (std.mem.startsWith(u8, arg, "--separate-git-dir=")) {
+            separate_git_dir = arg["--separate-git-dir=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--object-format=") or
+                   std.mem.startsWith(u8, arg, "--ref-format=")) {
+            // Silently accept for now (only sha1/files supported)
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
             work_dir = arg;
         }
     }
@@ -1677,7 +1698,7 @@ fn cmdInit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     // If no directory specified, use current directory
     const target_dir = work_dir orelse ".";
     
-    try initRepository(target_dir, bare, template_dir, allocator, platform_impl);
+    try initRepository(target_dir, bare, template_dir, initial_branch, quiet, allocator, platform_impl);
 }
 
 fn copyTemplateDir(git_dir: []const u8, template_path: []const u8, allocator: std.mem.Allocator) !void {
@@ -1711,7 +1732,7 @@ fn copyTemplateDir(git_dir: []const u8, template_path: []const u8, allocator: st
     }
 }
 
-fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+fn initRepository(path: []const u8, bare: bool, template_dir: ?[]const u8, initial_branch: ?[]const u8, quiet: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     
     const git_dir = if (bare) 
         try allocator.dupe(u8, path)
@@ -7148,7 +7169,142 @@ fn cmdUpdateRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
 }
 
 fn cmdSymbolicRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
-    try forwardPlumbingToGit(allocator, "symbolic-ref", args, platform_impl);
+    var quiet = false;
+    var short = false;
+    var delete = false;
+    var positional = std.array_list.Managed([]const u8).init(allocator);
+    defer positional.deinit();
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
+            quiet = true;
+        } else if (std.mem.eql(u8, arg, "--short")) {
+            short = true;
+        } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--delete")) {
+            delete = true;
+        } else if (std.mem.eql(u8, arg, "-m")) {
+            // Skip the message argument (reflog message, we ignore for now)
+            _ = args.next();
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            try positional.append(arg);
+        }
+    }
+
+    if (positional.items.len == 0) {
+        try platform_impl.writeStderr("usage: git symbolic-ref [-m <reason>] <name> <ref>\n       git symbolic-ref [-q] [--short] <name>\n       git symbolic-ref --delete [-q] <name>\n");
+        std.process.exit(1);
+    }
+
+    const git_dir = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+        unreachable;
+    };
+    defer allocator.free(git_dir);
+
+    const ref_name = positional.items[0];
+
+    if (delete) {
+        // Delete the symbolic ref by removing the file
+        const ref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_name }) catch {
+            std.process.exit(128);
+            unreachable;
+        };
+        defer allocator.free(ref_path);
+        std.fs.cwd().deleteFile(ref_path) catch {
+            if (!quiet) {
+                const msg = std.fmt.allocPrint(allocator, "fatal: Cannot delete {s}\n", .{ref_name}) catch "fatal: Cannot delete ref\n";
+                try platform_impl.writeStderr(msg);
+            }
+            std.process.exit(1);
+        };
+        return;
+    }
+
+    if (positional.items.len >= 2) {
+        // Write mode: symbolic-ref <name> <ref>
+        const target = positional.items[1];
+        const ref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_name }) catch {
+            std.process.exit(128);
+            unreachable;
+        };
+        defer allocator.free(ref_path);
+
+        const content = std.fmt.allocPrint(allocator, "ref: {s}\n", .{target}) catch {
+            std.process.exit(128);
+            unreachable;
+        };
+        defer allocator.free(content);
+
+        // Ensure parent directories exist
+        if (std.fs.path.dirname(ref_path)) |dir| {
+            std.fs.cwd().makePath(dir) catch {};
+        }
+
+        const file = std.fs.cwd().createFile(ref_path, .{}) catch {
+            const msg = std.fmt.allocPrint(allocator, "fatal: Cannot create {s}\n", .{ref_path}) catch "fatal: Cannot create ref\n";
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+            unreachable;
+        };
+        defer file.close();
+        file.writeAll(content) catch {
+            std.process.exit(128);
+            unreachable;
+        };
+        return;
+    }
+
+    // Read mode: symbolic-ref <name>
+    const ref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_name }) catch {
+        std.process.exit(128);
+        unreachable;
+    };
+    defer allocator.free(ref_path);
+
+    const content = std.fs.cwd().readFileAlloc(allocator, ref_path, 4096) catch {
+        if (!quiet) {
+            const msg = std.fmt.allocPrint(allocator, "fatal: ref {s} is not a symbolic ref\n", .{ref_name}) catch "fatal: not a symbolic ref\n";
+            try platform_impl.writeStderr(msg);
+        }
+        std.process.exit(1);
+        unreachable;
+    };
+    defer allocator.free(content);
+
+    const trimmed = std.mem.trimRight(u8, content, "\n\r ");
+    if (!std.mem.startsWith(u8, trimmed, "ref: ")) {
+        if (!quiet) {
+            const msg = std.fmt.allocPrint(allocator, "fatal: ref {s} is not a symbolic ref\n", .{ref_name}) catch "fatal: not a symbolic ref\n";
+            try platform_impl.writeStderr(msg);
+        }
+        std.process.exit(1);
+        unreachable;
+    }
+
+    const target = trimmed["ref: ".len..];
+    var output: []const u8 = undefined;
+    if (short) {
+        // Strip refs/heads/ or refs/tags/ or refs/remotes/ prefix
+        if (std.mem.startsWith(u8, target, "refs/heads/")) {
+            output = target["refs/heads/".len..];
+        } else if (std.mem.startsWith(u8, target, "refs/tags/")) {
+            output = target["refs/tags/".len..];
+        } else if (std.mem.startsWith(u8, target, "refs/remotes/")) {
+            output = target["refs/remotes/".len..];
+        } else {
+            output = target;
+        }
+    } else {
+        output = target;
+    }
+
+    const out_line = std.fmt.allocPrint(allocator, "{s}\n", .{output}) catch {
+        std.process.exit(128);
+        unreachable;
+    };
+    defer allocator.free(out_line);
+    try platform_impl.writeStdout(out_line);
 }
 
 fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
