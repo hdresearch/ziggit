@@ -2,30 +2,55 @@ Git Test Suite Results — CORE-MID Range (t3000-t4999)
 Date: 2026-03-27
 Ziggit: pure Zig implementation
 
-FULLY PASSING TESTS (12 scripts, 88 individual tests):
+FULLY PASSING TESTS (16 scripts, 112 individual tests):
   t3000-ls-files-others.sh        15/15 ALL PASSED
   t3002-ls-files-dashpath.sh       6/6  ALL PASSED
+  t3003-ls-files-exclude.sh        7/7  ALL PASSED
   t3004-ls-files-basic.sh          6/6  ALL PASSED
   t3006-ls-files-long.sh           3/3  ALL PASSED
   t3020-ls-files-error-unmatch.sh  3/3  ALL PASSED
   t3100-ls-tree-restrict.sh       14/14 ALL PASSED
   t3101-ls-tree-dirname.sh        19/19 ALL PASSED
-  t3102-ls-tree-wildcards.sh       3/3  ALL PASSED (+1 known breakage vanished)
+  t3102-ls-tree-wildcards.sh       4/4  ALL PASSED (+1 known breakage vanished)
   t3103-ls-tree-misc.sh           10/10 ALL PASSED
+  t4101-apply-nonl.sh             12/12 ALL PASSED
+  t4110-apply-scan.sh              1/1  ALL PASSED
   t4113-apply-ending.sh            3/3  ALL PASSED
   t4123-apply-shrink.sh            2/2  ALL PASSED
+  t4136-apply-check.sh             6/6  ALL PASSED
   t4141-apply-too-large.sh         1/1  ALL PASSED
 
-NEAR-PASSING (1-2 failures):
-  t3003-ls-files-exclude.sh        6/7  (86%)
+NEAR-PASSING (partial):
+  t3013-ls-files-format.sh        18/20 (90%)
+  t4100-apply-stat.sh             12/19 (63%)
+  t3001-ls-files-others-exclude.sh 12/27 (44%)
   t3104-ls-tree-format.sh         17/19 (89%)
   t4004-diff-rename-symlink.sh     3/4  (75%)
   t4024-diff-optimize-common.sh    1/2  (50%)
   t4025-hunk-header.sh             1/2  (50%)
   t4037-diff-r-t-dirs.sh           1/2  (50%)
-  t4136-apply-check.sh             5/6  (83%)
 
 KEY IMPLEMENTATIONS:
+  - ls-files --format with %(objectmode), %(objectname), %(objecttype),
+    %(objectsize), %(objectsize:padded), %(stage), %(path), %xNN escapes
+  - ls-files --format incompatibility checks (exit 129)
+  - ls-files --format with -m (modified) and -d (deleted) filters
+  - ls-files -i (--ignored) with -c correctly filters tracked-but-ignored files
+  - --exclude-standard loads .gitignore and .git/info/exclude
+  - Rewrote gitignore.zig with real pattern matching (glob, negation,
+    directory-only, anchored patterns)
+  - cat-file --batch-check with custom format string support
+  - git apply: full unified diff parser (git and traditional formats)
+  - git apply: context-based matching with fuzz offset search
+  - git apply: new file creation, file deletion, sequential patch application
+  - git apply: "\ No newline at end of file" handling
+  - git apply: already-applied detection, no-op patch detection
+  - git apply: trailing context validation, leading context validation
+  - git apply: --check, --stat, --numstat, --summary, --reverse, --verbose
+  - git apply: --recount allows no-op patches
+  - git apply: invalid combination detection (new file + copy/rename)
+  - git apply --stat: proper column-aligned output with dynamic graph bars
+  - git apply --stat: proportional +/- scaling, summary line
   - rev-parse <rev>:<path> syntax (findRevColonPath + resolveTreePath)
   - ls-files -h/--help (exit 129 with usage)
   - ls-files unknown option detection (exit 129)
