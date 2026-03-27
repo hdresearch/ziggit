@@ -26995,8 +26995,8 @@ fn outputPrettyCommitHeader(allocator: std.mem.Allocator, commit_hash: []const u
                 try platform_impl.writeStdout(indented);
             }
         }
-        // For patch-with-stat/raw, output --- separator
-        if (opts.patch_with_stat or opts.patch_with_raw) {
+        // For patch-with-stat, output --- separator; for others, blank line
+        if (opts.patch_with_stat) {
             try platform_impl.writeStdout("---\n");
         } else {
             try platform_impl.writeStdout("\n");
