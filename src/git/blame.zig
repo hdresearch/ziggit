@@ -12,6 +12,7 @@ pub const BlameEntry = struct {
     committer_tz: []const u8,
     summary: []const u8,
     is_default: bool,
+    is_boundary: bool,
 };
 
 pub const Info = struct {

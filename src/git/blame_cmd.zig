@@ -127,7 +127,7 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
         @memset(&e.commit_hash, '0');
         e.author_name = da; e.author_email = de; e.author_time = std.time.timestamp(); e.author_tz = "+0000";
         e.committer_name = da; e.committer_email = de; e.committer_time = std.time.timestamp(); e.committer_tz = "+0000";
-        e.summary = ""; e.is_default = true;
+        e.summary = ""; e.is_default = true; e.is_boundary = false;
     }
 
     if (hh) |sh| {
@@ -463,6 +463,7 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
             for (act.items) |idx| {
                 if (ub[idx] and t2t[idx] != std.math.maxInt(usize)) {
                     B.setEntry(&es[idx], cur.hash, info, a) catch {};
+                    es[idx].is_boundary = true;
                     ub[idx] = false;
                 }
             }
@@ -506,7 +507,7 @@ fn oC(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []con
     defer a.free(ds);
     const pnum = try B.padN(a, ln, lnw2);
     defer a.free(pnum);
-    // Non-boundary commits get +1 for alignment (to account for ^ prefix on boundary commits)
+    // In column format (-c / annotate), no ^ prefix is shown; use abl+1 for all
     const effective_abl = @min(abl2 + 1, 40);
     const out = try std.fmt.allocPrint(a, "{s}\t({s}\t{s}\t{s}){s}\n", .{ e.commit_hash[0..effective_abl], pn, ds, pnum, line });
     defer a.free(out);
@@ -523,17 +524,24 @@ fn oD(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []con
     const pnum = try B.padN(a, ln, lnw2);
     defer a.free(pnum);
     // Non-boundary commits get +1 for alignment
-    const effective_abl = @min(abl2 + 1, 40);
-    const out = try std.fmt.allocPrint(a, "{s} ({s} {s} {s}) {s}\n", .{ e.commit_hash[0..effective_abl], pn, ds, pnum, line });
+    const effective_abl = if (e.is_boundary) @min(abl2, 40) else @min(abl2 + 1, 40);
+    _ = effective_abl;
+    const hash_str = if (e.is_boundary)
+        try std.fmt.allocPrint(a, "^{s}", .{e.commit_hash[0..@min(abl2, 39)]})
+    else
+        try std.fmt.allocPrint(a, "{s}", .{e.commit_hash[0..@min(abl2 + 1, 40)]});
+    defer a.free(hash_str);
+    const out = try std.fmt.allocPrint(a, "{s} ({s} {s} {s}) {s}\n", .{ hash_str, pn, ds, pnum, line });
     defer a.free(out);
     try so.writeStdout(out);
 }
 
 fn oP(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []const u8, ln: usize, sh2: bool, fp2: []const u8) !void {
     if (sh2) {
-        const h = try std.fmt.allocPrint(a, "{s} {d} {d} 1\nauthor {s}\nauthor-mail <{s}>\nauthor-time {d}\nauthor-tz {s}\ncommitter {s}\ncommitter-mail <{s}>\ncommitter-time {d}\ncommitter-tz {s}\nsummary {s}\nfilename {s}\n", .{
+        const boundary_line = if (e.is_boundary) "boundary\n" else "";
+        const h = try std.fmt.allocPrint(a, "{s} {d} {d} 1\nauthor {s}\nauthor-mail <{s}>\nauthor-time {d}\nauthor-tz {s}\ncommitter {s}\ncommitter-mail <{s}>\ncommitter-time {d}\ncommitter-tz {s}\nsummary {s}\n{s}filename {s}\n", .{
             &e.commit_hash, ln, ln, e.author_name, e.author_email, e.author_time, e.author_tz,
-            e.committer_name, e.committer_email, e.committer_time, e.committer_tz, e.summary, fp2,
+            e.committer_name, e.committer_email, e.committer_time, e.committer_tz, e.summary, boundary_line, fp2,
         });
         defer a.free(h);
         try so.writeStdout(h);
