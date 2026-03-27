@@ -205,7 +205,7 @@ pub const PackFileAnalyzer = struct {
     
     /// Validate pack file integrity
     pub fn validatePackIntegrity(self: PackFileAnalyzer, pack_path: []const u8, platform_impl: anytype) ![][]const u8 {
-        var issues = std.ArrayList([]const u8).init(self.allocator);
+        var issues = std.array_list.Managed([]const u8).init(self.allocator);
         
         const pack_data = platform_impl.fs.readFile(self.allocator, pack_path) catch |err| {
             const issue = try std.fmt.allocPrint(self.allocator, "Cannot read pack file: {}", .{err});
@@ -264,7 +264,7 @@ pub const PackFileAnalyzer = struct {
     
     /// Compare pack index with pack file for consistency
     pub fn validatePackIndex(self: PackFileAnalyzer, pack_path: []const u8, platform_impl: anytype) ![][]const u8 {
-        var issues = std.ArrayList([]const u8).init(self.allocator);
+        var issues = std.array_list.Managed([]const u8).init(self.allocator);
         
         // Find corresponding .idx file
         if (!std.mem.endsWith(u8, pack_path, ".pack")) {

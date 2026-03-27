@@ -4,14 +4,14 @@ const index = @import("index.zig");
 /// Advanced index operations and utilities
 pub const AdvancedIndex = struct {
     base_index: index.Index,
-    conflicted_entries: std.ArrayList(ConflictedEntry),
-    extensions: std.ArrayList(IndexExtension),
+    conflicted_entries: std.array_list.Managed(ConflictedEntry),
+    extensions: std.array_list.Managed(IndexExtension),
     
     pub fn init(allocator: std.mem.Allocator) AdvancedIndex {
         return AdvancedIndex{
             .base_index = index.Index.init(allocator),
-            .conflicted_entries = std.ArrayList(ConflictedEntry).init(allocator),
-            .extensions = std.ArrayList(IndexExtension).init(allocator),
+            .conflicted_entries = std.array_list.Managed(ConflictedEntry).init(allocator),
+            .extensions = std.array_list.Managed(IndexExtension).init(allocator),
         };
     }
     
@@ -252,7 +252,7 @@ pub const AdvancedIndex = struct {
     
     /// Get conflicted files (useful for merge resolution)
     pub fn getConflictedFiles(self: AdvancedIndex, allocator: std.mem.Allocator) ![][]const u8 {
-        var conflicted = std.ArrayList([]const u8).init(allocator);
+        var conflicted = std.array_list.Managed([]const u8).init(allocator);
         
         for (self.conflicted_entries.items) |entry| {
             try conflicted.append(try allocator.dupe(u8, entry.path));
