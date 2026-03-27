@@ -9473,7 +9473,7 @@ fn configSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_a
         // Check for section header
         if (trimmed.len > 0 and trimmed[0] == '[') {
             const close = std.mem.indexOf(u8, trimmed, "]");
-            if (close != null) {
+            if (close) |close_pos| {
                 if (current_section_str) |s| allocator.free(s);
                 const parsed = parseConfigSectionHeader(trimmed, allocator) catch null;
                 if (parsed) |p| {
@@ -9491,6 +9491,43 @@ fn configSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_a
                 }
                 in_target_section = if (current_section_str) |cs| sectionMatchesKey(cs, section_part) else false;
                 if (in_target_section) section_found = true;
+                
+                // Check for inline key=value after ']' on this section header line
+                if (in_target_section and !do_add and close_pos + 1 < trimmed.len) {
+                    const after_bracket = std.mem.trim(u8, trimmed[close_pos + 1 ..], " \t");
+                    if (after_bracket.len > 0 and after_bracket[0] != '#' and after_bracket[0] != ';') {
+                        if (std.mem.indexOf(u8, after_bracket, "=")) |eq_pos| {
+                            const ik = std.mem.trim(u8, after_bracket[0..eq_pos], " \t");
+                            if (std.ascii.eqlIgnoreCase(ik, key_part)) {
+                                if (found and replace_all) {
+                                    // Skip - but we need to keep the section header
+                                    // Write just the section header part
+                                    const header_part = trimmed[0 .. close_pos + 1];
+                                    try result.appendSlice(header_part);
+                                    try result.append('\n');
+                                    pos = line_end + @as(usize, if (has_newline) 1 else 0);
+                                    continue;
+                                }
+                                // Replace: write section header on its own line, then the new key=value
+                                const header_part = trimmed[0 .. close_pos + 1];
+                                try result.appendSlice(header_part);
+                                try result.append('\n');
+                                const cs = try formatConfigComment(comment, allocator);
+                                defer allocator.free(cs);
+                                try result.appendSlice("\t");
+                                try result.appendSlice(key_part);
+                                try result.appendSlice(" = ");
+                                try result.appendSlice(value);
+                                try result.appendSlice(cs);
+                                try result.append('\n');
+                                found = true;
+                                last_line_in_section_end = result.items.len;
+                                pos = line_end + @as(usize, if (has_newline) 1 else 0);
+                                continue;
+                            }
+                        }
+                    }
+                }
             }
         }
         
