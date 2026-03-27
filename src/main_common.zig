@@ -16002,8 +16002,13 @@ fn nativeCmdColumn(_: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     // git column formats stdin into columns
     const allocator = std.heap.page_allocator;
     var mode: []const u8 = "always";
-    var width: u32 = 80;
+    var width: u32 = if (std.process.getEnvVarOwned(allocator, "COLUMNS")) |cols_str| blk: {
+        defer allocator.free(cols_str);
+        break :blk std.fmt.parseInt(u32, cols_str, 10) catch 80;
+    } else |_| 80;
     var padding: u32 = 1;
+    var indent: []const u8 = "";
+    var nl: []const u8 = "\n";
     
     while (args.next()) |arg| {
         if (std.mem.startsWith(u8, arg, "--mode=")) {
@@ -16012,14 +16017,40 @@ fn nativeCmdColumn(_: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
             width = std.fmt.parseInt(u32, arg["--width=".len..], 10) catch 80;
         } else if (std.mem.startsWith(u8, arg, "--padding=")) {
             padding = std.fmt.parseInt(u32, arg["--padding=".len..], 10) catch 1;
+        } else if (std.mem.eql(u8, arg, "--padding")) {
+            if (args.next()) |next| {
+                padding = std.fmt.parseInt(u32, next, 10) catch 1;
+            }
+        } else if (std.mem.startsWith(u8, arg, "--indent=")) {
+            indent = arg["--indent=".len..];
+        } else if (std.mem.eql(u8, arg, "--indent")) {
+            if (args.next()) |next| indent = next;
+        } else if (std.mem.startsWith(u8, arg, "--nl=")) {
+            nl = arg["--nl=".len..];
+        } else if (std.mem.eql(u8, arg, "--raw-mode")) {
+            // Ignore
         }
     }
     
-    if (std.mem.eql(u8, mode, "never") or std.mem.eql(u8, mode, "plain")) {
-        // Pass through
+    if (std.mem.eql(u8, mode, "never")) {
+        // Pass through without formatting
         const data = readStdin(allocator, 10 * 1024 * 1024) catch return;
         defer allocator.free(data);
         try platform_impl.writeStdout(data);
+        return;
+    }
+    
+    if (std.mem.eql(u8, mode, "plain")) {
+        // Each line gets indent prefix and nl suffix
+        const data = readStdin(allocator, 10 * 1024 * 1024) catch return;
+        defer allocator.free(data);
+        var line_it = std.mem.splitScalar(u8, data, '\n');
+        while (line_it.next()) |line| {
+            if (line.len == 0) continue;
+            try platform_impl.writeStdout(indent);
+            try platform_impl.writeStdout(line);
+            try platform_impl.writeStdout(nl);
+        }
         return;
     }
     
@@ -16043,25 +16074,20 @@ fn nativeCmdColumn(_: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     if (lines.items.len == 0) return;
     
     const col_width = max_len + padding;
-    const num_cols = if (col_width > 0) @max(1, width / col_width) else 1;
+    const effective_width = if (width > @as(u32, @intCast(indent.len))) width - @as(u32, @intCast(indent.len)) else width;
+    const num_cols = if (col_width > 0) @max(1, effective_width / col_width) else 1;
     const num_rows = (lines.items.len + num_cols - 1) / num_cols;
     
     if (std.mem.indexOf(u8, mode, "row") != null) {
         // Row-first layout
         var i: usize = 0;
         while (i < lines.items.len) {
+            if (indent.len > 0) try platform_impl.writeStdout(indent);
             var col: usize = 0;
             while (col < num_cols and i + col < lines.items.len) : (col += 1) {
-                if (col > 0) {
-                    // Pad previous column
-                    var p: u32 = 0;
-                    while (p < padding) : (p += 1) {
-                        try platform_impl.writeStdout(" ");
-                    }
-                }
                 try platform_impl.writeStdout(lines.items[i + col]);
+                // Pad unless last item on line
                 if (col + 1 < num_cols and i + col + 1 < lines.items.len) {
-                    // Pad to column width
                     var pad: usize = lines.items[i + col].len;
                     while (pad < col_width) : (pad += 1) {
                         try platform_impl.writeStdout(" ");
@@ -16075,25 +16101,18 @@ fn nativeCmdColumn(_: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
         // Column-first layout (default)
         var row: usize = 0;
         while (row < num_rows) : (row += 1) {
+            if (indent.len > 0) try platform_impl.writeStdout(indent);
             var col: usize = 0;
             while (col < num_cols) : (col += 1) {
                 const idx = col * num_rows + row;
                 if (idx >= lines.items.len) break;
-                if (col > 0) {
-                    var p: u32 = 0;
-                    while (p < padding) : (p += 1) {
-                        try platform_impl.writeStdout(" ");
-                    }
-                }
                 try platform_impl.writeStdout(lines.items[idx]);
-                if (col + 1 < num_cols) {
-                    const next_idx = (col + 1) * num_rows + row;
-                    if (next_idx < lines.items.len) {
-                        // Pad to column width
-                        var pad_amt: usize = lines.items[idx].len;
-                        while (pad_amt < col_width) : (pad_amt += 1) {
-                            try platform_impl.writeStdout(" ");
-                        }
+                // Pad to col_width unless it's the last item on the line
+                const next_idx = (col + 1) * num_rows + row;
+                if (col + 1 < num_cols and next_idx < lines.items.len) {
+                    var pad_amt: usize = lines.items[idx].len;
+                    while (pad_amt < col_width) : (pad_amt += 1) {
+                        try platform_impl.writeStdout(" ");
                     }
                 }
             }
