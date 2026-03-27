@@ -20223,9 +20223,33 @@ fn collectLooseRefs(allocator: std.mem.Allocator, git_dir: []const u8, prefix: [
                 });
                 continue;
             }
+            // Handle symbolic refs (ref: refs/...)
+            if (std.mem.startsWith(u8, trimmed, "ref: ")) {
+                const target_ref = trimmed["ref: ".len..];
+                const resolved = refs.resolveRef(git_dir, target_ref, platform_impl, allocator) catch {
+                    try ref_list.append(.{ .name = full_name, .hash = try allocator.dupe(u8, "0000000000000000000000000000000000000000"), .broken = true });
+                    continue;
+                };
+                if (resolved) |rh| {
+                    var found_p = false;
+                    for (ref_list.items, 0..) |ex, idx| {
+                        if (std.mem.eql(u8, ex.name, full_name)) {
+                            allocator.free(ex.hash);
+                            ref_list.items[idx].hash = rh;
+                            ref_list.items[idx].broken = false;
+                            found_p = true;
+                            allocator.free(full_name);
+                            break;
+                        }
+                    }
+                    if (!found_p) try ref_list.append(.{ .name = full_name, .hash = rh, .broken = false });
+                } else {
+                    try ref_list.append(.{ .name = full_name, .hash = try allocator.dupe(u8, "0000000000000000000000000000000000000000"), .broken = true });
+                }
+                continue;
+            }
             if (trimmed.len >= 40) {
                 const hash_val = trimmed[0..40];
-                // Check for all-zeros (null SHA)
                 const is_null = std.mem.eql(u8, hash_val, "0000000000000000000000000000000000000000");
 
                 // Check if this overrides a packed ref
@@ -28806,6 +28830,25 @@ fn performLocalFetch(allocator: std.mem.Allocator, git_path: []const u8, source_
             const fhc = try std.fmt.allocPrint(allocator, "{s}\t\tbranch '{s}' of {s}\n", .{h, bn, source_path}); defer allocator.free(fhc);
             std.fs.cwd().writeFile(.{ .sub_path = fhp, .data = fhc }) catch {};
             if (ho) allocator.free(h); } } else |_| {}
+    // Create remote HEAD symbolic ref
+    {
+        const src_head_p2 = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{src_git_dir});
+        defer allocator.free(src_head_p2);
+        if (std.fs.cwd().readFileAlloc(allocator, src_head_p2, 4096)) |hcont| {
+            defer allocator.free(hcont);
+            const th = std.mem.trim(u8, hcont, " \t\r\n");
+            if (std.mem.startsWith(u8, th, "ref: refs/heads/")) {
+                const def_branch = th["ref: refs/heads/".len..];
+                const rh_path = try std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}/HEAD", .{ git_path, remote_name });
+                defer allocator.free(rh_path);
+                if (std.fs.path.dirname(rh_path)) |pd| std.fs.cwd().makePath(pd) catch {};
+                const sc = try std.fmt.allocPrint(allocator, "ref: refs/remotes/{s}/{s}\n", .{ remote_name, def_branch });
+                defer allocator.free(sc);
+                std.fs.cwd().writeFile(.{ .sub_path = rh_path, .data = sc }) catch {};
+            }
+        } else |_| {}
+    }
+
     // Copy tags (unless --no-tags)
     if (copy_tags) {
         for (srl.items) |entry| { if (std.mem.startsWith(u8, entry.name, "refs/tags/")) {
