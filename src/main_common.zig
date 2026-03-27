@@ -377,6 +377,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try forwardCmdToGit(allocator, all_original_args.items, &platform_impl);
     } else if (std.mem.eql(u8, command, "ls-files")) {
         try forwardCmdToGit(allocator, all_original_args.items, &platform_impl);
+    } else if (std.mem.eql(u8, command, "ls-tree")) {
+        try nativeCmdLsTree(allocator, all_original_args.items, command_index, &platform_impl);
     } else if (std.mem.eql(u8, command, "config")) {
         // Forward to real git for full compatibility; fall back to native on freestanding
         if (build_options.enable_git_fallback and @import("builtin").target.os.tag != .freestanding) {
@@ -435,8 +437,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         std.mem.eql(u8, command, "symbolic-ref") or
         std.mem.eql(u8, command, "update-index") or
         std.mem.eql(u8, command, "diff-files") or
-        std.mem.eql(u8, command, "read-tree") or
-        std.mem.eql(u8, command, "ls-tree"))
+        std.mem.eql(u8, command, "read-tree"))
     {
         const translated = try translateCommandFlags(allocator, all_original_args.items, command_index);
         try forwardCmdToGit(allocator, translated, &platform_impl);
@@ -7132,7 +7133,445 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
 }
 
 fn cmdLsTree(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
-    try forwardPlumbingToGit(allocator, "ls-tree", args, platform_impl);
+    _ = allocator;
+    _ = args;
+    try platform_impl.writeStderr("fatal: ls-tree requires arguments\n");
+    std.process.exit(128);
+}
+
+/// Resolve a tree-ish (commit hash, branch name, tree hash) to a tree object hash
+fn resolveTreeish(git_path: []const u8, treeish: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
+    // First resolve the reference to an object hash
+    const obj_hash = resolveCommittish(git_path, treeish, platform_impl, allocator) catch {
+        // Maybe it's already a tree hash
+        if (treeish.len == 40 and isValidHashPrefix(treeish)) {
+            return try allocator.dupe(u8, treeish);
+        }
+        return error.UnknownRevision;
+    };
+    defer allocator.free(obj_hash);
+
+    // Load the object to check its type
+    const obj = objects.GitObject.load(obj_hash, git_path, platform_impl, allocator) catch {
+        return error.ObjectNotFound;
+    };
+    defer obj.deinit(allocator);
+
+    switch (obj.type) {
+        .tree => return try allocator.dupe(u8, obj_hash),
+        .commit => {
+            // Parse "tree <hash>" from the commit data
+            var lines = std.mem.splitSequence(u8, obj.data, "\n");
+            if (lines.next()) |first_line| {
+                if (std.mem.startsWith(u8, first_line, "tree ")) {
+                    return try allocator.dupe(u8, first_line["tree ".len..]);
+                }
+            }
+            return error.ObjectNotFound;
+        },
+        .tag => {
+            // Parse "object <hash>" from tag, then resolve that
+            var lines = std.mem.splitSequence(u8, obj.data, "\n");
+            while (lines.next()) |line| {
+                if (std.mem.startsWith(u8, line, "object ")) {
+                    const target_hash = line["object ".len..];
+                    return resolveTreeish(git_path, target_hash, platform_impl, allocator);
+                }
+            }
+            return error.ObjectNotFound;
+        },
+        else => return error.ObjectNotFound,
+    }
+}
+
+/// Parse tree object data and return entries as a list
+fn parseTreeEntries(tree_data: []const u8, allocator: std.mem.Allocator) !std.array_list.Managed(LsTreeEntry) {
+    var entries = std.array_list.Managed(LsTreeEntry).init(allocator);
+    var pos: usize = 0;
+
+    while (pos < tree_data.len) {
+        const space_pos = std.mem.indexOfScalarPos(u8, tree_data, pos, ' ') orelse break;
+        const mode = tree_data[pos..space_pos];
+        pos = space_pos + 1;
+
+        const null_pos = std.mem.indexOfScalarPos(u8, tree_data, pos, 0) orelse break;
+        const name = tree_data[pos..null_pos];
+        pos = null_pos + 1;
+
+        if (pos + 20 > tree_data.len) break;
+        const hash_bytes = tree_data[pos..pos + 20];
+        pos += 20;
+
+        var hash_hex: [40]u8 = undefined;
+        _ = std.fmt.bufPrint(&hash_hex, "{x}", .{hash_bytes}) catch break;
+
+        const is_tree = std.mem.eql(u8, mode, "40000");
+        // Pad mode to 6 digits (git format)
+        const padded_mode = if (is_tree) "040000" else mode;
+
+        try entries.append(LsTreeEntry{
+            .mode = try allocator.dupe(u8, padded_mode),
+            .obj_type = if (is_tree) "tree" else "blob",
+            .hash = try allocator.dupe(u8, &hash_hex),
+            .name = try allocator.dupe(u8, name),
+        });
+    }
+
+    return entries;
+}
+
+const LsTreeEntry = struct {
+    mode: []const u8,
+    obj_type: []const u8, // "blob" or "tree"
+    hash: []const u8,
+    name: []const u8,
+
+    fn deinit(self: LsTreeEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.mode);
+        allocator.free(self.hash);
+        allocator.free(self.name);
+    }
+};
+
+fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    var recursive = false;
+    var show_trees = false; // -t flag
+    var only_trees = false; // -d flag
+    var name_only = false;
+    var long_format = false;
+    var null_terminated = false;
+    var treeish: ?[]const u8 = null;
+    var pathspecs = std.array_list.Managed([]const u8).init(allocator);
+    defer pathspecs.deinit();
+
+    var i = command_index + 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-r")) {
+            recursive = true;
+        } else if (std.mem.eql(u8, arg, "-t")) {
+            show_trees = true;
+        } else if (std.mem.eql(u8, arg, "-d")) {
+            only_trees = true;
+        } else if (std.mem.eql(u8, arg, "--name-only") or std.mem.eql(u8, arg, "--name-status")) {
+            name_only = true;
+        } else if (std.mem.eql(u8, arg, "-l") or std.mem.eql(u8, arg, "--long")) {
+            long_format = true;
+        } else if (std.mem.eql(u8, arg, "-z")) {
+            null_terminated = true;
+        } else if (std.mem.eql(u8, arg, "--full-name") or std.mem.eql(u8, arg, "--full-tree") or std.mem.eql(u8, arg, "--abbrev")) {
+            // Accept but ignore these for now
+        } else if (std.mem.startsWith(u8, arg, "--abbrev=")) {
+            // Accept but ignore
+        } else if (std.mem.eql(u8, arg, "--")) {
+            // Everything after -- is a pathspec
+            i += 1;
+            while (i < args.len) : (i += 1) {
+                try pathspecs.append(args[i]);
+            }
+            break;
+        } else if (std.mem.eql(u8, arg, "-h")) {
+            try platform_impl.writeStdout("usage: git ls-tree [<options>] <tree-ish> [<path>...]\n\n    -d                  only show trees\n    -r                  recurse into subtrees\n    -t                  show trees when recursing\n    --name-only         list only filenames\n    --name-status       list only filenames\n    --long              include object size\n    -z                  terminate entries with NUL byte\n");
+            return;
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            if (treeish == null) {
+                treeish = arg;
+            } else {
+                try pathspecs.append(arg);
+            }
+        }
+    }
+
+    if (treeish == null) {
+        try platform_impl.writeStderr("fatal: not enough arguments\n");
+        std.process.exit(128);
+    }
+
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+        std.process.exit(128);
+        unreachable;
+    };
+    defer allocator.free(git_path);
+
+    // Resolve tree-ish to a tree hash
+    const tree_hash = resolveTreeish(git_path, treeish.?, platform_impl, allocator) catch {
+        const msg = try std.fmt.allocPrint(allocator, "fatal: Not a valid object name {s}\n", .{treeish.?});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        std.process.exit(128);
+        unreachable;
+    };
+    defer allocator.free(tree_hash);
+
+    // Collect all output entries
+    var output_entries = std.array_list.Managed(OutputEntry) .init(allocator);
+    defer {
+        for (output_entries.items) |*entry| entry.deinit(allocator);
+        output_entries.deinit();
+    }
+
+    // Walk the tree
+    try walkTree(allocator, git_path, tree_hash, "", recursive, show_trees, only_trees, &pathspecs, platform_impl, &output_entries);
+
+    // Sort by path (git ls-tree outputs sorted)
+    std.sort.block(OutputEntry, output_entries.items, {}, struct {
+        fn lessThan(_: void, a: OutputEntry, b: OutputEntry) bool {
+            return std.mem.order(u8, a.full_path, b.full_path) == .lt;
+        }
+    }.lessThan);
+
+    // Output
+    const line_end: []const u8 = if (null_terminated) "\x00" else "\n";
+    for (output_entries.items) |entry| {
+        if (name_only) {
+            const output = try std.fmt.allocPrint(allocator, "{s}{s}", .{ entry.full_path, line_end });
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+        } else if (long_format) {
+            // Long format: mode type size\thash\tpath
+            const size_str = if (std.mem.eql(u8, entry.obj_type, "tree"))
+                try allocator.dupe(u8, "      -")
+            else blk: {
+                // Load the object to get its size
+                const obj = objects.GitObject.load(entry.hash, git_path, platform_impl, allocator) catch {
+                    break :blk try allocator.dupe(u8, "      ?");
+                };
+                defer obj.deinit(allocator);
+                break :blk try std.fmt.allocPrint(allocator, "{d:>7}", .{obj.data.len});
+            };
+            defer allocator.free(size_str);
+            const output = try std.fmt.allocPrint(allocator, "{s} {s} {s} {s}\t{s}{s}", .{ entry.mode, entry.obj_type, entry.hash, size_str, entry.full_path, line_end });
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+        } else {
+            const output = try std.fmt.allocPrint(allocator, "{s} {s} {s}\t{s}{s}", .{ entry.mode, entry.obj_type, entry.hash, entry.full_path, line_end });
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+        }
+    }
+}
+
+const OutputEntry = struct {
+    mode: []const u8,
+    obj_type: []const u8,
+    hash: []const u8,
+    full_path: []const u8,
+
+    fn deinit(self: *OutputEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.mode);
+        allocator.free(self.hash);
+        allocator.free(self.full_path);
+    }
+};
+
+fn walkTree(
+    allocator: std.mem.Allocator,
+    git_path: []const u8,
+    tree_hash: []const u8,
+    prefix: []const u8,
+    recursive: bool,
+    show_trees: bool,
+    only_trees: bool,
+    pathspecs: *std.array_list.Managed([]const u8),
+    platform_impl: *const platform_mod.Platform,
+    output: *std.array_list.Managed(OutputEntry),
+) !void {
+    // Load the tree object
+    const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch {
+        return;
+    };
+    defer tree_obj.deinit(allocator);
+
+    if (tree_obj.type != .tree) return;
+
+    // Parse tree entries
+    var entries = try parseTreeEntries(tree_obj.data, allocator);
+    defer {
+        for (entries.items) |*entry| entry.deinit(allocator);
+        entries.deinit();
+    }
+
+    for (entries.items) |entry| {
+        const full_path = if (prefix.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, entry.name })
+        else
+            try allocator.dupe(u8, entry.name);
+
+        const is_tree = std.mem.eql(u8, entry.obj_type, "tree");
+
+        // Check pathspec filtering
+        if (pathspecs.items.len > 0) {
+            var matches = false;
+            for (pathspecs.items) |pathspec| {
+                if (pathMatchesSpec(full_path, pathspec, is_tree)) {
+                    matches = true;
+                    break;
+                }
+                // Also check if this tree is a prefix of the pathspec (need to recurse into it)
+                if (is_tree and pathSpecStartsWith(pathspec, full_path)) {
+                    matches = true;
+                    break;
+                }
+            }
+            if (!matches) {
+                allocator.free(full_path);
+                continue;
+            }
+        }
+
+        if (is_tree) {
+            if (recursive) {
+                if (show_trees or only_trees) {
+                    try output.append(OutputEntry{
+                        .mode = try allocator.dupe(u8, entry.mode),
+                        .obj_type = entry.obj_type,
+                        .hash = try allocator.dupe(u8, entry.hash),
+                        .full_path = try allocator.dupe(u8, full_path),
+                    });
+                }
+                if (!only_trees) {
+                    try walkTree(allocator, git_path, entry.hash, full_path, recursive, show_trees, only_trees, pathspecs, platform_impl, output);
+                } else {
+                    // Even with -d, recurse to find subtrees
+                    try walkTree(allocator, git_path, entry.hash, full_path, recursive, show_trees, only_trees, pathspecs, platform_impl, output);
+                }
+            } else {
+                // Non-recursive: check if pathspec asks for contents of this tree
+                var show_children = false;
+                if (pathspecs.items.len > 0) {
+                    for (pathspecs.items) |pathspec| {
+                        // If pathspec ends with '/' and matches this tree, show children
+                        if (std.mem.endsWith(u8, pathspec, "/") and
+                            std.mem.eql(u8, full_path, pathspec[0 .. pathspec.len - 1]))
+                        {
+                            show_children = true;
+                            break;
+                        }
+                        // If pathspec has more components beyond this tree, show children
+                        if (pathSpecStartsWith(pathspec, full_path) and
+                            pathspec.len > full_path.len and pathspec[full_path.len] == '/')
+                        {
+                            show_children = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (show_children) {
+                    // With -t flag, show intermediate tree entries
+                    if (show_trees) {
+                        try output.append(OutputEntry{
+                            .mode = try allocator.dupe(u8, entry.mode),
+                            .obj_type = entry.obj_type,
+                            .hash = try allocator.dupe(u8, entry.hash),
+                            .full_path = try allocator.dupe(u8, full_path),
+                        });
+                    }
+                    // Show the contents of this tree (one level)
+                    try walkTreeOneLevel(allocator, git_path, entry.hash, full_path, pathspecs, platform_impl, output, show_trees);
+                } else if (!only_trees or is_tree) {
+                    try output.append(OutputEntry{
+                        .mode = try allocator.dupe(u8, entry.mode),
+                        .obj_type = entry.obj_type,
+                        .hash = try allocator.dupe(u8, entry.hash),
+                        .full_path = try allocator.dupe(u8, full_path),
+                    });
+                }
+            }
+        } else {
+            // Blob entry
+            if (!only_trees) {
+                try output.append(OutputEntry{
+                    .mode = try allocator.dupe(u8, entry.mode),
+                    .obj_type = entry.obj_type,
+                    .hash = try allocator.dupe(u8, entry.hash),
+                    .full_path = try allocator.dupe(u8, full_path),
+                });
+            }
+        }
+
+        allocator.free(full_path);
+    }
+}
+
+fn walkTreeOneLevel(
+    allocator: std.mem.Allocator,
+    git_path: []const u8,
+    tree_hash: []const u8,
+    prefix: []const u8,
+    pathspecs: *std.array_list.Managed([]const u8),
+    platform_impl: *const platform_mod.Platform,
+    output: *std.array_list.Managed(OutputEntry),
+    show_trees_flag: bool,
+) !void {
+    _ = show_trees_flag;
+    const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch return;
+    defer tree_obj.deinit(allocator);
+    if (tree_obj.type != .tree) return;
+
+    var entries = try parseTreeEntries(tree_obj.data, allocator);
+    defer {
+        for (entries.items) |*entry| entry.deinit(allocator);
+        entries.deinit();
+    }
+
+    for (entries.items) |entry| {
+        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, entry.name });
+        defer allocator.free(full_path);
+
+        const is_tree = std.mem.eql(u8, entry.obj_type, "tree");
+
+        // Check pathspec filtering for sub-entries
+        if (pathspecs.items.len > 0) {
+            var matches = false;
+            for (pathspecs.items) |pathspec| {
+                if (pathMatchesSpec(full_path, pathspec, is_tree)) {
+                    matches = true;
+                    break;
+                }
+                if (is_tree and pathSpecStartsWith(pathspec, full_path)) {
+                    matches = true;
+                    break;
+                }
+            }
+            if (!matches) continue;
+        }
+
+        try output.append(OutputEntry{
+            .mode = try allocator.dupe(u8, entry.mode),
+            .obj_type = entry.obj_type,
+            .hash = try allocator.dupe(u8, entry.hash),
+            .full_path = try allocator.dupe(u8, full_path),
+        });
+    }
+}
+
+/// Check if a path matches a pathspec
+fn pathMatchesSpec(path: []const u8, spec: []const u8, is_tree: bool) bool {
+    // Spec with trailing slash: matches children of the directory but not a blob with the base name
+    if (std.mem.endsWith(u8, spec, "/")) {
+        const spec_base = spec[0 .. spec.len - 1];
+        // path0/ should NOT match the blob path0 (file, not directory)
+        if (std.mem.eql(u8, path, spec_base)) {
+            return is_tree; // Only match if it's actually a tree
+        }
+        // Match children of the specified directory (both blobs and trees)
+        if (std.mem.startsWith(u8, path, spec)) return true;
+        return false;
+    }
+    // Exact match
+    if (std.mem.eql(u8, path, spec)) return true;
+    // Path is a child of the spec directory
+    if (path.len > spec.len and std.mem.startsWith(u8, path, spec) and path[spec.len] == '/') return true;
+    return false;
+}
+
+/// Check if pathspec starts with the given prefix (for tree recursion)
+fn pathSpecStartsWith(spec: []const u8, prefix: []const u8) bool {
+    const clean_spec = if (std.mem.endsWith(u8, spec, "/")) spec[0 .. spec.len - 1] else spec;
+    if (clean_spec.len <= prefix.len) return false;
+    return std.mem.startsWith(u8, clean_spec, prefix) and clean_spec[prefix.len] == '/';
 }
 
 fn cmdReadTree(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {

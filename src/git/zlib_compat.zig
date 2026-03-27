@@ -17,6 +17,9 @@ pub fn decompress(old_reader: anytype, old_writer: anytype) !void {
 
     // Stream from decompressor reader to output writer
     _ = dec.reader.streamRemaining(&writer_adapter.new_interface) catch return error.InvalidInput;
+
+    // Flush any remaining buffered data in the writer adapter
+    writer_adapter.new_interface.flush() catch return error.InvalidInput;
 }
 
 /// Compress data from an old-style GenericReader into an old-style GenericWriter.
