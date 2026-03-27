@@ -107,7 +107,7 @@ const NATIVE_COMMANDS = [_][]const u8{
     "verify-commit", "verify-tag", "mv", "stash", "apply",
     "column", "check-ignore", "check-attr",
     "switch", "restore", "worktree", "stripspace", "checkout-index",
-    "show-branch", "ls-remote", "upload-pack", "receive-pack", "send-pack",
+    "show-branch", "blame", "annotate", "ls-remote", "upload-pack", "receive-pack", "send-pack",
 };
 
 fn isNativeCommand(command: []const u8) bool {
@@ -655,6 +655,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try nativeCmdShowBranch(allocator, all_original_args.items, command_index, &platform_impl);
     } else if (std.mem.eql(u8, command, "checkout-index")) {
         try cmdCheckoutIndex(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "blame") or std.mem.eql(u8, command, "annotate")) {
+        try @import("git/blame_cmd.zig").cmdBlame(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "ls-remote")) {
         try nativeCmdLsRemote(allocator, all_original_args.items, command_index, &platform_impl);
     } else if (std.mem.eql(u8, command, "upload-pack") or std.mem.eql(u8, command, "receive-pack") or std.mem.eql(u8, command, "send-pack")) {
@@ -2077,7 +2079,7 @@ fn resolveAlias(allocator: std.mem.Allocator, name: []const u8, platform_impl: *
     return null;
 }
 
-fn findGitDirectory(allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
+pub fn findGitDirectory(allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
     const current_dir = try platform_impl.fs.getCwd(allocator);
     defer allocator.free(current_dir);
     
@@ -3395,7 +3397,7 @@ fn showStagedDiff(index: *const index_mod.Index, git_path: []const u8, platform_
     return has_diff;
 }
 
-fn readGitObjectContent(git_path: []const u8, hex_hash: []const u8, allocator: std.mem.Allocator) ![]u8 {
+pub fn readGitObjectContent(git_path: []const u8, hex_hash: []const u8, allocator: std.mem.Allocator) ![]u8 {
     const objects_dir = try std.fmt.allocPrint(allocator, "{s}/objects", .{git_path});
     defer allocator.free(objects_dir);
     var hash_bytes: [20]u8 = undefined;
@@ -3409,7 +3411,7 @@ fn readGitObjectContent(git_path: []const u8, hex_hash: []const u8, allocator: s
     return try allocator.dupe(u8, raw);
 }
 
-fn getTreeEntryHashFromCommit(git_path: []const u8, commit_hash: []const u8, file_path: []const u8, allocator: std.mem.Allocator) ![]u8 {
+pub fn getTreeEntryHashFromCommit(git_path: []const u8, commit_hash: []const u8, file_path: []const u8, allocator: std.mem.Allocator) ![]u8 {
     // Read the commit to get the tree hash
     const commit_content = readGitObjectContent(git_path, commit_hash, allocator) catch return error.ObjectNotFound;
     defer allocator.free(commit_content);

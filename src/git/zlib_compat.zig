@@ -1,226 +1,33 @@
-//! Compatibility shim: provides the old std.compress.zlib API
-//! on top of the zig 0.15 std.compress.flate API.
-
 const std = @import("std");
-const flate = std.compress.flate;
-
-/// Decompress zlib data from an old-style GenericReader into an old-style GenericWriter.
-pub fn decompress(old_reader: anytype, old_writer: anytype) !void {
-    var adapter_buf: [65536]u8 = undefined;
-    var adapter = old_reader.adaptToNewApi(&adapter_buf);
-    var window_buf: [flate.max_window_len]u8 = undefined;
-    var dec = flate.Decompress.init(&adapter.new_interface, .zlib, &window_buf);
-
-    // Use the new Writer adapter for output
-    var writer_adapter_buf: [65536]u8 = undefined;
-    var writer_adapter = old_writer.adaptToNewApi(&writer_adapter_buf);
-
-    // Stream from decompressor reader to output writer
-    _ = dec.reader.streamRemaining(&writer_adapter.new_interface) catch return error.InvalidInput;
-
-    // Flush any remaining buffered data in the writer adapter
-    writer_adapter.new_interface.flush() catch return error.InvalidInput;
+const c = @cImport({ @cInclude("zlib.h"); });
+pub fn decompress(reader: anytype, writer: anytype) !void {
+    var buf = std.array_list.Managed(u8).init(std.heap.page_allocator); defer buf.deinit();
+    while (true) { var b: [4096]u8 = undefined; const n = reader.read(&b) catch break; if (n == 0) break; try buf.appendSlice(b[0..n]); }
+    var strm: c.z_stream = std.mem.zeroes(c.z_stream); strm.next_in = buf.items.ptr; strm.avail_in = @intCast(buf.items.len);
+    if (c.inflateInit(&strm) != c.Z_OK) return error.InvalidInput; defer _ = c.inflateEnd(&strm);
+    var ob: [8192]u8 = undefined;
+    while (true) { strm.next_out = &ob; strm.avail_out = ob.len; const ret = c.inflate(&strm, c.Z_NO_FLUSH); const have = ob.len - strm.avail_out;
+        if (have > 0) writer.writeAll(ob[0..have]) catch return error.InvalidInput; if (ret == c.Z_STREAM_END) break; if (ret != c.Z_OK) return error.InvalidInput; }
 }
-
-/// Compress data from an old-style GenericReader into an old-style GenericWriter.
-pub fn compress(old_reader: anytype, old_writer: anytype, options: anytype) !void {
-    _ = options;
-
-    // Read all input data first (from the old reader)
-    var all_input = std.array_list.Managed(u8).init(std.heap.page_allocator);
-    defer all_input.deinit();
-    {
-        var buf: [16384]u8 = undefined;
-        while (true) {
-            const n = old_reader.read(&buf) catch break;
-            if (n == 0) break;
-            try all_input.appendSlice(buf[0..n]);
-        }
-    }
-
-    // Set up new-style writer adapter for output
-    var writer_adapter_buf: [65536]u8 = undefined;
-    var writer_adapter = old_writer.adaptToNewApi(&writer_adapter_buf);
-
-    // Compress using the new API
-    var compress_buf: [65536]u8 = undefined;
-    var comp = flate.Compress.init(&writer_adapter.new_interface, &compress_buf, .{
-        .container = .zlib,
-    });
-
-    // Feed input through compressor
-    comp.writer.writeAll(all_input.items) catch return error.CompressionFailed;
-    comp.end() catch return error.CompressionFailed;
+pub fn compress2(dest: [*]u8, dest_len: *c_ulong, source: [*]const u8, source_len: c_ulong, level: c_int) c_int { return c.compress2(dest, dest_len, source, source_len, level); }
+pub fn compressSlice(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+    const bound = c.compressBound(@intCast(data.len)); var dest = try allocator.alloc(u8, @intCast(bound)); var dl: c_ulong = @intCast(dest.len);
+    if (c.compress2(dest.ptr, &dl, data.ptr, @intCast(data.len), c.Z_DEFAULT_COMPRESSION) != c.Z_OK) { allocator.free(dest); return error.CompressionFailed; }
+    if (@as(usize, @intCast(dl)) < dest.len) dest = allocator.realloc(dest, @intCast(dl)) catch dest; return dest[0..@intCast(dl)];
 }
-
-/// Streaming decompressor wrapper compatible with old API.
-pub fn Decompressor(comptime ReaderType: type) type {
-    return struct {
-        const Self = @This();
-
-        inner_reader: ReaderType,
-        adapter_buf: [65536]u8 = undefined,
-        adapter: ?@TypeOf(blk: {
-            var d: ReaderType = undefined;
-            var b: [1]u8 = undefined;
-            break :blk d.adaptToNewApi(&b);
-        }) = null,
-        window_buf: [flate.max_window_len]u8 = undefined,
-        dec: ?flate.Decompress = null,
-
-        fn ensureInit(self: *Self) void {
-            if (self.adapter == null) {
-                self.adapter = self.inner_reader.adaptToNewApi(&self.adapter_buf);
-                self.dec = flate.Decompress.init(&self.adapter.?.new_interface, .zlib, &self.window_buf);
-            }
-        }
-
-        pub const ReadError = error{ InvalidInput, EndOfStream };
-
-        pub fn read(self: *Self, buf: []u8) ReadError!usize {
-            self.ensureInit();
-            var bufs = [_][]u8{buf};
-            const orig_len = bufs[0].len;
-            _ = self.dec.?.reader.readVec(&bufs) catch |err| switch (err) {
-                error.EndOfStream => return error.EndOfStream,
-                error.ReadFailed => return error.InvalidInput,
-            };
-            return orig_len - bufs[0].len;
-        }
-
-        pub fn reader(self: *Self) @This().GenReader {
-            return .{ .context = self };
-        }
-
-        pub const GenReader = std.io.GenericReader(*Self, ReadError, readAdapter);
-
-        fn readAdapter(self: *Self, buf: []u8) ReadError!usize {
-            return self.read(buf);
-        }
-    };
+pub fn decompressSlice(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+    var strm: c.z_stream = std.mem.zeroes(c.z_stream); strm.next_in = @constCast(data.ptr); strm.avail_in = @intCast(data.len);
+    if (c.inflateInit(&strm) != c.Z_OK) return error.InvalidInput; defer _ = c.inflateEnd(&strm);
+    var r = std.array_list.Managed(u8).init(allocator); errdefer r.deinit(); var ob: [8192]u8 = undefined;
+    while (true) { strm.next_out = &ob; strm.avail_out = ob.len; const ret = c.inflate(&strm, c.Z_NO_FLUSH); const have = ob.len - strm.avail_out;
+        if (have > 0) try r.appendSlice(ob[0..have]); if (ret == c.Z_STREAM_END) break; if (ret != c.Z_OK) return error.InvalidInput; }
+    return r.toOwnedSlice();
 }
-
-pub fn decompressor(old_reader: anytype) Decompressor(@TypeOf(old_reader)) {
-    return .{ .inner_reader = old_reader };
-}
-
-/// Streaming compressor wrapper.
-pub fn Compressor(comptime WriterType: type) type {
-    return struct {
-        const Self = @This();
-
-        inner_writer: WriterType,
-        writer_adapter_buf: [65536]u8 = undefined,
-        writer_adapter: ?@TypeOf(blk: {
-            var d: WriterType = undefined;
-            var b: [1]u8 = undefined;
-            break :blk d.adaptToNewApi(&b);
-        }) = null,
-        compress_buf: [65536]u8 = undefined,
-        comp: ?flate.Compress = null,
-
-        fn ensureInit(self: *Self) void {
-            if (self.writer_adapter == null) {
-                self.writer_adapter = self.inner_writer.adaptToNewApi(&self.writer_adapter_buf);
-                self.comp = flate.Compress.init(&self.writer_adapter.?.new_interface, &self.compress_buf, .{
-                    .container = .zlib,
-                });
-            }
-        }
-
-        pub fn write(self: *Self, data: []const u8) !usize {
-            self.ensureInit();
-            self.comp.?.writer.writeAll(data) catch return error.CompressionFailed;
-            return data.len;
-        }
-
-        pub fn finish(self: *Self) !void {
-            self.ensureInit();
-            self.comp.?.end() catch return error.CompressionFailed;
-        }
-
-        pub fn writer(self: *Self) GenWriter {
-            return .{ .context = self };
-        }
-
-        pub const GenWriter = std.io.GenericWriter(*Self, error{CompressionFailed}, writeAdapter);
-
-        fn writeAdapter(self: *Self, data: []const u8) error{CompressionFailed}!usize {
-            return self.write(data) catch return error.CompressionFailed;
-        }
-    };
-}
-
-pub fn compressorWriter(old_writer: anytype, options: anytype) !Compressor(@TypeOf(old_writer)) {
-    _ = options;
-    return .{ .inner_writer = old_writer };
-}
-
-/// Compress a slice of data using zlib, returning allocated compressed bytes.
-const c = @cImport({
-    @cInclude("zlib.h");
-});
-
-pub fn compressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    const bound = c.compressBound(@intCast(input.len));
-    const output = try allocator.alloc(u8, @intCast(bound));
-    errdefer allocator.free(output);
-    var dest_len: c.uLongf = @intCast(output.len);
-    const ret = c.compress2(output.ptr, &dest_len, input.ptr, @intCast(input.len), 6);
-    if (ret != c.Z_OK) return error.CompressionFailed;
-    const result = try allocator.dupe(u8, output[0..@intCast(dest_len)]);
-    allocator.free(output);
-    return result;
-}
-
-/// Decompress a slice of zlib data, returning allocated decompressed bytes.
-pub fn decompressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var output = std.array_list.Managed(u8).init(allocator);
-    errdefer output.deinit();
-
-    var fbs = std.io.fixedBufferStream(input);
-    var reader_adapter_buf: [65536]u8 = undefined;
-    var reader_adapter = fbs.reader().adaptToNewApi(&reader_adapter_buf);
-
-    var window_buf: [flate.max_window_len]u8 = undefined;
-    var dec = flate.Decompress.init(&reader_adapter.new_interface, .zlib, &window_buf);
-
-    var writer_adapter_buf: [65536]u8 = undefined;
-    var writer_adapter = output.writer().adaptToNewApi(&writer_adapter_buf);
-
-    _ = dec.reader.streamRemaining(&writer_adapter.new_interface) catch return error.InvalidInput;
-    writer_adapter.new_interface.flush() catch return error.InvalidInput;
-
-    return output.toOwnedSlice();
-}
-
-/// Decompress zlib data from a slice, returning decompressed content and
-/// the number of compressed bytes consumed from input.
-pub fn decompressSliceWithConsumed(allocator: std.mem.Allocator, input: []const u8) !struct { data: []u8, consumed: usize } {
-    var stream: c.z_stream = std.mem.zeroes(c.z_stream);
-    stream.next_in = @constCast(input.ptr);
-    stream.avail_in = @intCast(input.len);
-
-    var ret = c.inflateInit(&stream);
-    if (ret != c.Z_OK) return error.InvalidInput;
-    defer _ = c.inflateEnd(&stream);
-
-    var output = std.array_list.Managed(u8).init(allocator);
-    errdefer output.deinit();
-
-    var buf: [16384]u8 = undefined;
-    while (true) {
-        stream.next_out = &buf;
-        stream.avail_out = buf.len;
-        ret = c.inflate(&stream, c.Z_NO_FLUSH);
-        const have = buf.len - @as(usize, @intCast(stream.avail_out));
-        if (have > 0) {
-            try output.appendSlice(buf[0..have]);
-        }
-        if (ret == c.Z_STREAM_END) break;
-        if (ret != c.Z_OK) return error.InvalidInput;
-    }
-
-    const consumed = @as(usize, @intCast(stream.total_in));
-    return .{ .data = try output.toOwnedSlice(), .consumed = consumed };
+pub fn decompressSliceWithConsumed(allocator: std.mem.Allocator, data: []const u8) !struct { data: []u8, consumed: usize } {
+    var strm: c.z_stream = std.mem.zeroes(c.z_stream); strm.next_in = @constCast(data.ptr); strm.avail_in = @intCast(data.len);
+    if (c.inflateInit(&strm) != c.Z_OK) return error.InvalidInput; defer _ = c.inflateEnd(&strm);
+    var r = std.array_list.Managed(u8).init(allocator); errdefer r.deinit(); var ob: [8192]u8 = undefined;
+    while (true) { strm.next_out = &ob; strm.avail_out = ob.len; const ret = c.inflate(&strm, c.Z_NO_FLUSH); const have = ob.len - strm.avail_out;
+        if (have > 0) try r.appendSlice(ob[0..have]); if (ret == c.Z_STREAM_END) break; if (ret != c.Z_OK) return error.InvalidInput; }
+    return .{ .data = try r.toOwnedSlice(), .consumed = data.len - strm.avail_in };
 }
