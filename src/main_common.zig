@@ -19885,9 +19885,16 @@ fn nativeCmdApply(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     }
 
     // Parse patches
-    var patches = parsePatchSet(allocator, all_patch_data.items, p_value) catch |err| {
+    var corrupt_line: usize = 0;
+    var patches = parsePatchSet(allocator, all_patch_data.items, p_value, &corrupt_line) catch |err| {
         if (err == error.InvalidPatch) {
             try platform_impl.writeStderr("error: invalid combination in patch header\n");
+            std.process.exit(128);
+        }
+        if (err == error.CorruptPatch) {
+            const msg = try std.fmt.allocPrint(allocator, "error: corrupt patch at line {d}\n", .{corrupt_line});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
             std.process.exit(128);
         }
         const msg = try std.fmt.allocPrint(allocator, "error: patch parsing failed: {}\n", .{err});
@@ -20019,6 +20026,9 @@ const Patch = struct {
     new_mode: ?u32,
     old_mode: ?u32,
     is_binary: bool,
+    is_rename: bool = false,
+    is_copy: bool = false,
+    similarity: ?u32 = null, // similarity index percentage
     hunks: std.array_list.Managed(PatchHunk),
     added: u32,
     removed: u32,
@@ -20031,7 +20041,7 @@ const Patch = struct {
     }
 };
 
-fn parsePatchSet(allocator: std.mem.Allocator, data: []const u8, p_value: u32) !std.array_list.Managed(Patch) {
+fn parsePatchSet(allocator: std.mem.Allocator, data: []const u8, p_value: u32, corrupt_line: *usize) !std.array_list.Managed(Patch) {
     var patches = std.array_list.Managed(Patch).init(allocator);
     var lines_iter = std.mem.splitScalar(u8, data, '\n');
     var lines = std.array_list.Managed([]const u8).init(allocator);
@@ -20042,13 +20052,25 @@ fn parsePatchSet(allocator: std.mem.Allocator, data: []const u8, p_value: u32) !
     while (i < lines.items.len) {
         // Look for "diff --git" or "---" header
         const line = lines.items[i];
-        if (std.mem.startsWith(u8, line, "diff --git ")) {
-            var patch = try parseSinglePatch(allocator, lines.items, &i, p_value);
+        if (std.mem.startsWith(u8, line, "diff --git ") or std.mem.startsWith(u8, line, "diff -")) {
+            const saved_i = i;
+            var patch = parseSinglePatch(allocator, lines.items, &i, p_value) catch |err| {
+                if (err == error.CorruptPatch) {
+                    corrupt_line.* = i + 1; // 1-indexed
+                }
+                return err;
+            };
+            _ = saved_i;
             _ = &patch;
             try patches.append(patch);
         } else if (std.mem.startsWith(u8, line, "--- ") and i + 1 < lines.items.len and std.mem.startsWith(u8, lines.items[i + 1], "+++ ")) {
             // Traditional diff format without "diff --git" header
-            var patch = try parseTraditionalPatch(allocator, lines.items, &i, p_value);
+            var patch = parseTraditionalPatch(allocator, lines.items, &i, p_value) catch |err| {
+                if (err == error.CorruptPatch) {
+                    corrupt_line.* = i + 1;
+                }
+                return err;
+            };
             _ = &patch;
             try patches.append(patch);
         } else {
@@ -20130,6 +20152,14 @@ fn parseSinglePatch(allocator: std.mem.Allocator, lines: []const []const u8, pos
                 std.mem.startsWith(u8, line, "copy to ")))
             {
                 return error.InvalidPatch;
+            }
+            if (std.mem.startsWith(u8, line, "rename from ")) {
+                patch.is_rename = true;
+            } else if (std.mem.startsWith(u8, line, "copy from ")) {
+                patch.is_copy = true;
+            } else if (std.mem.startsWith(u8, line, "similarity index ")) {
+                const pct = std.mem.trim(u8, line["similarity index ".len..], " \t\r%");
+                patch.similarity = std.fmt.parseInt(u32, pct, 10) catch null;
             }
             if (std.mem.startsWith(u8, line, "rename to ") or std.mem.startsWith(u8, line, "copy to ")) {
                 const new_name = std.mem.trim(u8, line[std.mem.indexOf(u8, line, " to ").? + 4 ..], " \t\r");
@@ -20262,18 +20292,18 @@ fn parseHunk(allocator: std.mem.Allocator, lines: []const []const u8, pos: *usiz
         if (std.mem.indexOf(u8, after_minus, " +")) |plus_pos| {
             const old_part = after_minus[0..plus_pos];
             if (std.mem.indexOf(u8, old_part, ",")) |comma| {
-                old_start = std.fmt.parseInt(u32, old_part[0..comma], 10) catch 1;
-                old_count = std.fmt.parseInt(u32, old_part[comma + 1 ..], 10) catch 1;
+                old_start = std.fmt.parseInt(u32, old_part[0..comma], 10) catch return error.CorruptPatch;
+                old_count = std.fmt.parseInt(u32, old_part[comma + 1 ..], 10) catch return error.CorruptPatch;
             } else {
-                old_start = std.fmt.parseInt(u32, old_part, 10) catch 1;
+                old_start = std.fmt.parseInt(u32, old_part, 10) catch return error.CorruptPatch;
                 old_count = 1;
             }
             const after_plus = after_minus[plus_pos + 2 ..];
             const new_end = std.mem.indexOf(u8, after_plus, " ") orelse std.mem.indexOf(u8, after_plus, "@") orelse after_plus.len;
             const new_part = after_plus[0..new_end];
             if (std.mem.indexOf(u8, new_part, ",")) |comma| {
-                new_start = std.fmt.parseInt(u32, new_part[0..comma], 10) catch 1;
-                new_count = std.fmt.parseInt(u32, new_part[comma + 1 ..], 10) catch 1;
+                new_start = std.fmt.parseInt(u32, new_part[0..comma], 10) catch return error.CorruptPatch;
+                new_count = std.fmt.parseInt(u32, new_part[comma + 1 ..], 10) catch return error.CorruptPatch;
             } else {
                 new_start = std.fmt.parseInt(u32, new_part, 10) catch 1;
                 new_count = 1;
@@ -20793,9 +20823,67 @@ fn outputPatchSummary(allocator: std.mem.Allocator, patch: *const Patch, platfor
         try platform_impl.writeStdout(mode_str);
     } else if (patch.is_delete) {
         const path = patch.old_path orelse "unknown";
-        const msg = try std.fmt.allocPrint(allocator, " delete {s}\n", .{path});
+        const mode_str = if (patch.old_mode) |m|
+            try std.fmt.allocPrint(allocator, " delete mode {o} {s}\n", .{ m, path })
+        else
+            try std.fmt.allocPrint(allocator, " delete {s}\n", .{path});
+        defer allocator.free(mode_str);
+        try platform_impl.writeStdout(mode_str);
+    }
+    if (patch.is_rename or patch.is_copy) {
+        const old_p = patch.old_path orelse "unknown";
+        const new_p = patch.new_path orelse "unknown";
+        const action: []const u8 = if (patch.is_rename) "rename" else "copy";
+
+        // Try to find common prefix/suffix for {old => new} format
+        const formatted = try formatRenamePath(allocator, old_p, new_p);
+        defer allocator.free(formatted);
+
+        if (patch.similarity) |sim| {
+            const msg = try std.fmt.allocPrint(allocator, " {s} {s} ({d}%)\n", .{ action, formatted, sim });
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
+        } else {
+            const msg = try std.fmt.allocPrint(allocator, " {s} {s}\n", .{ action, formatted });
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
+        }
+    }
+    if (patch.old_mode != null and patch.new_mode != null and patch.old_mode.? != patch.new_mode.? and !patch.is_new_file and !patch.is_delete) {
+        const msg = try std.fmt.allocPrint(allocator, " mode change {o} => {o} {s}\n", .{ patch.old_mode.?, patch.new_mode.?, patch.new_path orelse patch.old_path orelse "unknown" });
         defer allocator.free(msg);
         try platform_impl.writeStdout(msg);
+    }
+}
+
+fn formatRenamePath(allocator: std.mem.Allocator, old_path: []const u8, new_path: []const u8) ![]u8 {
+    // Find common prefix (directory)
+    var prefix_end: usize = 0;
+    var last_slash: usize = 0;
+    while (prefix_end < old_path.len and prefix_end < new_path.len and old_path[prefix_end] == new_path[prefix_end]) {
+        if (old_path[prefix_end] == '/') last_slash = prefix_end + 1;
+        prefix_end += 1;
+    }
+    // Use up to last slash as prefix
+    const prefix = old_path[0..last_slash];
+    const old_suffix = old_path[last_slash..];
+    const new_suffix = new_path[last_slash..];
+
+    // Find common suffix
+    var suffix_len: usize = 0;
+    while (suffix_len < old_suffix.len and suffix_len < new_suffix.len and
+        old_suffix[old_suffix.len - 1 - suffix_len] == new_suffix[new_suffix.len - 1 - suffix_len])
+    {
+        suffix_len += 1;
+    }
+
+    if (prefix.len > 0 or suffix_len > 0) {
+        const old_mid = old_suffix[0 .. old_suffix.len - suffix_len];
+        const new_mid = new_suffix[0 .. new_suffix.len - suffix_len];
+        const common_suffix = old_suffix[old_suffix.len - suffix_len ..];
+        return std.fmt.allocPrint(allocator, "{s}{{{s} => {s}}}{s}", .{ prefix, old_mid, new_mid, common_suffix });
+    } else {
+        return std.fmt.allocPrint(allocator, "{s} => {s}", .{ old_path, new_path });
     }
 }
 
