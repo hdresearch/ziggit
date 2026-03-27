@@ -8802,27 +8802,69 @@ fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         } else |_| {}
     }
 
+    // For hierarchical tag names (foo/bar), create parent directories
+    const tag_ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ tags_path, tag_name.? });
+    defer allocator.free(tag_ref_path);
+    if (std.fs.path.dirname(tag_ref_path)) |parent| {
+        std.fs.cwd().makePath(parent) catch {};
+    }
+
     if (annotated) {
-        // For now, just create a lightweight tag and ignore the annotation
-        // A full implementation would create a proper tag object
         if (message == null) {
+            // TODO: launch editor for annotation
             try platform_impl.writeStderr("error: annotated tag requires a message (use -m)\n");
             std.process.exit(1);
         }
         
-        // Create lightweight tag (direct reference to commit)
-        const tag_ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{tags_path, tag_name.?});
-        defer allocator.free(tag_ref_path);
+        // Create annotated tag object
+        const tagger_name = resolveAuthorName(allocator, git_path) catch "A U Thor";
+        defer if (!std.mem.eql(u8, tagger_name, "A U Thor")) allocator.free(tagger_name);
+        const tagger_email = resolveAuthorEmail(allocator, git_path) catch "author@example.com";
+        defer if (!std.mem.eql(u8, tagger_email, "author@example.com")) allocator.free(tagger_email);
+        const timestamp = std.time.timestamp();
         
-        const ref_content = try std.fmt.allocPrint(allocator, "{s}\n", .{commit_hash});
+        const tag_content = try std.fmt.allocPrint(allocator, "object {s}\ntype commit\ntag {s}\ntagger {s} <{s}> {d} +0000\n\n{s}\n", .{ commit_hash, tag_name.?, tagger_name, tagger_email, timestamp, message.? });
+        defer allocator.free(tag_content);
+        
+        // Hash and write tag object
+        const header = try std.fmt.allocPrint(allocator, "tag {d}\x00", .{tag_content.len});
+        defer allocator.free(header);
+        var hasher = std.crypto.hash.Sha1.init(.{});
+        hasher.update(header);
+        hasher.update(tag_content);
+        const tag_sha = hasher.finalResult();
+        
+        var tag_hex: [40]u8 = undefined;
+        for (tag_sha, 0..) |b, bi| {
+            _ = std.fmt.bufPrint(tag_hex[bi * 2 .. bi * 2 + 2], "{x:0>2}", .{b}) catch continue;
+        }
+        
+        // Write tag object
+        const obj_dir = try std.fmt.allocPrint(allocator, "{s}/objects/{s}", .{ git_path, tag_hex[0..2] });
+        defer allocator.free(obj_dir);
+        std.fs.cwd().makePath(obj_dir) catch {};
+        const obj_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ obj_dir, tag_hex[2..] });
+        defer allocator.free(obj_path);
+        
+        // Compress and write
+        var full_obj = std.array_list.Managed(u8).init(allocator);
+        defer full_obj.deinit();
+        try full_obj.appendSlice(header);
+        try full_obj.appendSlice(tag_content);
+        const compressed = zlib_compat_mod.compressSlice(allocator, full_obj.items) catch {
+            try platform_impl.writeStderr("fatal: unable to compress tag object\n");
+            std.process.exit(128);
+            unreachable;
+        };
+        defer allocator.free(compressed);
+        std.fs.cwd().writeFile(.{ .sub_path = obj_path, .data = compressed }) catch {};
+        
+        // Write ref pointing to tag object
+        const ref_content = try std.fmt.allocPrint(allocator, "{s}\n", .{tag_hex});
         defer allocator.free(ref_content);
-        
         try platform_impl.fs.writeFile(tag_ref_path, ref_content);
     } else {
         // Create lightweight tag (direct reference to commit)
-        const tag_ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{tags_path, tag_name.?});
-        defer allocator.free(tag_ref_path);
-        
         const ref_content = try std.fmt.allocPrint(allocator, "{s}\n", .{commit_hash});
         defer allocator.free(ref_content);
         
