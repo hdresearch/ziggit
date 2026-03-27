@@ -9069,6 +9069,89 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             defer allocator.free(msg);
             try platform_impl.writeStdout(msg);
         }
+    } else if (std.mem.startsWith(u8, first_arg.?, "--set-upstream-to=") or std.mem.eql(u8, first_arg.?, "--set-upstream-to") or std.mem.eql(u8, first_arg.?, "-u")) {
+        // Set upstream tracking branch
+        const upstream_name = if (std.mem.startsWith(u8, first_arg.?, "--set-upstream-to="))
+            first_arg.?["--set-upstream-to=".len..]
+        else
+            args.next() orelse {
+                try platform_impl.writeStderr("fatal: no upstream branch specified\n");
+                std.process.exit(128);
+                unreachable;
+            };
+        const branch_name = args.next() orelse blk: {
+            break :blk refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
+                try platform_impl.writeStderr("fatal: no branch specified and no current branch\n");
+                std.process.exit(128);
+                unreachable;
+            };
+        };
+        // branch_name may need freeing if allocated
+        
+        // Write tracking config: [branch "name"] remote = . merge = refs/heads/upstream
+        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+        defer allocator.free(config_path);
+        const existing = platform_impl.fs.readFile(allocator, config_path) catch try allocator.dupe(u8, "");
+        defer allocator.free(existing);
+        
+        // Remove existing [branch "name"] section if present
+        var new_config = std.array_list.Managed(u8).init(allocator);
+        defer new_config.deinit();
+        var skip_section = false;
+        const section_header = try std.fmt.allocPrint(allocator, "[branch \"{s}\"]", .{branch_name});
+        defer allocator.free(section_header);
+        var lines = std.mem.splitScalar(u8, existing, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (std.mem.startsWith(u8, trimmed, section_header)) {
+                skip_section = true;
+                continue;
+            }
+            if (skip_section and trimmed.len > 0 and trimmed[0] == '[') {
+                skip_section = false;
+            }
+            if (!skip_section) {
+                new_config.appendSlice(line) catch {};
+                new_config.append('\n') catch {};
+            }
+        }
+        // Add new section
+        const tracking_section = try std.fmt.allocPrint(allocator, "[branch \"{s}\"]\n\tremote = .\n\tmerge = refs/heads/{s}\n", .{branch_name, upstream_name});
+        defer allocator.free(tracking_section);
+        new_config.appendSlice(tracking_section) catch {};
+        
+        std.fs.cwd().writeFile(.{ .sub_path = config_path, .data = new_config.items }) catch {};
+        
+        const success_msg = try std.fmt.allocPrint(allocator, "branch '{s}' set up to track '{s}'.\n", .{branch_name, upstream_name});
+        defer allocator.free(success_msg);
+        try platform_impl.writeStdout(success_msg);
+    } else if (std.mem.eql(u8, first_arg.?, "--unset-upstream")) {
+        // Unset upstream
+        const branch_name = args.next() orelse blk: {
+            break :blk refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
+                try platform_impl.writeStderr("fatal: no branch specified\n");
+                std.process.exit(128);
+                unreachable;
+            };
+        };
+        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+        defer allocator.free(config_path);
+        const existing = platform_impl.fs.readFile(allocator, config_path) catch try allocator.dupe(u8, "");
+        defer allocator.free(existing);
+        var new_config = std.array_list.Managed(u8).init(allocator);
+        defer new_config.deinit();
+        var skip_section = false;
+        const section_header = try std.fmt.allocPrint(allocator, "[branch \"{s}\"]", .{branch_name});
+        defer allocator.free(section_header);
+        var line_iter = std.mem.splitScalar(u8, existing, '\n');
+        while (line_iter.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (std.mem.startsWith(u8, trimmed, section_header)) { skip_section = true; continue; }
+            if (skip_section and trimmed.len > 0 and trimmed[0] == '[') { skip_section = false; }
+            if (!skip_section) { new_config.appendSlice(line) catch {}; new_config.append('\n') catch {}; }
+        }
+        std.fs.cwd().writeFile(.{ .sub_path = config_path, .data = new_config.items }) catch {};
+
     } else if (std.mem.eql(u8, first_arg.?, "-d") or std.mem.eql(u8, first_arg.?, "-D")) {
         // Delete branch
         const branch_name = args.next() orelse {
