@@ -11755,14 +11755,9 @@ fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platform_im
                 try pack_data.append(byte);
             }
             // Compress data
-            var compressed = std.array_list.Managed(u8).init(allocator);
-            defer compressed.deinit();
-            {
-                var comp = zlib_compat_mod.compressorWriter(compressed.writer(), .{}) catch continue;
-                _ = comp.write(obj.data) catch continue;
-                comp.finish() catch continue;
-            }
-            try pack_data.appendSlice(compressed.items);
+            const compressed = zlib_compat_mod.compressSlice(allocator, obj.data) catch continue;
+            defer allocator.free(compressed);
+            try pack_data.appendSlice(compressed);
         } else |_| {
             continue;
         }
@@ -12040,15 +12035,9 @@ fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, comman
             }
 
             // Compress the object data using zlib
-            var compressed = std.array_list.Managed(u8).init(allocator);
-            defer compressed.deinit();
-            {
-                const zlib_compat = @import("git/zlib_compat.zig");
-                var comp = zlib_compat.compressorWriter(compressed.writer(), .{}) catch continue;
-                _ = comp.write(obj.data) catch continue;
-                comp.finish() catch continue;
-            }
-            try pack_data.appendSlice(compressed.items);
+            const compressed = zlib_compat_mod.compressSlice(allocator, obj.data) catch continue;
+            defer allocator.free(compressed);
+            try pack_data.appendSlice(compressed);
         } else |_| {
             continue;
         }
@@ -13069,16 +13058,15 @@ fn nativeCmdUnpackObjects(allocator: std.mem.Allocator, args: [][]const u8, comm
             std.fs.cwd().makePath(obj_dir) catch continue;
 
             // Compress and write object
-            var obj_data = std.array_list.Managed(u8).init(allocator);
-            defer obj_data.deinit();
-            {
-                var comp = zlib_compat.compressorWriter(obj_data.writer(), .{}) catch continue;
-                _ = comp.write(header) catch continue;
-                _ = comp.write(final_content) catch continue;
-                comp.finish() catch continue;
-            }
+            const zlib_compat2 = @import("git/zlib_compat.zig");
+            var combined = std.array_list.Managed(u8).init(allocator);
+            defer combined.deinit();
+            try combined.appendSlice(header);
+            try combined.appendSlice(final_content);
+            const obj_data_buf = zlib_compat2.compressSlice(allocator, combined.items) catch continue;
+            defer allocator.free(obj_data_buf);
 
-            std.fs.cwd().writeFile(.{ .sub_path = obj_path, .data = obj_data.items }) catch continue;
+            std.fs.cwd().writeFile(.{ .sub_path = obj_path, .data = obj_data_buf }) catch continue;
             unpacked += 1;
         } else if (final_type >= 1 and final_type <= 4) {
             unpacked += 1;

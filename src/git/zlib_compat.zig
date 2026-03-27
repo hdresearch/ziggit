@@ -155,3 +155,47 @@ pub fn compressorWriter(old_writer: anytype, options: anytype) !Compressor(@Type
     _ = options;
     return .{ .inner_writer = old_writer };
 }
+
+/// Compress a slice of data using zlib, returning allocated compressed bytes.
+pub fn compressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var output = std.array_list.Managed(u8).init(allocator);
+    errdefer output.deinit();
+
+    // Use a fixed buffer stream as writer
+    var writer_adapter_buf: [65536]u8 = undefined;
+    var writer_adapter = output.writer().adaptToNewApi(&writer_adapter_buf);
+
+    var compress_buf: [65536]u8 = undefined;
+    var comp = flate.Compress.init(&writer_adapter.new_interface, &compress_buf, .{
+        .container = .zlib,
+    });
+
+    comp.writer.writeAll(input) catch return error.CompressionFailed;
+    comp.end() catch return error.CompressionFailed;
+
+    // Flush adapter
+    writer_adapter.new_interface.flush() catch return error.CompressionFailed;
+
+    return output.toOwnedSlice();
+}
+
+/// Decompress a slice of zlib data, returning allocated decompressed bytes.
+pub fn decompressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var output = std.array_list.Managed(u8).init(allocator);
+    errdefer output.deinit();
+
+    var fbs = std.io.fixedBufferStream(input);
+    var reader_adapter_buf: [65536]u8 = undefined;
+    var reader_adapter = fbs.reader().adaptToNewApi(&reader_adapter_buf);
+
+    var window_buf: [flate.max_window_len]u8 = undefined;
+    var dec = flate.Decompress.init(&reader_adapter.new_interface, .zlib, &window_buf);
+
+    var writer_adapter_buf: [65536]u8 = undefined;
+    var writer_adapter = output.writer().adaptToNewApi(&writer_adapter_buf);
+
+    _ = dec.reader.streamRemaining(&writer_adapter.new_interface) catch return error.InvalidInput;
+    writer_adapter.new_interface.flush() catch return error.InvalidInput;
+
+    return output.toOwnedSlice();
+}
