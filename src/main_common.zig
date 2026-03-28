@@ -220,7 +220,7 @@ fn levenshteinDistance(allocator: std.mem.Allocator, s: []const u8, t: []const u
 
 fn findSimilarCommands(allocator: std.mem.Allocator, typo: []const u8, platform_impl: *const platform_mod.Platform) ![]const []const u8 {
     const Candidate = struct { name: []const u8, dist: u32 };
-    var candidates = std.array_list.Managed(Candidate).init(allocator);
+    var candidates: std.ArrayList(Candidate) = .{};
     defer candidates.deinit(allocator);
     for (NATIVE_COMMANDS) |cmd| {
         const d = levenshteinDistance(allocator, typo, cmd);
