@@ -135,7 +135,7 @@ fn handleConfigEnv(allocator: std.mem.Allocator, setting: []const u8) void {
             std.process.exit(128);
         };
     } else {
-        const msg = std.fmt.allocPrint(allocator, "fatal: invalid config format: missing '=': {s}\n", .{setting}) catch @constCast("");
+        const msg = std.fmt.allocPrint(allocator, "error: invalid config format: {s}\n", .{setting}) catch @constCast("");
         const fe = std.fs.File{ .handle = std.posix.STDERR_FILENO };
         _ = fe.write(msg) catch {};
         std.process.exit(128);
@@ -557,6 +557,17 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 try platform_impl.writeStderr("error: invalid global flag usage\n");
                 std.process.exit(128);
             }
+        } else if (std.mem.eql(u8, arg, "--config-env")) {
+            // --config-env requires a following argument
+            if (command_index + 1 < all_original_args.items.len) {
+                command_index += 1;
+                handleConfigEnv(allocator, all_original_args.items[command_index]);
+            } else {
+                const fe = std.fs.File{ .handle = std.posix.STDERR_FILENO };
+                _ = fe.write("error: no config key given for --config-env\n") catch {};
+                std.process.exit(129);
+            }
+            command_index += 1;
         } else if (std.mem.startsWith(u8, arg, "--git-dir=") or
                    std.mem.startsWith(u8, arg, "--work-tree=") or
                    std.mem.startsWith(u8, arg, "--ref-format=") or 
@@ -579,6 +590,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
             if (std.mem.eql(u8, arg, "--noglob-pathspecs")) global_noglob_pathspecs = true;
             if (std.mem.eql(u8, arg, "--icase-pathspecs")) global_icase_pathspecs = true;
             if (std.mem.eql(u8, arg, "--literal-pathspecs")) global_literal_pathspecs = true;
+            if (std.mem.startsWith(u8, arg, "--config-env=")) handleConfigEnv(allocator, arg["--config-env=".len..]);
             // Global flags with = form, or boolean global flags
             command_index += 1;
         } else {
