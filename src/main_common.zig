@@ -11019,7 +11019,6 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     var verbose = false;
     var quiet = false;
     var follow_tags = false;
-    var follow_tags = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
