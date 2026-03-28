@@ -723,7 +723,7 @@ fn State(comptime PlatformType: type) type {
                 pos = line_end + 1;
 
                 // Find end delimiter
-                var content = std.ArrayListUnmanaged(u8){};
+                var content = std.ArrayList(u8).init(allocator);
                 defer content.deinit();
 
                 while (pos < data.len) {
