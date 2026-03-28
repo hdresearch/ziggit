@@ -9181,13 +9181,13 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                             if (!cfgValueMatchesPattern(e.value, vp, fixed_value)) continue;
                         }
                         found_any = true;
-                        const fmt2 = try cfgFormatType(cfgEffectiveValue(e), config_type, allocator, platform_impl);
+                        const fmt2 = try cfgFormatTypeWithContext(cfgEffectiveValue(e), config_type, key2, source.path, allocator, platform_impl);
                         defer allocator.free(fmt2);
                         const term: []const u8 = if (null_terminator) "\x00" else "\n";
                         var out = std.array_list.Managed(u8).init(allocator);
                         defer out.deinit();
                         if (show_scope) { try out.appendSlice(source.scope); try out.append('\t'); }
-                        if (show_origin) { try out.appendSlice("file:"); try out.appendSlice(source.path); try out.append('\t'); }
+                        if (show_origin) { try cfgAppendOrigin(&out, source.path); try out.append('\t'); }
                         try out.appendSlice(fmt2);
                         try out.appendSlice(term);
                         try platform_impl.writeStdout(out.items);
