@@ -26550,8 +26550,8 @@ fn nativeCmdPrune(allocator: std.mem.Allocator, args: [][]const u8, command_inde
     var dry_run = false;
     var expire: []const u8 = "";
     var no_expire = false;
-    var positional_args = std.ArrayList([]const u8).init(allocator);
-    defer positional_args.deinit();
+    var positional_args = std.ArrayListUnmanaged([]const u8){};
+    defer positional_args.deinit(allocator);
     var saw_dashdash = false;
 
     var i = command_index + 1;
