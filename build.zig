@@ -27,11 +27,19 @@ pub fn build(b: *std.Build) void {
     const fix_wrapper = b.addSystemCommand(&.{
         "sh", "-c",
         \\DEST="$1"
-        \\BEST=$(ls -t .zig-cache/o/*/ziggit 2>/dev/null | while read f; do
-        \\  if od -A n -t x1 -N 4 "$f" 2>/dev/null | grep -q '7f 45 4c 46'; then
-        \\    echo "$f"; break
+        \\BEST=""
+        \\for f in .zig-cache/o/*/ziggit; do
+        \\  if [ -f "$f" ] && head -c 4 "$f" | od -A n -t x1 | grep -q '7f 45 4c 46'; then
+        \\    BEST="$f"; break
         \\  fi
-        \\done)
+        \\done
+        \\if [ -z "$BEST" ]; then
+        \\  for f in zig-cache/o/*/ziggit; do
+        \\    if [ -f "$f" ] && head -c 4 "$f" | od -A n -t x1 | grep -q '7f 45 4c 46'; then
+        \\      BEST="$f"; break
+        \\    fi
+        \\  done
+        \\fi
         \\if [ -n "$BEST" ]; then
         \\  rm -f "$DEST"
         \\  cp "$BEST" "$DEST"

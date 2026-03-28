@@ -6458,16 +6458,34 @@ fn clearWorkingDirectory(repo_root: []const u8, allocator: std.mem.Allocator, pl
     var dir = std.fs.cwd().openDir(repo_root, .{}) catch return;
     defer dir.close();
     
+    // Collect parent dirs for later cleanup
+    var parent_dirs = std.ArrayList([]const u8).init(allocator);
+    defer {
+        for (parent_dirs.items) |p| allocator.free(p);
+        parent_dirs.deinit();
+    }
+    
     // Only delete files that are in the index (tracked files)
     for (idx.entries.items) |entry| {
         dir.deleteFile(entry.path) catch {
-            // If it's a directory (file was replaced by dir), remove the directory tree
             dir.deleteTree(entry.path) catch {};
         };
-        // Try to remove empty parent directories
+        // Collect parent dirs
         if (std.fs.path.dirname(entry.path)) |parent| {
-            dir.deleteDir(parent) catch {};
+            parent_dirs.append(allocator.dupe(u8, parent) catch continue) catch {};
         }
+    }
+    
+    // Remove empty parent directories (deepest first - sort by length descending)
+    // Simple approach: try multiple passes
+    var pass: u32 = 0;
+    while (pass < 10) : (pass += 1) {
+        var removed_any = false;
+        for (parent_dirs.items) |parent| {
+            dir.deleteDir(parent) catch continue;
+            removed_any = true;
+        }
+        if (!removed_any) break;
     }
 }
 
@@ -19849,8 +19867,12 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
                 resetIndex(git_path, target_hash, platform_impl, allocator) catch {};
             },
             .hard, .merge_mode => {
-                // Update HEAD, index, and working tree to match target commit
+                // Clear old tracked files first (using OLD index), then checkout target tree
+                const repo_root_for_clear = std.fs.path.dirname(git_path) orelse ".";
+                clearWorkingDirectory(repo_root_for_clear, allocator, platform_impl);
+                // Now update index to match target commit
                 resetIndex(git_path, target_hash, platform_impl, allocator) catch {};
+                // Checkout the target tree into working directory
                 checkoutCommitTree(git_path, target_hash, allocator, platform_impl) catch {};
             },
         }
