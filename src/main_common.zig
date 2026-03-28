@@ -38790,7 +38790,7 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     var export_marks_file: ?[]const u8 = null;
     var no_data = false;
     var use_done_feature = false;
-    var positional_args = std.ArrayList([]const u8).init(allocator);
+    var positional_args = std.array_list.Managed([]const u8).init(allocator);
     defer positional_args.deinit();
     var seen_dashdash = false;
 
@@ -38858,7 +38858,7 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     }
 
     // Determine which refs to export
-    var ref_targets = std.ArrayList([]const u8).init(allocator);
+    var ref_targets = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (ref_targets.items) |r| allocator.free(r);
         ref_targets.deinit();
@@ -38889,7 +38889,7 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             const exc_hash = resolveRevision(git_path, exc_ref, platform_impl, allocator) catch continue;
             try excluded_commits.put(exc_hash, {});
             // Walk back and exclude all ancestors
-            var walk_list = std.ArrayList([]const u8).init(allocator);
+            var walk_list = std.array_list.Managed([]const u8).init(allocator);
             defer {
                 for (walk_list.items) |w| allocator.free(w);
                 walk_list.deinit();
@@ -38950,7 +38950,7 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     }.lessThan);
 
     // Collect all commits reachable from target refs
-    var all_commits = std.ArrayList([]const u8).init(allocator);
+    var all_commits = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (all_commits.items) |c| allocator.free(c);
         all_commits.deinit();
@@ -38989,7 +38989,7 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
 
         // Walk commits
         if (!excluded_commits.contains(commit_hash) and !commit_set.contains(commit_hash)) {
-            var walk_stack = std.ArrayList([]const u8).init(allocator);
+            var walk_stack = std.array_list.Managed([]const u8).init(allocator);
             defer {
                 for (walk_stack.items) |w| allocator.free(w);
                 walk_stack.deinit();
@@ -39050,7 +39050,7 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         }
     }
 
-    var output = std.ArrayList(u8).init(allocator);
+    var output = std.array_list.Managed(u8).init(allocator);
     defer output.deinit();
 
     // Determine which ref each commit belongs to
@@ -39094,7 +39094,7 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
 
         // Check for gpgsig
         var has_gpgsig = false;
-        var gpgsig_content = std.ArrayList(u8).init(allocator);
+        var gpgsig_content = std.array_list.Managed(u8).init(allocator);
         defer gpgsig_content.deinit();
         {
             var lines_it = std.mem.splitScalar(u8, cobj.data, '\n');
@@ -39139,7 +39139,7 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         }
 
         // Collect parents
-        var parents = std.ArrayList([]const u8).init(allocator);
+        var parents = std.array_list.Managed([]const u8).init(allocator);
         defer parents.deinit();
         {
             var plines = std.mem.splitScalar(u8, cobj.data, '\n');
@@ -39152,7 +39152,7 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         }
 
         // Collect file entries from tree
-        var file_entries = std.ArrayList(FastExportEntry).init(allocator);
+        var file_entries = std.array_list.Managed(FastExportEntry).init(allocator);
         defer {
             for (file_entries.items) |fe| allocator.free(fe.path);
             file_entries.deinit();
@@ -39497,7 +39497,7 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
 
     // Write export marks
     if (export_marks_file) |marks_path| {
-        var marks_buf = std.ArrayList(u8).init(allocator);
+        var marks_buf = std.array_list.Managed(u8).init(allocator);
         defer marks_buf.deinit();
         var bit = blob_to_mark.iterator();
         while (bit.next()) |entry| {
