@@ -3368,6 +3368,12 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             }
         } else if (std.mem.eql(u8, arg, "--first-parent")) {
             // first-parent flag - already the default behavior (we only follow first parent)
+        } else if (std.mem.eql(u8, arg, "-S")) {
+            // -S requires an argument
+            try platform_impl.writeStderr("error: switch `S' requires a value\n");
+            std.process.exit(1);
+        } else if (std.mem.startsWith(u8, arg, "-S")) {
+            // -Sstring - pickaxe search, ignore for now
         } else if (std.mem.startsWith(u8, arg, "-") and arg.len > 1 and std.ascii.isDigit(arg[1])) {
             // Parse -n format like -1, -5, etc.
             const count_str = arg[1..];
