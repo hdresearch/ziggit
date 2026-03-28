@@ -1040,11 +1040,30 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     // Handle --git-completion-helper and --git-completion-helper-all
     for (remaining_args_copy) |carg| {
         if (std.mem.eql(u8, carg, "--git-completion-helper") or std.mem.eql(u8, carg, "--git-completion-helper-all")) {
+            const is_show_all = std.mem.eql(u8, carg, "--git-completion-helper-all");
             const opts = getCompletionHelperOptions(command);
             if (opts.len > 0) {
-                const cline = try std.fmt.allocPrint(allocator, "{s}\n", .{opts});
-                defer allocator.free(cline);
-                try platform_impl.writeStdout(cline);
+                if (!is_show_all) {
+                    // For --git-completion-helper, only output options before trailing " --" separator
+                    var visible_end: usize = opts.len;
+                    if (opts.len >= 3 and std.mem.eql(u8, opts[opts.len - 3 ..], " --")) {
+                        visible_end = opts.len - 3;
+                    }
+                    const trimmed = std.mem.trim(u8, opts[0..visible_end], " ");
+                    const cline = try std.fmt.allocPrint(allocator, "{s}\n", .{trimmed});
+                    defer allocator.free(cline);
+                    try platform_impl.writeStdout(cline);
+                } else {
+                    // For --git-completion-helper-all, output everything but remove trailing " --"
+                    var end: usize = opts.len;
+                    if (opts.len >= 3 and std.mem.eql(u8, opts[opts.len - 3 ..], " --")) {
+                        end = opts.len - 3;
+                    }
+                    const trimmed2 = std.mem.trim(u8, opts[0..end], " ");
+                    const cline = try std.fmt.allocPrint(allocator, "{s}\n", .{trimmed2});
+                    defer allocator.free(cline);
+                    try platform_impl.writeStdout(cline);
+                }
             }
             std.process.exit(0);
         }
