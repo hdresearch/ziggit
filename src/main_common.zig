@@ -27856,7 +27856,22 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
             std.process.exit(128);
         };
         defer allocator.free(tree2);
-        had_diff = try diffTwoTreesFiltered(allocator, tree1, tree2, "", &dt_opts, pathspecs.items, platform_impl);
+        if (dt_opts.show_stat or dt_opts.show_shortstat or (dt_opts.show_summary and !dt_opts.show_patch)) {
+            var stat_entries = std.array_list.Managed(DiffStatEntry).init(allocator);
+            defer { for (stat_entries.items) |*de| allocator.free(de.path); stat_entries.deinit(); }
+            try collectTreeDiffEntries(allocator, tree1, tree2, "", git_path, pathspecs.items, platform_impl, &stat_entries);
+            if (stat_entries.items.len > 0) had_diff = true;
+            if (dt_opts.show_stat) {
+                try formatDiffStat(stat_entries.items, platform_impl, allocator);
+            } else if (dt_opts.show_shortstat) {
+                try formatDiffShortStat(stat_entries.items, platform_impl, allocator);
+            }
+            if (dt_opts.show_summary) {
+                try outputSummaryForTwoTrees(allocator, tree1, tree2, git_path, pathspecs.items, platform_impl);
+            }
+        } else {
+            had_diff = try diffTwoTreesFiltered(allocator, tree1, tree2, "", &dt_opts, pathspecs.items, platform_impl);
+        }
     }
     
     if (had_diff) {
