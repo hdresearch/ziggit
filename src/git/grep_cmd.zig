@@ -187,6 +187,8 @@ pub fn cmdGrep(allocator: Allocator, args: *platform_mod.ArgIterator, platform_i
 
     var expr_tokens = std.array_list.Managed(ExprToken).init(allocator);
     defer expr_tokens.deinit();
+    var expr_tokens = std.array_list.Managed(ExprToken).init(allocator);
+    defer expr_tokens.deinit();
     var has_explicit_pattern = false;
     var after_dd = false;
     
