@@ -34138,9 +34138,11 @@ fn nativeCmdRevert(allocator: std.mem.Allocator, args: [][]const u8, command_ind
                 }
             } else |_| {}
             cleanupMergeState(git_path, allocator);
+            cleanupSequencer(git_path, allocator);
             return;
         } else if (std.mem.eql(u8, arg, "--continue") or std.mem.eql(u8, arg, "--skip")) {
             cleanupMergeState(git_path, allocator);
+            cleanupSequencer(git_path, allocator);
             return;
         } else if (std.mem.eql(u8, arg, "--no-edit") or std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--no-commit")) {
             // accept but ignore for now
