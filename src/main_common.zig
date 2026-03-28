@@ -30184,6 +30184,15 @@ fn padMode6(buf: *[6]u8, mode: []const u8) []const u8 {
     return buf[0..6];
 }
 
+fn padMode(allocator: std.mem.Allocator, mode: []const u8) ![]const u8 {
+    if (mode.len >= 6) return try allocator.dupe(u8, mode[0..6]);
+    const result = try allocator.alloc(u8, 6);
+    const pad_len = 6 - mode.len;
+    @memset(result[0..pad_len], '0');
+    @memcpy(result[pad_len..6], mode);
+    return result;
+}
+
 fn isTreeMode(mode: []const u8) bool {
     return std.mem.eql(u8, mode, "40000") or std.mem.eql(u8, mode, "040000");
 }
