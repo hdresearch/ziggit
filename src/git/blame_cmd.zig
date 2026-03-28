@@ -15,6 +15,7 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
     var rv: ?[]const u8 = null;
     var cf: ?[]const u8 = null;
     var abl: usize = 7;
+    var show_progress = false;
     var lr = std.array_list.Managed([]const u8).init(a);
     defer lr.deinit();
 
@@ -40,6 +41,12 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
         else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try pi.writeStdout("usage: git blame [<options>] [<rev>] [--] <file>\n");
             std.process.exit(129);
+        }
+        else if (std.mem.eql(u8, arg, "--progress")) { show_progress = true; }
+        else if (std.mem.eql(u8, arg, "--no-progress")) { show_progress = false; }
+        else if (std.mem.eql(u8, arg, "--exclude-promisor-objects")) {
+            try pi.writeStderr("fatal: --exclude-promisor-objects not supported for blame\n");
+            std.process.exit(1);
         }
         else if (arg.len > 0 and arg[0] == '-') {}
         else {
@@ -324,6 +331,13 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
     }
     var lnw: usize = 1;
     { var nn = lines.items.len; while (nn >= 10) : (nn /= 10) lnw += 1; }
+
+    // Output progress if requested
+    if (show_progress and oi.items.len > 0) {
+        const progress_msg = try std.fmt.allocPrint(a, "Blaming lines: 100% ({d}/{d}), done.\n", .{oi.items.len, oi.items.len});
+        defer a.free(progress_msg);
+        try pi.writeStderr(progress_msg);
+    }
 
     var seen_hashes = std.StringHashMap(void).init(a);
     defer seen_hashes.deinit();
