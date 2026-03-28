@@ -30968,14 +30968,21 @@ fn diffTreeWithEmptyPrefix(allocator: std.mem.Allocator, tree_hash_str: []const 
 }
 
 fn collectTreeDiffEntries(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, prefix: []const u8, git_path: []const u8, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform, diff_entries_out: *std.array_list.Managed(DiffStatEntry)) !void {
-    const tree1_obj = objects.GitObject.load(tree1_hash, git_path, platform_impl, allocator) catch return;
-    defer tree1_obj.deinit(allocator);
-    const tree2_obj = objects.GitObject.load(tree2_hash, git_path, platform_impl, allocator) catch return;
-    defer tree2_obj.deinit(allocator);
+    const empty_tree_hash = "4b825dc642cb6eb9a060e54bf899d69f82cf0101";
+    const is_empty1 = std.mem.eql(u8, tree1_hash, empty_tree_hash);
+    const is_empty2 = std.mem.eql(u8, tree2_hash, empty_tree_hash);
 
-    var parsed1 = tree_mod.parseTree(tree1_obj.data, allocator) catch return;
+    var tree1_obj_opt: ?objects.GitObject = if (!is_empty1) (objects.GitObject.load(tree1_hash, git_path, platform_impl, allocator) catch return) else null;
+    defer if (tree1_obj_opt) |*o| o.deinit(allocator);
+    var tree2_obj_opt: ?objects.GitObject = if (!is_empty2) (objects.GitObject.load(tree2_hash, git_path, platform_impl, allocator) catch return) else null;
+    defer if (tree2_obj_opt) |*o| o.deinit(allocator);
+
+    const data1: []const u8 = if (tree1_obj_opt) |o| o.data else "";
+    const data2: []const u8 = if (tree2_obj_opt) |o| o.data else "";
+
+    var parsed1 = tree_mod.parseTree(data1, allocator) catch return;
     defer parsed1.deinit();
-    var parsed2 = tree_mod.parseTree(tree2_obj.data, allocator) catch return;
+    var parsed2 = tree_mod.parseTree(data2, allocator) catch return;
     defer parsed2.deinit();
 
     var map1 = std.StringHashMap(tree_mod.TreeEntry).init(allocator);
