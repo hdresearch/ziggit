@@ -3944,7 +3944,7 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
             std.mem.eql(u8, arg, "-b") or std.mem.eql(u8, arg, "--ignore-blank-lines"))
         {
             // whitespace options - accept but don't fully implement
-        } else if (std.mem.eql(u8, arg, "--summary")) {
+        } else if (std.mem.eql(u8, arg, "--summary") or std.mem.eql(u8, arg, "--compact-summary")) {
             diff_output_mode = .summary;
         } else if (std.mem.eql(u8, arg, "--dirstat") or std.mem.eql(u8, arg, "--cumulative") or std.mem.eql(u8, arg, "--dirstat-by-file")) {
             diff_output_mode = .dirstat;
