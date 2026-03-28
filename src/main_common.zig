@@ -197,6 +197,27 @@ fn isNativeCommand(command: []const u8) bool {
     return false;
 }
 
+fn parseGitConfigParameters(allocator: std.mem.Allocator, params: []const u8) void {
+    var i: usize = 0;
+    while (i < params.len) {
+        while (i < params.len and (params[i] == ' ' or params[i] == '\t')) i += 1;
+        if (i >= params.len) break;
+        if (params[i] == '\'') {
+            i += 1;
+            const start = i;
+            while (i < params.len and params[i] != '\'') i += 1;
+            const entry = params[start..i];
+            if (i < params.len) i += 1;
+            addConfigOverride(allocator, entry) catch {};
+        } else {
+            const start = i;
+            while (i < params.len and params[i] != ' ' and params[i] != '\t') i += 1;
+            const entry = params[start..i];
+            if (entry.len > 0) addConfigOverride(allocator, entry) catch {};
+        }
+    }
+}
+
 pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     const platform_impl = platform_mod.getCurrentPlatform();
     
