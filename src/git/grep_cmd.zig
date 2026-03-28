@@ -212,6 +212,31 @@ pub fn cmdGrep(allocator: Allocator, args: *platform_mod.ArgIterator, platform_i
         }
 
         if (std.mem.eql(u8, arg, "--")) {
+            // If no pattern yet, the next argument after -- is the pattern
+            if (!has_explicit_pattern and opts.patterns.items.len == 0 and opts.pattern_files.items.len == 0) {
+                // First non-option after -- is pattern
+                i += 1;
+                if (i < raw_args.items.len) {
+                    try opts.patterns.append(raw_args.items[i]);
+                    try opts.expr_tokens.append(.{ .pattern = raw_args.items[i] });
+                    has_explicit_pattern = true;
+                }
+                // Check if there's a second -- for pathspecs
+                i += 1;
+                if (i < raw_args.items.len and std.mem.eql(u8, raw_args.items[i], "--")) {
+                    // Rest are pathspecs
+                    i += 1;
+                    while (i < raw_args.items.len) : (i += 1) {
+                        try opts.pathspecs.append(raw_args.items[i]);
+                    }
+                } else {
+                    // Rest after pattern are pathspecs
+                    while (i < raw_args.items.len) : (i += 1) {
+                        try opts.pathspecs.append(raw_args.items[i]);
+                    }
+                }
+                break;
+            }
             after_dd = true;
             continue;
         }
@@ -349,9 +374,10 @@ pub fn cmdGrep(allocator: Allocator, args: *platform_mod.ArgIterator, platform_i
                 continue;
             }
             if (std.mem.eql(u8, arg, "-P") or std.mem.eql(u8, arg, "--perl-regexp")) {
-                // We don't support PCRE, error out
-                try platform_impl.writeStderr("fatal: cannot use Perl-compatible regexes when not compiled with USE_LIBPCRE\n");
-                std.process.exit(128);
+                // Record perl pattern type - only error if it's the effective type at use time
+                opts.pattern_type = .perl;
+                try opts.pattern_type_values.append(.perl);
+                continue;
             }
             if (std.mem.eql(u8, arg, "--cached")) {
                 opts.cached = true;
@@ -574,8 +600,8 @@ pub fn cmdGrep(allocator: Allocator, args: *platform_mod.ArgIterator, platform_i
                                 try opts.pattern_type_values.append(.fixed);
                             },
                             'P' => {
-                                try platform_impl.writeStderr("fatal: cannot use Perl-compatible regexes when not compiled with USE_LIBPCRE\n");
-                                std.process.exit(128);
+                                opts.pattern_type = .perl;
+                                try opts.pattern_type_values.append(.perl);
                             },
                             'q' => opts.quiet = true,
                             'o' => opts.only_matching = true,
@@ -649,6 +675,44 @@ pub fn cmdGrep(allocator: Allocator, args: *platform_mod.ArgIterator, platform_i
         }
     }
 
+    // Split patterns containing newlines into multiple patterns (OR logic)
+    {
+        var new_patterns = std.array_list.Managed([]const u8).init(allocator);
+        var new_tokens = std.array_list.Managed(ExprToken).init(allocator);
+        var had_split = false;
+        for (opts.patterns.items) |pat| {
+            if (std.mem.indexOf(u8, pat, "\n")) |_| {
+                var line_iter = std.mem.splitScalar(u8, pat, '\n');
+                var first = true;
+                while (line_iter.next()) |line| {
+                    if (line.len == 0) continue;
+                    if (!first) {
+                        try new_tokens.append(.op_or);
+                    }
+                    try new_patterns.append(line);
+                    try new_tokens.append(.{ .pattern = line });
+                    first = false;
+                }
+                had_split = true;
+            } else {
+                try new_patterns.append(pat);
+                try new_tokens.append(.{ .pattern = pat });
+            }
+        }
+        if (had_split) {
+            opts.patterns.deinit();
+            opts.patterns = new_patterns;
+            opts.expr_tokens.deinit();
+            opts.expr_tokens = new_tokens;
+            if (new_patterns.items.len > 1) {
+                opts.has_boolean_expr = true;
+            }
+        } else {
+            new_patterns.deinit();
+            new_tokens.deinit();
+        }
+    }
+
     // No pattern specified
     if (opts.patterns.items.len == 0) {
         try platform_impl.writeStderr("fatal: no pattern given\n");
@@ -664,6 +728,12 @@ pub fn cmdGrep(allocator: Allocator, args: *platform_mod.ArgIterator, platform_i
 
     // Determine effective pattern type
     const eff_pattern_type = opts.effectivePatternType();
+
+    // Error if effective pattern type is perl (we don't support PCRE)
+    if (eff_pattern_type == .perl) {
+        try platform_impl.writeStderr("fatal: cannot use Perl-compatible regexes when not compiled with USE_LIBPCRE\n");
+        std.process.exit(128);
+    }
 
     // Validate patterns (check for invalid regex)
     if (eff_pattern_type != .fixed) {
@@ -2147,14 +2217,14 @@ fn quotePathIfNeeded(path: []const u8, allocator: Allocator, null_sep: bool) []c
     // Check if path needs quoting (contains special chars)
     var needs_quoting = false;
     for (path) |c| {
-        if (c == '"' or c == '\n' or c == '\t') {
+        if (c == '"' or c == '\n' or c == '\t' or c == '\\' or c < 0x20 or c >= 0x7f) {
             needs_quoting = true;
             break;
         }
     }
     if (!needs_quoting) return allocator.dupe(u8, path) catch path;
 
-    // Quote the path
+    // Quote the path C-style
     var buf = std.array_list.Managed(u8).init(allocator);
     buf.append('"') catch return allocator.dupe(u8, path) catch path;
     for (path) |c| {
@@ -2166,6 +2236,12 @@ fn quotePathIfNeeded(path: []const u8, allocator: Allocator, null_sep: bool) []c
             buf.appendSlice("\\n") catch {};
         } else if (c == '\t') {
             buf.appendSlice("\\t") catch {};
+        } else if (c < 0x20 or c >= 0x7f) {
+            buf.appendSlice("\\") catch {};
+            // Octal encoding
+            buf.append('0' + (c >> 6)) catch {};
+            buf.append('0' + ((c >> 3) & 7)) catch {};
+            buf.append('0' + (c & 7)) catch {};
         } else {
             buf.append(c) catch {};
         }
