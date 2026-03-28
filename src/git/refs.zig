@@ -202,7 +202,9 @@ fn resolveRefOnce(git_dir: []const u8, ref_name: []const u8, platform_impl: anyt
         return error.RefNotFound;
     }
     if (std.mem.eql(u8, ref_name, "MERGE_HEAD") or std.mem.eql(u8, ref_name, "ORIG_HEAD") or
-        std.mem.eql(u8, ref_name, "CHERRY_PICK_HEAD") or std.mem.eql(u8, ref_name, "REVERT_HEAD"))
+        std.mem.eql(u8, ref_name, "CHERRY_PICK_HEAD") or std.mem.eql(u8, ref_name, "REVERT_HEAD") or
+        std.mem.eql(u8, ref_name, "BISECT_HEAD") or std.mem.eql(u8, ref_name, "AUTO_MERGE") or
+        std.mem.eql(u8, ref_name, "REBASE_HEAD") or isPseudoRef(ref_name))
     {
         const special_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_name });
         defer allocator.free(special_path);
@@ -319,6 +321,31 @@ pub fn getRef(git_dir: []const u8, ref_name: []const u8, platform_impl: anytype,
     } else {
         return error.InvalidHash;
     }
+}
+
+/// Check if a ref name is a pseudoref (stored directly in .git/ not under refs/)
+pub fn isPseudoRef(ref_name: []const u8) bool {
+    const pseudorefs = [_][]const u8{
+        "CHERRY_PICK_HEAD",
+        "MERGE_HEAD",
+        "REVERT_HEAD",
+        "ORIG_HEAD",
+        "FETCH_HEAD",
+        "BISECT_HEAD",
+        "AUTO_MERGE",
+        "REBASE_HEAD",
+    };
+    for (pseudorefs) |pr| {
+        if (std.mem.eql(u8, ref_name, pr)) return true;
+    }
+    // Also treat any ALL_CAPS_WITH_UNDERSCORES name as a pseudoref
+    if (ref_name.len > 0 and ref_name[0] >= 'A' and ref_name[0] <= 'Z') {
+        for (ref_name) |c| {
+            if (c != '_' and (c < 'A' or c > 'Z')) return false;
+        }
+        return true;
+    }
+    return false;
 }
 
 pub fn updateRef(git_dir: []const u8, ref_name: []const u8, hash: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !void {
