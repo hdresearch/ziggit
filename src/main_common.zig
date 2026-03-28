@@ -33526,6 +33526,19 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     var apply_mode = false;
     var merge_mode = false;
     var keep_base = false;
+    var whitespace_opt = false;
+    var interactive = false;
+    var has_strategy = false;
+    var has_strategy_option = false;
+    var has_autosquash = false;
+    var has_exec = false;
+    var has_keep_empty = false;
+    var has_empty = false;
+    var has_reapply_cherry_picks = false;
+    var has_no_reapply_cherry_picks = false;
+    var has_rebase_merges = false;
+    var has_update_refs = false;
+    var has_root = false;
     var positionals = std.array_list.Managed([]const u8).init(allocator);
     defer positionals.deinit();
 
@@ -33553,13 +33566,42 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
             apply_mode = true;
         } else if (std.mem.eql(u8, arg, "--merge") or std.mem.eql(u8, arg, "-m")) {
             merge_mode = true;
+        } else if (std.mem.startsWith(u8, arg, "--whitespace")) {
+            apply_mode = true;
+            whitespace_opt = true;
+        } else if (std.mem.startsWith(u8, arg, "--strategy=") or std.mem.eql(u8, arg, "-s")) {
+            has_strategy = true;
+            merge_mode = true;
+            if (std.mem.eql(u8, arg, "-s")) { i += 1; }
+        } else if (std.mem.startsWith(u8, arg, "--strategy-option") or std.mem.eql(u8, arg, "-X")) {
+            has_strategy_option = true;
+            merge_mode = true;
+            if (std.mem.eql(u8, arg, "-X") or std.mem.eql(u8, arg, "--strategy-option")) { i += 1; }
+        } else if (std.mem.eql(u8, arg, "--autosquash") or std.mem.eql(u8, arg, "--no-autosquash")) {
+            has_autosquash = true;
+            merge_mode = true;
+        } else if (std.mem.eql(u8, arg, "--keep-empty") or std.mem.eql(u8, arg, "--no-keep-empty")) {
+            has_keep_empty = true;
+            merge_mode = true;
+        } else if (std.mem.startsWith(u8, arg, "--empty")) {
+            has_empty = true;
+            merge_mode = true;
+        } else if (std.mem.eql(u8, arg, "--no-reapply-cherry-picks")) {
+            has_no_reapply_cherry_picks = true;
+        } else if (std.mem.eql(u8, arg, "--reapply-cherry-picks")) {
+            has_reapply_cherry_picks = true;
+        } else if (std.mem.eql(u8, arg, "--rebase-merges") or std.mem.startsWith(u8, arg, "--rebase-merges=")) {
+            has_rebase_merges = true;
+            merge_mode = true;
+        } else if (std.mem.eql(u8, arg, "--root")) {
+            has_root = true;
         } else if (std.mem.eql(u8, arg, "--exec")) {
             i += 1;
-            // skip exec command, not implemented yet
+            has_exec = true; merge_mode = true;
         } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--interactive")) {
-            // ignore for now
+            interactive = true; merge_mode = true;
         } else if (std.mem.eql(u8, arg, "--update-refs")) {
-            // ignore for now
+            has_update_refs = true; merge_mode = true;
         } else if (std.mem.eql(u8, arg, "--keep-base")) {
             keep_base = true;
         } else if (std.mem.eql(u8, arg, "--no-fork-point") or std.mem.eql(u8, arg, "--fork-point")) {
@@ -33573,6 +33615,38 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
         }
     }
 
+
+    // Check for incompatible options
+    // --apply/--whitespace are incompatible with merge-backend options
+    if (apply_mode or whitespace_opt) {
+        const apply_opt_name: []const u8 = if (whitespace_opt) "--whitespace=..." else "--apply";
+        if (merge_mode and !apply_mode) {
+            // --whitespace implies --apply, which conflicts with --merge
+        }
+        const incompat_pairs = [_]struct { flag: bool, name: []const u8 }{
+            .{ .flag = merge_mode, .name = "--merge" },
+            .{ .flag = has_strategy, .name = "--strategy" },
+            .{ .flag = has_strategy_option, .name = "--strategy-option" },
+            .{ .flag = has_autosquash, .name = "--autosquash" },
+            .{ .flag = interactive, .name = "--interactive" },
+            .{ .flag = has_exec, .name = "--exec" },
+            .{ .flag = has_keep_empty, .name = "--keep-empty" },
+            .{ .flag = has_empty, .name = "--empty" },
+            .{ .flag = has_no_reapply_cherry_picks, .name = "--no-reapply-cherry-picks" },
+            .{ .flag = has_reapply_cherry_picks, .name = "--reapply-cherry-picks" },
+            .{ .flag = has_rebase_merges, .name = "--rebase-merges" },
+            .{ .flag = has_update_refs, .name = "--update-refs" },
+            .{ .flag = has_root, .name = "--root" },
+        };
+        for (incompat_pairs) |pair| {
+            if (pair.flag) {
+                const emsg = try std.fmt.allocPrint(allocator, "fatal: {s} is incompatible with {s}\n", .{ apply_opt_name, pair.name });
+                defer allocator.free(emsg);
+                try platform_impl.writeStderr(emsg);
+                std.process.exit(1);
+            }
+        }
+    }
     // Handle --quit
     if (do_quit) {
         const rebase_dir = try std.fmt.allocPrint(allocator, "{s}/rebase-merge", .{git_path});
