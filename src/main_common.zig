@@ -21822,21 +21822,7 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                     platform_impl.writeStdout(vmsg) catch {};
                 }
             }
-            // Apply chmod mode if set
-            if (chmod_mode) |cm| {
-                setIndexEntryMode(&idx, arg, cm) catch {};
-                modified = true;
-                if (verbose) {
-                    const chmod_str = if (cm == 0o100755) "+x" else "-x";
-                    const cmsg = std.fmt.allocPrint(allocator, "chmod {s} '{s}'\n", .{ chmod_str, arg }) catch "";
-                    if (cmsg.len > 0) {
-                        defer allocator.free(cmsg);
-                        platform_impl.writeStdout(cmsg) catch {};
-                    }
-                }
-                // Don't reset chmod_mode - it persists for subsequent paths
-                // A new --chmod flag will override it
-            }
+            // chmod mode handling removed - handled inline with --chmod=+x/--chmod=-x
         } else {
             // Unknown option starting with -
             if (std.mem.eql(u8, arg, "-h")) {
