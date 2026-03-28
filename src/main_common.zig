@@ -21571,6 +21571,11 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                         }
                         return err;
                     };
+                    if (verbose) {
+                        const vmsg2 = try std.fmt.allocPrint(allocator, "add '{s}'\n", .{path});
+                        defer allocator.free(vmsg2);
+                        try platform_impl.writeStdout(vmsg2);
+                    }
                     modified = true;
                 } else {
                     // Three separate args: mode sha1 path
