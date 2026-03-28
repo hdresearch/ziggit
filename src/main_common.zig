@@ -12713,7 +12713,7 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             std.process.exit(128);
             unreachable;
         };
-        defer allocator.free(src_hash2);
+        defer if (src_hash2) |h2| allocator.free(h2);
         const dst_ref_path3 = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, copy_dst });
         defer allocator.free(dst_ref_path3);
         try std.fs.cwd().writeFile(.{ .sub_path = dst_ref_path3, .data = src_hash2 orelse "" });
