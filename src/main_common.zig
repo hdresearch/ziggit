@@ -7688,11 +7688,15 @@ fn resolveSourceGitDir(allocator: std.mem.Allocator, source_path: []const u8) ![
 
     // Resolve to absolute path (try original, then with .git suffix)
     const abs_path = std.fs.cwd().realpathAlloc(allocator, path) catch blk: {
-        // Try with .git suffix before giving up
-        const with_git_suffix = try std.fmt.allocPrint(allocator, "{s}.git", .{path});
-        defer allocator.free(with_git_suffix);
-        break :blk std.fs.cwd().realpathAlloc(allocator, with_git_suffix) catch {
-            return error.RepositoryNotFound;
+        // Try with /.git suffix (for worktree paths like ".")
+        const with_slash_git = try std.fmt.allocPrint(allocator, "{s}/.git", .{path});
+        defer allocator.free(with_slash_git);
+        break :blk std.fs.cwd().realpathAlloc(allocator, with_slash_git) catch blk2: {
+            const with_git_sfx = std.fmt.allocPrint(allocator, "{s}.git", .{path}) catch return error.RepositoryNotFound;
+            defer allocator.free(with_git_sfx);
+            break :blk2 std.fs.cwd().realpathAlloc(allocator, with_git_sfx) catch {
+                return error.RepositoryNotFound;
+            };
         };
     };
     errdefer allocator.free(abs_path);
