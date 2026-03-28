@@ -1557,7 +1557,7 @@ pub const RefManager = struct {
             } else if (std.mem.startsWith(u8, ref_name, "refs/tags/")) {
                 ref_type = .tag;
             } else if (std.mem.startsWith(u8, ref_name, "refs/remotes/")) {
-                ref_type = .remote_branch;
+                ref_type = .remote;
             } else if (std.mem.eql(u8, ref_name, "HEAD")) {
                 ref_type = .head;
             } else {
@@ -1574,7 +1574,7 @@ pub const RefManager = struct {
                     .target = null,
                 };
             };
-            defer if (resolution.target) |target| self.allocator.free(target);
+            defer self.allocator.free(resolution.target);
             
             return RefInfo{
                 .name = try self.allocator.dupe(u8, ref_name),
