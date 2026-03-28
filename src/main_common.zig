@@ -11531,11 +11531,19 @@ fn colorToAnsiAlloc(allocator: std.mem.Allocator, color_str: []const u8) ![]u8 {
 
     // Output attributes
     for (attrs.items) |attr| {
-        if (!first) try codes.append(';');
-        var buf: [8]u8 = undefined;
-        const s = std.fmt.bufPrint(&buf, "{d}", .{attr}) catch unreachable;
-        try codes.appendSlice(s);
-        first = false;
+        switch (attr) {
+            .code => |code| {
+                if (!first) try codes.append(';');
+                var buf: [8]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, "{d}", .{code}) catch unreachable;
+                try codes.appendSlice(s);
+                first = false;
+            },
+            .reset => {
+                if (!first) try codes.append(';');
+                first = false;
+            },
+        }
     }
 
     // Output foreground color
