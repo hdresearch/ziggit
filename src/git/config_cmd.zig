@@ -48,6 +48,7 @@ const CfgAction = enum {
     edit,
     get_color,
     get_colorbool,
+    get_urlmatch,
 };
 
 fn readStdin(allocator: Allocator, max_size: usize) ![]u8 {
@@ -94,6 +95,8 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
     var do_all = false;
     var action_name: ?[]const u8 = null;
     var blob_ref: ?[]const u8 = null;
+    var url_match: ?[]const u8 = null;
+    var includes_flag = false;
 
     var i: usize = 0;
     while (i < config_args.items.len) : (i += 1) {
@@ -296,10 +299,17 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
             }
         } else if (std.mem.eql(u8, arg, "--all") and new_style_sub) {
             do_all = true;
+        } else if (std.mem.eql(u8, arg, "--get-urlmatch")) {
+            action = .get_urlmatch;
+            action_name = "--get-urlmatch";
+        } else if (std.mem.eql(u8, arg, "--includes")) {
+            includes_flag = true;
         } else if (std.mem.eql(u8, arg, "--url") or std.mem.startsWith(u8, arg, "--url=")) {
-            // URL match mode - skip for now
-            if (!std.mem.startsWith(u8, arg, "--url=")) {
+            if (std.mem.startsWith(u8, arg, "--url=")) {
+                url_match = arg["--url=".len..];
+            } else {
                 i += 1;
+                if (i < config_args.items.len) url_match = config_args.items[i];
             }
         } else if (std.mem.eql(u8, arg, "--regexp") and new_style_sub and action == .get) {
             action = .get_regexp;
@@ -371,11 +381,20 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
     if (fixed_value) {
         switch (action) {
             .get, .get_all, .get_regexp, .set, .replace_all, .unset, .unset_all => {},
-            else => {
+            .add, .get_urlmatch, .rename_section, .remove_section, .list, .get_color, .get_colorbool, .edit => {
+                try platform_impl.writeStderr("error: --fixed-value only applies with 'get', 'set', 'unset'\n");
+                std.process.exit(129);
+            },
+            .none => {
                 try platform_impl.writeStderr("error: --fixed-value only applies with 'get', 'set', 'unset'\n");
                 std.process.exit(129);
             },
         }
+    }
+
+    // url_match on subcommand get implies get_urlmatch behavior
+    if (url_match != null and action == .get) {
+        action = .get_urlmatch;
     }
 
     const git_path_opt: ?[]const u8 = main_mod.findGitDirectory(allocator, platform_impl) catch null;
@@ -429,9 +448,33 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
     const home_dir = std.process.getEnvVarOwned(allocator, "HOME") catch null;
     defer if (home_dir) |h| allocator.free(h);
 
-    if (blob_ref != null) {
-        // --blob mode: read config from a git blob
-        // For now, treat as a special source
+    // Blob content (read once if --blob is used)
+    var blob_content: ?[]u8 = null;
+    defer if (blob_content) |bc| allocator.free(bc);
+    var blob_display_name: ?[]u8 = null;
+    defer if (blob_display_name) |bn| allocator.free(bn);
+
+    if (blob_ref) |br| {
+        // --blob mode: read config from a git blob using git cat-file
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &[_][]const u8{ "/usr/bin/git", "cat-file", "-p", br },
+        }) catch {
+            const em = try std.fmt.allocPrint(allocator, "fatal: unable to read blob object '{s}'\n", .{br});
+            defer allocator.free(em);
+            try platform_impl.writeStderr(em);
+            std.process.exit(128);
+        };
+        defer allocator.free(result.stderr);
+        if (result.term.Exited != 0) {
+            const em = try std.fmt.allocPrint(allocator, "fatal: unable to read blob object '{s}'\n", .{br});
+            defer allocator.free(em);
+            try platform_impl.writeStderr(em);
+            allocator.free(result.stdout);
+            std.process.exit(128);
+        }
+        blob_content = result.stdout;
+        blob_display_name = try std.fmt.allocPrint(allocator, "blob:{s}", .{br});
     } else if (config_file) |cf| {
         try sources.append(.{ .path = cf, .scope = "command", .needs_free = false });
     } else if (use_system) {
@@ -496,7 +539,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
     }
 
     // Follow includes only when not restricted to a single scope
-    const follow_includes = !use_global and !use_system and !use_local and !use_worktree and config_file == null;
+    const follow_includes = includes_flag or (!use_global and !use_system and !use_local and !use_worktree and config_file == null);
 
     // Write path helper
     const getWritePath = struct {
@@ -584,22 +627,41 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
                 all_entries.deinit();
             }
 
-            for (sources.items) |source| {
-                if (std.mem.eql(u8, source.path, "-")) {
-                    const content = readStdin(allocator, 10 * 1024 * 1024) catch continue;
-                    defer allocator.free(content);
-                    try cfgValidateAndReport(content, "standard input", allocator, platform_impl);
-                    try collectEntriesWithIncludes(content, "standard input", source.scope, allocator, platform_impl, &all_entries, git_path_opt, follow_includes);
-                } else {
-                    const content = platform_impl.fs.readFile(allocator, source.path) catch continue;
-                    defer allocator.free(content);
-                    try cfgValidateAndReport(content, source.path, allocator, platform_impl);
-                    try collectEntriesWithIncludes(content, source.path, source.scope, allocator, platform_impl, &all_entries, git_path_opt, follow_includes);
+            // Handle blob content
+            if (blob_content) |bc| {
+                const bdn = blob_display_name orelse "blob:";
+                try cfgValidateAndReport(bc, bdn, allocator, platform_impl);
+                try collectEntriesWithIncludes(bc, bdn, "command", allocator, platform_impl, &all_entries, git_path_opt, false);
+            }
+
+            if (blob_content == null) {
+                for (sources.items) |source| {
+                    if (std.mem.eql(u8, source.path, "-")) {
+                        const content = readStdin(allocator, 10 * 1024 * 1024) catch continue;
+                        defer allocator.free(content);
+                        try cfgValidateAndReport(content, "standard input", allocator, platform_impl);
+                        try collectEntriesWithIncludes(content, "standard input", source.scope, allocator, platform_impl, &all_entries, git_path_opt, follow_includes);
+                    } else {
+                        const content = platform_impl.fs.readFile(allocator, source.path) catch |err| {
+                            // For scoped operations, missing file is an error
+                            if (err == error.FileNotFound and (use_global or use_system or use_local)) {
+                                const em = try std.fmt.allocPrint(allocator, "fatal: unable to read config file '{s}': No such file or directory\n", .{source.path});
+                                defer allocator.free(em);
+                                try platform_impl.writeStderr(em);
+                                std.process.exit(1);
+                            }
+                            continue;
+                        };
+                        defer allocator.free(content);
+                        try cfgValidateAndReport(content, source.path, allocator, platform_impl);
+                        try collectEntriesWithIncludes(content, source.path, source.scope, allocator, platform_impl, &all_entries, git_path_opt, follow_includes);
+                    }
                 }
             }
 
             for (all_entries.items) |e| {
                 const term: []const u8 = if (null_terminator) "\x00" else "\n";
+                const origin_sep: u8 = if (null_terminator) '\x00' else '\t';
                 var out = std.array_list.Managed(u8).init(allocator);
                 defer out.deinit();
                 if (show_scope) {
@@ -608,7 +670,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
                 }
                 if (show_origin) {
                     try cfgAppendOrigin(&out, e.source_path orelse "");
-                    try out.append('\t');
+                    try out.append(origin_sep);
                 }
                 if (show_names) {
                     try out.appendSlice(e.full_key);
@@ -624,7 +686,6 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
                     try out.appendSlice(e.value);
                 } else {
                     try out.appendSlice(e.full_key);
-                    if (!null_terminator) try out.append('=');
                 }
                 try out.appendSlice(term);
                 try platform_impl.writeStdout(out.items);
@@ -633,6 +694,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
             if (main_mod.global_config_overrides) |overrides| {
                 for (overrides.items) |ov| {
                     const term3: []const u8 = if (null_terminator) "\x00" else "\n";
+                    const origin_sep3: u8 = if (null_terminator) '\x00' else '\t';
                     var out3 = std.array_list.Managed(u8).init(allocator);
                     defer out3.deinit();
                     if (show_scope) {
@@ -641,7 +703,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
                     }
                     if (show_origin) {
                         try out3.appendSlice("command line:");
-                        try out3.append('\t');
+                        try out3.append(origin_sep3);
                     }
                     if (show_names) {
                         try out3.appendSlice(ov.key);
@@ -664,9 +726,27 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
                 break :blk @as([]u8, "");
             };
             // Editor priority: GIT_EDITOR env, core.editor config, VISUAL env, EDITOR env, vi
+            // For core.editor lookup, always use main config sources (not the -f file)
+            var editor_sources = std.array_list.Managed(ConfigSource).init(allocator);
+            defer {
+                for (editor_sources.items) |es| {
+                    if (es.needs_free) allocator.free(es.path);
+                }
+                editor_sources.deinit();
+            }
+            if (git_path_opt) |gp| {
+                const abs_p2 = try std.fmt.allocPrint(allocator, "{s}/config", .{gp});
+                defer allocator.free(abs_p2);
+                const p2 = try cfgMakeRelativePath(abs_p2, allocator);
+                try editor_sources.append(.{ .path = p2, .scope = "local", .needs_free = true });
+            }
+            if (home_dir) |h| {
+                const p2 = try std.fmt.allocPrint(allocator, "{s}/.gitconfig", .{h});
+                try editor_sources.append(.{ .path = p2, .scope = "global", .needs_free = true });
+            }
             const editor = blk_editor: {
                 if (std.process.getEnvVarOwned(allocator, "GIT_EDITOR")) |e| break :blk_editor e else |_| {}
-                if (cfgLookup(sources.items, "core.editor", allocator, platform_impl)) |e| break :blk_editor e else |_| {}
+                if (cfgLookup(editor_sources.items, "core.editor", allocator, platform_impl)) |e| break :blk_editor e else |_| {}
                 if (std.process.getEnvVarOwned(allocator, "VISUAL")) |e| break :blk_editor e else |_| {}
                 if (std.process.getEnvVarOwned(allocator, "EDITOR")) |e| break :blk_editor e else |_| {}
                 break :blk_editor try allocator.dupe(u8, "vi");
@@ -735,6 +815,187 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
             try platform_impl.writeStdout("false\n");
             return;
         },
+        .get_urlmatch => {
+            if (positionals.items.len < 1) {
+                try platform_impl.writeStderr("error: --get-urlmatch requires a key and URL\n");
+                std.process.exit(2);
+            }
+            const key_or_section = positionals.items[0];
+            const match_url = url_match orelse (if (positionals.items.len >= 2) positionals.items[1] else {
+                try platform_impl.writeStderr("error: --get-urlmatch requires a URL\n");
+                std.process.exit(2);
+            });
+
+            // Collect all entries
+            var all_entries = std.array_list.Managed(CfgEntry).init(allocator);
+            defer {
+                for (all_entries.items) |*e| e.deinit(allocator);
+                all_entries.deinit();
+            }
+            for (sources.items) |source| {
+                const content = cfgReadSource(source.path, allocator, platform_impl) orelse continue;
+                defer allocator.free(content);
+                cfgValidateAndReport(content, source.path, allocator, platform_impl) catch {};
+                collectEntriesWithIncludes(content, source.path, source.scope, allocator, platform_impl, &all_entries, git_path_opt, follow_includes) catch continue;
+            }
+
+            // Check if key_or_section contains a dot (key) or not (section)
+            const is_section = (std.mem.indexOfScalar(u8, key_or_section, '.') == null);
+
+            if (is_section) {
+                // Section mode: return all matching keys from the best-matching URL subsection
+                // Find entries in [section] and [section "url-pattern"] that match
+                const lower_section = try std.ascii.allocLowerString(allocator, key_or_section);
+                defer allocator.free(lower_section);
+
+                // Collect results: for each variable, find the best URL match
+                const UrlResult = struct { value: []const u8, specificity: usize, scope: []const u8, has_equals: bool };
+                var results = std.StringHashMap(UrlResult).init(allocator);
+                defer {
+                    var it = results.iterator();
+                    while (it.next()) |_| {}
+                    results.deinit();
+                }
+
+                for (all_entries.items) |e| {
+                    const last_dot = std.mem.lastIndexOfScalar(u8, e.full_key, '.') orelse continue;
+                    const var_name = e.full_key[last_dot + 1 ..];
+                    const prefix = e.full_key[0..last_dot];
+                    const first_dot = std.mem.indexOfScalar(u8, prefix, '.');
+
+                    if (first_dot) |fd| {
+                        // Has subsection: [section "subsection"]
+                        const sec = prefix[0..fd];
+                        const subsec = prefix[fd + 1 ..];
+                        if (!std.ascii.eqlIgnoreCase(sec, lower_section)) continue;
+                        // subsec is a URL pattern - check if it matches match_url
+                        const specificity = urlMatchSpecificity(subsec, match_url);
+                        if (specificity == 0) continue;
+                        const var_lower = try std.ascii.allocLowerString(allocator, var_name);
+                        defer allocator.free(var_lower);
+                        if (results.get(var_lower)) |existing| {
+                            if (specificity >= existing.specificity) {
+                                results.put(var_lower, .{ .value = e.value, .specificity = specificity, .scope = e.source_scope orelse "local", .has_equals = e.has_equals }) catch continue;
+                            }
+                        } else {
+                            results.put(var_lower, .{ .value = e.value, .specificity = specificity, .scope = e.source_scope orelse "local", .has_equals = e.has_equals }) catch continue;
+                        }
+                    } else {
+                        // No subsection: [section] - base values (specificity=1)
+                        if (!std.ascii.eqlIgnoreCase(prefix, lower_section)) continue;
+                        const var_lower = try std.ascii.allocLowerString(allocator, var_name);
+                        defer allocator.free(var_lower);
+                        if (results.get(var_lower)) |existing| {
+                            if (1 >= existing.specificity) {
+                                results.put(var_lower, .{ .value = cfgEffectiveValue(e), .specificity = 1, .scope = e.source_scope orelse "local", .has_equals = e.has_equals }) catch continue;
+                            }
+                        } else {
+                            results.put(var_lower, .{ .value = cfgEffectiveValue(e), .specificity = 1, .scope = e.source_scope orelse "local", .has_equals = e.has_equals }) catch continue;
+                        }
+                    }
+                }
+
+                if (results.count() == 0) {
+                    std.process.exit(1);
+                }
+
+                // Collect and sort by variable name
+                var keys_list = std.array_list.Managed([]const u8).init(allocator);
+                defer keys_list.deinit();
+                var it = results.iterator();
+                while (it.next()) |entry| {
+                    try keys_list.append(entry.key_ptr.*);
+                }
+                std.mem.sort([]const u8, keys_list.items, {}, struct {
+                    fn cmp(_: void, a: []const u8, b: []const u8) bool {
+                        return std.mem.order(u8, a, b) == .lt;
+                    }
+                }.cmp);
+
+                for (keys_list.items) |var_key| {
+                    const entry = results.get(var_key).?;
+                    const fmt_val = if (config_type != .none)
+                        (cfgFormatTypeSilent(entry.value, config_type, allocator) catch continue)
+                    else
+                        try allocator.dupe(u8, entry.value);
+                    defer allocator.free(fmt_val);
+                    var out = std.array_list.Managed(u8).init(allocator);
+                    defer out.deinit();
+                    if (show_scope) {
+                        try out.appendSlice(entry.scope);
+                        try out.append('\t');
+                    }
+                    try out.appendSlice(lower_section);
+                    try out.append('.');
+                    try out.appendSlice(var_key);
+                    // Only append value if entry has = or config_type forces it
+                    if (entry.has_equals or config_type != .none) {
+                        try out.append(' ');
+                        try out.appendSlice(fmt_val);
+                    }
+                    try out.append('\n');
+                    try platform_impl.writeStdout(out.items);
+                }
+            } else {
+                // Key mode: find the best-matching value for this key
+                const last_dot = std.mem.lastIndexOfScalar(u8, key_or_section, '.') orelse {
+                    std.process.exit(1);
+                };
+                const key_section = key_or_section[0..last_dot];
+                const key_var = key_or_section[last_dot + 1 ..];
+
+                var best_value: ?[]const u8 = null;
+                var best_specificity: usize = 0;
+                var best_scope: []const u8 = "local";
+
+                for (all_entries.items) |e| {
+                    const e_last_dot = std.mem.lastIndexOfScalar(u8, e.full_key, '.') orelse continue;
+                    const e_var = e.full_key[e_last_dot + 1 ..];
+                    const e_prefix = e.full_key[0..e_last_dot];
+
+                    if (!std.ascii.eqlIgnoreCase(e_var, key_var)) continue;
+
+                    const e_first_dot = std.mem.indexOfScalar(u8, e_prefix, '.');
+                    if (e_first_dot) |fd| {
+                        const sec = e_prefix[0..fd];
+                        const subsec = e_prefix[fd + 1 ..];
+                        if (!std.ascii.eqlIgnoreCase(sec, key_section)) continue;
+                        const specificity = urlMatchSpecificity(subsec, match_url);
+                        if (specificity == 0) continue;
+                        if (specificity >= best_specificity) {
+                            best_value = e.value;
+                            best_specificity = specificity;
+                            best_scope = e.source_scope orelse "local";
+                        }
+                    } else {
+                        if (!std.ascii.eqlIgnoreCase(e_prefix, key_section)) continue;
+                        // Base value, specificity=1
+                        if (1 >= best_specificity) {
+                            best_value = cfgEffectiveValue(e);
+                            best_specificity = 1;
+                            best_scope = e.source_scope orelse "local";
+                        }
+                    }
+                }
+
+                if (best_value) |val| {
+                    const fmt_val = try cfgFormatType(val, config_type, allocator, platform_impl);
+                    defer allocator.free(fmt_val);
+                    var out = std.array_list.Managed(u8).init(allocator);
+                    defer out.deinit();
+                    if (show_scope) {
+                        try out.appendSlice(best_scope);
+                        try out.append('\t');
+                    }
+                    try out.appendSlice(fmt_val);
+                    try out.append('\n');
+                    try platform_impl.writeStdout(out.items);
+                } else {
+                    std.process.exit(1);
+                }
+            }
+            return;
+        },
         .get, .get_all => {
             if (positionals.items.len < 1) {
                 try platform_impl.writeStderr("error: missing key\n");
@@ -749,12 +1010,17 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
                 for (all_entries.items) |*e| e.deinit(allocator);
                 all_entries.deinit();
             }
-            for (sources.items) |source| {
+            if (blob_content) |bc| {
+                const bdn = blob_display_name orelse "blob:";
+                cfgValidateAndReport(bc, bdn, allocator, platform_impl) catch {};
+                collectEntriesWithIncludes(bc, bdn, "command", allocator, platform_impl, &all_entries, git_path_opt, false) catch {};
+            }
+            if (blob_content == null) for (sources.items) |source| {
                 const content = cfgReadSource(source.path, allocator, platform_impl) orelse continue;
                 defer allocator.free(content);
                 cfgValidateAndReport(content, source.path, allocator, platform_impl) catch {};
                 collectEntriesWithIncludes(content, source.path, source.scope, allocator, platform_impl, &all_entries, git_path_opt, follow_includes) catch continue;
-            }
+            };
 
             if (action == .get_all) {
                 var found_any = false;
@@ -831,7 +1097,8 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
                     }
                     const fmt2 = try cfgFormatTypeWithContext(v, config_type, key2, if (last_origin.len > 0) last_origin else null, allocator, platform_impl);
                     defer allocator.free(fmt2);
-                    const term: []const u8 = if (null_terminator) "\x00" else "\n";
+                    // Color type with empty key outputs without trailing newline (like --get-color)
+                    const term: []const u8 = if (config_type == .color_type and key2.len == 0) "" else if (null_terminator) "\x00" else "\n";
                     var out = std.array_list.Managed(u8).init(allocator);
                     defer out.deinit();
                     if (show_scope) {
@@ -865,18 +1132,27 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
                 for (all_entries.items) |*e| e.deinit(allocator);
                 all_entries.deinit();
             }
-            for (sources.items) |source| {
+            if (blob_content) |bc| {
+                const bdn = blob_display_name orelse "blob:";
+                cfgValidateAndReport(bc, bdn, allocator, platform_impl) catch {};
+                collectEntriesWithIncludes(bc, bdn, "command", allocator, platform_impl, &all_entries, git_path_opt, false) catch {};
+            }
+            if (blob_content == null) for (sources.items) |source| {
                 const content = cfgReadSource(source.path, allocator, platform_impl) orelse continue;
                 defer allocator.free(content);
                 cfgValidateAndReport(content, source.path, allocator, platform_impl) catch {};
                 collectEntriesWithIncludes(content, source.path, source.scope, allocator, platform_impl, &all_entries, git_path_opt, follow_includes) catch continue;
-            }
+            };
 
             var found_any = false;
             for (all_entries.items) |e| {
                 if (!simpleRegexMatch(e.full_key, pattern)) continue;
                 if (vpat) |vp| {
-                    if (!simpleRegexMatch(e.value, vp)) continue;
+                    if (fixed_value) {
+                        if (!std.mem.eql(u8, e.value, vp)) continue;
+                    } else {
+                        if (!simpleRegexMatch(e.value, vp)) continue;
+                    }
                 }
                 found_any = true;
                 const term: []const u8 = if (null_terminator) "\x00" else "\n";
@@ -1009,6 +1285,12 @@ fn cfgMakeRelativePath(abs_path: []const u8, allocator: Allocator) ![]u8 {
     return try allocator.dupe(u8, abs_path);
 }
 
+/// Strip exactly one trailing \r (CRLF line ending)
+fn stripOneTrailingCR(line: []const u8) []const u8 {
+    if (line.len > 0 and line[line.len - 1] == '\r') return line[0 .. line.len - 1];
+    return line;
+}
+
 fn cfgReadSource(path: []const u8, allocator: Allocator, platform_impl: *const platform_mod.Platform) ?[]u8 {
     if (std.mem.eql(u8, path, "-")) {
         return readStdin(allocator, 10 * 1024 * 1024) catch null;
@@ -1052,7 +1334,7 @@ fn cfgValidateConfig(content: []const u8, allocator: Allocator) ?CfgParseError {
                 if (tv.len > 0 and tv[tv.len - 1] == '\\') {
                     if (line_iter.next()) |nl| {
                         line_num += 1;
-                        raw_value = std.mem.trimRight(u8, nl, "\r");
+                        raw_value = stripOneTrailingCR(nl);
                     } else break;
                 } else break;
             }
@@ -1094,7 +1376,7 @@ pub fn cfgParseEntries(content: []const u8, entries: *std.array_list.Managed(Cfg
     defer if (current_section) |s| allocator.free(s);
     while (line_iter.next()) |raw_line| {
         line_num += 1;
-        const line = std.mem.trimRight(u8, raw_line, "\r");
+        const line = stripOneTrailingCR(raw_line);
         const trimmed = std.mem.trim(u8, line, " \t");
         if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') continue;
         if (trimmed[0] == '[') {
@@ -1127,7 +1409,10 @@ pub fn cfgParseEntries(content: []const u8, entries: *std.array_list.Managed(Cfg
         if (current_section == null) continue;
         if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
             const k = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
-            var raw_value = trimmed[eq_pos + 1 ..];
+            // Use untrimmed line to preserve embedded \r in values
+            const untrimmed = std.mem.trimLeft(u8, raw_line, " \t");
+            const ut_eq = std.mem.indexOf(u8, untrimmed, "=") orelse eq_pos;
+            var raw_value = untrimmed[ut_eq + 1 ..];
             var vbuf = std.array_list.Managed(u8).init(allocator);
             defer vbuf.deinit();
             while (true) {
@@ -1135,7 +1420,7 @@ pub fn cfgParseEntries(content: []const u8, entries: *std.array_list.Managed(Cfg
                 if (tv.len > 0 and tv[tv.len - 1] == '\\' and cfgIsContinuation(tv)) {
                     try cfgAppendValuePart(&vbuf, tv[0 .. tv.len - 1]);
                     raw_value = if (line_iter.next()) |nl|
-                        std.mem.trim(u8, std.mem.trimRight(u8, nl, "\r"), " \t")
+                        std.mem.trim(u8, stripOneTrailingCR(nl), " \t")
                     else
                         break;
                 } else {
@@ -1225,7 +1510,12 @@ fn collectEntriesWithIncludes(
                         .source_path = src_path_dup_ii,
                         .source_scope = src_scope_dup_ii,
                     });
-                    if (evaluateIncludeCondition(condition, source_path, allocator, platform_impl, git_path_opt)) {
+                    // For hasconfig conditions, pass all entries from the current file
+                    const use_entries: ?[]const CfgEntry = if (std.mem.startsWith(u8, condition, "hasconfig:"))
+                        entries.items
+                    else
+                        null;
+                    if (evaluateIncludeConditionEx(condition, source_path, allocator, platform_impl, git_path_opt, use_entries)) {
                         const inc_path = resolveIncludePath(e.value, source_path, allocator) catch continue;
                         defer allocator.free(inc_path);
                         const inc_content = platform_impl.fs.readFile(allocator, inc_path) catch continue;
@@ -1292,6 +1582,10 @@ fn computeIncludeDisplayPath(source_path: []const u8, rel_path: []const u8, allo
 }
 
 fn evaluateIncludeCondition(condition: []const u8, source_path: []const u8, allocator: Allocator, platform_impl: *const platform_mod.Platform, git_path_opt: ?[]const u8) bool {
+    return evaluateIncludeConditionEx(condition, source_path, allocator, platform_impl, git_path_opt, null);
+}
+
+fn evaluateIncludeConditionEx(condition: []const u8, source_path: []const u8, allocator: Allocator, platform_impl: *const platform_mod.Platform, git_path_opt: ?[]const u8, all_config_entries: ?[]const CfgEntry) bool {
     _ = source_path;
     _ = platform_impl;
     if (std.mem.startsWith(u8, condition, "gitdir:") or std.mem.startsWith(u8, condition, "gitdir/i:")) {
@@ -1319,8 +1613,23 @@ fn evaluateIncludeCondition(condition: []const u8, source_path: []const u8, allo
         return false; // TODO
     }
     if (std.mem.startsWith(u8, condition, "hasconfig:remote.")) {
-        // hasconfig:remote.*.url condition - we can't easily check this
-        return false; // TODO
+        // hasconfig:remote.*.url:PATTERN
+        const hc = condition["hasconfig:".len..];
+        // hc = "remote.*.url:PATTERN"
+        if (std.mem.indexOf(u8, hc, ":")) |colon| {
+            const key_glob = hc[0..colon]; // "remote.*.url"
+            const url_pattern = hc[colon + 1 ..]; // the URL pattern
+            if (all_config_entries) |entries| {
+                for (entries) |e| {
+                    // Check if entry key matches the glob (e.g., remote.*.url)
+                    if (cfgKeyMatchesGlob(e.full_key, key_glob)) {
+                        // Check if entry value matches the URL pattern
+                        if (simpleGlobMatch(e.value, url_pattern)) return true;
+                    }
+                }
+            }
+        }
+        return false;
     }
     return false;
 }
@@ -1662,7 +1971,7 @@ fn cfgFormatType(value: []const u8, config_type: ConfigType, allocator: Allocato
             }
             if (trimmed[0] == '~' and (trimmed.len == 1 or trimmed[1] == '/')) {
                 const h = std.process.getEnvVarOwned(allocator, "HOME") catch {
-                    try platform_impl.writeStderr("fatal: could not expand '~'\n");
+                    try platform_impl.writeStderr("fatal: failed to expand user dir in: '~/'\n");
                     std.process.exit(128);
                 };
                 defer allocator.free(h);
@@ -1738,11 +2047,9 @@ fn cfgFormatTypeWithContext(value: []const u8, config_type: ConfigType, key_name
             if (trimmed.len == 0) return try allocator.dupe(u8, "");
             if (trimmed[0] == '~' and (trimmed.len == 1 or trimmed[1] == '/')) {
                 const h = std.process.getEnvVarOwned(allocator, "HOME") catch {
-                    if (key_name) |kn| {
-                        const em = try std.fmt.allocPrint(allocator, "fatal: failed to expand user dir in: '{s}'\n", .{kn});
-                        defer allocator.free(em);
-                        try platform_impl.writeStderr(em);
-                    } else try platform_impl.writeStderr("fatal: could not expand '~'\n");
+                    const em = try std.fmt.allocPrint(allocator, "fatal: failed to expand user dir in: '{s}'\n", .{trimmed});
+                    defer allocator.free(em);
+                    try platform_impl.writeStderr(em);
                     std.process.exit(128);
                 };
                 defer allocator.free(h);
@@ -3152,4 +3459,159 @@ fn matchCharClass(c: u8, class: []const u8) bool {
         }
     }
     return if (negated) !matched else matched;
+}
+
+fn cfgKeyMatchesGlob(key: []const u8, glob: []const u8) bool {
+    // Match a config key against a glob pattern like "remote.*.url"
+    return simpleGlobMatch(key, glob);
+}
+
+/// URL match specificity: returns 0 if pattern doesn't match url, >0 for how specific
+fn urlMatchSpecificity(pattern: []const u8, url: []const u8) usize {
+    // Parse both URLs to compare scheme, host, port, path
+    const p = parseUrlParts(pattern);
+    const u = parseUrlParts(url);
+
+    // Scheme must match (case-insensitive)
+    if (p.scheme.len > 0 and u.scheme.len > 0) {
+        if (!std.ascii.eqlIgnoreCase(p.scheme, u.scheme)) return 0;
+    }
+
+    // Host must match (case-insensitive), with wildcard support
+    if (p.host.len > 0) {
+        if (!urlHostMatches(p.host, u.host)) return 0;
+    }
+
+    // Port must match if specified in pattern
+    if (p.port.len > 0) {
+        if (!std.mem.eql(u8, p.port, u.port)) {
+            // Default ports
+            const p_port = if (p.port.len == 0) defaultPort(p.scheme) else p.port;
+            const u_port = if (u.port.len == 0) defaultPort(u.scheme) else u.port;
+            if (!std.mem.eql(u8, p_port, u_port)) return 0;
+        }
+    }
+
+    // User must match if specified in pattern
+    if (p.user.len > 0) {
+        if (!std.mem.eql(u8, p.user, u.user)) return 0;
+    }
+
+    // Path: pattern path must be a prefix of url path
+    if (p.path.len > 0) {
+        if (!urlPathMatches(p.path, u.path)) return 0;
+    }
+
+    // Calculate specificity based on git's rules:
+    // - Exact host match > wildcard host match
+    // - Longer path > shorter path
+    // - User specified > no user
+    // - Port specified > no port
+    var specificity: usize = 1;
+
+    // Host specificity: exact > wildcard
+    if (p.host.len > 0) {
+        if (std.mem.indexOfScalar(u8, p.host, '*') != null) {
+            specificity += p.host.len; // wildcard: less specific
+        } else {
+            specificity += p.host.len * 2 + 100; // exact: more specific
+        }
+    }
+
+    // Path specificity
+    var path_len = p.path.len;
+    while (path_len > 0 and p.path[path_len - 1] == '/') path_len -= 1;
+    specificity += path_len * 4;
+
+    // User adds specificity
+    if (p.user.len > 0) specificity += p.user.len + 50;
+
+    // Port adds specificity
+    if (p.port.len > 0) specificity += 10;
+
+    return specificity;
+}
+
+const UrlParts = struct {
+    scheme: []const u8,
+    user: []const u8,
+    host: []const u8,
+    port: []const u8,
+    path: []const u8,
+};
+
+fn parseUrlParts(url: []const u8) UrlParts {
+    var result = UrlParts{ .scheme = "", .user = "", .host = "", .port = "", .path = "" };
+    var rest = url;
+
+    // Extract scheme
+    if (std.mem.indexOf(u8, rest, "://")) |idx| {
+        result.scheme = rest[0..idx];
+        rest = rest[idx + 3 ..];
+    }
+
+    // Extract path (everything after first / that's part of the path)
+    if (std.mem.indexOfScalar(u8, rest, '/')) |idx| {
+        result.path = rest[idx..];
+        rest = rest[0..idx];
+    }
+
+    // Extract user@
+    if (std.mem.indexOfScalar(u8, rest, '@')) |idx| {
+        result.user = rest[0..idx];
+        rest = rest[idx + 1 ..];
+    }
+
+    // Extract host:port
+    if (std.mem.lastIndexOfScalar(u8, rest, ':')) |idx| {
+        result.host = rest[0..idx];
+        result.port = rest[idx + 1 ..];
+    } else {
+        result.host = rest;
+    }
+
+    return result;
+}
+
+fn defaultPort(scheme: []const u8) []const u8 {
+    if (std.ascii.eqlIgnoreCase(scheme, "http")) return "80";
+    if (std.ascii.eqlIgnoreCase(scheme, "https")) return "443";
+    if (std.ascii.eqlIgnoreCase(scheme, "ftp")) return "21";
+    return "";
+}
+
+fn urlHostMatches(pattern_host: []const u8, url_host: []const u8) bool {
+    // Support wildcard * at the start of pattern host
+    if (pattern_host.len > 0 and pattern_host[0] == '*') {
+        // *.example.com matches foo.example.com but NOT deep.nested.example.com
+        const suffix = pattern_host[1..]; // ".example.com"
+        if (suffix.len == 0) return true;
+        if (url_host.len > suffix.len) {
+            if (!std.ascii.eqlIgnoreCase(url_host[url_host.len - suffix.len ..], suffix)) return false;
+            // Check that the prefix (the part matching *) has no dots (single level)
+            const prefix = url_host[0 .. url_host.len - suffix.len];
+            if (std.mem.indexOfScalar(u8, prefix, '.') != null) return false;
+            return true;
+        }
+        // Exact match with suffix (e.g., *.example.com doesn't match example.com)
+        return false;
+    }
+    return std.ascii.eqlIgnoreCase(pattern_host, url_host);
+}
+
+fn urlPathMatches(pattern_path: []const u8, url_path: []const u8) bool {
+    // Pattern path must be a prefix of url path
+    // Trailing / in pattern is optional; "/" matches empty
+    var pp = pattern_path;
+    while (pp.len > 0 and pp[pp.len - 1] == '/') pp = pp[0 .. pp.len - 1];
+    var up = url_path;
+    while (up.len > 0 and up[up.len - 1] == '/') up = up[0 .. up.len - 1];
+
+    if (pp.len == 0) return true;
+    if (up.len < pp.len) return false;
+    if (!std.ascii.eqlIgnoreCase(up[0..pp.len], pp)) return false;
+    // After the match, url must either end or have a /
+    if (up.len == pp.len) return true;
+    if (up[pp.len] == '/') return true;
+    return false;
 }

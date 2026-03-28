@@ -429,13 +429,30 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     var args = try platform_impl.getArgs(allocator);
     defer args.deinit();
     
-    // Skip program name
-    _ = args.skip();
+    // Check program name for git-<command> invocation pattern
+    const prog_name = args.next() orelse {
+        try showUsage(&platform_impl);
+        std.process.exit(1);
+    };
+
+    // Extract command from argv[0] if invoked as git-<command>
+    var dashed_command: ?[]const u8 = null;
+    {
+        const basename = if (std.mem.lastIndexOfScalar(u8, prog_name, '/')) |slash| prog_name[slash + 1 ..] else prog_name;
+        if (std.mem.startsWith(u8, basename, "git-") and basename.len > 4) {
+            dashed_command = basename[4..];
+        }
+    }
 
     // Store all arguments for potential git fallback
     var all_original_args = std.array_list.Managed([]const u8).init(allocator);
     defer all_original_args.deinit();
-    
+
+    // If invoked as git-<command>, prepend the command name
+    if (dashed_command) |dc| {
+        try all_original_args.append(dc);
+    }
+
     // Collect all arguments first
     while (args.next()) |arg| {
         try all_original_args.append(arg);
