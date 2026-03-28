@@ -28251,6 +28251,34 @@ fn outputSummaryForEmptyTree(allocator: std.mem.Allocator, tree_hash_str: []cons
     }
 }
 
+fn outputSummaryForTwoTrees(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, git_path: []const u8, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform) !void {
+    var diff_entries = std.array_list.Managed(DiffStatEntry).init(allocator);
+    defer {
+        for (diff_entries.items) |*de| allocator.free(de.path);
+        diff_entries.deinit();
+    }
+    try collectTreeDiffEntries(allocator, tree1_hash, tree2_hash, "", git_path, pathspecs, platform_impl, &diff_entries);
+    
+    // Load tree entries to get modes
+    const tree1_obj = objects.GitObject.load(tree1_hash, git_path, platform_impl, allocator) catch return;
+    defer tree1_obj.deinit(allocator);
+    const tree2_obj = objects.GitObject.load(tree2_hash, git_path, platform_impl, allocator) catch return;
+    defer tree2_obj.deinit(allocator);
+    
+    // For summary, we need to know mode changes, new files, deleted files
+    for (diff_entries.items) |de| {
+        if (de.is_new) {
+            const out = try std.fmt.allocPrint(allocator, " create mode 100644 {s}\n", .{de.path});
+            defer allocator.free(out);
+            try platform_impl.writeStdout(out);
+        } else if (de.is_deleted) {
+            const out = try std.fmt.allocPrint(allocator, " delete mode 100644 {s}\n", .{de.path});
+            defer allocator.free(out);
+            try platform_impl.writeStdout(out);
+        }
+    }
+}
+
 fn diffTreeWithEmptyOpts(allocator: std.mem.Allocator, tree_hash_str: []const u8, opts: *const DiffTreeOpts, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
     try diffTreeWithEmptyPrefix(allocator, tree_hash_str, "", opts, git_path, platform_impl);
 }
