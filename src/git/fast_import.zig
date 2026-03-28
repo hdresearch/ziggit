@@ -394,6 +394,17 @@ fn State(comptime PlatformType: type) type {
                     const dataref = after_mode[0..space2];
                     const path = unquotePath(after_mode[space2 + 1 ..], self.allocator) catch continue;
 
+                    // Validate path
+                    if (isInvalidPath(path)) {
+                        const msg = std.fmt.allocPrint(self.allocator, "fatal: Invalid path '{s}'\n", .{path}) catch {
+                            try self.platform.writeStderr("fatal: Invalid path\n");
+                            std.process.exit(1);
+                        };
+                        defer self.allocator.free(msg);
+                        try self.platform.writeStderr(msg);
+                        std.process.exit(1);
+                    }
+
                     var file_hash: [40]u8 = undefined;
                     if (std.mem.eql(u8, dataref, "inline")) {
                         // Read inline data
