@@ -10277,7 +10277,7 @@ fn cfgParseKey(key: []const u8, allocator: std.mem.Allocator) !CfgParsedKey {
 fn cfgSectionMatches(file_section: []const u8, file_subsection: ?[]const u8, parsed: CfgParsedKey) bool {
     if (!std.ascii.eqlIgnoreCase(file_section, parsed.section)) return false;
     if (parsed.subsection) |ps| {
-        if (file_subsection) |fs| return std.mem.eql(u8, fs, ps);
+        if (file_subsection) |fs| return std.ascii.eqlIgnoreCase(fs, ps);
         return false;
     }
     return file_subsection == null;
@@ -10353,9 +10353,7 @@ fn cfgSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add:
                     cur_sub = try sb.toOwnedSlice();
                 } else if (std.mem.indexOf(u8, inner, ".")) |d| {
                     cur_sec = try allocator.dupe(u8, std.mem.trim(u8, inner[0..d], " \t"));
-                    const sub_raw = try allocator.dupe(u8, inner[d + 1 ..]);
-                    for (sub_raw) |*ch| ch.* = std.ascii.toLower(ch.*);
-                    cur_sub = sub_raw;
+                    cur_sub = try allocator.dupe(u8, inner[d + 1 ..]);
                 } else {
                     cur_sec = try allocator.dupe(u8, std.mem.trim(u8, inner, " \t"));
                 }
@@ -10646,9 +10644,7 @@ fn cfgUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, value_r
                     cur_sub = try sb.toOwnedSlice();
                 } else if (std.mem.indexOf(u8, inner, ".")) |d| {
                     cur_sec = try allocator.dupe(u8, std.mem.trim(u8, inner[0..d], " \t"));
-                    const sub_raw = try allocator.dupe(u8, inner[d + 1 ..]);
-                    for (sub_raw) |*ch| ch.* = std.ascii.toLower(ch.*);
-                    cur_sub = sub_raw;
+                    cur_sub = try allocator.dupe(u8, inner[d + 1 ..]);
                 } else {
                     cur_sec = try allocator.dupe(u8, std.mem.trim(u8, inner, " \t"));
                 }
