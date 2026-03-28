@@ -3736,7 +3736,7 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             const tz_abs: u32 = @intCast(if (tz_offset < 0) -tz_offset else tz_offset);
             const tz_hours = tz_abs / 3600;
             const tz_minutes = (tz_abs % 3600) / 60;
-            try std.fmt.allocPrint(allocator, "Unknown <unknown@unknown> {d} {c}{d:0>2}{d:0>2}", .{ timestamp, tz_sign, tz_hours, tz_minutes });
+            break :blk try std.fmt.allocPrint(allocator, "Unknown <unknown@unknown> {d} {c}{d:0>2}{d:0>2}", .{ timestamp, tz_sign, tz_hours, tz_minutes });
         };
     } else getAuthorString(allocator) catch blk: {
         const timestamp = std.time.timestamp();
