@@ -11008,7 +11008,7 @@ fn cfgFormatTypeSilent(value: []const u8, config_type: ConfigType, allocator: st
             if (std.mem.eql(u8, trimmed, "never") or std.mem.eql(u8, trimmed, "false")) return try allocator.dupe(u8, "0");
             if (std.mem.eql(u8, trimmed, "now")) return try std.fmt.allocPrint(allocator, "{d}", .{std.time.timestamp()});
             if (std.fmt.parseInt(i64, trimmed, 10)) |n| return try std.fmt.allocPrint(allocator, "{d}", .{n}) else |_| {}
-            if (cfgParseDate(trimmed, allocator)) |ts| return ts;
+            if (cfgParseDateFull(trimmed, allocator)) |ts| return ts;
             return error.InvalidValue;
         },
         .color_type => {
