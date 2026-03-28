@@ -3,6 +3,8 @@ const platform_mod = @import("platform/platform.zig");
 const wildmatch_mod = @import("wildmatch.zig");
 const fetch_cmd = @import("git/fetch_cmd.zig");
 const push_cmd = @import("git/push_cmd.zig");
+const rebase_cmd = @import("git/rebase_cmd.zig");
+const cherry_pick_mod = @import("git/cherry_pick.zig");
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 const cSetenv = setenv;
@@ -4048,16 +4050,18 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     if (walk_reflog) {
         // Determine which reflog to read
         const ref_name = committish orelse "HEAD";
-        // Build reflog path
-        const reflog_path = try std.fmt.allocPrint(allocator, "{s}/logs/{s}", .{ git_path, ref_name });
-        defer allocator.free(reflog_path);
-        // Try refs/heads/<name> if direct path doesn't exist
-        var reflog_content: ?[]u8 = platform_impl.fs.readFile(allocator, reflog_path) catch null;
+        // Build reflog path - for branch names, check refs/heads/ path first (canonical location)
+        var reflog_content: ?[]u8 = null;
         var reflog_path2: ?[]u8 = null;
         defer if (reflog_path2) |p2| allocator.free(p2);
-        if (reflog_content == null and !std.mem.eql(u8, ref_name, "HEAD") and !std.mem.startsWith(u8, ref_name, "refs/")) {
+        if (!std.mem.eql(u8, ref_name, "HEAD") and !std.mem.startsWith(u8, ref_name, "refs/")) {
             reflog_path2 = try std.fmt.allocPrint(allocator, "{s}/logs/refs/heads/{s}", .{ git_path, ref_name });
             reflog_content = platform_impl.fs.readFile(allocator, reflog_path2.?) catch null;
+        }
+        const reflog_path = try std.fmt.allocPrint(allocator, "{s}/logs/{s}", .{ git_path, ref_name });
+        defer allocator.free(reflog_path);
+        if (reflog_content == null) {
+            reflog_content = platform_impl.fs.readFile(allocator, reflog_path) catch null;
         }
         if (reflog_content) |content| {
             defer allocator.free(content);
@@ -20542,8 +20546,32 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     defer if (target_hash_or_null) |th| allocator.free(th);
 
     if (target_hash_or_null) |target_hash| {
+        // Get old HEAD hash for reflog
+        const old_head_for_reflog = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
+        defer if (old_head_for_reflog) |oh| allocator.free(oh);
+
         // Update HEAD to point to the target commit
         try updateHead(git_path, target_hash, platform_impl, allocator);
+
+        // Write reflog entries for reset
+        {
+            const zero_hash = "0000000000000000000000000000000000000000";
+            const old_h = old_head_for_reflog orelse zero_hash;
+            const subj_for_reflog = getCommitSubject(target_hash, git_path, platform_impl, allocator) catch try allocator.dupe(u8, "");
+            defer allocator.free(subj_for_reflog);
+            const reset_reflog_msg = try std.fmt.allocPrint(allocator, "reset: moving to {s}", .{target_ref orelse target_hash});
+            defer allocator.free(reset_reflog_msg);
+            // Write HEAD reflog
+            writeReflogEntry(git_path, "HEAD", old_h, target_hash, reset_reflog_msg, allocator, platform_impl) catch {};
+            // Write branch reflog if on a branch
+            const current_branch_for_reflog = refs.getCurrentBranch(git_path, platform_impl, allocator) catch null;
+            defer if (current_branch_for_reflog) |cb| allocator.free(cb);
+            if (current_branch_for_reflog) |cb| {
+                if (!std.mem.eql(u8, cb, "HEAD")) {
+                    writeReflogEntry(git_path, cb, old_h, target_hash, reset_reflog_msg, allocator, platform_impl) catch {};
+                }
+            }
+        }
 
         // Handle different reset modes  
         switch (reset_mode) {
@@ -22444,7 +22472,17 @@ fn shouldLogRef(git_dir: []const u8, ref_name: []const u8, platform_impl: *const
 }
 
 fn writeReflogEntry(git_dir: []const u8, ref_name: []const u8, old_hash: []const u8, new_hash: []const u8, msg_str: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
-    const reflog_path = try std.fmt.allocPrint(allocator, "{s}/logs/{s}", .{ git_dir, ref_name });
+    // Resolve short branch names to full ref paths for correct reflog location
+    const effective_ref = if (std.mem.eql(u8, ref_name, "HEAD") or std.mem.startsWith(u8, ref_name, "refs/"))
+        ref_name
+    else blk: {
+        break :blk ref_name;  // keep as-is for now, path constructed below handles it
+    };
+    _ = effective_ref;
+    const reflog_path = if (std.mem.eql(u8, ref_name, "HEAD") or std.mem.startsWith(u8, ref_name, "refs/"))
+        try std.fmt.allocPrint(allocator, "{s}/logs/{s}", .{ git_dir, ref_name })
+    else
+        try std.fmt.allocPrint(allocator, "{s}/logs/refs/heads/{s}", .{ git_dir, ref_name });
     defer allocator.free(reflog_path);
     
     // Create parent directories
@@ -36630,7 +36668,22 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
             apply_mode = true;
         } else if (std.mem.eql(u8, arg, "--merge") or std.mem.eql(u8, arg, "-m")) {
             merge_mode = true;
-        } else if (std.mem.startsWith(u8, arg, "--whitespace")) {
+        } else if (std.mem.startsWith(u8, arg, "--whitespace=")) {
+            const ws_val = arg["--whitespace=".len..];
+            const valid_ws = [_][]const u8{ "nowarn", "warn", "fix", "error", "error-all" };
+            var ws_valid = false;
+            for (valid_ws) |v| {
+                if (std.mem.eql(u8, ws_val, v)) { ws_valid = true; break; }
+            }
+            if (!ws_valid) {
+                const ws_err = try std.fmt.allocPrint(allocator, "fatal: Invalid whitespace option: '{s}'\n", .{ws_val});
+                defer allocator.free(ws_err);
+                try platform_impl.writeStderr(ws_err);
+                std.process.exit(1);
+            }
+            apply_mode = true;
+            whitespace_opt = true;
+        } else if (std.mem.eql(u8, arg, "--whitespace")) {
             apply_mode = true;
             whitespace_opt = true;
         } else if (std.mem.startsWith(u8, arg, "--strategy=") or std.mem.eql(u8, arg, "-s")) {
@@ -36659,8 +36712,20 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
             merge_mode = true;
         } else if (std.mem.eql(u8, arg, "--root")) {
             has_root = true;
-        } else if (std.mem.eql(u8, arg, "--exec")) {
+        } else if (std.mem.eql(u8, arg, "--exec") or std.mem.eql(u8, arg, "-x")) {
             i += 1;
+            if (i < args.len) {
+                const exec_cmd = args[i];
+                const trimmed_exec = std.mem.trim(u8, exec_cmd, " \t");
+                if (trimmed_exec.len == 0) {
+                    try platform_impl.writeStderr("error: empty exec command\n");
+                    std.process.exit(1);
+                }
+                if (std.mem.indexOfScalar(u8, exec_cmd, '\n') != null) {
+                    try platform_impl.writeStderr("error: exec commands cannot contain newlines\n");
+                    std.process.exit(1);
+                }
+            }
             has_exec = true; merge_mode = true;
         } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--interactive")) {
             interactive = true; merge_mode = true;
@@ -36670,8 +36735,14 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
             keep_base = true;
         } else if (std.mem.eql(u8, arg, "--no-fork-point") or std.mem.eql(u8, arg, "--fork-point")) {
             // ignore for now
-        } else if (std.mem.startsWith(u8, arg, "-C") and arg.len > 2 and std.ascii.isDigit(arg[2])) {
-            // -C<n> implies --apply
+        } else if (std.mem.startsWith(u8, arg, "-C") and arg.len > 2) {
+            // -C<n> implies --apply - validate it's a number
+            _ = std.fmt.parseInt(i32, arg[2..], 10) catch {
+                const c_err = try std.fmt.allocPrint(allocator, "fatal: switch `C' expects a numerical value\n", .{});
+                defer allocator.free(c_err);
+                try platform_impl.writeStderr(c_err);
+                std.process.exit(1);
+            };
             apply_mode = true;
         } else if (std.mem.startsWith(u8, arg, "-c")) {
             // skip -c key=value
@@ -36988,16 +37059,41 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
 
     // Check if fast-forward is possible (no commits to replay and onto is ahead)
     if (is_fast_forward and !force_rebase) {
+        // Determine reflog action prefix
+        const ff_reflog_action = std.process.getEnvVarOwned(allocator, "GIT_REFLOG_ACTION") catch try allocator.dupe(u8, "rebase");
+        defer allocator.free(ff_reflog_action);
+        const ff_upstream_name = original_upstream_display orelse upstream_arg orelse "upstream";
+
+        // Write start reflog entry
+        const ff_start_msg = try std.fmt.allocPrint(allocator, "{s} (start): checkout {s}", .{ ff_reflog_action, ff_upstream_name });
+        defer allocator.free(ff_start_msg);
+        writeReflogEntry(git_path, "HEAD", head_hash, onto_hash, ff_start_msg, allocator, platform_impl) catch {};
+
         // Fast-forward: just update branch to onto
         if (!std.mem.eql(u8, current_branch_name, "HEAD")) {
             try refs.updateRef(git_path, current_branch_name, onto_hash, platform_impl, allocator);
+            // Write branch reflog
+            const ff_branch_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{current_branch_name});
+            defer allocator.free(ff_branch_ref);
+            const ff_finish_branch_msg = try std.fmt.allocPrint(allocator, "{s} (finish): {s} onto {s}", .{ ff_reflog_action, ff_branch_ref, onto_hash });
+            defer allocator.free(ff_finish_branch_msg);
+            writeReflogEntry(git_path, ff_branch_ref, head_hash, onto_hash, ff_finish_branch_msg, allocator, platform_impl) catch {};
         }
         try refs.updateHEAD(git_path, if (std.mem.eql(u8, current_branch_name, "HEAD")) onto_hash else current_branch_name, platform_impl, allocator);
+
+        // Write finish reflog entry for HEAD
+        if (!std.mem.eql(u8, current_branch_name, "HEAD")) {
+            const ff_branch_ref2 = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{current_branch_name});
+            defer allocator.free(ff_branch_ref2);
+            const ff_finish_head_msg = try std.fmt.allocPrint(allocator, "{s} (finish): returning to {s}", .{ ff_reflog_action, ff_branch_ref2 });
+            defer allocator.free(ff_finish_head_msg);
+            writeReflogEntry(git_path, "HEAD", onto_hash, onto_hash, ff_finish_head_msg, allocator, platform_impl) catch {};
+        }
+
         checkoutCommitTree(git_path, onto_hash, allocator, platform_impl) catch {};
         if (!quiet) {
             // For fast-forward, output "Fast-forwarded X to Y." to stdout
             const ff_branch = if (std.mem.eql(u8, current_branch_name, "HEAD")) "HEAD" else current_branch_name;
-            const ff_upstream_name = original_upstream_display orelse upstream_arg orelse "upstream";
             const ff_msg = try std.fmt.allocPrint(allocator, "Fast-forwarded {s} to {s}.\n", .{ ff_branch, ff_upstream_name });
             defer allocator.free(ff_msg);
             try platform_impl.writeStdout(ff_msg);
@@ -37250,15 +37346,15 @@ fn copyRebaseNotes(git_path: []const u8, old_commit: []const u8, new_commit: []c
     const config_content = platform_impl.fs.readFile(allocator, config_path) catch return;
     defer allocator.free(config_content);
 
-    // Check notes.rewrite.rebase
+    // Check notes.rewrite.rebase - can be [notes] rewrite.rebase = true
+    // or [notes "rewrite"] rebase = true
     var rewrite_rebase = false;
     if (findConfigValue(config_content, "notes", null, "rewrite.rebase")) |val| {
         const trimmed = std.mem.trim(u8, val, " \t\r\n");
         rewrite_rebase = std.mem.eql(u8, trimmed, "true");
     }
-    // Also check notes "rewrite" subsection
     if (!rewrite_rebase) {
-        if (findConfigValue(config_content, "notes \"rewrite\"", null, "rebase")) |val| {
+        if (findConfigValue(config_content, "notes", "rewrite", "rebase")) |val| {
             const trimmed = std.mem.trim(u8, val, " \t\r\n");
             rewrite_rebase = std.mem.eql(u8, trimmed, "true");
         }
@@ -37687,15 +37783,21 @@ fn removeDirectoryRecursive(path: []const u8, allocator: std.mem.Allocator, plat
 fn rebaseAbort(git_path: []const u8, repo_root: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     _ = repo_root;
     // Read orig-head
-    const orig_head = readRebaseFile(git_path, "orig-head", allocator, platform_impl) orelse {
+    const orig_head_raw = readRebaseFile(git_path, "orig-head", allocator, platform_impl) orelse {
         try platform_impl.writeStderr("fatal: no rebase in progress\n");
         std.process.exit(128);
     };
-    defer allocator.free(orig_head);
+    defer allocator.free(orig_head_raw);
+    const orig_head = std.mem.trim(u8, orig_head_raw, " \t\n\r");
 
     // Read head-name
-    const head_name = readRebaseFile(git_path, "head-name", allocator, platform_impl) orelse try allocator.dupe(u8, "detached HEAD");
-    defer allocator.free(head_name);
+    const head_name_raw = readRebaseFile(git_path, "head-name", allocator, platform_impl) orelse try allocator.dupe(u8, "detached HEAD");
+    defer allocator.free(head_name_raw);
+    const head_name = std.mem.trim(u8, head_name_raw, " \t\n\r");
+
+    // Get current HEAD for reflog old value
+    const current_head = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
+    defer if (current_head) |ch| allocator.free(ch);
 
     // Checkout orig-head
     checkoutCommitTree(git_path, orig_head, allocator, platform_impl) catch {};
@@ -37708,6 +37810,14 @@ fn rebaseAbort(git_path: []const u8, repo_root: []const u8, allocator: std.mem.A
     } else {
         try refs.updateHEAD(git_path, orig_head, platform_impl, allocator);
     }
+
+    // Write abort reflog entry
+    const abort_reflog_action = std.process.getEnvVarOwned(allocator, "GIT_REFLOG_ACTION") catch try allocator.dupe(u8, "rebase");
+    defer allocator.free(abort_reflog_action);
+    const return_target = if (std.mem.startsWith(u8, head_name, "refs/")) head_name else orig_head;
+    const abort_msg = try std.fmt.allocPrint(allocator, "{s} (abort): returning to {s}", .{ abort_reflog_action, return_target });
+    defer allocator.free(abort_msg);
+    writeReflogEntry(git_path, "HEAD", current_head orelse orig_head, orig_head, abort_msg, allocator, platform_impl) catch {};
 
     cleanupRebaseState(git_path, allocator, platform_impl);
 }
@@ -37778,12 +37888,20 @@ fn rebaseContinue(git_path: []const u8, repo_root: []const u8, allocator: std.me
         defer allocator.free(new_hash);
 
         try refs.updateHEAD(git_path, new_hash, platform_impl, allocator);
-        // Write reflog for continue: "rebase (continue): <subject>"
+        // Write reflog for continue: "rebase (continue): <subject>" (merge mode)
+        // or "rebase (pick): <subject>" (apply mode)
         const continue_reflog_action = std.process.getEnvVarOwned(allocator, "GIT_REFLOG_ACTION") catch try allocator.dupe(u8, "rebase");
         defer allocator.free(continue_reflog_action);
         const continue_subject = getCommitSubject(commit_hash, git_path, platform_impl, allocator) catch try allocator.dupe(u8, "");
         defer allocator.free(continue_subject);
-        const continue_msg = try std.fmt.allocPrint(allocator, "{s} (continue): {s}", .{ continue_reflog_action, continue_subject });
+        // Detect apply mode by checking which directory exists
+        const is_apply_mode = blk: {
+            const apply_dir = std.fmt.allocPrint(allocator, "{s}/rebase-apply", .{git_path}) catch break :blk false;
+            defer allocator.free(apply_dir);
+            break :blk dirExists(apply_dir);
+        };
+        const continue_action = if (is_apply_mode) "pick" else "continue";
+        const continue_msg = try std.fmt.allocPrint(allocator, "{s} ({s}): {s}", .{ continue_reflog_action, continue_action, continue_subject });
         defer allocator.free(continue_msg);
         writeReflogEntry(git_path, "HEAD", current_head, new_hash, continue_msg, allocator, platform_impl) catch {};
     }
@@ -37797,7 +37915,13 @@ fn rebaseContinue(git_path: []const u8, repo_root: []const u8, allocator: std.me
 
     const reflog_action_continue = std.process.getEnvVarOwned(allocator, "GIT_REFLOG_ACTION") catch try allocator.dupe(u8, "rebase");
     defer allocator.free(reflog_action_continue);
-    try replayCommits(git_path, ".", &commits, current_idx, branch_name, quiet, false, reflog_action_continue, allocator, platform_impl);
+    // Detect apply mode by checking which directory exists
+    const continue_apply_mode = blk: {
+        const apply_dir2 = std.fmt.allocPrint(allocator, "{s}/rebase-apply", .{git_path}) catch break :blk false;
+        defer allocator.free(apply_dir2);
+        break :blk dirExists(apply_dir2);
+    };
+    try replayCommits(git_path, ".", &commits, current_idx, branch_name, quiet, continue_apply_mode, reflog_action_continue, allocator, platform_impl);
 }
 
 fn rebaseSkip(git_path: []const u8, repo_root: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform, quiet: bool) !void {
