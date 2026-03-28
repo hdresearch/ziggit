@@ -30143,7 +30143,9 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
             show_pretty = true;
         } else if (std.mem.eql(u8, arg, "--cc")) {
             show_cc = true;
+            show_patch = true;
             show_raw = false;
+            recursive = true;
         } else if (std.mem.eql(u8, arg, "-c")) {
             show_combined = true;
             show_raw = false;
