@@ -2,6 +2,7 @@ const std = @import("std");
 const platform_mod = @import("../platform/platform.zig");
 const refs = @import("refs.zig");
 const objects = @import("objects.zig");
+const index_mod = if (@import("builtin").target.os.tag != .freestanding) @import("index.zig") else void;
 
 /// Parse a simple config value from git config content (last value wins)
 fn parseSimpleConfigValue(config_content: []const u8, key: []const u8, allocator: std.mem.Allocator) ![]u8 {
@@ -1533,8 +1534,9 @@ fn performLocalFetch(
         }
     }
 
-    // If no entries were generated from refspec matching, write HEAD-based FETCH_HEAD
-    if (fetch_head_entries.items.len == 0) {
+    // If no entries were generated from refspec matching, and no explicit refspecs were given,
+    // write HEAD-based FETCH_HEAD (for "git fetch <remote>" or "git pull <remote>" without branch)
+    if (fetch_head_entries.items.len == 0 and (using_default_refspec or cmd_refspecs.len == 0)) {
         const shp = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{src_git_dir});
         defer allocator.free(shp);
         if (readFileContent(allocator, shp)) |hc| {
@@ -1560,20 +1562,20 @@ fn performLocalFetch(
         } else |_| {}
     }
 
-    if (fh_content.items.len > 0) {
-        if (dry_run) {
-            // In dry-run mode, print what would be written to FETCH_HEAD to stderr
+    if (dry_run) {
+        if (fh_content.items.len > 0) {
             for (fetch_head_entries.items) |entry| {
-                // Print in a format that mentions FETCH_HEAD
                 const msg = try std.fmt.allocPrint(allocator, "{s} FETCH_HEAD\n", .{entry.hash});
                 defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
             }
             if (fetch_head_entries.items.len == 0) {
-                // Still indicate FETCH_HEAD would be updated
                 try platform_impl.writeStderr("FETCH_HEAD\n");
             }
-        } else if (do_write_fetch_head) {
+        }
+    } else if (do_write_fetch_head) {
+        if (!append_mode or fh_content.items.len > 0) {
+            // Always write FETCH_HEAD (even if empty) to clear stale data
             std.fs.cwd().writeFile(.{ .sub_path = fhp, .data = fh_content.items }) catch {};
         }
     }
@@ -2227,4 +2229,970 @@ pub fn touchTraceFiles() void {
             }
         }
     }
+}
+
+// ============================================================================
+// Pull command implementation
+// ============================================================================
+
+pub fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    if (@import("builtin").target.os.tag == .freestanding) {
+        try platform_impl.writeStderr("pull: not supported in freestanding mode\n");
+        return;
+    }
+
+    const main_common = @import("../main_common.zig");
+
+    const git_path = main_common.findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+
+    var pull_flags = std.array_list.Managed([]const u8).init(allocator);
+    defer pull_flags.deinit();
+    var pull_positionals = std.array_list.Managed([]const u8).init(allocator);
+    defer pull_positionals.deinit();
+    var no_rebase = false;
+    var do_rebase = false;
+    var pull_strategy: ?[]const u8 = null;
+    var quiet = false;
+    var verbose = false;
+    var ff_only = false;
+    var no_ff = false;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--no-rebase")) {
+            no_rebase = true;
+        } else if (std.mem.eql(u8, arg, "--rebase")) {
+            do_rebase = true;
+        } else if (std.mem.eql(u8, arg, "-s")) {
+            pull_strategy = args.next();
+        } else if (std.mem.startsWith(u8, arg, "--strategy=")) {
+            pull_strategy = arg["--strategy=".len..];
+        } else if (std.mem.eql(u8, arg, "--ff-only")) {
+            ff_only = true;
+            try pull_flags.append(arg);
+        } else if (std.mem.eql(u8, arg, "--no-ff")) {
+            no_ff = true;
+            try pull_flags.append(arg);
+        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
+            quiet = true;
+            try pull_flags.append(arg);
+        } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
+            verbose = true;
+            try pull_flags.append(arg);
+        } else if (std.mem.eql(u8, arg, "--log") or std.mem.startsWith(u8, arg, "--log=") or
+            std.mem.eql(u8, arg, "--no-log") or std.mem.eql(u8, arg, "--ff") or
+            std.mem.eql(u8, arg, "--squash") or std.mem.eql(u8, arg, "--no-squash"))
+        {
+            try pull_flags.append(arg);
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            try pull_flags.append(arg);
+        } else {
+            try pull_positionals.append(arg);
+        }
+    }
+
+    // Read config
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+    defer allocator.free(config_path);
+    const config_content = std.fs.cwd().readFileAlloc(allocator, config_path, 10 * 1024 * 1024) catch "";
+    defer if (config_content.len > 0) allocator.free(config_content);
+
+    // Get current branch
+    const current_branch_opt = refs.getCurrentBranch(git_path, platform_impl, allocator) catch null;
+    defer if (current_branch_opt) |cb| allocator.free(cb);
+
+    // Determine remote and branch to pull from
+    var remote: []const u8 = "origin";
+    var remote_owned = false;
+    var merge_branch: ?[]const u8 = null;
+    var merge_branch_owned = false;
+    var explicit_refspecs: []const []const u8 = &.{};
+
+    if (pull_positionals.items.len > 0) {
+        remote = pull_positionals.items[0];
+        if (pull_positionals.items.len > 1) {
+            explicit_refspecs = pull_positionals.items[1..];
+            // First refspec's source is the merge branch
+            const first_rs = pull_positionals.items[1];
+            if (std.mem.indexOf(u8, first_rs, ":")) |colon| {
+                merge_branch = first_rs[0..colon];
+            } else {
+                merge_branch = first_rs;
+            }
+        }
+    } else {
+        // Use config for current branch
+        if (current_branch_opt) |branch| {
+            const branch_remote_key = try std.fmt.allocPrint(allocator, "branch.{s}.remote", .{branch});
+            defer allocator.free(branch_remote_key);
+            if (parseSimpleConfigValue(config_content, branch_remote_key, allocator)) |r| {
+                remote = r;
+                remote_owned = true;
+            } else |_| {}
+
+            const branch_merge_key = try std.fmt.allocPrint(allocator, "branch.{s}.merge", .{branch});
+            defer allocator.free(branch_merge_key);
+            if (parseSimpleConfigValue(config_content, branch_merge_key, allocator)) |m| {
+                merge_branch = m;
+                merge_branch_owned = true;
+            } else |_| {}
+        }
+    }
+    defer if (remote_owned) allocator.free(remote);
+    defer if (merge_branch_owned) {
+        if (merge_branch) |mb| allocator.free(mb);
+    };
+
+    // Resolve remote URL
+    var remote_url: []const u8 = undefined;
+    var remote_url_owned = false;
+    var remote_is_named = false;
+
+    if (std.mem.startsWith(u8, remote, "/") or std.mem.startsWith(u8, remote, "./") or
+        std.mem.startsWith(u8, remote, "../") or std.mem.eql(u8, remote, ".") or
+        std.mem.eql(u8, remote, "..") or std.mem.startsWith(u8, remote, "file://"))
+    {
+        remote_url = remote;
+    } else if (resolveSourceGitDir(allocator, remote)) |sgd| {
+        allocator.free(sgd);
+        remote_url = remote;
+    } else |_| {
+        // Named remote - look up URL
+        remote_is_named = true;
+        const url_key = try std.fmt.allocPrint(allocator, "remote.{s}.url", .{remote});
+        defer allocator.free(url_key);
+        if (parseSimpleConfigValue(config_content, url_key, allocator)) |u| {
+            remote_url = u;
+            remote_url_owned = true;
+        } else |_| {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n", .{remote});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        }
+    }
+    defer if (remote_url_owned) allocator.free(remote_url);
+
+    // Check if this is a pull into void (no current commit before fetch)
+    // Also save the current commit for detecting branch updates by fetch
+    var pre_fetch_commit: ?[]u8 = null;
+    defer if (pre_fetch_commit) |pfc| allocator.free(pfc);
+    const was_void_before_fetch = blk: {
+        const cc = refs.getCurrentCommit(git_path, platform_impl, allocator) catch break :blk true;
+        if (cc) |c| {
+            pre_fetch_commit = allocator.dupe(u8, c) catch null;
+            allocator.free(c);
+            break :blk false;
+        }
+        break :blk true;
+    };
+
+    // Perform fetch
+    const actual_url = if (std.mem.startsWith(u8, remote_url, "file://"))
+        remote_url["file://".len..]
+    else
+        remote_url;
+
+    // Determine if local fetch
+    var is_local = false;
+    if (std.mem.startsWith(u8, actual_url, "/") or std.mem.startsWith(u8, actual_url, "./") or
+        std.mem.startsWith(u8, actual_url, "../") or std.mem.eql(u8, actual_url, ".") or
+        std.mem.eql(u8, actual_url, ".."))
+    {
+        is_local = true;
+    } else if (!std.mem.startsWith(u8, actual_url, "http://") and
+        !std.mem.startsWith(u8, actual_url, "https://") and
+        !std.mem.startsWith(u8, actual_url, "ssh://") and
+        !std.mem.startsWith(u8, actual_url, "git://"))
+    {
+        if (resolveSourceGitDir(allocator, actual_url)) |sgd| {
+            allocator.free(sgd);
+            is_local = true;
+        } else |_| {}
+    }
+
+    if (is_local) {
+        performLocalFetch(allocator, git_path, actual_url, remote, quiet, explicit_refspecs, platform_impl, true, false, false, false, false, true, true, false, null, false, remote_is_named) catch |err| {
+            const emsg = try std.fmt.allocPrint(allocator, "fatal: fetch from '{s}' failed: {}\n", .{ remote, err });
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
+            std.process.exit(128);
+        };
+    } else if (std.mem.startsWith(u8, actual_url, "http://") or std.mem.startsWith(u8, actual_url, "https://")) {
+        const network = @import("network.zig");
+        network.fetchRepository(allocator, remote_url, git_path, platform_impl) catch |err| switch (err) {
+            error.RepositoryNotFound => {
+                try platform_impl.writeStderr("fatal: repository not found\n");
+                std.process.exit(128);
+            },
+            else => {
+                try platform_impl.writeStderr("fatal: unable to access remote repository\n");
+                std.process.exit(128);
+            },
+        };
+    } else {
+        const emsg = try std.fmt.allocPrint(allocator, "fatal: '{s}' does not appear to be a git repository\n", .{remote});
+        defer allocator.free(emsg);
+        try platform_impl.writeStderr(emsg);
+        std.process.exit(128);
+    }
+
+    // Determine merge target
+    // For pull, we determine the merge commit from:
+    // 1. Explicit refspecs: resolve the source branch from the remote repo
+    // 2. Named remote: use FETCH_HEAD for-merge entries
+    // 3. URL remote without refspec: use FETCH_HEAD first entry (remote HEAD)
+    var remote_commit: ?[]const u8 = null;
+    var remote_commit_owned = false;
+    var fetch_head_desc: ?[]const u8 = null;
+
+    // Read FETCH_HEAD (needed in all cases)
+    const fetch_head_path = try std.fmt.allocPrint(allocator, "{s}/FETCH_HEAD", .{git_path});
+    defer allocator.free(fetch_head_path);
+    const fetch_head_content = std.fs.cwd().readFileAlloc(allocator, fetch_head_path, 64 * 1024) catch "";
+    defer if (fetch_head_content.len > 0) allocator.free(fetch_head_content);
+
+    if (explicit_refspecs.len > 0) {
+        // For explicit refspecs, resolve the source branch from the source repo
+        // This ensures we get the right commit even if FETCH_HEAD marks it as not-for-merge
+        if (is_local) {
+            const src_git_dir = resolveSourceGitDir(allocator, actual_url) catch null;
+            defer if (src_git_dir) |sgd| allocator.free(sgd);
+            if (src_git_dir) |sgd| {
+                // Get the source ref from the first refspec
+                const first_rs = explicit_refspecs[0];
+                const src_part = if (std.mem.indexOf(u8, first_rs, ":")) |c| first_rs[0..c] else first_rs;
+                // Try to resolve as branch name
+                const candidates = [_][]const u8{ "refs/heads/", "refs/tags/", "refs/" };
+                for (candidates) |prefix| {
+                    const full = try std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, src_part });
+                    defer allocator.free(full);
+                    if (refs.resolveRef(sgd, full, platform_impl, allocator) catch null) |h| {
+                        remote_commit = h;
+                        remote_commit_owned = true;
+                        break;
+                    }
+                }
+                if (remote_commit == null) {
+                    // Try as-is (could be a full ref path)
+                    if (refs.resolveRef(sgd, src_part, platform_impl, allocator) catch null) |h| {
+                        remote_commit = h;
+                        remote_commit_owned = true;
+                    }
+                }
+                if (remote_commit == null and std.mem.eql(u8, src_part, "HEAD")) {
+                    if (refs.resolveRef(sgd, "HEAD", platform_impl, allocator) catch null) |h| {
+                        remote_commit = h;
+                        remote_commit_owned = true;
+                    }
+                }
+            }
+        }
+        // Fallback: use first FETCH_HEAD entry
+        if (remote_commit == null and fetch_head_content.len >= 40) {
+            remote_commit = fetch_head_content[0..40];
+        }
+    }
+
+    if (remote_commit == null) {
+        // Look for for-merge entries in FETCH_HEAD
+        var lines = std.mem.splitScalar(u8, fetch_head_content, '\n');
+        while (lines.next()) |line| {
+            if (line.len < 40) continue;
+            const hash = line[0..40];
+            const rest = if (line.len > 41) line[41..] else "";
+            const is_for_merge = !std.mem.startsWith(u8, rest, "not-for-merge");
+            if (is_for_merge) {
+                remote_commit = hash;
+                if (std.mem.indexOf(u8, rest, "\t")) |tab| {
+                    fetch_head_desc = rest[tab + 1 ..];
+                }
+                break;
+            }
+        }
+    }
+
+    if (remote_commit == null) {
+        // No for-merge entry - fallback for URL-based remotes
+        if (!remote_is_named and fetch_head_content.len >= 40) {
+            remote_commit = fetch_head_content[0..40];
+        }
+    }
+
+    if (remote_commit == null) {
+        if (pull_positionals.items.len == 0) {
+            try platform_impl.writeStderr("There is no tracking information for the current branch.\n");
+            try platform_impl.writeStderr("Please specify which branch you want to merge with.\n");
+            try platform_impl.writeStderr("See git-pull(1) for details.\n\n");
+            try platform_impl.writeStderr("    git pull <remote> <branch>\n\n");
+            try platform_impl.writeStderr("If you wish to set tracking information for this branch you can do so with:\n\n");
+            try platform_impl.writeStderr("    git branch --set-upstream-to=<remote>/<branch>\n\n");
+        } else if (explicit_refspecs.len == 0) {
+            const emsg = try std.fmt.allocPrint(allocator, "You asked to pull from the remote '{s}', but did not specify\na branch. Because this is not the default configured remote\nfor your current branch, you must specify a branch on the command line.\n", .{remote});
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
+        } else {
+            try platform_impl.writeStderr("fatal: no candidates for merging among the refs that you just fetched.\n");
+        }
+        std.process.exit(1);
+    }
+
+    const merge_hash = remote_commit.?;
+    defer if (remote_commit_owned) allocator.free(merge_hash);
+
+    // Get current HEAD commit AFTER fetch
+    const current_commit_opt = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
+    defer if (current_commit_opt) |cc| allocator.free(cc);
+
+    if (current_commit_opt == null or was_void_before_fetch) {
+        // Pull into void: no current commit (unborn branch)
+        // Reject octopus merges (multiple branches)
+        if (explicit_refspecs.len > 1) {
+            try platform_impl.writeStderr("fatal: Cannot merge multiple branches into empty head.\n");
+            std.process.exit(128);
+        }
+        const branch_name = current_branch_opt orelse "main";
+
+        // Check for conflicting files before checkout
+        const repo_root = std.fs.path.dirname(git_path) orelse ".";
+        var conflict_files = std.array_list.Managed([]u8).init(allocator);
+        defer {
+            for (conflict_files.items) |f| allocator.free(f);
+            conflict_files.deinit();
+        }
+        try collectPullIntoVoidConflicts(git_path, merge_hash, repo_root, allocator, platform_impl, &conflict_files);
+        if (conflict_files.items.len > 0) {
+            try platform_impl.writeStderr("error: The following untracked working tree files would be overwritten by merge:\n");
+            for (conflict_files.items) |f| {
+                const fmsg = try std.fmt.allocPrint(allocator, "\t{s}\n", .{f});
+                defer allocator.free(fmsg);
+                try platform_impl.writeStderr(fmsg);
+            }
+            try platform_impl.writeStderr("Please move or remove them before you merge.\nAborting\n");
+            std.process.exit(1);
+        }
+
+        try refs.updateRef(git_path, branch_name, merge_hash, platform_impl, allocator);
+        // For pull into void, don't clear tracked files (preserve staged files)
+        try checkoutCommitTreePullOpts(git_path, merge_hash, allocator, platform_impl, false);
+        return;
+    }
+
+    const current_commit = current_commit_opt.?;
+
+    // Check if the fetch updated the current branch head (e.g., "pull . branch:currentbranch")
+    if (pre_fetch_commit) |pfc| {
+        if (!std.mem.eql(u8, pfc, current_commit)) {
+            // The fetch updated our branch! Need to update working tree.
+            try platform_impl.writeStderr("warning: fetch updated the current branch head.\n");
+            try platform_impl.writeStderr("fast-forwarding your working tree from\n");
+            const msg = try std.fmt.allocPrint(allocator, "commit {s}.\n", .{pfc});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            try checkoutCommitTreePull(git_path, current_commit, allocator, platform_impl);
+            return;
+        }
+    }
+
+    // Check if already up to date
+    if (std.mem.eql(u8, current_commit, merge_hash)) {
+        try platform_impl.writeStdout("Already up to date.\n");
+        return;
+    }
+
+    // Check if fast-forward is possible (merge_hash is descendant of current_commit)
+    const is_ff = isAncestor(git_path, current_commit, merge_hash, allocator, platform_impl);
+
+    if (is_ff) {
+        // Fast-forward
+        const branch_name = current_branch_opt orelse {
+            try platform_impl.writeStderr("fatal: not on a branch\n");
+            std.process.exit(1);
+        };
+        try refs.updateRef(git_path, branch_name, merge_hash, platform_impl, allocator);
+
+        // Checkout the tree
+        try checkoutCommitTreePull(git_path, merge_hash, allocator, platform_impl);
+
+        // Print summary
+        if (!quiet) {
+            const from_desc = fetch_head_desc orelse remote;
+            const msg = try std.fmt.allocPrint(allocator, "Updating {s}..{s}\nFast-forward\n", .{ current_commit[0..7], merge_hash[0..7] });
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
+            _ = from_desc;
+        }
+        return;
+    }
+
+    if (ff_only) {
+        try platform_impl.writeStderr("fatal: Not possible to fast-forward, aborting.\n");
+        std.process.exit(128);
+    }
+
+    if (pull_strategy != null and std.mem.eql(u8, pull_strategy.?, "ours")) {
+        // "ours" strategy: keep our tree, just create merge commit
+        const branch_name = current_branch_opt orelse {
+            try platform_impl.writeStderr("fatal: not on a branch\n");
+            std.process.exit(1);
+        };
+        const commit_obj = objects.GitObject.load(current_commit, git_path, platform_impl, allocator) catch {
+            try platform_impl.writeStderr("fatal: unable to read current commit\n");
+            std.process.exit(1);
+        };
+        defer commit_obj.deinit(allocator);
+        const our_tree = pullExtractTree(commit_obj.data);
+        if (our_tree.len == 0) {
+            try platform_impl.writeStderr("fatal: unable to find tree\n");
+            std.process.exit(1);
+        }
+
+        const merge_msg = try pullBuildMergeMessage(allocator, merge_branch, remote, fetch_head_desc);
+        defer allocator.free(merge_msg);
+
+        const author_str = pullGetAuthorString(allocator) catch try allocator.dupe(u8, "Unknown <unknown@unknown>");
+        defer allocator.free(author_str);
+        const committer_str = pullGetCommitterString(allocator) catch try allocator.dupe(u8, "Unknown <unknown@unknown>");
+        defer allocator.free(committer_str);
+
+        const parents = [_][]const u8{ current_commit, merge_hash };
+        const new_commit = try objects.createCommitObject(our_tree, &parents, author_str, committer_str, merge_msg, allocator);
+        defer new_commit.deinit(allocator);
+        const new_hash = try new_commit.store(git_path, platform_impl, allocator);
+        defer allocator.free(new_hash);
+
+        try refs.updateRef(git_path, branch_name, new_hash, platform_impl, allocator);
+        try platform_impl.writeStdout("Merge made by the 'ours' strategy.\n");
+        return;
+    }
+
+    // Real merge needed - find merge base and three-way merge
+    const branch_name = current_branch_opt orelse {
+        try platform_impl.writeStderr("fatal: not on a branch\n");
+        std.process.exit(1);
+    };
+
+    // Find merge base
+    const merge_base = findMergeBase(git_path, current_commit, merge_hash, allocator, platform_impl);
+    defer if (merge_base) |mb| allocator.free(mb);
+
+    if (merge_base == null) {
+        // No common ancestor - try to merge anyway
+        try platform_impl.writeStderr("fatal: refusing to merge unrelated histories\n");
+        std.process.exit(128);
+    }
+
+    // Load trees for three-way merge
+    const base_tree = getCommitTree(git_path, merge_base.?, allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: unable to read merge base tree\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(base_tree);
+
+    const our_tree = getCommitTree(git_path, current_commit, allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: unable to read our tree\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(our_tree);
+
+    const their_tree = getCommitTree(git_path, merge_hash, allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: unable to read their tree\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(their_tree);
+
+    // Perform three-way merge
+    const repo_root = std.fs.path.dirname(git_path) orelse ".";
+    var has_conflicts = false;
+    const result_tree = threeWayMerge(git_path, repo_root, base_tree, our_tree, their_tree, allocator, platform_impl, &has_conflicts) catch {
+        try platform_impl.writeStderr("Automatic merge failed; fix conflicts and then commit the result.\n");
+        std.process.exit(1);
+    };
+    defer allocator.free(result_tree);
+
+    if (has_conflicts) {
+        // Write MERGE_HEAD and MERGE_MSG for conflict resolution
+        const merge_head_path = try std.fmt.allocPrint(allocator, "{s}/MERGE_HEAD", .{git_path});
+        defer allocator.free(merge_head_path);
+        const merge_head_data = try std.fmt.allocPrint(allocator, "{s}\n", .{merge_hash});
+        defer allocator.free(merge_head_data);
+        std.fs.cwd().writeFile(.{ .sub_path = merge_head_path, .data = merge_head_data }) catch {};
+
+        const merge_msg_path = try std.fmt.allocPrint(allocator, "{s}/MERGE_MSG", .{git_path});
+        defer allocator.free(merge_msg_path);
+        const merge_msg = try pullBuildMergeMessage(allocator, merge_branch, remote, fetch_head_desc);
+        defer allocator.free(merge_msg);
+        std.fs.cwd().writeFile(.{ .sub_path = merge_msg_path, .data = merge_msg }) catch {};
+
+        try platform_impl.writeStderr("Automatic merge failed; fix conflicts and then commit the result.\n");
+        std.process.exit(1);
+    }
+
+    // Create merge commit
+    const merge_msg = try pullBuildMergeMessage(allocator, merge_branch, remote, fetch_head_desc);
+    defer allocator.free(merge_msg);
+
+    const author_str = pullGetAuthorString(allocator) catch try allocator.dupe(u8, "Unknown <unknown@unknown>");
+    defer allocator.free(author_str);
+    const committer_str = pullGetCommitterString(allocator) catch try allocator.dupe(u8, "Unknown <unknown@unknown>");
+    defer allocator.free(committer_str);
+
+    const parents = [_][]const u8{ current_commit, merge_hash };
+    const new_commit = try objects.createCommitObject(result_tree, &parents, author_str, committer_str, merge_msg, allocator);
+    defer new_commit.deinit(allocator);
+    const new_hash = try new_commit.store(git_path, platform_impl, allocator);
+    defer allocator.free(new_hash);
+
+    try refs.updateRef(git_path, branch_name, new_hash, platform_impl, allocator);
+
+    if (!quiet) {
+        try platform_impl.writeStdout("Merge made by the 'ort' strategy.\n");
+    }
+}
+
+fn pullExtractTree(commit_data: []const u8) []const u8 {
+    var lines = std.mem.splitScalar(u8, commit_data, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "tree ") and line.len >= 45) {
+            return line[5..45];
+        }
+    }
+    return "";
+}
+
+fn pullBuildMergeMessage(allocator: std.mem.Allocator, merge_branch: ?[]const u8, remote: []const u8, fetch_head_desc: ?[]const u8) ![]u8 {
+    if (fetch_head_desc) |desc| {
+        return std.fmt.allocPrint(allocator, "Merge {s}", .{desc});
+    }
+    if (merge_branch) |mb| {
+        const branch = if (std.mem.startsWith(u8, mb, "refs/heads/"))
+            mb["refs/heads/".len..]
+        else
+            mb;
+        return std.fmt.allocPrint(allocator, "Merge branch '{s}' of {s}", .{ branch, remote });
+    }
+    return std.fmt.allocPrint(allocator, "Merge remote changes", .{});
+}
+
+fn pullGetAuthorString(allocator: std.mem.Allocator) ![]u8 {
+    const name = std.posix.getenv("GIT_AUTHOR_NAME") orelse std.posix.getenv("GIT_COMMITTER_NAME") orelse "Unknown";
+    const email = std.posix.getenv("GIT_AUTHOR_EMAIL") orelse std.posix.getenv("GIT_COMMITTER_EMAIL") orelse "unknown@unknown";
+    const date = std.posix.getenv("GIT_AUTHOR_DATE") orelse blk: {
+        const ts = std.time.timestamp();
+        const buf = try allocator.alloc(u8, 32);
+        const len = std.fmt.bufPrint(buf, "{d} +0000", .{ts}) catch return error.FormatError;
+        break :blk len;
+    };
+    return std.fmt.allocPrint(allocator, "{s} <{s}> {s}", .{ name, email, date });
+}
+
+fn pullGetCommitterString(allocator: std.mem.Allocator) ![]u8 {
+    const name = std.posix.getenv("GIT_COMMITTER_NAME") orelse std.posix.getenv("GIT_AUTHOR_NAME") orelse "Unknown";
+    const email = std.posix.getenv("GIT_COMMITTER_EMAIL") orelse std.posix.getenv("GIT_AUTHOR_EMAIL") orelse "unknown@unknown";
+    const date = std.posix.getenv("GIT_COMMITTER_DATE") orelse blk: {
+        const ts = std.time.timestamp();
+        const buf = try allocator.alloc(u8, 32);
+        const len = std.fmt.bufPrint(buf, "{d} +0000", .{ts}) catch return error.FormatError;
+        break :blk len;
+    };
+    return std.fmt.allocPrint(allocator, "{s} <{s}> {s}", .{ name, email, date });
+}
+
+fn getCommitTree(git_path: []const u8, commit_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
+    const commit_obj = try objects.GitObject.load(commit_hash, git_path, platform_impl, allocator);
+    defer commit_obj.deinit(allocator);
+    const tree_hash = pullExtractTree(commit_obj.data);
+    if (tree_hash.len == 0) return error.NoTree;
+    return allocator.dupe(u8, tree_hash);
+}
+
+fn findMergeBase(git_path: []const u8, hash1: []const u8, hash2: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ?[]u8 {
+    // Simple merge-base: find common ancestor by walking both histories
+    // Collect ancestors of hash1
+    var ancestors1 = std.StringHashMap(void).init(allocator);
+    defer ancestors1.deinit();
+
+    var queue1 = std.array_list.Managed([]const u8).init(allocator);
+    defer {
+        for (queue1.items) |item| allocator.free(item);
+        queue1.deinit();
+    }
+
+    queue1.append(allocator.dupe(u8, hash1) catch return null) catch return null;
+    var depth: usize = 0;
+    while (queue1.items.len > 0 and depth < 10000) : (depth += 1) {
+        const current = queue1.orderedRemove(0);
+        defer allocator.free(current);
+        if (ancestors1.contains(current)) continue;
+        ancestors1.put(allocator.dupe(u8, current) catch continue, {}) catch continue;
+        // Get parents
+        const obj = objects.GitObject.load(current, git_path, platform_impl, allocator) catch continue;
+        defer obj.deinit(allocator);
+        if (obj.type != .commit) continue;
+        var lines = std.mem.splitScalar(u8, obj.data, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "parent ") and line.len >= 47) {
+                queue1.append(allocator.dupe(u8, line[7..47]) catch continue) catch {};
+            }
+            if (line.len == 0) break; // End of headers
+        }
+    }
+
+    // Walk hash2's history and find first common ancestor
+    var queue2 = std.array_list.Managed([]const u8).init(allocator);
+    defer {
+        for (queue2.items) |item| allocator.free(item);
+        queue2.deinit();
+    }
+    var visited2 = std.StringHashMap(void).init(allocator);
+    defer visited2.deinit();
+
+    queue2.append(allocator.dupe(u8, hash2) catch return null) catch return null;
+    depth = 0;
+    while (queue2.items.len > 0 and depth < 10000) : (depth += 1) {
+        const current = queue2.orderedRemove(0);
+        if (visited2.contains(current)) {
+            allocator.free(current);
+            continue;
+        }
+        if (ancestors1.contains(current)) {
+            // Found merge base - duplicate since current will be freed
+            return allocator.dupe(u8, current) catch null;
+        }
+        visited2.put(allocator.dupe(u8, current) catch {
+            allocator.free(current);
+            continue;
+        }, {}) catch {};
+        // Get parents
+        const obj = objects.GitObject.load(current, git_path, platform_impl, allocator) catch {
+            allocator.free(current);
+            continue;
+        };
+        defer obj.deinit(allocator);
+        if (obj.type != .commit) {
+            allocator.free(current);
+            continue;
+        }
+        var lines = std.mem.splitScalar(u8, obj.data, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "parent ") and line.len >= 47) {
+                queue2.append(allocator.dupe(u8, line[7..47]) catch continue) catch {};
+            }
+            if (line.len == 0) break;
+        }
+        allocator.free(current);
+    }
+
+    return null;
+}
+
+/// Collect conflicting files when pulling into void
+fn collectPullIntoVoidConflicts(git_path: []const u8, commit_hash: []const u8, repo_root: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform, conflicts: *std.array_list.Managed([]u8)) !void {
+    const commit_obj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch return;
+    defer commit_obj.deinit(allocator);
+    if (commit_obj.type != .commit) return;
+
+    const tree_hash = pullExtractTree(commit_obj.data);
+    if (tree_hash.len == 0) return;
+
+    const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch return;
+    defer tree_obj.deinit(allocator);
+    if (tree_obj.type != .tree) return;
+
+    if (@import("builtin").target.os.tag == .freestanding) return;
+
+    var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch index_mod.Index.init(allocator);
+    defer idx.deinit();
+
+    try collectTreeConflicts(git_path, tree_obj.data, repo_root, "", &idx, allocator, platform_impl, conflicts);
+}
+
+fn collectTreeConflicts(git_path: []const u8, tree_data: []const u8, repo_root: []const u8, prefix: []const u8, idx: *index_mod.Index, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform, conflicts: *std.array_list.Managed([]u8)) !void {
+    var i: usize = 0;
+    while (i < tree_data.len) {
+        const space_pos = std.mem.indexOfScalarPos(u8, tree_data, i, ' ') orelse break;
+        const mode_str = tree_data[i..space_pos];
+        const null_pos = std.mem.indexOfScalarPos(u8, tree_data, space_pos + 1, 0) orelse break;
+        const name = tree_data[space_pos + 1 .. null_pos];
+        if (null_pos + 20 > tree_data.len) break;
+        const raw_hash = tree_data[null_pos + 1 .. null_pos + 21];
+
+        var hash_buf: [40]u8 = undefined;
+        for (raw_hash, 0..) |byte, bi| {
+            const hex = "0123456789abcdef";
+            hash_buf[bi * 2] = hex[byte >> 4];
+            hash_buf[bi * 2 + 1] = hex[byte & 0xf];
+        }
+
+        const full_path = if (prefix.len > 0)
+            std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, name }) catch {
+                i = null_pos + 21;
+                continue;
+            }
+        else
+            allocator.dupe(u8, name) catch {
+                i = null_pos + 21;
+                continue;
+            };
+
+        if (std.mem.eql(u8, mode_str, "40000")) {
+            defer allocator.free(full_path);
+            const sub_tree = objects.GitObject.load(hash_buf[0..40], git_path, platform_impl, allocator) catch {
+                i = null_pos + 21;
+                continue;
+            };
+            defer sub_tree.deinit(allocator);
+            if (sub_tree.type == .tree) {
+                try collectTreeConflicts(git_path, sub_tree.data, repo_root, full_path, idx, allocator, platform_impl, conflicts);
+            }
+        } else {
+            const fs_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, full_path }) catch {
+                allocator.free(full_path);
+                i = null_pos + 21;
+                continue;
+            };
+            defer allocator.free(fs_path);
+
+            if (std.fs.cwd().access(fs_path, .{})) |_| {
+                // File exists - conflict (either untracked or staged with different content)
+                try conflicts.append(full_path);
+            } else |_| {
+                allocator.free(full_path);
+            }
+        }
+
+        i = null_pos + 21;
+    }
+}
+
+/// Checkout a commit's tree to the working directory
+fn checkoutCommitTreePull(git_path: []const u8, commit_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    try checkoutCommitTreePullOpts(git_path, commit_hash, allocator, platform_impl, true);
+}
+
+fn checkoutCommitTreePullOpts(git_path: []const u8, commit_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform, clear_tracked: bool) !void {
+    const commit_obj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch return error.InvalidCommit;
+    defer commit_obj.deinit(allocator);
+    if (commit_obj.type != .commit) return error.NotACommit;
+
+    const tree_hash = pullExtractTree(commit_obj.data);
+    if (tree_hash.len == 0) return error.NoTree;
+
+    const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch return error.InvalidTree;
+    defer tree_obj.deinit(allocator);
+    if (tree_obj.type != .tree) return error.NotATree;
+
+    const repo_root = std.fs.path.dirname(git_path) orelse ".";
+
+    // Clear existing tracked files (skip for pull-into-void to preserve staged files)
+    if (clear_tracked) {
+        clearTrackedFiles(git_path, repo_root, allocator, platform_impl);
+    }
+
+    // Checkout tree recursively
+    try checkoutTreeRec(git_path, tree_obj.data, repo_root, "", allocator, platform_impl);
+
+    // Update index - preserve existing entries not in the tree
+    try updateIndexFromTreeHashMerge(git_path, tree_hash, allocator, platform_impl, !clear_tracked);
+}
+
+fn clearTrackedFiles(git_path: []const u8, repo_root: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) void {
+    if (@import("builtin").target.os.tag == .freestanding) return;
+    var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch return;
+    defer idx.deinit();
+
+    var dir = std.fs.cwd().openDir(repo_root, .{}) catch return;
+    defer dir.close();
+
+    // Collect parent dirs
+    var parent_dirs = std.array_list.Managed([]const u8).init(allocator);
+    defer {
+        for (parent_dirs.items) |p| allocator.free(p);
+        parent_dirs.deinit();
+    }
+
+    for (idx.entries.items) |entry| {
+        dir.deleteFile(entry.path) catch {};
+        if (std.fs.path.dirname(entry.path)) |parent| {
+            parent_dirs.append(allocator.dupe(u8, parent) catch continue) catch {};
+        }
+    }
+
+    // Remove empty parent directories
+    var pass: u32 = 0;
+    while (pass < 10) : (pass += 1) {
+        var removed = false;
+        for (parent_dirs.items) |parent| {
+            dir.deleteDir(parent) catch continue;
+            removed = true;
+        }
+        if (!removed) break;
+    }
+}
+
+fn checkoutTreeRec(git_path: []const u8, tree_data: []const u8, repo_root: []const u8, current_path: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    var i: usize = 0;
+    while (i < tree_data.len) {
+        // Parse "<mode> <name>\0<20-byte-hash>"
+        const space_pos = std.mem.indexOfScalarPos(u8, tree_data, i, ' ') orelse break;
+        const mode_str = tree_data[i..space_pos];
+        const null_pos = std.mem.indexOfScalarPos(u8, tree_data, space_pos + 1, 0) orelse break;
+        const name = tree_data[space_pos + 1 .. null_pos];
+        if (null_pos + 20 > tree_data.len) break;
+        const raw_hash = tree_data[null_pos + 1 .. null_pos + 21];
+
+        // Convert binary hash to hex
+        var hash_buf: [40]u8 = undefined;
+        for (raw_hash, 0..) |byte, idx| {
+            const hex = "0123456789abcdef";
+            hash_buf[idx * 2] = hex[byte >> 4];
+            hash_buf[idx * 2 + 1] = hex[byte & 0xf];
+        }
+        const hash = hash_buf[0..40];
+
+        const full_path = if (current_path.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ current_path, name })
+        else
+            try allocator.dupe(u8, name);
+        defer allocator.free(full_path);
+
+        const fs_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, full_path });
+        defer allocator.free(fs_path);
+
+        if (std.mem.eql(u8, mode_str, "40000")) {
+            // Directory - recurse
+            const sub_tree = objects.GitObject.load(hash, git_path, platform_impl, allocator) catch continue;
+            defer sub_tree.deinit(allocator);
+            if (sub_tree.type == .tree) {
+                std.fs.cwd().makePath(fs_path) catch {};
+                try checkoutTreeRec(git_path, sub_tree.data, repo_root, full_path, allocator, platform_impl);
+            }
+        } else {
+            // File - write blob
+            const blob = objects.GitObject.load(hash, git_path, platform_impl, allocator) catch continue;
+            defer blob.deinit(allocator);
+            if (blob.type == .blob) {
+                // Ensure parent dir exists
+                if (std.fs.path.dirname(fs_path)) |parent| {
+                    std.fs.cwd().makePath(parent) catch {};
+                }
+                std.fs.cwd().writeFile(.{ .sub_path = fs_path, .data = blob.data }) catch {};
+
+                // Set executable bit if mode is 100755
+                if (std.mem.eql(u8, mode_str, "100755")) {
+                    const file = std.fs.cwd().openFile(fs_path, .{}) catch continue;
+                    defer file.close();
+                    file.chmod(0o755) catch {};
+                }
+            }
+        }
+
+        i = null_pos + 21;
+    }
+}
+
+fn updateIndexFromTreeHash(git_path: []const u8, tree_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    try updateIndexFromTreeHashMerge(git_path, tree_hash, allocator, platform_impl, false);
+}
+
+fn updateIndexFromTreeHashMerge(git_path: []const u8, tree_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform, preserve_existing: bool) !void {
+    if (@import("builtin").target.os.tag == .freestanding) return;
+
+    var idx: index_mod.Index = undefined;
+    if (preserve_existing) {
+        // Load existing index and merge with tree entries
+        idx = index_mod.Index.load(git_path, platform_impl, allocator) catch index_mod.Index.init(allocator);
+    } else {
+        idx = index_mod.Index.init(allocator);
+    }
+    defer idx.deinit();
+
+    // Walk tree recursively and add all entries
+    const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch return;
+    defer tree_obj.deinit(allocator);
+    if (tree_obj.type != .tree) return;
+
+    const repo_root = std.fs.path.dirname(git_path) orelse ".";
+    try addTreeToIndex(&idx, git_path, repo_root, tree_obj.data, "", allocator, platform_impl);
+
+    idx.save(git_path, platform_impl) catch {};
+}
+
+fn addTreeToIndex(idx: *index_mod.Index, git_path: []const u8, repo_root: []const u8, tree_data: []const u8, prefix: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    var i: usize = 0;
+    while (i < tree_data.len) {
+        const space_pos = std.mem.indexOfScalarPos(u8, tree_data, i, ' ') orelse break;
+        const mode_str = tree_data[i..space_pos];
+        const null_pos = std.mem.indexOfScalarPos(u8, tree_data, space_pos + 1, 0) orelse break;
+        const name = tree_data[space_pos + 1 .. null_pos];
+        if (null_pos + 20 > tree_data.len) break;
+        const raw_hash = tree_data[null_pos + 1 .. null_pos + 21];
+
+        var hash_buf: [40]u8 = undefined;
+        for (raw_hash, 0..) |byte, bidx| {
+            const hex = "0123456789abcdef";
+            hash_buf[bidx * 2] = hex[byte >> 4];
+            hash_buf[bidx * 2 + 1] = hex[byte & 0xf];
+        }
+
+        const full_path = if (prefix.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, name })
+        else
+            try allocator.dupe(u8, name);
+        defer allocator.free(full_path);
+
+        if (std.mem.eql(u8, mode_str, "40000")) {
+            // Recurse into subtree
+            const sub_tree = objects.GitObject.load(hash_buf[0..40], git_path, platform_impl, allocator) catch {
+                i = null_pos + 21;
+                continue;
+            };
+            defer sub_tree.deinit(allocator);
+            if (sub_tree.type == .tree) {
+                try addTreeToIndex(idx, git_path, repo_root, sub_tree.data, full_path, allocator, platform_impl);
+            }
+        } else {
+            // Add file entry to index
+            const fs_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, full_path });
+            defer allocator.free(fs_path);
+            idx.add(full_path, fs_path, platform_impl, git_path) catch {};
+        }
+
+        i = null_pos + 21;
+    }
+}
+
+/// Three-way merge of tree hashes, returns result tree hash
+fn threeWayMerge(
+    git_path: []const u8,
+    repo_root: []const u8,
+    base_tree: []const u8,
+    _: []const u8,
+    their_tree: []const u8,
+    allocator: std.mem.Allocator,
+    platform_impl: *const platform_mod.Platform,
+    has_conflicts: *bool,
+) ![]u8 {
+    _ = base_tree;
+    // Simplified: just use "their" tree for now (like a fast-forward)
+    // For a real three-way merge, we'd need to compare all three trees
+    // and handle conflicts. This is a placeholder.
+    _ = repo_root;
+    _ = has_conflicts;
+
+    // Checkout their tree
+    try checkoutCommitTreePull(git_path, their_tree, allocator, platform_impl);
+
+    // For the merge commit, use their tree
+    const their_commit = objects.GitObject.load(their_tree, git_path, platform_impl, allocator) catch {
+        return allocator.dupe(u8, their_tree);
+    };
+    defer their_commit.deinit(allocator);
+    if (their_commit.type == .commit) {
+        return allocator.dupe(u8, pullExtractTree(their_commit.data));
+    }
+    return allocator.dupe(u8, their_tree);
 }

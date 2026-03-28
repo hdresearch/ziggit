@@ -413,6 +413,35 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     };
     defer allocator.free(remote_git_dir);
 
+    // Check for invalid branch config (empty subsection like "branch..remote")
+    {
+        const cfg_path_chk = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+        defer allocator.free(cfg_path_chk);
+        if (readFileContent(allocator, cfg_path_chk)) |cfg_chk| {
+            defer allocator.free(cfg_chk);
+            var cfg_lines = std.mem.splitScalar(u8, cfg_chk, '\n');
+            var line_nr: usize = 0;
+            var in_empty_branch = false;
+            while (cfg_lines.next()) |raw_line| {
+                line_nr += 1;
+                const tl = std.mem.trim(u8, raw_line, " \t\r");
+                if (tl.len > 0 and tl[0] == '[') {
+                    in_empty_branch = std.mem.startsWith(u8, tl, "[branch \"\"]");
+                    continue;
+                }
+                if (in_empty_branch and tl.len > 0 and tl[0] != '#' and tl[0] != ';') {
+                    // Found a variable in [branch ""] - report error
+                    const eq = std.mem.indexOfScalar(u8, tl, '=') orelse continue;
+                    const var_name = std.mem.trim(u8, tl[0..eq], " \t");
+                    const emsg = try std.fmt.allocPrint(allocator, "fatal: bad config variable 'branch..{s}' in file '.git/config' at line {d}\n", .{ var_name, line_nr });
+                    defer allocator.free(emsg);
+                    try platform_impl.writeStderr(emsg);
+                    std.process.exit(128);
+                }
+            }
+        } else |_| {}
+    }
+
     // Copy objects first
     const src_objects = try std.fmt.allocPrint(allocator, "{s}/objects", .{git_path});
     defer allocator.free(src_objects);
