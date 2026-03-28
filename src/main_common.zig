@@ -33922,17 +33922,34 @@ fn nativeCmdCherryPick(allocator: std.mem.Allocator, args: [][]const u8, command
         if (std.mem.startsWith(u8, arg, "-") and arg.len >= 2 and arg[1] >= '0' and arg[1] <= '9') {
             num_picks = std.fmt.parseInt(i32, arg[1..], 10) catch null;
         } else if (std.mem.eql(u8, arg, "--abort")) {
-            // Restore from ORIG_HEAD
+            // Restore from ORIG_HEAD - also restore branch pointer
             const ohp = std.fmt.allocPrint(allocator, "{s}/ORIG_HEAD", .{git_path}) catch return;
             defer allocator.free(ohp);
             if (platform_impl.fs.readFile(allocator, ohp)) |oc| {
                 defer allocator.free(oc);
                 const oh = std.mem.trim(u8, oc, " \t\n\r");
                 if (oh.len == 40) {
-                    refs.updateHEAD(git_path, oh, platform_impl, allocator) catch {};
-                    const cb = refs.getCurrentBranch(git_path, platform_impl, allocator) catch null;
-                    defer if (cb) |b| allocator.free(b);
-                    if (cb) |b| if (!std.mem.eql(u8, b, "HEAD")) refs.updateRef(git_path, b, oh, platform_impl, allocator) catch {};
+                    // First check if HEAD points to a branch
+                    const head_path_abort = std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path}) catch null;
+                    defer if (head_path_abort) |hp| allocator.free(hp);
+                    var branch_ref: ?[]const u8 = null;
+                    if (head_path_abort) |hp| {
+                        if (platform_impl.fs.readFile(allocator, hp)) |hc| {
+                            defer allocator.free(hc);
+                            const ht = std.mem.trim(u8, hc, " \t\n\r");
+                            if (std.mem.startsWith(u8, ht, "ref: ")) {
+                                branch_ref = allocator.dupe(u8, ht["ref: ".len..]) catch null;
+                            }
+                        } else |_| {}
+                    }
+                    defer if (branch_ref) |br| allocator.free(br);
+                    if (branch_ref) |br| {
+                        // Update the branch ref to point to ORIG_HEAD
+                        refs.updateRef(git_path, br, oh, platform_impl, allocator) catch {};
+                    } else {
+                        // Detached HEAD - just update HEAD
+                        refs.updateHEAD(git_path, oh, platform_impl, allocator) catch {};
+                    }
                     resetIndex(git_path, oh, platform_impl, allocator) catch {};
                     checkoutCommitTree(git_path, oh, allocator, platform_impl) catch {};
                 }
@@ -33959,7 +33976,7 @@ fn nativeCmdCherryPick(allocator: std.mem.Allocator, args: [][]const u8, command
         std.process.exit(1);
     }
 
-    // Save ORIG_HEAD
+    // Save ORIG_HEAD and original HEAD ref
     {
         const ohp2 = std.fmt.allocPrint(allocator, "{s}/ORIG_HEAD", .{git_path}) catch null;
         defer if (ohp2) |p| allocator.free(p);
@@ -34110,10 +34127,24 @@ fn nativeCmdRevert(allocator: std.mem.Allocator, args: [][]const u8, command_ind
                 defer allocator.free(oc2);
                 const oh2 = std.mem.trim(u8, oc2, " \t\n\r");
                 if (oh2.len == 40) {
-                    refs.updateHEAD(git_path, oh2, platform_impl, allocator) catch {};
-                    const cb4 = refs.getCurrentBranch(git_path, platform_impl, allocator) catch null;
-                    defer if (cb4) |b| allocator.free(b);
-                    if (cb4) |b| if (!std.mem.eql(u8, b, "HEAD")) refs.updateRef(git_path, b, oh2, platform_impl, allocator) catch {};
+                    // Check if HEAD is on a branch
+                    const hp3 = std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path}) catch null;
+                    defer if (hp3) |p| allocator.free(p);
+                    var br3: ?[]const u8 = null;
+                    if (hp3) |p| {
+                        if (platform_impl.fs.readFile(allocator, p)) |hc3| {
+                            defer allocator.free(hc3);
+                            const ht3 = std.mem.trim(u8, hc3, " \t\n\r");
+                            if (std.mem.startsWith(u8, ht3, "ref: "))
+                                br3 = allocator.dupe(u8, ht3["ref: ".len..]) catch null;
+                        } else |_| {}
+                    }
+                    defer if (br3) |b| allocator.free(b);
+                    if (br3) |b| {
+                        refs.updateRef(git_path, b, oh2, platform_impl, allocator) catch {};
+                    } else {
+                        refs.updateHEAD(git_path, oh2, platform_impl, allocator) catch {};
+                    }
                     resetIndex(git_path, oh2, platform_impl, allocator) catch {};
                     checkoutCommitTree(git_path, oh2, allocator, platform_impl) catch {};
                 }
