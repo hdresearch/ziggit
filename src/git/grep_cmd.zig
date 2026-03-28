@@ -2096,7 +2096,13 @@ fn isValidRegex(pattern: []const u8, extended: bool) bool {
 // ===== Path matching =====
 
 fn matchesPathspecs(path: []const u8, pathspecs: []const []const u8, prefix: []const u8) bool {
-    if (pathspecs.len == 0) return true;
+    if (pathspecs.len == 0) {
+        // When no pathspecs, limit to current prefix (subdirectory)
+        if (prefix.len > 0) {
+            return std.mem.startsWith(u8, path, prefix);
+        }
+        return true;
+    }
 
     for (pathspecs) |spec| {
         // Resolve spec relative to prefix
