@@ -600,11 +600,11 @@ fn State(comptime PlatformType: type) type {
                     if (self.resolveRef(clean_ref)) |h| {
                         target_hash = h;
                     } else {
-                        return pos; // Can't resolve target
+                        return error.InvalidTag; // Can't resolve target
                     }
                 }
             } else {
-                return pos;
+                return error.InvalidTag; // Tag without from
             }
 
             // Determine target type
