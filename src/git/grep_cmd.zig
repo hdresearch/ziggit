@@ -1286,6 +1286,7 @@ fn collectFilesRecursive(allocator: Allocator, path: []const u8, files: *std.arr
 /// Returns true if any match was found
 fn grepContent(allocator: Allocator, opts: *GrepOptions, display_path: []const u8, content: []const u8, tree_prefix_opt: ?[]const u8, platform_impl: *const platform_mod.Platform, prev_file_had_output: bool) !bool {
     _ = tree_prefix_opt;
+    _ = std.posix.write(2, "GC ENTERED\n") catch 0;
 
     // Debug
     {
@@ -1569,6 +1570,7 @@ fn grepContent(allocator: Allocator, opts: *GrepOptions, display_path: []const u
 
 fn lineMatches(line: []const u8, opts: *GrepOptions, eff_pt: PatternType, allocator: Allocator) bool {
     if (opts.has_boolean_expr and opts.patterns.items.len > 1) {
+    _ = std.posix.write(2, "LM ENTERED\n") catch 0;
         return evaluateBooleanExpr(line, opts, eff_pt, allocator);
     }
 
