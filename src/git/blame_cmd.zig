@@ -765,20 +765,45 @@ fn oD(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []con
     }
 }
 
-fn oP(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []const u8, ln: usize, sh2: bool, fp2: []const u8, is_group_start: bool, group_count: usize) !void {
+fn oP(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []const u8, ln: usize, sh2: bool, fp2: []const u8, is_group_start2: bool, group_size2: usize) !void {
+    const orig_ln = if (e.orig_line > 0) e.orig_line else ln;
     if (sh2) {
-        const boundary_line = if (e.is_boundary) "boundary\n" else "";
-        const gc = if (is_group_start) group_count else @as(usize, 1);
-        const h = try std.fmt.allocPrint(a, "{s} {d} {d} {d}\nauthor {s}\nauthor-mail <{s}>\nauthor-time {d}\nauthor-tz {s}\ncommitter {s}\ncommitter-mail <{s}>\ncommitter-time {d}\ncommitter-tz {s}\nsummary {s}\n{s}filename {s}\n", .{
-            &e.commit_hash, ln, ln, gc, e.author_name, e.author_email, e.author_time, e.author_tz,
-            e.committer_name, e.committer_email, e.committer_time, e.committer_tz, e.summary, boundary_line, fp2,
+        // Full header (first time hash seen or --line-porcelain)
+        if (is_group_start2) {
+            const h1 = try std.fmt.allocPrint(a, "{s} {d} {d} {d}\n", .{ &e.commit_hash, orig_ln, ln, group_size2 });
+            defer a.free(h1);
+            try so.writeStdout(h1);
+        } else {
+            const h1 = try std.fmt.allocPrint(a, "{s} {d} {d}\n", .{ &e.commit_hash, orig_ln, ln });
+            defer a.free(h1);
+            try so.writeStdout(h1);
+        }
+        const ab = try std.fmt.allocPrint(a, "author {s}\nauthor-mail <{s}>\nauthor-time {d}\nauthor-tz {s}\ncommitter {s}\ncommitter-mail <{s}>\ncommitter-time {d}\ncommitter-tz {s}\nsummary {s}\n", .{
+            e.author_name, e.author_email, e.author_time, e.author_tz,
+            e.committer_name, e.committer_email, e.committer_time, e.committer_tz, e.summary,
         });
-        defer a.free(h);
-        try so.writeStdout(h);
+        defer a.free(ab);
+        try so.writeStdout(ab);
+        if (e.has_previous) {
+            const pv = try std.fmt.allocPrint(a, "previous {s} {s}\n", .{ &e.previous_hash, fp2 });
+            defer a.free(pv);
+            try so.writeStdout(pv);
+        }
+        if (e.is_boundary) try so.writeStdout("boundary\n");
+        const fl = try std.fmt.allocPrint(a, "filename {s}\n", .{fp2});
+        defer a.free(fl);
+        try so.writeStdout(fl);
     } else {
-        const h = try std.fmt.allocPrint(a, "{s} {d} {d}\n", .{ &e.commit_hash, ln, ln });
-        defer a.free(h);
-        try so.writeStdout(h);
+        // Continuation (--porcelain, hash already seen)
+        if (is_group_start2) {
+            const h1 = try std.fmt.allocPrint(a, "{s} {d} {d} {d}\n", .{ &e.commit_hash, orig_ln, ln, group_size2 });
+            defer a.free(h1);
+            try so.writeStdout(h1);
+        } else {
+            const h1 = try std.fmt.allocPrint(a, "{s} {d} {d}\n", .{ &e.commit_hash, orig_ln, ln });
+            defer a.free(h1);
+            try so.writeStdout(h1);
+        }
     }
     const cl = try std.fmt.allocPrint(a, "\t{s}\n", .{line});
     defer a.free(cl);
