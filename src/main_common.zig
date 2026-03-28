@@ -35249,7 +35249,7 @@ fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
 }
 
 // === T5 agent functions ===
-fn performLocalFetch(allocator: std.mem.Allocator, git_path: []const u8, source_path: []const u8, remote_name: []const u8, quiet: bool, cmd_refspecs: []const []const u8, platform_impl: *const platform_mod.Platform, copy_tags: bool) !void {
+fn performLocalFetch(allocator: std.mem.Allocator, git_path: []const u8, source_path: []const u8, remote_name: []const u8, _: bool, cmd_refspecs: []const []const u8, platform_impl: *const platform_mod.Platform, copy_tags: bool) !void {
     const src_git_dir = resolveSourceGitDir(allocator, source_path) catch { const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' does not appear to be a git repository\n", .{source_path}); defer allocator.free(msg); try platform_impl.writeStderr(msg); std.process.exit(128); };
     defer allocator.free(src_git_dir);
     const fkey = try std.fmt.allocPrint(allocator, "remote.{s}.fetch", .{remote_name}); defer allocator.free(fkey);
