@@ -57,13 +57,13 @@ fn addConfigOverride(allocator: std.mem.Allocator, setting: []const u8) !void {
     }
 }
 
-/// Look up a config override by key (case-insensitive)
+/// Look up a config override by key (case-insensitive for section/variable, case-sensitive for subsection)
 pub fn getConfigOverride(key: []const u8) ?[]const u8 {
     if (global_config_overrides) |overrides| {
         // Return last match (last -c wins)
         var result: ?[]const u8 = null;
         for (overrides.items) |ov| {
-            if (asciiCaseInsensitiveEqual(ov.key, key)) {
+            if (cfgKeyMatchesConfigStyle(ov.key, key)) {
                 result = ov.value;
             }
         }
