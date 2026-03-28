@@ -10502,6 +10502,13 @@ fn cfgParseEntries(content: []const u8, entries: *std.array_list.Managed(CfgEntr
                     .value = try vbuf.toOwnedSlice(),
                     .has_equals = true,
                 });
+            } else {
+                // Inline boolean key (no =) after section header
+                try entries.append(.{
+                    .full_key = try cfgMakeKey(current_section, after, allocator),
+                    .value = try allocator.dupe(u8, ""),
+                    .has_equals = false,
+                });
             }
             continue;
         }
@@ -11304,7 +11311,7 @@ fn cfgSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add:
             }
             in_target = if (cur_sec) |cs| cfgSectionMatches(cs, cur_sub, pk) else false;
             if (in_target) section_found = true;
-            // Check for inline key=value after ]
+            // Check for inline key=value or boolean key after ]
             if (in_target and close != null) {
                 const after_bracket = std.mem.trim(u8, trimmed[close.? + 1 ..], " \t");
                 if (after_bracket.len > 0 and after_bracket[0] != '#' and after_bracket[0] != ';') {
@@ -11319,6 +11326,21 @@ fn cfgSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add:
                                 const neg2 = vr.len > 0 and vr[0] == '!';
                                 const act2 = if (neg2) vr[1..] else vr;
                                 const m2 = if (fixed_val) std.mem.eql(u8, vbuf2.items, act2) else simpleRegexMatch(vbuf2.items, act2);
+                                rok2 = if (neg2) !m2 else m2;
+                            }
+                            try infos.append(.{ .start = ls, .end = le, .cont_end = le, .is_key = true, .regex_ok = rok2, .inline_on_header = true });
+                            last_target_end = le;
+                            continue;
+                        }
+                    } else {
+                        // Inline boolean key (no =) after section header
+                        const inline_key = after_bracket;
+                        if (std.ascii.eqlIgnoreCase(inline_key, pk.variable)) {
+                            var rok2 = true;
+                            if (value_regex) |vr| {
+                                const neg2 = vr.len > 0 and vr[0] == '!';
+                                const act2 = if (neg2) vr[1..] else vr;
+                                const m2 = if (fixed_val) std.mem.eql(u8, "", act2) else simpleRegexMatch("", act2);
                                 rok2 = if (neg2) !m2 else m2;
                             }
                             try infos.append(.{ .start = ls, .end = le, .cont_end = le, .is_key = true, .regex_ok = rok2, .inline_on_header = true });
@@ -11646,7 +11668,19 @@ fn cfgUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, value_r
             try result.append('\n');
     }
 
-    const cleaned = try cfgRemoveEmptySections(result.items, allocator);
+    // Build the section key that was modified for targeted section removal
+    var mod_sec_key: ?[]u8 = null;
+    defer if (mod_sec_key) |msk| allocator.free(msk);
+    if (pk.subsection) |sub| {
+        mod_sec_key = std.fmt.allocPrint(allocator, "{s}.{s}", .{ pk.section, sub }) catch null;
+    } else {
+        mod_sec_key = allocator.dupe(u8, pk.section) catch null;
+    }
+    if (mod_sec_key) |msk| {
+        for (msk) |*c| c.* = std.ascii.toLower(c.*);
+    }
+    const mod_secs: []const []const u8 = if (mod_sec_key) |msk| &[_][]const u8{msk} else &[_][]const u8{};
+    const cleaned = try cfgRemoveEmptySectionsFiltered(result.items, mod_secs, allocator);
     defer allocator.free(cleaned);
     try platform_impl.fs.writeFile(cfg_path, cleaned);
 }
