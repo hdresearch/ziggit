@@ -857,8 +857,8 @@ fn State(comptime PlatformType: type) type {
                         pos = next_end + 1;
                         break;
                     }
-                    if (content.items.len > 0) try content.append('\n');
                     try content.appendSlice(next_line);
+                    try content.append('\n');
                     pos = next_end + 1;
                 }
 
