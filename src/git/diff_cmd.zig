@@ -41,8 +41,12 @@ const DiffOpts = struct {
     line_prefix: []const u8 = "",
     raw_abbrev: bool = true, // whether to abbreviate in raw mode
     no_renames: bool = false,
+    find_renames: bool = false,
+    find_copies: bool = false,
+    rename_limit: ?u32 = null,
     reverse: bool = false,
     compact_summary: bool = false,
+    show_summary: bool = false,
     ignore_regex: std.array_list.Managed([]const u8) = undefined,
     ignore_blank_lines: bool = false,
 
@@ -85,6 +89,7 @@ const FileChange = struct {
     is_rename: bool = false,
     rename_from: ?[]const u8 = null,
     similarity: u8 = 0,
+    is_unmerged: bool = false,
 };
 
 pub fn cmdDiff(allocator: std.mem.Allocator, args: *pm.ArgIterator, platform_impl: *const pm.Platform) !void {
@@ -92,6 +97,7 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *pm.ArgIterator, platform_imp
         try platform_impl.writeStderr("diff: not supported in freestanding mode\n");
         return;
     }
+    // Debug removed
 
     // Collect all args
     var all_args = std.array_list.Managed([]const u8).init(allocator);
@@ -180,7 +186,8 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *pm.ArgIterator, platform_imp
         } else if (std.mem.eql(u8, arg, "--patch-with-raw")) {
             opts.output_mode = .patch_with_raw;
         } else if (std.mem.eql(u8, arg, "--summary")) {
-            opts.output_mode = .summary;
+            opts.show_summary = true;
+            if (opts.output_mode == .patch) opts.output_mode = .summary;
         } else if (std.mem.eql(u8, arg, "--dirstat") or std.mem.eql(u8, arg, "--cumulative") or
             std.mem.eql(u8, arg, "--dirstat-by-file") or std.mem.startsWith(u8, arg, "--dirstat="))
         {
@@ -208,6 +215,13 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *pm.ArgIterator, platform_imp
             opts.mnemonic_prefix = false;
         } else if (std.mem.eql(u8, arg, "--no-renames")) {
             opts.no_renames = true;
+        } else if (std.mem.eql(u8, arg, "-M") or std.mem.startsWith(u8, arg, "-M") or std.mem.eql(u8, arg, "--find-renames") or std.mem.startsWith(u8, arg, "--find-renames=")) {
+            opts.find_renames = true;
+        } else if (std.mem.eql(u8, arg, "-C") or std.mem.startsWith(u8, arg, "-C") or std.mem.eql(u8, arg, "--find-copies") or std.mem.startsWith(u8, arg, "--find-copies=")) {
+            opts.find_copies = true;
+            opts.find_renames = true;
+        } else if (std.mem.startsWith(u8, arg, "-l") and arg.len > 2) {
+            opts.rename_limit = std.fmt.parseInt(u32, arg[2..], 10) catch null;
         } else if (std.mem.eql(u8, arg, "-R")) {
             opts.reverse = true;
         } else if (std.mem.eql(u8, arg, "--compact-summary")) {
@@ -254,8 +268,65 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *pm.ArgIterator, platform_imp
                 try platform_impl.writeStderr("\n");
                 std.process.exit(129);
             }
-        } else if (std.mem.startsWith(u8, arg, "-") and !std.mem.eql(u8, arg, "-")) {
-            // Other flags - silently accept
+        } else if (std.mem.eql(u8, arg, "-w") or std.mem.eql(u8, arg, "--ignore-all-space")) {
+            // Ignore whitespace changes - accept but treat as noop for now
+        } else if (std.mem.eql(u8, arg, "-b") or std.mem.eql(u8, arg, "--ignore-space-change")) {
+            // Accept
+        } else if (std.mem.eql(u8, arg, "--ignore-space-at-eol")) {
+            // Accept
+        } else if (std.mem.eql(u8, arg, "--check")) {
+            opts.check_mode = true;
+        } else if (std.mem.eql(u8, arg, "--find-copies-harder")) {
+            opts.find_copies = true;
+            opts.find_renames = true;
+        } else if (std.mem.eql(u8, arg, "--submodule") or std.mem.startsWith(u8, arg, "--submodule=")) {
+            // Accept submodule option
+        } else if (std.mem.eql(u8, arg, "--color") or std.mem.startsWith(u8, arg, "--color=")) {
+            // Accept color option
+        } else if (std.mem.eql(u8, arg, "--no-color")) {
+            // Accept
+        } else if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--text")) {
+            // Accept
+        } else if (std.mem.eql(u8, arg, "--binary")) {
+            // Accept (we don't output binary patches but don't error)
+        } else if (std.mem.eql(u8, arg, "--ita-invisible-in-index") or std.mem.eql(u8, arg, "--ita-visible-in-index")) {
+            // Accept
+        } else if (std.mem.eql(u8, arg, "--patience") or std.mem.eql(u8, arg, "--histogram") or std.mem.eql(u8, arg, "--minimal") or std.mem.eql(u8, arg, "--no-minimal")) {
+            // Accept diff algorithm options
+        } else if (std.mem.startsWith(u8, arg, "--diff-algorithm=")) {
+            // Accept
+        } else if (std.mem.startsWith(u8, arg, "--diff-filter=")) {
+            // Accept diff filter
+        } else if (std.mem.startsWith(u8, arg, "--word-diff") or std.mem.startsWith(u8, arg, "--color-words") or std.mem.startsWith(u8, arg, "--color-moved")) {
+            // Accept
+        } else if (std.mem.startsWith(u8, arg, "--inter-hunk-context=")) {
+            // Accept
+        } else if (std.mem.eql(u8, arg, "--function-context")) {
+            // Accept
+        } else if (std.mem.eql(u8, arg, "--ext-diff") or std.mem.eql(u8, arg, "--no-ext-diff")) {
+            // Accept
+        } else if (std.mem.eql(u8, arg, "--textconv") or std.mem.eql(u8, arg, "--no-textconv")) {
+            // Accept
+        } else if (std.mem.eql(u8, arg, "--ignore-submodules") or std.mem.startsWith(u8, arg, "--ignore-submodules=")) {
+            // Accept
+        } else if (std.mem.eql(u8, arg, "--indent-heuristic") or std.mem.eql(u8, arg, "--no-indent-heuristic")) {
+            // Accept
+        } else if (std.mem.eql(u8, arg, "--no-pager")) {
+            // Accept
+        } else if (std.mem.startsWith(u8, arg, "--output=") or std.mem.startsWith(u8, arg, "--output-indicator-")) {
+            // Accept
+        } else if (std.mem.startsWith(u8, arg, "--relative") or std.mem.startsWith(u8, arg, "--no-relative")) {
+            // Accept
+        } else if (std.mem.startsWith(u8, arg, "--break-rewrites") or std.mem.startsWith(u8, arg, "-B")) {
+            // Accept
+        } else if (std.mem.startsWith(u8, arg, "--") and arg.len > 2) {
+            // Unknown long option - error
+            const msg = try std.fmt.allocPrint(allocator, "usage: git diff [<options>] [<commit>] [--] [<path>...]\n", .{});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        } else if (std.mem.startsWith(u8, arg, "-") and !std.mem.eql(u8, arg, "-") and arg.len > 1) {
+            // Unknown short option - accept for compatibility
         } else {
             try positional.append(arg);
         }
@@ -404,34 +475,7 @@ fn doTreeToTreeDiff(allocator: std.mem.Allocator, ref1: []const u8, ref2: []cons
     }
     try collectTreeChanges(allocator, tree1, tree2, "", git_path, pathspecs, pi, &changes);
 
-    if (changes.items.len == 0 and (opts.exit_code or opts.quiet)) return;
-
-    switch (opts.output_mode) {
-        .stat => try outputStat(changes.items, pi, allocator),
-        .shortstat => try outputShortStat(changes.items, pi, allocator),
-        .numstat => try outputNumStat(changes.items, pi, allocator),
-        .name_only => try outputNameOnly(changes.items, pi, allocator),
-        .name_status => try outputNameStatus(changes.items, pi, allocator),
-        .raw => try outputRaw(changes.items, opts, pi, allocator),
-        .summary => try outputSummary(changes.items, pi, allocator),
-        .dirstat => try outputDirStat(changes.items, pi, allocator),
-        .patch => try outputPatch(changes.items, opts, pi, allocator),
-        .patch_with_stat => {
-            try outputStat(changes.items, pi, allocator);
-            try pi.writeStdout("\n");
-            try outputPatch(changes.items, opts, pi, allocator);
-        },
-        .patch_with_raw => {
-            try outputRaw(changes.items, opts, pi, allocator);
-            try pi.writeStdout("\n");
-            try outputPatch(changes.items, opts, pi, allocator);
-        },
-        .no_patch => {},
-    }
-
-    if ((opts.exit_code or opts.quiet) and changes.items.len > 0) {
-        std.process.exit(1);
-    }
+    try outputChanges(changes.items, opts, pi, allocator);
 }
 
 fn freeChange(allocator: std.mem.Allocator, c: *FileChange) void {
@@ -847,31 +891,117 @@ fn abbreviateHash(hash: []const u8, len: u32) []const u8 {
     return hash[0..@min(len, hash.len)];
 }
 
+/// Compute the rename pretty-print display: e.g. "a/b/c => c/b/a" or "c/{b/a => d/e}" or "{c/d => d}/e"
+/// Mirrors git's pprint_rename() in diff.c
+fn renamePrettyPath(from: []const u8, to: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    // Find common prefix length (break at /)
+    var pfx_len: usize = 0;
+    var pfx_slash: usize = 0; // length up to and including last slash in common prefix
+    while (pfx_len < from.len and pfx_len < to.len) {
+        if (from[pfx_len] != to[pfx_len]) break;
+        if (from[pfx_len] == '/') pfx_slash = pfx_len + 1;
+        pfx_len += 1;
+    }
+
+    // Find common suffix length (break at /)
+    var sfx_len: usize = 0;
+    var sfx_slash: usize = 0; // length from start of suffix component (at /)
+    {
+        var fi = from.len;
+        var ti = to.len;
+        while (fi > 0 and ti > 0) {
+            fi -= 1;
+            ti -= 1;
+            if (from[fi] != to[ti]) break;
+            if (from[fi] == '/') sfx_slash = from.len - fi;
+            sfx_len += 1;
+        }
+        // If we didn't break (loop ran to completion and chars still match)
+        if (fi == 0 and ti == 0 and from.len > 0 and to.len > 0 and from[0] == to[0]) {
+            sfx_len = from.len;
+        }
+    }
+
+    // Use directory-boundary prefix
+    const prefix_len = if (pfx_len == from.len or pfx_len == to.len) pfx_len else pfx_slash;
+    // Use directory-boundary suffix
+    const suffix_len = if (sfx_len == from.len) sfx_len else sfx_slash;
+
+    // Make sure prefix and suffix don't overlap
+    const final_pfx = prefix_len;
+    var final_sfx = suffix_len;
+    if (final_pfx + final_sfx > from.len) {
+        final_sfx = from.len - final_pfx;
+    }
+    if (final_pfx + final_sfx > to.len) {
+        final_sfx = to.len - final_pfx;
+    }
+
+    const from_mid = from[final_pfx .. from.len - final_sfx];
+    const to_mid = to[final_pfx .. to.len - final_sfx];
+    const prefix = from[0..final_pfx];
+    const suffix = from[from.len - final_sfx ..];
+
+    if (final_pfx == 0 and final_sfx == 0) {
+        return std.fmt.allocPrint(allocator, "{s} => {s}", .{ from, to });
+    } else {
+        var buf = std.array_list.Managed(u8).init(allocator);
+        defer buf.deinit();
+        try buf.appendSlice(prefix);
+        try buf.append('{');
+        try buf.appendSlice(from_mid);
+        try buf.appendSlice(" => ");
+        try buf.appendSlice(to_mid);
+        try buf.append('}');
+        try buf.appendSlice(suffix);
+        return allocator.dupe(u8, buf.items);
+    }
+}
+
+fn getDisplayPath(c: FileChange, allocator: std.mem.Allocator) ![]u8 {
+    if (c.is_rename) {
+        if (c.rename_from) |from| {
+            return renamePrettyPath(from, c.path, allocator);
+        }
+    }
+    return allocator.dupe(u8, c.path);
+}
+
 fn outputStat(changes: []const FileChange, pi: *const pm.Platform, allocator: std.mem.Allocator) !void {
     if (changes.len == 0) return;
+
+    // Compute display paths
+    var display_paths = std.array_list.Managed([]u8).init(allocator);
+    defer {
+        for (display_paths.items) |p| allocator.free(p);
+        display_paths.deinit();
+    }
     var max_path_len: usize = 0;
     for (changes) |c| {
-        if (c.path.len > max_path_len) max_path_len = c.path.len;
+        const dp = try getDisplayPath(c, allocator);
+        if (dp.len > max_path_len) max_path_len = dp.len;
+        try display_paths.append(dp);
     }
 
     var total_ins: usize = 0;
     var total_dels: usize = 0;
 
-    for (changes) |c| {
+    for (changes, 0..) |c, idx| {
         total_ins += c.insertions;
         total_dels += c.deletions;
         const total = c.insertions + c.deletions;
-        const pad_len = max_path_len - c.path.len;
+        const dp = display_paths.items[idx];
+        const pad_len = max_path_len - dp.len;
         const pad = try allocator.alloc(u8, pad_len);
         defer allocator.free(pad);
         @memset(pad, ' ');
 
         if (c.is_binary) {
-            const line = try std.fmt.allocPrint(allocator, " {s}{s} | Bin\n", .{ c.path, pad });
+            const line = try std.fmt.allocPrint(allocator, " {s}{s} | Bin\n", .{ dp, pad });
             defer allocator.free(line);
             try pi.writeStdout(line);
         } else if (total == 0) {
-            const line = try std.fmt.allocPrint(allocator, " {s}{s} | 0\n", .{ c.path, pad });
+            const line = try std.fmt.allocPrint(allocator, " {s}{s} | 0\n", .{ dp, pad });
             defer allocator.free(line);
             try pi.writeStdout(line);
         } else {
@@ -881,7 +1011,7 @@ fn outputStat(changes: []const FileChange, pi: *const pm.Platform, allocator: st
             const minus = try allocator.alloc(u8, c.deletions);
             defer allocator.free(minus);
             @memset(minus, '-');
-            const line = try std.fmt.allocPrint(allocator, " {s}{s} | {d} {s}{s}\n", .{ c.path, pad, total, plus, minus });
+            const line = try std.fmt.allocPrint(allocator, " {s}{s} | {d} {s}{s}\n", .{ dp, pad, total, plus, minus });
             defer allocator.free(line);
             try pi.writeStdout(line);
         }
@@ -940,10 +1070,21 @@ fn outputNameOnly(changes: []const FileChange, pi: *const pm.Platform, allocator
 
 fn outputNameStatus(changes: []const FileChange, pi: *const pm.Platform, allocator: std.mem.Allocator) !void {
     for (changes) |c| {
-        const status: u8 = if (c.is_new) 'A' else if (c.is_deleted) 'D' else 'M';
-        const line = try std.fmt.allocPrint(allocator, "{c}\t{s}\n", .{ status, c.path });
-        defer allocator.free(line);
-        try pi.writeStdout(line);
+        if (c.is_unmerged) {
+            const line = try std.fmt.allocPrint(allocator, "U\t{s}\n", .{c.path});
+            defer allocator.free(line);
+            try pi.writeStdout(line);
+        } else if (c.is_rename) {
+            const from = c.rename_from orelse c.path;
+            const line = try std.fmt.allocPrint(allocator, "R{d:0>3}\t{s}\t{s}\n", .{ @as(u32, c.similarity), from, c.path });
+            defer allocator.free(line);
+            try pi.writeStdout(line);
+        } else {
+            const status: u8 = if (c.is_new) 'A' else if (c.is_deleted) 'D' else 'M';
+            const line = try std.fmt.allocPrint(allocator, "{c}\t{s}\n", .{ status, c.path });
+            defer allocator.free(line);
+            try pi.writeStdout(line);
+        }
     }
 }
 
@@ -957,7 +1098,18 @@ fn outputRaw(changes: []const FileChange, opts: *const DiffOpts, pi: *const pm.P
     const actual_ellipsis: []const u8 = if (abbrev_len < 40 and show_ellipsis) "..." else if (abbrev_len < 40) "" else "";
 
     for (changes) |c| {
-        const status: u8 = if (c.is_new) 'A' else if (c.is_deleted) 'D' else 'M';
+        if (c.is_unmerged) {
+            const line = try std.fmt.allocPrint(allocator, ":{s} {s} {s}{s} {s}{s} U\t{s}\n", .{
+                c.old_mode, c.new_mode,
+                abbreviateHash(c.old_hash, abbrev_len), actual_ellipsis,
+                abbreviateHash(c.new_hash, abbrev_len), actual_ellipsis,
+                c.path,
+            });
+            defer allocator.free(line);
+            try pi.writeStdout(line);
+            continue;
+        }
+        const status: u8 = if (c.is_new) 'A' else if (c.is_deleted) 'D' else if (c.is_rename) 'R' else 'M';
         const old_mode: []const u8 = if (c.is_new) "000000" else if (c.old_mode.len > 0) c.old_mode else "100644";
         const new_mode: []const u8 = if (c.is_deleted) "000000" else if (c.new_mode.len > 0) c.new_mode else "100644";
 
@@ -974,7 +1126,15 @@ fn outputRaw(changes: []const FileChange, opts: *const DiffOpts, pi: *const pm.P
 
 fn outputSummary(changes: []const FileChange, pi: *const pm.Platform, allocator: std.mem.Allocator) !void {
     for (changes) |c| {
-        if (c.is_new) {
+        if (c.is_rename) {
+            if (c.rename_from) |from| {
+                const pretty = try renamePrettyPath(from, c.path, allocator);
+                defer allocator.free(pretty);
+                const line = try std.fmt.allocPrint(allocator, " rename {s} ({d}%)\n", .{ pretty, c.similarity });
+                defer allocator.free(line);
+                try pi.writeStdout(line);
+            }
+        } else if (c.is_new) {
             const mode = if (c.new_mode.len > 0 and !std.mem.eql(u8, c.new_mode, "000000")) c.new_mode else "100644";
             const line = try std.fmt.allocPrint(allocator, " create mode {s} {s}\n", .{ mode, c.path });
             defer allocator.free(line);
@@ -1384,19 +1544,60 @@ fn outputDiffHunks(old_content: []const u8, new_content: []const u8, context_lin
     ) catch return;
     defer allocator.free(diff_output);
 
+    // Check if old/new content lacks trailing newline
+    const old_no_nl = old_content.len > 0 and old_content[old_content.len - 1] != '\n';
+    const new_no_nl = new_content.len > 0 and new_content[new_content.len - 1] != '\n';
+
     // Extract just the hunks (skip the header lines)
-    var lines = std.mem.splitScalar(u8, diff_output, '\n');
-    var in_hunk = false;
-    while (lines.next()) |line| {
-        if (std.mem.startsWith(u8, line, "@@")) {
-            in_hunk = true;
-        }
-        if (in_hunk and line.len > 0) {
-            if (lp.len > 0) try pi.writeStdout(lp);
-            try pi.writeStdout(line);
-            try pi.writeStdout("\n");
+    var lines_list = std.array_list.Managed([]const u8).init(allocator);
+    defer lines_list.deinit();
+    {
+        var lines = std.mem.splitScalar(u8, diff_output, '\n');
+        var in_hunk = false;
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "@@")) {
+                in_hunk = true;
+            }
+            if (in_hunk and line.len > 0) {
+                try lines_list.append(line);
+            }
         }
     }
+
+    for (lines_list.items) |line| {
+        if (lp.len > 0) try pi.writeStdout(lp);
+        try pi.writeStdout(line);
+        try pi.writeStdout("\n");
+
+        // After this line, check if we need "\ No newline at end of file"
+        if (line.len > 1) {
+            const line_text = line[1..]; // skip the +/- / space prefix
+            // Check: is this a remove/context line matching the last line of old content (no trailing nl)?
+            if ((line[0] == '-' or line[0] == ' ') and old_no_nl) {
+                if (contentEndsWithLine(old_content, line_text)) {
+                    if (lp.len > 0) try pi.writeStdout(lp);
+                    try pi.writeStdout("\\ No newline at end of file\n");
+                }
+            }
+            // Check: is this an add/context line matching the last line of new content (no trailing nl)?
+            if ((line[0] == '+' or line[0] == ' ') and new_no_nl) {
+                if (contentEndsWithLine(new_content, line_text)) {
+                    if (lp.len > 0) try pi.writeStdout(lp);
+                    try pi.writeStdout("\\ No newline at end of file\n");
+                }
+            }
+        }
+    }
+}
+
+/// Check if the content ends with the given line (no trailing newline)
+fn contentEndsWithLine(content: []const u8, line_text: []const u8) bool {
+    if (content.len < line_text.len) return false;
+    // Content should end with exactly line_text (no trailing \n)
+    if (!std.mem.endsWith(u8, content, line_text)) return false;
+    const before_len = content.len - line_text.len;
+    // The character before should be \n or there should be nothing before
+    return before_len == 0 or content[before_len - 1] == '\n';
 }
 
 fn doCombinedDiff(allocator: std.mem.Allocator, ref_list: []const []const u8, git_path: []const u8, opts: *const DiffOpts, pi: *const pm.Platform) !void {
@@ -2268,8 +2469,44 @@ fn doWorkingTreeDiff(allocator: std.mem.Allocator, index: *const index_mod.Index
         changes.deinit();
     }
 
+    // Pre-scan: find paths with unmerged (stage > 0) entries
+    var unmerged_paths = std.StringHashMap(void).init(allocator);
+    defer unmerged_paths.deinit();
+    for (index.entries.items) |entry| {
+        const stage = (entry.flags >> 12) & 0x3;
+        if (stage > 0) unmerged_paths.put(entry.path, {}) catch {};
+    }
+
+    // Track paths already processed (for handling multiple stage entries)
+    var seen_paths = std.StringHashMap(void).init(allocator);
+    defer seen_paths.deinit();
+
     for (index.entries.items) |entry| {
         if (pathspecs.len > 0 and !matchPathspec(entry.path, pathspecs)) continue;
+
+        // Skip if we already processed this path
+        if (seen_paths.contains(entry.path)) continue;
+        try seen_paths.put(entry.path, {});
+
+        // For unmerged paths (have any stage > 0 entry), emit a single unmerged change
+        if (unmerged_paths.contains(entry.path)) {
+            try changes.append(.{
+                .path = try allocator.dupe(u8, entry.path),
+                .old_hash = try allocator.dupe(u8, "0000000000000000000000000000000000000000"),
+                .new_hash = try allocator.dupe(u8, "0000000000000000000000000000000000000000"),
+                .old_mode = try allocator.dupe(u8, "100644"),
+                .new_mode = try allocator.dupe(u8, "100644"),
+                .old_content = try allocator.dupe(u8, ""),
+                .new_content = try allocator.dupe(u8, ""),
+                .insertions = 0,
+                .deletions = 0,
+                .is_new = false,
+                .is_deleted = false,
+                .is_binary = false,
+                .is_unmerged = true,
+            });
+            continue;
+        }
 
         var idx_hash_buf: [40]u8 = undefined;
         _ = std.fmt.bufPrint(&idx_hash_buf, "{x}", .{&entry.sha1}) catch continue;
@@ -2443,13 +2680,16 @@ fn sameBasename(path1: []const u8, path2: []const u8) bool {
 }
 
 fn outputChanges(changes_slice: []const FileChange, opts: *const DiffOpts, pi: *const pm.Platform, allocator: std.mem.Allocator) !void {
+    if (changes_slice.len == 0 and (opts.exit_code or opts.quiet)) return;
+
     if (opts.quiet and !(opts.exit_code)) return;
 
-    // Apply rename detection if enabled
+    // Apply rename detection if enabled (default on unless --no-renames, or forced with -M)
     var rename_list: ?std.array_list.Managed(FileChange) = null;
     defer if (rename_list) |*rl| rl.deinit();
 
-    const changes = if (!opts.no_renames) blk: {
+    const do_renames = !opts.no_renames or opts.find_renames;
+    const changes = if (do_renames) blk: {
         rename_list = std.array_list.Managed(FileChange).init(allocator);
         for (changes_slice) |c| rename_list.?.append(c) catch {};
         detectRenames(&rename_list.?, allocator);
@@ -2467,6 +2707,11 @@ fn outputChanges(changes_slice: []const FileChange, opts: *const DiffOpts, pi: *
     blk: {
         filtered_changes = std.array_list.Managed(FileChange).init(allocator);
         for (changes) |c| {
+            // Unmerged, deleted, new files always pass through -I filter
+            if (c.is_unmerged or c.is_deleted or c.is_new) {
+                filtered_changes.?.append(c) catch {};
+                continue;
+            }
             const filtered = getFilteredStats(c, opts, allocator);
             if (filtered.has_changes) {
                 var fc = c;
@@ -2484,7 +2729,10 @@ fn outputChanges(changes_slice: []const FileChange, opts: *const DiffOpts, pi: *
     }
 
     switch (opts.output_mode) {
-        .stat => try outputStat(effective_changes, pi, allocator),
+        .stat => {
+            try outputStat(effective_changes, pi, allocator);
+            if (opts.show_summary) try outputSummary(effective_changes, pi, allocator);
+        },
         .shortstat => try outputShortStat(effective_changes, pi, allocator),
         .numstat => try outputNumStat(effective_changes, pi, allocator),
         .name_only => try outputNameOnly(effective_changes, pi, allocator),
@@ -2492,9 +2740,13 @@ fn outputChanges(changes_slice: []const FileChange, opts: *const DiffOpts, pi: *
         .raw => try outputRaw(effective_changes, opts, pi, allocator),
         .summary => try outputSummary(effective_changes, pi, allocator),
         .dirstat => try outputDirStat(effective_changes, pi, allocator),
-        .patch => try outputPatch(changes, opts, pi, allocator),
+        .patch => {
+            try outputPatch(changes, opts, pi, allocator);
+            if (opts.show_summary) try outputSummary(changes, pi, allocator);
+        },
         .patch_with_stat => {
             try outputStat(effective_changes, pi, allocator);
+            if (opts.show_summary) try outputSummary(effective_changes, pi, allocator);
             try pi.writeStdout("\n");
             try outputPatch(changes, opts, pi, allocator);
         },
