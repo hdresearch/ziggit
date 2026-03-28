@@ -9393,21 +9393,26 @@ const ConfigSource = struct {
 };
 
 fn formatConfigType(value: []const u8, config_type: ConfigType, allocator: std.mem.Allocator) ![]u8 {
+    // Handle boolean sentinel: \x01 means "boolean key with no value"
+    const is_boolean_key = value.len == 1 and value[0] == 0x01;
+    const effective_value = if (is_boolean_key) "" else value;
     return switch (config_type) {
         .bool_type => {
+            // Boolean key with no = sign means true
+            if (is_boolean_key) return try allocator.dupe(u8, "true");
             // Normalize to true/false
-            if (std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "yes") or std.mem.eql(u8, value, "on") or std.mem.eql(u8, value, "1")) {
+            if (std.mem.eql(u8, effective_value, "true") or std.mem.eql(u8, effective_value, "yes") or std.mem.eql(u8, effective_value, "on") or std.mem.eql(u8, effective_value, "1")) {
                 return try allocator.dupe(u8, "true");
-            } else if (std.mem.eql(u8, value, "false") or std.mem.eql(u8, value, "no") or std.mem.eql(u8, value, "off") or std.mem.eql(u8, value, "0") or value.len == 0) {
+            } else if (std.mem.eql(u8, effective_value, "false") or std.mem.eql(u8, effective_value, "no") or std.mem.eql(u8, effective_value, "off") or std.mem.eql(u8, effective_value, "0") or effective_value.len == 0) {
                 return try allocator.dupe(u8, "false");
             }
-            return try allocator.dupe(u8, value);
+            return try allocator.dupe(u8, effective_value);
         },
         .int_type => {
             // Expand git-style size suffixes: k/K=1024, m/M=1048576, g/G=1073741824
             const trimmed_val = std.mem.trim(u8, value, " \t");
             if (trimmed_val.len == 0) {
-                return try allocator.dupe(u8, value);
+                return try allocator.dupe(u8, effective_value);
             }
             const last = trimmed_val[trimmed_val.len - 1];
             if (last == 'k' or last == 'K' or last == 'm' or last == 'M' or last == 'g' or last == 'G') {
@@ -9426,7 +9431,7 @@ fn formatConfigType(value: []const u8, config_type: ConfigType, allocator: std.m
             if (std.fmt.parseInt(i64, trimmed_val, 10)) |_| {
                 return try allocator.dupe(u8, trimmed_val);
             } else |_| {}
-            return try allocator.dupe(u8, value);
+            return try allocator.dupe(u8, effective_value);
         },
         .bool_or_int => {
             if (std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "yes") or std.mem.eql(u8, value, "on")) {
@@ -9434,9 +9439,9 @@ fn formatConfigType(value: []const u8, config_type: ConfigType, allocator: std.m
             } else if (std.mem.eql(u8, value, "false") or std.mem.eql(u8, value, "no") or std.mem.eql(u8, value, "off")) {
                 return try allocator.dupe(u8, "false");
             }
-            return try allocator.dupe(u8, value);
+            return try allocator.dupe(u8, effective_value);
         },
-        else => try allocator.dupe(u8, value),
+        else => try allocator.dupe(u8, effective_value),
     };
 }
 
@@ -9638,9 +9643,28 @@ fn parseConfigGetAll(content: []const u8, key: []const u8, results: *std.array_l
         const trimmed = std.mem.trim(u8, line, " \t\r\n");
         if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') continue;
 
-        if (trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']') {
-            if (current_section) |s| allocator.free(s);
-            current_section = try parseSectionHeader(trimmed, allocator);
+        if (trimmed[0] == '[') {
+            const close = std.mem.indexOfScalar(u8, trimmed, ']');
+            if (close) |cp| {
+                if (current_section) |s| allocator.free(s);
+                current_section = parseSectionHeader(trimmed[0 .. cp + 1], allocator) catch null;
+                // Handle inline key=value after section header
+                const after = std.mem.trim(u8, trimmed[cp + 1 ..], " \t");
+                if (after.len > 0 and after[0] != '#' and after[0] != ';') {
+                    if (std.mem.indexOf(u8, after, "=")) |eq_pos| {
+                        const ik = std.mem.trim(u8, after[0..eq_pos], " \t");
+                        const iv = std.mem.trim(u8, after[eq_pos + 1 ..], " \t");
+                        const ifk = if (current_section) |sec|
+                            try std.fmt.allocPrint(allocator, "{s}.{s}", .{ sec, ik })
+                        else
+                            try allocator.dupe(u8, ik);
+                        defer allocator.free(ifk);
+                        if (std.ascii.eqlIgnoreCase(ifk, key)) {
+                            try results.append(try allocator.dupe(u8, iv));
+                        }
+                    }
+                }
+            }
             continue;
         }
 
@@ -9655,6 +9679,19 @@ fn parseConfigGetAll(content: []const u8, key: []const u8, results: *std.array_l
 
             if (std.ascii.eqlIgnoreCase(full_key, key)) {
                 try results.append(try allocator.dupe(u8, v));
+            }
+        } else {
+            // Boolean key (no =)
+            const bk = std.mem.trim(u8, trimmed, " \t");
+            if (bk.len > 0 and bk[0] != '#' and bk[0] != ';') {
+                const full_key = if (current_section) |sec|
+                    try std.fmt.allocPrint(allocator, "{s}.{s}", .{ sec, bk })
+                else
+                    try allocator.dupe(u8, bk);
+                defer allocator.free(full_key);
+                if (std.ascii.eqlIgnoreCase(full_key, key)) {
+                    try results.append(try allocator.dupe(u8, ""));
+                }
             }
         }
     }
@@ -10331,7 +10368,9 @@ fn parseConfigValue(config_content: []const u8, key: []const u8, allocator: std.
                 
                 if (section_matches and subsection_matches and key_matches) {
                     if (last_value) |lv| allocator.free(lv);
-                    last_value = try allocator.dupe(u8, "true"); // boolean key
+                    // Boolean key: no = sign means true
+                    // Use "\x01" as sentinel to distinguish from empty value
+                    last_value = try allocator.dupe(u8, "\x01");
                 }
             }
         }
