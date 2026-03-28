@@ -10990,6 +10990,7 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     var dry_run = false;
     var verbose = false;
     var quiet = false;
+    var follow_tags = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
@@ -11011,6 +11012,8 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
             verbose = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             quiet = true;
+        } else if (std.mem.eql(u8, arg, "--follow-tags")) {
+            follow_tags = true;
         } else if (std.mem.eql(u8, arg, "-h")) {
             try platform_impl.writeStdout("usage: git push [<options>] [<repository> [<refspec>...]]\n");
             return;
@@ -11204,6 +11207,12 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
                         defer allocator.free(msg);
                         try platform_impl.writeStderr(msg);
                     };
+                    if (std.mem.startsWith(u8, full_ref, "refs/heads/")) {
+                        const del_branch = full_ref["refs/heads/".len..];
+                        const del_track = std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}/{s}", .{ git_path, remote, del_branch }) catch null;
+                        defer if (del_track) |dtr| allocator.free(dtr);
+                        if (del_track) |dtr| std.fs.cwd().deleteFile(dtr) catch {};
+                    }
                 }
                 if (!quiet) {
                     const msg = try std.fmt.allocPrint(allocator, " - [deleted]         {s}\n", .{remote_ref_name});
@@ -11256,6 +11265,36 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
                 try pushRefspec(allocator, git_path, remote_git_dir, full_refspec, force_this, dry_run, quiet, platform_impl);
             }
         }
+    }
+
+    // Handle --follow-tags: push annotated tags
+    if (follow_tags) {
+        const ftags_dir = try std.fmt.allocPrint(allocator, "{s}/refs/tags", .{git_path});
+        defer allocator.free(ftags_dir);
+        if (std.fs.cwd().openDir(ftags_dir, .{ .iterate = true })) |ftd_val| {
+            var ftd = ftd_val;
+            defer ftd.close();
+            var ftiter = ftd.iterate();
+            while (ftiter.next() catch null) |ftentry| {
+                if (ftentry.kind != .file) continue;
+                const ft_ref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ ftags_dir, ftentry.name }) catch continue;
+                defer allocator.free(ft_ref_path);
+                const ft_hash_raw = std.fs.cwd().readFileAlloc(allocator, ft_ref_path, 256) catch continue;
+                defer allocator.free(ft_hash_raw);
+                const ft_hash = std.mem.trim(u8, ft_hash_raw, " \t\r\n");
+                const ft_remote_path = std.fmt.allocPrint(allocator, "{s}/refs/tags/{s}", .{ remote_git_dir, ftentry.name }) catch continue;
+                defer allocator.free(ft_remote_path);
+                if (std.fs.cwd().access(ft_remote_path, .{})) {
+                    continue;
+                } else |_| {}
+                const ft_obj = objects.GitObject.load(ft_hash, git_path, platform_impl, allocator) catch continue;
+                defer ft_obj.deinit(allocator);
+                if (ft_obj.type != .tag) continue;
+                const ft_refspec = std.fmt.allocPrint(allocator, "refs/tags/{s}:refs/tags/{s}", .{ ftentry.name, ftentry.name }) catch continue;
+                defer allocator.free(ft_refspec);
+                pushRefspec(allocator, git_path, remote_git_dir, ft_refspec, false, dry_run, quiet, platform_impl) catch {};
+            }
+        } else |_| {}
     }
 
     // Update remote tracking refs - sync refs/remotes/<remote>/* with what remote has
