@@ -1766,8 +1766,11 @@ fn printGrepLine(allocator: Allocator, opts: *GrepOptions, display_path: []const
 
 fn printOnlyMatching(allocator: Allocator, opts: *GrepOptions, display_path: []const u8, line: []const u8, line_num: usize, eff_pt: PatternType, platform_impl: *const platform_mod.Platform) !void {
     // Find all matches in the line and print each one
+    // Git uses a running column counter (cno) that starts at first_match_start + 1
+    // and after each match adds match.rm_eo (relative end) to cno.
     for (opts.patterns.items) |pat| {
         var search_start: usize = 0;
+        var cno: ?usize = null; // running column number, git-compatible
         while (search_start < line.len) {
             if (eff_pt == .fixed) {
                 const pos = if (opts.case_insensitive)
@@ -1777,9 +1780,15 @@ fn printOnlyMatching(allocator: Allocator, opts: *GrepOptions, display_path: []c
 
                 if (pos) |p| {
                     const actual_pos = search_start + p;
-                    const col = actual_pos + 1;
+                    // Git column: first match = rm_so + 1, subsequent = cno (accumulated)
+                    if (cno == null) {
+                        cno = actual_pos + 1;
+                    }
+                    const col = cno.?;
                     const matched_text = line[actual_pos .. actual_pos + pat.len];
                     try printGrepLine(allocator, opts, display_path, matched_text, line_num, ':', col, platform_impl);
+                    // After match: cno += rm_eo (relative end from search start)
+                    cno.? += p + pat.len;
                     search_start = actual_pos + pat.len;
                     if (pat.len == 0) search_start += 1;
                 } else break;
@@ -1787,9 +1796,13 @@ fn printOnlyMatching(allocator: Allocator, opts: *GrepOptions, display_path: []c
                 if (regexMatchRange(line[search_start..], pat, eff_pt == .extended, opts.case_insensitive, allocator)) |range| {
                     const actual_start = search_start + range.start;
                     const actual_end = search_start + range.end;
-                    const col = actual_start + 1;
+                    if (cno == null) {
+                        cno = actual_start + 1;
+                    }
+                    const col = cno.?;
                     const matched_text = line[actual_start..actual_end];
                     try printGrepLine(allocator, opts, display_path, matched_text, line_num, ':', col, platform_impl);
+                    cno.? += range.end;
                     search_start = actual_end;
                     if (range.start == range.end) search_start += 1;
                 } else break;
