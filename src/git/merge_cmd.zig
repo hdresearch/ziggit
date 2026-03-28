@@ -380,12 +380,38 @@ pub fn cmdMerge(allocator: Allocator, args: *pm.ArgIterator, platform_impl: *con
     }
 
     for (opts.targets.items) |target| {
-        const hash = resolveToCommitHash(git_path, target, allocator, platform_impl) catch {
-            const msg = std.fmt.allocPrint(allocator, "merge: {s} - not something we can merge\n", .{target}) catch "";
-            if (msg.len > 0) {
-                defer allocator.free(msg);
-                writeStderr(platform_impl, msg);
+        // Special handling for FETCH_HEAD
+        if (std.mem.eql(u8, target, "FETCH_HEAD")) {
+            const fh_path = std.fmt.allocPrint(allocator, "{s}/FETCH_HEAD", .{git_path}) catch {
+                writeStderr(platform_impl, "merge: FETCH_HEAD - not something we can merge\n");
+                std.process.exit(1);
+            };
+            defer allocator.free(fh_path);
+            const fh_content = std.fs.cwd().readFileAlloc(allocator, fh_path, 10 * 1024 * 1024) catch {
+                writeStderr(platform_impl, "merge: FETCH_HEAD - not something we can merge\n");
+                std.process.exit(1);
+            };
+            defer allocator.free(fh_content);
+
+            var found_merge = false;
+            var fh_lines = std.mem.splitScalar(u8, fh_content, '\n');
+            while (fh_lines.next()) |fh_line| {
+                if (fh_line.len < 40) continue;
+                if (std.mem.indexOf(u8, fh_line, "not-for-merge") != null) continue;
+                const fh_hash = allocator.dupe(u8, fh_line[0..40]) catch continue;
+                target_hashes.append(fh_hash) catch {};
+                found_merge = true;
             }
+            if (!found_merge) {
+                writeStderr(platform_impl, "fatal: No remote for the current branch.\n");
+                std.process.exit(128);
+            }
+            continue;
+        }
+
+        const hash = resolveToCommitHash(git_path, target, allocator, platform_impl) catch {
+            // Try suggesting remote refnames
+            suggestRemoteRef(git_path, target, allocator, platform_impl);
             std.process.exit(1);
         };
         target_hashes.append(hash) catch {};
@@ -618,6 +644,49 @@ fn isTruthy(val: []const u8) bool {
         std.mem.eql(u8, val, "1");
 }
 
+fn invokeEditor(git_path: []const u8, message: []const u8, allocator: Allocator) ?[]u8 {
+    // Write message to MERGE_MSG file
+    const merge_msg_path = std.fmt.allocPrint(allocator, "{s}/MERGE_MSG", .{git_path}) catch return null;
+    defer allocator.free(merge_msg_path);
+
+    // Write the message
+    var f = std.fs.cwd().createFile(merge_msg_path, .{}) catch return null;
+    f.writeAll(message) catch {
+        f.close();
+        return null;
+    };
+    f.close();
+
+    // Get editor
+    const editor = std.process.getEnvVarOwned(allocator, "GIT_EDITOR") catch
+        std.process.getEnvVarOwned(allocator, "VISUAL") catch
+        std.process.getEnvVarOwned(allocator, "EDITOR") catch
+        (allocator.dupe(u8, "vi") catch return null);
+    defer allocator.free(editor);
+
+    // Run editor using shell
+    const cmd = std.fmt.allocPrint(allocator, "{s} \"{s}\"", .{ editor, merge_msg_path }) catch return null;
+    defer allocator.free(cmd);
+
+    const cmd_z = allocator.dupeZ(u8, cmd) catch return null;
+    defer allocator.free(cmd_z);
+
+    const argv = [_][]const u8{ "/bin/sh", "-c", cmd_z };
+    var child = std.process.Child.init(&argv, allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+
+    child.spawn() catch return null;
+    const result = child.wait() catch return null;
+
+    if (result.Exited == 0) {
+        // Read edited file
+        return std.fs.cwd().readFileAlloc(allocator, merge_msg_path, 10 * 1024 * 1024) catch null;
+    }
+    return null;
+}
+
 fn readStdinAll(allocator: Allocator) ![]u8 {
     var result = std.array_list.Managed(u8).init(allocator);
     errdefer result.deinit();
@@ -646,6 +715,98 @@ fn resolveToCommitHash(git_path: []const u8, target: []const u8, allocator: Allo
     }
 
     return error.NotFound;
+}
+
+fn suggestRemoteRef(git_path: []const u8, target: []const u8, allocator: Allocator, platform_impl: *const pm.Platform) void {
+    const msg = std.fmt.allocPrint(allocator, "merge: {s} - not something we can merge\n", .{target}) catch "";
+    if (msg.len > 0) {
+        defer allocator.free(msg);
+        writeStderr(platform_impl, msg);
+    }
+
+    // Look for matching refs in remotes
+    const remotes_dir = std.fmt.allocPrint(allocator, "{s}/refs/remotes", .{git_path}) catch return;
+    defer allocator.free(remotes_dir);
+
+    var found_any = false;
+
+    if (std.fs.cwd().openDir(remotes_dir, .{ .iterate = true })) |dir_val| {
+        var dir = dir_val;
+        defer dir.close();
+
+        var it = dir.iterate();
+        while (it.next() catch null) |entry| {
+        if (entry.kind != .directory) continue;
+        const remote_name = entry.name;
+        // Check if remote_name/target exists
+        const ref_path = std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}/{s}", .{ git_path, remote_name, target }) catch continue;
+        defer allocator.free(ref_path);
+
+        if (std.fs.cwd().access(ref_path, .{})) |_| {
+            // Also check if there's a local branch with same name (ambiguity)
+            const local_path = std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}/{s}", .{ git_path, remote_name, target }) catch continue;
+            defer allocator.free(local_path);
+            const is_ambiguous = if (std.fs.cwd().access(local_path, .{})) |_| true else |_| false;
+
+            if (!found_any) {
+                writeStderr(platform_impl, "\nDid you mean one of these?\n");
+                found_any = true;
+            }
+            if (is_ambiguous) {
+                const hint = std.fmt.allocPrint(allocator, "\tremotes/{s}/{s}\n", .{ remote_name, target }) catch continue;
+                defer allocator.free(hint);
+                writeStderr(platform_impl, hint);
+            } else {
+                const hint = std.fmt.allocPrint(allocator, "\t{s}/{s}\n", .{ remote_name, target }) catch continue;
+                defer allocator.free(hint);
+                writeStderr(platform_impl, hint);
+            }
+        } else |_| {}
+    }
+    } else |_| {} // openDir failed
+
+    // Also check packed-refs for remote refs
+    if (!found_any) {
+        const packed_path = std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_path}) catch return;
+        defer allocator.free(packed_path);
+        const packed_content = std.fs.cwd().readFileAlloc(allocator, packed_path, 10 * 1024 * 1024) catch return;
+        defer allocator.free(packed_content);
+
+        const search = std.fmt.allocPrint(allocator, "refs/remotes/", .{}) catch return;
+        defer allocator.free(search);
+        const suffix = std.fmt.allocPrint(allocator, "/{s}", .{target}) catch return;
+        defer allocator.free(suffix);
+
+        var lines = std.mem.splitScalar(u8, packed_content, '\n');
+        while (lines.next()) |line| {
+            if (line.len == 0 or line[0] == '#' or line[0] == '^') continue;
+            // Format: hash SP ref
+            if (line.len > 40) {
+                const ref = std.mem.trimLeft(u8, line[41..], " ");
+                if (std.mem.startsWith(u8, ref, "refs/remotes/") and std.mem.endsWith(u8, ref, suffix)) {
+                    if (!found_any) {
+                        writeStderr(platform_impl, "\nDid you mean one of these?\n");
+                        found_any = true;
+                    }
+                    // Check ambiguity
+                    const remote_ref = ref["refs/remotes/".len..];
+                    const local_check = std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, remote_ref }) catch continue;
+                    defer allocator.free(local_check);
+                    const is_ambiguous = if (std.fs.cwd().access(local_check, .{})) |_| true else |_| false;
+
+                    if (is_ambiguous) {
+                        const hint = std.fmt.allocPrint(allocator, "\tremotes/{s}\n", .{remote_ref}) catch continue;
+                        defer allocator.free(hint);
+                        writeStderr(platform_impl, hint);
+                    } else {
+                        const hint = std.fmt.allocPrint(allocator, "\t{s}\n", .{remote_ref}) catch continue;
+                        defer allocator.free(hint);
+                        writeStderr(platform_impl, hint);
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn peelToCommit(git_path: []const u8, hash: []u8, allocator: Allocator, platform_impl: *const pm.Platform) ![]u8 {
@@ -975,7 +1136,12 @@ fn doSquashMerge(git_path: []const u8, current_hash: []const u8, target_hash: []
     defer if (merge_base) |b| allocator.free(b);
 
     const base = merge_base orelse current_hash;
-    const conflicts = doTreeMerge(git_path, base, current_hash, target_hash, allocator, platform_impl);
+    var conflict_files = std.array_list.Managed([]const u8).init(allocator);
+    defer {
+        for (conflict_files.items) |f| allocator.free(f);
+        conflict_files.deinit();
+    }
+    const conflicts = doTreeMergeTracked(git_path, base, current_hash, target_hash, &conflict_files, allocator, platform_impl);
 
     // Show diffstat
     const show_stat = opts.stat orelse true;
@@ -984,7 +1150,12 @@ fn doSquashMerge(git_path: []const u8, current_hash: []const u8, target_hash: []
     }
 
     // Write SQUASH_MSG
-    const squash_msg = buildSquashMsg(git_path, current_hash, merge_target, allocator, platform_impl);
+    var squash_msg_buf = buildSquashMsgBuf(git_path, current_hash, merge_target, allocator, platform_impl);
+    defer squash_msg_buf.deinit();
+    if (conflicts) {
+        appendConflictInfo(&squash_msg_buf, conflict_files.items, opts.cleanup);
+    }
+    const squash_msg = squash_msg_buf.toOwnedSlice() catch "";
     defer if (squash_msg.len > 0) allocator.free(squash_msg);
     if (squash_msg.len > 0) {
         const squash_path = std.fmt.allocPrint(allocator, "{s}/SQUASH_MSG", .{git_path}) catch return;
@@ -1017,15 +1188,20 @@ fn doThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_hash: 
     defer if (merge_base) |b| allocator.free(b);
 
     const base = merge_base orelse current_hash;
-    const conflicts = doTreeMerge(git_path, base, current_hash, target_hash, allocator, platform_impl);
+    var conflict_files = std.array_list.Managed([]const u8).init(allocator);
+    defer {
+        for (conflict_files.items) |f| allocator.free(f);
+        conflict_files.deinit();
+    }
+    const conflicts = doTreeMergeTracked(git_path, base, current_hash, target_hash, &conflict_files, allocator, platform_impl);
 
     const merge_msg = opts.message orelse (buildMergeMessage(merge_target, current_branch, git_path, allocator, platform_impl) catch "Merge");
     const should_free_msg = opts.message == null and !std.mem.eql(u8, merge_msg, "Merge");
     defer if (should_free_msg) allocator.free(@constCast(merge_msg));
 
     if (conflicts) {
-        // Write merge state
-        writeMergeState(git_path, target_hash, merge_msg, allocator, platform_impl);
+        // Write merge state with conflict info
+        writeMergeStateWithConflicts(git_path, target_hash, merge_msg, conflict_files.items, opts.cleanup, allocator, platform_impl);
         writeStderr(platform_impl, "Automatic merge failed; fix conflicts and then commit the result.\n");
         std.process.exit(1);
     }
@@ -1049,7 +1225,26 @@ fn doThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_hash: 
         appendSignoff(&final_msg_buf, allocator);
     }
 
-    const final_msg = if (final_msg_buf.items.len > 0) final_msg_buf.items else merge_msg;
+    var final_msg = if (final_msg_buf.items.len > 0) final_msg_buf.items else merge_msg;
+
+    // If --edit, invoke editor on the message
+    if (opts.edit orelse false) {
+        if (invokeEditor(git_path, final_msg, allocator)) |edited_msg| {
+            // Strip comment lines (starting with #) and trailing whitespace
+            var clean_buf = std.array_list.Managed(u8).init(allocator);
+            var line_iter = std.mem.splitScalar(u8, edited_msg, '\n');
+            while (line_iter.next()) |line| {
+                if (line.len > 0 and line[0] == '#') continue;
+                clean_buf.appendSlice(line) catch {};
+                clean_buf.append('\n') catch {};
+            }
+            // Strip trailing newlines
+            while (clean_buf.items.len > 0 and clean_buf.items[clean_buf.items.len - 1] == '\n') {
+                _ = clean_buf.pop();
+            }
+            final_msg = clean_buf.toOwnedSlice() catch edited_msg;
+        }
+    }
 
     createMergeCommit(git_path, current_hash, target_hash, current_branch, final_msg, allocator, platform_impl);
 
@@ -1136,12 +1331,22 @@ fn doOctopusMerge(git_path: []const u8, current_hash: []const u8, current_branch
     if (opts.no_commit or opts.squash) {
         // Don't create commit, write merge state
         if (opts.squash) {
+            // Build proper squash message matching git log --no-merges ^HEAD targets...
+            var squash_buf = std.array_list.Managed(u8).init(allocator);
+            defer squash_buf.deinit();
+            squash_buf.appendSlice("Squashed commit of the following:\n\n") catch {};
+            // Match git log behavior: walk from last target only
+            if (opts.targets.items.len > 0) {
+                const last_target = opts.targets.items[opts.targets.items.len - 1];
+                buildSquashMsgInto(&squash_buf, git_path, current_hash, last_target, allocator, platform_impl);
+            }
+
             const squash_path = std.fmt.allocPrint(allocator, "{s}/SQUASH_MSG", .{git_path}) catch {
                 allocator.free(head);
                 return;
             };
             defer allocator.free(squash_path);
-            platform_impl.fs.writeFile(squash_path, merge_msg) catch {};
+            platform_impl.fs.writeFile(squash_path, squash_buf.items) catch {};
             writeStdout(platform_impl, "Squash commit -- not updating HEAD\n");
         } else {
             // Write MERGE_HEAD with all target hashes
@@ -1299,8 +1504,17 @@ fn freeTreeMap(map: *TreeFileMap, allocator: Allocator) void {
     map.deinit();
 }
 
+/// Perform 3-way tree merge tracking conflict files. Returns true if conflicts found.
+fn doTreeMergeTracked(git_path: []const u8, base_hash: []const u8, ours_hash: []const u8, theirs_hash: []const u8, conflict_files: *std.array_list.Managed([]const u8), allocator: Allocator, platform_impl: *const pm.Platform) bool {
+    return doTreeMergeImpl(git_path, base_hash, ours_hash, theirs_hash, conflict_files, allocator, platform_impl);
+}
+
 /// Perform 3-way tree merge. Returns true if conflicts found.
 fn doTreeMerge(git_path: []const u8, base_hash: []const u8, ours_hash: []const u8, theirs_hash: []const u8, allocator: Allocator, platform_impl: *const pm.Platform) bool {
+    return doTreeMergeImpl(git_path, base_hash, ours_hash, theirs_hash, null, allocator, platform_impl);
+}
+
+fn doTreeMergeImpl(git_path: []const u8, base_hash: []const u8, ours_hash: []const u8, theirs_hash: []const u8, conflict_files: ?*std.array_list.Managed([]const u8), allocator: Allocator, platform_impl: *const pm.Platform) bool {
     const base_tree = getCommitTree(git_path, base_hash, allocator, platform_impl) catch return true;
     defer allocator.free(base_tree);
     const ours_tree = getCommitTree(git_path, ours_hash, allocator, platform_impl) catch return true;
@@ -1373,6 +1587,7 @@ fn doTreeMerge(git_path: []const u8, base_hash: []const u8, ours_hash: []const u
                     // Merged successfully
                 } else {
                     conflicts = true;
+                    if (conflict_files) |cf| cf.append(allocator.dupe(u8, path) catch path) catch {};
                     writeConflictFile(git_path, path, base_h.?, ours_h.?, theirs_h.?, repo_root, allocator, platform_impl);
                 }
             }
@@ -1388,6 +1603,7 @@ fn doTreeMerge(git_path: []const u8, base_hash: []const u8, ours_hash: []const u
                 // OK
             } else {
                 conflicts = true;
+                if (conflict_files) |cf| cf.append(allocator.dupe(u8, path) catch path) catch {};
                 const msg = std.fmt.allocPrint(allocator, "CONFLICT (add/add): Merge conflict in {s}\n", .{path}) catch "";
                 defer if (msg.len > 0) allocator.free(msg);
                 writeStderr(platform_impl, msg);
@@ -1403,6 +1619,7 @@ fn doTreeMerge(git_path: []const u8, base_hash: []const u8, ours_hash: []const u
             } else {
                 // Modified in ours, deleted in theirs - conflict
                 conflicts = true;
+                if (conflict_files) |cf| cf.append(allocator.dupe(u8, path) catch path) catch {};
                 const msg = std.fmt.allocPrint(allocator, "CONFLICT (modify/delete): {s} deleted in theirs and modified in ours.\n", .{path}) catch "";
                 defer if (msg.len > 0) allocator.free(msg);
                 writeStderr(platform_impl, msg);
@@ -1415,6 +1632,7 @@ fn doTreeMerge(git_path: []const u8, base_hash: []const u8, ours_hash: []const u
             } else {
                 // Modified in theirs, deleted in ours - conflict
                 conflicts = true;
+                if (conflict_files) |cf| cf.append(allocator.dupe(u8, path) catch path) catch {};
                 const msg = std.fmt.allocPrint(allocator, "CONFLICT (modify/delete): {s} deleted in ours and modified in theirs.\n", .{path}) catch "";
                 defer if (msg.len > 0) allocator.free(msg);
                 writeStderr(platform_impl, msg);
@@ -1531,15 +1749,64 @@ fn writeConflictFile(git_path: []const u8, path: []const u8, base_hash: []const 
 
 fn buildMergeMessage(merge_target: []const u8, current_branch: []const u8, git_path: []const u8, allocator: Allocator, platform_impl: *const pm.Platform) ![]u8 {
     _ = platform_impl;
-    const is_tag = isTagRef(git_path, merge_target, allocator);
-    const kind = if (is_tag) "tag" else "branch";
     const short_branch = if (std.mem.startsWith(u8, current_branch, "refs/heads/")) current_branch["refs/heads/".len..] else current_branch;
 
+    // Check if target is branch~N or branch^N format
+    const tilde_pos = std.mem.indexOf(u8, merge_target, "~");
+    const caret_pos = std.mem.indexOf(u8, merge_target, "^");
+    const suffix_pos = if (tilde_pos != null and caret_pos != null) @min(tilde_pos.?, caret_pos.?) else (tilde_pos orelse caret_pos);
+
+    if (suffix_pos) |sp| {
+        const base_name = merge_target[0..sp];
+        // Check if base_name is a branch
+        const is_branch = isBranchRef(git_path, base_name, allocator);
+        if (is_branch) {
+            if (isDefaultBranch(short_branch, allocator)) {
+                return std.fmt.allocPrint(allocator, "Merge branch '{s}' (early part)", .{base_name});
+            } else {
+                return std.fmt.allocPrint(allocator, "Merge branch '{s}' (early part) into {s}", .{ base_name, short_branch });
+            }
+        }
+        // If it's a tag with suffix, use "Merge commit 'target'"
+        if (isTagRef(git_path, base_name, allocator)) {
+            if (isDefaultBranch(short_branch, allocator)) {
+                return std.fmt.allocPrint(allocator, "Merge commit '{s}'", .{merge_target});
+            } else {
+                return std.fmt.allocPrint(allocator, "Merge commit '{s}' into {s}", .{ merge_target, short_branch });
+            }
+        }
+        // Default: "Merge commit 'target'"
+        if (isDefaultBranch(short_branch, allocator)) {
+            return std.fmt.allocPrint(allocator, "Merge commit '{s}'", .{merge_target});
+        } else {
+            return std.fmt.allocPrint(allocator, "Merge commit '{s}' into {s}", .{ merge_target, short_branch });
+        }
+    }
+
+    const is_tag = isTagRef(git_path, merge_target, allocator);
+    const kind = if (is_tag) "tag" else "branch";
     if (isDefaultBranch(short_branch, allocator)) {
         return std.fmt.allocPrint(allocator, "Merge {s} '{s}'", .{ kind, merge_target });
     } else {
         return std.fmt.allocPrint(allocator, "Merge {s} '{s}' into {s}", .{ kind, merge_target, short_branch });
     }
+}
+
+fn isBranchRef(git_path: []const u8, name: []const u8, allocator: Allocator) bool {
+    const branch_path = std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, name }) catch return false;
+    defer allocator.free(branch_path);
+    if (std.fs.cwd().access(branch_path, .{})) |_| return true else |_| {}
+
+    // Check packed-refs
+    const packed_path = std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_path}) catch return false;
+    defer allocator.free(packed_path);
+    const packed_ref = std.fmt.allocPrint(allocator, "refs/heads/{s}", .{name}) catch return false;
+    defer allocator.free(packed_ref);
+    if (std.fs.cwd().readFileAlloc(allocator, packed_path, 10 * 1024 * 1024)) |content| {
+        defer allocator.free(content);
+        return std.mem.indexOf(u8, content, packed_ref) != null;
+    } else |_| {}
+    return false;
 }
 
 fn isTagRef(git_path: []const u8, name: []const u8, allocator: Allocator) bool {
@@ -1621,31 +1888,140 @@ fn buildOctopusMessage(targets: []const []const u8, current_branch: []const u8, 
     return buf.toOwnedSlice();
 }
 
+fn buildSquashMsgBuf(git_path: []const u8, current_hash: []const u8, merge_target: []const u8, allocator: Allocator, platform_impl: *const pm.Platform) std.array_list.Managed(u8) {
+    var buf = std.array_list.Managed(u8).init(allocator);
+    buf.appendSlice("Squashed commit of the following:\n\n") catch {};
+    buildSquashMsgInto(&buf, git_path, current_hash, merge_target, allocator, platform_impl);
+    return buf;
+}
+
 fn buildSquashMsg(git_path: []const u8, current_hash: []const u8, merge_target: []const u8, allocator: Allocator, platform_impl: *const pm.Platform) []const u8 {
     var buf = std.array_list.Managed(u8).init(allocator);
     buf.appendSlice("Squashed commit of the following:\n\n") catch return "";
+    buildSquashMsgInto(&buf, git_path, current_hash, merge_target, allocator, platform_impl);
+    return buf.toOwnedSlice() catch "";
+}
+
+fn buildSquashMsgMultiple(buf: *std.array_list.Managed(u8), git_path: []const u8, _: []const u8, targets: []const []const u8, allocator: Allocator, platform_impl: *const pm.Platform) void {
+    // Walk all targets and collect commits in timestamp-descending order (like git log)
+    // This matches git log --no-merges ^HEAD <targets> behavior
+    const CommitInfo = struct {
+        hash: []const u8,
+        timestamp: i64,
+        data: []const u8,
+    };
+
+    var commits = std.array_list.Managed(CommitInfo).init(allocator);
+    defer {
+        for (commits.items) |ci| {
+            allocator.free(ci.hash);
+            allocator.free(ci.data);
+        }
+        commits.deinit();
+    }
+    var seen = std.StringHashMap(void).init(allocator);
+    defer {
+        var it = seen.iterator();
+        while (it.next()) |e| allocator.free(e.key_ptr.*);
+        seen.deinit();
+    }
+
+    for (targets) |tgt| {
+        const target_hash = resolveToCommitHash(git_path, tgt, allocator, platform_impl) catch continue;
+        defer allocator.free(target_hash);
+
+        var commit_h = allocator.dupe(u8, target_hash) catch continue;
+        var depth: usize = 0;
+        while (depth < 100) : (depth += 1) {
+            if (seen.contains(commit_h)) {
+                allocator.free(commit_h);
+                break;
+            }
+            seen.put(allocator.dupe(u8, commit_h) catch {
+                allocator.free(commit_h);
+                break;
+            }, {}) catch {
+                allocator.free(commit_h);
+                break;
+            };
+
+            const obj = objects.GitObject.load(commit_h, git_path, platform_impl, allocator) catch {
+                allocator.free(commit_h);
+                break;
+            };
+            // Don't defer deinit - we'll store the data
+
+            var parent_count: usize = 0;
+            var first_parent: ?[]const u8 = null;
+            var ts: i64 = 0;
+            {
+                var hl = std.mem.splitScalar(u8, obj.data, '\n');
+                while (hl.next()) |line| {
+                    if (std.mem.startsWith(u8, line, "parent ")) {
+                        parent_count += 1;
+                        if (first_parent == null) first_parent = line["parent ".len..];
+                    }
+                    if (std.mem.startsWith(u8, line, "committer ")) {
+                        // Extract timestamp
+                        if (std.mem.lastIndexOf(u8, line, ">")) |gt| {
+                            const rest = std.mem.trim(u8, line[gt + 1 ..], " ");
+                            if (std.mem.indexOf(u8, rest, " ")) |sp| {
+                                ts = std.fmt.parseInt(i64, rest[0..sp], 10) catch 0;
+                            }
+                        }
+                    }
+                    if (line.len == 0) break;
+                }
+            }
+
+            if (parent_count <= 1) {
+                commits.append(.{
+                    .hash = allocator.dupe(u8, commit_h) catch {
+                        obj.deinit(allocator);
+                        allocator.free(commit_h);
+                        break;
+                    },
+                    .timestamp = ts,
+                    .data = allocator.dupe(u8, obj.data) catch {
+                        obj.deinit(allocator);
+                        allocator.free(commit_h);
+                        break;
+                    },
+                }) catch {};
+            }
+
+            obj.deinit(allocator);
+
+            const next = if (first_parent) |ph| allocator.dupe(u8, ph) catch null else null;
+            allocator.free(commit_h);
+            if (next) |n| {
+                commit_h = n;
+            } else break;
+        }
+    }
+
+    // Sort by timestamp descending (matching git log order)
+    std.mem.sort(CommitInfo, commits.items, {}, struct {
+        fn cmp(_: void, a: CommitInfo, b: CommitInfo) bool {
+            return a.timestamp > b.timestamp;
+        }
+    }.cmp);
+
+    for (commits.items) |ci| {
+        formatCommitForSquash(ci.data, ci.hash, buf, allocator);
+    }
+}
+
+fn buildSquashMsgInto(buf: *std.array_list.Managed(u8), git_path: []const u8, _: []const u8, merge_target: []const u8, allocator: Allocator, platform_impl: *const pm.Platform) void {
 
     // Get target hash
-    const target_hash = resolveToCommitHash(git_path, merge_target, allocator, platform_impl) catch return buf.toOwnedSlice() catch "";
+    const target_hash = resolveToCommitHash(git_path, merge_target, allocator, platform_impl) catch return;
     defer allocator.free(target_hash);
 
-    // Collect ancestors of current (HEAD) to exclude
-    var head_ancestors = std.StringHashMap(void).init(allocator);
-    defer {
-        var it = head_ancestors.iterator();
-        while (it.next()) |e| allocator.free(e.key_ptr.*);
-        head_ancestors.deinit();
-    }
-    collectAncestorSet(git_path, current_hash, &head_ancestors, allocator, platform_impl);
-
-    // Walk from target, excluding commits reachable from HEAD
-    var commit = allocator.dupe(u8, target_hash) catch return buf.toOwnedSlice() catch "";
+    // Walk from target through all ancestors (matching git log --no-merges ^HEAD behavior)
+    var commit = allocator.dupe(u8, target_hash) catch return;
     var depth: usize = 0;
     while (depth < 100) : (depth += 1) {
-        if (head_ancestors.contains(commit)) {
-            allocator.free(commit);
-            break;
-        }
 
         const obj = objects.GitObject.load(commit, git_path, platform_impl, allocator) catch {
             allocator.free(commit);
@@ -1669,7 +2045,7 @@ fn buildSquashMsg(git_path: []const u8, current_hash: []const u8, merge_target: 
 
         if (parent_count <= 1) {
             // Format this commit
-            formatCommitForSquash(obj.data, commit, &buf, allocator);
+            formatCommitForSquash(obj.data, commit, buf, allocator);
         }
 
         allocator.free(commit);
@@ -1678,7 +2054,6 @@ fn buildSquashMsg(git_path: []const u8, current_hash: []const u8, merge_target: 
         } else break;
     }
 
-    return buf.toOwnedSlice() catch "";
 }
 
 fn collectAncestorSet(git_path: []const u8, hash: []const u8, set: *std.StringHashMap(void), allocator: Allocator, platform_impl: *const pm.Platform) void {
@@ -1698,7 +2073,7 @@ fn collectAncestorSet(git_path: []const u8, hash: []const u8, set: *std.StringHa
     }
 }
 
-fn formatCommitForSquash(data: []const u8, hash: []const u8, buf: *std.array_list.Managed(u8), allocator: Allocator) void {
+fn formatCommitForSquash(data: []const u8, hash: []const u8, buf: *std.array_list.Managed(u8), _: Allocator) void {
     const msg_start = std.mem.indexOf(u8, data, "\n\n") orelse return;
     const headers = data[0..msg_start];
     const msg_body = data[msg_start + 2 ..];
@@ -1734,8 +2109,8 @@ fn formatCommitForSquash(data: []const u8, hash: []const u8, buf: *std.array_lis
     buf.append('\n') catch {};
     buf.appendSlice("Date:   ") catch {};
     // Format the date
-    const formatted_date = formatGitDate(author_ts, author_tz, allocator);
-    defer if (formatted_date.len > 0) allocator.free(formatted_date);
+    const formatted_date = formatGitDate(author_ts, author_tz, @import("std").heap.page_allocator);
+    defer if (formatted_date.len > 0) @import("std").heap.page_allocator.free(formatted_date);
     if (formatted_date.len > 0) {
         buf.appendSlice(formatted_date) catch {};
     } else {
@@ -1746,13 +2121,17 @@ fn formatCommitForSquash(data: []const u8, hash: []const u8, buf: *std.array_lis
     buf.append('\n') catch {};
     buf.append('\n') catch {};
 
-    // Indent message body
+    // Indent message body, matching git log format
     var msg_iter = std.mem.splitScalar(u8, msg_body, '\n');
     while (msg_iter.next()) |ml| {
+        // Skip trailing empty lines from the raw commit data
+        if (ml.len == 0 and msg_iter.peek() == null) break;
         buf.appendSlice("    ") catch {};
         buf.appendSlice(ml) catch {};
         buf.append('\n') catch {};
     }
+    // Add trailing blank line (matching git log format)
+    buf.append('\n') catch {};
 }
 
 fn formatGitDate(ts_str: []const u8, tz_str: []const u8, allocator: Allocator) []u8 {
@@ -2143,6 +2522,49 @@ fn showDiffstat(git_path: []const u8, from_hash: []const u8, to_hash: []const u8
             defer allocator.free(line);
             writeStdout(platform_impl, line);
         }
+    }
+}
+
+fn writeMergeStateWithConflicts(git_path: []const u8, target_hash: []const u8, message: []const u8, conflict_files: []const []const u8, cleanup: ?[]const u8, allocator: Allocator, platform_impl: *const pm.Platform) void {
+    const merge_head_path = std.fmt.allocPrint(allocator, "{s}/MERGE_HEAD", .{git_path}) catch return;
+    defer allocator.free(merge_head_path);
+    const head_content = std.fmt.allocPrint(allocator, "{s}\n", .{target_hash}) catch return;
+    defer allocator.free(head_content);
+    platform_impl.fs.writeFile(merge_head_path, head_content) catch {};
+
+    // Build MERGE_MSG with conflict info
+    var msg_buf = std.array_list.Managed(u8).init(allocator);
+    defer msg_buf.deinit();
+    msg_buf.appendSlice(message) catch {};
+    if (message.len > 0 and message[message.len - 1] != '\n') msg_buf.append('\n') catch {};
+    appendConflictInfo(&msg_buf, conflict_files, cleanup);
+
+    const merge_msg_path = std.fmt.allocPrint(allocator, "{s}/MERGE_MSG", .{git_path}) catch return;
+    defer allocator.free(merge_msg_path);
+    platform_impl.fs.writeFile(merge_msg_path, msg_buf.items) catch {};
+
+    const merge_mode_path = std.fmt.allocPrint(allocator, "{s}/MERGE_MODE", .{git_path}) catch return;
+    defer allocator.free(merge_mode_path);
+    platform_impl.fs.writeFile(merge_mode_path, "") catch {};
+}
+
+fn appendConflictInfo(buf: *std.array_list.Managed(u8), conflict_files: []const []const u8, cleanup: ?[]const u8) void {
+    if (conflict_files.len == 0) return;
+
+    const is_scissors = if (cleanup) |c| std.ascii.eqlIgnoreCase(c, "scissors") else false;
+
+    if (is_scissors) {
+        buf.appendSlice("\n# ------------------------ >8 ------------------------\n") catch {};
+        buf.appendSlice("# Do not modify or remove the line above.\n") catch {};
+        buf.appendSlice("# Everything below it will be ignored.\n#\n") catch {};
+        buf.appendSlice("# Conflicts:\n") catch {};
+    } else {
+        buf.appendSlice("\n# Conflicts:\n") catch {};
+    }
+    for (conflict_files) |f| {
+        buf.appendSlice("#\t") catch {};
+        buf.appendSlice(f) catch {};
+        buf.append('\n') catch {};
     }
 }
 
