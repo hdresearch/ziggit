@@ -34815,30 +34815,38 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     }
     try collectCommitsToReplay(git_path, head_hash, merge_base, &commits_to_replay, allocator, platform_impl);
 
-    // Check if already up to date or noop
-    if (!force_rebase) {
-        const is_noop = blk: {
-            if (commits_to_replay.items.len == 0) {
-                if (std.mem.eql(u8, head_hash, onto_hash) or std.mem.eql(u8, merge_base, head_hash))
-                    break :blk true;
-            }
-            // If onto equals the merge base, commits are already on top of it
-            if (std.mem.eql(u8, onto_hash, merge_base))
-                break :blk true;
-            break :blk false;
-        };
-        if (is_noop) {
-            if (!quiet) {
-                try platform_impl.writeStdout("Current branch ");
-                try platform_impl.writeStdout(current_branch_name);
-                try platform_impl.writeStdout(" is up to date.\n");
-            }
-            return;
+    // Detect noop vs fast-forward
+    const is_fast_forward = commits_to_replay.items.len == 0 and
+        !std.mem.eql(u8, head_hash, onto_hash) and
+        std.mem.eql(u8, merge_base, head_hash);
+    const is_noop = blk: {
+        if (is_fast_forward) break :blk false;
+        if (std.mem.eql(u8, head_hash, onto_hash) and commits_to_replay.items.len == 0)
+            break :blk true;
+        // Commits are already based on onto (onto == merge_base)
+        if (std.mem.eql(u8, onto_hash, merge_base))
+            break :blk true;
+        break :blk false;
+    };
+    if (is_noop and !force_rebase) {
+        if (!quiet) {
+            try platform_impl.writeStdout("Current branch ");
+            try platform_impl.writeStdout(current_branch_name);
+            try platform_impl.writeStdout(" is up to date.\n");
         }
+        return;
+    }
+    if (is_noop and force_rebase) {
+        if (!quiet) {
+            try platform_impl.writeStdout("Current branch ");
+            try platform_impl.writeStdout(current_branch_name);
+            try platform_impl.writeStdout(" is up to date, rebase forced.\n");
+        }
+        // Still continue to replay commits with --force
     }
 
     // Check if fast-forward is possible (no commits to replay and onto is ahead)
-    if (commits_to_replay.items.len == 0 and !force_rebase) {
+    if (is_fast_forward and !force_rebase) {
         // Fast-forward: just update branch to onto
         if (!std.mem.eql(u8, current_branch_name, "HEAD")) {
             try refs.updateRef(git_path, current_branch_name, onto_hash, platform_impl, allocator);
