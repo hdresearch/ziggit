@@ -9757,6 +9757,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 var last_val: ?[]u8 = null;
                 var last_scope: []const u8 = "";
                 var last_origin: []const u8 = "";
+                var last_has_equals: bool = true;
                 defer if (last_val) |v| allocator.free(v);
                 for (sources.items) |source| {
                     const content = cfgReadSource(source.path, allocator, platform_impl) orelse continue;
@@ -9771,6 +9772,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                         }
                         if (last_val) |v| allocator.free(v);
                         last_val = try allocator.dupe(u8, cfgEffectiveValue(e));
+                        last_has_equals = e.has_equals;
                         last_scope = source.scope;
                         last_origin = source.path;
                     }
