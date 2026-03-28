@@ -28,10 +28,18 @@ pub fn build(b: *std.Build) void {
         "sh", "-c",
         \\DEST="$1"
         \\if [ -f "$DEST" ] && head -c 2 "$DEST" | grep -q '#!'; then
-        \\  # It's a shell wrapper, extract the real binary path
-        \\  REAL=$(sed -n 's/^exec \(.*\) "$@"/\1/p' "$DEST")
+        \\  # Find the real ELF binary in zig-cache
+        \\  REAL=$(find "$(dirname "$DEST")/../../.zig-cache/o" -name ziggit -type f 2>/dev/null | while read f; do
+        \\    head -c 4 "$f" | grep -q ELF && echo "$f"
+        \\  done | sort -t/ -k1 | tail -1)
+        \\  if [ -z "$REAL" ]; then
+        \\    REAL=$(find "$PWD/.zig-cache/o" -name ziggit -type f 2>/dev/null | while read f; do
+        \\      head -c 4 "$f" | grep -q ELF && echo "$f"
+        \\    done | sort -t/ -k1 | tail -1)
+        \\  fi
         \\  if [ -n "$REAL" ] && [ -f "$REAL" ]; then
         \\    cp "$REAL" "$DEST"
+        \\    chmod +x "$DEST"
         \\  fi
         \\fi
         ,
