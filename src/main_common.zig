@@ -37286,7 +37286,7 @@ fn copyRebaseNotes(git_path: []const u8, old_commit: []const u8, new_commit: []c
         defer tree_obj.deinit(allocator);
 
         // Build new tree with the added entry
-        var new_tree_data = std.ArrayList(u8).init(allocator);
+        var new_tree_data = std.array_list.Managed(u8).init(allocator);
         defer new_tree_data.deinit();
 
         // Copy existing entries
@@ -37319,7 +37319,7 @@ fn copyRebaseNotes(git_path: []const u8, old_commit: []const u8, new_commit: []c
 
         // Write the new tree object
         const new_tree_obj = objects.GitObject{ .type = .tree, .data = new_tree_data.items };
-        const new_tree_hash = new_tree_obj.writeToRepo(git_path, platform_impl, allocator) catch continue;
+        const new_tree_hash = new_tree_obj.store(git_path, platform_impl, allocator) catch continue;
         defer allocator.free(new_tree_hash);
 
         // Create a new notes commit
@@ -37333,7 +37333,7 @@ fn copyRebaseNotes(git_path: []const u8, old_commit: []const u8, new_commit: []c
         var parents: [1][]const u8 = .{notes_commit_hash};
         const notes_commit_obj = objects.createCommitObject(new_tree_hash, &parents, committer_str, committer_str, "Notes added by 'git notes copy'", allocator) catch continue;
         defer notes_commit_obj.deinit(allocator);
-        const new_notes_hash = notes_commit_obj.writeToRepo(git_path, platform_impl, allocator) catch continue;
+        const new_notes_hash = notes_commit_obj.store(git_path, platform_impl, allocator) catch continue;
         defer allocator.free(new_notes_hash);
 
         // Update the notes ref
