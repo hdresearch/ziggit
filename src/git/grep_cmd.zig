@@ -1585,10 +1585,15 @@ fn evaluateBooleanExpr(line: []const u8, opts: *GrepOptions, eff_pt: PatternType
     return evalExprOr(line, opts, eff_pt, allocator, opts.expr_tokens.items, &pos);
 }
 
+
+fn isExprTokenTag(tok: ExprToken, comptime tag: std.meta.Tag(ExprToken)) bool {
+    return std.meta.activeTag(tok) == tag;
+}
+
 fn evalExprOr(line: []const u8, opts: *GrepOptions, eff_pt: PatternType, allocator: Allocator, tokens: []const ExprToken, pos: *usize) bool {
     var result = evalExprAnd(line, opts, eff_pt, allocator, tokens, pos);
     while (pos.* < tokens.len) {
-        if (tokens[pos.*] == .op_or) {
+        if (isExprTokenTag(tokens[pos.*], .op_or)) {
             pos.* += 1;
             const right = evalExprAnd(line, opts, eff_pt, allocator, tokens, pos);
             result = result or right;
@@ -1602,7 +1607,7 @@ fn evalExprOr(line: []const u8, opts: *GrepOptions, eff_pt: PatternType, allocat
 fn evalExprAnd(line: []const u8, opts: *GrepOptions, eff_pt: PatternType, allocator: Allocator, tokens: []const ExprToken, pos: *usize) bool {
     var result = evalExprNot(line, opts, eff_pt, allocator, tokens, pos);
     while (pos.* < tokens.len) {
-        if (tokens[pos.*] == .op_and) {
+        if (isExprTokenTag(tokens[pos.*], .op_and)) {
             pos.* += 1;
             const right = evalExprNot(line, opts, eff_pt, allocator, tokens, pos);
             result = result and right;
@@ -1614,7 +1619,7 @@ fn evalExprAnd(line: []const u8, opts: *GrepOptions, eff_pt: PatternType, alloca
 }
 
 fn evalExprNot(line: []const u8, opts: *GrepOptions, eff_pt: PatternType, allocator: Allocator, tokens: []const ExprToken, pos: *usize) bool {
-    if (pos.* < tokens.len and tokens[pos.*] == .op_not) {
+    if (pos.* < tokens.len and isExprTokenTag(tokens[pos.*], .op_not)) {
         pos.* += 1;
         return !evalExprNot(line, opts, eff_pt, allocator, tokens, pos);
     }
@@ -1631,7 +1636,7 @@ fn evalExprAtom(line: []const u8, opts: *GrepOptions, eff_pt: PatternType, alloc
         .open_paren => {
             pos.* += 1;
             const result = evalExprOr(line, opts, eff_pt, allocator, tokens, pos);
-            if (pos.* < tokens.len and tokens[pos.*] == .close_paren) {
+            if (pos.* < tokens.len and isExprTokenTag(tokens[pos.*], .close_paren)) {
                 pos.* += 1;
             }
             return result;
