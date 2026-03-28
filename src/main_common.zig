@@ -1337,7 +1337,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "refs")) {
         try cmdRefs(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "rebase")) {
-        try nativeCmdRebase(allocator, all_original_args.items, command_index, &platform_impl);
+        try rebase_cmd.nativeCmdRebase(allocator, all_original_args.items, command_index, &platform_impl);
     } else if (std.mem.eql(u8, command, "cherry-pick")) {
         try nativeCmdCherryPick(allocator, all_original_args.items, command_index, &platform_impl);
     } else if (std.mem.eql(u8, command, "revert")) {
