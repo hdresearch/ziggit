@@ -7714,7 +7714,8 @@ fn resolveSourceGitDir(allocator: std.mem.Allocator, source_path: []const u8) ![
     {
         if (std.fs.cwd().createFile("/tmp/zdbg.log", .{})) |df| {
             defer df.close();
-            df.writer().print("src={s} abs={s} gitobj={s} exist={}\n", .{source_path, abs_path, git_objects, git_objs_exist}) catch {};
+            const msg2 = std.fmt.allocPrint(allocator, "src={s} abs={s} gitobj={s} exist={}\n", .{source_path, abs_path, git_objects, git_objs_exist}) catch "";
+            if (msg2.len > 0) { df.writeAll(msg2) catch {}; allocator.free(msg2); }
         } else |_| {}
     }
     if (git_objs_exist) {
