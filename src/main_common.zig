@@ -29475,7 +29475,6 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
         }
     }
     
-    _ = had_diff;
 }
 
 fn resolveToTree(allocator: std.mem.Allocator, ref_str: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) ![]u8 {
