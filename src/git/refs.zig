@@ -369,6 +369,8 @@ pub fn isPseudoRef(ref_name: []const u8) bool {
         if (std.mem.eql(u8, ref_name, pr)) return true;
     }
     // Also treat any ALL_CAPS_WITH_UNDERSCORES name as a pseudoref
+    // But NOT "HEAD" which is a special symbolic ref
+    if (std.mem.eql(u8, ref_name, "HEAD")) return false;
     if (ref_name.len > 0 and ref_name[0] >= 'A' and ref_name[0] <= 'Z') {
         for (ref_name) |c| {
             if (c != '_' and (c < 'A' or c > 'Z')) return false;
