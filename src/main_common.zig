@@ -37394,10 +37394,7 @@ fn nativeCmdCherryPick(allocator: std.mem.Allocator, args: [][]const u8, command
                     continue;
                 };
                 defer allocator.free(new_hash);
-                try refs.updateHEAD(git_path, new_hash, platform_impl, allocator);
-                const cb2 = refs.getCurrentBranch(git_path, platform_impl, allocator) catch continue;
-                defer allocator.free(cb2);
-                if (!std.mem.eql(u8, cb2, "HEAD")) refs.updateRef(git_path, cb2, new_hash, platform_impl, allocator) catch {};
+                try refs.updateHEADCommit(git_path, new_hash, platform_impl, allocator);
             }
         } else {
             const new_hash = cherryPickCommit(git_path, commit_hash, allocator, platform_impl) catch |err| {
@@ -37424,10 +37421,7 @@ fn nativeCmdCherryPick(allocator: std.mem.Allocator, args: [][]const u8, command
                 return err;
             };
             defer allocator.free(new_hash);
-            try refs.updateHEAD(git_path, new_hash, platform_impl, allocator);
-            const cb3 = refs.getCurrentBranch(git_path, platform_impl, allocator) catch return;
-            defer allocator.free(cb3);
-            if (!std.mem.eql(u8, cb3, "HEAD")) try refs.updateRef(git_path, cb3, new_hash, platform_impl, allocator);
+            try refs.updateHEADCommit(git_path, new_hash, platform_impl, allocator);
         }
     }
 }
@@ -37629,10 +37623,7 @@ fn nativeCmdRevert(allocator: std.mem.Allocator, args: [][]const u8, command_ind
         defer co.deinit(allocator);
         const nc = co.store(git_path, platform_impl, allocator) catch continue;
         defer allocator.free(nc);
-        refs.updateHEAD(git_path, nc, platform_impl, allocator) catch {};
-        const cb5 = refs.getCurrentBranch(git_path, platform_impl, allocator) catch null;
-        defer if (cb5) |b| allocator.free(b);
-        if (cb5) |b| if (!std.mem.eql(u8, b, "HEAD")) refs.updateRef(git_path, b, nc, platform_impl, allocator) catch {};
+        refs.updateHEADCommit(git_path, nc, platform_impl, allocator) catch {};
     }
 }
 
