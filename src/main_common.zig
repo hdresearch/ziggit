@@ -4250,10 +4250,10 @@ fn outputDiffEntries(diff_entries: []const DiffStatEntry, diff_output_mode: anyt
                 defer allocator.free(line);
                 try platform_impl.writeStdout(line);
             }
-        }
-    } else if (diff_output_mode == .dirstat) {
-        // Minimal dirstat - empty output for now
-    }
+
+
+
+
     // no_patch, patch_with_stat, patch_with_raw: handled elsewhere or no output
 }
 
