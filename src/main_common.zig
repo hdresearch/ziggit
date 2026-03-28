@@ -26286,7 +26286,7 @@ fn packRefsImpl(allocator: std.mem.Allocator, git_dir: []const u8, prune: bool) 
     }
 }
 
-fn collectLooseRefs(allocator: std.mem.Allocator, git_dir: []const u8, prefix: []const u8, ref_map: *std.StringHashMap([]const u8), loose_refs: *std.array_list.Managed([]const u8)) !void {
+fn collectLooseRefsForPack(allocator: std.mem.Allocator, git_dir: []const u8, prefix: []const u8, ref_map: *std.StringHashMap([]const u8), loose_refs: *std.array_list.Managed([]const u8)) !void {
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, prefix });
     defer allocator.free(dir_path);
 
