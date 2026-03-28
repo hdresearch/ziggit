@@ -11464,7 +11464,7 @@ fn colorToAnsiAlloc(allocator: std.mem.Allocator, color_str: []const u8) ![]u8 {
     var fg_set = false;
     var bg_set = false;
 
-    var attrs = std.array_list.Managed(u8).init(allocator);
+    var attrs = std.array_list.Managed(ColorAttrEntry).init(allocator);
     defer attrs.deinit();
 
     // We need to also track RGB values
