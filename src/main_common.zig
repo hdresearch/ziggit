@@ -9587,6 +9587,44 @@ fn cfgKeyMatches(full_key: []const u8, query: []const u8) bool {
     return false;
 }
 
+fn cfgFormatTypeWithContext(value: []const u8, config_type: ConfigType, _key: []const u8, _path: ?[]const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
+    _ = _key;
+    _ = _path;
+    return cfgFormatType(value, config_type, allocator, platform_impl);
+}
+
+fn cfgFormatTypeSilent(value: []const u8, config_type: ConfigType, allocator: std.mem.Allocator) ![]u8 {
+    switch (config_type) {
+        .bool_type => {
+            const lower = try std.ascii.allocLowerString(allocator, value);
+            defer allocator.free(lower);
+            if (value.len == 0) return try allocator.dupe(u8, "false");
+            if (std.mem.eql(u8, lower, "true") or std.mem.eql(u8, lower, "yes") or std.mem.eql(u8, lower, "on") or std.mem.eql(u8, lower, "1"))
+                return try allocator.dupe(u8, "true");
+            if (std.mem.eql(u8, lower, "false") or std.mem.eql(u8, lower, "no") or std.mem.eql(u8, lower, "off") or std.mem.eql(u8, lower, "0"))
+                return try allocator.dupe(u8, "false");
+            if (std.fmt.parseInt(i64, std.mem.trim(u8, value, " \t"), 10)) |num|
+                return try allocator.dupe(u8, if (num != 0) "true" else "false")
+            else |_| {}
+            return error.InvalidValue;
+        },
+        .int_type => {
+            const trimmed = std.mem.trim(u8, value, " \t");
+            if (trimmed.len == 0) return error.InvalidValue;
+            const last = trimmed[trimmed.len - 1];
+            if (last == 'k' or last == 'K' or last == 'm' or last == 'M' or last == 'g' or last == 'G') {
+                if (std.fmt.parseInt(i64, trimmed[0 .. trimmed.len - 1], 10)) |num| {
+                    const mult: i64 = switch (last) { 'k', 'K' => 1024, 'm', 'M' => 1048576, 'g', 'G' => 1073741824, else => 1 };
+                    return try std.fmt.allocPrint(allocator, "{d}", .{num * mult});
+                } else |_| {}
+            }
+            if (std.fmt.parseInt(i64, trimmed, 10)) |n| return try std.fmt.allocPrint(allocator, "{d}", .{n}) else |_| {}
+            return error.InvalidValue;
+        },
+        else => return try allocator.dupe(u8, value),
+    }
+}
+
 fn cfgFormatType(value: []const u8, config_type: ConfigType, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
     switch (config_type) {
         .bool_type => {
