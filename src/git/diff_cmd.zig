@@ -3678,8 +3678,28 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
             lo.line_prefix = arg["--line-prefix=".len..];
         } else if (std.mem.eql(u8, arg, "--i-still-use-this")) {
             // whatchanged deprecation override
-        } else if (std.mem.startsWith(u8, arg, "--pretty=") or std.mem.startsWith(u8, arg, "--format=")) {
-            // Accept but mostly ignore for now (we implement default/oneline)
+        } else if (std.mem.startsWith(u8, arg, "--format=")) {
+            lo.format_string = arg["--format=".len..];
+            lo.format_is_separator = false;
+        } else if (std.mem.startsWith(u8, arg, "--pretty=format:")) {
+            lo.format_string = arg["--pretty=format:".len..];
+            lo.format_is_separator = true;
+        } else if (std.mem.startsWith(u8, arg, "--pretty=tformat:")) {
+            lo.format_string = arg["--pretty=tformat:".len..];
+            lo.format_is_separator = false;
+        } else if (std.mem.startsWith(u8, arg, "--pretty=")) {
+            const fmt_val = arg["--pretty=".len..];
+            if (std.mem.eql(u8, fmt_val, "oneline") or std.mem.eql(u8, fmt_val, "short")) {
+                lo.oneline = true;
+            } else if (std.mem.eql(u8, fmt_val, "medium") or std.mem.eql(u8, fmt_val, "full") or
+                std.mem.eql(u8, fmt_val, "fuller") or std.mem.eql(u8, fmt_val, "email") or
+                std.mem.eql(u8, fmt_val, "raw") or std.mem.eql(u8, fmt_val, "reference") or
+                std.mem.eql(u8, fmt_val, "mboxrd")) {
+                // Named formats - use default
+            } else if (fmt_val.len > 0) {
+                lo.format_string = fmt_val;
+                lo.format_is_separator = false;
+            }
         } else if (std.mem.eql(u8, arg, "--pretty") or std.mem.eql(u8, arg, "--pretty=medium")) {
             // default format
         } else if (std.mem.eql(u8, arg, "-g") or std.mem.eql(u8, arg, "--walk-reflogs")) {
