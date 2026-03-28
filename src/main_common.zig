@@ -16885,10 +16885,7 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                     if (!matches) continue;
                 }
                 others_found += 1;
-                const display_path_u = if (cwd_prefix.len > 0 and std.mem.startsWith(u8, file, cwd_prefix) and file.len > cwd_prefix.len and file[cwd_prefix.len] == '/')
-                    file[cwd_prefix.len + 1 ..]
-                else
-                    @as([]const u8, file);
+                const display_path_u = @as([]const u8, file);
                 const output = try std.fmt.allocPrint(allocator, "{s}\n", .{display_path_u});
                 defer allocator.free(output);
                 try platform_impl.writeStdout(output);
