@@ -36200,6 +36200,16 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
         branch_arg = positionals.items[1];
     }
 
+    // Resolve "-" to the previous branch name (like @{-1})
+    var resolved_dash_upstream: ?[]u8 = null;
+    defer if (resolved_dash_upstream) |r| allocator.free(r);
+    if (upstream_arg != null and std.mem.eql(u8, upstream_arg.?, "-")) {
+        resolved_dash_upstream = resolvePreviousBranch(git_path, 1, allocator, platform_impl) catch null;
+        if (resolved_dash_upstream) |rb| {
+            upstream_arg = rb;
+        }
+    }
+
     // If branch_arg is given, switch to it first
     if (branch_arg) |branch| {
         // Resolve the branch
