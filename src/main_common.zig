@@ -26243,7 +26243,7 @@ fn packRefsImpl(allocator: std.mem.Allocator, git_dir: []const u8, prune: bool) 
         for (loose_refs.items) |r| allocator.free(r);
         loose_refs.deinit();
     }
-    try collectLooseRefs(allocator, git_dir, "refs", &ref_map, &loose_refs);
+    try collectLooseRefsForPack(allocator, git_dir, "refs", &ref_map, &loose_refs);
 
     // Write packed-refs file
     var output = std.array_list.Managed(u8).init(allocator);
@@ -26299,7 +26299,7 @@ fn collectLooseRefs(allocator: std.mem.Allocator, git_dir: []const u8, prefix: [
         defer allocator.free(child_prefix);
 
         if (entry.kind == .directory) {
-            try collectLooseRefs(allocator, git_dir, child_prefix, ref_map, loose_refs);
+            try collectLooseRefsForPack(allocator, git_dir, child_prefix, ref_map, loose_refs);
         } else if (entry.kind == .file) {
             // Read the file to get the hash
             const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, child_prefix });
