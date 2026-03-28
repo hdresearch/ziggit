@@ -665,7 +665,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                     try platform_impl.writeStderr(delay_msg);
                     // Sleep for deciseconds
                     const ns: u64 = @as(u64, @intCast(autocorrect_val)) * 100_000_000;
-                    std.time.sleep(ns);
+                    std.Thread.sleep(ns);
                     all_original_args.items[command_index] = best;
                     command = best;
                     alias_depth = 0;
