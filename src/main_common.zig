@@ -24177,6 +24177,10 @@ fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, command
     {
         var vidx: usize = 0;
         while (vidx < format.len) {
+            if (format[vidx] == '%' and vidx + 1 < format.len and format[vidx + 1] == '%') {
+                vidx += 2;
+                continue;
+            }
             if (format[vidx] == '%' and vidx + 1 < format.len and format[vidx + 1] == '(') {
                 if (std.mem.indexOfScalar(u8, format[vidx..], ')')) |close| {
                     const field = format[vidx + 2 .. vidx + close];
@@ -24398,8 +24402,13 @@ fn formatRefOutput(allocator: std.mem.Allocator, format: []const u8, refname: []
                 continue;
             }
         }
-        try result.append(format[idx]);
-        idx += 1;
+        if (format[idx] == '%' and idx + 1 < format.len and format[idx + 1] == '%') {
+            try result.append('%');
+            idx += 2;
+        } else {
+            try result.append(format[idx]);
+            idx += 1;
+        }
     }
     return result.toOwnedSlice();
 }
