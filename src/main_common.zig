@@ -9902,7 +9902,8 @@ fn cfgOutputList(content: []const u8, source_path: []const u8, scope: []const u8
         defer out.deinit();
         if (show_scope) { try out.appendSlice(scope); try out.append('\t'); }
         if (show_origin) {
-                        else { try out.appendSlice("file:"); try out.appendSlice(source_path); }
+            try out.appendSlice("file:");
+            try out.appendSlice(source_path);
             try out.append('\t');
         }
         if (name_only) {
