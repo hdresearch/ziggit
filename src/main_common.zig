@@ -9197,7 +9197,45 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         }
     }
 
-    switch (action) {
+    // Process GIT_CONFIG_COUNT environment config pairs
+    {
+        const env_count_str = std.process.getEnvVarOwned(allocator, "GIT_CONFIG_COUNT") catch null;
+        defer if (env_count_str) |ecs| allocator.free(ecs);
+        if (env_count_str) |ecs| {
+            if (std.fmt.parseInt(usize, ecs, 10)) |count| {
+                var env_idx: usize = 0;
+                while (env_idx < count) : (env_idx += 1) {
+                    const key_env_name = std.fmt.allocPrint(allocator, "GIT_CONFIG_KEY_{d}", .{env_idx}) catch continue;
+                    defer allocator.free(key_env_name);
+                    const val_env_name = std.fmt.allocPrint(allocator, "GIT_CONFIG_VALUE_{d}", .{env_idx}) catch continue;
+                    defer allocator.free(val_env_name);
+                    const env_key = std.process.getEnvVarOwned(allocator, key_env_name) catch continue;
+                    defer allocator.free(env_key);
+                    const env_val = std.process.getEnvVarOwned(allocator, val_env_name) catch continue;
+                    defer allocator.free(env_val);
+                    const setting = std.fmt.allocPrint(allocator, "{s}={s}", .{env_key, env_val}) catch continue;
+                    defer allocator.free(setting);
+                    addConfigOverride(allocator, setting) catch continue;
+                }
+            } else |_| {}
+        }
+    }
+
+        // Validate --fixed-value requires value-pattern
+    if (fixed_value) {
+        const has_vpat = sub_value_pattern != null or (positionals.items.len >= 2 and (action == .get or action == .get_all or action == .get_regexp or action == .unset or action == .unset_all)) or (positionals.items.len >= 3 and (action == .set or action == .replace_all));
+        if (!has_vpat) {
+            switch (action) {
+                .get, .get_all, .get_regexp, .set, .replace_all, .unset, .unset_all => {
+                    try platform_impl.writeStderr("error: --fixed-value requires a value argument\n");
+                    std.process.exit(129);
+                },
+                else => {},
+            }
+        }
+    }
+
+        switch (action) {
         .list => {
             for (sources.items) |source| {
                 if (std.mem.eql(u8, source.path, "-")) {
@@ -9208,6 +9246,25 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                     const content = platform_impl.fs.readFile(allocator, source.path) catch continue;
                     defer allocator.free(content);
                     try cfgOutputList(content, source.path, source.scope, null_terminator, show_names, show_origin, show_scope, config_type, allocator, platform_impl);
+                }
+            }
+            // Also list config overrides
+            if (global_config_overrides) |overrides| {
+                for (overrides.items) |ov| {
+                    const term3: []const u8 = if (null_terminator) "\x00" else "\n";
+                    var out3 = std.array_list.Managed(u8).init(allocator);
+                    defer out3.deinit();
+                    if (show_scope) { try out3.appendSlice("command"); try out3.append('\t'); }
+                    if (show_origin) { try out3.appendSlice("command line:"); try out3.append('\t'); }
+                    if (show_names) {
+                        try out3.appendSlice(ov.key);
+                    } else {
+                        try out3.appendSlice(ov.key);
+                        if (null_terminator) try out3.append('\n') else try out3.append('=');
+                        try out3.appendSlice(ov.value);
+                    }
+                    try out3.appendSlice(term3);
+                    try platform_impl.writeStdout(out3.items);
                 }
             }
             return;
@@ -9389,6 +9446,28 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                     }
                     try out.appendSlice(term);
                     try platform_impl.writeStdout(out.items);
+                }
+            }
+            // Also check config overrides (-c and GIT_CONFIG_COUNT)
+            if (global_config_overrides) |overrides| {
+                for (overrides.items) |ov| {
+                    if (!simpleRegexMatch(ov.key, pattern)) continue;
+                    if (vpat) |vp| { if (!simpleRegexMatch(ov.value, vp)) continue; }
+                    found_any = true;
+                    const term2: []const u8 = if (null_terminator) "\x00" else "\n";
+                    var out2 = std.array_list.Managed(u8).init(allocator);
+                    defer out2.deinit();
+                    if (show_scope) { try out2.appendSlice("command"); try out2.append('\t'); }
+                    if (show_origin) { try out2.appendSlice("command line:"); try out2.append('\t'); }
+                    if (show_names) {
+                        try out2.appendSlice(ov.key);
+                    } else {
+                        try out2.appendSlice(ov.key);
+                        try out2.append(if (null_terminator) '\n' else ' ');
+                        try out2.appendSlice(ov.value);
+                    }
+                    try out2.appendSlice(term2);
+                    try platform_impl.writeStdout(out2.items);
                 }
             }
             if (!found_any) std.process.exit(1);
