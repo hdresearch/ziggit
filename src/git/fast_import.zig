@@ -772,7 +772,7 @@ fn State(comptime PlatformType: type) type {
         }
 
         fn copyEntries(self: *Self, entries: *std.StringArrayHashMap(TreeFileEntry), src: []const u8, dest: []const u8) !void {
-            var to_add = std.ArrayList(struct { path: []u8, entry: TreeFileEntry }).init(self.allocator);
+            var to_add = std.array_list.Managed(struct { path: []u8, entry: TreeFileEntry }).init(self.allocator);
             defer to_add.deinit();
 
             var it = entries.iterator();
@@ -1055,14 +1055,9 @@ fn State(comptime PlatformType: type) type {
 
         fn lsCommand(self: *Self, arg: []const u8) !void {
             // ls <path> - list file in current commit context
-            // Just output something reasonable for now
-            const path = unquotePath(arg, self.allocator) catch return;
-            defer {
-                if (path.ptr != arg.ptr) self.allocator.free(path);
-            }
-            // Try to find the file in the last ref's tree
+            _ = self;
+            _ = arg;
             // For now, output nothing (git fast-import ls outputs to stdout)
-            _ = path;
         }
 
         fn catBlob(self: *Self, dataref: []const u8) !void {
