@@ -44,7 +44,10 @@ pub fn parseInfo(cc: []const u8, alloc: std.mem.Allocator) !Info {
     var it = std.mem.splitScalar(u8, cc, '\n');
     while (it.next()) |line| {
         if (body) {
-            if (line.len > 0 and sum.len == 0) sum = line;
+            if (sum.len == 0) {
+                const trimmed = std.mem.trim(u8, line, " \t\r");
+                if (trimmed.len > 0) sum = trimmed;
+            }
             continue;
         }
         if (line.len == 0) {
