@@ -1119,7 +1119,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "fetch")) {
         try fetch_cmd.cmdFetch(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "pull")) {
-        try cmdPull(allocator, &args_iter, &platform_impl);
+        try fetch_cmd.cmdPull(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "push")) {
         try push_cmd.cmdPush(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "describe")) {
