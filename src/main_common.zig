@@ -38735,10 +38735,799 @@ fn cmdFastImport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     };
 }
 
+fn fastExportCollectTree(git_path: []const u8, tree_hash_str: []const u8, prefix: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, result: *std.ArrayList(FastExportEntry)) !void {
+    const tree_obj = objects.GitObject.load(tree_hash_str, git_path, platform_impl, allocator) catch return;
+    defer tree_obj.deinit(allocator);
+
+    var entries = tree_mod.parseTree(tree_obj.data, allocator) catch return;
+    defer {
+        for (entries.items) |*e| e.deinit(allocator);
+        entries.deinit();
+    }
+
+    for (entries.items) |entry| {
+        const full_path = if (prefix.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, entry.name })
+        else
+            try allocator.dupe(u8, entry.name);
+
+        if (entry.type == .tree) {
+            defer allocator.free(full_path);
+            try fastExportCollectTree(git_path, entry.hash, full_path, platform_impl, allocator, result);
+        } else {
+            try result.append(.{
+                .path = full_path,
+                .mode = entry.mode,
+                .blob_hash = entry.hash,
+            });
+        }
+    }
+}
+
+const FastExportEntry = struct {
+    path: []const u8,
+    mode: []const u8,
+    blob_hash: []const u8,
+};
+
 fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
-    _ = args;
-    _ = allocator;
-    _ = platform_impl;
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+
+    // Parse arguments
+    var export_all = false;
+    var signed_tags_mode: enum { strip, abort_mode, warn, verbatim, warn_strip, warn_verbatim } = .strip;
+    var signed_commits_mode: enum { strip, abort_mode, warn, verbatim, warn_strip, warn_verbatim } = .strip;
+    var show_original_ids = false;
+    var mark_tags = false;
+    var reference_excluded_parents = false;
+    var tag_of_filtered: enum { drop, rewrite, abort_mode } = .abort_mode;
+    var reencode_mode: enum { yes, no, abort_mode } = .yes;
+    var import_marks_file: ?[]const u8 = null;
+    var export_marks_file: ?[]const u8 = null;
+    var no_data = false;
+    var use_done_feature = false;
+    var positional_args = std.ArrayList([]const u8).init(allocator);
+    defer positional_args.deinit();
+    var seen_dashdash = false;
+
+    while (args.next()) |arg| {
+        if (seen_dashdash) {
+            try positional_args.append(arg);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--")) {
+            seen_dashdash = true;
+        } else if (std.mem.eql(u8, arg, "--all")) {
+            export_all = true;
+        } else if (std.mem.eql(u8, arg, "--show-original-ids")) {
+            show_original_ids = true;
+        } else if (std.mem.eql(u8, arg, "--mark-tags")) {
+            mark_tags = true;
+        } else if (std.mem.eql(u8, arg, "--reference-excluded-parents")) {
+            reference_excluded_parents = true;
+        } else if (std.mem.eql(u8, arg, "--no-data")) {
+            no_data = true;
+        } else if (std.mem.eql(u8, arg, "--use-done-feature")) {
+            use_done_feature = true;
+        } else if (std.mem.startsWith(u8, arg, "--signed-tags=")) {
+            const val = arg["--signed-tags=".len..];
+            if (std.mem.eql(u8, val, "abort")) signed_tags_mode = .abort_mode
+            else if (std.mem.eql(u8, val, "verbatim")) signed_tags_mode = .verbatim
+            else if (std.mem.eql(u8, val, "warn-verbatim")) signed_tags_mode = .warn_verbatim
+            else if (std.mem.eql(u8, val, "strip")) signed_tags_mode = .strip
+            else if (std.mem.eql(u8, val, "warn")) signed_tags_mode = .warn
+            else if (std.mem.eql(u8, val, "warn-strip")) signed_tags_mode = .warn_strip;
+        } else if (std.mem.startsWith(u8, arg, "--signed-commits=")) {
+            const val = arg["--signed-commits=".len..];
+            if (std.mem.eql(u8, val, "abort")) signed_commits_mode = .abort_mode
+            else if (std.mem.eql(u8, val, "verbatim")) signed_commits_mode = .verbatim
+            else if (std.mem.eql(u8, val, "warn-verbatim")) signed_commits_mode = .warn_verbatim
+            else if (std.mem.eql(u8, val, "strip")) signed_commits_mode = .strip
+            else if (std.mem.eql(u8, val, "warn")) signed_commits_mode = .warn
+            else if (std.mem.eql(u8, val, "warn-strip")) signed_commits_mode = .warn_strip;
+        } else if (std.mem.startsWith(u8, arg, "--tag-of-filtered-object=")) {
+            const val = arg["--tag-of-filtered-object=".len..];
+            if (std.mem.eql(u8, val, "drop")) tag_of_filtered = .drop
+            else if (std.mem.eql(u8, val, "rewrite")) tag_of_filtered = .rewrite
+            else if (std.mem.eql(u8, val, "abort")) tag_of_filtered = .abort_mode;
+        } else if (std.mem.startsWith(u8, arg, "--reencode=")) {
+            const val = arg["--reencode=".len..];
+            if (std.mem.eql(u8, val, "yes")) reencode_mode = .yes
+            else if (std.mem.eql(u8, val, "no")) reencode_mode = .no
+            else if (std.mem.eql(u8, val, "abort")) reencode_mode = .abort_mode;
+        } else if (std.mem.startsWith(u8, arg, "--import-marks=") or std.mem.startsWith(u8, arg, "--import-marks-if-exists=")) {
+            if (std.mem.startsWith(u8, arg, "--import-marks="))
+                import_marks_file = arg["--import-marks=".len..]
+            else
+                import_marks_file = arg["--import-marks-if-exists=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--export-marks=")) {
+            export_marks_file = arg["--export-marks=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--progress=") or std.mem.startsWith(u8, arg, "--refspec=") or std.mem.startsWith(u8, arg, "--anonymize-map=") or std.mem.eql(u8, arg, "--anonymize") or std.mem.eql(u8, arg, "--full-tree") or std.mem.eql(u8, arg, "--fake-missing-tagger")) {
+            // ignore for now
+        } else if (!std.mem.startsWith(u8, arg, "-") or std.mem.startsWith(u8, arg, "^")) {
+            try positional_args.append(arg);
+        }
+    }
+
+    if (use_done_feature) {
+        try platform_impl.writeStdout("feature done\n");
+    }
+
+    // Determine which refs to export
+    var ref_targets = std.ArrayList([]const u8).init(allocator);
+    defer {
+        for (ref_targets.items) |r| allocator.free(r);
+        ref_targets.deinit();
+    }
+    var excluded_commits = std.StringHashMap(void).init(allocator);
+    defer excluded_commits.deinit();
+
+    if (export_all) {
+        const ref_mgr = refs.RefManager.init(git_path, allocator);
+        const all_refs_info = try ref_mgr.getAllRefsInfo(platform_impl);
+        defer {
+            for (all_refs_info) |ri| {
+                allocator.free(ri.name);
+                allocator.free(ri.hash);
+            }
+            allocator.free(all_refs_info);
+        }
+        for (all_refs_info) |ri| {
+            if (std.mem.eql(u8, ri.name, "HEAD")) continue;
+            try ref_targets.append(try allocator.dupe(u8, ri.name));
+        }
+    }
+
+    // Process positional args
+    for (positional_args.items) |parg| {
+        if (std.mem.startsWith(u8, parg, "^")) {
+            const exc_ref = parg[1..];
+            const exc_hash = resolveRevision(git_path, exc_ref, platform_impl, allocator) catch continue;
+            try excluded_commits.put(exc_hash, {});
+            // Walk back and exclude all ancestors
+            var walk_list = std.ArrayList([]const u8).init(allocator);
+            defer {
+                for (walk_list.items) |w| allocator.free(w);
+                walk_list.deinit();
+            }
+            try walk_list.append(try allocator.dupe(u8, exc_hash));
+            var wi: usize = 0;
+            while (wi < walk_list.items.len and wi < 10000) : (wi += 1) {
+                const wh = walk_list.items[wi];
+                const wobj = objects.GitObject.load(wh, git_path, platform_impl, allocator) catch continue;
+                defer wobj.deinit(allocator);
+                if (wobj.type != .commit) continue;
+                var plines = std.mem.splitScalar(u8, wobj.data, '\n');
+                while (plines.next()) |pline| {
+                    if (pline.len == 0) break;
+                    if (std.mem.startsWith(u8, pline, "parent ")) {
+                        const ph = pline["parent ".len..];
+                        if (!excluded_commits.contains(ph)) {
+                            const phd = try allocator.dupe(u8, ph);
+                            try excluded_commits.put(phd, {});
+                            try walk_list.append(try allocator.dupe(u8, ph));
+                        }
+                    }
+                }
+            }
+        } else if (!export_all) {
+            // Try to find the actual ref name
+            const ref_name = blk: {
+                if (refs.resolveRef(git_path, parg, platform_impl, allocator) catch null) |_rh| {
+                    allocator.free(_rh);
+                    break :blk try allocator.dupe(u8, parg);
+                }
+                const heads_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{parg});
+                if (refs.resolveRef(git_path, heads_ref, platform_impl, allocator) catch null) |_rh| {
+                    allocator.free(_rh);
+                    break :blk heads_ref;
+                }
+                allocator.free(heads_ref);
+                const tags_ref = try std.fmt.allocPrint(allocator, "refs/tags/{s}", .{parg});
+                if (refs.resolveRef(git_path, tags_ref, platform_impl, allocator) catch null) |_rh| {
+                    allocator.free(_rh);
+                    break :blk tags_ref;
+                }
+                allocator.free(tags_ref);
+                break :blk try allocator.dupe(u8, parg);
+            };
+            try ref_targets.append(ref_name);
+        }
+    }
+
+    // Sort refs: branches first, then tags
+    std.sort.block([]const u8, ref_targets.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            const a_is_tag = std.mem.startsWith(u8, a, "refs/tags/");
+            const b_is_tag = std.mem.startsWith(u8, b, "refs/tags/");
+            if (a_is_tag != b_is_tag) return !a_is_tag;
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+
+    // Collect all commits reachable from target refs
+    var all_commits = std.ArrayList([]const u8).init(allocator);
+    defer {
+        for (all_commits.items) |c| allocator.free(c);
+        all_commits.deinit();
+    }
+    var commit_set = std.StringHashMap(void).init(allocator);
+    defer commit_set.deinit();
+
+    // Map ref name -> commit hash
+    var ref_to_commit = std.StringHashMap([]const u8).init(allocator);
+    defer {
+        var vit = ref_to_commit.valueIterator();
+        while (vit.next()) |v| allocator.free(v.*);
+        ref_to_commit.deinit();
+    }
+
+    for (ref_targets.items) |ref_name| {
+        const raw_hash = refs.getRef(git_path, ref_name, platform_impl, allocator) catch continue;
+        defer allocator.free(raw_hash);
+
+        // Resolve tag objects to find commit
+        var commit_hash = try allocator.dupe(u8, raw_hash);
+        var depth: usize = 0;
+        while (depth < 10) : (depth += 1) {
+            const obj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch break;
+            defer obj.deinit(allocator);
+            if (obj.type == .tag) {
+                const target_hash = extractHeaderField(obj.data, "object");
+                if (target_hash.len > 0) {
+                    allocator.free(commit_hash);
+                    commit_hash = try allocator.dupe(u8, target_hash);
+                } else break;
+            } else break;
+        }
+
+        try ref_to_commit.put(ref_name, try allocator.dupe(u8, commit_hash));
+
+        // Walk commits
+        if (!excluded_commits.contains(commit_hash) and !commit_set.contains(commit_hash)) {
+            var walk_stack = std.ArrayList([]const u8).init(allocator);
+            defer {
+                for (walk_stack.items) |w| allocator.free(w);
+                walk_stack.deinit();
+            }
+            try walk_stack.append(try allocator.dupe(u8, commit_hash));
+
+            while (walk_stack.items.len > 0) {
+                const cur = walk_stack.pop();
+                defer allocator.free(cur);
+                if (excluded_commits.contains(cur) or commit_set.contains(cur)) continue;
+                const obj = objects.GitObject.load(cur, git_path, platform_impl, allocator) catch continue;
+                defer obj.deinit(allocator);
+                if (obj.type != .commit) continue;
+
+                const duped = try allocator.dupe(u8, cur);
+                try commit_set.put(duped, {});
+                try all_commits.append(try allocator.dupe(u8, cur));
+
+                var plines = std.mem.splitScalar(u8, obj.data, '\n');
+                while (plines.next()) |pline| {
+                    if (pline.len == 0) break;
+                    if (std.mem.startsWith(u8, pline, "parent ")) {
+                        const ph = pline["parent ".len..];
+                        if (!excluded_commits.contains(ph) and !commit_set.contains(ph)) {
+                            try walk_stack.append(try allocator.dupe(u8, ph));
+                        }
+                    }
+                }
+            }
+        }
+
+        allocator.free(commit_hash);
+    }
+
+    // Reverse to get oldest first (topological order)
+    std.mem.reverse([]const u8, all_commits.items);
+
+    // Assign marks
+    var mark_counter: usize = 0;
+    var commit_to_mark = std.StringHashMap(usize).init(allocator);
+    defer commit_to_mark.deinit();
+    var blob_to_mark = std.StringHashMap(usize).init(allocator);
+    defer blob_to_mark.deinit();
+    var tag_mark_map = std.StringHashMap(usize).init(allocator);
+    defer tag_mark_map.deinit();
+
+    // Import marks
+    if (import_marks_file) |marks_path| {
+        const marks_content = platform_impl.fs.readFile(allocator, marks_path) catch "";
+        defer if (marks_content.len > 0) allocator.free(marks_content);
+        var mlines = std.mem.splitScalar(u8, marks_content, '\n');
+        while (mlines.next()) |mline| {
+            if (mline.len < 2 or mline[0] != ':') continue;
+            if (std.mem.indexOfScalar(u8, mline[1..], ' ')) |sp| {
+                const mark_num = std.fmt.parseInt(usize, mline[1 .. sp + 1], 10) catch continue;
+                if (mark_num > mark_counter) mark_counter = mark_num;
+            }
+        }
+    }
+
+    var output = std.ArrayList(u8).init(allocator);
+    defer output.deinit();
+
+    // Determine which ref each commit belongs to
+    // Build a map: commit_hash -> ref_name for branch refs
+    var commit_to_ref = std.StringHashMap([]const u8).init(allocator);
+    defer commit_to_ref.deinit();
+
+    // For each branch ref, walk its history and assign commits
+    for (ref_targets.items) |ref_name| {
+        if (std.mem.startsWith(u8, ref_name, "refs/tags/")) continue;
+        if (ref_to_commit.get(ref_name)) |tip_hash| {
+            var cur_h = try allocator.dupe(u8, tip_hash);
+            var walk_depth: usize = 0;
+            while (walk_depth < 10000) : (walk_depth += 1) {
+                defer allocator.free(cur_h);
+                if (!commit_set.contains(cur_h)) break;
+                if (!commit_to_ref.contains(cur_h)) {
+                    try commit_to_ref.put(cur_h, ref_name);
+                }
+                const obj = objects.GitObject.load(cur_h, git_path, platform_impl, allocator) catch break;
+                defer obj.deinit(allocator);
+                const parent = extractHeaderField(obj.data, "parent");
+                if (parent.len == 0) break;
+                cur_h = try allocator.dupe(u8, parent);
+            } else {
+                allocator.free(cur_h);
+            }
+        }
+    }
+
+    // Process each commit
+    for (all_commits.items) |commit_hash| {
+        const cobj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch continue;
+        defer cobj.deinit(allocator);
+        if (cobj.type != .commit) continue;
+
+        const tree_hash = extractHeaderField(cobj.data, "tree");
+        const author_line = extractHeaderField(cobj.data, "author");
+        const committer_line = extractHeaderField(cobj.data, "committer");
+        const encoding_field = extractHeaderField(cobj.data, "encoding");
+
+        // Check for gpgsig
+        var has_gpgsig = false;
+        var gpgsig_content = std.ArrayList(u8).init(allocator);
+        defer gpgsig_content.deinit();
+        {
+            var lines_it = std.mem.splitScalar(u8, cobj.data, '\n');
+            var in_gpgsig = false;
+            while (lines_it.next()) |line| {
+                if (line.len == 0 and !in_gpgsig) break;
+                if (std.mem.startsWith(u8, line, "gpgsig ")) {
+                    has_gpgsig = true;
+                    in_gpgsig = true;
+                    try gpgsig_content.appendSlice(line["gpgsig ".len..]);
+                    try gpgsig_content.append('\n');
+                } else if (in_gpgsig and line.len > 0 and line[0] == ' ') {
+                    try gpgsig_content.appendSlice(line[1..]);
+                    try gpgsig_content.append('\n');
+                } else if (in_gpgsig) {
+                    in_gpgsig = false;
+                    if (line.len == 0) break;
+                }
+            }
+        }
+
+        if (has_gpgsig) {
+            switch (signed_commits_mode) {
+                .abort_mode => {
+                    try platform_impl.writeStdout(output.items);
+                    try platform_impl.writeStderr("Error: encountered signed commit\n");
+                    std.process.exit(1);
+                },
+                .warn, .warn_strip => {
+                    const wmsg = try std.fmt.allocPrint(allocator, "Warning: signed commit {s}\n", .{commit_hash});
+                    defer allocator.free(wmsg);
+                    try platform_impl.writeStderr(wmsg);
+                },
+                else => {},
+            }
+        }
+
+        // Get commit message
+        var commit_msg: []const u8 = "";
+        if (std.mem.indexOf(u8, cobj.data, "\n\n")) |blank| {
+            commit_msg = cobj.data[blank + 2 ..];
+        }
+
+        // Collect parents
+        var parents = std.ArrayList([]const u8).init(allocator);
+        defer parents.deinit();
+        {
+            var plines = std.mem.splitScalar(u8, cobj.data, '\n');
+            while (plines.next()) |pline| {
+                if (pline.len == 0) break;
+                if (std.mem.startsWith(u8, pline, "parent ")) {
+                    try parents.append(pline["parent ".len..]);
+                }
+            }
+        }
+
+        // Collect file entries from tree
+        var file_entries = std.ArrayList(FastExportEntry).init(allocator);
+        defer {
+            for (file_entries.items) |fe| allocator.free(fe.path);
+            file_entries.deinit();
+        }
+        try fastExportCollectTree(git_path, tree_hash, "", platform_impl, allocator, &file_entries);
+
+        // Output blobs
+        for (file_entries.items) |fe| {
+            if (!blob_to_mark.contains(fe.blob_hash)) {
+                mark_counter += 1;
+                try blob_to_mark.put(fe.blob_hash, mark_counter);
+
+                try output.appendSlice("blob\n");
+                const mark_str = try std.fmt.allocPrint(allocator, "mark :{d}\n", .{mark_counter});
+                defer allocator.free(mark_str);
+                try output.appendSlice(mark_str);
+
+                if (show_original_ids) {
+                    const oid_str = try std.fmt.allocPrint(allocator, "original-oid {s}\n", .{fe.blob_hash});
+                    defer allocator.free(oid_str);
+                    try output.appendSlice(oid_str);
+                }
+
+                if (no_data) {
+                    try output.appendSlice("data 0\n\n");
+                } else {
+                    const blob_obj = objects.GitObject.load(fe.blob_hash, git_path, platform_impl, allocator) catch {
+                        try output.appendSlice("data 0\n\n");
+                        continue;
+                    };
+                    defer blob_obj.deinit(allocator);
+                    const data_header = try std.fmt.allocPrint(allocator, "data {d}\n", .{blob_obj.data.len});
+                    defer allocator.free(data_header);
+                    try output.appendSlice(data_header);
+                    try output.appendSlice(blob_obj.data);
+                    try output.append('\n');
+                }
+            }
+        }
+
+        // Find the ref for this commit
+        const actual_ref = commit_to_ref.get(commit_hash) orelse blk: {
+            for (ref_targets.items) |rn| {
+                if (!std.mem.startsWith(u8, rn, "refs/tags/")) break :blk rn;
+            }
+            break :blk "refs/heads/main";
+        };
+
+        // Assign mark
+        mark_counter += 1;
+        const commit_mark = mark_counter;
+        const ch_dup = try allocator.dupe(u8, commit_hash);
+        try commit_to_mark.put(ch_dup, commit_mark);
+
+        // Output commit header
+        const commit_line = try std.fmt.allocPrint(allocator, "commit {s}\n", .{actual_ref});
+        defer allocator.free(commit_line);
+        try output.appendSlice(commit_line);
+
+        const cmark_str = try std.fmt.allocPrint(allocator, "mark :{d}\n", .{commit_mark});
+        defer allocator.free(cmark_str);
+        try output.appendSlice(cmark_str);
+
+        if (show_original_ids) {
+            const oid_str = try std.fmt.allocPrint(allocator, "original-oid {s}\n", .{commit_hash});
+            defer allocator.free(oid_str);
+            try output.appendSlice(oid_str);
+        }
+
+        // Output gpgsig for verbatim modes
+        if (has_gpgsig and (signed_commits_mode == .verbatim or signed_commits_mode == .warn_verbatim)) {
+            // Output as "gpgsig <hash-algo> <sig-type>" header
+            // Actually the format is different - need to determine the sig type
+            // For now output as-is
+            const gpgsig_trimmed = std.mem.trimRight(u8, gpgsig_content.items, "\n");
+            _ = gpgsig_trimmed;
+            // Detect signature type
+            var sig_type: []const u8 = "openpgp";
+            if (std.mem.indexOf(u8, gpgsig_content.items, "SSH SIGNATURE") != null) {
+                sig_type = "ssh";
+            } else if (std.mem.indexOf(u8, gpgsig_content.items, "SIGNED MESSAGE") != null) {
+                sig_type = "x509";
+            }
+            const sig_line = try std.fmt.allocPrint(allocator, "gpgsig sha1 {s}\n", .{sig_type});
+            defer allocator.free(sig_line);
+            try output.appendSlice(sig_line);
+        }
+
+        // Encoding
+        if (encoding_field.len > 0 and reencode_mode == .no) {
+            const enc_line = try std.fmt.allocPrint(allocator, "encoding {s}\n", .{encoding_field});
+            defer allocator.free(enc_line);
+            try output.appendSlice(enc_line);
+        }
+
+        const author_str = try std.fmt.allocPrint(allocator, "author {s}\n", .{author_line});
+        defer allocator.free(author_str);
+        try output.appendSlice(author_str);
+
+        const committer_str = try std.fmt.allocPrint(allocator, "committer {s}\n", .{committer_line});
+        defer allocator.free(committer_str);
+        try output.appendSlice(committer_str);
+
+        // Commit message
+        var msg_with_nl = commit_msg;
+        var msg_needs_free = false;
+        if (msg_with_nl.len > 0 and msg_with_nl[msg_with_nl.len - 1] != '\n') {
+            msg_with_nl = try std.fmt.allocPrint(allocator, "{s}\n", .{commit_msg});
+            msg_needs_free = true;
+        }
+        defer if (msg_needs_free) allocator.free(msg_with_nl);
+
+        const data_line = try std.fmt.allocPrint(allocator, "data {d}\n", .{msg_with_nl.len});
+        defer allocator.free(data_line);
+        try output.appendSlice(data_line);
+        try output.appendSlice(msg_with_nl);
+
+        // from (first parent)
+        if (parents.items.len > 0) {
+            const parent_hash = parents.items[0];
+            if (commit_to_mark.get(parent_hash)) |pm| {
+                const from_str = try std.fmt.allocPrint(allocator, "from :{d}\n", .{pm});
+                defer allocator.free(from_str);
+                try output.appendSlice(from_str);
+            } else if (reference_excluded_parents and excluded_commits.contains(parent_hash)) {
+                const from_str = try std.fmt.allocPrint(allocator, "from {s}\n", .{parent_hash});
+                defer allocator.free(from_str);
+                try output.appendSlice(from_str);
+            }
+        }
+
+        // merge parents
+        if (parents.items.len > 1) {
+            for (parents.items[1..]) |parent_hash| {
+                if (commit_to_mark.get(parent_hash)) |pm| {
+                    const merge_str = try std.fmt.allocPrint(allocator, "merge :{d}\n", .{pm});
+                    defer allocator.free(merge_str);
+                    try output.appendSlice(merge_str);
+                } else if (reference_excluded_parents and excluded_commits.contains(parent_hash)) {
+                    const merge_str = try std.fmt.allocPrint(allocator, "merge {s}\n", .{parent_hash});
+                    defer allocator.free(merge_str);
+                    try output.appendSlice(merge_str);
+                }
+            }
+        }
+
+        // File modifications
+        for (file_entries.items) |fe| {
+            if (blob_to_mark.get(fe.blob_hash)) |bm| {
+                const m_str = try std.fmt.allocPrint(allocator, "M {s} :{d} {s}\n", .{ fe.mode, bm, fe.path });
+                defer allocator.free(m_str);
+                try output.appendSlice(m_str);
+            }
+        }
+
+        try output.append('\n');
+
+        // Flush periodically
+        if (output.items.len > 1024 * 1024) {
+            try platform_impl.writeStdout(output.items);
+            output.clearRetainingCapacity();
+        }
+    }
+
+    // Output tags
+    for (ref_targets.items) |ref_name| {
+        if (!std.mem.startsWith(u8, ref_name, "refs/tags/")) continue;
+
+        const raw_hash = refs.getRef(git_path, ref_name, platform_impl, allocator) catch continue;
+        defer allocator.free(raw_hash);
+
+        const tag_obj = objects.GitObject.load(raw_hash, git_path, platform_impl, allocator) catch {
+            // Lightweight tag
+            if (commit_to_mark.get(raw_hash)) |cm| {
+                const reset_str = try std.fmt.allocPrint(allocator, "reset {s}\nfrom :{d}\n\n", .{ ref_name, cm });
+                defer allocator.free(reset_str);
+                try output.appendSlice(reset_str);
+            }
+            continue;
+        };
+        defer tag_obj.deinit(allocator);
+
+        if (tag_obj.type == .tag) {
+            const tag_target = extractHeaderField(tag_obj.data, "object");
+            const tag_type = extractHeaderField(tag_obj.data, "type");
+            _ = tag_type;
+            const tagger_line = extractHeaderField(tag_obj.data, "tagger");
+            const tag_short_name = if (std.mem.startsWith(u8, ref_name, "refs/tags/"))
+                ref_name["refs/tags/".len..]
+            else
+                ref_name;
+
+            // Check for signature
+            var has_signature = false;
+            var tag_msg: []const u8 = "";
+            var tag_sig: []const u8 = "";
+            if (std.mem.indexOf(u8, tag_obj.data, "\n\n")) |blank| {
+                const body = tag_obj.data[blank + 2 ..];
+                if (std.mem.indexOf(u8, body, "-----BEGIN PGP SIGNATURE-----")) |sig_start| {
+                    has_signature = true;
+                    tag_msg = body[0..sig_start];
+                    tag_sig = body[sig_start..];
+                } else if (std.mem.indexOf(u8, body, "-----BEGIN PGP MESSAGE-----")) |sig_start| {
+                    has_signature = true;
+                    tag_msg = body[0..sig_start];
+                    tag_sig = body[sig_start..];
+                } else if (std.mem.indexOf(u8, body, "-----BEGIN SSH SIGNATURE-----")) |sig_start| {
+                    has_signature = true;
+                    tag_msg = body[0..sig_start];
+                    tag_sig = body[sig_start..];
+                } else if (std.mem.indexOf(u8, body, "-----BEGIN SIGNED MESSAGE-----")) |sig_start| {
+                    has_signature = true;
+                    tag_msg = body[0..sig_start];
+                    tag_sig = body[sig_start..];
+                } else {
+                    tag_msg = body;
+                }
+            }
+
+            if (has_signature) {
+                switch (signed_tags_mode) {
+                    .abort_mode => {
+                        const emsg = try std.fmt.allocPrint(allocator, "Error: encountered signed tag {s}\n", .{tag_short_name});
+                        defer allocator.free(emsg);
+                        try platform_impl.writeStdout(output.items);
+                        try platform_impl.writeStderr(emsg);
+                        std.process.exit(1);
+                    },
+                    .warn, .warn_strip => {
+                        const wmsg = try std.fmt.allocPrint(allocator, "Warning: signed tag {s}\n", .{tag_short_name});
+                        defer allocator.free(wmsg);
+                        try platform_impl.writeStderr(wmsg);
+                    },
+                    .warn_verbatim => {
+                        const wmsg = try std.fmt.allocPrint(allocator, "Warning: exporting signed tag {s}\n", .{tag_short_name});
+                        defer allocator.free(wmsg);
+                        try platform_impl.writeStderr(wmsg);
+                    },
+                    else => {},
+                }
+            }
+
+            // Check if tag target is in export set
+            const target_in_set = commit_to_mark.contains(tag_target);
+
+            if (!target_in_set) {
+                switch (tag_of_filtered) {
+                    .drop => continue,
+                    .rewrite => {
+                        const tag_line2 = try std.fmt.allocPrint(allocator, "tag {s}\n", .{tag_short_name});
+                        defer allocator.free(tag_line2);
+                        try output.appendSlice(tag_line2);
+
+                        if (mark_tags) {
+                            mark_counter += 1;
+                            try tag_mark_map.put(ref_name, mark_counter);
+                            const tm_str = try std.fmt.allocPrint(allocator, "mark :{d}\n", .{mark_counter});
+                            defer allocator.free(tm_str);
+                            try output.appendSlice(tm_str);
+                        }
+
+                        const from_str2 = try std.fmt.allocPrint(allocator, "from {s}\n", .{tag_target});
+                        defer allocator.free(from_str2);
+                        try output.appendSlice(from_str2);
+
+                        if (tagger_line.len > 0) {
+                            const tagger_str = try std.fmt.allocPrint(allocator, "tagger {s}\n", .{tagger_line});
+                            defer allocator.free(tagger_str);
+                            try output.appendSlice(tagger_str);
+                        }
+
+                        const full_msg2 = if (has_signature and (signed_tags_mode == .verbatim or signed_tags_mode == .warn_verbatim))
+                            try std.fmt.allocPrint(allocator, "{s}{s}", .{ tag_msg, tag_sig })
+                        else
+                            try allocator.dupe(u8, tag_msg);
+                        defer allocator.free(full_msg2);
+                        const data_str2 = try std.fmt.allocPrint(allocator, "data {d}\n{s}\n", .{ full_msg2.len, full_msg2 });
+                        defer allocator.free(data_str2);
+                        try output.appendSlice(data_str2);
+                        continue;
+                    },
+                    .abort_mode => {},
+                }
+            }
+
+            // Normal tag output
+            const tag_line3 = try std.fmt.allocPrint(allocator, "tag {s}\n", .{tag_short_name});
+            defer allocator.free(tag_line3);
+            try output.appendSlice(tag_line3);
+
+            if (mark_tags) {
+                mark_counter += 1;
+                try tag_mark_map.put(ref_name, mark_counter);
+                const tm_str = try std.fmt.allocPrint(allocator, "mark :{d}\n", .{mark_counter});
+                defer allocator.free(tm_str);
+                try output.appendSlice(tm_str);
+            }
+
+            if (show_original_ids) {
+                const oid_str = try std.fmt.allocPrint(allocator, "original-oid {s}\n", .{raw_hash});
+                defer allocator.free(oid_str);
+                try output.appendSlice(oid_str);
+            }
+
+            if (commit_to_mark.get(tag_target)) |cm| {
+                const from_str3 = try std.fmt.allocPrint(allocator, "from :{d}\n", .{cm});
+                defer allocator.free(from_str3);
+                try output.appendSlice(from_str3);
+            } else {
+                const from_str3 = try std.fmt.allocPrint(allocator, "from {s}\n", .{tag_target});
+                defer allocator.free(from_str3);
+                try output.appendSlice(from_str3);
+            }
+
+            if (tagger_line.len > 0) {
+                const tagger_str = try std.fmt.allocPrint(allocator, "tagger {s}\n", .{tagger_line});
+                defer allocator.free(tagger_str);
+                try output.appendSlice(tagger_str);
+            }
+
+            const full_msg3 = if (has_signature and (signed_tags_mode == .verbatim or signed_tags_mode == .warn_verbatim))
+                try std.fmt.allocPrint(allocator, "{s}{s}", .{ tag_msg, tag_sig })
+            else
+                try allocator.dupe(u8, tag_msg);
+            defer allocator.free(full_msg3);
+            const data_str3 = try std.fmt.allocPrint(allocator, "data {d}\n{s}\n", .{ full_msg3.len, full_msg3 });
+            defer allocator.free(data_str3);
+            try output.appendSlice(data_str3);
+        } else {
+            // Not a tag object, treat as lightweight
+            if (commit_to_mark.get(raw_hash)) |cm| {
+                const reset_str = try std.fmt.allocPrint(allocator, "reset {s}\nfrom :{d}\n\n", .{ ref_name, cm });
+                defer allocator.free(reset_str);
+                try output.appendSlice(reset_str);
+            }
+        }
+    }
+
+    if (use_done_feature) {
+        try output.appendSlice("done\n");
+    }
+
+    // Write export marks
+    if (export_marks_file) |marks_path| {
+        var marks_buf = std.ArrayList(u8).init(allocator);
+        defer marks_buf.deinit();
+        var bit = blob_to_mark.iterator();
+        while (bit.next()) |entry| {
+            const ml = try std.fmt.allocPrint(allocator, ":{d} {s}\n", .{ entry.value_ptr.*, entry.key_ptr.* });
+            defer allocator.free(ml);
+            try marks_buf.appendSlice(ml);
+        }
+        var cit = commit_to_mark.iterator();
+        while (cit.next()) |entry| {
+            const ml = try std.fmt.allocPrint(allocator, ":{d} {s}\n", .{ entry.value_ptr.*, entry.key_ptr.* });
+            defer allocator.free(ml);
+            try marks_buf.appendSlice(ml);
+        }
+        var tit = tag_mark_map.iterator();
+        while (tit.next()) |entry| {
+            const raw_h = refs.getRef(git_path, entry.key_ptr.*, platform_impl, allocator) catch continue;
+            defer allocator.free(raw_h);
+            const ml = try std.fmt.allocPrint(allocator, ":{d} {s}\n", .{ entry.value_ptr.*, raw_h });
+            defer allocator.free(ml);
+            try marks_buf.appendSlice(ml);
+        }
+        const marks_file = std.fs.cwd().createFile(marks_path, .{}) catch null;
+        if (marks_file) |f| {
+            defer f.close();
+            f.writeAll(marks_buf.items) catch {};
+        }
+    }
+
+    // Flush output
+    try platform_impl.writeStdout(output.items);
 }
 
 fn cmdNotes(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
