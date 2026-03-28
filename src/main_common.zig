@@ -286,7 +286,7 @@ fn findSimilarCommands(allocator: std.mem.Allocator, typo: []const u8, platform_
             return std.mem.lessThan(u8, a.name, b.name);
         }
     }.lt);
-    var result2 = std.array_list.Managed([]const u8).init(allocator);
+    var result2: std.ArrayList([]const u8) = .{};
     var seen2 = std.StringHashMap(void).init(allocator);
     defer seen2.deinit();
     const best = candidates.items[0].dist;
@@ -294,7 +294,7 @@ fn findSimilarCommands(allocator: std.mem.Allocator, typo: []const u8, platform_
         if (c.dist > best + 1) break;
         if (!seen2.contains(c.name)) {
             seen2.put(c.name, {}) catch continue;
-            result2.append(c.name) catch continue;
+            result2.append(allocator, c.name) catch continue;
         }
     }
     return result2.toOwnedSlice(allocator) catch &[_][]const u8{};
