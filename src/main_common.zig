@@ -10211,6 +10211,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 var last_scope: []const u8 = "";
                 var last_origin: []const u8 = "";
                 var last_has_equals: bool = true;
+                var last_line_number: usize = 0;
                 defer if (last_val) |v| allocator.free(v);
                 for (sources.items) |source| {
                     const content = cfgReadSource(source.path, allocator, platform_impl) orelse continue;
@@ -10226,6 +10227,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                         if (last_val) |v| allocator.free(v);
                         last_val = try allocator.dupe(u8, cfgEffectiveValue(e));
                         last_has_equals = e.has_equals;
+                        last_line_number = e.line_number;
                         last_scope = source.scope;
                         last_origin = source.path;
                     }
@@ -10242,6 +10244,19 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 } else null;
                 defer if (last_val == null) { if (eff) |ev| allocator.free(ev); };
                 if (eff) |v| {
+                    // --path on a boolean variable (no = sign) is an error
+                    if (config_type == .path_type and !last_has_equals) {
+                        if (last_origin.len > 0 and last_line_number > 0) {
+                            const em = try std.fmt.allocPrint(allocator, "fatal: bad config variable '{s}' in file {s} at line {d}\n", .{ key2, last_origin, last_line_number });
+                            defer allocator.free(em);
+                            try platform_impl.writeStderr(em);
+                        } else {
+                            const em = try std.fmt.allocPrint(allocator, "fatal: bad config variable '{s}'\n", .{key2});
+                            defer allocator.free(em);
+                            try platform_impl.writeStderr(em);
+                        }
+                        std.process.exit(128);
+                    }
                     const fmt2 = try cfgFormatTypeWithContext(v, config_type, key2, if (last_origin.len > 0) last_origin else null, allocator, platform_impl);
                     defer allocator.free(fmt2);
                     const term: []const u8 = if (null_terminator) "\x00" else "\n";
@@ -10504,6 +10519,7 @@ fn cfgParseEntries(content: []const u8, entries: *std.array_list.Managed(CfgEntr
                     .full_key = try cfgMakeKey(current_section, k, allocator),
                     .value = try vbuf.toOwnedSlice(),
                     .has_equals = true,
+                    .line_number = line_num,
                 });
             } else {
                 // Inline boolean key (no =) after section header
@@ -10511,6 +10527,7 @@ fn cfgParseEntries(content: []const u8, entries: *std.array_list.Managed(CfgEntr
                     .full_key = try cfgMakeKey(current_section, after, allocator),
                     .value = try allocator.dupe(u8, ""),
                     .has_equals = false,
+                    .line_number = line_num,
                 });
             }
             continue;
@@ -10537,6 +10554,7 @@ fn cfgParseEntries(content: []const u8, entries: *std.array_list.Managed(CfgEntr
                 .full_key = try cfgMakeKey(current_section, k, allocator),
                 .value = try vbuf.toOwnedSlice(),
                 .has_equals = true,
+                .line_number = line_num,
             });
         } else {
             // Boolean key
@@ -10547,6 +10565,7 @@ fn cfgParseEntries(content: []const u8, entries: *std.array_list.Managed(CfgEntr
                     .full_key = try cfgMakeKey(current_section, clean, allocator),
                     .value = try allocator.dupe(u8, ""),
                     .has_equals = false,
+                    .line_number = line_num,
                 });
             }
         }
