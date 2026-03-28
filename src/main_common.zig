@@ -9076,6 +9076,30 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 .list, .get, .get_all, .get_regexp => {
                     _ = platform_impl.fs.readFile(allocator, cf) catch |err| switch (err) {
                         error.FileNotFound => {
+                            if (default_value != null and action == .get) {
+                                const dv = default_value.?;
+                                if (config_type == .expiry_date) {
+                                    const trimmed_dv = std.mem.trim(u8, dv, " \t");
+                                    const valid_exp = std.mem.eql(u8, trimmed_dv, "never") or
+                                        std.mem.eql(u8, trimmed_dv, "false") or
+                                        std.mem.eql(u8, trimmed_dv, "now") or
+                                        (std.fmt.parseInt(i64, trimmed_dv, 10) catch null) != null;
+                                    if (!valid_exp) {
+                                        try platform_impl.writeStderr("error: failed to format default config value\n");
+                                        std.process.exit(1);
+                                    }
+                                }
+                                const fmt_dv = cfgFormatType(dv, config_type, allocator, platform_impl) catch {
+                                    try platform_impl.writeStderr("error: failed to format default config value\n");
+                                    std.process.exit(1);
+                                };
+                                defer allocator.free(fmt_dv);
+                                const dv_term: []const u8 = if (null_terminator) "\x00" else "\n";
+                                const dv_out = try std.fmt.allocPrint(allocator, "{s}{s}", .{ fmt_dv, dv_term });
+                                defer allocator.free(dv_out);
+                                try platform_impl.writeStdout(dv_out);
+                                return;
+                            }
                             const em = try std.fmt.allocPrint(allocator, "fatal: unable to read config file '{s}': No such file or directory\n", .{cf});
                             defer allocator.free(em);
                             try platform_impl.writeStderr(em);
@@ -9086,6 +9110,16 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 },
                 else => {},
             }
+        }
+    }
+
+    if (default_value != null) {
+        switch (action) {
+            .get, .get_all, .get_regexp => {},
+            else => {
+                try platform_impl.writeStderr("error: --default is only applicable to --get\n");
+                std.process.exit(129);
+            },
         }
     }
 
