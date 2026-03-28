@@ -12694,6 +12694,49 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         if (new_hash) |nh| {
             writeReflogEntry(git_path, std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name}) catch "", "0000000000000000000000000000000000000000", nh, "branch: Created from HEAD", allocator, platform_impl) catch {};
         }
+    } else if (std.mem.eql(u8, first_arg.?, "--copy")) {
+        const copy_src = args.next() orelse {
+            try platform_impl.writeStderr("fatal: branch name required\n");
+            std.process.exit(128);
+            unreachable;
+        };
+        const copy_dst = args.next() orelse copy_src;
+        const src_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{copy_src});
+        defer allocator.free(src_ref);
+        const src_hash2 = refs.resolveRef(git_path, src_ref, platform_impl, allocator) catch {
+            const emsg = try std.fmt.allocPrint(allocator, "fatal: no such branch: '{s}'\n", .{copy_src});
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
+            std.process.exit(128);
+            unreachable;
+        };
+        defer allocator.free(src_hash2);
+        const dst_ref_path3 = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, copy_dst });
+        defer allocator.free(dst_ref_path3);
+        try std.fs.cwd().writeFile(.{ .sub_path = dst_ref_path3, .data = src_hash2 });
+    } else if (std.mem.eql(u8, first_arg.?, "--no-sort") or std.mem.startsWith(u8, first_arg.?, "--sort=") or
+        std.mem.eql(u8, first_arg.?, "--sort") or std.mem.startsWith(u8, first_arg.?, "--track=") or
+        std.mem.eql(u8, first_arg.?, "--no-track") or std.mem.eql(u8, first_arg.?, "--no-column") or
+        std.mem.startsWith(u8, first_arg.?, "--column") or std.mem.eql(u8, first_arg.?, "--color") or
+        std.mem.startsWith(u8, first_arg.?, "--color=") or std.mem.eql(u8, first_arg.?, "--no-color") or
+        std.mem.eql(u8, first_arg.?, "-q") or std.mem.eql(u8, first_arg.?, "--quiet") or
+        std.mem.eql(u8, first_arg.?, "-a") or std.mem.eql(u8, first_arg.?, "--all") or
+        std.mem.eql(u8, first_arg.?, "-r") or std.mem.eql(u8, first_arg.?, "--remotes"))
+    {
+        const current_branch4 = refs.getCurrentBranch(git_path, platform_impl, allocator) catch "master";
+        defer allocator.free(current_branch4);
+        var branches4 = try refs.listBranches(git_path, platform_impl, allocator);
+        defer {
+            for (branches4.items) |br4| allocator.free(br4);
+            branches4.deinit();
+        }
+        while (args.next()) |_| {}
+        for (branches4.items) |br4| {
+            const p4 = if (std.mem.eql(u8, br4, current_branch4)) "* " else "  ";
+            const m4 = try std.fmt.allocPrint(allocator, "{s}{s}\n", .{ p4, br4 });
+            defer allocator.free(m4);
+            try platform_impl.writeStdout(m4);
+        }
     } else {
         // Create new branch
         const branch_name = first_arg.?;
