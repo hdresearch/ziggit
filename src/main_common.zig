@@ -8464,7 +8464,10 @@ fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
                 defer allocator.free(bare_msg);
                 try platform_impl.writeStderr(bare_msg);
 
-                try performLocalClone(allocator, burl, bfinal_target, true, false, null, null, platform_impl, false, is_mirror);
+                performLocalClone(allocator, burl, bfinal_target, true, false, null, null, platform_impl, false, is_mirror) catch {
+                    try platform_impl.writeStderr("fatal: repository does not exist\n");
+                    std.process.exit(128);
+                };
                 return;
             }
         }
