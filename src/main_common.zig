@@ -33636,7 +33636,7 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
             }
             // Check for rebase.updateRefs
             if (!has_update_refs) {
-                if (getConfigValue(config_content, "rebase", "updaterefs")) |val| {
+                if (findConfigValue(config_content, "rebase", null, "updaterefs")) |val| {
                     const trimmed = std.mem.trim(u8, val, " \t\r\n");
                     if (std.mem.eql(u8, trimmed, "true")) {
                         has_update_refs = true;
