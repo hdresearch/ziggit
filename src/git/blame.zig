@@ -13,6 +13,9 @@ pub const BlameEntry = struct {
     summary: []const u8,
     is_default: bool,
     is_boundary: bool,
+    previous_hash: [40]u8 = [_]u8{0} ** 40,
+    has_previous: bool = false,
+    orig_line: usize = 0, // original line number in the blamed commit (1-based)
 };
 
 pub const Info = struct {
