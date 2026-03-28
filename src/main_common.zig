@@ -35771,6 +35771,11 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     try collectCommitsToReplay(git_path, head_hash, merge_base, &commits_to_replay, allocator, platform_impl);
 
     // Detect noop vs fast-forward
+    {
+        const dbg = try std.fmt.allocPrint(allocator, "DEBUG: head={s} onto={s} merge_base={s} commits={d}\n", .{ head_hash, onto_hash, merge_base, commits_to_replay.items.len });
+        defer allocator.free(dbg);
+        try platform_impl.writeStderr(dbg);
+    }
     const is_fast_forward = commits_to_replay.items.len == 0 and
         !std.mem.eql(u8, head_hash, onto_hash) and
         std.mem.eql(u8, merge_base, head_hash);
