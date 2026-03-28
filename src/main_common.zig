@@ -38897,7 +38897,7 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             try walk_list.append(try allocator.dupe(u8, exc_hash));
             var wi: usize = 0;
             while (wi < walk_list.items.len and wi < 10000) : (wi += 1) {
-                const wh = walk_list.items[wi];
+                const wh: []const u8 = walk_list.items[wi];
                 const wobj = objects.GitObject.load(wh, git_path, platform_impl, allocator) catch continue;
                 defer wobj.deinit(allocator);
                 if (wobj.type != .commit) continue;
@@ -38997,7 +38997,7 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             try walk_stack.append(try allocator.dupe(u8, commit_hash));
 
             while (walk_stack.items.len > 0) {
-                const cur = walk_stack.pop();
+                const cur = walk_stack.pop() orelse break;
                 defer allocator.free(cur);
                 if (excluded_commits.contains(cur) or commit_set.contains(cur)) continue;
                 const obj = objects.GitObject.load(cur, git_path, platform_impl, allocator) catch continue;
