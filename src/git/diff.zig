@@ -42,6 +42,7 @@ pub const DiffOptions = struct {
     ignore_case: bool = false,
     word_diff: bool = false,
     show_function_names: bool = false,
+    suppress_blank_empty: bool = false,
     
     pub fn default() DiffOptions {
         return DiffOptions{};
