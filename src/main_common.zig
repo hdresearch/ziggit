@@ -26642,7 +26642,6 @@ fn nativeCmdPrune(allocator: std.mem.Allocator, args: [][]const u8, command_inde
         };
     }
 
-    _ = verbose;
     _ = dry_run;
     try doNativePrune(allocator, git_dir, platform_impl, expire);
 }
