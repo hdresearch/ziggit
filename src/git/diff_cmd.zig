@@ -479,6 +479,46 @@ fn doTreeToTreeDiff(allocator: std.mem.Allocator, ref1: []const u8, ref2: []cons
     try outputChanges(changes.items, opts, pi, allocator);
 }
 
+fn fileChangeContainsString(c: *const FileChange, search: []const u8) bool {
+    // Check if the search string appears in the old or new content
+    // (i.e., the file is relevant to the pickaxe search)
+    if (search.len == 0) return true;
+    const old_has = if (c.old_content.len > 0) std.mem.indexOf(u8, c.old_content, search) != null else false;
+    const new_has = if (c.new_content.len > 0) std.mem.indexOf(u8, c.new_content, search) != null else false;
+    // Show file if the count of occurrences changed
+    if (old_has != new_has) return true;
+    if (old_has and new_has) {
+        // Count occurrences
+        var old_count: usize = 0;
+        var oi: usize = 0;
+        while (oi <= c.old_content.len - search.len) {
+            if (std.mem.eql(u8, c.old_content[oi .. oi + search.len], search)) {
+                old_count += 1;
+                oi += search.len;
+            } else oi += 1;
+        }
+        var new_count: usize = 0;
+        var ni: usize = 0;
+        while (ni <= c.new_content.len - search.len) {
+            if (std.mem.eql(u8, c.new_content[ni .. ni + search.len], search)) {
+                new_count += 1;
+                ni += search.len;
+            } else ni += 1;
+        }
+        return old_count != new_count;
+    }
+    return false;
+}
+
+fn fileChangeMatchesGrep(c: *const FileChange, search: []const u8) bool {
+    // Check if search string appears in diff lines (added or removed)
+    if (search.len == 0) return true;
+    // Simple: check if the diff hunks contain the search string in changed lines
+    const old_has = if (c.old_content.len > 0) std.mem.indexOf(u8, c.old_content, search) != null else false;
+    const new_has = if (c.new_content.len > 0) std.mem.indexOf(u8, c.new_content, search) != null else false;
+    return old_has or new_has;
+}
+
 fn freeChange(allocator: std.mem.Allocator, c: *FileChange) void {
     allocator.free(c.path);
     allocator.free(c.old_hash);
@@ -2815,6 +2855,8 @@ const LogOpts = struct {
     pickaxe_s: ?[]const u8 = null,
     pickaxe_g: ?[]const u8 = null,
     pickaxe_all: bool = false,
+    name_only: bool = false,
+    name_status: bool = false,
     ignore_regex: std.array_list.Managed([]const u8),
     pathspecs: std.array_list.Managed([]const u8),
     all_refs: bool = false,
@@ -3262,17 +3304,13 @@ fn writeCommitHeaderWithFrom(hash: []const u8, data: []const u8, from_hash: []co
     // Blank line before message
     try pi.writeStdout("\n");
 
-    // Message
-    var lines = std.mem.splitScalar(u8, msg, '\n');
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trimRight(u8, line, " \t\r");
-        if (trimmed.len > 0) {
-            const mout = try std.fmt.allocPrint(allocator, "    {s}\n", .{trimmed});
-            defer allocator.free(mout);
-            try pi.writeStdout(mout);
-        } else {
-            try pi.writeStdout("    \n");
-        }
+    // Message with 4-space indent
+    const trimmed_msg = std.mem.trimRight(u8, msg, "\n");
+    var msg_iter = std.mem.splitScalar(u8, trimmed_msg, '\n');
+    while (msg_iter.next()) |line| {
+        const mout = try std.fmt.allocPrint(allocator, "    {s}\n", .{line});
+        defer allocator.free(mout);
+        try pi.writeStdout(mout);
     }
 
     _ = lo;
@@ -3577,6 +3615,39 @@ fn writeDiffForCommit(hash: []const u8, data: []const u8, parent_hash: ?[]const 
 
     if (changes.items.len == 0) return;
 
+    // Pickaxe file filtering: only show files where the search string appears
+    if (!lo.pickaxe_all) {
+        if (lo.pickaxe_s) |search| {
+            var filtered = std.array_list.Managed(FileChange).init(allocator);
+            for (changes.items) |*c| {
+                if (fileChangeContainsString(c, search)) {
+                    filtered.append(c.*) catch continue;
+                    c.old_content = "";
+                    c.new_content = ""; // prevent double-free of content
+                } else {
+                    freeChange(allocator, c);
+                }
+            }
+            changes.deinit();
+            changes = filtered;
+        } else if (lo.pickaxe_g) |search| {
+            var filtered = std.array_list.Managed(FileChange).init(allocator);
+            for (changes.items) |*c| {
+                if (fileChangeMatchesGrep(c, search)) {
+                    filtered.append(c.*) catch continue;
+                    c.old_content = "";
+                    c.new_content = ""; // prevent double-free of content
+                } else {
+                    freeChange(allocator, c);
+                }
+            }
+            changes.deinit();
+            changes = filtered;
+        }
+    }
+
+    if (changes.items.len == 0) return;
+
     var diff_opts = DiffOpts{
         .ignore_regex = std.array_list.Managed([]const u8).init(allocator),
         .context_lines = lo.context_lines,
@@ -3614,6 +3685,12 @@ fn writeDiffForCommit(hash: []const u8, data: []const u8, parent_hash: ?[]const 
         }
         if (lo.show_summary) {
             try outputSummary(changes.items, pi, allocator);
+        }
+        if (lo.name_only) {
+            try outputNameOnly(changes.items, pi, allocator);
+        }
+        if (lo.name_status) {
+            try outputNameStatus(changes.items, pi, allocator);
         }
     }
 }
@@ -3662,7 +3739,8 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
     var committish_list = std.array_list.Managed([]const u8).init(allocator);
     defer committish_list.deinit();
     var seen_dashdash = false;
-    const i_still_use_this = false;
+    // Note: --i-still-use-this is stripped in main_common.zig arg pre-processing
+    // so we can't check for it here.
 
     // Check for -S requiring argument
     var args_list = std.array_list.Managed([]const u8).init(allocator);
@@ -3670,8 +3748,6 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
     while (args.next()) |arg| {
         try args_list.append(arg);
     }
-
-    _ = i_still_use_this;
 
     var i: usize = 0;
     while (i < args_list.items.len) : (i += 1) {
@@ -3698,6 +3774,10 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
             lo.show_raw = true;
         } else if (std.mem.eql(u8, arg, "--summary")) {
             lo.show_summary = true;
+        } else if (std.mem.eql(u8, arg, "--name-only")) {
+            lo.name_only = true;
+        } else if (std.mem.eql(u8, arg, "--name-status")) {
+            lo.name_status = true;
         } else if (std.mem.eql(u8, arg, "--root")) {
             lo.root = true;
         } else if (std.mem.eql(u8, arg, "--first-parent")) {
@@ -3849,7 +3929,7 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
 
     // Fix option interactions:
     // In show mode, --stat without explicit -p should disable default patch
-    if (show_mode and (lo.explicit_stat or lo.show_raw or lo.show_summary or lo.show_shortstat) and !lo.explicit_patch and !lo.patch_with_stat and !lo.patch_with_raw) {
+    if (show_mode and (lo.explicit_stat or lo.show_raw or lo.show_summary or lo.show_shortstat or lo.name_only or lo.name_status) and !lo.explicit_patch and !lo.patch_with_stat and !lo.patch_with_raw) {
         lo.show_patch = false;
     }
     // In whatchanged mode, -p should replace default raw
@@ -3857,9 +3937,29 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
         lo.show_raw = false;
     }
 
-    // Read log.diffMerges config
+    // Read log.diffMerges config (check -c overrides first, then config file)
     {
-        const dm_config = mc.getConfigOverride("log.diffmerges");
+        var dm_config = mc.getConfigOverride("log.diffmerges");
+        var dm_config_alloc: ?[]u8 = null;
+        defer if (dm_config_alloc) |d| allocator.free(d);
+        if (dm_config == null) {
+            // Read from git config file
+            const cfg_git_path = mc.findGitDirectory(allocator, pi) catch null;
+            defer if (cfg_git_path) |gp| allocator.free(gp);
+            if (cfg_git_path) |gp| {
+                const cfg_path = std.fmt.allocPrint(allocator, "{s}/config", .{gp}) catch null;
+                defer if (cfg_path) |cp| allocator.free(cp);
+                if (cfg_path) |cp| {
+                    if (std.fs.cwd().readFileAlloc(allocator, cp, 1024 * 1024)) |cfg_content| {
+                        defer allocator.free(cfg_content);
+                        if (getConfigValue(cfg_content, "log", "diffmerges")) |val| {
+                            dm_config_alloc = allocator.dupe(u8, val) catch null;
+                            dm_config = dm_config_alloc;
+                        }
+                    } else |_| {}
+                }
+            }
+        }
         if (dm_config) |val| {
             // Parse config value
             var config_mode: ?LogOpts.DiffMergesMode = null;
@@ -3974,6 +4074,9 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
 
             if (obj.type != .commit) continue;
 
+            const parents = try getAllParents(obj.data, allocator);
+            defer parents.deinit();
+
             if (lo.format_string) |fmt| {
                 if (lo.format_is_separator and idx > 0) {
                     try pi.writeStdout("\n");
@@ -3982,29 +4085,42 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
                 if (!lo.format_is_separator) {
                     try pi.writeStdout("\n");
                 }
-                continue;
+                // If name_only, name_status, or other diff modes, continue to diff output
+                if (!lo.name_only and !lo.name_status and !lo.show_raw and !lo.show_stat and !lo.show_patch) {
+                    continue;
+                }
             }
-            try writeCommitHeader(hash, obj.data, &lo, idx == start_hashes.items.len - 1, pi, allocator, git_path);
 
-            const parents = try getAllParents(obj.data, allocator);
-            defer parents.deinit();
+            const is_separate_show = lo.format_string == null and parents.items.len > 1 and lo.diff_merges == .separate;
+            if (is_separate_show) {
+                // show -m: repeated header+diff for each parent
+                const show_parents = if (lo.first_parent) parents.items[0..1] else parents.items;
+                const use_from = show_parents.len > 1;
+                for (show_parents, 0..) |ph, pidx| {
+                    if (idx > 0 or pidx > 0) try pi.writeStdout("\n");
+                    if (use_from) {
+                        try writeCommitHeaderWithFrom(hash, obj.data, ph, &lo, pi, allocator, git_path);
+                    } else {
+                        try writeCommitHeader(hash, obj.data, &lo, false, pi, allocator, git_path);
+                    }
+                    try pi.writeStdout("\n");
+                    try writeDiffForCommit(hash, obj.data, ph, &lo, git_path, pi, allocator);
+                }
+            } else if (lo.format_string == null) {
+                try writeCommitHeader(hash, obj.data, &lo, idx == start_hashes.items.len - 1, pi, allocator, git_path);
+            }
 
-            if (parents.items.len > 1) {
-                try pi.writeStdout("\n");
-                // Merge commit in show mode - use combined diff by default
-                if (lo.diff_merges == .separate or lo.combined_style == .none) {
-                    // show -m: show diff against each parent
-                    if (lo.diff_merges == .separate) {
-                        for (parents.items) |ph| {
-                            try writeDiffForCommit(hash, obj.data, ph, &lo, git_path, pi, allocator);
-                        }
-                    }
-                    // Default show for merge: combined diff
-                    if (lo.combined_style == .none and lo.diff_merges != .separate and lo.diff_merges != .off) {
-                        // Default show: combined diff
-                        try writeCombinedDiffForCommit(obj.data, &lo, git_path, pi, allocator);
-                    }
+            if (parents.items.len > 1 and !is_separate_show) {
+                if (lo.first_parent or lo.diff_merges == .first_parent) {
+                    // show --first-parent: first-parent diff
+                    try pi.writeStdout("\n");
+                    try writeDiffForCommit(hash, obj.data, parents.items[0], &lo, git_path, pi, allocator);
+                } else if (lo.combined_style != .none or lo.diff_merges == .combined or lo.diff_merges == .dense_combined) {
+                    try pi.writeStdout("\n");
+                    try writeCombinedDiffForCommit(obj.data, &lo, git_path, pi, allocator);
                 } else {
+                    // Default show for merge: combined diff (--cc style)
+                    try pi.writeStdout("\n");
                     try writeCombinedDiffForCommit(obj.data, &lo, git_path, pi, allocator);
                 }
             } else {
@@ -4083,7 +4199,7 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
 
         // For whatchanged mode without -p, we show raw by default
         // For log mode, default is no diff
-        const show_any_diff = lo.show_patch or lo.show_stat or lo.show_raw or lo.show_summary or lo.show_shortstat or lo.patch_with_stat or lo.patch_with_raw;
+        const show_any_diff = lo.show_patch or lo.show_stat or lo.show_raw or lo.show_summary or lo.show_shortstat or lo.patch_with_stat or lo.patch_with_raw or lo.name_only or lo.name_status;
 
         // Determine if we should show diff for this commit
         var show_diff = show_any_diff;
@@ -4142,18 +4258,24 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
 
         // For merge commits with separate diff mode, output a header+diff per parent
         const is_separate_merge = is_merge and diff_parents != null and
-            (lo.diff_merges == .separate or lo.diff_merges == .on or lo.diff_merges == .first_parent);
+            (lo.diff_merges == .separate or lo.diff_merges == .on or lo.diff_merges == .first_parent or lo.diff_merges == .default);
         if (is_separate_merge and show_diff) {
             // For --diff-merges=first-parent, enable patch if not explicitly set
             const old_patch = lo.show_patch;
             if (lo.diff_merges == .first_parent and !lo.show_patch and !lo.show_stat and !lo.show_raw) {
                 lo.show_patch = true;
             }
+            // Show "(from ...)" only when showing multiple parents explicitly
+            const use_from_header = (lo.diff_merges == .separate or lo.diff_merges == .on) and diff_parents.?.len > 1;
             for (diff_parents.?) |ph| {
                 if (!first) try pi.writeStdout("\n");
                 first = false;
                 if (!lo.oneline) {
-                    try writeCommitHeaderWithFrom(cur_hash, obj.data, ph, &lo, pi, allocator, git_path);
+                    if (use_from_header) {
+                        try writeCommitHeaderWithFrom(cur_hash, obj.data, ph, &lo, pi, allocator, git_path);
+                    } else {
+                        try writeCommitHeader(cur_hash, obj.data, &lo, false, pi, allocator, git_path);
+                    }
                 } else {
                     const short = cur_hash[0..@min(7, cur_hash.len)];
                     const msg = extractMessage(obj.data);
