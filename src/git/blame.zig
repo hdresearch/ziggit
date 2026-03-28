@@ -143,37 +143,58 @@ pub fn doLcs(alloc: std.mem.Allocator, al: []const []const u8, bl: []const []con
         }
         return r;
     }
+    // Compute prefix LCS: dp[i][j] = LCS length of al[0..i] and bl[0..j]
     const dp = try alloc.alloc(usize, (m + 1) * (n + 1));
     defer alloc.free(dp);
-    const ds = try alloc.alloc(u8, (m + 1) * (n + 1));
-    defer alloc.free(ds);
     @memset(dp, 0);
-    @memset(ds, 0);
     for (1..m + 1) |i| {
         for (1..n + 1) |j| {
             if (std.mem.eql(u8, al[i - 1], bl[j - 1])) {
                 dp[i * (n + 1) + j] = dp[(i - 1) * (n + 1) + (j - 1)] + 1;
-                ds[i * (n + 1) + j] = 1;
             } else if (dp[(i - 1) * (n + 1) + j] >= dp[i * (n + 1) + (j - 1)]) {
                 dp[i * (n + 1) + j] = dp[(i - 1) * (n + 1) + j];
-                ds[i * (n + 1) + j] = 2;
             } else {
                 dp[i * (n + 1) + j] = dp[i * (n + 1) + (j - 1)];
-                ds[i * (n + 1) + j] = 3;
             }
         }
     }
-    var i = m;
-    var j = n;
-    while (i > 0 and j > 0) {
-        if (ds[i * (n + 1) + j] == 1) {
-            r[i - 1] = j - 1;
-            i -= 1;
-            j -= 1;
-        } else if (ds[i * (n + 1) + j] == 2) {
-            i -= 1;
-        } else {
-            j -= 1;
+    // Compute suffix LCS: sdp[i][j] = LCS length of al[i..] and bl[j..]
+    const sdp = try alloc.alloc(usize, (m + 1) * (n + 1));
+    defer alloc.free(sdp);
+    @memset(sdp, 0);
+    {
+        var si: usize = m;
+        while (si > 0) : (si -= 1) {
+            var sj: usize = n;
+            while (sj > 0) : (sj -= 1) {
+                if (std.mem.eql(u8, al[si - 1], bl[sj - 1])) {
+                    sdp[(si - 1) * (n + 1) + (sj - 1)] = sdp[si * (n + 1) + sj] + 1;
+                } else if (sdp[si * (n + 1) + (sj - 1)] >= sdp[(si - 1) * (n + 1) + sj]) {
+                    sdp[(si - 1) * (n + 1) + (sj - 1)] = sdp[si * (n + 1) + (sj - 1)];
+                } else {
+                    sdp[(si - 1) * (n + 1) + (sj - 1)] = sdp[(si - 1) * (n + 1) + sj];
+                }
+            }
+        }
+    }
+    const total_lcs = dp[m * (n + 1) + n];
+    // Forward scan: greedily assign earliest possible matches
+    var matched: usize = 0;
+    var j_start: usize = 0;
+    for (0..m) |i| {
+        if (matched >= total_lcs) break;
+        var j: usize = j_start;
+        while (j < n) : (j += 1) {
+            if (std.mem.eql(u8, al[i], bl[j])) {
+                // Check if this match is compatible with an optimal LCS
+                const suffix_remaining = sdp[(i + 1) * (n + 1) + (j + 1)];
+                if (matched + 1 + suffix_remaining >= total_lcs) {
+                    r[i] = j;
+                    matched += 1;
+                    j_start = j + 1;
+                    break;
+                }
+            }
         }
     }
     return r;
