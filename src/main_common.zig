@@ -3877,7 +3877,7 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     var cached = false;
     var quiet = false;
     var exit_code = false;
-    var diff_output_mode: enum { patch, stat, shortstat, numstat, name_only, name_status, raw, no_patch, summary } = .patch;
+    var diff_output_mode: enum { patch, stat, shortstat, numstat, name_only, name_status, raw, no_patch, summary, dirstat } = .patch;
     var check_mode = false;
     var positional = std.array_list.Managed([]const u8).init(allocator);
     defer positional.deinit();
