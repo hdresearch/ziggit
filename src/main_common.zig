@@ -9675,7 +9675,10 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             const val = cfgLookup(sources.items, key2, allocator, platform_impl) catch null;
             defer if (val) |v| allocator.free(v);
             const color_str = val orelse def;
-            const ansi = colorToAnsi(color_str);
+            const ansi = colorToAnsiAlloc(allocator, color_str) catch {
+                std.process.exit(1);
+            };
+            defer allocator.free(ansi);
             try platform_impl.writeStdout(ansi);
             return;
         },
@@ -11322,6 +11325,7 @@ fn cfgRemoveSection(cfg_path: []const u8, section_name: []const u8, allocator: s
 }
 
 fn colorToAnsi(color_str: []const u8) []const u8 {
+    // Legacy static version - kept for any remaining callers
     if (std.mem.eql(u8, color_str, "red")) return "\x1b[31m";
     if (std.mem.eql(u8, color_str, "green")) return "\x1b[32m";
     if (std.mem.eql(u8, color_str, "yellow")) return "\x1b[33m";
@@ -11337,6 +11341,256 @@ fn colorToAnsi(color_str: []const u8) []const u8 {
     if (std.mem.eql(u8, color_str, "bold blue")) return "\x1b[1;34m";
     if (color_str.len == 0) return "";
     return "";
+}
+
+const ColorParseError = error{InvalidColor};
+
+fn parseColorName(word: []const u8) ?i16 {
+    if (std.mem.eql(u8, word, "normal") or std.mem.eql(u8, word, "default")) return -1;
+    if (std.mem.eql(u8, word, "black")) return 0;
+    if (std.mem.eql(u8, word, "red")) return 1;
+    if (std.mem.eql(u8, word, "green")) return 2;
+    if (std.mem.eql(u8, word, "yellow")) return 3;
+    if (std.mem.eql(u8, word, "blue")) return 4;
+    if (std.mem.eql(u8, word, "magenta")) return 5;
+    if (std.mem.eql(u8, word, "cyan")) return 6;
+    if (std.mem.eql(u8, word, "white")) return 7;
+    return null;
+}
+
+fn parseColorWord(word: []const u8, fg_color: *i16, bg_color: *i16, attrs: *std.ArrayList(u8), fg_set: *bool, bg_set: *bool) !void {
+    // Check for "bright" prefix colors
+    if (word.len > 6 and std.mem.startsWith(u8, word, "bright")) {
+        const base = parseColorName(word[6..]);
+        if (base) |b| {
+            if (!fg_set.*) {
+                fg_color.* = b + 8; // bright colors are 8-15
+                fg_set.* = true;
+            } else {
+                bg_color.* = b + 8;
+                bg_set.* = true;
+            }
+            return;
+        }
+    }
+
+    // Attributes
+    if (std.mem.eql(u8, word, "bold")) { try attrs.append(1); return; }
+    if (std.mem.eql(u8, word, "dim")) { try attrs.append(2); return; }
+    if (std.mem.eql(u8, word, "italic")) { try attrs.append(3); return; }
+    if (std.mem.eql(u8, word, "ul")) { try attrs.append(4); return; }
+    if (std.mem.eql(u8, word, "blink")) { try attrs.append(5); return; }
+    if (std.mem.eql(u8, word, "reverse")) { try attrs.append(7); return; }
+    if (std.mem.eql(u8, word, "strike")) { try attrs.append(9); return; }
+
+    // Negated attributes
+    if (std.mem.eql(u8, word, "nobold") or std.mem.eql(u8, word, "no-bold")) { try attrs.append(22); return; }
+    if (std.mem.eql(u8, word, "nodim") or std.mem.eql(u8, word, "no-dim")) { try attrs.append(22); return; }
+    if (std.mem.eql(u8, word, "noitalic") or std.mem.eql(u8, word, "no-italic")) { try attrs.append(23); return; }
+    if (std.mem.eql(u8, word, "noul") or std.mem.eql(u8, word, "no-ul")) { try attrs.append(24); return; }
+    if (std.mem.eql(u8, word, "noblink") or std.mem.eql(u8, word, "no-blink")) { try attrs.append(25); return; }
+    if (std.mem.eql(u8, word, "noreverse") or std.mem.eql(u8, word, "no-reverse")) { try attrs.append(27); return; }
+    if (std.mem.eql(u8, word, "nostrike") or std.mem.eql(u8, word, "no-strike")) { try attrs.append(29); return; }
+
+    // Color names
+    if (parseColorName(word)) |c| {
+        if (!fg_set.*) {
+            fg_color.* = c;
+            fg_set.* = true;
+        } else {
+            bg_color.* = c;
+            bg_set.* = true;
+        }
+        return;
+    }
+
+    // Reset
+    if (std.mem.eql(u8, word, "reset")) {
+        try attrs.append(0);
+        return;
+    }
+
+    // RGB color #RRGGBB
+    if (word.len == 7 and word[0] == '#') {
+        const r = std.fmt.parseInt(u8, word[1..3], 16) catch return error.InvalidColor;
+        const g = std.fmt.parseInt(u8, word[3..5], 16) catch return error.InvalidColor;
+        const b = std.fmt.parseInt(u8, word[5..7], 16) catch return error.InvalidColor;
+        _ = r;
+        _ = g;
+        _ = b;
+        // Store as special marker - we'll handle this differently
+        if (!fg_set.*) {
+            fg_color.* = -2; // marker for RGB
+            fg_set.* = true;
+        } else {
+            bg_color.* = -2;
+            bg_set.* = true;
+        }
+        return;
+    }
+
+    // Numeric color 0-255 or -1
+    if (std.fmt.parseInt(i16, word, 10)) |n| {
+        if (n < -1 or n > 255) return error.InvalidColor;
+        if (!fg_set.*) {
+            fg_color.* = n;
+            fg_set.* = true;
+        } else {
+            bg_color.* = n;
+            bg_set.* = true;
+        }
+        return;
+    } else |_| {}
+
+    return error.InvalidColor;
+}
+
+fn colorToAnsiAlloc(allocator: std.mem.Allocator, color_str: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, color_str, " \t");
+    if (trimmed.len == 0) return try allocator.dupe(u8, "");
+
+    // Check for "normal" special case - produces no color at all
+    if (std.mem.eql(u8, trimmed, "normal") or std.mem.eql(u8, trimmed, "-1")) {
+        return try allocator.dupe(u8, "");
+    }
+
+    var fg_color: i16 = -2; // unset marker
+    var bg_color: i16 = -2; // unset marker
+    var fg_set = false;
+    var bg_set = false;
+
+    var attrs = std.ArrayList(u8).init(allocator);
+    defer attrs.deinit();
+
+    // We need to also track RGB values
+    var fg_rgb: ?[3]u8 = null;
+    var bg_rgb: ?[3]u8 = null;
+
+    // Parse each word
+    var word_iter = std.mem.tokenizeAny(u8, trimmed, " \t");
+    while (word_iter.next()) |word| {
+        // Handle RGB specially before passing to parseColorWord
+        if (word.len == 7 and word[0] == '#') {
+            const r = std.fmt.parseInt(u8, word[1..3], 16) catch return error.InvalidColor;
+            const g = std.fmt.parseInt(u8, word[3..5], 16) catch return error.InvalidColor;
+            const b = std.fmt.parseInt(u8, word[5..7], 16) catch return error.InvalidColor;
+            if (!fg_set) {
+                fg_rgb = .{ r, g, b };
+                fg_color = -3; // RGB marker
+                fg_set = true;
+            } else {
+                bg_rgb = .{ r, g, b };
+                bg_color = -3; // RGB marker
+                bg_set = true;
+            }
+            continue;
+        }
+        try parseColorWord(word, &fg_color, &bg_color, &attrs, &fg_set, &bg_set);
+    }
+
+    // Build ANSI code
+    var codes = std.ArrayList(u8).init(allocator);
+    defer codes.deinit();
+
+    var first = true;
+
+    // Output attributes
+    for (attrs.items) |attr| {
+        if (!first) try codes.append(';');
+        var buf: [8]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, "{d}", .{attr}) catch unreachable;
+        try codes.appendSlice(s);
+        first = false;
+    }
+
+    // Output foreground color
+    if (fg_set) {
+        if (fg_color == -3) {
+            // RGB
+            if (fg_rgb) |rgb| {
+                if (!first) try codes.append(';');
+                var buf: [32]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, "38;2;{d};{d};{d}", .{ rgb[0], rgb[1], rgb[2] }) catch unreachable;
+                try codes.appendSlice(s);
+                first = false;
+            }
+        } else if (fg_color == -1) {
+            // default color
+            if (!first) try codes.append(';');
+            try codes.appendSlice("39");
+            first = false;
+        } else if (fg_color >= 0 and fg_color <= 7) {
+            if (!first) try codes.append(';');
+            var buf: [8]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{d}", .{@as(u16, @intCast(fg_color)) + 30}) catch unreachable;
+            try codes.appendSlice(s);
+            first = false;
+        } else if (fg_color >= 8 and fg_color <= 15) {
+            // Bright/aixterm colors
+            if (!first) try codes.append(';');
+            var buf: [8]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{d}", .{@as(u16, @intCast(fg_color)) - 8 + 90}) catch unreachable;
+            try codes.appendSlice(s);
+            first = false;
+        } else if (fg_color >= 16 and fg_color <= 255) {
+            // 256-color mode
+            if (!first) try codes.append(';');
+            var buf: [16]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "38;5;{d}", .{@as(u16, @intCast(fg_color))}) catch unreachable;
+            try codes.appendSlice(s);
+            first = false;
+        }
+    }
+
+    // Output background color
+    if (bg_set) {
+        if (bg_color == -3) {
+            // RGB
+            if (bg_rgb) |rgb| {
+                if (!first) try codes.append(';');
+                var buf: [32]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, "48;2;{d};{d};{d}", .{ rgb[0], rgb[1], rgb[2] }) catch unreachable;
+                try codes.appendSlice(s);
+                first = false;
+            }
+        } else if (bg_color == -1) {
+            // default color
+            if (!first) try codes.append(';');
+            try codes.appendSlice("49");
+            first = false;
+        } else if (bg_color >= 0 and bg_color <= 7) {
+            if (!first) try codes.append(';');
+            var buf: [8]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{d}", .{@as(u16, @intCast(bg_color)) + 40}) catch unreachable;
+            try codes.appendSlice(s);
+            first = false;
+        } else if (bg_color >= 8 and bg_color <= 15) {
+            if (!first) try codes.append(';');
+            var buf: [8]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{d}", .{@as(u16, @intCast(bg_color)) - 8 + 100}) catch unreachable;
+            try codes.appendSlice(s);
+            first = false;
+        } else if (bg_color >= 16 and bg_color <= 255) {
+            if (!first) try codes.append(';');
+            var buf: [16]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "48;5;{d}", .{@as(u16, @intCast(bg_color))}) catch unreachable;
+            try codes.appendSlice(s);
+            first = false;
+        }
+    }
+
+    if (codes.items.len == 0 and !fg_set and !bg_set and attrs.items.len == 0) {
+        return try allocator.dupe(u8, "");
+    }
+
+    // Build final string: \e[CODESm
+    var result = std.ArrayList(u8).init(allocator);
+    try result.append(0x1b);
+    try result.append('[');
+    try result.appendSlice(codes.items);
+    try result.append('m');
+
+    return try result.toOwnedSlice();
 }
 
 // Compatibility wrappers for code that uses old function names
