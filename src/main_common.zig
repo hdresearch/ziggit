@@ -561,7 +561,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
 
     // If -h is in the args for a command, show basic usage and exit 129
     // (git convention: -h prints usage to stdout, exits with 129)
-    {
+    // Exception: grep uses -h as --no-filename
+    if (!std.mem.eql(u8, command, "grep")) {
         var cmd_has_help = false;
         var cmd_saw_dd = false;
         for (remaining_args_copy) |arg| {
