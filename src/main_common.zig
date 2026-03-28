@@ -98,7 +98,7 @@ pub fn asciiCaseInsensitiveEqual(a: []const u8, b: []const u8) bool {
 }
 
 fn handleConfigEnv(allocator: std.mem.Allocator, setting: []const u8) void {
-    if (std.mem.indexOfScalar(u8, setting, '=')) |eq| {
+    if (std.mem.lastIndexOfScalar(u8, setting, '=')) |eq| {
         const key = setting[0..eq];
         const envvar = setting[eq + 1 ..];
         if (key.len == 0 or !cfgIsValidKey(key)) {

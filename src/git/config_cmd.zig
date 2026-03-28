@@ -27,87 +27,126 @@ fn buildConfigOverrides(allocator: Allocator) BuildOverridesError!std.array_list
         overrides.deinit();
     }
 
-    // First, figure out how many GIT_CONFIG_PARAMETERS entries there are
-    // so we can skip them in main_mod's overrides (which includes both -c and GIT_CONFIG_PARAMETERS)
-    var gcp_count: usize = 0;
-    {
-        const params_str = std.process.getEnvVarOwned(allocator, "GIT_CONFIG_PARAMETERS") catch null;
-        if (params_str) |params| {
-            defer allocator.free(params);
-            var temp = std.array_list.Managed(CfgOverride).init(allocator);
-            defer {
-                for (temp.items) |item| {
-                    allocator.free(item.key);
-                    allocator.free(item.value);
-                }
-                temp.deinit();
-            }
-            parseGitConfigParams(params, &temp, allocator) catch |e| {
-                if (e == error.BogusConfigParameters) return error.BogusConfigParameters;
-                return error.OutOfMemory;
-            };
-            gcp_count = temp.items.len;
-        }
-    }
-
-    // Add -c overrides from main_mod (all except the last gcp_count entries)
-    if (main_mod.global_config_overrides) |mo_overrides| {
-        const total = mo_overrides.items.len;
-        const c_count = if (total >= gcp_count) total - gcp_count else 0;
-        for (mo_overrides.items[0..c_count]) |ov| {
-            const key_dup = try allocator.dupe(u8, ov.key);
-            const val_dup = try allocator.dupe(u8, ov.value);
-            try overrides.append(.{ .key = key_dup, .value = val_dup, .has_equals = true, .source = "command" });
-        }
-    }
-
-    // Handle --config-env from command line args (read from /proc/self/cmdline)
-    {
-        const cmdline = std.fs.cwd().readFileAlloc(allocator, "/proc/self/cmdline", 1024 * 1024) catch null;
-        if (cmdline) |cl| {
-            defer allocator.free(cl);
-            var arg_iter = std.mem.splitScalar(u8, cl, 0);
-            var prev_was_config_env = false;
-            while (arg_iter.next()) |arg| {
-                if (arg.len == 0) continue;
-                if (prev_was_config_env) {
-                    prev_was_config_env = false;
-                    // arg is "key=ENVVAR"
-                    processConfigEnvArg(arg, &overrides, allocator) catch continue;
-                } else if (std.mem.startsWith(u8, arg, "--config-env=")) {
-                    const rest = arg["--config-env=".len..];
-                    processConfigEnvArg(rest, &overrides, allocator) catch continue;
-                } else if (std.mem.eql(u8, arg, "--config-env")) {
-                    prev_was_config_env = true;
-                }
-            }
-        }
-    }
-
-    // Now add our properly parsed GIT_CONFIG_PARAMETERS entries
-    {
-        const params2 = std.process.getEnvVarOwned(allocator, "GIT_CONFIG_PARAMETERS") catch null;
-        if (params2) |params| {
-            defer allocator.free(params);
-            parseGitConfigParams(params, &overrides, allocator) catch |e| {
-                if (e == error.BogusConfigParameters) return error.BogusConfigParameters;
-                return error.OutOfMemory;
-            };
-        }
-    }
-
-    // GIT_CONFIG_COUNT/KEY_N/VALUE_N are already included from main_mod's overrides
-    // (they're processed first in zigzitMain, before -c and GIT_CONFIG_PARAMETERS)
-    // We need to mark the first entries from main_mod that came from GIT_CONFIG_COUNT
-    // with the "environment" source instead of "command"
+    // Step 1: Add GIT_CONFIG_COUNT entries first (environment scope)
     {
         const count_str = std.process.getEnvVarOwned(allocator, "GIT_CONFIG_COUNT") catch null;
         if (count_str) |cs| {
             defer allocator.free(cs);
-            const count = std.fmt.parseInt(usize, cs, 10) catch 0;
-            // The first 'count' entries from main_mod are GIT_CONFIG_COUNT entries
-            for (overrides.items[0..@min(count, overrides.items.len)]) |*ov| {
-                ov.source = "environment";
+            const trimmed = std.mem.trim(u8, cs, " \t");
+            if (trimmed.len > 0) {
+                if (std.fmt.parseInt(usize, trimmed, 10)) |count| {
+                    var idx: usize = 0;
+                    while (idx < count) : (idx += 1) {
+                        const key_env = std.fmt.allocPrint(allocator, "GIT_CONFIG_KEY_{d}", .{idx}) catch continue;
+                        defer allocator.free(key_env);
+                        const val_env = std.fmt.allocPrint(allocator, "GIT_CONFIG_VALUE_{d}", .{idx}) catch continue;
+                        defer allocator.free(val_env);
+                        const env_key = std.process.getEnvVarOwned(allocator, key_env) catch continue;
+                        defer allocator.free(env_key);
+                        const env_val = std.process.getEnvVarOwned(allocator, val_env) catch continue;
+                        defer allocator.free(env_val);
+                        const key_dup = normalizeConfigKey(allocator, env_key) catch continue;
+                        const val_dup = allocator.dupe(u8, env_val) catch continue;
+                        overrides.append(.{ .key = key_dup, .value = val_dup, .has_equals = true, .source = "environment" }) catch continue;
+                    }
+                } else |_| {}
+            }
+        }
+    }
+
+    // Step 2: Process -c and --config-env from command line in order they appear.
+    // Read /proc/self/cmdline to get the exact argument order.
+    {
+        const cmdline = std.fs.cwd().readFileAlloc(allocator, "/proc/self/cmdline", 1024 * 1024) catch null;
+        if (cmdline) |cl| {
+            defer allocator.free(cl);
+            // Split by null bytes into args
+            var args_list = std.array_list.Managed([]const u8).init(allocator);
+            defer args_list.deinit();
+            var split_iter = std.mem.splitScalar(u8, cl, 0);
+            while (split_iter.next()) |arg| {
+                if (arg.len > 0) args_list.append(arg) catch continue;
+            }
+            const args = args_list.items;
+
+            var i: usize = 0;
+            while (i < args.len) {
+                const arg = args[i];
+                if (std.mem.eql(u8, arg, "-c") and i + 1 < args.len) {
+                    i += 1;
+                    const setting = args[i];
+                    if (std.mem.indexOfScalar(u8, setting, '=')) |eq| {
+                        const key_dup = normalizeConfigKey(allocator, setting[0..eq]) catch {
+                            i += 1;
+                            continue;
+                        };
+                        const val_dup = allocator.dupe(u8, setting[eq + 1 ..]) catch {
+                            allocator.free(key_dup);
+                            i += 1;
+                            continue;
+                        };
+                        overrides.append(.{ .key = key_dup, .value = val_dup, .has_equals = true, .source = "command" }) catch {
+                            allocator.free(key_dup);
+                            allocator.free(val_dup);
+                        };
+                    } else {
+                        // No = means boolean true
+                        const key_dup = normalizeConfigKey(allocator, setting) catch {
+                            i += 1;
+                            continue;
+                        };
+                        const val_dup = allocator.dupe(u8, "") catch {
+                            allocator.free(key_dup);
+                            i += 1;
+                            continue;
+                        };
+                        overrides.append(.{ .key = key_dup, .value = val_dup, .has_equals = false, .source = "command" }) catch {
+                            allocator.free(key_dup);
+                            allocator.free(val_dup);
+                        };
+                    }
+                    i += 1;
+                } else if (std.mem.startsWith(u8, arg, "--config-env=")) {
+                    const rest = arg["--config-env=".len..];
+                    processConfigEnvArg(rest, &overrides, allocator) catch {};
+                    i += 1;
+                } else if (std.mem.eql(u8, arg, "--config-env") and i + 1 < args.len) {
+                    i += 1;
+                    processConfigEnvArg(args[i], &overrides, allocator) catch {};
+                    i += 1;
+                } else {
+                    // Stop at the git subcommand (first non-flag arg after skipping global flags)
+                    // But skip the binary name (git, ziggit, or paths ending with /git or /ziggit)
+                    if (arg.len > 0 and arg[0] != '-' and
+                        !std.mem.eql(u8, arg, "git") and !std.mem.eql(u8, arg, "ziggit") and
+                        !std.mem.endsWith(u8, arg, "/git") and !std.mem.endsWith(u8, arg, "/ziggit"))
+                    {
+                        break;
+                    }
+                    // Skip other flags and their values
+                    if ((std.mem.eql(u8, arg, "-C") or std.mem.eql(u8, arg, "--git-dir") or
+                        std.mem.eql(u8, arg, "--work-tree") or std.mem.eql(u8, arg, "--namespace") or
+                        std.mem.eql(u8, arg, "--super-prefix")) and i + 1 < args.len)
+                    {
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Step 3: Add GIT_CONFIG_PARAMETERS entries (from parent git processes)
+    {
+        const params = std.process.getEnvVarOwned(allocator, "GIT_CONFIG_PARAMETERS") catch null;
+        if (params) |p| {
+            defer allocator.free(p);
+            if (p.len > 0) {
+                parseGitConfigParams(p, &overrides, allocator) catch |e| {
+                    if (e == error.BogusConfigParameters) return error.BogusConfigParameters;
+                    return error.OutOfMemory;
+                };
             }
         }
     }
@@ -212,8 +251,9 @@ fn gcpExtract(params: []const u8, start: usize, buf: *std.array_list.Managed(u8)
 }
 
 fn processConfigEnvArg(arg: []const u8, overrides: *std.array_list.Managed(CfgOverride), allocator: Allocator) !void {
-    // arg is "key=ENVVAR" - find the first = to split key from env var name
-    const eq = std.mem.indexOfScalar(u8, arg, '=') orelse return;
+    // arg is "key=ENVVAR" - find the last = to split key from env var name
+    // (key can contain = in subsection, e.g. section.sub=section.var=ENVVAR)
+    const eq = std.mem.lastIndexOfScalar(u8, arg, '=') orelse return;
     const key_raw = arg[0..eq];
     const envvar_name = arg[eq + 1 ..];
     if (key_raw.len == 0) return;
@@ -809,6 +849,73 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
             allocator.free(item.value);
         }
         cfg_overrides.deinit();
+    }
+
+    // Process include.path entries in command overrides
+    // Absolute paths: include the file's entries in the override list
+    // Relative paths: ignored (not allowed from command line)
+    {
+        var inc_idx: usize = 0;
+        while (inc_idx < cfg_overrides.items.len) {
+            const ov = cfg_overrides.items[inc_idx];
+            if (cfgKeyMatches(ov.key, "include.path")) {
+                const path = ov.value;
+                if (path.len == 0) {
+                    inc_idx += 1;
+                    continue;
+                }
+                if (path[0] != '/' and path[0] != '~') {
+                    // Relative includes from command line are not allowed
+                    const fe = std.fs.File{ .handle = std.posix.STDERR_FILENO };
+                    _ = fe.write("error: relative config includes must come from files\nfatal: unable to parse command-line config\n") catch {};
+                    std.process.exit(128);
+                }
+                if (path[0] == '/' or path[0] == '~') {
+                    // Absolute path: read and parse the file
+                    const content = platform_impl.fs.readFile(allocator, path) catch {
+                        inc_idx += 1;
+                        continue;
+                    };
+                    defer allocator.free(content);
+                    const config_mod = @import("config.zig");
+                    var parsed = config_mod.GitConfig.parseConfig(allocator, content) catch {
+                        inc_idx += 1;
+                        continue;
+                    };
+                    defer parsed.deinit();
+                    // Insert entries after this include.path entry
+                    var insert_pos = inc_idx + 1;
+                    for (parsed.entries.items) |pe| {
+                        // Construct full key from section.subsection.name
+                        const full_key = if (pe.subsection) |ss|
+                            std.fmt.allocPrint(allocator, "{s}.{s}.{s}", .{ pe.section, ss, pe.name }) catch continue
+                        else
+                            std.fmt.allocPrint(allocator, "{s}.{s}", .{ pe.section, pe.name }) catch continue;
+                        const key_dup = normalizeConfigKey(allocator, full_key) catch {
+                            allocator.free(full_key);
+                            continue;
+                        };
+                        allocator.free(full_key);
+                        const val_dup = allocator.dupe(u8, pe.value) catch {
+                            allocator.free(key_dup);
+                            continue;
+                        };
+                        cfg_overrides.insert(insert_pos, .{
+                            .key = key_dup,
+                            .value = val_dup,
+                            .has_equals = true,
+                            .source = ov.source,
+                        }) catch {
+                            allocator.free(key_dup);
+                            allocator.free(val_dup);
+                            continue;
+                        };
+                        insert_pos += 1;
+                    }
+                }
+            }
+            inc_idx += 1;
+        }
     }
 
     // Write path helper
@@ -1816,7 +1923,31 @@ fn collectEntriesWithIncludesD(
                         const display_path = computeIncludeDisplayPath(source_path, e.value, allocator) catch inc_path;
                         const needs_free_dp = !std.mem.eql(u8, display_path, inc_path);
                         defer if (needs_free_dp) allocator.free(display_path);
+                        const entries_before = all_entries.items.len;
                         collectEntriesWithIncludesD(inc_content, display_path, scope, allocator, platform_impl, all_entries, git_path_opt, true, depth + 1) catch continue;
+                        // Check: if included via hasconfig:remote.*.url, forbid remote URLs in included files
+                        if (std.mem.startsWith(u8, condition, "hasconfig:remote.") and
+                            std.mem.indexOf(u8, condition, ".url:") != null)
+                        {
+                            for (all_entries.items[entries_before..]) |inc_entry| {
+                                const fk = inc_entry.full_key;
+                                // Check if this entry sets remote.*.url
+                                if (std.ascii.startsWithIgnoreCase(fk, "remote.")) {
+                                    if (fk.len > 7) {
+                                        // Find the next dot after "remote."
+                                        if (std.mem.indexOfScalar(u8, fk[7..], '.')) |dot_off| {
+                                            const var_part = fk[7 + dot_off + 1 ..];
+                                            if (std.ascii.eqlIgnoreCase(var_part, "url")) {
+                                                // Fatal error
+                                                const fe = std.fs.File{ .handle = std.posix.STDERR_FILENO };
+                                                _ = fe.write("fatal: remote URLs cannot be configured in file directly or indirectly included by includeIf.hasconfig:remote.*.url\n") catch {};
+                                                std.process.exit(128);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     continue;
                 }
