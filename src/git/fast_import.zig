@@ -25,9 +25,8 @@ pub fn run(allocator: std.mem.Allocator, platform_impl: anytype, options: Option
     }
 
     const stdin_file = std.fs.File{ .handle = std.posix.STDIN_FILENO };
-    const stdin_content = stdin_file.readToEndAlloc(allocator, 512 * 1024 * 1024) catch |e| {
+    const stdin_content = stdin_file.readToEndAlloc(allocator, 512 * 1024 * 1024) catch {
         try platform_impl.writeStderr("fatal: read error\n");
-        _ = e;
         std.process.exit(1);
     };
     defer allocator.free(stdin_content);
