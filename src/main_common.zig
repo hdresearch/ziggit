@@ -3357,8 +3357,15 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             format_is_separator = false;
         } else if (std.mem.eql(u8, arg, "--pretty=oneline") or std.mem.eql(u8, arg, "--pretty=short")) {
             oneline = true;
+        } else if (std.mem.eql(u8, arg, "--pretty=medium") or std.mem.eql(u8, arg, "--pretty=full") or std.mem.eql(u8, arg, "--pretty=fuller") or std.mem.eql(u8, arg, "--pretty=email") or std.mem.eql(u8, arg, "--pretty=raw") or std.mem.eql(u8, arg, "--pretty=reference") or std.mem.eql(u8, arg, "--pretty=mboxrd")) {
+            // Named formats - use default for now
         } else if (std.mem.startsWith(u8, arg, "--pretty=")) {
-            // Other pretty formats - just use default for now
+            // Custom format string without "format:" prefix - treat as tformat
+            const fmt_val = arg["--pretty=".len..];
+            if (fmt_val.len > 0) {
+                format_string = fmt_val;
+                format_is_separator = false;
+            }
         } else if (std.mem.eql(u8, arg, "--first-parent")) {
             // first-parent flag - already the default behavior (we only follow first parent)
         } else if (std.mem.startsWith(u8, arg, "-") and arg.len > 1 and std.ascii.isDigit(arg[1])) {
