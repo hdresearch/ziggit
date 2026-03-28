@@ -22138,11 +22138,26 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                     modified = true;
                 }
             } else if (remove_mode) {
-                // Only remove if file doesn't exist
-                std.fs.cwd().access(arg, .{}) catch {
+                // With --remove: update entry if file exists on disk, remove if not
+                if (std.fs.cwd().access(arg, .{})) |_| {
+                    // File exists - check if it's in the index, if so update it
+                    var found_in_idx = false;
+                    for (idx.entries.items) |entry| {
+                        if (std.mem.eql(u8, entry.path, arg)) { found_in_idx = true; break; }
+                    }
+                    if (found_in_idx) {
+                        idx.add(arg, arg, platform_impl, git_dir) catch {};
+                        modified = true;
+                    } else {
+                        const err_msg3 = std.fmt.allocPrint(allocator, "error: {s}: cannot add to the index - missing --add option?\nfatal: Unable to process path {s}\n", .{ arg, arg }) catch "error: cannot add to the index\n";
+                        try platform_impl.writeStderr(err_msg3);
+                        std.process.exit(128);
+                    }
+                } else |_| {
+                    // File doesn't exist - remove from index
                     idx.remove(arg) catch {};
                     modified = true;
-                };
+                }
             } else if (add_mode) {
                 if (replace_mode) {
                     // D/F conflict resolution:
