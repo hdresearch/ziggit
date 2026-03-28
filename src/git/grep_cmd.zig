@@ -1572,32 +1572,64 @@ fn lineMatches(line: []const u8, opts: *GrepOptions, eff_pt: PatternType, alloca
 }
 
 fn evaluateBooleanExpr(line: []const u8, opts: *GrepOptions, eff_pt: PatternType, allocator: Allocator) bool {
-    // Simple boolean expression evaluator
-    // Tokens were collected during parsing. We need to evaluate them.
-    // For now, handle common cases:
-    // -e A --and -e B: both must match
-    // -e A --or -e B: either matches
-    // --not -e A: A doesn't match
-    // ( -e A --or -e B ) --and -e C: (A or B) and C
+    if (!opts.expr_tokens_initialized or opts.expr_tokens.items.len == 0) return false;
+    var pos: usize = 0;
+    return evalExprOr(line, opts, eff_pt, allocator, opts.expr_tokens.items, &pos);
+}
 
-    // Re-parse the patterns and operators from the options
-    // We need to work with the expression tokens stored during parsing
-    // For simplicity, we'll evaluate using a recursive descent parser on the stored tokens
-
-    // Build a simple expression from patterns
-    // Since we can't easily access the tokens here, let's use a simpler approach:
-    // Check if all patterns match (AND) or any pattern matches (OR) based on the boolean expr
-
-    // Actually, we need to evaluate the boolean expressions properly.
-    // The patterns in opts.patterns are in order, with the boolean ops between them.
-    // Let's reconstruct: pattern[0] OP pattern[1] OP pattern[2] ...
-
-    // For now, default behavior: implicit OR between multiple -e patterns
-    // unless --and is used
-    for (opts.patterns.items) |pat| {
-        if (matchPattern(line, pat, opts, eff_pt, allocator)) return true;
+fn evalExprOr(line: []const u8, opts: *GrepOptions, eff_pt: PatternType, allocator: Allocator, tokens: []const ExprToken, pos: *usize) bool {
+    var result = evalExprAnd(line, opts, eff_pt, allocator, tokens, pos);
+    while (pos.* < tokens.len) {
+        if (tokens[pos.*] == .op_or) {
+            pos.* += 1;
+            const right = evalExprAnd(line, opts, eff_pt, allocator, tokens, pos);
+            result = result or right;
+        } else {
+            break;
+        }
     }
-    return false;
+    return result;
+}
+
+fn evalExprAnd(line: []const u8, opts: *GrepOptions, eff_pt: PatternType, allocator: Allocator, tokens: []const ExprToken, pos: *usize) bool {
+    var result = evalExprNot(line, opts, eff_pt, allocator, tokens, pos);
+    while (pos.* < tokens.len) {
+        if (tokens[pos.*] == .op_and) {
+            pos.* += 1;
+            const right = evalExprNot(line, opts, eff_pt, allocator, tokens, pos);
+            result = result and right;
+        } else {
+            break;
+        }
+    }
+    return result;
+}
+
+fn evalExprNot(line: []const u8, opts: *GrepOptions, eff_pt: PatternType, allocator: Allocator, tokens: []const ExprToken, pos: *usize) bool {
+    if (pos.* < tokens.len and tokens[pos.*] == .op_not) {
+        pos.* += 1;
+        return !evalExprNot(line, opts, eff_pt, allocator, tokens, pos);
+    }
+    return evalExprAtom(line, opts, eff_pt, allocator, tokens, pos);
+}
+
+fn evalExprAtom(line: []const u8, opts: *GrepOptions, eff_pt: PatternType, allocator: Allocator, tokens: []const ExprToken, pos: *usize) bool {
+    if (pos.* >= tokens.len) return false;
+    switch (tokens[pos.*]) {
+        .pattern => |pat| {
+            pos.* += 1;
+            return matchPattern(line, pat, opts, eff_pt, allocator);
+        },
+        .open_paren => {
+            pos.* += 1;
+            const result = evalExprOr(line, opts, eff_pt, allocator, tokens, pos);
+            if (pos.* < tokens.len and tokens[pos.*] == .close_paren) {
+                pos.* += 1;
+            }
+            return result;
+        },
+        else => return false,
+    }
 }
 
 fn matchPattern(line: []const u8, pattern: []const u8, opts: *GrepOptions, eff_pt: PatternType, allocator: Allocator) bool {
