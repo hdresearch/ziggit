@@ -54,7 +54,22 @@ fn buildConfigOverrides(allocator: Allocator) BuildOverridesError!std.array_list
         }
     }
 
-    // Step 2: Process -c and --config-env from command line in order they appear.
+    // Step 2: Add GIT_CONFIG_PARAMETERS entries (from parent git processes)
+    // These come before own cmdline -c entries, so parent overrides appear first.
+    {
+        const params = std.process.getEnvVarOwned(allocator, "GIT_CONFIG_PARAMETERS") catch null;
+        if (params) |p| {
+            defer allocator.free(p);
+            if (p.len > 0) {
+                parseGitConfigParams(p, &overrides, allocator) catch |e| {
+                    if (e == error.BogusConfigParameters) return error.BogusConfigParameters;
+                    return error.OutOfMemory;
+                };
+            }
+        }
+    }
+
+    // Step 3: Process -c and --config-env from command line in order they appear.
     // Read /proc/self/cmdline to get the exact argument order.
     {
         const cmdline = std.fs.cwd().readFileAlloc(allocator, "/proc/self/cmdline", 1024 * 1024) catch null;
@@ -85,10 +100,23 @@ fn buildConfigOverrides(allocator: Allocator) BuildOverridesError!std.array_list
                             i += 1;
                             continue;
                         };
-                        overrides.append(.{ .key = key_dup, .value = val_dup, .has_equals = true, .source = "command" }) catch {
+                        // Skip if already present from GIT_CONFIG_PARAMETERS (avoid duplicates)
+                        var already_present = false;
+                        for (overrides.items) |existing| {
+                            if (std.ascii.eqlIgnoreCase(existing.key, key_dup) and std.mem.eql(u8, existing.value, val_dup)) {
+                                already_present = true;
+                                break;
+                            }
+                        }
+                        if (!already_present) {
+                            overrides.append(.{ .key = key_dup, .value = val_dup, .has_equals = true, .source = "command" }) catch {
+                                allocator.free(key_dup);
+                                allocator.free(val_dup);
+                            };
+                        } else {
                             allocator.free(key_dup);
                             allocator.free(val_dup);
-                        };
+                        }
                     } else {
                         // No = means boolean true
                         const key_dup = normalizeConfigKey(allocator, setting) catch {
@@ -133,20 +161,6 @@ fn buildConfigOverrides(allocator: Allocator) BuildOverridesError!std.array_list
                         i += 1;
                     }
                 }
-            }
-        }
-    }
-
-    // Step 3: Add GIT_CONFIG_PARAMETERS entries (from parent git processes)
-    {
-        const params = std.process.getEnvVarOwned(allocator, "GIT_CONFIG_PARAMETERS") catch null;
-        if (params) |p| {
-            defer allocator.free(p);
-            if (p.len > 0) {
-                parseGitConfigParams(p, &overrides, allocator) catch |e| {
-                    if (e == error.BogusConfigParameters) return error.BogusConfigParameters;
-                    return error.OutOfMemory;
-                };
             }
         }
     }

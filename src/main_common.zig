@@ -7,7 +7,7 @@ const rebase_cmd = @import("git/rebase_cmd.zig");
 const cherry_pick_mod = @import("git/cherry_pick.zig");
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-const cSetenv = setenv;
+pub const cSetenv = setenv;
 
 /// Global config overrides from -c key=value command line options
 pub var global_config_overrides: ?std.array_list.Managed(ConfigOverride) = null;
@@ -167,6 +167,7 @@ const tree_mod = if (@import("builtin").target.os.tag != .freestanding) @import(
 const gitignore_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/gitignore.zig") else void;
 const config_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/config.zig") else void;
 const config_cmd_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/config_cmd.zig") else void;
+const config_helpers_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/config_helpers.zig") else void;
 const diff_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/diff.zig") else void;
 const diff_stats_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/diff_stats.zig") else void;
 const diff_cmd_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/diff_cmd.zig") else void;
@@ -510,8 +511,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 all_original_args.items[write_idx + 1] = translateConfigKeyValue(next);
                 write_idx += 2;
                 read_idx += 2;
-            } else if (std.mem.startsWith(u8, all_original_args.items[write_idx], "-c") and all_original_args.items[write_idx].len > 2) {
-                // -ckey=value form (no space)
+            } else if (std.mem.startsWith(u8, all_original_args.items[write_idx], "-c") and all_original_args.items[write_idx].len > 2 and all_original_args.items[write_idx][2] != ' ') {
+                // -ckey=value form (no space between -c and key)
                 all_original_args.items[write_idx] = translateConfigKeyValue(all_original_args.items[write_idx][2..]);
                 // Need to split into -c and value... actually keep as-is, just translate in-place
                 // This form is rare. Skip for now.
@@ -549,9 +550,14 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     while (command_index < all_original_args.items.len) {
         const arg = all_original_args.items[command_index];
         
-        if (std.mem.eql(u8, arg, "-C") or std.mem.eql(u8, arg, "-c") or 
-           std.mem.eql(u8, arg, "--git-dir") or std.mem.eql(u8, arg, "--work-tree")) {
+        if (std.mem.eql(u8, arg, "-C") or std.mem.eql(u8, arg, "--git-dir") or std.mem.eql(u8, arg, "--work-tree")) {
             // Skip the flag and its value
+            command_index += 2;
+        } else if (std.mem.eql(u8, arg, "-c")) {
+            // Skip -c and its value, but also register the override early
+            if (command_index + 1 < all_original_args.items.len) {
+                try addConfigOverride(allocator, all_original_args.items[command_index + 1]);
+            }
             command_index += 2;
             if (command_index > all_original_args.items.len) {
                 try platform_impl.writeStderr("error: invalid global flag usage\n");
@@ -631,6 +637,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 child.stdin_behavior = .Inherit;
                 child.stdout_behavior = .Inherit;
                 child.stderr_behavior = .Inherit;
+                if (@import("builtin").target.os.tag != .freestanding) config_helpers_mod.setConfigParametersEnv(allocator);
                 _ = child.spawn() catch {
                     try platform_impl.writeStderr("fatal: failed to run shell alias\n");
                     std.process.exit(128);
@@ -673,8 +680,30 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 for (new_args.items) |a| {
                     try all_original_args.append(a);
                 }
-                // Re-find command_index (same position, but now the command is the alias expansion)
+                // Re-scan for global flags in expanded alias (e.g., alias = "-c key=val config ...")
+                while (command_index < all_original_args.items.len) {
+                    const carg = all_original_args.items[command_index];
+                    if (std.mem.eql(u8, carg, "-c") and command_index + 1 < all_original_args.items.len) {
+                        const cv = all_original_args.items[command_index + 1];
+                        if (std.mem.indexOfScalar(u8, cv, '=')) |eq_pos| {
+                            const ckey = cv[0..eq_pos];
+                            const cval = cv[eq_pos + 1 ..];
+                            if (global_config_overrides == null) {
+                                global_config_overrides = std.array_list.Managed(ConfigOverride).init(allocator);
+                            }
+                            global_config_overrides.?.append(.{ .key = try allocator.dupe(u8, ckey), .value = try allocator.dupe(u8, cval) }) catch {};
+                        }
+                        command_index += 2;
+                    } else if (std.mem.eql(u8, carg, "-C") and command_index + 1 < all_original_args.items.len) {
+                        command_index += 2;
+                    } else {
+                        break;
+                    }
+                }
+                if (command_index >= all_original_args.items.len) break;
                 command = all_original_args.items[command_index];
+                // Set GIT_CONFIG_PARAMETERS so config_cmd picks up alias-expanded -c overrides
+                if (@import("builtin").target.os.tag != .freestanding) config_helpers_mod.setConfigParametersEnv(allocator);
                 // Continue the while loop to check if the expanded command is native or needs further alias resolution
             }
         } else {
@@ -1020,6 +1049,9 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
             std.process.exit(0);
         }
     }
+
+    // Pre-command config validation (core.bare boolean check, etc.)
+    if (@import("builtin").target.os.tag != .freestanding) config_helpers_mod.validatePreCommandConfig(&platform_impl);
 
     // Commands with native ziggit implementations
     if (std.mem.eql(u8, command, "init") or std.mem.eql(u8, command, "init-db")) {
@@ -3021,73 +3053,9 @@ fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 /// Also supports subsection syntax: alias.<name>.command
 /// Returns the alias value (caller must free), or null if not found.
 fn resolveAlias(allocator: std.mem.Allocator, name: []const u8, platform_impl: *const platform_mod.Platform) !?[]u8 {
-    const alias_key = try std.fmt.allocPrint(allocator, "alias.{s}", .{name});
-    defer allocator.free(alias_key);
-    // Also try subsection syntax: alias.<name>.command
-    const alias_subsection_key = try std.fmt.allocPrint(allocator, "alias.{s}.command", .{name});
-    defer allocator.free(alias_subsection_key);
-    
-    // Search config sources in order: local (.git/config), global (~/.gitconfig), system (/etc/gitconfig)
-    // Last value wins in git, but for aliases we want first match (local > global > system)
-    
-    // Try local config (.git/config)
-    if (findGitDirectory(allocator, platform_impl)) |git_path| {
-        defer allocator.free(git_path);
-        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
-        defer allocator.free(config_path);
-        if (platform_impl.fs.readFile(allocator, config_path)) |content| {
-            defer allocator.free(content);
-            if (parseConfigValue(content, alias_key, allocator) catch null) |val| {
-                return val;
-            }
-            if (parseConfigValue(content, alias_subsection_key, allocator) catch null) |val| {
-                return val;
-            }
-        } else |_| {}
-    } else |_| {}
-    
-    // Try global config (~/.gitconfig)
-    if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
-        defer allocator.free(home);
-        const global_config = try std.fmt.allocPrint(allocator, "{s}/.gitconfig", .{home});
-        defer allocator.free(global_config);
-        if (platform_impl.fs.readFile(allocator, global_config)) |content| {
-            defer allocator.free(content);
-            if (parseConfigValue(content, alias_key, allocator) catch null) |val| {
-                return val;
-            }
-            if (parseConfigValue(content, alias_subsection_key, allocator) catch null) |val| {
-                return val;
-            }
-        } else |_| {}
-        
-        // Try XDG config
-        const xdg_config = try std.fmt.allocPrint(allocator, "{s}/.config/git/config", .{home});
-        defer allocator.free(xdg_config);
-        if (platform_impl.fs.readFile(allocator, xdg_config)) |content| {
-            defer allocator.free(content);
-            if (parseConfigValue(content, alias_key, allocator) catch null) |val| {
-                return val;
-            }
-            if (parseConfigValue(content, alias_subsection_key, allocator) catch null) |val| {
-                return val;
-            }
-        } else |_| {}
-    } else |_| {}
-    
-    // Try system config
-    {
-        if (platform_impl.fs.readFile(allocator, "/etc/gitconfig")) |content| {
-            defer allocator.free(content);
-            if (parseConfigValue(content, alias_key, allocator) catch null) |val| {
-                return val;
-            }
-            if (parseConfigValue(content, alias_subsection_key, allocator) catch null) |val| {
-                return val;
-            }
-        } else |_| {}
+    if (@import("builtin").target.os.tag != .freestanding) {
+        return config_helpers_mod.resolveAliasFromConfig(allocator, name, platform_impl);
     }
-    
     return null;
 }
 
@@ -12563,7 +12531,7 @@ fn colorToAnsiAlloc(allocator: std.mem.Allocator, color_str: []const u8) ![]u8 {
 }
 
 // Compatibility wrappers for code that uses old function names
-fn parseConfigValue(config_content: []const u8, key: []const u8, allocator: std.mem.Allocator) !?[]u8 {
+pub fn parseConfigValue(config_content: []const u8, key: []const u8, allocator: std.mem.Allocator) !?[]u8 {
     var entries = std.array_list.Managed(CfgEntry).init(allocator);
     defer { for (entries.items) |*e| e.deinit(allocator); entries.deinit(); }
     try cfgParseEntries(config_content, &entries, allocator);
