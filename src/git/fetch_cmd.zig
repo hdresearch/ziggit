@@ -484,6 +484,7 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     var write_fetch_head = true;
     var has_refmap = false;
     var refmap_value: ?[]const u8 = null;
+    var prune_tags = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
@@ -498,6 +499,8 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         } else if (std.mem.eql(u8, arg, "--no-prune")) {
             no_prune = true;
             prune = false;
+        } else if (std.mem.eql(u8, arg, "--prune-tags")) {
+            prune_tags = true;
         } else if (std.mem.eql(u8, arg, "--force") or std.mem.eql(u8, arg, "-f")) {
             force = true;
         } else if (std.mem.eql(u8, arg, "--update-head-ok")) {
@@ -642,40 +645,72 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     }
 
     if (is_local) {
-        // Check tagopt and prune from config
+        // Check tagopt, prune and pruneTags from config
         var effective_tags = fetch_tags;
         var effective_prune = prune;
-        if (!no_prune and is_named_remote) {
+        var effective_prune_tags = prune_tags;
+        {
             const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
             defer allocator.free(config_path);
             if (readFileContent(allocator, config_path)) |config_content| {
                 defer allocator.free(config_content);
-                if (effective_tags == .auto) {
-                    const tagopt_key = try std.fmt.allocPrint(allocator, "remote.{s}.tagopt", .{remote_name});
-                    defer allocator.free(tagopt_key);
-                    if (getConfigValue(config_content, tagopt_key, allocator)) |tagopt_val| {
-                        defer allocator.free(tagopt_val);
-                        if (std.mem.eql(u8, tagopt_val, "--no-tags")) effective_tags = .no
-                        else if (std.mem.eql(u8, tagopt_val, "--tags")) effective_tags = .yes;
-                    } else |_| {}
+                if (is_named_remote) {
+                    if (effective_tags == .auto) {
+                        const tagopt_key = try std.fmt.allocPrint(allocator, "remote.{s}.tagopt", .{remote_name});
+                        defer allocator.free(tagopt_key);
+                        if (getConfigValue(config_content, tagopt_key, allocator)) |tagopt_val| {
+                            defer allocator.free(tagopt_val);
+                            if (std.mem.eql(u8, tagopt_val, "--no-tags")) effective_tags = .no
+                            else if (std.mem.eql(u8, tagopt_val, "--tags")) effective_tags = .yes;
+                        } else |_| {}
+                    }
                 }
-                if (!effective_prune) {
-                    // Check remote.<name>.prune first, then fetch.prune
-                    const remote_prune_key = try std.fmt.allocPrint(allocator, "remote.{s}.prune", .{remote_name});
-                    defer allocator.free(remote_prune_key);
-                    if (getConfigValue(config_content, remote_prune_key, allocator)) |prune_val| {
-                        defer allocator.free(prune_val);
-                        effective_prune = std.mem.eql(u8, prune_val, "true");
-                    } else |_| {
+                // Read prune config - fetch.prune is global, remote.<name>.prune is per-remote
+                if (!no_prune and !effective_prune) {
+                    if (is_named_remote) {
+                        const remote_prune_key = try std.fmt.allocPrint(allocator, "remote.{s}.prune", .{remote_name});
+                        defer allocator.free(remote_prune_key);
+                        if (getConfigValue(config_content, remote_prune_key, allocator)) |prune_val| {
+                            defer allocator.free(prune_val);
+                            effective_prune = std.mem.eql(u8, prune_val, "true");
+                        } else |_| {
+                            if (getConfigValue(config_content, "fetch.prune", allocator)) |prune_val| {
+                                defer allocator.free(prune_val);
+                                effective_prune = std.mem.eql(u8, prune_val, "true");
+                            } else |_| {}
+                        }
+                    } else {
+                        // For non-named remotes, still check fetch.prune
                         if (getConfigValue(config_content, "fetch.prune", allocator)) |prune_val| {
                             defer allocator.free(prune_val);
                             effective_prune = std.mem.eql(u8, prune_val, "true");
                         } else |_| {}
                     }
                 }
+                // Read pruneTags config
+                if (!effective_prune_tags) {
+                    if (is_named_remote) {
+                        const remote_prune_tags_key = try std.fmt.allocPrint(allocator, "remote.{s}.pruneTags", .{remote_name});
+                        defer allocator.free(remote_prune_tags_key);
+                        if (getConfigValue(config_content, remote_prune_tags_key, allocator)) |pt_val| {
+                            defer allocator.free(pt_val);
+                            effective_prune_tags = std.mem.eql(u8, pt_val, "true");
+                        } else |_| {
+                            if (getConfigValue(config_content, "fetch.pruneTags", allocator)) |pt_val| {
+                                defer allocator.free(pt_val);
+                                effective_prune_tags = std.mem.eql(u8, pt_val, "true");
+                            } else |_| {}
+                        }
+                    } else {
+                        if (getConfigValue(config_content, "fetch.pruneTags", allocator)) |pt_val| {
+                            defer allocator.free(pt_val);
+                            effective_prune_tags = std.mem.eql(u8, pt_val, "true");
+                        } else |_| {}
+                    }
+                }
             } else |_| {}
         }
-        try performLocalFetch(allocator, git_path, local_path, remote_name, quiet, cmd_refspecs.items, platform_impl, effective_tags != .no, force, append_mode, effective_prune, dry_run, write_fetch_head and !dry_run, update_head_ok, has_refmap, refmap_value);
+        try performLocalFetch(allocator, git_path, local_path, remote_name, quiet, cmd_refspecs.items, platform_impl, effective_tags != .no, force, append_mode, effective_prune, dry_run, write_fetch_head and !dry_run, update_head_ok, has_refmap, refmap_value, effective_prune_tags);
         return;
     }
 
@@ -700,7 +735,10 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         return;
     }
 
-    try platform_impl.writeStderr("fatal: non-HTTPS/non-local fetch not supported natively yet\n");
+    // Try to resolve as a named remote that failed, give proper error
+    const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n", .{remote_url});
+    defer allocator.free(msg);
+    try platform_impl.writeStderr(msg);
     std.process.exit(128);
 }
 
@@ -721,6 +759,7 @@ fn performLocalFetch(
     update_head_ok: bool,
     has_refmap: bool,
     refmap_value: ?[]const u8,
+    do_prune_tags: bool,
 ) !void {
     // Resolve source git dir
     const src_git_dir = resolveSourceGitDir(allocator, source_path) catch {
@@ -744,6 +783,7 @@ fn performLocalFetch(
         refspecs.deinit();
     }
 
+    var using_default_refspec = false;
     if (cmd_refspecs.len > 0) {
         for (cmd_refspecs) |rs| try refspecs.append(try allocator.dupe(u8, rs));
     } else {
@@ -758,9 +798,17 @@ fn performLocalFetch(
             all_fetch.deinit();
         } else {
             all_fetch.deinit();
-            // Default refspec
+            // Default refspec - not from config, so shouldn't be used for pruning
+            using_default_refspec = true;
             try refspecs.append(try std.fmt.allocPrint(allocator, "+refs/heads/*:refs/remotes/{s}/*", .{remote_name}));
         }
+    }
+
+    // Print "From" line (like real git)
+    if (!quiet) {
+        const from_msg = try std.fmt.allocPrint(allocator, "From {s}\n", .{source_path});
+        defer allocator.free(from_msg);
+        try platform_impl.writeStderr(from_msg);
     }
 
     // Copy objects from source
@@ -997,7 +1045,36 @@ fn performLocalFetch(
 
     // Prune: delete local refs that no longer exist on remote
     if (do_prune) {
-        try pruneStaleRefs(allocator, git_path, refspecs.items, source_refs.items);
+        // Build prune refspec list - only use configured refspecs, not defaults
+        var prune_refspecs = std.array_list.Managed([]u8).init(allocator);
+        defer {
+            for (prune_refspecs.items) |rs| allocator.free(rs);
+            prune_refspecs.deinit();
+        }
+        if (!using_default_refspec) {
+            for (refspecs.items) |rs| {
+                try prune_refspecs.append(try allocator.dupe(u8, rs));
+            }
+        }
+        // When prune_tags is active, add refs/tags/*:refs/tags/* to prune refspecs
+        // But ignore --prune-tags when explicit refspecs are given on cmdline
+        if (do_prune_tags and cmd_refspecs.len == 0) {
+            var has_tag_refspec = false;
+            for (prune_refspecs.items) |rs| {
+                var cs = @as([]const u8, rs);
+                if (cs.len > 0 and cs[0] == '+') cs = cs[1..];
+                if (std.mem.startsWith(u8, cs, "refs/tags/")) {
+                    has_tag_refspec = true;
+                    break;
+                }
+            }
+            if (!has_tag_refspec) {
+                try prune_refspecs.append(try allocator.dupe(u8, "refs/tags/*:refs/tags/*"));
+            }
+        }
+        if (prune_refspecs.items.len > 0) {
+            try pruneStaleRefs(allocator, git_path, prune_refspecs.items, source_refs.items);
+        }
     }
 
     // Write FETCH_HEAD
@@ -1128,7 +1205,6 @@ fn performLocalFetch(
         std.process.exit(1);
     }
 
-    _ = quiet;
 }
 
 const FetchHeadEntry = struct {

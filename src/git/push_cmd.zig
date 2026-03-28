@@ -8,6 +8,59 @@ fn readFileContent(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024);
 }
 
+/// Simple config value reader (last value wins)
+fn getSimpleConfigValue(config_content: []const u8, key: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    const dot1 = std.mem.indexOfScalar(u8, key, '.') orelse return error.InvalidKey;
+    const rest = key[dot1 + 1 ..];
+    const dot2 = std.mem.lastIndexOfScalar(u8, rest, '.');
+    const section = key[0..dot1];
+    const subsection: ?[]const u8 = if (dot2) |d| rest[0..d] else null;
+    const var_name = if (dot2) |d| rest[d + 1 ..] else rest;
+
+    var result: ?[]u8 = null;
+    var in_matching_section = false;
+    var lines = std.mem.splitScalar(u8, config_content, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0 or line[0] == '#' or line[0] == ';') continue;
+        if (line[0] == '[') {
+            in_matching_section = false;
+            const close = std.mem.indexOfScalar(u8, line, ']') orelse continue;
+            const header = line[1..close];
+            var cur_section: []const u8 = undefined;
+            var cur_subsection: ?[]const u8 = null;
+            if (std.mem.indexOfScalar(u8, header, '"')) |q1| {
+                cur_section = std.mem.trim(u8, header[0..q1], " \t");
+                const after = header[q1 + 1 ..];
+                if (std.mem.indexOfScalar(u8, after, '"')) |q2| cur_subsection = after[0..q2];
+            } else if (std.mem.indexOfScalar(u8, header, ' ')) |sp| {
+                cur_section = header[0..sp];
+                cur_subsection = std.mem.trim(u8, header[sp + 1 ..], " \t\"");
+            } else {
+                cur_section = header;
+            }
+            if (std.ascii.eqlIgnoreCase(cur_section, section)) {
+                if (subsection) |ss| {
+                    if (cur_subsection != null and std.mem.eql(u8, cur_subsection.?, ss)) in_matching_section = true;
+                } else {
+                    if (cur_subsection == null) in_matching_section = true;
+                }
+            }
+            continue;
+        }
+        if (!in_matching_section) continue;
+        if (std.mem.indexOfScalar(u8, line, '=')) |eq| {
+            const vkey = std.mem.trim(u8, line[0..eq], " \t");
+            const vval = std.mem.trim(u8, line[eq + 1 ..], " \t");
+            if (std.ascii.eqlIgnoreCase(vkey, var_name)) {
+                if (result) |old| allocator.free(old);
+                result = try allocator.dupe(u8, vval);
+            }
+        }
+    }
+    return result orelse error.KeyNotFound;
+}
+
 fn resolveSourceGitDir(allocator: std.mem.Allocator, source_path: []const u8) ![]u8 {
     const path = if (std.mem.startsWith(u8, source_path, "file://"))
         try allocator.dupe(u8, source_path["file://".len..])
@@ -288,6 +341,24 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     defer allocator.free(dst_packs);
     fetch_cmd.copyMissingPackFiles(src_packs, dst_packs);
 
+    // Validate --delete usage
+    if (push_delete) {
+        if (refspecs_list.items.len == 0) {
+            try platform_impl.writeStderr("fatal: --delete requires at least one argument\n");
+            std.process.exit(1);
+        }
+        for (refspecs_list.items) |rs| {
+            if (std.mem.indexOf(u8, rs, ":") != null) {
+                try platform_impl.writeStderr("fatal: --delete doesn't accept src:dest refspecs\n");
+                std.process.exit(1);
+            }
+            if (rs.len == 0) {
+                try platform_impl.writeStderr("fatal: --delete requires at least one argument\n");
+                std.process.exit(1);
+            }
+        }
+    }
+
     // Determine what to push
     if (push_tags) {
         try pushWildcardRefspec(allocator, git_path, remote_git_dir, "refs/tags/*", "refs/tags/*", force_push, dry_run, quiet, platform_impl);
@@ -297,19 +368,49 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         // Mirror: push all refs
         try pushWildcardRefspec(allocator, git_path, remote_git_dir, "refs/*", "refs/*", true, dry_run, quiet, platform_impl);
     } else if (refspecs_list.items.len == 0 and !push_all and !push_tags) {
-        // Default push
-        const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
-            try platform_impl.writeStderr("fatal: not on a branch\n");
-            std.process.exit(128);
-        };
-        defer allocator.free(current_branch);
+        // Default push: check remote.<name>.push config first
+        var used_config_push = false;
+        blk_cfg_push: {
+            const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch break :blk_cfg_push;
+            defer allocator.free(config_path);
+            const config_content = readFileContent(allocator, config_path) catch break :blk_cfg_push;
+            defer allocator.free(config_content);
 
-        const refspec = try std.fmt.allocPrint(allocator, "refs/heads/{s}:refs/heads/{s}", .{ current_branch, current_branch });
-        defer allocator.free(refspec);
-        pushSingleRefspec(allocator, git_path, remote_git_dir, refspec, force_push, dry_run, quiet, platform_impl) catch {
-            
-            std.process.exit(1);
-        };
+            // Find the actual remote name used for this push
+            const push_remote_name: []const u8 = remote;
+            // Check if we resolved via config
+            if (std.mem.startsWith(u8, remote, "/") or std.mem.startsWith(u8, remote, ".") or
+                std.mem.startsWith(u8, remote, "file://"))
+            {
+                break :blk_cfg_push; // URL, not named remote
+            }
+
+            // Look for remote.<name>.push
+            const push_key = std.fmt.allocPrint(allocator, "remote.{s}.push", .{push_remote_name}) catch break :blk_cfg_push;
+            defer allocator.free(push_key);
+            const push_val = getSimpleConfigValue(config_content, push_key, allocator) catch break :blk_cfg_push;
+            defer allocator.free(push_val);
+
+            if (push_val.len > 0) {
+                pushSingleRefspec(allocator, git_path, remote_git_dir, push_val, force_push, dry_run, quiet, platform_impl) catch {
+                    std.process.exit(1);
+                };
+                used_config_push = true;
+            }
+        }
+        if (!used_config_push) {
+            const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
+                try platform_impl.writeStderr("fatal: not on a branch\n");
+                std.process.exit(128);
+            };
+            defer allocator.free(current_branch);
+
+            const refspec = try std.fmt.allocPrint(allocator, "refs/heads/{s}:refs/heads/{s}", .{ current_branch, current_branch });
+            defer allocator.free(refspec);
+            pushSingleRefspec(allocator, git_path, remote_git_dir, refspec, force_push, dry_run, quiet, platform_impl) catch {
+                std.process.exit(1);
+            };
+        }
     } else if (push_all) {
         // Push all branches using wildcard
         try pushWildcardRefspec(allocator, git_path, remote_git_dir, "refs/heads/*", "refs/heads/*", force_push, dry_run, quiet, platform_impl);
@@ -354,8 +455,20 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             if (push_delete) {
                 const full_ref = if (std.mem.startsWith(u8, rs, "refs/"))
                     try allocator.dupe(u8, rs)
-                else
-                    try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{rs});
+                else blk_del: {
+                    // DWIM: check tags, heads, etc. on remote
+                    const del_candidates = [_][]const u8{ "refs/tags/", "refs/heads/" };
+                    var del_found: ?[]u8 = null;
+                    for (del_candidates) |prefix| {
+                        const cp = try std.fmt.allocPrint(allocator, "{s}/{s}{s}", .{ remote_git_dir, prefix, rs });
+                        defer allocator.free(cp);
+                        if (std.fs.cwd().access(cp, .{})) |_| {
+                            del_found = try std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, rs });
+                            break;
+                        } else |_| {}
+                    }
+                    break :blk_del del_found orelse try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{rs});
+                };
                 defer allocator.free(full_ref);
                 if (!dry_run) {
                     const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ remote_git_dir, full_ref });
@@ -386,7 +499,7 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                 var push_src = rs;
                 var push_dst = rs;
                 var resolved_branch: ?[]u8 = null;
-                if (std.mem.eql(u8, rs, "HEAD")) {
+                if (std.mem.eql(u8, rs, "HEAD") or std.mem.eql(u8, rs, "@")) {
                     if (refs.getCurrentBranch(git_path, platform_impl, allocator)) |branch| {
                         resolved_branch = branch;
                         push_src = branch;
@@ -396,8 +509,16 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                 defer if (resolved_branch) |b| allocator.free(b);
                 const full_refspec = if (std.mem.startsWith(u8, push_src, "refs/"))
                     try std.fmt.allocPrint(allocator, "{s}:{s}", .{ push_src, push_dst })
-                else
-                    try std.fmt.allocPrint(allocator, "refs/heads/{s}:refs/heads/{s}", .{ push_src, push_dst });
+                else blk: {
+                    // DWIM: check if it's a tag first, then branch
+                    const tag_ref = try std.fmt.allocPrint(allocator, "refs/tags/{s}", .{push_src});
+                    defer allocator.free(tag_ref);
+                    if (refs.resolveRef(git_path, tag_ref, platform_impl, allocator) catch null) |h| {
+                        allocator.free(h);
+                        break :blk try std.fmt.allocPrint(allocator, "refs/tags/{s}:refs/tags/{s}", .{ push_src, push_dst });
+                    }
+                    break :blk try std.fmt.allocPrint(allocator, "refs/heads/{s}:refs/heads/{s}", .{ push_src, push_dst });
+                };
                 defer allocator.free(full_refspec);
                 pushSingleRefspec(allocator, git_path, remote_git_dir, full_refspec, force_this, dry_run, quiet, platform_impl) catch {
                     
@@ -437,21 +558,43 @@ fn pushSingleRefspec(
     platform_impl: *const platform_mod.Platform,
 ) !void {
     const colon_pos = std.mem.indexOf(u8, refspec, ":") orelse return;
-    const src_ref = refspec[0..colon_pos];
+    const src_ref_raw = refspec[0..colon_pos];
+    // Translate @ to HEAD
+    const src_ref = if (std.mem.eql(u8, src_ref_raw, "@")) "HEAD" else src_ref_raw;
     const dst_ref = refspec[colon_pos + 1 ..];
 
-    // Resolve source ref to hash
+    // Resolve source ref to hash and determine its type
+    var src_is_tag = false;
+    var src_is_head = false;
     const hash = blk: {
-        // Try direct resolution
-        if (refs.resolveRef(local_git_dir, src_ref, platform_impl, allocator) catch null) |h| break :blk h;
-        // Try with refs/heads/ prefix
-        if (!std.mem.startsWith(u8, src_ref, "refs/")) {
-            const full = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{src_ref});
-            defer allocator.free(full);
-            if (refs.resolveRef(local_git_dir, full, platform_impl, allocator) catch null) |h| break :blk h;
+        if (std.mem.startsWith(u8, src_ref, "refs/tags/")) {
+            src_is_tag = true;
+            if (refs.resolveRef(local_git_dir, src_ref, platform_impl, allocator) catch null) |h| break :blk h;
+        } else if (std.mem.startsWith(u8, src_ref, "refs/heads/")) {
+            src_is_head = true;
+            if (refs.resolveRef(local_git_dir, src_ref, platform_impl, allocator) catch null) |h| break :blk h;
+        } else if (std.mem.eql(u8, src_ref, "HEAD")) {
+            src_is_head = true;
+            if (refs.resolveRef(local_git_dir, src_ref, platform_impl, allocator) catch null) |h| break :blk h;
+        } else if (!std.mem.startsWith(u8, src_ref, "refs/")) {
+            // Short ref: try heads first, then tags
+            const full_head = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{src_ref});
+            defer allocator.free(full_head);
+            if (refs.resolveRef(local_git_dir, full_head, platform_impl, allocator) catch null) |h| {
+                src_is_head = true;
+                break :blk h;
+            }
             const full_tag = try std.fmt.allocPrint(allocator, "refs/tags/{s}", .{src_ref});
             defer allocator.free(full_tag);
-            if (refs.resolveRef(local_git_dir, full_tag, platform_impl, allocator) catch null) |h| break :blk h;
+            if (refs.resolveRef(local_git_dir, full_tag, platform_impl, allocator) catch null) |h| {
+                src_is_tag = true;
+                break :blk h;
+            }
+            // Try direct resolution as fallback
+            if (refs.resolveRef(local_git_dir, src_ref, platform_impl, allocator) catch null) |h| break :blk h;
+        } else {
+            // Other refs/ prefix
+            if (refs.resolveRef(local_git_dir, src_ref, platform_impl, allocator) catch null) |h| break :blk h;
         }
         // Try as raw hash
         if (src_ref.len == 40) {
@@ -466,9 +609,53 @@ fn pushSingleRefspec(
 
     const full_dst = if (std.mem.startsWith(u8, dst_ref, "refs/"))
         try allocator.dupe(u8, dst_ref)
-    else
-        try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{dst_ref});
+    else blk: {
+        // DWIM: check if the ref exists on remote under various prefixes
+        const candidates = [_][]const u8{ "refs/heads/", "refs/tags/", "refs/remotes/" };
+        var found: ?[]u8 = null;
+        var match_count: usize = 0;
+        for (candidates) |prefix| {
+            const candidate_path = try std.fmt.allocPrint(allocator, "{s}/{s}{s}", .{ remote_git_dir, prefix, dst_ref });
+            defer allocator.free(candidate_path);
+            if (std.fs.cwd().access(candidate_path, .{})) |_| {
+                match_count += 1;
+                if (found == null) {
+                    found = try std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, dst_ref });
+                }
+            } else |_| {}
+        }
+        if (match_count > 1) {
+            // Ambiguous destination ref
+            if (found) |f| allocator.free(f);
+            const msg = try std.fmt.allocPrint(allocator, "error: dst refspec {s} matches more than one\nerror: failed to push some refs\n", .{dst_ref});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            return error.AmbiguousRef;
+        }
+        // When no match on remote, use source ref type to determine prefix
+        if (!src_is_tag and !src_is_head) {
+            // Can't determine type (e.g., raw OID) - reject
+            if (found) |f| allocator.free(f);
+            const emsg = try std.fmt.allocPrint(allocator, "error: unable to push to unqualified destination: {s}\nerror: failed to push some refs\n", .{dst_ref});
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
+            return error.InvalidRef;
+        }
+        const default_prefix: []const u8 = if (src_is_tag) "refs/tags/" else "refs/heads/";
+        break :blk found orelse try std.fmt.allocPrint(allocator, "{s}{s}", .{ default_prefix, dst_ref });
+    };
     defer allocator.free(full_dst);
+
+    // Reject one-level refs (must be at least refs/X/Y)
+    if (std.mem.startsWith(u8, full_dst, "refs/")) {
+        const rest = full_dst["refs/".len..];
+        if (std.mem.indexOfScalar(u8, rest, '/') == null) {
+            const msg = try std.fmt.allocPrint(allocator, "error: unable to push to unqualified destination: {s}\nerror: failed to push some refs\n", .{dst_ref});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            return error.InvalidRef;
+        }
+    }
 
     if (!dry_run) {
         const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ remote_git_dir, full_dst });
@@ -494,9 +681,69 @@ fn pushSingleRefspec(
         const data = try std.fmt.allocPrint(allocator, "{s}\n", .{hash});
         defer allocator.free(data);
         std.fs.cwd().writeFile(.{ .sub_path = ref_path, .data = data }) catch {};
+
+        // Update local tracking ref
+        if (std.mem.startsWith(u8, full_dst, "refs/heads/")) {
+            const pushed_branch = full_dst["refs/heads/".len..];
+            const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{local_git_dir}) catch unreachable;
+            defer allocator.free(config_path);
+            if (readFileContent(allocator, config_path)) |config_content| {
+                defer allocator.free(config_content);
+                // Find remote name by matching URL
+                if (findRemoteNameByGitDir(allocator, config_content, remote_git_dir)) |rn| {
+                    defer allocator.free(rn);
+                    const tracking_ref_path = std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}/{s}", .{ local_git_dir, rn, pushed_branch }) catch unreachable;
+                    defer allocator.free(tracking_ref_path);
+                    if (std.mem.lastIndexOfScalar(u8, tracking_ref_path, '/')) |ls2| std.fs.cwd().makePath(tracking_ref_path[0..ls2]) catch {};
+                    std.fs.cwd().writeFile(.{ .sub_path = tracking_ref_path, .data = data }) catch {};
+                }
+            } else |_| {}
+        }
     }
 
     _ = quiet;
+}
+
+/// Find a remote name whose URL resolves to the same git dir as the target
+fn findRemoteNameByGitDir(allocator: std.mem.Allocator, config_content: []const u8, target_git_dir: []const u8) ?[]u8 {
+    // Scan for [remote "X"] sections and extract URL
+    var lines = std.mem.splitScalar(u8, config_content, '\n');
+    var current_remote: ?[]const u8 = null;
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0 or line[0] == '#' or line[0] == ';') continue;
+
+        if (line[0] == '[') {
+            current_remote = null;
+            if (std.mem.startsWith(u8, line, "[remote \"")) {
+                const rest = line["[remote \"".len..];
+                if (std.mem.indexOfScalar(u8, rest, '"')) |q| {
+                    current_remote = rest[0..q];
+                }
+            }
+            continue;
+        }
+        if (current_remote) |rn| {
+            if (std.mem.startsWith(u8, line, "url = ") or std.mem.startsWith(u8, line, "url=")) {
+                const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+                const url = std.mem.trim(u8, line[eq + 1 ..], " \t");
+                // Try to resolve this URL to a git dir and compare
+                const resolved = resolveSourceGitDir(allocator, url) catch continue;
+                defer allocator.free(resolved);
+                const resolved_target = resolveSourceGitDir(allocator, target_git_dir) catch {
+                    if (std.mem.eql(u8, resolved, target_git_dir)) {
+                        return allocator.dupe(u8, rn) catch null;
+                    }
+                    continue;
+                };
+                defer allocator.free(resolved_target);
+                if (std.mem.eql(u8, resolved, resolved_target)) {
+                    return allocator.dupe(u8, rn) catch null;
+                }
+            }
+        }
+    }
+    return null;
 }
 
 fn pushMatching(
