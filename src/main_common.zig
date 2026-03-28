@@ -10386,6 +10386,7 @@ const CfgEntry = struct {
     full_key: []u8,
     value: []u8,
     has_equals: bool,
+    line_number: usize = 0,
     fn deinit(self: *CfgEntry, alloc: std.mem.Allocator) void {
         alloc.free(self.full_key);
         alloc.free(self.value);
@@ -10480,8 +10481,10 @@ fn cfgValidateAndReport(content: []const u8, source_path: []const u8, allocator:
 fn cfgParseEntries(content: []const u8, entries: *std.array_list.Managed(CfgEntry), allocator: std.mem.Allocator) !void {
     var line_iter = std.mem.splitSequence(u8, content, "\n");
     var current_section: ?[]u8 = null;
+    var line_num: usize = 0;
     defer if (current_section) |s| allocator.free(s);
     while (line_iter.next()) |raw_line| {
+        line_num += 1;
         const line = std.mem.trimRight(u8, raw_line, "\r");
         const trimmed = std.mem.trim(u8, line, " \t");
         if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') continue;
