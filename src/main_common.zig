@@ -225,7 +225,7 @@ fn findSimilarCommands(allocator: std.mem.Allocator, typo: []const u8, platform_
     for (NATIVE_COMMANDS) |cmd| {
         const d = levenshteinDistance(allocator, typo, cmd);
         if (d <= 3 and d < typo.len) {
-            candidates.append(.{ .name = cmd, .dist = d }) catch continue;
+            candidates.append(allocator, .{ .name = cmd, .dist = d }) catch continue;
         }
     }
     if (findGitDirectory(allocator, platform_impl)) |git_path| {
