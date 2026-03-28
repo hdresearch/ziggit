@@ -27865,12 +27865,12 @@ fn outputStatForTwoTrees(allocator: std.mem.Allocator, tree1_hash: []const u8, t
     
     // Find max filename width
     var max_name_len: usize = 0;
-    var total_added: usize = 0;
-    var total_removed: usize = 0;
+    var total_ins: usize = 0;
+    var total_del: usize = 0;
     for (diff_entries.items) |de| {
         if (de.path.len > max_name_len) max_name_len = de.path.len;
-        total_added += de.added;
-        total_removed += de.removed;
+        total_ins += de.insertions;
+        total_del += de.deletions;
     }
     
     for (diff_entries.items) |de| {
@@ -27879,11 +27879,11 @@ fn outputStatForTwoTrees(allocator: std.mem.Allocator, tree1_hash: []const u8, t
         defer allocator.free(pad_buf);
         @memset(pad_buf, ' ');
         
-        const total = de.added + de.removed;
-        var plus_buf = try allocator.alloc(u8, de.added);
+        const total = de.insertions + de.deletions;
+        const plus_buf = try allocator.alloc(u8, de.insertions);
         defer allocator.free(plus_buf);
         @memset(plus_buf, '+');
-        var minus_buf = try allocator.alloc(u8, de.removed);
+        const minus_buf = try allocator.alloc(u8, de.deletions);
         defer allocator.free(minus_buf);
         @memset(minus_buf, '-');
         
@@ -27898,13 +27898,13 @@ fn outputStatForTwoTrees(allocator: std.mem.Allocator, tree1_hash: []const u8, t
     });
     defer allocator.free(summary);
     try platform_impl.writeStdout(summary);
-    if (total_added > 0) {
-        const added = try std.fmt.allocPrint(allocator, ", {d} insertion{s}(+)", .{ total_added, if (total_added != 1) "s" else "" });
+    if (total_ins > 0) {
+        const added = try std.fmt.allocPrint(allocator, ", {d} insertion{s}(+)", .{ total_ins, if (total_ins != 1) "s" else "" });
         defer allocator.free(added);
         try platform_impl.writeStdout(added);
     }
-    if (total_removed > 0) {
-        const removed = try std.fmt.allocPrint(allocator, ", {d} deletion{s}(-)", .{ total_removed, if (total_removed != 1) "s" else "" });
+    if (total_del > 0) {
+        const removed = try std.fmt.allocPrint(allocator, ", {d} deletion{s}(-)", .{ total_del, if (total_del != 1) "s" else "" });
         defer allocator.free(removed);
         try platform_impl.writeStdout(removed);
     }
@@ -30030,8 +30030,8 @@ fn outputAllPatchStats(allocator: std.mem.Allocator, patches: []Patch, platform_
     var stats = std.array_list.Managed(StatInfo).init(allocator);
     defer stats.deinit();
 
-    var total_added: u32 = 0;
-    var total_removed: u32 = 0;
+    var total_ins: u32 = 0;
+    var total_del: u32 = 0;
     var max_path_len: usize = 0;
     var max_count: u32 = 0;
 
@@ -30048,8 +30048,8 @@ fn outputAllPatchStats(allocator: std.mem.Allocator, patches: []Patch, platform_
                 }
             }
         }
-        total_added += added;
-        total_removed += removed;
+        total_ins += added;
+        total_del += removed;
         if (path.len > max_path_len) max_path_len = path.len;
         const count = added + removed;
         if (count > max_count) max_count = count;
@@ -30156,14 +30156,14 @@ fn outputAllPatchStats(allocator: std.mem.Allocator, patches: []Patch, platform_
     const nfiles_str = try std.fmt.allocPrint(allocator, " {d} file{s} changed", .{ nfiles, if (nfiles != 1) "s" else "" });
     defer allocator.free(nfiles_str);
     try summary.appendSlice(nfiles_str);
-    if (total_added > 0 or total_removed > 0) {
-        if (total_added > 0) {
-            const add_str = try std.fmt.allocPrint(allocator, ", {d} insertion{s}(+)", .{ total_added, if (total_added != 1) "s" else "" });
+    if (total_ins > 0 or total_del > 0) {
+        if (total_ins > 0) {
+            const add_str = try std.fmt.allocPrint(allocator, ", {d} insertion{s}(+)", .{ total_ins, if (total_ins != 1) "s" else "" });
             defer allocator.free(add_str);
             try summary.appendSlice(add_str);
         }
-        if (total_removed > 0) {
-            const del_str = try std.fmt.allocPrint(allocator, ", {d} deletion{s}(-)", .{ total_removed, if (total_removed != 1) "s" else "" });
+        if (total_del > 0) {
+            const del_str = try std.fmt.allocPrint(allocator, ", {d} deletion{s}(-)", .{ total_del, if (total_del != 1) "s" else "" });
             defer allocator.free(del_str);
             try summary.appendSlice(del_str);
         }
