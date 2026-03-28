@@ -30804,8 +30804,8 @@ const TreeFileInfo = struct {
 };
 
 /// Output combined raw diff for merge commits (::mode mode mode hash hash hash SS\tpath)
-fn outputCombinedRaw(allocator: std.mem.Allocator, parent_hashes: []const []const u8, merge_tree_hash: []const u8, git_path: []const u8, opts: *const DiffTreeOpts, platform_impl: *const platform_mod.Platform) !void {
-    _ = opts;
+fn outputCombinedRaw(allocator: std.mem.Allocator, parent_hashes: []const []const u8, merge_tree_hash: []const u8, git_path: []const u8, _opts: *const DiffTreeOpts, platform_impl: *const platform_mod.Platform) !void {
+    _ = _opts;
     // Collect merge tree files
     var merge_files = std.StringHashMap(TreeFileInfo).init(allocator);
     defer {
