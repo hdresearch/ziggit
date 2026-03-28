@@ -10353,7 +10353,9 @@ fn cfgSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add:
                     cur_sub = try sb.toOwnedSlice();
                 } else if (std.mem.indexOf(u8, inner, ".")) |d| {
                     cur_sec = try allocator.dupe(u8, std.mem.trim(u8, inner[0..d], " \t"));
-                    cur_sub = try allocator.dupe(u8, inner[d + 1 ..]);
+                    const sub_raw = try allocator.dupe(u8, inner[d + 1 ..]);
+                    for (sub_raw) |*ch| ch.* = std.ascii.toLower(ch.*);
+                    cur_sub = sub_raw;
                 } else {
                     cur_sec = try allocator.dupe(u8, std.mem.trim(u8, inner, " \t"));
                 }
@@ -10644,7 +10646,9 @@ fn cfgUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, value_r
                     cur_sub = try sb.toOwnedSlice();
                 } else if (std.mem.indexOf(u8, inner, ".")) |d| {
                     cur_sec = try allocator.dupe(u8, std.mem.trim(u8, inner[0..d], " \t"));
-                    cur_sub = try allocator.dupe(u8, inner[d + 1 ..]);
+                    const sub_raw = try allocator.dupe(u8, inner[d + 1 ..]);
+                    for (sub_raw) |*ch| ch.* = std.ascii.toLower(ch.*);
+                    cur_sub = sub_raw;
                 } else {
                     cur_sec = try allocator.dupe(u8, std.mem.trim(u8, inner, " \t"));
                 }
