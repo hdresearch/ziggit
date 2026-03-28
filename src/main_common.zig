@@ -17990,6 +17990,8 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             reset_mode = .mixed;
         } else if (std.mem.eql(u8, arg, "--hard")) {
             reset_mode = .hard;
+        } else if (std.mem.eql(u8, arg, "--merge") or std.mem.eql(u8, arg, "--keep")) {
+            reset_mode = .merge_mode;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             // Accepted
         } else if (std.mem.eql(u8, arg, "-N") or std.mem.eql(u8, arg, "--no-refresh")) {
