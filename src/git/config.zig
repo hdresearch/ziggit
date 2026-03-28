@@ -6,7 +6,7 @@ fn unescapeConfigValue(allocator: std.mem.Allocator, input: []const u8) ![]const
     if (std.mem.indexOf(u8, input, "\\") == null) {
         return try allocator.dupe(u8, input);
     }
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.ArrayListUnmanaged(u8){};
     errdefer result.deinit();
     var i: usize = 0;
     while (i < input.len) {
