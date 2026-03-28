@@ -7710,6 +7710,13 @@ fn resolveSourceGitDir(allocator: std.mem.Allocator, source_path: []const u8) ![
     const git_objects = try std.fmt.allocPrint(allocator, "{s}/.git/objects", .{abs_path});
     defer allocator.free(git_objects);
     const git_objs_exist = if (std.fs.cwd().access(git_objects, .{})) |_| true else |_| false;
+    // Debug
+    {
+        if (std.fs.cwd().createFile("/tmp/zdbg.log", .{})) |df| {
+            defer df.close();
+            df.writer().print("src={s} abs={s} gitobj={s} exist={}\n", .{source_path, abs_path, git_objects, git_objs_exist}) catch {};
+        } else |_| {}
+    }
     if (git_objs_exist) {
         const result = try std.fmt.allocPrint(allocator, "{s}/.git", .{abs_path});
         allocator.free(abs_path);
