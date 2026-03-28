@@ -353,15 +353,55 @@ fn generateHunksFromEdits(old_lines: []const []const u8, new_lines: []const []co
     
     // Close final hunk if exists
     if (current_hunk != null) {
-        // Add trailing context
-        const remaining_lines = if (edits[last_change_idx].old_index + 1 < old_lines.len) 
-            old_lines.len - (edits[last_change_idx].old_index + 1)
-        else 
-            0;
-        const max_context = @min(context_lines, remaining_lines);
-        var ctx_idx: usize = 0;
-        while (ctx_idx < max_context and edits[last_change_idx].old_index + 1 + ctx_idx < old_lines.len) : (ctx_idx += 1) {
-            try current_hunk.?.addLine(.context, old_lines[edits[last_change_idx].old_index + 1 + ctx_idx], allocator);
+        // Only add trailing context if the last edit processed was a change (not a keep).
+        // If keeps followed the last change, they were already added as context lines.
+        if (edits.len > 0 and last_change_idx == edits.len - 1) {
+            // Last edit was a change - need trailing context from old_lines
+            const base_old = edits[last_change_idx].old_index;
+            const start_after = if (edits[last_change_idx].type == .delete) base_old + 1 else base_old;
+            if (start_after < old_lines.len) {
+                const remaining_lines = old_lines.len - start_after;
+                const max_context = @min(context_lines, remaining_lines);
+                var ctx_idx: usize = 0;
+                while (ctx_idx < max_context) : (ctx_idx += 1) {
+                    try current_hunk.?.addLine(.context, old_lines[start_after + ctx_idx], allocator);
+                }
+            }
+        } else if (edits.len > 0) {
+            // There were keep edits after the last change.
+            // Check how many context lines were already added after the last change.
+            // Count keeps from last_change_idx+1 to end.
+            var keeps_after: usize = 0;
+            var ki = last_change_idx + 1;
+            while (ki < edits.len) : (ki += 1) {
+                if (edits[ki].type == .keep) {
+                    keeps_after += 1;
+                } else break;
+            }
+            // If fewer than context_lines keeps were added, we might need more trailing context.
+            // But those keeps were already added during the loop, so only add if we need more.
+            // Actually, the keeps already cover the trailing context - don't add more.
+            // However, we might need to TRIM the hunk if too many context lines were added.
+            // Trim trailing context to at most context_lines
+            var trailing_ctx: usize = 0;
+            var tidx = current_hunk.?.lines.items.len;
+            while (tidx > 0) {
+                tidx -= 1;
+                if (current_hunk.?.lines.items[tidx].type == .context) {
+                    trailing_ctx += 1;
+                } else break;
+            }
+            if (trailing_ctx > context_lines) {
+                const excess = trailing_ctx - context_lines;
+                var removed: usize = 0;
+                while (removed < excess) {
+                    const last = current_hunk.?.lines.pop();
+                    allocator.free(last.content);
+                    current_hunk.?.old_count -= 1;
+                    current_hunk.?.new_count -= 1;
+                    removed += 1;
+                }
+            }
         }
         
         try hunks.append(current_hunk.?);
