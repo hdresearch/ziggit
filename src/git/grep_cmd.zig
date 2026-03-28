@@ -216,6 +216,18 @@ pub fn cmdGrep(allocator: Allocator, args: *platform_mod.ArgIterator, platform_i
             continue;
         }
 
+        // Handle ( and ) as boolean expression tokens
+        if (std.mem.eql(u8, arg, "(")) {
+            try opts.expr_tokens.append(.open_paren);
+            has_boolean_op = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, ")")) {
+            try opts.expr_tokens.append(.close_paren);
+            has_boolean_op = true;
+            continue;
+        }
+
         // Options
         if (std.mem.startsWith(u8, arg, "-") and !after_dd) {
             if (std.mem.eql(u8, arg, "-e")) {
