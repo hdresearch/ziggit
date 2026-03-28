@@ -19757,7 +19757,6 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     var seen_separator = false;
     var quiet = false;
     var intent_to_add = false;
-    _ = quiet;
 
     while (args.next()) |arg| {
         if (seen_separator) {
@@ -27096,7 +27095,6 @@ fn doNativePrune(allocator: std.mem.Allocator, git_dir: []const u8, platform_imp
 }
 
 fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platform_impl: anytype, quiet: bool) !void {
-    _ = quiet;
 
     // Simple repack: collect all loose objects and write them into a pack file
     // Also consolidate existing packs
@@ -35344,7 +35342,6 @@ fn performLocalFetch(allocator: std.mem.Allocator, git_path: []const u8, source_
             const hnl = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.hash}); defer allocator.free(hnl);
             std.fs.cwd().writeFile(.{ .sub_path = dtp, .data = hnl }) catch {}; } }
     }
-    _ = quiet;
     if (fetch_failed) {
         std.process.exit(1);
     }
