@@ -9089,6 +9089,18 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         }
     }
 
+    // Validate --default is only applicable to --get
+    if (default_value != null) {
+        switch (action) {
+            .get, .get_all, .get_regexp => {},
+            .none => {}, // implicit get
+            else => {
+                try platform_impl.writeStderr("error: --default is only applicable to --get\n");
+                std.process.exit(129);
+            },
+        }
+    }
+
     switch (action) {
         .list => {
             for (sources.items) |source| {
