@@ -11464,7 +11464,7 @@ fn colorToAnsiAlloc(allocator: std.mem.Allocator, color_str: []const u8) ![]u8 {
     var fg_set = false;
     var bg_set = false;
 
-    var attrs = std.ArrayList(u8).init(allocator);
+    var attrs = std.array_list.Managed(u8).init(allocator);
     defer attrs.deinit();
 
     // We need to also track RGB values
@@ -11494,7 +11494,7 @@ fn colorToAnsiAlloc(allocator: std.mem.Allocator, color_str: []const u8) ![]u8 {
     }
 
     // Build ANSI code
-    var codes = std.ArrayList(u8).init(allocator);
+    var codes = std.array_list.Managed(u8).init(allocator);
     defer codes.deinit();
 
     var first = true;
@@ -11589,7 +11589,7 @@ fn colorToAnsiAlloc(allocator: std.mem.Allocator, color_str: []const u8) ![]u8 {
     }
 
     // Build final string: \e[CODESm
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     try result.append(0x1b);
     try result.append('[');
     try result.appendSlice(codes.items);
