@@ -27684,6 +27684,19 @@ fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, opts:
                         try platform_impl.writeStdout(id_line);
                     }
                 }
+                if (opts.patch_with_stat) {
+                    // Output stat before patch
+                    try outputStatForTwoTrees(allocator, pt, this_tree, git_path, pathspecs, platform_impl);
+                    try platform_impl.writeStdout("\n");
+                }
+                if (opts.patch_with_raw) {
+                    // Output raw before patch
+                    var raw_opts = opts.*;
+                    raw_opts.show_patch = false;
+                    raw_opts.show_raw = true;
+                    _ = try diffTwoTreesFiltered(allocator, pt, this_tree, "", &raw_opts, pathspecs, platform_impl);
+                    try platform_impl.writeStdout("\n");
+                }
                 _ = try diffTwoTreesFiltered(allocator, pt, this_tree, "", opts, pathspecs, platform_impl);
             }
             return true;
