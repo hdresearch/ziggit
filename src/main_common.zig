@@ -20707,7 +20707,7 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             if (std.fs.cwd().access(full_path2, .{})) |_| {
                 if (platform_impl.fs.readFile(allocator, full_path2)) |file_content| {
                     defer allocator.free(file_content);
-                    const new_hash = objects.hashAndStore(file_content, "blob", git_dir, platform_impl, allocator) catch { i_ag += 1; continue; };
+                    const new_hash = objects.REPLACED_MARKER(file_content, "blob", git_dir, platform_impl, allocator) catch { i_ag += 1; continue; };
                     defer allocator.free(new_hash);
                     if (!std.mem.eql(u8, new_hash, entry.hash)) {
                         idx.entries.items[i_ag].hash = allocator.dupe(u8, new_hash) catch { i_ag += 1; continue; };
