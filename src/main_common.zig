@@ -3537,9 +3537,16 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         return;
     }
     
-    // Walk the commit history
-    var commit_hash = try allocator.dupe(u8, start_commit);
-    defer allocator.free(commit_hash);
+    // Walk the commit history using priority queue (sorted by committer date)
+    const CommitQueueEntry = struct {
+        hash: []const u8,
+        timestamp: i64,
+    };
+    var queue = std.array_list.Managed(CommitQueueEntry).init(allocator);
+    defer {
+        for (queue.items) |entry| allocator.free(@constCast(entry.hash));
+        queue.deinit();
+    }
 
     var visited = std.StringHashMap(void).init(allocator);
     defer {
@@ -3550,16 +3557,28 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         visited.deinit();
     }
 
+    // Seed the queue with the start commit
+    const start_ts = getCommitTimestamp(start_commit, git_path, platform_impl, allocator);
+    try queue.append(.{ .hash = try allocator.dupe(u8, start_commit), .timestamp = start_ts });
+    try visited.put(try allocator.dupe(u8, start_commit), {});
+
     var count: u32 = 0;
-    while (max_count == null or count < max_count.?) {
-        // Avoid infinite loops
-        if (visited.contains(commit_hash)) break;
-        try visited.put(try allocator.dupe(u8, commit_hash), {});
+    while (queue.items.len > 0 and (max_count == null or count < max_count.?)) {
+        // Find the entry with the highest timestamp (most recent commit)
+        var best_idx: usize = 0;
+        for (queue.items, 0..) |entry, i| {
+            if (entry.timestamp > queue.items[best_idx].timestamp) {
+                best_idx = i;
+            }
+        }
+        const current = queue.orderedRemove(best_idx);
+        const cur_hash = current.hash;
+        defer allocator.free(@constCast(cur_hash));
 
         // Load commit object
-        const commit_object = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch |err| switch (err) {
+        const commit_object = objects.GitObject.load(cur_hash, git_path, platform_impl, allocator) catch |err| switch (err) {
             error.ObjectNotFound => {
-                const msg = try std.fmt.allocPrint(allocator, "fatal: bad object {s}\n", .{commit_hash});
+                const msg = try std.fmt.allocPrint(allocator, "fatal: bad object {s}\n", .{cur_hash});
                 defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
                 return;
@@ -3577,8 +3596,7 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         const commit_data = commit_object.data;
         
         // Extract commit message and author
-        var lines = std.mem.splitSequence(u8, commit_data, "\n");
-        var parent_hash: ?[]const u8 = null;
+        var lines_it = std.mem.splitSequence(u8, commit_data, "\n");
         var parent_hashes = std.array_list.Managed([]const u8).init(allocator);
         defer parent_hashes.deinit();
         var author_line: ?[]const u8 = null;
@@ -3586,7 +3604,7 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         var message = std.array_list.Managed(u8).init(allocator);
         defer message.deinit();
 
-        while (lines.next()) |line| {
+        while (lines_it.next()) |line| {
             if (empty_line_found) {
                 try message.appendSlice(line);
                 try message.append('\n');
@@ -3594,9 +3612,6 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
                 empty_line_found = true;
             } else if (std.mem.startsWith(u8, line, "parent ")) {
                 try parent_hashes.append(line["parent ".len..]);
-                if (parent_hash == null) {
-                    parent_hash = line["parent ".len..];
-                }
             } else if (std.mem.startsWith(u8, line, "author ")) {
                 author_line = line["author ".len..];
             }
@@ -3607,12 +3622,12 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             if (format_is_separator and count > 0) {
                 try platform_impl.writeStdout("\n");
             }
-            try outputFormattedCommit(fmt, commit_hash, allocator, platform_impl);
+            try outputFormattedCommit(fmt, cur_hash, allocator, platform_impl);
             if (!format_is_separator) {
                 try platform_impl.writeStdout("\n");
             }
         } else if (oneline) {
-            const short_hash = commit_hash[0..7];
+            const short_hash = cur_hash[0..@min(7, cur_hash.len)];
             const first_line = blk: {
                 var msg_lines = std.mem.splitSequence(u8, std.mem.trimRight(u8, message.items, "\n"), "\n");
                 if (msg_lines.next()) |line| {
@@ -3625,7 +3640,7 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             defer allocator.free(oneline_output);
             try platform_impl.writeStdout(oneline_output);
         } else {
-            const commit_header = try std.fmt.allocPrint(allocator, "commit {s}\n", .{commit_hash});
+            const commit_header = try std.fmt.allocPrint(allocator, "commit {s}\n", .{cur_hash});
             defer allocator.free(commit_header);
             try platform_impl.writeStdout(commit_header);
 
@@ -3678,14 +3693,34 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
 
         count += 1;
 
-        // Move to parent commit
-        if (parent_hash) |parent| {
-            allocator.free(commit_hash);
-            commit_hash = try allocator.dupe(u8, parent);
-        } else {
-            break; // No parent, we've reached the initial commit
+        // Add all parents to the queue
+        for (parent_hashes.items) |parent| {
+            if (!visited.contains(parent)) {
+                try visited.put(try allocator.dupe(u8, parent), {});
+                const pts = getCommitTimestamp(parent, git_path, platform_impl, allocator);
+                try queue.append(.{ .hash = try allocator.dupe(u8, parent), .timestamp = pts });
+            }
         }
     }
+}
+
+fn getCommitTimestamp(hash: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) i64 {
+    const obj = objects.GitObject.load(hash, git_path, platform_impl, allocator) catch return 0;
+    defer obj.deinit(allocator);
+    var line_iter = std.mem.splitScalar(u8, obj.data, '\n');
+    while (line_iter.next()) |line| {
+        if (line.len == 0) break;
+        if (std.mem.startsWith(u8, line, "committer ")) {
+            if (std.mem.indexOf(u8, line, "> ")) |gt| {
+                const rest = line[gt + 2 ..];
+                if (std.mem.indexOf(u8, rest, " ")) |sp| {
+                    return std.fmt.parseInt(i64, rest[0..sp], 10) catch 0;
+                }
+                return std.fmt.parseInt(i64, rest, 10) catch 0;
+            }
+        }
+    }
+    return 0;
 }
 
 fn resolveHeadRelative(git_path: []const u8, steps: u32, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
