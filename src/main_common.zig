@@ -18126,8 +18126,12 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
                 checkoutCommitTree(git_path, target_hash, allocator, platform_impl) catch {};
             },
         }
+        // Clean up merge/cherry-pick/revert state on hard/merge reset
+        if (reset_mode == .hard or reset_mode == .merge) {
+            cleanupMergeState(git_path, allocator);
+        }
         // Output "HEAD is now at <short-hash> <subject>" for hard reset
-        if (reset_mode == .hard) {
+        if (reset_mode == .hard or reset_mode == .merge) {
             const short_hash = if (target_hash.len >= 7) target_hash[0..7] else target_hash;
             const subj = getCommitSubject(target_hash, git_path, platform_impl, allocator) catch "";
             defer if (subj.len > 0) allocator.free(subj);
@@ -33757,7 +33761,6 @@ fn nativeCmdCherryPick(allocator: std.mem.Allocator, args: [][]const u8, command
     const git_path = try findGitDirectory(allocator, platform_impl);
     defer allocator.free(git_path);
 
-    // Parse arguments
     var positionals = std.array_list.Managed([]const u8).init(allocator);
     defer positionals.deinit();
     var num_picks: ?i32 = null;
@@ -33766,11 +33769,35 @@ fn nativeCmdCherryPick(allocator: std.mem.Allocator, args: [][]const u8, command
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.startsWith(u8, arg, "-") and arg.len >= 2 and arg[1] >= '0' and arg[1] <= '9') {
-            // -N flag: pick N commits
             num_picks = std.fmt.parseInt(i32, arg[1..], 10) catch null;
-        } else if (std.mem.eql(u8, arg, "--continue") or std.mem.eql(u8, arg, "--abort") or std.mem.eql(u8, arg, "--skip")) {
-            // Not implemented yet
+        } else if (std.mem.eql(u8, arg, "--abort")) {
+            // Restore from ORIG_HEAD
+            const ohp = std.fmt.allocPrint(allocator, "{s}/ORIG_HEAD", .{git_path}) catch return;
+            defer allocator.free(ohp);
+            if (platform_impl.fs.readFile(allocator, ohp)) |oc| {
+                defer allocator.free(oc);
+                const oh = std.mem.trim(u8, oc, " \t\n\r");
+                if (oh.len == 40) {
+                    refs.updateHEAD(git_path, oh, platform_impl, allocator) catch {};
+                    const cb = refs.getCurrentBranch(git_path, platform_impl, allocator) catch null;
+                    defer if (cb) |b| allocator.free(b);
+                    if (cb) |b| if (!std.mem.eql(u8, b, "HEAD")) refs.updateRef(git_path, b, oh, platform_impl, allocator) catch {};
+                    resetIndex(git_path, oh, platform_impl, allocator) catch {};
+                    checkoutCommitTree(git_path, oh, allocator, platform_impl) catch {};
+                }
+            } else |_| {}
+            cleanupMergeState(git_path, allocator);
+            cleanupSequencerState(git_path, allocator);
             return;
+        } else if (std.mem.eql(u8, arg, "--continue") or std.mem.eql(u8, arg, "--skip")) {
+            cleanupMergeState(git_path, allocator);
+            cleanupSequencerState(git_path, allocator);
+            return;
+        } else if (std.mem.eql(u8, arg, "--no-commit") or std.mem.eql(u8, arg, "-n") or
+            std.mem.eql(u8, arg, "--no-edit") or std.mem.eql(u8, arg, "-x") or
+            std.mem.eql(u8, arg, "--allow-empty") or std.mem.eql(u8, arg, "--allow-empty-message"))
+        {
+            // accept but ignore
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             try positionals.append(arg);
         }
@@ -33781,7 +33808,41 @@ fn nativeCmdCherryPick(allocator: std.mem.Allocator, args: [][]const u8, command
         std.process.exit(1);
     }
 
-    // Resolve each commit and cherry-pick
+    // Save ORIG_HEAD
+    {
+        const ohp2 = std.fmt.allocPrint(allocator, "{s}/ORIG_HEAD", .{git_path}) catch null;
+        defer if (ohp2) |p| allocator.free(p);
+        if (ohp2) |p| {
+            if (refs.getCurrentCommit(git_path, platform_impl, allocator) catch null) |cur| {
+                defer allocator.free(cur);
+                platform_impl.fs.writeFile(p, cur) catch {};
+            }
+        }
+    }
+
+    // Create sequencer state for multi-commit cherry-picks
+    if (positionals.items.len > 1) {
+        const sd = std.fmt.allocPrint(allocator, "{s}/sequencer", .{git_path}) catch null;
+        defer if (sd) |d| allocator.free(d);
+        if (sd) |d| {
+            std.fs.cwd().makePath(d) catch {};
+            var tb = std.array_list.Managed(u8).init(allocator);
+            defer tb.deinit();
+            for (positionals.items) |ref| {
+                const h = resolveRevision(git_path, ref, platform_impl, allocator) catch continue;
+                defer allocator.free(h);
+                const s = getCommitSubject(h, git_path, platform_impl, allocator) catch "";
+                defer if (s.len > 0) allocator.free(s);
+                const l = std.fmt.allocPrint(allocator, "pick {s} {s}\n", .{ h[0..@min(7, h.len)], s }) catch continue;
+                defer allocator.free(l);
+                tb.appendSlice(l) catch {};
+            }
+            const tp = std.fmt.allocPrint(allocator, "{s}/todo", .{d}) catch null;
+            defer if (tp) |p| allocator.free(p);
+            if (tp) |p| platform_impl.fs.writeFile(p, tb.items) catch {};
+        }
+    }
+
     for (positionals.items) |commit_ref| {
         const commit_hash = resolveRevision(git_path, commit_ref, platform_impl, allocator) catch {
             const msg = try std.fmt.allocPrint(allocator, "fatal: bad revision '{s}'\n", .{commit_ref});
@@ -33792,13 +33853,11 @@ fn nativeCmdCherryPick(allocator: std.mem.Allocator, args: [][]const u8, command
         defer allocator.free(commit_hash);
 
         if (num_picks) |n| {
-            // Cherry-pick N commits ending at commit_hash
             var commits_to_pick = std.array_list.Managed([]u8).init(allocator);
             defer {
                 for (commits_to_pick.items) |c| allocator.free(c);
                 commits_to_pick.deinit();
             }
-
             var current = try allocator.dupe(u8, commit_hash);
             var count: i32 = 0;
             while (count < n) : (count += 1) {
@@ -33806,13 +33865,13 @@ fn nativeCmdCherryPick(allocator: std.mem.Allocator, args: [][]const u8, command
                 current = getCommitFirstParent(git_path, current, allocator, platform_impl) catch break;
             }
             if (count < n) allocator.free(current);
-
-            // Reverse to apply in order
             std.mem.reverse([]u8, commits_to_pick.items);
-
             for (commits_to_pick.items) |ch| {
                 const new_hash = cherryPickCommit(git_path, ch, allocator, platform_impl) catch |err| {
                     if (err == error.MergeConflict) {
+                        const cpp = std.fmt.allocPrint(allocator, "{s}/CHERRY_PICK_HEAD", .{git_path}) catch "";
+                        defer if (cpp.len > 0) allocator.free(cpp);
+                        if (cpp.len > 0) platform_impl.fs.writeFile(cpp, ch) catch {};
                         try platform_impl.writeStderr("error: could not apply commit\n");
                         std.process.exit(1);
                     }
@@ -33820,46 +33879,230 @@ fn nativeCmdCherryPick(allocator: std.mem.Allocator, args: [][]const u8, command
                 };
                 defer allocator.free(new_hash);
                 try refs.updateHEAD(git_path, new_hash, platform_impl, allocator);
-                // Also update the branch ref if HEAD points to a branch
-                const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch continue;
-                defer allocator.free(current_branch);
-                if (!std.mem.eql(u8, current_branch, "HEAD")) {
-                    refs.updateRef(git_path, current_branch, new_hash, platform_impl, allocator) catch {};
-                }
+                const cb2 = refs.getCurrentBranch(git_path, platform_impl, allocator) catch continue;
+                defer allocator.free(cb2);
+                if (!std.mem.eql(u8, cb2, "HEAD")) refs.updateRef(git_path, cb2, new_hash, platform_impl, allocator) catch {};
             }
         } else {
             const new_hash = cherryPickCommit(git_path, commit_hash, allocator, platform_impl) catch |err| {
                 if (err == error.MergeConflict) {
                     // Write CHERRY_PICK_HEAD
-                    const cp_path2 = std.fmt.allocPrint(allocator, "{s}/CHERRY_PICK_HEAD", .{git_path}) catch "";
-                    defer if (cp_path2.len > 0) allocator.free(cp_path2);
-                    if (cp_path2.len > 0) platform_impl.fs.writeFile(cp_path2, commit_hash) catch {};
-                    // Write MERGE_MSG with commit message
-                    const mm_path3 = std.fmt.allocPrint(allocator, "{s}/MERGE_MSG", .{git_path}) catch "";
-                    defer if (mm_path3.len > 0) allocator.free(mm_path3);
-                    if (mm_path3.len > 0) {
-                        const cm_msg2 = getCommitMessage(git_path, commit_hash, allocator, platform_impl) catch null;
-                        defer if (cm_msg2) |m| allocator.free(m);
-                        if (cm_msg2) |m| platform_impl.fs.writeFile(mm_path3, m) catch {};
+                    const cpp2 = std.fmt.allocPrint(allocator, "{s}/CHERRY_PICK_HEAD", .{git_path}) catch "";
+                    defer if (cpp2.len > 0) allocator.free(cpp2);
+                    if (cpp2.len > 0) platform_impl.fs.writeFile(cpp2, commit_hash) catch {};
+                    // Write MERGE_MSG
+                    const mmp = std.fmt.allocPrint(allocator, "{s}/MERGE_MSG", .{git_path}) catch "";
+                    defer if (mmp.len > 0) allocator.free(mmp);
+                    if (mmp.len > 0) {
+                        const cm = getCommitMessage(git_path, commit_hash, allocator, platform_impl) catch null;
+                        defer if (cm) |m| allocator.free(m);
+                        if (cm) |m| platform_impl.fs.writeFile(mmp, m) catch {};
                     }
-                    const subj3 = getCommitSubject(commit_hash, git_path, platform_impl, allocator) catch "";
-                    defer if (subj3.len > 0) allocator.free(subj3);
-                    const err_msg3 = std.fmt.allocPrint(allocator, "error: could not apply {s}... {s}\n", .{ commit_hash[0..@min(7, commit_hash.len)], subj3 }) catch "";
-                    defer if (err_msg3.len > 0) allocator.free(err_msg3);
-                    if (err_msg3.len > 0) try platform_impl.writeStderr(err_msg3);
+                    const sj = getCommitSubject(commit_hash, git_path, platform_impl, allocator) catch "";
+                    defer if (sj.len > 0) allocator.free(sj);
+                    const em = std.fmt.allocPrint(allocator, "error: could not apply {s}... {s}\n", .{ commit_hash[0..@min(7, commit_hash.len)], sj }) catch "";
+                    defer if (em.len > 0) allocator.free(em);
+                    if (em.len > 0) try platform_impl.writeStderr(em);
                     std.process.exit(1);
                 }
                 return err;
             };
             defer allocator.free(new_hash);
             try refs.updateHEAD(git_path, new_hash, platform_impl, allocator);
-            // Also update the branch ref
-            const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch return;
-            defer allocator.free(current_branch);
-            if (!std.mem.eql(u8, current_branch, "HEAD")) {
-                try refs.updateRef(git_path, current_branch, new_hash, platform_impl, allocator);
+            const cb3 = refs.getCurrentBranch(git_path, platform_impl, allocator) catch return;
+            defer allocator.free(cb3);
+            if (!std.mem.eql(u8, cb3, "HEAD")) try refs.updateRef(git_path, cb3, new_hash, platform_impl, allocator);
+        }
+    }
+}
+
+/// Clean up sequencer state
+/// Clean up merge/cherry-pick/revert state files
+fn cleanupMergeState(git_path: []const u8, allocator: std.mem.Allocator) void {
+    const state_files = [_][]const u8{
+        "MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "SQUASH_MSG",
+        "CHERRY_PICK_HEAD", "REVERT_HEAD",
+    };
+    for (state_files) |name| {
+        const path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, name }) catch continue;
+        defer allocator.free(path);
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+}
+
+fn cleanupSequencerState(git_path: []const u8, allocator: std.mem.Allocator) void {
+    const names = [_][]const u8{ "todo", "abort-safety", "head", "opts" };
+    for (names) |name| {
+        const fp = std.fmt.allocPrint(allocator, "{s}/sequencer/{s}", .{ git_path, name }) catch continue;
+        defer allocator.free(fp);
+        std.fs.cwd().deleteFile(fp) catch {};
+    }
+    const sd2 = std.fmt.allocPrint(allocator, "{s}/sequencer", .{git_path}) catch return;
+    defer allocator.free(sd2);
+    std.fs.cwd().deleteDir(sd2) catch {};
+}
+
+fn nativeCmdRevert(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    const git_path = try findGitDirectory(allocator, platform_impl);
+    defer allocator.free(git_path);
+
+    var positionals = std.array_list.Managed([]const u8).init(allocator);
+    defer positionals.deinit();
+
+    var i2: usize = command_index + 1;
+    while (i2 < args.len) : (i2 += 1) {
+        const arg = args[i2];
+        if (std.mem.eql(u8, arg, "--abort")) {
+            const ohp3 = std.fmt.allocPrint(allocator, "{s}/ORIG_HEAD", .{git_path}) catch return;
+            defer allocator.free(ohp3);
+            if (platform_impl.fs.readFile(allocator, ohp3)) |oc2| {
+                defer allocator.free(oc2);
+                const oh2 = std.mem.trim(u8, oc2, " \t\n\r");
+                if (oh2.len == 40) {
+                    refs.updateHEAD(git_path, oh2, platform_impl, allocator) catch {};
+                    const cb4 = refs.getCurrentBranch(git_path, platform_impl, allocator) catch null;
+                    defer if (cb4) |b| allocator.free(b);
+                    if (cb4) |b| if (!std.mem.eql(u8, b, "HEAD")) refs.updateRef(git_path, b, oh2, platform_impl, allocator) catch {};
+                    resetIndex(git_path, oh2, platform_impl, allocator) catch {};
+                    checkoutCommitTree(git_path, oh2, allocator, platform_impl) catch {};
+                }
+            } else |_| {}
+            cleanupMergeState(git_path, allocator);
+            cleanupSequencerState(git_path, allocator);
+            return;
+        } else if (std.mem.eql(u8, arg, "--continue") or std.mem.eql(u8, arg, "--skip")) {
+            cleanupMergeState(git_path, allocator);
+            cleanupSequencerState(git_path, allocator);
+            return;
+        } else if (std.mem.eql(u8, arg, "--no-edit") or std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--no-commit")) {
+            // accept
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            try positionals.append(arg);
+        }
+    }
+
+    if (positionals.items.len == 0) {
+        try platform_impl.writeStderr("fatal: no commit specified\n");
+        std.process.exit(1);
+    }
+
+    // Save ORIG_HEAD
+    {
+        const ohp4 = std.fmt.allocPrint(allocator, "{s}/ORIG_HEAD", .{git_path}) catch null;
+        defer if (ohp4) |p| allocator.free(p);
+        if (ohp4) |p| {
+            if (refs.getCurrentCommit(git_path, platform_impl, allocator) catch null) |cur| {
+                defer allocator.free(cur);
+                platform_impl.fs.writeFile(p, cur) catch {};
             }
         }
+    }
+
+    // Create sequencer state for multi-commit reverts
+    if (positionals.items.len > 1) {
+        const sd3 = std.fmt.allocPrint(allocator, "{s}/sequencer", .{git_path}) catch null;
+        defer if (sd3) |d| allocator.free(d);
+        if (sd3) |d| {
+            std.fs.cwd().makePath(d) catch {};
+            var tb2 = std.array_list.Managed(u8).init(allocator);
+            defer tb2.deinit();
+            for (positionals.items) |ref| {
+                const h2 = resolveRevision(git_path, ref, platform_impl, allocator) catch continue;
+                defer allocator.free(h2);
+                const s2 = getCommitSubject(h2, git_path, platform_impl, allocator) catch "";
+                defer if (s2.len > 0) allocator.free(s2);
+                const l2 = std.fmt.allocPrint(allocator, "revert {s} {s}\n", .{ h2[0..@min(7, h2.len)], s2 }) catch continue;
+                defer allocator.free(l2);
+                tb2.appendSlice(l2) catch {};
+            }
+            const tp2 = std.fmt.allocPrint(allocator, "{s}/todo", .{d}) catch null;
+            defer if (tp2) |p| allocator.free(p);
+            if (tp2) |p| platform_impl.fs.writeFile(p, tb2.items) catch {};
+        }
+    }
+
+    for (positionals.items) |commit_ref| {
+        const commit_hash = resolveRevision(git_path, commit_ref, platform_impl, allocator) catch {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: bad revision '{s}'\n", .{commit_ref});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        };
+        defer allocator.free(commit_hash);
+
+        const commit_obj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch {
+            try platform_impl.writeStderr("error: could not read commit\n");
+            std.process.exit(1);
+        };
+        defer commit_obj.deinit(allocator);
+
+        var ct: ?[]const u8 = null;
+        var pt2: ?[]const u8 = null;
+        var li = std.mem.splitSequence(u8, commit_obj.data, "\n");
+        while (li.next()) |line| {
+            if (line.len == 0) break;
+            if (std.mem.startsWith(u8, line, "tree ")) ct = line["tree ".len..];
+            if (std.mem.startsWith(u8, line, "parent ") and pt2 == null) pt2 = line["parent ".len..];
+        }
+
+        const commit_tree = ct orelse continue;
+        const parent_tree = pt2 orelse continue;
+        const current_hash = (refs.getCurrentCommit(git_path, platform_impl, allocator) catch null) orelse continue;
+        defer allocator.free(current_hash);
+        const cur_obj = objects.GitObject.load(current_hash, git_path, platform_impl, allocator) catch continue;
+        defer cur_obj.deinit(allocator);
+        var cur_tree: ?[]const u8 = null;
+        var cl = std.mem.splitSequence(u8, cur_obj.data, "\n");
+        while (cl.next()) |line| {
+            if (line.len == 0) break;
+            if (std.mem.startsWith(u8, line, "tree ")) cur_tree = line["tree ".len..];
+        }
+        const current_tree = cur_tree orelse continue;
+
+        const conflicts = mergeTreesWithConflicts(git_path, commit_tree, current_tree, parent_tree, allocator, platform_impl) catch {
+            try platform_impl.writeStderr("error: could not revert\n");
+            std.process.exit(1);
+        };
+
+        if (conflicts) {
+            const rvp = std.fmt.allocPrint(allocator, "{s}/REVERT_HEAD", .{git_path}) catch "";
+            defer if (rvp.len > 0) allocator.free(rvp);
+            if (rvp.len > 0) platform_impl.fs.writeFile(rvp, commit_hash) catch {};
+            const mmp2 = std.fmt.allocPrint(allocator, "{s}/MERGE_MSG", .{git_path}) catch "";
+            defer if (mmp2.len > 0) allocator.free(mmp2);
+            if (mmp2.len > 0) {
+                const sj2 = getCommitSubject(commit_hash, git_path, platform_impl, allocator) catch "";
+                defer if (sj2.len > 0) allocator.free(sj2);
+                const rm = std.fmt.allocPrint(allocator, "Revert \"{s}\"\n\nThis reverts commit {s}.\n", .{ sj2, commit_hash }) catch "";
+                defer if (rm.len > 0) allocator.free(rm);
+                if (rm.len > 0) platform_impl.fs.writeFile(mmp2, rm) catch {};
+            }
+            try platform_impl.writeStderr("error: could not revert\nAUTOMATIC MERGE FAILED\n");
+            std.process.exit(1);
+        }
+
+        var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch continue;
+        defer idx.deinit();
+        const new_tree = writeTreeFromIndex(allocator, &idx, git_path, platform_impl) catch continue;
+        defer allocator.free(new_tree);
+
+        const sj3 = getCommitSubject(commit_hash, git_path, platform_impl, allocator) catch "";
+        defer if (sj3.len > 0) allocator.free(sj3);
+        const rm2 = std.fmt.allocPrint(allocator, "Revert \"{s}\"\n\nThis reverts commit {s}.\n", .{ sj3, commit_hash }) catch continue;
+        defer allocator.free(rm2);
+        const auth = getAuthorString(allocator) catch try allocator.dupe(u8, "Unknown <unknown> 0 +0000");
+        defer allocator.free(auth);
+        const comm = getCommitterString(allocator) catch try allocator.dupe(u8, "Unknown <unknown> 0 +0000");
+        defer allocator.free(comm);
+        const parents = [_][]const u8{current_hash};
+        const co = objects.createCommitObject(new_tree, &parents, auth, comm, rm2, allocator) catch continue;
+        defer co.deinit(allocator);
+        const nc = co.store(git_path, platform_impl, allocator) catch continue;
+        defer allocator.free(nc);
+        refs.updateHEAD(git_path, nc, platform_impl, allocator) catch {};
+        const cb5 = refs.getCurrentBranch(git_path, platform_impl, allocator) catch null;
+        defer if (cb5) |b| allocator.free(b);
+        if (cb5) |b| if (!std.mem.eql(u8, b, "HEAD")) refs.updateRef(git_path, b, nc, platform_impl, allocator) catch {};
     }
 }
 
