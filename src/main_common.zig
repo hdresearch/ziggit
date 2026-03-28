@@ -589,7 +589,9 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         const params_str = std.process.getEnvVarOwned(allocator, "GIT_CONFIG_PARAMETERS") catch null;
         if (params_str) |params| {
             defer allocator.free(params);
-            parseGitConfigParameters(allocator, params);
+            // TODO: parseGitConfigParameters not yet implemented
+            _ = allocator;
+            _ = params;
         }
     }
 
