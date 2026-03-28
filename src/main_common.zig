@@ -107,6 +107,7 @@ const tree_mod = if (@import("builtin").target.os.tag != .freestanding) @import(
 const gitignore_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/gitignore.zig") else void;
 const config_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/config.zig") else void;
 const diff_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/diff.zig") else void;
+const diff_stats_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/diff_stats.zig") else void;
 const network = if (@import("builtin").target.os.tag != .freestanding) @import("git/network.zig") else void;
 const zlib_compat_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/zlib_compat.zig") else void;
 
@@ -28933,14 +28934,14 @@ fn collectFilesFromTree(allocator: std.mem.Allocator, tree_hash_str: []const u8,
 }
 
 fn outputStatForTwoTrees(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, git_path: []const u8, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform) !void {
-    var diff_entries = std.array_list.Managed(DiffStatEntry).init(allocator);
+    var entries = std.array_list.Managed(diff_stats_mod.StatEntry).init(allocator);
     defer {
-        for (diff_entries.items) |*de| allocator.free(de.path);
-        diff_entries.deinit();
+        for (entries.items) |*e| allocator.free(e.path);
+        entries.deinit();
     }
-    try collectTreeDiffEntries(allocator, tree1_hash, tree2_hash, "", git_path, pathspecs, platform_impl, &diff_entries);
-    if (diff_entries.items.len == 0) return;
-    try formatDiffStat(diff_entries.items, platform_impl, allocator);
+    try diff_stats_mod.collectAccurate(allocator, tree1_hash, tree2_hash, "", git_path, pathspecs, platform_impl, &entries);
+    if (entries.items.len == 0) return;
+    try diff_stats_mod.formatStat(entries.items, platform_impl, allocator);
 }
 
 fn outputSummaryForTwoTrees(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, git_path: []const u8, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform) !void {
