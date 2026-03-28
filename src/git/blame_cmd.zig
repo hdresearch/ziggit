@@ -580,13 +580,10 @@ fn resolveRegex(spec: []const u8, file_lines: []const []const u8, start_from: us
     const pattern = spec[1..end];
     if (pattern.len == 0) return null;
 
-    // Search from start_from forward (wrapping if needed)
+    // Search forward from start_from without wrapping (relative search)
     var i: usize = start_from;
-    var checked: usize = 0;
-    while (checked < file_lines.len) : (checked += 1) {
-        if (i >= file_lines.len) i = 0;
+    while (i < file_lines.len) : (i += 1) {
         if (simpleMatch(file_lines[i], pattern)) return i + 1;
-        i += 1;
     }
     return null;
 }
