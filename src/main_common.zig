@@ -20710,8 +20710,12 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                     var blob_obj = objects.createBlobObject(file_content, allocator) catch { i_ag += 1; continue; };
                     const new_hash = blob_obj.store(git_dir, platform_impl, allocator) catch { blob_obj.deinit(allocator); i_ag += 1; continue; };
                     blob_obj.deinit(allocator);
-                    if (!std.mem.eql(u8, new_hash, entry.hash)) {
-                        idx.entries.items[i_ag].hash = allocator.dupe(u8, new_hash) catch { i_ag += 1; continue; };
+                    const entry_hex = std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch { i_ag += 1; continue; };
+                    defer allocator.free(entry_hex);
+                    if (!std.mem.eql(u8, new_hash, entry_hex)) {
+                        var new_sha1: [20]u8 = undefined;
+                        _ = std.fmt.hexToBytes(&new_sha1, new_hash) catch { i_ag += 1; continue; };
+                        idx.entries.items[i_ag].sha1 = new_sha1;
                         if (std.fs.cwd().statFile(full_path2)) |stat| {
                             idx.entries.items[i_ag].size = @intCast(@min(stat.size, std.math.maxInt(u32)));
                         } else |_| {}
