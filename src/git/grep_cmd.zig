@@ -73,6 +73,7 @@ const GrepOptions = struct {
     color: ColorMode = .auto,
     pathspecs: std.array_list.Managed([]const u8),
     tree_ish: ?[]const u8 = null,
+    tree_prefix_display: []const u8 = "", // e.g. "HEAD:" for tree-ish grep
     suppress_filename: bool = false, // -h
     show_filename: bool = true, // -H (default)
     threads: ?u32 = null,
@@ -1159,6 +1160,7 @@ fn grepTreeIsh(allocator: Allocator, opts: *GrepOptions, git_dir: []const u8, re
     // Format tree-ish prefix
     const tree_prefix = try std.fmt.allocPrint(allocator, "{s}:", .{tree_ish});
     defer allocator.free(tree_prefix);
+    opts.tree_prefix_display = tree_prefix;
 
     for (files.items) |file| {
         if (!matchesPathspecs(file.path, opts.pathspecs.items, prefix)) continue;
@@ -1167,22 +1169,19 @@ fn grepTreeIsh(allocator: Allocator, opts: *GrepOptions, git_dir: []const u8, re
         const display_path = getDisplayPath(file.path, prefix, opts.full_name, allocator);
         defer allocator.free(display_path);
 
-        const full_display = try std.fmt.allocPrint(allocator, "{s}{s}", .{ tree_prefix, display_path });
-        defer allocator.free(full_display);
-
         // Read blob content
         const blob_obj = objects.GitObject.load(file.hash, git_dir, platform_impl, allocator) catch continue;
         defer blob_obj.deinit(allocator);
 
-        const matched = try grepContent(allocator, opts, full_display, blob_obj.data, null, platform_impl, prev_file_had_output);
+        const matched = try grepContent(allocator, opts, display_path, blob_obj.data, tree_prefix, platform_impl, prev_file_had_output);
         if (matched) {
             found_match = true;
             prev_file_had_output = true;
         } else {
             if (opts.files_without_match) {
-                const quoted = quotePathIfNeeded(full_display, allocator, opts.null_separator);
+                const quoted = quotePathIfNeeded(display_path, allocator, opts.null_separator);
                 defer allocator.free(quoted);
-                const out = std.fmt.allocPrint(allocator, "{s}\n", .{quoted}) catch continue;
+                const out = std.fmt.allocPrint(allocator, "{s}{s}\n", .{ tree_prefix, quoted }) catch continue;
                 defer allocator.free(out);
                 platform_impl.writeStdout(out) catch {};
                 found_match = true;
@@ -1370,6 +1369,7 @@ fn collectFilesRecursive(allocator: Allocator, path: []const u8, files: *std.arr
 fn grepContent(allocator: Allocator, opts: *GrepOptions, display_path: []const u8, content: []const u8, tree_prefix_opt: ?[]const u8, platform_impl: *const platform_mod.Platform, prev_file_had_output: bool) !bool {
     _ = tree_prefix_opt;
 
+    const tp = opts.tree_prefix_display;
 
     // Check if content is binary
     if (isBinaryContent(content)) {
@@ -1380,7 +1380,7 @@ fn grepContent(allocator: Allocator, opts: *GrepOptions, display_path: []const u
                 if (opts.case_insensitive) {
                     if (containsIgnoreCase(content, pat)) {
                         if (!opts.quiet) {
-                            const msg = try std.fmt.allocPrint(allocator, "Binary file {s} matches\n", .{display_path});
+                            const msg = try std.fmt.allocPrint(allocator, "Binary file {s}{s} matches\n", .{ tp, display_path });
                             defer allocator.free(msg);
                             try platform_impl.writeStdout(msg);
                         }
@@ -1389,7 +1389,7 @@ fn grepContent(allocator: Allocator, opts: *GrepOptions, display_path: []const u
                 } else {
                     if (std.mem.indexOf(u8, content, pat) != null) {
                         if (!opts.quiet) {
-                            const msg = try std.fmt.allocPrint(allocator, "Binary file {s} matches\n", .{display_path});
+                            const msg = try std.fmt.allocPrint(allocator, "Binary file {s}{s} matches\n", .{ tp, display_path });
                             defer allocator.free(msg);
                             try platform_impl.writeStdout(msg);
                         }
@@ -1400,7 +1400,7 @@ fn grepContent(allocator: Allocator, opts: *GrepOptions, display_path: []const u
                 // For regex, try to match
                 if (regexMatch(content, pat, eff_pt == .extended, opts.case_insensitive, allocator)) |_| {
                     if (!opts.quiet) {
-                        const msg = try std.fmt.allocPrint(allocator, "Binary file {s} matches\n", .{display_path});
+                        const msg = try std.fmt.allocPrint(allocator, "Binary file {s}{s} matches\n", .{ tp, display_path });
                         defer allocator.free(msg);
                         try platform_impl.writeStdout(msg);
                     }
@@ -1478,11 +1478,11 @@ fn grepContent(allocator: Allocator, opts: *GrepOptions, display_path: []const u
             const quoted = quotePathIfNeeded(display_path, allocator, opts.null_separator);
             defer allocator.free(quoted);
             if (opts.null_separator) {
-                const out = try std.fmt.allocPrint(allocator, "{s}\x00", .{quoted});
+                const out = try std.fmt.allocPrint(allocator, "{s}{s}\x00", .{ tp, quoted });
                 defer allocator.free(out);
                 try platform_impl.writeStdout(out);
             } else {
-                const out = try std.fmt.allocPrint(allocator, "{s}\n", .{quoted});
+                const out = try std.fmt.allocPrint(allocator, "{s}{s}\n", .{ tp, quoted });
                 defer allocator.free(out);
                 try platform_impl.writeStdout(out);
             }
@@ -1499,7 +1499,7 @@ fn grepContent(allocator: Allocator, opts: *GrepOptions, display_path: []const u
             defer allocator.free(out);
             try platform_impl.writeStdout(out);
         } else {
-            const out = try std.fmt.allocPrint(allocator, "{s}:{d}\n", .{ quoted, match_count });
+            const out = try std.fmt.allocPrint(allocator, "{s}{s}:{d}\n", .{ tp, quoted, match_count });
             defer allocator.free(out);
             try platform_impl.writeStdout(out);
         }
@@ -1515,7 +1515,7 @@ fn grepContent(allocator: Allocator, opts: *GrepOptions, display_path: []const u
     if (opts.show_heading and match_count > 0) {
         const quoted = quotePathIfNeeded(display_path, allocator, opts.null_separator);
         defer allocator.free(quoted);
-        const out = try std.fmt.allocPrint(allocator, "{s}\n", .{quoted});
+        const out = try std.fmt.allocPrint(allocator, "{s}{s}\n", .{ tp, quoted });
         defer allocator.free(out);
         try platform_impl.writeStdout(out);
     }
@@ -1798,9 +1798,11 @@ fn printGrepLine(allocator: Allocator, opts: *GrepOptions, display_path: []const
         const quoted = quotePathIfNeeded(display_path, allocator, opts.null_separator);
         defer allocator.free(quoted);
         if (opts.null_separator) {
+            try buf.appendSlice(opts.tree_prefix_display);
             try buf.appendSlice(quoted);
             try buf.append(0);
         } else {
+            try buf.appendSlice(opts.tree_prefix_display);
             try buf.appendSlice(quoted);
             try buf.append(separator);
         }
