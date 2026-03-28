@@ -31038,7 +31038,6 @@ fn nativeCmdCheckIgnore(allocator: std.mem.Allocator, args: *platform_mod.ArgIte
 
     const line_end: []const u8 = if (use_z) "\x00" else "\n";
     const sep: []const u8 = "\t";
-    _ = no_index;
     var found_any = false;
 
     for (paths.items) |path| {
