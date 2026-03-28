@@ -9666,12 +9666,11 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 break :blk_editor try allocator.dupe(u8, "vi");
             };
             defer allocator.free(editor);
-            var child_args2 = std.array_list.Managed([]const u8).init(allocator);
-            defer child_args2.deinit();
-            var ep = std.mem.splitSequence(u8, editor, " ");
-            while (ep.next()) |part| { if (part.len > 0) try child_args2.append(part); }
-            try child_args2.append(cfg_path);
-            var child = std.process.Child.init(child_args2.items, allocator);
+            // Run editor through shell to handle complex editor commands (redirections, etc.)
+            const shell_cmd = try std.fmt.allocPrint(allocator, "{s} \"{s}\"", .{ editor, cfg_path });
+            defer allocator.free(shell_cmd);
+            const shell_argv = [_][]const u8{ "/bin/sh", "-c", shell_cmd };
+            var child = std.process.Child.init(&shell_argv, allocator);
             child.spawn() catch { try platform_impl.writeStderr("error: could not launch editor\n"); std.process.exit(1); };
             _ = child.wait() catch {};
             return;
@@ -10004,10 +10003,11 @@ fn cfgValidateConfig(content: []const u8, allocator: std.mem.Allocator) ?CfgPars
 
 fn cfgValidateAndReport(content: []const u8, source_path: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     if (cfgValidateConfig(content, allocator)) |err| {
-        const source_name = if (std.mem.eql(u8, source_path, "-")) "standard input" else source_path;
+        const is_stdin = std.mem.eql(u8, source_path, "-") or std.mem.eql(u8, source_path, "standard input");
+        const source_name = if (is_stdin) "standard input" else source_path;
         const em = try std.fmt.allocPrint(allocator, "fatal: bad config line {d} in {s}{s}\n", .{
             err.line_number,
-            if (std.mem.eql(u8, source_path, "-")) @as([]const u8, "") else @as([]const u8, "file "),
+            if (is_stdin) @as([]const u8, "") else @as([]const u8, "file "),
             source_name,
         });
         defer allocator.free(em);
