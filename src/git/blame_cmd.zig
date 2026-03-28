@@ -150,6 +150,25 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
         } else { try pi.writeStderr("fatal: no such ref\n"); std.process.exit(128); }
     } else {
         if (std.fs.cwd().readFileAlloc(a, fp.?, 10 * 1024 * 1024)) |c| {
+            // Check if file is tracked - must exist in HEAD commit or be in an empty repo
+            if (hh) |h| {
+                // File exists on disk but check if it's tracked
+                _ = gf(gp, h, fp.?, a) catch {
+                    // File not in HEAD - untracked
+                    a.free(c);
+                    const emsg = try std.fmt.allocPrint(a, "fatal: no such path '{s}' in HEAD\n", .{fp.?});
+                    defer a.free(emsg);
+                    try pi.writeStderr(emsg);
+                    std.process.exit(128);
+                };
+            } else {
+                // No HEAD - empty repo
+                a.free(c);
+                const emsg = try std.fmt.allocPrint(a, "fatal: no such path '{s}' in HEAD\n", .{fp.?});
+                defer a.free(emsg);
+                try pi.writeStderr(emsg);
+                std.process.exit(128);
+            }
             fc = c; fca = true; bu = true;
         } else |_| {
             if (hh) |h| {
