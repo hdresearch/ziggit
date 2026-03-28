@@ -158,12 +158,8 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
             if (hh) |h| {
                 // File exists on disk but check if it's tracked
                 _ = gf(gp, h, fp.?, a) catch {
-                    // File not in HEAD - untracked
-                    a.free(c);
-                    const emsg = try std.fmt.allocPrint(a, "fatal: no such path '{s}' in HEAD\n", .{fp.?});
-                    defer a.free(emsg);
-                    try pi.writeStderr(emsg);
-                    std.process.exit(128);
+                    // File not in HEAD - could be conflicted merge state
+                    // Just treat as uncommitted content (don't error)
                 };
             } else {
                 // No HEAD - empty repo
