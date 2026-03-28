@@ -21664,11 +21664,21 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             // Next arg should be a path
             if (args.next()) |path| {
                 try setIndexEntryMode(&idx, path, 0o100755);
+                if (verbose) {
+                    const vmsg = try std.fmt.allocPrint(allocator, "add '{s}'\nchmod +x '{s}'\n", .{ path, path });
+                    defer allocator.free(vmsg);
+                    try platform_impl.writeStdout(vmsg);
+                }
                 modified = true;
             }
         } else if (std.mem.eql(u8, arg, "--chmod=-x")) {
             if (args.next()) |path| {
                 try setIndexEntryMode(&idx, path, 0o100644);
+                if (verbose) {
+                    const vmsg = try std.fmt.allocPrint(allocator, "add '{s}'\nchmod -x '{s}'\n", .{ path, path });
+                    defer allocator.free(vmsg);
+                    try platform_impl.writeStdout(vmsg);
+                }
                 modified = true;
             }
         } else if (std.mem.eql(u8, arg, "--show-index-version")) {
@@ -21687,7 +21697,17 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             }
             return;
         } else if (std.mem.eql(u8, arg, "--index-version")) {
-            _ = args.next(); // skip version number
+            if (args.next()) |ver_str| {
+                const new_ver = std.fmt.parseInt(u32, ver_str, 10) catch 2;
+                const old_ver = idx.version;
+                idx.version = new_ver;
+                modified = true;
+                if (verbose) {
+                    const vmsg = try std.fmt.allocPrint(allocator, "index-version: was {d}, set to {d}\n", .{ old_ver, new_ver });
+                    defer allocator.free(vmsg);
+                    try platform_impl.writeStdout(vmsg);
+                }
+            }
         } else if (std.mem.eql(u8, arg, "--")) {
             // rest are paths
             while (args.next()) |path| {

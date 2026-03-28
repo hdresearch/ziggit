@@ -131,11 +131,13 @@ pub const IndexEntry = struct {
 pub const Index = struct {
     entries: std.array_list.Managed(IndexEntry),
     allocator: std.mem.Allocator,
+    version: u32 = 2,
 
     pub fn init(allocator: std.mem.Allocator) Index {
         return Index{
             .entries = std.array_list.Managed(IndexEntry).init(allocator),
             .allocator = allocator,
+            .version = 2,
         };
     }
 
@@ -190,6 +192,7 @@ pub const Index = struct {
                 return error.UnsupportedIndexVersion;
             }
         }
+        self.version = version;
 
         const entry_count = try reader.readInt(u32, .big);
         
@@ -539,12 +542,14 @@ pub const Index = struct {
         
         const writer = buffer.writer();
 
-        // Determine version: use v3 if any entry has extended flags
-        var version: u32 = 2;
-        for (self.entries.items) |entry| {
-            if (entry.extended_flags != null) {
-                version = 3;
-                break;
+        // Determine version: use explicitly set version, or auto-detect
+        var version: u32 = self.version;
+        if (version < 3) {
+            for (self.entries.items) |entry| {
+                if (entry.extended_flags != null) {
+                    version = 3;
+                    break;
+                }
             }
         }
 
