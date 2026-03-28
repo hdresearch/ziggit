@@ -411,20 +411,22 @@ fn generateHunksFromEditsWithContext(old_lines: []const []const u8, new_lines: [
         switch (edit.type) {
             .keep => {
                 if (current_hunk != null) {
-                    // Add context line to current hunk
-                    try current_hunk.?.addLine(.context, old_lines[edit.old_index], allocator);
-                    
-                    // Check if we should close this hunk
+                    // Count consecutive keep edits from this point
                     var consecutive_context: usize = 0;
                     var check_idx = idx;
                     while (check_idx < edits.len and edits[check_idx].type == .keep) : (check_idx += 1) {
                         consecutive_context += 1;
-                        if (consecutive_context > context_lines * 2) {
-                            // Close current hunk
-                            try hunks.append(current_hunk.?);
-                            current_hunk = null;
-                            break;
-                        }
+                    }
+
+                    // If there are more consecutive context lines than 2*context_lines,
+                    // we should split hunks. With U0, any keep line closes the hunk.
+                    if (context_lines == 0 or consecutive_context > context_lines * 2) {
+                        // Close current hunk (don't add this context line)
+                        try hunks.append(current_hunk.?);
+                        current_hunk = null;
+                    } else {
+                        // Add context line to current hunk
+                        try current_hunk.?.addLine(.context, old_lines[edit.old_index], allocator);
                     }
                 }
             },
