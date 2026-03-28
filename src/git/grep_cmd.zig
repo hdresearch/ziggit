@@ -696,6 +696,7 @@ pub fn cmdGrep(allocator: Allocator, args: *platform_mod.ArgIterator, platform_i
         }
     }
 
+    platform_impl.writeStderr("GREP DEBUG POINT 1\n") catch {};
     // If -l, -L, -c, or -q, no line numbers
     if (opts.files_only or opts.files_without_match or opts.count_only or opts.quiet) {
         opts.show_line_number = false;
