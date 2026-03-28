@@ -613,7 +613,7 @@ fn State(comptime PlatformType: type) type {
             const target_obj = objects.GitObject.load(&target_hash, self.git_dir, self.platform, self.allocator) catch return pos;
             defer target_obj.deinit(self.allocator);
 
-            const type_str = switch (target_obj.obj_type) {
+            const type_str = switch (target_obj.type) {
                 .commit => "commit",
                 .tree => "tree",
                 .blob => "blob",
