@@ -26,26 +26,7 @@ pub fn build(b: *std.Build) void {
     // This must run AFTER install_artifact completes (which creates the wrapper)
     const fix_wrapper = b.addSystemCommand(&.{
         "sh", "-c",
-        \\DEST="$1"
-        \\BEST=""
-        \\for f in .zig-cache/o/*/ziggit; do
-        \\  if [ -f "$f" ] && head -c 4 "$f" | od -A n -t x1 | grep -q '7f 45 4c 46'; then
-        \\    BEST="$f"; break
-        \\  fi
-        \\done
-        \\if [ -z "$BEST" ]; then
-        \\  for f in zig-cache/o/*/ziggit; do
-        \\    if [ -f "$f" ] && head -c 4 "$f" | od -A n -t x1 | grep -q '7f 45 4c 46'; then
-        \\      BEST="$f"; break
-        \\    fi
-        \\  done
-        \\fi
-        \\if [ -n "$BEST" ]; then
-        \\  rm -f "$DEST"
-        \\  cp "$BEST" "$DEST"
-        \\  chmod +x "$DEST"
-        \\fi
-        ,
+        "DEST=\"$1\"; for f in .zig-cache/o/*/ziggit; do [ -f \"$f\" ] || continue; SZ=$(wc -c < \"$f\"); if [ \"$SZ\" -gt 1000 ]; then rm -f \"$DEST\"; cp \"$f\" \"$DEST\"; chmod +x \"$DEST\"; break; fi; done",
         "--",
         b.getInstallPath(.bin, "ziggit"),
     });
