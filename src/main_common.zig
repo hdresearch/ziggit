@@ -37925,7 +37925,8 @@ fn cmdFastImport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         }
     }
 
-    fast_import.run(allocator, platform_impl, options) catch |e| {
+    const git_dir = resolveGitDir(allocator, platform_impl) catch ".git";
+    fast_import.run(allocator, platform_impl, options, git_dir) catch |e| {
         const msg = std.fmt.allocPrint(allocator, "fatal: fast-import error: {}\n", .{e}) catch "fatal: fast-import error\n";
         platform_impl.writeStderr(msg) catch {};
         std.process.exit(1);
