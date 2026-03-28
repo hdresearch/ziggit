@@ -1102,6 +1102,72 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 try platform_impl.writeStdout(line);
             }
         }
+        if (std.mem.indexOf(u8, spec, "list-complete") != null) {
+            const complete_cmds = [_][]const u8{
+                "apply", "blame", "cherry", "config", "difftool", "fsck",
+                "help", "instaweb", "mergetool", "prune", "reflog", "remote",
+                "repack", "replace", "request-pull", "send-email", "show-branch",
+                "stage", "whatchanged",
+            };
+            for (complete_cmds) |cmd| {
+                const line = try std.fmt.allocPrint(allocator, "{s}\n", .{cmd});
+                defer allocator.free(line);
+                try platform_impl.writeStdout(line);
+            }
+        }
+        if (std.mem.indexOf(u8, spec, "list-guide") != null) {
+            const guides = [_][]const u8{
+                "core-tutorial", "credentials", "cvs-migration", "diffcore",
+                "everyday", "faq", "glossary", "namespaces", "remote-helpers",
+                "submodules", "tutorial", "tutorial-2", "workflows",
+            };
+            for (guides) |g| {
+                const line = try std.fmt.allocPrint(allocator, "{s}\n", .{g});
+                defer allocator.free(line);
+                try platform_impl.writeStdout(line);
+            }
+        }
+        if (std.mem.indexOf(u8, spec, "others") != null) {
+            // External/contrib commands - typically empty for ziggit
+        }
+        if (std.mem.indexOf(u8, spec, "nohelpers") != null) {
+            // Already handled by main listing
+        }
+        if (std.mem.indexOf(u8, spec, "alias") != null) {
+            // List aliases from config
+            const git_path_alias = findGitDirectory(allocator, &platform_impl) catch null;
+            if (git_path_alias) |gp| {
+                defer allocator.free(gp);
+                const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{gp}) catch null;
+                if (config_path) |cp| {
+                    defer allocator.free(cp);
+                    const config_content = platform_impl.fs.readFile(allocator, cp) catch null;
+                    if (config_content) |cc| {
+                        defer allocator.free(cc);
+                        var lines_it = std.mem.splitScalar(u8, cc, '\n');
+                        var in_alias = false;
+                        while (lines_it.next()) |line| {
+                            const trimmed = std.mem.trim(u8, line, " \t\r");
+                            if (trimmed.len > 0 and trimmed[0] == '[') {
+                                in_alias = std.mem.startsWith(u8, std.mem.trim(u8, trimmed[1..], " \t"), "alias");
+                            } else if (in_alias) {
+                                if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
+                                    const alias_name = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
+                                    if (alias_name.len > 0) {
+                                        const aout = try std.fmt.allocPrint(allocator, "{s}\n", .{alias_name});
+                                        defer allocator.free(aout);
+                                        try platform_impl.writeStdout(aout);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (std.mem.indexOf(u8, spec, "parseopt") != null) {
+            try platform_impl.writeStdout("add am annotate apply archive bisect blame branch bugreport bundle cat-file check-attr check-ignore check-mailmap checkout checkout-index cherry cherry-pick clean clone column commit commit-graph commit-tree config count-objects describe diagnose difftool fast-export fetch fmt-merge-msg for-each-ref for-each-repo format-patch fsck gc grep hash-object help init interpret-trailers log ls-files ls-remote ls-tree mailinfo maintenance merge merge-base merge-file merge-tree mktag mktree multi-pack-index mv name-rev notes pack-objects pack-refs prune pull push range-diff read-tree rebase receive-pack reflog remote repack replace rerere reset restore revert rm send-pack shortlog show show-branch show-index show-ref sparse-checkout stash status stripspace switch symbolic-ref tag update-index update-ref update-server-info upload-pack verify-commit verify-pack verify-tag version whatchanged worktree write-tree \n");
+        }
     } else if (std.mem.eql(u8, command, "--exec-path")) {
         // Output the directory containing this executable
         const self_exe = std.fs.selfExePathAlloc(allocator) catch {
