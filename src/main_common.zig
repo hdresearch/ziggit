@@ -346,7 +346,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 }
                 // Add remaining args after the alias command
                 var ri2: usize = command_index + 1;
-                while (ri2 < all_original_args.items.len) : (riter_idx += 1) {
+                while (ri2 < all_original_args.items.len) : (ri2 += 1) {
                     try new_args.append(all_original_args.items[ri2]);
                 }
                 // Replace all_original_args content
