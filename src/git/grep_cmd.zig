@@ -1287,14 +1287,7 @@ fn collectFilesRecursive(allocator: Allocator, path: []const u8, files: *std.arr
 /// Returns true if any match was found
 fn grepContent(allocator: Allocator, opts: *GrepOptions, display_path: []const u8, content: []const u8, tree_prefix_opt: ?[]const u8, platform_impl: *const platform_mod.Platform, prev_file_had_output: bool) !bool {
     _ = tree_prefix_opt;
-    _ = std.posix.write(2, "GC ENTERED\n") catch 0;
 
-    // Debug
-    {
-        const dbg = std.fmt.allocPrint(allocator, "DEBUG grepContent: path='{s}' bool={} pats={d} tokens={d}\n", .{ display_path, opts.has_boolean_expr, opts.patterns.items.len, opts.expr_tokens.items.len }) catch "";
-        defer if (dbg.len > 0) allocator.free(dbg);
-        // debug removed
-    }
 
     // Check if content is binary
     if (isBinaryContent(content)) {
@@ -1570,8 +1563,7 @@ fn grepContent(allocator: Allocator, opts: *GrepOptions, display_path: []const u
 }
 
 fn lineMatches(line: []const u8, opts: *GrepOptions, eff_pt: PatternType, allocator: Allocator) bool {
-    if (opts.has_boolean_expr and opts.patterns.items.len > 1) {
-    _ = std.posix.write(2, "LM ENTERED\n") catch 0;
+    if (opts.has_boolean_expr and opts.expr_tokens.items.len > 1) {
         return evaluateBooleanExpr(line, opts, eff_pt, allocator);
     }
 
@@ -1583,8 +1575,7 @@ fn lineMatches(line: []const u8, opts: *GrepOptions, eff_pt: PatternType, alloca
 }
 
 fn evaluateBooleanExpr(line: []const u8, opts: *GrepOptions, eff_pt: PatternType, allocator: Allocator) bool {
-    if (!opts.expr_tokens_initialized or opts.expr_tokens.items.len == 0) return false;
-    _ = std.posix.write(2, "EVAL CALLED\n") catch 0;
+    if (opts.expr_tokens.items.len == 0) return false;
     var pos: usize = 0;
     return evalExprOr(line, opts, eff_pt, allocator, opts.expr_tokens.items, &pos);
 }
