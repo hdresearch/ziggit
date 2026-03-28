@@ -396,7 +396,8 @@ fn generateHunksFromEdits(old_lines: []const []const u8, new_lines: []const []co
                 var removed: usize = 0;
                 while (removed < excess) {
                     if (current_hunk.?.lines.items.len == 0) break;
-                    const last = current_hunk.?.lines.popOrNull() orelse break;
+                    if (current_hunk.?.lines.items.len == 0) break;
+                    const last = current_hunk.?.lines.pop();
                     allocator.free(last.content);
                     current_hunk.?.old_count -= 1;
                     current_hunk.?.new_count -= 1;
