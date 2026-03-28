@@ -19,7 +19,27 @@ pub fn build(b: *std.Build) void {
     });
     exe.linkLibC();
     exe.linkSystemLibrary("z");
-    b.installArtifact(exe);
+
+    const install_artifact = b.addInstallArtifact(exe, .{});
+    b.getInstallStep().dependOn(&install_artifact.step);
+
+    // Fix Zig's wrapper script issue: replace shell wrapper with actual binary
+    const fix_wrapper = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\DEST="$1"
+        \\if [ -f "$DEST" ] && head -c 2 "$DEST" | grep -q '#!'; then
+        \\  # It's a shell wrapper, extract the real binary path
+        \\  REAL=$(sed -n 's/^exec \(.*\) "$@"/\1/p' "$DEST")
+        \\  if [ -n "$REAL" ] && [ -f "$REAL" ]; then
+        \\    cp "$REAL" "$DEST"
+        \\  fi
+        \\fi
+        ,
+        "--",
+        b.getInstallPath(.bin, "ziggit"),
+    });
+    fix_wrapper.step.dependOn(&install_artifact.step);
+    b.getInstallStep().dependOn(&fix_wrapper.step);
 
     // Install shell helper scripts needed by git test suite
     const shell_scripts = [_][]const u8{
@@ -35,6 +55,6 @@ pub fn build(b: *std.Build) void {
 
     // Create git -> ziggit symlink so test suite can find 'git' command
     const symlink = b.addSystemCommand(&.{ "ln", "-sf", "ziggit", b.getInstallPath(.bin, "git") });
-    symlink.step.dependOn(&b.addInstallArtifact(exe, .{}).step);
+    symlink.step.dependOn(&fix_wrapper.step);
     b.getInstallStep().dependOn(&symlink.step);
 }
