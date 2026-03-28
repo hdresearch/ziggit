@@ -158,8 +158,27 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
             if (hh) |h| {
                 // File exists on disk but check if it's tracked
                 _ = gf(gp, h, fp.?, a) catch {
-                    // File not in HEAD - could be conflicted merge state
-                    // Just treat as uncommitted content (don't error)
+                    // File not in HEAD - check if it's in the index (conflicted merge)
+                    const idx_mod = @import("index.zig");
+                    const idx = idx_mod.Index.load(gp, pi, a) catch null;
+                    var in_index = false;
+                    if (idx) |ix| {
+                        var ix_mut = ix;
+                        defer ix_mut.deinit();
+                        for (ix_mut.entries.items) |*entry| {
+                            if (std.mem.eql(u8, entry.path, fp.?)) {
+                                in_index = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!in_index) {
+                        a.free(c);
+                        const emsg = std.fmt.allocPrint(a, "fatal: no such path '{s}' in HEAD\n", .{fp.?}) catch unreachable;
+                        defer a.free(emsg);
+                        pi.writeStderr(emsg) catch {};
+                        std.process.exit(128);
+                    }
                 };
             } else {
                 // No HEAD - empty repo
