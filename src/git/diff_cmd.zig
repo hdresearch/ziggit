@@ -894,55 +894,42 @@ fn abbreviateHash(hash: []const u8, len: u32) []const u8 {
 /// Compute the rename pretty-print display: e.g. "a/b/c => c/b/a" or "c/{b/a => d/e}" or "{c/d => d}/e"
 /// Mirrors git's pprint_rename() in diff.c
 fn renamePrettyPath(from: []const u8, to: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    // Find common prefix length (break at /)
-    var pfx_len: usize = 0;
-    var pfx_slash: usize = 0; // length up to and including last slash in common prefix
-    while (pfx_len < from.len and pfx_len < to.len) {
-        if (from[pfx_len] != to[pfx_len]) break;
-        if (from[pfx_len] == '/') pfx_slash = pfx_len + 1;
-        pfx_len += 1;
+    // Match git's pprint_rename algorithm exactly
+
+    // Find common prefix (at directory boundary)
+    var pfx_length: usize = 0;
+    {
+        var i: usize = 0;
+        while (i < from.len and i < to.len and from[i] == to[i]) : (i += 1) {
+            if (from[i] == '/') pfx_length = i + 1;
+        }
     }
 
-    // Find common suffix length (break at /)
-    var sfx_len: usize = 0;
-    var sfx_slash: usize = 0; // length from start of suffix component (at /)
+    // Find common suffix (at directory boundary)
+    // Allow overlap with prefix by 1 char (the shared slash) if prefix > 0
+    var sfx_length: usize = 0;
     {
+        const pfx_adjust: usize = if (pfx_length > 0) 1 else 0;
         var fi = from.len;
         var ti = to.len;
-        while (fi > 0 and ti > 0) {
+        while (fi > 0 and ti > 0 and pfx_length <= fi + pfx_adjust and pfx_length <= ti + pfx_adjust) {
             fi -= 1;
             ti -= 1;
             if (from[fi] != to[ti]) break;
-            if (from[fi] == '/') sfx_slash = from.len - fi;
-            sfx_len += 1;
-        }
-        // If we didn't break (loop ran to completion and chars still match)
-        if (fi == 0 and ti == 0 and from.len > 0 and to.len > 0 and from[0] == to[0]) {
-            sfx_len = from.len;
+            if (from[fi] == '/') sfx_length = from.len - fi;
         }
     }
 
-    // Use directory-boundary prefix
-    const prefix_len = if (pfx_len == from.len or pfx_len == to.len) pfx_len else pfx_slash;
-    // Use directory-boundary suffix
-    const suffix_len = if (sfx_len == from.len) sfx_len else sfx_slash;
+    // Compute mid lengths (can be 0 or negative -> 0)
+    const a_midlen = if (from.len >= pfx_length + sfx_length) from.len - pfx_length - sfx_length else 0;
+    const b_midlen = if (to.len >= pfx_length + sfx_length) to.len - pfx_length - sfx_length else 0;
 
-    // Make sure prefix and suffix don't overlap
-    const final_pfx = prefix_len;
-    var final_sfx = suffix_len;
-    if (final_pfx + final_sfx > from.len) {
-        final_sfx = from.len - final_pfx;
-    }
-    if (final_pfx + final_sfx > to.len) {
-        final_sfx = to.len - final_pfx;
-    }
+    const from_mid = from[pfx_length .. pfx_length + a_midlen];
+    const to_mid = to[pfx_length .. pfx_length + b_midlen];
+    const prefix = from[0..pfx_length];
+    const suffix = if (sfx_length <= from.len) from[from.len - sfx_length ..] else "";
 
-    const from_mid = from[final_pfx .. from.len - final_sfx];
-    const to_mid = to[final_pfx .. to.len - final_sfx];
-    const prefix = from[0..final_pfx];
-    const suffix = from[from.len - final_sfx ..];
-
-    if (final_pfx == 0 and final_sfx == 0) {
+    if (pfx_length == 0 and sfx_length == 0) {
         return std.fmt.allocPrint(allocator, "{s} => {s}", .{ from, to });
     } else {
         var buf = std.array_list.Managed(u8).init(allocator);
@@ -4124,13 +4111,16 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
         subject_prefix = val;
     }
     // Also check git config file
+    var config_subject_prefix: ?[]u8 = null;
+    defer if (config_subject_prefix) |csp| allocator.free(csp);
     {
         const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
         defer allocator.free(config_path);
         if (std.fs.cwd().readFileAlloc(allocator, config_path, 1024 * 1024)) |config_content| {
             defer allocator.free(config_content);
             if (getConfigValue(config_content, "format", "subjectprefix")) |val| {
-                subject_prefix = val;
+                config_subject_prefix = try allocator.dupe(u8, val);
+                subject_prefix = config_subject_prefix.?;
             }
         } else |_| {}
     }
@@ -4204,33 +4194,83 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
     };
     defer allocator.free(tip_hash);
 
-    // Walk from tip to base collecting commits
+    // Walk from tip to base collecting non-merge commits (BFS)
     var commit_list = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (commit_list.items) |h| allocator.free(@constCast(h));
         commit_list.deinit();
     }
 
-    var current = try allocator.dupe(u8, tip_hash);
-    var walk: usize = 0;
-    while (walk < 1000) : (walk += 1) {
-        if (std.mem.eql(u8, current, base_hash)) {
-            allocator.free(current);
-            break;
+    {
+        var visited = std.StringHashMap(void).init(allocator);
+        defer visited.deinit();
+        var queue = std.array_list.Managed([]const u8).init(allocator);
+        defer {
+            for (queue.items) |h| allocator.free(@constCast(h));
+            queue.deinit();
         }
-        try commit_list.append(current);
-        const obj = objects.GitObject.load(current, git_path, pi, allocator) catch {
-            break;
-        };
-        defer obj.deinit(allocator);
-        const parent = extractField(obj.data, "parent ");
-        if (parent.len < 40) break;
-        current = try allocator.dupe(u8, parent);
-    } else {
-        allocator.free(current);
+
+        try queue.append(try allocator.dupe(u8, tip_hash));
+        try visited.put(tip_hash, {});
+
+        // Also mark base as visited so we stop there
+        try visited.put(base_hash, {});
+
+        while (queue.items.len > 0) {
+            const current = queue.orderedRemove(0);
+            defer allocator.free(current);
+
+            if (std.mem.eql(u8, current, base_hash)) continue;
+
+            const obj = objects.GitObject.load(current, git_path, pi, allocator) catch continue;
+            defer obj.deinit(allocator);
+
+            // Extract ALL parent hashes
+            var parents = std.array_list.Managed([]const u8).init(allocator);
+            defer parents.deinit();
+            {
+                var data_remaining = obj.data;
+                while (data_remaining.len > 0) {
+                    if (std.mem.indexOf(u8, data_remaining, "parent ")) |pos| {
+                        const line_start = pos + "parent ".len;
+                        if (line_start + 40 <= data_remaining.len) {
+                            const phash = data_remaining[line_start .. line_start + 40];
+                            try parents.append(phash);
+                        }
+                        data_remaining = data_remaining[@min(line_start + 40, data_remaining.len)..];
+                    } else break;
+                }
+            }
+
+            // Only include non-merge commits (1 parent or 0 parents)
+            if (parents.items.len <= 1) {
+                try commit_list.append(try allocator.dupe(u8, current));
+            }
+
+            // Enqueue all parents
+            for (parents.items) |phash| {
+                if (!visited.contains(phash)) {
+                    try visited.put(try allocator.dupe(u8, phash), {});
+                    try queue.append(try allocator.dupe(u8, phash));
+                }
+            }
+        }
     }
 
-    std.mem.reverse([]const u8, commit_list.items);
+    // Sort commits by date (oldest first) for format-patch ordering
+    const SortCtx = struct {
+        alloc: std.mem.Allocator,
+        gp: []const u8,
+        platform: *const pm.Platform,
+    };
+    const ctx = SortCtx{ .alloc = allocator, .gp = git_path, .platform = pi };
+    std.mem.sort([]const u8, commit_list.items, ctx, struct {
+        fn lessThan(c: SortCtx, a: []const u8, b: []const u8) bool {
+            const a_ts = getCommitTimestamp(a, c.gp, c.platform, c.alloc);
+            const b_ts = getCommitTimestamp(b, c.gp, c.platform, c.alloc);
+            return a_ts < b_ts;
+        }
+    }.lessThan);
     const total = commit_list.items.len;
 
     // Auto-numbering: number if more than 1 patch
@@ -4241,16 +4281,19 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
 
     // Cover letter
     if (cover_letter and stdout_mode and total > 0) {
-        const first_hash = commit_list.items[0];
-        const first_obj = objects.GitObject.load(first_hash, git_path, pi, allocator) catch null;
-        defer if (first_obj) |o| o.deinit(allocator);
-        const author = if (first_obj) |o| extractField(o.data, "author ") else "";
+        // Use the last (tip) commit for From hash and committer info
+        const last_hash = commit_list.items[total - 1];
+        const last_obj = objects.GitObject.load(last_hash, git_path, pi, allocator) catch null;
+        defer if (last_obj) |o| o.deinit(allocator);
+        const committer = if (last_obj) |o| extractField(o.data, "committer ") else "";
 
-        try pi.writeStdout("From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\n");
-        const from_hdr = try std.fmt.allocPrint(allocator, "From: {s} <{s}>\n", .{ parsePersonName(author), parsePersonEmail(author) });
+        const from_line = try std.fmt.allocPrint(allocator, "From {s} Mon Sep 17 00:00:00 2001\n", .{last_hash});
+        defer allocator.free(from_line);
+        try pi.writeStdout(from_line);
+        const from_hdr = try std.fmt.allocPrint(allocator, "From: {s} <{s}>\n", .{ parsePersonName(committer), parsePersonEmail(committer) });
         defer allocator.free(from_hdr);
         try pi.writeStdout(from_hdr);
-        const date_rfc = formatRfc2822Date(author, allocator);
+        const date_rfc = formatRfc2822Date(committer, allocator);
         defer if (date_rfc) |d| allocator.free(d);
         const date_hdr = try std.fmt.allocPrint(allocator, "Date: {s}\n", .{date_rfc orelse "Thu, 1 Jan 1970 00:00:00 +0000"});
         defer allocator.free(date_hdr);
@@ -4260,12 +4303,64 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
         try pi.writeStdout(subj);
         try pi.writeStdout("\n*** BLURB HERE ***\n\n");
 
-        // Diffstat of all changes
-        // ... simplified: just show separator
-        try pi.writeStdout("---\n");
+        // Shortlog: group commits by author
+        {
+            var author_commits = std.StringHashMap(std.array_list.Managed([]const u8)).init(allocator);
+            defer {
+                var vit = author_commits.valueIterator();
+                while (vit.next()) |list| list.deinit();
+                author_commits.deinit();
+            }
+            for (commit_list.items) |ch| {
+                const cobj = objects.GitObject.load(ch, git_path, pi, allocator) catch continue;
+                defer cobj.deinit(allocator);
+                const ca = extractField(cobj.data, "author ");
+                const aname = parsePersonName(ca);
+                const cmsg = extractMessage(cobj.data);
+                const cfirst = if (std.mem.indexOf(u8, cmsg, "\n")) |nl| cmsg[0..nl] else std.mem.trimRight(u8, cmsg, "\n");
+                var list = author_commits.get(aname) orelse std.array_list.Managed([]const u8).init(allocator);
+                try list.append(cfirst);
+                try author_commits.put(aname, list);
+            }
+            var ait = author_commits.iterator();
+            while (ait.next()) |entry| {
+                const line = try std.fmt.allocPrint(allocator, "{s} ({d}):\n", .{ entry.key_ptr.*, entry.value_ptr.items.len });
+                defer allocator.free(line);
+                try pi.writeStdout(line);
+                for (entry.value_ptr.items) |title| {
+                    const tl = try std.fmt.allocPrint(allocator, "  {s}\n", .{title});
+                    defer allocator.free(tl);
+                    try pi.writeStdout(tl);
+                }
+                try pi.writeStdout("\n");
+            }
+        }
 
-        // Shortlog
-        // ... simplified
+        // Diffstat of all changes (base to tip)
+        {
+            const base_obj = objects.GitObject.load(base_hash, git_path, pi, allocator) catch null;
+            defer if (base_obj) |o| o.deinit(allocator);
+            const base_tree = if (base_obj) |o| extractField(o.data, "tree ") else "";
+
+            // Get the tip tree (tip_hash may be a merge, find the actual tip)
+            const tip_obj_cl = objects.GitObject.load(tip_hash, git_path, pi, allocator) catch null;
+            defer if (tip_obj_cl) |o| o.deinit(allocator);
+            const tip_tree = if (tip_obj_cl) |o| extractField(o.data, "tree ") else "";
+
+            if (base_tree.len >= 40 and tip_tree.len >= 40) {
+                var changes = std.array_list.Managed(FileChange).init(allocator);
+                defer {
+                    for (changes.items) |*c| freeChange(allocator, c);
+                    changes.deinit();
+                }
+                collectTreeChanges(allocator, base_tree, tip_tree, "", git_path, &.{}, pi, &changes) catch {};
+                if (changes.items.len > 0) {
+                    try outputStat(changes.items, pi, allocator);
+                    try outputSummary(changes.items, pi, allocator);
+                }
+            }
+        }
+
         try pi.writeStdout("\n-- \n");
         const ver_line = try std.fmt.allocPrint(allocator, "{s}\n\n", .{version_str});
         defer allocator.free(ver_line);
@@ -4283,7 +4378,8 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
         const patch_num = start_number + idx;
 
         if (stdout_mode) {
-            // From line
+            // From line (add extra blank line between patches)
+            if (idx > 0) try pi.writeStdout("\n");
             const from_line = try std.fmt.allocPrint(allocator, "From {s} Mon Sep 17 00:00:00 2001\n", .{commit_hash});
             defer allocator.free(from_line);
             try pi.writeStdout(from_line);
@@ -4311,93 +4407,120 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
                 try pi.writeStdout(subj);
             }
 
-            // MIME headers for --attach/--inline
+            // Collect changes for stat and patch
+            const parent_hash = extractField(obj.data, "parent ");
+            var changes = std.array_list.Managed(FileChange).init(allocator);
+            defer {
+                for (changes.items) |*c| freeChange(allocator, c);
+                changes.deinit();
+            }
+            if (parent_hash.len >= 40) {
+                const cur_tree = extractField(obj.data, "tree ");
+                const pobj = objects.GitObject.load(parent_hash, git_path, pi, allocator) catch null;
+                defer if (pobj) |po| po.deinit(allocator);
+                const par_tree = if (pobj) |po| extractField(po.data, "tree ") else "";
+                if (cur_tree.len >= 40 and par_tree.len >= 40) {
+                    collectTreeChanges(allocator, par_tree, cur_tree, "", git_path, &.{}, pi, &changes) catch {};
+                }
+            }
+
             if (attach or inline_mode) {
+                // MIME multipart format
                 const boundary = try std.fmt.allocPrint(allocator, "------------{s}", .{version_str});
                 defer allocator.free(boundary);
                 try pi.writeStdout("MIME-Version: 1.0\n");
                 const ct = try std.fmt.allocPrint(allocator, "Content-Type: multipart/mixed; boundary=\"{s}\"\n", .{boundary});
                 defer allocator.free(ct);
                 try pi.writeStdout(ct);
-                try pi.writeStdout("\n");
-                const sep = try std.fmt.allocPrint(allocator, "--{s}\n", .{boundary});
+                try pi.writeStdout("\nThis is a multi-part message in MIME format.\n");
+                const sep = try std.fmt.allocPrint(allocator, "--------------{s}\n", .{version_str});
                 defer allocator.free(sep);
                 try pi.writeStdout(sep);
-                try pi.writeStdout("Content-Type: text/plain; charset=UTF-8\n\n");
-            }
+                try pi.writeStdout("Content-Type: text/plain; charset=UTF-8; format=fixed\nContent-Transfer-Encoding: 8bit\n\n");
 
-            // Message body (everything after first line)
-            try pi.writeStdout("\n");
-            if (std.mem.indexOf(u8, commit_msg, "\n")) |nl| {
-                var rest = commit_msg[nl + 1 ..];
-                rest = std.mem.trimRight(u8, rest, "\n");
-                if (rest.len > 0) {
-                    try pi.writeStdout(rest);
-                    try pi.writeStdout("\n");
-                }
-            }
-
-            // Diff stat and patch
-            const parent_hash = extractField(obj.data, "parent ");
-            if (parent_hash.len >= 40) {
-                // Get parent tree and current tree
-                const cur_tree = extractField(obj.data, "tree ");
-                const pobj = objects.GitObject.load(parent_hash, git_path, pi, allocator) catch null;
-                defer if (pobj) |po| po.deinit(allocator);
-                const par_tree = if (pobj) |po| extractField(po.data, "tree ") else "";
-
-                if (cur_tree.len >= 40 and par_tree.len >= 40) {
-                    var changes = std.array_list.Managed(FileChange).init(allocator);
-                    defer {
-                        for (changes.items) |*c| freeChange(allocator, c);
-                        changes.deinit();
-                    }
-                    collectTreeChanges(allocator, par_tree, cur_tree, "", git_path, &.{}, pi, &changes) catch {};
-
-                    if (changes.items.len > 0) {
-                        try pi.writeStdout("---\n");
-                        try outputStat(changes.items, pi, allocator);
+                // Message body (preserve leading blank lines in MIME parts)
+                if (std.mem.indexOf(u8, commit_msg, "\n")) |nl| {
+                    var rest = commit_msg[nl + 1 ..];
+                    rest = std.mem.trimRight(u8, rest, "\n");
+                    if (rest.len > 0) {
+                        try pi.writeStdout(rest);
                         try pi.writeStdout("\n");
-                        var diff_opts = DiffOpts{
-                            .ignore_regex = std.array_list.Managed([]const u8).init(allocator),
-                        };
-                        defer diff_opts.ignore_regex.deinit();
-                        try outputPatch(changes.items, &diff_opts, pi, allocator);
-                    } else {
-                        try pi.writeStdout("---\n\n");
                     }
+                }
+
+                // Stat section
+                if (changes.items.len > 0) {
+                    try pi.writeStdout("---\n");
+                    try outputStat(changes.items, pi, allocator);
+                    try outputSummary(changes.items, pi, allocator);
+                    try pi.writeStdout("\n");
                 } else {
                     try pi.writeStdout("---\n\n");
                 }
-            } else {
-                try pi.writeStdout("---\n\n");
-            }
 
-            if (attach or inline_mode) {
-                const boundary = try std.fmt.allocPrint(allocator, "------------{s}", .{version_str});
-                defer allocator.free(boundary);
-                const sep = try std.fmt.allocPrint(allocator, "\n--{s}\n", .{boundary});
-                defer allocator.free(sep);
-                try pi.writeStdout(sep);
+                // Attachment/inline part with the diff
+                const sep2 = try std.fmt.allocPrint(allocator, "\n--------------{s}\n", .{version_str});
+                defer allocator.free(sep2);
+                try pi.writeStdout(sep2);
+
                 const disp_type: []const u8 = if (inline_mode) "inline" else "attachment";
                 var fname: []u8 = undefined;
                 if (numbered_files) {
                     fname = try std.fmt.allocPrint(allocator, "{d}", .{patch_num});
                 } else {
-                    fname = try sanitizeSubject(first_line, allocator);
+                    // For attach/inline, git uses "NNNN-subject.patch" format
+                    const sane = try sanitizeSubject(first_line, allocator);
+                    defer allocator.free(sane);
+                    fname = try std.fmt.allocPrint(allocator, "{d:0>4}-{s}", .{ patch_num, sane });
                 }
                 defer allocator.free(fname);
-                const full_fname = try std.fmt.allocPrint(allocator, "{s}{s}", .{ fname, suffix });
+                const full_fname = if (numbered_files) try allocator.dupe(u8, fname) else try std.fmt.allocPrint(allocator, "{s}{s}", .{ fname, suffix });
                 defer allocator.free(full_fname);
                 const cd = try std.fmt.allocPrint(allocator, "Content-Type: text/x-patch; name=\"{s}\"\nContent-Transfer-Encoding: 8bit\nContent-Disposition: {s}; filename=\"{s}\"\n\n", .{ full_fname, disp_type, full_fname });
                 defer allocator.free(cd);
                 try pi.writeStdout(cd);
-                // Re-output diff in attachment
-                // ... for now just show separator
-                const end_sep = try std.fmt.allocPrint(allocator, "\n--{s}--\n\n", .{boundary});
+
+                // Output the diff in the attachment
+                if (changes.items.len > 0) {
+                    var diff_opts = DiffOpts{
+                        .ignore_regex = std.array_list.Managed([]const u8).init(allocator),
+                    };
+                    defer diff_opts.ignore_regex.deinit();
+                    try outputPatch(changes.items, &diff_opts, pi, allocator);
+                }
+
+                const end_sep = try std.fmt.allocPrint(allocator, "\n--------------{s}--\n\n\n", .{version_str});
                 defer allocator.free(end_sep);
                 try pi.writeStdout(end_sep);
             } else {
+                // Plain format (no MIME)
+                // Message body (everything after first line)
+                try pi.writeStdout("\n");
+                if (std.mem.indexOf(u8, commit_msg, "\n")) |nl| {
+                    var rest = commit_msg[nl + 1 ..];
+                    rest = std.mem.trimLeft(u8, rest, "\n");
+                    rest = std.mem.trimRight(u8, rest, "\n");
+                    if (rest.len > 0) {
+                        try pi.writeStdout(rest);
+                        try pi.writeStdout("\n");
+                    }
+                }
+
+                // Stat + patch
+                if (changes.items.len > 0) {
+                    try pi.writeStdout("---\n");
+                    try outputStat(changes.items, pi, allocator);
+                    try outputSummary(changes.items, pi, allocator);
+                    try pi.writeStdout("\n");
+                    var diff_opts = DiffOpts{
+                        .ignore_regex = std.array_list.Managed([]const u8).init(allocator),
+                    };
+                    defer diff_opts.ignore_regex.deinit();
+                    try outputPatch(changes.items, &diff_opts, pi, allocator);
+                } else {
+                    try pi.writeStdout("---\n\n");
+                }
+
                 try pi.writeStdout("-- \n");
                 const ver_line = try std.fmt.allocPrint(allocator, "{s}\n\n", .{version_str});
                 defer allocator.free(ver_line);
@@ -4429,6 +4552,17 @@ fn sanitizeSubject(subject: []const u8, allocator: std.mem.Allocator) ![]u8 {
         // Skip other chars
     }
     return try allocator.dupe(u8, result.items);
+}
+
+fn getCommitTimestamp(hash: []const u8, gpath: []const u8, platform: *const pm.Platform, alloc: std.mem.Allocator) i64 {
+    const obj = objects.GitObject.load(hash, gpath, platform, alloc) catch return 0;
+    defer obj.deinit(alloc);
+    const author = extractField(obj.data, "author ");
+    // Parse timestamp from author line: "Name <email> timestamp timezone"
+    var it = std.mem.splitBackwardsScalar(u8, author, ' ');
+    _ = it.next(); // timezone
+    const ts_str = it.next() orelse return 0;
+    return std.fmt.parseInt(i64, ts_str, 10) catch 0;
 }
 
 fn getConfigValue(content: []const u8, section: []const u8, key: []const u8) ?[]const u8 {
