@@ -11358,11 +11358,17 @@ fn parseColorName(word: []const u8) ?i16 {
     return null;
 }
 
-fn parseColorWord(word: []const u8, fg_color: *i16, bg_color: *i16, attrs: *std.ArrayList(u8), fg_set: *bool, bg_set: *bool) !void {
+const ColorAttrEntry = union(enum) {
+    code: u8,
+    reset: void, // empty entry for reset (produces just ';')
+};
+
+fn parseColorWord(word: []const u8, fg_color: *i16, bg_color: *i16, attrs: *std.ArrayList(ColorAttrEntry), fg_set: *bool, bg_set: *bool) !void {
     // Check for "bright" prefix colors
     if (word.len > 6 and std.mem.startsWith(u8, word, "bright")) {
         const base = parseColorName(word[6..]);
         if (base) |b| {
+            if (b == -1) return error.InvalidColor; // brightnormal/brightdefault invalid
             if (!fg_set.*) {
                 fg_color.* = b + 8; // bright colors are 8-15
                 fg_set.* = true;
@@ -11372,27 +11378,34 @@ fn parseColorWord(word: []const u8, fg_color: *i16, bg_color: *i16, attrs: *std.
             }
             return;
         }
+        return error.InvalidColor;
+    }
+
+    // Reset
+    if (std.mem.eql(u8, word, "reset")) {
+        try attrs.append(.{ .reset = {} });
+        return;
     }
 
     // Attributes
-    if (std.mem.eql(u8, word, "bold")) { try attrs.append(1); return; }
-    if (std.mem.eql(u8, word, "dim")) { try attrs.append(2); return; }
-    if (std.mem.eql(u8, word, "italic")) { try attrs.append(3); return; }
-    if (std.mem.eql(u8, word, "ul")) { try attrs.append(4); return; }
-    if (std.mem.eql(u8, word, "blink")) { try attrs.append(5); return; }
-    if (std.mem.eql(u8, word, "reverse")) { try attrs.append(7); return; }
-    if (std.mem.eql(u8, word, "strike")) { try attrs.append(9); return; }
+    if (std.mem.eql(u8, word, "bold")) { try attrs.append(.{ .code = 1 }); return; }
+    if (std.mem.eql(u8, word, "dim")) { try attrs.append(.{ .code = 2 }); return; }
+    if (std.mem.eql(u8, word, "italic")) { try attrs.append(.{ .code = 3 }); return; }
+    if (std.mem.eql(u8, word, "ul")) { try attrs.append(.{ .code = 4 }); return; }
+    if (std.mem.eql(u8, word, "blink")) { try attrs.append(.{ .code = 5 }); return; }
+    if (std.mem.eql(u8, word, "reverse")) { try attrs.append(.{ .code = 7 }); return; }
+    if (std.mem.eql(u8, word, "strike")) { try attrs.append(.{ .code = 9 }); return; }
 
     // Negated attributes
-    if (std.mem.eql(u8, word, "nobold") or std.mem.eql(u8, word, "no-bold")) { try attrs.append(22); return; }
-    if (std.mem.eql(u8, word, "nodim") or std.mem.eql(u8, word, "no-dim")) { try attrs.append(22); return; }
-    if (std.mem.eql(u8, word, "noitalic") or std.mem.eql(u8, word, "no-italic")) { try attrs.append(23); return; }
-    if (std.mem.eql(u8, word, "noul") or std.mem.eql(u8, word, "no-ul")) { try attrs.append(24); return; }
-    if (std.mem.eql(u8, word, "noblink") or std.mem.eql(u8, word, "no-blink")) { try attrs.append(25); return; }
-    if (std.mem.eql(u8, word, "noreverse") or std.mem.eql(u8, word, "no-reverse")) { try attrs.append(27); return; }
-    if (std.mem.eql(u8, word, "nostrike") or std.mem.eql(u8, word, "no-strike")) { try attrs.append(29); return; }
+    if (std.mem.eql(u8, word, "nobold") or std.mem.eql(u8, word, "no-bold")) { try attrs.append(.{ .code = 22 }); return; }
+    if (std.mem.eql(u8, word, "nodim") or std.mem.eql(u8, word, "no-dim")) { try attrs.append(.{ .code = 22 }); return; }
+    if (std.mem.eql(u8, word, "noitalic") or std.mem.eql(u8, word, "no-italic")) { try attrs.append(.{ .code = 23 }); return; }
+    if (std.mem.eql(u8, word, "noul") or std.mem.eql(u8, word, "no-ul")) { try attrs.append(.{ .code = 24 }); return; }
+    if (std.mem.eql(u8, word, "noblink") or std.mem.eql(u8, word, "no-blink")) { try attrs.append(.{ .code = 25 }); return; }
+    if (std.mem.eql(u8, word, "noreverse") or std.mem.eql(u8, word, "no-reverse")) { try attrs.append(.{ .code = 27 }); return; }
+    if (std.mem.eql(u8, word, "nostrike") or std.mem.eql(u8, word, "no-strike")) { try attrs.append(.{ .code = 29 }); return; }
 
-    // Color names
+    // Color names (normal/default/black/red/etc.)
     if (parseColorName(word)) |c| {
         if (!fg_set.*) {
             fg_color.* = c;
@@ -11404,32 +11417,24 @@ fn parseColorWord(word: []const u8, fg_color: *i16, bg_color: *i16, attrs: *std.
         return;
     }
 
-    // Reset
-    if (std.mem.eql(u8, word, "reset")) {
-        try attrs.append(0);
-        return;
-    }
-
     // RGB color #RRGGBB
-    if (word.len == 7 and word[0] == '#') {
-        const r = std.fmt.parseInt(u8, word[1..3], 16) catch return error.InvalidColor;
-        const g = std.fmt.parseInt(u8, word[3..5], 16) catch return error.InvalidColor;
-        const b = std.fmt.parseInt(u8, word[5..7], 16) catch return error.InvalidColor;
-        _ = r;
-        _ = g;
-        _ = b;
-        // Store as special marker - we'll handle this differently
+    if (word.len > 0 and word[0] == '#') {
+        if (word.len != 7) return error.InvalidColor;
+        _ = std.fmt.parseInt(u8, word[1..3], 16) catch return error.InvalidColor;
+        _ = std.fmt.parseInt(u8, word[3..5], 16) catch return error.InvalidColor;
+        _ = std.fmt.parseInt(u8, word[5..7], 16) catch return error.InvalidColor;
         if (!fg_set.*) {
-            fg_color.* = -2; // marker for RGB
+            fg_color.* = -3; // RGB marker
             fg_set.* = true;
         } else {
-            bg_color.* = -2;
+            bg_color.* = -3;
             bg_set.* = true;
         }
         return;
     }
 
     // Numeric color 0-255 or -1
+    // Must be a valid integer with no trailing characters
     if (std.fmt.parseInt(i16, word, 10)) |n| {
         if (n < -1 or n > 255) return error.InvalidColor;
         if (!fg_set.*) {
