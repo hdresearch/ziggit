@@ -805,7 +805,8 @@ fn State(comptime PlatformType: type) type {
                 const hash_bytes = tree_obj.data[null_pos + 1 .. null_pos + 21];
 
                 var hex_hash: [40]u8 = undefined;
-                _ = std.fmt.bufPrint(&hex_hash, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch break;
+                const hex_arr = std.fmt.bytesToHex(hash_bytes[0..20].*, .lower);
+                @memcpy(&hex_hash, &hex_arr);
 
                 const full_path = if (prefix.len > 0)
                     std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, name }) catch break
