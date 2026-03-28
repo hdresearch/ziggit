@@ -82,6 +82,51 @@ pub fn asciiCaseInsensitiveEqual(a: []const u8, b: []const u8) bool {
     return true;
 }
 
+fn handleConfigEnv(allocator: std.mem.Allocator, setting: []const u8) void {
+    if (std.mem.indexOfScalar(u8, setting, '=')) |eq| {
+        const key = setting[0..eq];
+        const envvar = setting[eq + 1 ..];
+        if (key.len == 0 or !cfgIsValidKey(key)) {
+            const msg = std.fmt.allocPrint(allocator, "error: invalid config key: {s}\n", .{key}) catch @constCast("");
+            const fe = std.fs.File{ .handle = std.posix.STDERR_FILENO };
+            _ = fe.write(msg) catch {};
+            std.process.exit(128);
+        }
+        if (envvar.len == 0) {
+            const msg = std.fmt.allocPrint(allocator, "fatal: missing environment variable name for configuration '{s}'\n", .{key}) catch @constCast("");
+            const fe = std.fs.File{ .handle = std.posix.STDERR_FILENO };
+            _ = fe.write(msg) catch {};
+            std.process.exit(128);
+        }
+        const env_value = std.process.getEnvVarOwned(allocator, envvar) catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => {
+                const msg = std.fmt.allocPrint(allocator, "fatal: missing environment variable '{s}' for configuration '{s}'\n", .{ envvar, key }) catch @constCast("");
+                const fe = std.fs.File{ .handle = std.posix.STDERR_FILENO };
+                _ = fe.write(msg) catch {};
+                std.process.exit(128);
+                unreachable;
+            },
+            else => {
+                std.process.exit(128);
+                unreachable;
+            },
+        };
+        initConfigOverrides(allocator);
+        const key_dup = allocator.dupe(u8, key) catch {
+            std.process.exit(128);
+            unreachable;
+        };
+        global_config_overrides.?.append(.{ .key = key_dup, .value = env_value }) catch {
+            std.process.exit(128);
+        };
+    } else {
+        const msg = std.fmt.allocPrint(allocator, "fatal: invalid config format: missing '=': {s}\n", .{setting}) catch @constCast("");
+        const fe = std.fs.File{ .handle = std.posix.STDERR_FILENO };
+        _ = fe.write(msg) catch {};
+        std.process.exit(128);
+    }
+}
+
 fn readStdin(allocator: std.mem.Allocator, max_size: usize) ![]u8 {
     var result = std.array_list.Managed(u8).init(allocator);
     errdefer result.deinit();
