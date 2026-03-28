@@ -9181,13 +9181,13 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                             if (!cfgValueMatchesPattern(e.value, vp, fixed_value)) continue;
                         }
                         found_any = true;
-                        const fmt2 = try cfgFormatType(cfgEffectiveValue(e), config_type, allocator, platform_impl);
+                        const fmt2 = try cfgFormatTypeWithContext(cfgEffectiveValue(e), config_type, key2, source.path, allocator, platform_impl);
                         defer allocator.free(fmt2);
                         const term: []const u8 = if (null_terminator) "\x00" else "\n";
                         var out = std.array_list.Managed(u8).init(allocator);
                         defer out.deinit();
                         if (show_scope) { try out.appendSlice(source.scope); try out.append('\t'); }
-                        if (show_origin) { try out.appendSlice("file:"); try out.appendSlice(source.path); try out.append('\t'); }
+                        if (show_origin) { try cfgAppendOrigin(&out, source.path); try out.append('\t'); }
                         try out.appendSlice(fmt2);
                         try out.appendSlice(term);
                         try platform_impl.writeStdout(out.items);
@@ -9229,14 +9229,14 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 } else null;
                 defer if (last_val == null) { if (eff) |ev| allocator.free(ev); };
                 if (eff) |v| {
-                    const fmt2 = try cfgFormatType(v, config_type, allocator, platform_impl);
+                    const fmt2 = try cfgFormatTypeWithContext(v, config_type, key2, if (last_origin.len > 0) last_origin else null, allocator, platform_impl);
                     defer allocator.free(fmt2);
                     const term: []const u8 = if (null_terminator) "\x00" else "\n";
                     var out = std.array_list.Managed(u8).init(allocator);
                     defer out.deinit();
                     if (show_scope) { try out.appendSlice(last_scope); try out.append('\t'); }
                     if (show_origin) {
-                        if (last_origin.len > 0) { try out.appendSlice("file:"); try out.appendSlice(last_origin); }
+                        if (last_origin.len > 0) { try cfgAppendOrigin(&out, last_origin); }
                         else try out.appendSlice("command line:");
                         try out.append('\t');
                     }
@@ -9266,7 +9266,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                     var out = std.array_list.Managed(u8).init(allocator);
                     defer out.deinit();
                     if (show_scope) { try out.appendSlice(source.scope); try out.append('\t'); }
-                    if (show_origin) { try out.appendSlice("file:"); try out.appendSlice(source.path); try out.append('\t'); }
+                    if (show_origin) { try cfgAppendOrigin(&out, source.path); try out.append('\t'); }
                     if (show_names) {
                         try out.appendSlice(e.full_key);
                     } else {
@@ -9666,6 +9666,179 @@ fn cfgFormatType(value: []const u8, config_type: ConfigType, allocator: std.mem.
     }
 }
 
+fn cfgFormatTypeWithContext(value: []const u8, config_type: ConfigType, key_name: ?[]const u8, source_path: ?[]const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
+    switch (config_type) {
+        .bool_type => {
+            const r = cfgFormatTypeSilent(value, config_type, allocator) catch {
+                if (key_name) |kn| {
+                    const em = try std.fmt.allocPrint(allocator, "fatal: bad boolean config value '{s}' for '{s}'\n", .{ value, kn });
+                    defer allocator.free(em);
+                    try platform_impl.writeStderr(em);
+                } else {
+                    const em = try std.fmt.allocPrint(allocator, "fatal: bad boolean config value '{s}'\n", .{value});
+                    defer allocator.free(em);
+                    try platform_impl.writeStderr(em);
+                }
+                std.process.exit(128);
+            };
+            return r;
+        },
+        .int_type => {
+            const r = cfgFormatTypeSilent(value, config_type, allocator) catch {
+                if (key_name) |kn| {
+                    if (source_path) |sp| {
+                        const em = try std.fmt.allocPrint(allocator, "fatal: bad numeric config value '{s}' for '{s}' in file {s}: invalid unit\n", .{ value, kn, sp });
+                        defer allocator.free(em);
+                        try platform_impl.writeStderr(em);
+                    } else {
+                        const em = try std.fmt.allocPrint(allocator, "fatal: bad numeric config value '{s}' for '{s}': invalid unit\n", .{ value, kn });
+                        defer allocator.free(em);
+                        try platform_impl.writeStderr(em);
+                    }
+                } else {
+                    const em = try std.fmt.allocPrint(allocator, "fatal: bad numeric config value '{s}'\n", .{value});
+                    defer allocator.free(em);
+                    try platform_impl.writeStderr(em);
+                }
+                std.process.exit(128);
+            };
+            return r;
+        },
+        .path_type => {
+            const trimmed = std.mem.trim(u8, value, " \t");
+            if (trimmed.len == 0) {
+                if (key_name) |kn| {
+                    const em = try std.fmt.allocPrint(allocator, "fatal: missing value for '{s}'\n", .{kn});
+                    defer allocator.free(em);
+                    try platform_impl.writeStderr(em);
+                }
+                std.process.exit(128);
+            }
+            if (trimmed[0] == '~' and (trimmed.len == 1 or trimmed[1] == '/')) {
+                const h = std.process.getEnvVarOwned(allocator, "HOME") catch {
+                    if (key_name) |kn| {
+                        const em = try std.fmt.allocPrint(allocator, "fatal: failed to expand user dir in: '{s}'\n", .{kn});
+                        defer allocator.free(em);
+                        try platform_impl.writeStderr(em);
+                    } else try platform_impl.writeStderr("fatal: could not expand '~'\n");
+                    std.process.exit(128);
+                };
+                defer allocator.free(h);
+                if (trimmed.len == 1) return try allocator.dupe(u8, h);
+                return try std.fmt.allocPrint(allocator, "{s}{s}", .{ h, trimmed[1..] });
+            }
+            return try allocator.dupe(u8, trimmed);
+        },
+        else => return cfgFormatType(value, config_type, allocator, platform_impl),
+    }
+}
+
+fn cfgFormatTypeSilent(value: []const u8, config_type: ConfigType, allocator: std.mem.Allocator) ![]u8 {
+    switch (config_type) {
+        .bool_type => {
+            const lower = try std.ascii.allocLowerString(allocator, value);
+            defer allocator.free(lower);
+            if (value.len == 0) return try allocator.dupe(u8, "false");
+            if (std.mem.eql(u8, lower, "true") or std.mem.eql(u8, lower, "yes") or std.mem.eql(u8, lower, "on") or std.mem.eql(u8, lower, "1"))
+                return try allocator.dupe(u8, "true");
+            if (std.mem.eql(u8, lower, "false") or std.mem.eql(u8, lower, "no") or std.mem.eql(u8, lower, "off") or std.mem.eql(u8, lower, "0"))
+                return try allocator.dupe(u8, "false");
+            if (std.fmt.parseInt(i64, std.mem.trim(u8, value, " \t"), 10)) |num|
+                return try allocator.dupe(u8, if (num != 0) "true" else "false")
+            else |_| {}
+            return error.InvalidValue;
+        },
+        .int_type => {
+            const trimmed = std.mem.trim(u8, value, " \t");
+            if (trimmed.len == 0) return error.InvalidValue;
+            // Must start with a digit or sign
+            if (trimmed.len > 0 and !std.ascii.isDigit(trimmed[0]) and trimmed[0] != '-' and trimmed[0] != '+') return error.InvalidValue;
+            const last = trimmed[trimmed.len - 1];
+            if (last == 'k' or last == 'K' or last == 'm' or last == 'M' or last == 'g' or last == 'G') {
+                if (std.fmt.parseInt(i64, trimmed[0 .. trimmed.len - 1], 10)) |num| {
+                    const mult: i64 = switch (last) { 'k', 'K' => 1024, 'm', 'M' => 1048576, 'g', 'G' => 1073741824, else => 1 };
+                    return try std.fmt.allocPrint(allocator, "{d}", .{num * mult});
+                } else |_| {}
+            }
+            if (std.fmt.parseInt(i64, trimmed, 10)) |n| return try std.fmt.allocPrint(allocator, "{d}", .{n}) else |_| {}
+            return error.InvalidValue;
+        },
+        .bool_or_int => {
+            const lower = try std.ascii.allocLowerString(allocator, value);
+            defer allocator.free(lower);
+            if (value.len == 0) return try allocator.dupe(u8, "false");
+            if (std.mem.eql(u8, lower, "true") or std.mem.eql(u8, lower, "yes") or std.mem.eql(u8, lower, "on"))
+                return try allocator.dupe(u8, "true");
+            if (std.mem.eql(u8, lower, "false") or std.mem.eql(u8, lower, "no") or std.mem.eql(u8, lower, "off"))
+                return try allocator.dupe(u8, "false");
+            const trimmed = std.mem.trim(u8, value, " \t");
+            if (trimmed.len > 0) {
+                const l = trimmed[trimmed.len - 1];
+                if (l == 'k' or l == 'K' or l == 'm' or l == 'M' or l == 'g' or l == 'G') {
+                    if (std.fmt.parseInt(i64, trimmed[0 .. trimmed.len - 1], 10)) |num| {
+                        const mult: i64 = switch (l) { 'k', 'K' => 1024, 'm', 'M' => 1048576, 'g', 'G' => 1073741824, else => 1 };
+                        return try std.fmt.allocPrint(allocator, "{d}", .{num * mult});
+                    } else |_| {}
+                }
+                if (std.fmt.parseInt(i64, trimmed, 10)) |n| return try std.fmt.allocPrint(allocator, "{d}", .{n}) else |_| {}
+            }
+            return error.InvalidValue;
+        },
+        .path_type => return try allocator.dupe(u8, std.mem.trim(u8, value, " \t")),
+        .expiry_date => {
+            const trimmed = std.mem.trim(u8, value, " \t");
+            if (std.mem.eql(u8, trimmed, "never") or std.mem.eql(u8, trimmed, "false")) return try allocator.dupe(u8, "0");
+            if (std.mem.eql(u8, trimmed, "now")) return try std.fmt.allocPrint(allocator, "{d}", .{std.time.timestamp()});
+            if (std.fmt.parseInt(i64, trimmed, 10)) |n| return try std.fmt.allocPrint(allocator, "{d}", .{n}) else |_| {}
+            if (cfgParseDate(trimmed, allocator)) |ts| return ts;
+            return error.InvalidValue;
+        },
+        .color_type => {
+            const trimmed = std.mem.trim(u8, value, " \t");
+            if (cfgValidateColor(trimmed)) return try cfgColorToAnsiAlloc(trimmed, allocator);
+            return error.InvalidValue;
+        },
+        .none => return try allocator.dupe(u8, value),
+    }
+}
+
+fn cfgParseDate(date_str: []const u8, allocator: std.mem.Allocator) ?[]u8 {
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &[_][]const u8{ "date", "-d", date_str, "+%s" },
+    }) catch return null;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    if (result.term.Exited != 0) return null;
+    const trimmed = std.mem.trimRight(u8, result.stdout, " \t\n\r");
+    if (trimmed.len == 0) return null;
+    return allocator.dupe(u8, trimmed) catch null;
+}
+
+fn cfgAppendOrigin(out: *std.array_list.Managed(u8), source_path: []const u8) !void {
+    if (std.mem.eql(u8, source_path, "standard input")) {
+        try out.appendSlice("standard input:");
+    } else if (std.mem.eql(u8, source_path, "command line")) {
+        try out.appendSlice("command line:");
+    } else {
+        var needs_quote = false;
+        for (source_path) |c| {
+            if (c == '"' or c == ' ' or c == '(' or c == ')') { needs_quote = true; break; }
+        }
+        if (needs_quote) {
+            try out.appendSlice("file:\"");
+            for (source_path) |c| {
+                if (c == '"') { try out.appendSlice("\\\""); }
+                else try out.append(c);
+            }
+            try out.append('"');
+        } else {
+            try out.appendSlice("file:");
+            try out.appendSlice(source_path);
+        }
+    }
+}
+
 fn cfgValidateColor(color: []const u8) bool {
     if (color.len == 0) return true;
     const valid = [_][]const u8{ "normal", "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white", "default", "reset", "bold", "dim", "ul", "blink", "reverse", "italic", "strike", "nobold", "nodim", "noul", "noblink", "noreverse", "noitalic", "nostrike", "no-bold", "no-dim", "no-ul", "no-blink", "no-reverse", "no-italic", "no-strike", "brightred", "brightgreen", "brightyellow", "brightblue", "brightmagenta", "brightcyan", "brightwhite" };
@@ -9729,14 +9902,13 @@ fn cfgOutputList(content: []const u8, source_path: []const u8, scope: []const u8
         defer out.deinit();
         if (show_scope) { try out.appendSlice(scope); try out.append('\t'); }
         if (show_origin) {
-            if (std.mem.eql(u8, source_path, "standard input")) try out.appendSlice("standard input:")
-            else { try out.appendSlice("file:"); try out.appendSlice(source_path); }
+                        else { try out.appendSlice("file:"); try out.appendSlice(source_path); }
             try out.append('\t');
         }
         if (name_only) {
             try out.appendSlice(e.full_key);
         } else if (config_type != .none) {
-            const fmt2 = cfgFormatType(cfgEffectiveValue(e), config_type, allocator, platform_impl) catch continue;
+            const fmt2 = cfgFormatTypeSilent(cfgEffectiveValue(e), config_type, allocator) catch continue;
             defer allocator.free(fmt2);
             try out.appendSlice(e.full_key);
             if (null_term) try out.append('\n') else try out.append('=');
