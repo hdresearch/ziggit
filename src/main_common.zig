@@ -1046,7 +1046,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "commit")) {
         try cmdCommit(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "log")) {
-        try cmdLog(allocator, &args_iter, &platform_impl);
+        try diff_cmd_mod.cmdLog(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "diff")) {
         try diff_cmd_mod.cmdDiff(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "branch")) {
@@ -1064,7 +1064,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "tag")) {
         try cmdTag(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "show")) {
-        try cmdShow(allocator, &args_iter, &platform_impl);
+        try diff_cmd_mod.cmdShow(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "cat-file")) {
         try cmdCatFile(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "remote")) {
@@ -1339,9 +1339,9 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "notes")) {
         try cmdNotes(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "format-patch")) {
-        try cmdFormatPatch(allocator, &args_iter, &platform_impl);
+        try diff_cmd_mod.cmdFormatPatch(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "whatchanged")) {
-        try cmdLog(allocator, &args_iter, &platform_impl);
+        try diff_cmd_mod.cmdWhatchanged(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "for-each-repo")) {
         try cmdForEachRepo(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "bugreport")) {
