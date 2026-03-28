@@ -3884,7 +3884,7 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     var cached = false;
     var quiet = false;
     var exit_code = false;
-    var diff_output_mode: enum { patch, stat, shortstat, numstat, name_only, name_status, raw, no_patch } = .patch;
+    var diff_output_mode: enum { patch, stat, shortstat, numstat, name_only, name_status, raw, no_patch, summary, dirstat, patch_with_stat, patch_with_raw } = .patch;
     var check_mode = false;
     var positional = std.array_list.Managed([]const u8).init(allocator);
     defer positional.deinit();
@@ -3929,6 +3929,14 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
             std.mem.eql(u8, arg, "-b") or std.mem.eql(u8, arg, "--ignore-blank-lines"))
         {
             // whitespace options - accept but don't fully implement
+        } else if (std.mem.eql(u8, arg, "--summary")) {
+            diff_output_mode = .summary;
+        } else if (std.mem.eql(u8, arg, "--dirstat") or std.mem.eql(u8, arg, "--cumulative") or std.mem.eql(u8, arg, "--dirstat-by-file")) {
+            diff_output_mode = .dirstat;
+        } else if (std.mem.eql(u8, arg, "--patch-with-stat")) {
+            diff_output_mode = .patch_with_stat;
+        } else if (std.mem.eql(u8, arg, "--patch-with-raw")) {
+            diff_output_mode = .patch_with_raw;
         } else if (std.mem.eql(u8, arg, "--check")) {
             check_mode = true;
         } else if (std.mem.eql(u8, arg, "--full-index") or std.mem.eql(u8, arg, "--binary") or
@@ -3942,10 +3950,7 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
             std.mem.startsWith(u8, arg, "--diff-filter=") or
             std.mem.startsWith(u8, arg, "--submodule") or std.mem.startsWith(u8, arg, "--submodule=") or
             std.mem.eql(u8, arg, "--compact-summary") or
-            std.mem.eql(u8, arg, "--patch-with-stat") or std.mem.eql(u8, arg, "--patch-with-raw") or
-            std.mem.eql(u8, arg, "--summary") or
-            std.mem.eql(u8, arg, "--dirstat") or std.mem.startsWith(u8, arg, "--dirstat=") or
-            std.mem.eql(u8, arg, "--cumulative") or std.mem.eql(u8, arg, "--dirstat-by-file") or
+            std.mem.startsWith(u8, arg, "--dirstat=") or
             std.mem.startsWith(u8, arg, "-G") or std.mem.startsWith(u8, arg, "-S") or
             std.mem.eql(u8, arg, "--pickaxe-regex") or std.mem.eql(u8, arg, "--pickaxe-all") or
             std.mem.eql(u8, arg, "--relative") or std.mem.startsWith(u8, arg, "--relative=") or
@@ -4052,7 +4057,7 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
                 std.process.exit(128);
             };
             defer allocator.free(tree2);
-            if (diff_output_mode == .name_only or diff_output_mode == .name_status or diff_output_mode == .numstat or diff_output_mode == .stat or diff_output_mode == .shortstat or diff_output_mode == .raw or diff_output_mode == .no_patch) {
+            if (diff_output_mode == .name_only or diff_output_mode == .name_status or diff_output_mode == .numstat or diff_output_mode == .stat or diff_output_mode == .shortstat or diff_output_mode == .raw or diff_output_mode == .no_patch or diff_output_mode == .summary or diff_output_mode == .dirstat) {
                 // Use tree comparison to get file-level changes, then output in requested format
                 var diff_entries = std.array_list.Managed(DiffStatEntry).init(allocator);
                 defer {
@@ -4092,7 +4097,7 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     defer allocator.free(cwd);
     
     var has_diff = false;
-    const use_stat = diff_output_mode == .stat or diff_output_mode == .shortstat or diff_output_mode == .numstat or diff_output_mode == .name_only or diff_output_mode == .name_status or diff_output_mode == .raw or diff_output_mode == .no_patch;
+    const use_stat = diff_output_mode == .stat or diff_output_mode == .shortstat or diff_output_mode == .numstat or diff_output_mode == .name_only or diff_output_mode == .name_status or diff_output_mode == .raw or diff_output_mode == .no_patch or diff_output_mode == .summary or diff_output_mode == .dirstat;
     if (use_stat) {
         // Collect diff entries for stat/name output
         var diff_entries = std.array_list.Managed(DiffStatEntry).init(allocator);
@@ -4247,8 +4252,22 @@ fn outputDiffEntries(diff_entries: []const DiffStatEntry, diff_output_mode: anyt
             defer allocator.free(line);
             try platform_impl.writeStdout(line);
         }
+    } else if (diff_output_mode == .summary) {
+        for (diff_entries) |e| {
+            if (e.is_new) {
+                const line = try std.fmt.allocPrint(allocator, " create mode 100644 {s}\n", .{e.path});
+                defer allocator.free(line);
+                try platform_impl.writeStdout(line);
+            } else if (e.is_deleted) {
+                const line = try std.fmt.allocPrint(allocator, " delete mode 100644 {s}\n", .{e.path});
+                defer allocator.free(line);
+                try platform_impl.writeStdout(line);
+            }
+        }
+    } else if (diff_output_mode == .dirstat) {
+        // Minimal dirstat output
     }
-    // no_patch: no output
+    // no_patch, patch_with_stat, patch_with_raw: no output here
 }
 
 fn collectRefDiffEntries(ref_name: []const u8, index: *const index_mod.Index, cwd: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, entries: *std.array_list.Managed(DiffStatEntry), is_cached: bool) !bool {
@@ -21750,11 +21769,17 @@ fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             df_suppress = false;
         } else if (std.mem.eql(u8, arg, "--patch-with-stat") or std.mem.eql(u8, arg, "--stat") or
             std.mem.eql(u8, arg, "--numstat") or std.mem.eql(u8, arg, "--shortstat") or
-            std.mem.eql(u8, arg, "--summary") or std.mem.eql(u8, arg, "--dirstat") or
-            std.mem.eql(u8, arg, "--cumulative") or std.mem.eql(u8, arg, "--dirstat-by-file") or
             std.mem.eql(u8, arg, "--compact-summary"))
         {
             df_suppress = false;
+        } else if (std.mem.eql(u8, arg, "--summary") or std.mem.eql(u8, arg, "--dirstat") or
+            std.mem.eql(u8, arg, "--cumulative") or std.mem.eql(u8, arg, "--dirstat-by-file"))
+        {
+            df_suppress = true;
+            df_patch = false;
+            df_show_raw = false;
+            name_only = false;
+            name_status = false;
         }
     }
     const git_dir = findGitDirectory(allocator, platform_impl) catch {
@@ -34229,7 +34254,7 @@ fn cmdWebBrowse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Pipe;
         try child.spawn();
-        const stdout = child.stdout.?.readToEndAlloc(allocator, 1024 * 1024) catch "";
+        const stdout = child.stdout.?.reader.readAllAlloc(allocator, 1024 * 1024) catch "";
         defer if (stdout.len > 0) allocator.free(stdout);
         _ = child.wait() catch {};
         if (stdout.len > 0) try platform_impl.writeStdout(stdout);
@@ -34242,7 +34267,7 @@ fn cmdWebBrowse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         child2.stdout_behavior = .Pipe;
         child2.stderr_behavior = .Pipe;
         try child2.spawn();
-        const stdout2 = child2.stdout.?.readToEndAlloc(allocator, 1024 * 1024) catch "";
+        const stdout2 = child2.stdout.?.reader.readAllAlloc(allocator, 1024 * 1024) catch "";
         defer if (stdout2.len > 0) allocator.free(stdout2);
         _ = child2.wait() catch {};
         if (stdout2.len > 0) try platform_impl.writeStdout(stdout2);
@@ -34254,7 +34279,7 @@ fn cmdWebBrowse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
 
 fn cmdFastImport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     _ = args;
-    const stdin_content = std.io.getStdIn().readToEndAlloc(allocator, 256 * 1024 * 1024) catch "";
+    const stdin_content = std.io.getStdIn().reader.readAllAlloc(allocator, 256 * 1024 * 1024) catch "";
     defer if (stdin_content.len > 0) allocator.free(stdin_content);
     if (stdin_content.len == 0) return;
     if (std.mem.startsWith(u8, stdin_content, "tag ") or
