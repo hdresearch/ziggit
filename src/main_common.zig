@@ -3686,7 +3686,12 @@ fn outputFormattedCommit(format: []const u8, commit_hash: []const u8, allocator:
     var subject: []const u8 = "";
     var body = std.array_list.Managed(u8).init(allocator);
     defer body.deinit();
+    // Raw message for %B
+    var raw_message: []const u8 = "";
     
+    if (std.mem.indexOf(u8, commit_obj.data, "\n\n")) |sep_pos| {
+        raw_message = commit_obj.data[sep_pos + 2 ..];
+    }
     var lines_iter = std.mem.splitSequence(u8, commit_obj.data, "\n");
     var in_body = false;
     var first_body_line = true;
@@ -3750,11 +3755,9 @@ fn outputFormattedCommit(format: []const u8, commit_hash: []const u8, allocator:
                 try output.appendSlice(std.mem.trimRight(u8, body.items, "\n"));
                 i += 2;
             } else if (c == 'B') {
-                try output.appendSlice(subject);
-                if (body.items.len > 0) {
-                    try output.append('\n');
-                    try output.appendSlice(body.items);
-                }
+                const trimmed_raw = std.mem.trimRight(u8, raw_message, "\n");
+                try output.appendSlice(trimmed_raw);
+                try output.append('\n');
                 i += 2;
             } else if (c == 'n') {
                 try output.append('\n');
@@ -6918,7 +6921,21 @@ fn loadBlobForMerge(git_path: []const u8, blob_hash: []const u8, allocator: std.
 }
 
 /// Perform a simple 3-way content merge. Returns merged content or null if conflict.
+/// Perform a simple 3-way content merge. Returns merged content or null if conflict.
 fn threeWayContentMerge(base: []const u8, ours: []const u8, theirs: []const u8, allocator: std.mem.Allocator) !?[]const u8 {
+    // If ours == base, just take theirs
+    if (std.mem.eql(u8, base, ours)) {
+        return try allocator.dupe(u8, theirs);
+    }
+    // If theirs == base, just take ours
+    if (std.mem.eql(u8, base, theirs)) {
+        return try allocator.dupe(u8, ours);
+    }
+    // If ours == theirs, both made same change
+    if (std.mem.eql(u8, ours, theirs)) {
+        return try allocator.dupe(u8, ours);
+    }
+
     // Split into lines
     const base_lines = splitLines(base, allocator) catch return null;
     defer allocator.free(base_lines);
@@ -6927,109 +6944,199 @@ fn threeWayContentMerge(base: []const u8, ours: []const u8, theirs: []const u8, 
     const theirs_lines = splitLines(theirs, allocator) catch return null;
     defer allocator.free(theirs_lines);
 
-    // Simple approach: compute hunks of changes from base->ours and base->theirs
-    // If changes don't overlap, merge them
-    var result = std.array_list.Managed(u8).init(allocator);
-    errdefer result.deinit();
+    // Compute LCS of base with ours and theirs
+    const ours_lcs = mergeComputeLCS(base_lines, ours_lines, allocator) catch return null;
+    defer allocator.free(ours_lcs);
+    const theirs_lcs = mergeComputeLCS(base_lines, theirs_lines, allocator) catch return null;
+    defer allocator.free(theirs_lcs);
 
-    var bi: usize = 0; // base index
-    var oi: usize = 0; // ours index
-    var ti: usize = 0; // theirs index
+    // Mark which base lines are kept in each
+    const ours_kept = allocator.alloc(bool, base_lines.len) catch return null;
+    defer allocator.free(ours_kept);
+    const theirs_kept = allocator.alloc(bool, base_lines.len) catch return null;
+    defer allocator.free(theirs_kept);
+    @memset(ours_kept, false);
+    @memset(theirs_kept, false);
+    for (ours_lcs) |bi| ours_kept[bi] = true;
+    for (theirs_lcs) |bi| theirs_kept[bi] = true;
 
-    while (bi < base_lines.len or oi < ours_lines.len or ti < theirs_lines.len) {
-        // Check if both sides match base at current position
-        const base_line = if (bi < base_lines.len) base_lines[bi] else null;
-        const ours_line = if (oi < ours_lines.len) ours_lines[oi] else null;
-        const theirs_line = if (ti < theirs_lines.len) theirs_lines[ti] else null;
-
-        if (base_line != null and ours_line != null and theirs_line != null and
-            std.mem.eql(u8, base_line.?, ours_line.?) and std.mem.eql(u8, base_line.?, theirs_line.?))
-        {
-            // All three match - take the line
-            try result.appendSlice(base_line.?);
-            try result.append('\n');
-            bi += 1;
-            oi += 1;
-            ti += 1;
-        } else if (base_line != null and ours_line != null and std.mem.eql(u8, base_line.?, ours_line.?) and
-            (theirs_line == null or !std.mem.eql(u8, base_line.?, theirs_line.?)))
-        {
-            // Ours matches base but theirs doesn't - take theirs' change
-            if (theirs_line) |tl| {
-                // Check if theirs deleted this line or changed it
-                // Look ahead in theirs to see if base_line appears later
-                if (findLineInSlice(theirs_lines[ti..], base_line.?)) |offset| {
-                    // Theirs inserted lines before this one
-                    var j: usize = 0;
-                    while (j < offset) : (j += 1) {
-                        try result.appendSlice(theirs_lines[ti + j]);
-                        try result.append('\n');
-                    }
-                    ti += offset;
-                    // Don't advance bi/oi yet - they still need to match
-                } else {
-                    // Theirs changed this line
-                    try result.appendSlice(tl);
-                    try result.append('\n');
-                    bi += 1;
-                    oi += 1;
-                    ti += 1;
-                }
-            } else {
-                // Theirs ran out - this line was deleted in theirs
-                bi += 1;
-                oi += 1;
-            }
-        } else if (base_line != null and theirs_line != null and std.mem.eql(u8, base_line.?, theirs_line.?) and
-            (ours_line == null or !std.mem.eql(u8, base_line.?, ours_line.?)))
-        {
-            // Theirs matches base but ours doesn't - take ours' change
-            if (ours_line) |ol| {
-                if (findLineInSlice(ours_lines[oi..], base_line.?)) |offset| {
-                    var j: usize = 0;
-                    while (j < offset) : (j += 1) {
-                        try result.appendSlice(ours_lines[oi + j]);
-                        try result.append('\n');
-                    }
-                    oi += offset;
-                } else {
-                    try result.appendSlice(ol);
-                    try result.append('\n');
-                    bi += 1;
-                    oi += 1;
-                    ti += 1;
-                }
-            } else {
-                bi += 1;
-                ti += 1;
-            }
-        } else if (base_line == null and ours_line != null and theirs_line == null) {
-            // Past base, ours has extra lines
-            try result.appendSlice(ours_line.?);
-            try result.append('\n');
-            oi += 1;
-        } else if (base_line == null and ours_line == null and theirs_line != null) {
-            // Past base, theirs has extra lines
-            try result.appendSlice(theirs_line.?);
-            try result.append('\n');
-            ti += 1;
-        } else if (base_line == null and ours_line != null and theirs_line != null) {
-            if (std.mem.eql(u8, ours_line.?, theirs_line.?)) {
-                try result.appendSlice(ours_line.?);
-                try result.append('\n');
-                oi += 1;
-                ti += 1;
-            } else {
-                return null; // Conflict
-            }
-        } else {
-            // Both sides changed - conflict
-            return null;
+    // Find common anchors (base lines kept in both)
+    var common_base = std.array_list.Managed(usize).init(allocator);
+    defer common_base.deinit();
+    for (0..base_lines.len) |bi| {
+        if (ours_kept[bi] and theirs_kept[bi]) {
+            try common_base.append(bi);
         }
     }
 
-    const slice = try result.toOwnedSlice();
-    return slice;
+    // Map common base indices to ours/theirs line indices
+    var ours_idx_map = std.array_list.Managed(usize).init(allocator);
+    defer ours_idx_map.deinit();
+    var theirs_idx_map = std.array_list.Managed(usize).init(allocator);
+    defer theirs_idx_map.deinit();
+
+    {
+        var oi: usize = 0;
+        for (common_base.items) |bi| {
+            while (oi < ours_lines.len) : (oi += 1) {
+                if (std.mem.eql(u8, ours_lines[oi], base_lines[bi])) {
+                    try ours_idx_map.append(oi);
+                    oi += 1;
+                    break;
+                }
+            }
+        }
+    }
+    {
+        var ti: usize = 0;
+        for (common_base.items) |bi| {
+            while (ti < theirs_lines.len) : (ti += 1) {
+                if (std.mem.eql(u8, theirs_lines[ti], base_lines[bi])) {
+                    try theirs_idx_map.append(ti);
+                    ti += 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (ours_idx_map.items.len != common_base.items.len or
+        theirs_idx_map.items.len != common_base.items.len)
+    {
+        return null; // Mapping failed
+    }
+
+    var result = std.array_list.Managed(u8).init(allocator);
+    errdefer result.deinit();
+
+    const anchor_count = common_base.items.len;
+    var prev_base: usize = 0;
+    var prev_ours: usize = 0;
+    var prev_theirs: usize = 0;
+
+    var i: usize = 0;
+    while (i <= anchor_count) : (i += 1) {
+        const cur_base = if (i < anchor_count) common_base.items[i] else base_lines.len;
+        const cur_ours = if (i < anchor_count) ours_idx_map.items[i] else ours_lines.len;
+        const cur_theirs = if (i < anchor_count) theirs_idx_map.items[i] else theirs_lines.len;
+
+        const base_gap = base_lines[prev_base..cur_base];
+        const ours_gap = ours_lines[prev_ours..cur_ours];
+        const theirs_gap = theirs_lines[prev_theirs..cur_theirs];
+
+        if (base_gap.len == 0 and ours_gap.len == 0 and theirs_gap.len == 0) {
+            // No gap
+        } else if (mergeLineSlicesEqual(base_gap, ours_gap) and mergeLineSlicesEqual(base_gap, theirs_gap)) {
+            for (base_gap) |line| {
+                try result.appendSlice(line);
+                try result.append('\n');
+            }
+        } else if (mergeLineSlicesEqual(base_gap, ours_gap)) {
+            // Only theirs changed
+            for (theirs_gap) |line| {
+                try result.appendSlice(line);
+                try result.append('\n');
+            }
+        } else if (mergeLineSlicesEqual(base_gap, theirs_gap)) {
+            // Only ours changed
+            for (ours_gap) |line| {
+                try result.appendSlice(line);
+                try result.append('\n');
+            }
+        } else if (mergeLineSlicesEqual(ours_gap, theirs_gap)) {
+            // Both made same change
+            for (ours_gap) |line| {
+                try result.appendSlice(line);
+                try result.append('\n');
+            }
+        } else {
+            // Both changed differently - CONFLICT
+            return null;
+        }
+
+        // Output the anchor line
+        if (i < anchor_count) {
+            try result.appendSlice(base_lines[common_base.items[i]]);
+            try result.append('\n');
+            prev_base = common_base.items[i] + 1;
+            prev_ours = cur_ours + 1;
+            prev_theirs = cur_theirs + 1;
+        }
+    }
+
+    return try result.toOwnedSlice();
+}
+
+fn mergeLineSlicesEqual(a: []const []const u8, b: []const []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (!std.mem.eql(u8, x, y)) return false;
+    }
+    return true;
+}
+
+/// Compute LCS indices into `a` for common elements with `b`
+fn mergeComputeLCS(a: []const []const u8, b: []const []const u8, allocator: std.mem.Allocator) ![]usize {
+    const m = a.len;
+    const n = b.len;
+    if (m == 0 or n == 0) return try allocator.alloc(usize, 0);
+
+    // For large inputs, use greedy approach
+    if (m * n > 1000000) {
+        var res = std.array_list.Managed(usize).init(allocator);
+        defer res.deinit();
+        var bj: usize = 0;
+        for (0..m) |ai| {
+            while (bj < n) : (bj += 1) {
+                if (std.mem.eql(u8, a[ai], b[bj])) {
+                    try res.append(ai);
+                    bj += 1;
+                    break;
+                }
+            }
+        }
+        return res.toOwnedSlice();
+    }
+
+    // Standard DP LCS
+    const dp = try allocator.alloc([]u16, m + 1);
+    defer {
+        for (dp) |row| allocator.free(row);
+        allocator.free(dp);
+    }
+    for (dp) |*row| {
+        row.* = try allocator.alloc(u16, n + 1);
+        @memset(row.*, 0);
+    }
+
+    for (1..m + 1) |ii| {
+        for (1..n + 1) |jj| {
+            if (std.mem.eql(u8, a[ii - 1], b[jj - 1])) {
+                dp[ii][jj] = dp[ii - 1][jj - 1] + 1;
+            } else {
+                dp[ii][jj] = @max(dp[ii - 1][jj], dp[ii][jj - 1]);
+            }
+        }
+    }
+
+    var res = std.array_list.Managed(usize).init(allocator);
+    defer res.deinit();
+    var ii: usize = m;
+    var jj: usize = n;
+    while (ii > 0 and jj > 0) {
+        if (std.mem.eql(u8, a[ii - 1], b[jj - 1])) {
+            try res.append(ii - 1);
+            ii -= 1;
+            jj -= 1;
+        } else if (dp[ii - 1][jj] >= dp[ii][jj - 1]) {
+            ii -= 1;
+        } else {
+            jj -= 1;
+        }
+    }
+
+    std.mem.reverse(usize, res.items);
+    return res.toOwnedSlice();
 }
 
 fn splitLines(text: []const u8, allocator: std.mem.Allocator) ![][]const u8 {
@@ -34985,6 +35092,8 @@ fn cmdNotes(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         while (args.next()) |arg| {
             if (std.mem.eql(u8, arg, "-m")) {
                 message = args.next();
+            } else if (std.mem.startsWith(u8, arg, "-m") and arg.len > 2) {
+                message = arg[2..];
             } else if (std.mem.eql(u8, arg, "-f")) {
                 force = true;
             } else if (!std.mem.startsWith(u8, arg, "-")) {
@@ -35098,9 +35207,75 @@ fn cmdNotes(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             try refs.updateRef(git_path, "refs/notes/commits", notes_hash, platform_impl, allocator);
         }
     } else if (std.mem.eql(u8, subcmd, "show")) {
-        while (args.next()) |_| {}
-        try platform_impl.writeStderr("error: no note found\n");
-        std.process.exit(1);
+        var show_target: ?[]const u8 = null;
+        while (args.next()) |arg| {
+            if (!std.mem.startsWith(u8, arg, "-")) show_target = arg;
+        }
+        const show_hash = if (show_target) |t|
+            resolveRevision(git_path, t, platform_impl, allocator) catch {
+                try platform_impl.writeStderr("error: no note found for object\n");
+                std.process.exit(1);
+            }
+        else blk: {
+            const h = refs.getCurrentCommit(git_path, platform_impl, allocator) catch {
+                try platform_impl.writeStderr("error: no note found\n");
+                std.process.exit(1);
+            };
+            break :blk h orelse { try platform_impl.writeStderr("error: no note found\n"); std.process.exit(1); };
+        };
+        defer allocator.free(show_hash);
+        const notes_ref = "refs/notes/commits";
+        const notes_commit_hash = refs.getRef(git_path, notes_ref, platform_impl, allocator) catch {
+            try platform_impl.writeStderr("error: no note found for object\n");
+            std.process.exit(1);
+        };
+        defer allocator.free(notes_commit_hash);
+        const notes_commit_obj = objects.GitObject.load(notes_commit_hash, git_path, platform_impl, allocator) catch {
+            try platform_impl.writeStderr("error: no note found\n");
+            std.process.exit(1);
+        };
+        defer notes_commit_obj.deinit(allocator);
+        const notes_tree_hash_str = extractHeaderField(notes_commit_obj.data, "tree");
+        if (notes_tree_hash_str.len == 0) { try platform_impl.writeStderr("error: no note found\n"); std.process.exit(1); }
+        const notes_tree_obj = objects.GitObject.load(notes_tree_hash_str, git_path, platform_impl, allocator) catch {
+            try platform_impl.writeStderr("error: no note found\n");
+            std.process.exit(1);
+        };
+        defer notes_tree_obj.deinit(allocator);
+        var found_blob_hash: ?[40]u8 = null;
+        {
+            var pos: usize = 0;
+            while (pos < notes_tree_obj.data.len) {
+                const space_pos = std.mem.indexOfPos(u8, notes_tree_obj.data, pos, " ") orelse break;
+                const null_pos = std.mem.indexOfPos(u8, notes_tree_obj.data, space_pos, &[_]u8{0}) orelse break;
+                const entry_name = notes_tree_obj.data[space_pos + 1 .. null_pos];
+                const hash_start = null_pos + 1;
+                if (hash_start + 20 > notes_tree_obj.data.len) break;
+                const hash_bytes = notes_tree_obj.data[hash_start .. hash_start + 20];
+                if (std.mem.eql(u8, entry_name, show_hash)) {
+                    var hex: [40]u8 = undefined;
+                    for (hash_bytes, 0..) |b, bi| {
+                        const hc = "0123456789abcdef";
+                        hex[bi * 2] = hc[b >> 4];
+                        hex[bi * 2 + 1] = hc[b & 0xf];
+                    }
+                    found_blob_hash = hex;
+                    break;
+                }
+                pos = hash_start + 20;
+            }
+        }
+        if (found_blob_hash) |bh| {
+            const blob_obj = objects.GitObject.load(&bh, git_path, platform_impl, allocator) catch {
+                try platform_impl.writeStderr("error: no note found\n");
+                std.process.exit(1);
+            };
+            defer blob_obj.deinit(allocator);
+            if (blob_obj.type == .blob) try platform_impl.writeStdout(blob_obj.data);
+        } else {
+            try platform_impl.writeStderr("error: no note found for object\n");
+            std.process.exit(1);
+        }
     } else if (std.mem.eql(u8, subcmd, "remove")) {
         // no-op for now
     } else if (std.mem.eql(u8, subcmd, "list")) {
