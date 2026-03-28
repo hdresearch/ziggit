@@ -368,6 +368,8 @@ pub fn updateRef(git_dir: []const u8, ref_name: []const u8, hash: []const u8, pl
         break :blk try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir});
     } else if (std.mem.startsWith(u8, ref_name, "refs/"))
         try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_name })
+    else if (isPseudoRef(ref_name))
+        try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_name })
     else
         try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_dir, ref_name });
     defer allocator.free(ref_path);
