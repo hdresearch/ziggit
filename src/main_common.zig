@@ -610,8 +610,32 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         const params_str = std.process.getEnvVarOwned(allocator, "GIT_CONFIG_PARAMETERS") catch null;
         if (params_str) |params| {
             defer allocator.free(params);
-            // TODO: parseGitConfigParameters not yet implemented
-            _ = params;
+            // Parse GIT_CONFIG_PARAMETERS: 'key=value' 'key=value' ...
+            var ppos2: usize = 0;
+            while (ppos2 < params.len) {
+                while (ppos2 < params.len and (params[ppos2] == ' ' or params[ppos2] == '\t')) ppos2 += 1;
+                if (ppos2 >= params.len) break;
+                if (params[ppos2] == '\'') {
+                    ppos2 += 1;
+                    const pstart2 = ppos2;
+                    while (ppos2 < params.len and params[ppos2] != '\'') ppos2 += 1;
+                    const entry2 = params[pstart2..ppos2];
+                    if (ppos2 < params.len) ppos2 += 1;
+                    if (std.mem.indexOf(u8, entry2, "=")) |eq2| {
+                        const key2 = entry2[0..eq2];
+                        const value2 = entry2[eq2 + 1 ..];
+                        if (global_config_overrides == null) {
+                            global_config_overrides = std.array_list.Managed(ConfigOverride).init(allocator);
+                        }
+                        global_config_overrides.?.append(.{
+                            .key = allocator.dupe(u8, key2) catch continue,
+                            .value = allocator.dupe(u8, value2) catch continue,
+                        }) catch {};
+                    }
+                } else {
+                    while (ppos2 < params.len and params[ppos2] != ' ' and params[ppos2] != '\t') ppos2 += 1;
+                }
+            }
         }
     }
 
