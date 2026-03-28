@@ -4949,10 +4949,10 @@ fn formatDiffStatSummary(files_changed: usize, total_ins: usize, total_dels: usi
     const w = parts.writer();
     try w.writeAll(" ");
     try w.print("{d} file{s} changed", .{ files_changed, if (files_changed != 1) "s" else "" });
-    if (total_ins > 0) {
+    if (total_ins > 0 or (total_ins == 0 and total_dels == 0)) {
         try w.print(", {d} insertion{s}(+)", .{ total_ins, if (total_ins != 1) "s" else "" });
     }
-    if (total_dels > 0) {
+    if (total_dels > 0 or (total_ins == 0 and total_dels == 0)) {
         try w.print(", {d} deletion{s}(-)", .{ total_dels, if (total_dels != 1) "s" else "" });
     }
     try w.writeAll("\n");
