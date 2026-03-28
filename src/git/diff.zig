@@ -1,5 +1,24 @@
 const std = @import("std");
 
+fn writeDiffHeader(writer: anytype, file_path: []const u8, old_hash: []const u8, new_hash: []const u8, old_content: []const u8, new_content: []const u8) !void {
+    writer.print("diff --git a/{s} b/{s}\n", .{ file_path, file_path }) catch {};
+    if (old_content.len == 0 and new_content.len > 0) {
+        writer.print("new file mode 100644\n", .{}) catch {};
+        writer.print("index {s}..{s}\n", .{ old_hash, new_hash }) catch {};
+        writer.print("--- /dev/null\n", .{}) catch {};
+        writer.print("+++ b/{s}\n", .{file_path}) catch {};
+    } else if (new_content.len == 0 and old_content.len > 0) {
+        writer.print("deleted file mode 100644\n", .{}) catch {};
+        writer.print("index {s}..{s}\n", .{ old_hash, new_hash }) catch {};
+        writer.print("--- a/{s}\n", .{file_path}) catch {};
+        writer.print("+++ /dev/null\n", .{}) catch {};
+    } else {
+        writer.print("index {s}..{s} 100644\n", .{ old_hash, new_hash }) catch {};
+        writer.print("--- a/{s}\n", .{file_path}) catch {};
+        writer.print("+++ b/{s}\n", .{file_path}) catch {};
+    }
+}
+
 pub const DiffLine = struct {
     type: enum { context, add, remove },
     content: []const u8,
@@ -153,10 +172,7 @@ pub fn generateUnifiedDiffWithHashes(old_content: []const u8, new_content: []con
     const writer = result.writer();
     
     // Diff header
-    try writer.print("diff --git a/{s} b/{s}\n", .{ file_path, file_path });
-    try writer.print("index {s}..{s} 100644\n", .{ old_hash, new_hash });
-    try writer.print("--- a/{s}\n", .{file_path});
-    try writer.print("+++ b/{s}\n", .{file_path});
+    try writeDiffHeader(writer, file_path, old_hash, new_hash, old_content, new_content);
     
     // Hunks
     for (hunks.items) |hunk| {
@@ -428,10 +444,7 @@ pub fn generateUnifiedDiffWithOptions(
     const writer = result.writer();
     
     // Diff header
-    try writer.print("diff --git a/{s} b/{s}\n", .{ file_path, file_path });
-    try writer.print("index {s}..{s} 100644\n", .{ old_hash, new_hash });
-    try writer.print("--- a/{s}\n", .{file_path});
-    try writer.print("+++ b/{s}\n", .{file_path});
+    try writeDiffHeader(writer, file_path, old_hash, new_hash, old_content, new_content);
     
     // Hunks
     for (hunks.items) |hunk| {
