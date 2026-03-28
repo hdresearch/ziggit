@@ -338,12 +338,14 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         defer allocator.free(remote_section);
 
         // Use config value parser for pushurl and url
+        var has_explicit_pushurl = false;
         {
             const pushurl_key = try std.fmt.allocPrint(allocator, "remote.{s}.pushurl", .{remote});
             defer allocator.free(pushurl_key);
             if (getSimpleConfigValue(config_content, pushurl_key, allocator)) |pu| {
                 remote_url = pu;
                 remote_url_allocated = true;
+                has_explicit_pushurl = true;
             } else |_| {
                 const url_key = try std.fmt.allocPrint(allocator, "remote.{s}.url", .{remote});
                 defer allocator.free(url_key);
@@ -355,7 +357,8 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         }
 
         // Apply url.<base>.pushInsteadOf or url.<base>.insteadOf rewriting
-        if (remote_url_allocated) {
+        // But NOT when an explicit pushurl is configured (pushurl is used as-is)
+        if (remote_url_allocated and !has_explicit_pushurl) {
             if (applyPushInsteadOf(allocator, remote_url, config_content)) |rewritten| {
                 if (remote_url_allocated) allocator.free(remote_url);
                 remote_url = rewritten;
@@ -368,7 +371,14 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         }
 
         if (!remote_url_allocated) {
-            if (resolveSourceGitDir(allocator, remote)) |rgd| {
+            // Try applying insteadOf/pushInsteadOf to the raw remote name
+            if (applyPushInsteadOf(allocator, remote, config_content)) |rewritten| {
+                remote_url = rewritten;
+                remote_url_allocated = true;
+            } else if (fetch_cmd.applyInsteadOf(allocator, remote, config_content)) |rewritten| {
+                remote_url = rewritten;
+                remote_url_allocated = true;
+            } else if (resolveSourceGitDir(allocator, remote)) |rgd| {
                 allocator.free(rgd);
                 remote_url = remote;
             } else |_| {
@@ -665,7 +675,31 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         }
 
         // Determine which refspecs to use for pruning
-        if (refspecs_list.items.len > 0) {
+        // Check if we have a bare ":" refspec - treat it as matching push (refs/heads/*:refs/heads/*)
+        var has_bare_colon = false;
+        for (refspecs_list.items) |rs_raw| {
+            var rs2 = rs_raw;
+            if (rs2.len > 0 and rs2[0] == '+') rs2 = rs2[1..];
+            if (rs2.len == 1 and rs2[0] == ':') { has_bare_colon = true; break; }
+        }
+        if (has_bare_colon or refspecs_list.items.len == 0) {
+            // Default: prune refs/heads/* that don't exist locally
+            for (remote_all_refs.items) |remote_entry| {
+                if (!std.mem.startsWith(u8, remote_entry.name, "refs/heads/")) continue;
+                var exists_locally2 = false;
+                for (local_all_refs.items) |local_entry| {
+                    if (std.mem.eql(u8, local_entry.name, remote_entry.name)) {
+                        exists_locally2 = true;
+                        break;
+                    }
+                }
+                if (!exists_locally2) {
+                    const ref_path2 = std.fmt.allocPrint(allocator, "{s}/{s}", .{ remote_git_dir, remote_entry.name }) catch continue;
+                    defer allocator.free(ref_path2);
+                    std.fs.cwd().deleteFile(ref_path2) catch {};
+                }
+            }
+        } else if (refspecs_list.items.len > 0) {
             // Use explicit refspecs to determine what to prune
             for (refspecs_list.items) |rs_raw| {
                 var rs = rs_raw;
@@ -693,23 +727,6 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                         defer allocator.free(ref_path);
                         std.fs.cwd().deleteFile(ref_path) catch {};
                     }
-                }
-            }
-        } else {
-            // Default: prune refs/heads/* that don't exist locally
-            for (remote_all_refs.items) |remote_entry| {
-                if (!std.mem.startsWith(u8, remote_entry.name, "refs/heads/")) continue;
-                var exists_locally = false;
-                for (local_all_refs.items) |local_entry| {
-                    if (std.mem.eql(u8, local_entry.name, remote_entry.name)) {
-                        exists_locally = true;
-                        break;
-                    }
-                }
-                if (!exists_locally) {
-                    const ref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ remote_git_dir, remote_entry.name }) catch continue;
-                    defer allocator.free(ref_path);
-                    std.fs.cwd().deleteFile(ref_path) catch {};
                 }
             }
         }
@@ -942,6 +959,19 @@ fn pushSingleRefspec(
         } else |_| {}
     }
 
+    // Validate that we're not pushing non-commit objects to branch refs
+    if (std.mem.startsWith(u8, full_dst, "refs/heads/")) {
+        if (objects.GitObject.load(hash, local_git_dir, platform_impl, allocator)) |obj| {
+            defer obj.deinit(allocator);
+            if (obj.type != .commit) {
+                const emsg = try std.fmt.allocPrint(allocator, "error: trying to write non-commit object {s} to branch '{s}'\n ! [remote rejected] {s} -> {s} (invalid new value provided)\nerror: failed to push some refs\n", .{ hash, full_dst, formatRefDisplay(full_dst), formatRefDisplay(full_dst) });
+                defer allocator.free(emsg);
+                try platform_impl.writeStderr(emsg);
+                return error.NonCommitObject;
+            }
+        } else |_| {}
+    }
+
     if (!dry_run) {
         const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ remote_git_dir, full_dst });
         defer allocator.free(ref_path);
@@ -975,7 +1005,7 @@ fn pushSingleRefspec(
         defer allocator.free(data);
         std.fs.cwd().writeFile(.{ .sub_path = ref_path, .data = data }) catch {};
 
-        // Update local tracking ref
+        // Update local tracking ref (only if value changed)
         if (std.mem.startsWith(u8, full_dst, "refs/heads/")) {
             const pushed_branch = full_dst["refs/heads/".len..];
             const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{local_git_dir}) catch unreachable;
@@ -985,10 +1015,18 @@ fn pushSingleRefspec(
                 // Find remote name by matching URL
                 if (findRemoteNameByGitDir(allocator, config_content, remote_git_dir)) |rn| {
                     defer allocator.free(rn);
-                    const tracking_ref_path = std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}/{s}", .{ local_git_dir, rn, pushed_branch }) catch unreachable;
-                    defer allocator.free(tracking_ref_path);
-                    if (std.mem.lastIndexOfScalar(u8, tracking_ref_path, '/')) |ls2| std.fs.cwd().makePath(tracking_ref_path[0..ls2]) catch {};
-                    std.fs.cwd().writeFile(.{ .sub_path = tracking_ref_path, .data = data }) catch {};
+                    const tracking_ref_name = std.fmt.allocPrint(allocator, "refs/remotes/{s}/{s}", .{ rn, pushed_branch }) catch unreachable;
+                    defer allocator.free(tracking_ref_name);
+                    // Check current value (loose or packed)
+                    const current_val = refs.resolveRef(local_git_dir, tracking_ref_name, platform_impl, allocator) catch null;
+                    defer if (current_val) |cv| allocator.free(cv);
+                    const needs_update = if (current_val) |cv| !std.mem.eql(u8, cv, hash) else true;
+                    if (needs_update) {
+                        const tracking_ref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ local_git_dir, tracking_ref_name }) catch unreachable;
+                        defer allocator.free(tracking_ref_path);
+                        if (std.mem.lastIndexOfScalar(u8, tracking_ref_path, '/')) |ls2| std.fs.cwd().makePath(tracking_ref_path[0..ls2]) catch {};
+                        std.fs.cwd().writeFile(.{ .sub_path = tracking_ref_path, .data = data }) catch {};
+                    }
                 }
             } else |_| {}
         }

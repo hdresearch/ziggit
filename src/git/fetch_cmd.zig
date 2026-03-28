@@ -909,7 +909,11 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                 }
             } else |_| {}
         }
-        try performLocalFetch(allocator, git_path, local_path, remote_name, quiet, cmd_refspecs.items, platform_impl, effective_tags != .no, force, append_mode, effective_prune, dry_run, write_fetch_head and !dry_run, update_head_ok, has_refmap, refmap_value, effective_prune_tags, is_named_remote);
+        var local_fetch_failed = false;
+        performLocalFetch(allocator, git_path, local_path, remote_name, quiet, cmd_refspecs.items, platform_impl, effective_tags != .no, force, append_mode, effective_prune, dry_run, write_fetch_head and !dry_run, update_head_ok, has_refmap, refmap_value, effective_prune_tags, is_named_remote) catch |err| switch (err) {
+            error.FetchFailed => { local_fetch_failed = true; },
+            else => return err,
+        };
 
         // Handle --set-upstream
         if (set_upstream and cmd_refspecs.items.len > 0 and is_named_remote) {
@@ -942,6 +946,7 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             } else |_| {}
         }
 
+        if (local_fetch_failed) std.process.exit(1);
         return;
     }
 
@@ -1096,6 +1101,9 @@ fn performLocalFetch(
     }
     defer if (from_display_owned) allocator.free(from_display);
 
+    // For FETCH_HEAD entries, use the raw source_path (not resolved absolute path)
+    const fetch_head_url = source_path;
+
     if (!quiet) {
         const from_msg = try std.fmt.allocPrint(allocator, "From {s}\n", .{from_display});
         defer allocator.free(from_msg);
@@ -1204,6 +1212,33 @@ fn performLocalFetch(
     }
 
     var fetch_failed = false;
+    var has_df_conflict = false;
+
+    // Pre-prune: when --prune is active, prune BEFORE writing refs to resolve D/F conflicts
+    if (do_prune) {
+        var prune_refspecs_pre = std.array_list.Managed([]u8).init(allocator);
+        defer {
+            for (prune_refspecs_pre.items) |rs2| allocator.free(rs2);
+            prune_refspecs_pre.deinit();
+        }
+        if (!using_default_refspec) {
+            for (refspecs.items) |rs2| {
+                try prune_refspecs_pre.append(try allocator.dupe(u8, rs2));
+            }
+        }
+        if (do_prune_tags and cmd_refspecs.len == 0) {
+            var has_tag_rs = false;
+            for (prune_refspecs_pre.items) |rs2| {
+                var cs2 = @as([]const u8, rs2);
+                if (cs2.len > 0 and cs2[0] == '+') cs2 = cs2[1..];
+                if (std.mem.startsWith(u8, cs2, "refs/tags/")) { has_tag_rs = true; break; }
+            }
+            if (!has_tag_rs) try prune_refspecs_pre.append(try allocator.dupe(u8, "refs/tags/*:refs/tags/*"));
+        }
+        if (prune_refspecs_pre.items.len > 0) {
+            try pruneStaleRefs(allocator, git_path, prune_refspecs_pre.items, source_refs.items);
+        }
+    }
 
     for (refspecs.items, 0..) |rs, refspec_idx| {
         var cs = rs;
@@ -1246,7 +1281,7 @@ fn performLocalFetch(
                 }
 
                 // Build description for FETCH_HEAD
-                const branch_desc = buildFetchHeadDesc(allocator, entry.name, from_display) catch null;
+                const branch_desc = buildFetchHeadDesc(allocator, entry.name, fetch_head_url) catch null;
 
                 if (branch_desc) |desc| {
                     try fetch_head_entries.append(.{
@@ -1317,9 +1352,33 @@ fn performLocalFetch(
                             }
 
                             if (!dry_run) {
-                                const hnl = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.hash});
-                                defer allocator.free(hnl);
-                                std.fs.cwd().writeFile(.{ .sub_path = drp, .data = hnl }) catch {};
+                                const write_result = tryWriteRef(git_path, dn, entry.hash, allocator);
+                                switch (write_result) {
+                                    .df_conflict => {
+                                        if (!quiet) {
+                                            const emsg = try std.fmt.allocPrint(allocator, " ! [rejected]        {s} -> {s}  (unable to update local ref)\n", .{ formatRefDisplay(entry.name), formatRefDisplay(dn) });
+                                            defer allocator.free(emsg);
+                                            try platform_impl.writeStderr(emsg);
+                                        }
+                                        fetch_failed = true;
+                                        has_df_conflict = true;
+                                        continue;
+                                    },
+                                    .lock_conflict => {
+                                        if (!quiet) {
+                                            const emsg = try std.fmt.allocPrint(allocator, "error: cannot lock ref '{s}': Unable to create '{s}/{s}.lock': File exists.\n", .{ dn, git_path, dn });
+                                            defer allocator.free(emsg);
+                                            try platform_impl.writeStderr(emsg);
+                                        }
+                                        fetch_failed = true;
+                                        continue;
+                                    },
+                                    .other_error => {
+                                        fetch_failed = true;
+                                        continue;
+                                    },
+                                    .success => {},
+                                }
                             }
 
                             // Print status line
@@ -1403,13 +1462,12 @@ fn performLocalFetch(
                     const tracking_ref = refspecMap(allocator, suffix2, cfg_dst) catch continue;
                     defer allocator.free(tracking_ref);
 
-                    const tracking_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, tracking_ref }) catch continue;
-                    defer allocator.free(tracking_path);
-                    if (std.mem.lastIndexOfScalar(u8, tracking_path, '/')) |ls| std.fs.cwd().makePath(tracking_path[0..ls]) catch {};
-
-                    // Check fast-forward if not forced
+                    // Use tryWriteRef which handles D/F conflicts and lock files
+                    // But first check fast-forward
                     if (!cfg_force and !force_flag) {
-                        if (readFileContent(allocator, tracking_path)) |old| {
+                        const tracking_path_ff = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, tracking_ref }) catch continue;
+                        defer allocator.free(tracking_path_ff);
+                        if (readFileContent(allocator, tracking_path_ff)) |old| {
                             defer allocator.free(old);
                             const old_h = std.mem.trim(u8, old, " \t\r\n");
                             if (old_h.len >= 40 and !std.mem.eql(u8, old_h[0..40], fhe.hash)) {
@@ -1418,47 +1476,29 @@ fn performLocalFetch(
                         } else |_| {}
                     }
 
-                    const hnl = std.fmt.allocPrint(allocator, "{s}\n", .{fhe.hash}) catch continue;
-                    defer allocator.free(hnl);
-                    std.fs.cwd().writeFile(.{ .sub_path = tracking_path, .data = hnl }) catch {};
+                    const write_result2 = tryWriteRef(git_path, tracking_ref, fhe.hash, allocator);
+                    switch (write_result2) {
+                        .df_conflict => {
+                            fetch_failed = true;
+                            has_df_conflict = true;
+                        },
+                        .lock_conflict => {
+                            if (!quiet) {
+                                const emsg2 = std.fmt.allocPrint(allocator, "error: cannot lock ref '{s}': Unable to create '{s}/{s}.lock': File exists.\n", .{ tracking_ref, git_path, tracking_ref }) catch continue;
+                                defer allocator.free(emsg2);
+                                platform_impl.writeStderr(emsg2) catch {};
+                            }
+                            fetch_failed = true;
+                        },
+                        .other_error => { fetch_failed = true; },
+                        .success => {},
+                    }
                 }
             }
         }
     }
 
-    // Prune: delete local refs that no longer exist on remote
-    if (do_prune) {
-        // Build prune refspec list - only use configured refspecs, not defaults
-        var prune_refspecs = std.array_list.Managed([]u8).init(allocator);
-        defer {
-            for (prune_refspecs.items) |rs| allocator.free(rs);
-            prune_refspecs.deinit();
-        }
-        if (!using_default_refspec) {
-            for (refspecs.items) |rs| {
-                try prune_refspecs.append(try allocator.dupe(u8, rs));
-            }
-        }
-        // When prune_tags is active, add refs/tags/*:refs/tags/* to prune refspecs
-        // But ignore --prune-tags when explicit refspecs are given on cmdline
-        if (do_prune_tags and cmd_refspecs.len == 0) {
-            var has_tag_refspec = false;
-            for (prune_refspecs.items) |rs| {
-                var cs = @as([]const u8, rs);
-                if (cs.len > 0 and cs[0] == '+') cs = cs[1..];
-                if (std.mem.startsWith(u8, cs, "refs/tags/")) {
-                    has_tag_refspec = true;
-                    break;
-                }
-            }
-            if (!has_tag_refspec) {
-                try prune_refspecs.append(try allocator.dupe(u8, "refs/tags/*:refs/tags/*"));
-            }
-        }
-        if (prune_refspecs.items.len > 0) {
-            try pruneStaleRefs(allocator, git_path, prune_refspecs.items, source_refs.items);
-        }
-    }
+    // Note: prune already happened before ref writes (see "Pre-prune" above)
 
     // Write FETCH_HEAD
     // Sort: for-merge entries first, then not-for-merge
@@ -1513,7 +1553,7 @@ fn performLocalFetch(
             defer if (hh_owned) allocator.free(hh.?);
             if (hh) |h| {
                 const bn = if (std.mem.startsWith(u8, tr, "ref: refs/heads/")) tr["ref: refs/heads/".len..] else "HEAD";
-                const line = try std.fmt.allocPrint(allocator, "{s}\t\tbranch '{s}' of {s}\n", .{ h, bn, from_display });
+                const line = try std.fmt.allocPrint(allocator, "{s}\t\tbranch '{s}' of {s}\n", .{ h, bn, fetch_head_url });
                 defer allocator.free(line);
                 try fh_content.appendSlice(line);
             }
@@ -1713,9 +1753,92 @@ fn performLocalFetch(
     }
 
     if (fetch_failed) {
-        std.process.exit(1);
+        if (has_df_conflict and is_named_remote) {
+            const df_err1 = try std.fmt.allocPrint(allocator, "error: some local refs could not be updated; try running\n 'git remote prune {s}' to remove any old, conflicting branches\n", .{remote_name});
+            defer allocator.free(df_err1);
+            try platform_impl.writeStderr(df_err1);
+        }
+        return error.FetchFailed;
     }
 
+}
+
+/// Check if a ref path has a D/F (directory/file) conflict.
+/// Returns true if the ref cannot be written because a directory is in the way,
+/// or a file exists where a directory component needs to be.
+fn hasRefDFConflict(git_path: []const u8, ref_name: []const u8, allocator: std.mem.Allocator) bool {
+    const ref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, ref_name }) catch return false;
+    defer allocator.free(ref_path);
+
+    // Check if ref_path itself is a directory (we want to write a file there)
+    if (std.fs.cwd().openDir(ref_path, .{})) |dir| {
+        var d = dir;
+        d.close();
+        return true;
+    } else |_| {}
+
+    // Check if any parent component of ref_name (within refs/) is an existing file
+    // e.g., if we want to write refs/remotes/origin/dir/file but refs/remotes/origin/dir is a file
+    var pos: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, ref_name, pos, '/')) |slash| {
+        if (slash > 0) {
+            const prefix_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, ref_name[0..slash] }) catch return false;
+            defer allocator.free(prefix_path);
+            // Check if this is a regular file (not directory)
+            if (std.fs.cwd().statFile(prefix_path)) |stat| {
+                if (stat.kind == .file) return true;
+            } else |_| {}
+        }
+        pos = slash + 1;
+    }
+
+    return false;
+}
+
+/// Check if a ref path has a .lock file conflict.
+fn hasLockConflict(git_path: []const u8, ref_name: []const u8, allocator: std.mem.Allocator) bool {
+    const lock_path = std.fmt.allocPrint(allocator, "{s}/{s}.lock", .{ git_path, ref_name }) catch return false;
+    defer allocator.free(lock_path);
+    return if (std.fs.cwd().access(lock_path, .{})) |_| true else |_| false;
+}
+
+/// Try to write a ref, handling D/F conflicts. Returns error info.
+const RefWriteResult = enum { success, df_conflict, lock_conflict, other_error };
+
+fn tryWriteRef(git_path: []const u8, ref_name: []const u8, hash: []const u8, allocator: std.mem.Allocator) RefWriteResult {
+    const ref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, ref_name }) catch return .other_error;
+    defer allocator.free(ref_path);
+
+    // Create parent directories
+    if (std.mem.lastIndexOfScalar(u8, ref_path, '/')) |ls| {
+        std.fs.cwd().makePath(ref_path[0..ls]) catch {
+            // makePath can fail due to D/F conflict (file in the way)
+            if (hasRefDFConflict(git_path, ref_name, allocator)) return .df_conflict;
+            return .other_error;
+        };
+    }
+
+    // Check for lock file
+    if (hasLockConflict(git_path, ref_name, allocator)) return .lock_conflict;
+
+    const data = std.fmt.allocPrint(allocator, "{s}\n", .{hash}) catch return .other_error;
+    defer allocator.free(data);
+
+    std.fs.cwd().writeFile(.{ .sub_path = ref_path, .data = data }) catch {
+        if (hasRefDFConflict(git_path, ref_name, allocator)) return .df_conflict;
+        return .other_error;
+    };
+
+    return .success;
+}
+
+/// Remove a directory tree that conflicts with a ref path
+fn removeDFConflictDir(git_path: []const u8, ref_name: []const u8, allocator: std.mem.Allocator) void {
+    const ref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, ref_name }) catch return;
+    defer allocator.free(ref_path);
+
+    // If the ref_path is a directory, remove it recursively
+    std.fs.cwd().deleteTree(ref_path) catch {};
 }
 
 /// Format a ref name for display (strip common prefixes)
@@ -1827,8 +1950,30 @@ fn pruneStaleRefs(allocator: std.mem.Allocator, git_path: []const u8, refspecs_r
                 defer allocator.free(ref_path);
                 std.fs.cwd().deleteFile(ref_path) catch {};
                 removeFromPackedRefs(allocator, git_path, local_entry.name);
+                // Clean up empty parent directories
+                cleanupEmptyRefDirs(allocator, git_path, local_entry.name);
             }
         }
+    }
+}
+
+/// Remove empty parent directories after deleting a ref
+fn cleanupEmptyRefDirs(allocator: std.mem.Allocator, git_path: []const u8, ref_name: []const u8) void {
+    // Walk up from the ref's directory, removing empty dirs until refs/
+    var current = ref_name;
+    while (std.mem.lastIndexOfScalar(u8, current, '/')) |slash| {
+        current = current[0..slash];
+        if (current.len == 0 or std.mem.eql(u8, current, "refs") or
+            std.mem.eql(u8, current, "refs/heads") or
+            std.mem.eql(u8, current, "refs/tags") or
+            std.mem.eql(u8, current, "refs/remotes"))
+        {
+            break;
+        }
+        const dir_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, current }) catch break;
+        defer allocator.free(dir_path);
+        // Try to remove - will only succeed if empty
+        std.fs.cwd().deleteDir(dir_path) catch break;
     }
 }
 
