@@ -346,7 +346,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 }
                 // Add remaining args after the alias command
                 var ri2: usize = command_index + 1;
-                while (ri2 < all_original_args.items.len) : (ri2 += 1) {
+                while (ri2 < all_original_args.items.len) : (riter_idx += 1) {
                     try new_args.append(all_original_args.items[ri2]);
                 }
                 // Replace all_original_args content
@@ -17973,7 +17973,7 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     defer allocator.free(git_path);
 
     // Parse arguments
-    var reset_mode: enum { soft, mixed, hard } = .mixed; // default is mixed
+    var reset_mode: enum { soft, mixed, hard, merge_mode } = .mixed; // default is mixed
     var target_ref: ?[]const u8 = null;
     var reset_paths = std.array_list.Managed([]const u8).init(allocator);
     defer reset_paths.deinit();
@@ -18040,7 +18040,7 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         break :blk false;
     };
     
-    if (!has_worktree and reset_mode == .hard) {
+    if (!has_worktree and (reset_mode == .hard or reset_mode == .merge_mode)) {
         try platform_impl.writeStderr("fatal: this operation must be run in a work tree\n");
         std.process.exit(128);
         unreachable;
@@ -18120,7 +18120,7 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
                 // Update HEAD and index, leave working tree unchanged
                 resetIndex(git_path, target_hash, platform_impl, allocator) catch {};
             },
-            .hard => {
+            .hard, .merge_mode => {
                 // Update HEAD, index, and working tree to match target commit
                 resetIndex(git_path, target_hash, platform_impl, allocator) catch {};
                 checkoutCommitTree(git_path, target_hash, allocator, platform_impl) catch {};
@@ -18158,7 +18158,7 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
                     // Write an empty index (not delete — git writes empty index)
                     writeEmptyIndex(allocator, index_path) catch {};
                 },
-                .hard => {
+                .hard, .merge_mode => {
                     // Clear the index and remove tracked files
                     const repo_root = std.fs.path.dirname(git_path) orelse ".";
                     removeTrackedFiles(allocator, index_path, repo_root) catch {};
@@ -33949,9 +33949,9 @@ fn nativeCmdRevert(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     var positionals = std.array_list.Managed([]const u8).init(allocator);
     defer positionals.deinit();
 
-    var i2: usize = command_index + 1;
-    while (i2 < args.len) : (i2 += 1) {
-        const arg = args[i2];
+    var iter_idx: usize = command_index + 1;
+    while (iter_idx < args.len) : (iter_idx += 1) {
+        const arg = args[iter_idx];
         if (std.mem.eql(u8, arg, "--abort")) {
             const ohp3 = std.fmt.allocPrint(allocator, "{s}/ORIG_HEAD", .{git_path}) catch return;
             defer allocator.free(ohp3);
