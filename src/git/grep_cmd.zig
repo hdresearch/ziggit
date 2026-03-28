@@ -30,6 +30,16 @@ const ExprNode = union(enum) {
     or_expr: struct { left: *ExprNode, right: *ExprNode },
 };
 
+/// Expression token for boolean expression parsing
+const ExprToken = union(enum) {
+    pattern: []const u8,
+    op_and,
+    op_or,
+    op_not,
+    open_paren,
+    close_paren,
+};
+
 /// Grep options
 const GrepOptions = struct {
     patterns: std.array_list.Managed([]const u8),
