@@ -26555,7 +26555,7 @@ fn nativeCmdGc(allocator: std.mem.Allocator, args: [][]const u8, command_index: 
 
     // Prune loose objects
     if (!std.mem.eql(u8, prune_option, "never")) {
-        try doNativePrune(allocator, git_dir, platform_impl, prune_option);
+        try doNativePrune(allocator, git_dir, platform_impl, prune_option, false, false);
     }
 
     // Pack refs
