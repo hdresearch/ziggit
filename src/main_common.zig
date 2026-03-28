@@ -26558,7 +26558,7 @@ fn nativeCmdPrune(allocator: std.mem.Allocator, args: [][]const u8, command_inde
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (saw_dashdash) {
-            positional_args.append(arg) catch {};
+            positional_args.append(allocator, arg) catch {};
             continue;
         }
         if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
