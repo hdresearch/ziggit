@@ -6,25 +6,36 @@ fn unescapeConfigValue(allocator: std.mem.Allocator, input: []const u8) ![]const
     if (std.mem.indexOf(u8, input, "\\") == null) {
         return try allocator.dupe(u8, input);
     }
-    var result = std.ArrayListUnmanaged(u8){};
-    errdefer result.deinit();
+    var buf = try allocator.alloc(u8, input.len);
+    var out: usize = 0;
     var i: usize = 0;
     while (i < input.len) {
         if (input[i] == '\\' and i + 1 < input.len) {
-            switch (input[i + 1]) {
-                'n' => { try result.append('\n'); i += 2; },
-                't' => { try result.append('\t'); i += 2; },
-                '\\' => { try result.append('\\'); i += 2; },
-                '"' => { try result.append('"'); i += 2; },
-                'b' => { try result.append(0x08); i += 2; },
-                else => { try result.append(input[i]); i += 1; },
-            }
+            const c: u8 = switch (input[i + 1]) {
+                'n' => '\n',
+                't' => '\t',
+                '\\' => '\\',
+                '"' => '"',
+                'b' => 0x08,
+                else => {
+                    buf[out] = input[i];
+                    out += 1;
+                    i += 1;
+                    continue;
+                },
+            };
+            buf[out] = c;
+            out += 1;
+            i += 2;
         } else {
-            try result.append(input[i]);
+            buf[out] = input[i];
+            out += 1;
             i += 1;
         }
     }
-    return try result.toOwnedSlice();
+    const result = try allocator.dupe(u8, buf[0..out]);
+    allocator.free(buf);
+    return result;
 }
 
 /// Git configuration entry
