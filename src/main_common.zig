@@ -79,7 +79,7 @@ fn cfgKeyMatchesConfigStyle(a: []const u8, b: []const u8) bool {
 fn parseAutocorrectValue(val: []const u8) i32 {
     const trimmed = std.mem.trim(u8, val, " \t\r\n");
     if (std.ascii.eqlIgnoreCase(trimmed, "immediate")) return -1;
-    if (std.ascii.eqlIgnoreCase(trimmed, "never")) return 0;
+    if (std.ascii.eqlIgnoreCase(trimmed, "never")) return -2;
     return std.fmt.parseInt(i32, trimmed, 10) catch 0;
 }
 
