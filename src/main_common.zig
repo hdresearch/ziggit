@@ -35423,14 +35423,12 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
         try refs.updateHEAD(git_path, if (std.mem.eql(u8, current_branch_name, "HEAD")) onto_hash else current_branch_name, platform_impl, allocator);
         checkoutCommitTree(git_path, onto_hash, allocator, platform_impl) catch {};
         if (!quiet) {
-            try platform_impl.writeStdout("Successfully rebased and updated ");
-            if (std.mem.eql(u8, current_branch_name, "HEAD")) {
-                try platform_impl.writeStdout("HEAD.\n");
-            } else {
-                const ref_msg = try std.fmt.allocPrint(allocator, "refs/heads/{s}.\n", .{current_branch_name});
-                defer allocator.free(ref_msg);
-                try platform_impl.writeStdout(ref_msg);
-            }
+            // For fast-forward, output "Fast-forwarded X to Y." to stdout
+            const ff_branch = if (std.mem.eql(u8, current_branch_name, "HEAD")) "HEAD" else current_branch_name;
+            const ff_upstream_name = upstream_arg orelse "upstream";
+            const ff_msg = try std.fmt.allocPrint(allocator, "Fast-forwarded {s} to {s}.\n", .{ ff_branch, ff_upstream_name });
+            defer allocator.free(ff_msg);
+            try platform_impl.writeStdout(ff_msg);
         }
         return;
     }
@@ -35759,13 +35757,13 @@ fn replayCommits(git_path: []const u8, repo_root: []const u8, commits: *std.arra
     platform_impl.fs.deleteFile(rebase_head_path) catch {};
 
     if (!quiet) {
-        try platform_impl.writeStdout("Successfully rebased and updated ");
+        try platform_impl.writeStderr("Successfully rebased and updated ");
         if (std.mem.eql(u8, branch_name, "HEAD")) {
-            try platform_impl.writeStdout("HEAD.\n");
+            try platform_impl.writeStderr("HEAD.\n");
         } else {
             const ref_msg = try std.fmt.allocPrint(allocator, "refs/heads/{s}.\n", .{branch_name});
             defer allocator.free(ref_msg);
-            try platform_impl.writeStdout(ref_msg);
+            try platform_impl.writeStderr(ref_msg);
         }
     }
 }
