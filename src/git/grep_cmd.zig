@@ -185,9 +185,6 @@ pub fn cmdGrep(allocator: Allocator, args: *platform_mod.ArgIterator, platform_i
     var opts = GrepOptions.init(allocator);
     defer opts.deinit();
 
-    // Expression tokens for boolean parsing
-    var expr_tokens = std.array_list.Managed(ExprToken).init(allocator);
-    defer expr_tokens.deinit();
     var has_explicit_pattern = false;
     var after_dd = false;
     
