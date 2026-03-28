@@ -3462,6 +3462,8 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         // Extract commit message and author
         var lines = std.mem.splitSequence(u8, commit_data, "\n");
         var parent_hash: ?[]const u8 = null;
+        var parent_hashes = std.array_list.Managed([]const u8).init(allocator);
+        defer parent_hashes.deinit();
         var author_line: ?[]const u8 = null;
         var empty_line_found = false;
         var message = std.array_list.Managed(u8).init(allocator);
@@ -3474,6 +3476,7 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             } else if (line.len == 0) {
                 empty_line_found = true;
             } else if (std.mem.startsWith(u8, line, "parent ")) {
+                try parent_hashes.append(line["parent ".len..]);
                 if (parent_hash == null) {
                     parent_hash = line["parent ".len..];
                 }
@@ -3509,16 +3512,51 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
             defer allocator.free(commit_header);
             try platform_impl.writeStdout(commit_header);
 
+            // Show Merge line for merge commits (commits with 2+ parents)
+            if (parent_hashes.items.len > 1) {
+                var merge_line = std.array_list.Managed(u8).init(allocator);
+                defer merge_line.deinit();
+                try merge_line.appendSlice("Merge:");
+                for (parent_hashes.items) |ph| {
+                    try merge_line.appendSlice(" ");
+                    try merge_line.appendSlice(ph[0..@min(7, ph.len)]);
+                }
+                try merge_line.appendSlice("\n");
+                try platform_impl.writeStdout(merge_line.items);
+            }
+
             if (author_line) |author| {
-                const author_output = try std.fmt.allocPrint(allocator, "Author: {s}\n", .{author});
+                // Parse author into name <email> and date
+                const a_name = parseAuthorName(author);
+                const a_email = parseAuthorEmail(author);
+                const author_output = try std.fmt.allocPrint(allocator, "Author: {s} <{s}>\n", .{ a_name, a_email });
                 defer allocator.free(author_output);
                 try platform_impl.writeStdout(author_output);
+                
+                // Date line
+                const date_str = parseAuthorDateGitFmt(author, allocator);
+                defer if (date_str) |d| allocator.free(d);
+                if (date_str) |d| {
+                    const date_output = try std.fmt.allocPrint(allocator, "Date:   {s}\n", .{d});
+                    defer allocator.free(date_output);
+                    try platform_impl.writeStdout(date_output);
+                }
             }
 
             try platform_impl.writeStdout("\n");
-            const msg_output = try std.fmt.allocPrint(allocator, "    {s}\n", .{std.mem.trimRight(u8, message.items, "\n")});
-            defer allocator.free(msg_output);
-            try platform_impl.writeStdout(msg_output);
+            // Output message with 4-space indent, handling multi-line messages
+            const trimmed_msg = std.mem.trimRight(u8, message.items, "\n");
+            var msg_iter = std.mem.splitScalar(u8, trimmed_msg, '\n');
+            while (msg_iter.next()) |line| {
+                if (line.len == 0) {
+                    try platform_impl.writeStdout("\n");
+                } else {
+                    const indented = try std.fmt.allocPrint(allocator, "    {s}\n", .{line});
+                    defer allocator.free(indented);
+                    try platform_impl.writeStdout(indented);
+                }
+            }
+            try platform_impl.writeStdout("\n");
         }
 
         count += 1;
