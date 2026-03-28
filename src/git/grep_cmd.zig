@@ -1286,6 +1286,13 @@ fn collectFilesRecursive(allocator: Allocator, path: []const u8, files: *std.arr
 fn grepContent(allocator: Allocator, opts: *GrepOptions, display_path: []const u8, content: []const u8, tree_prefix_opt: ?[]const u8, platform_impl: *const platform_mod.Platform, prev_file_had_output: bool) !bool {
     _ = tree_prefix_opt;
 
+    // Debug
+    {
+        const dbg = std.fmt.allocPrint(allocator, "DEBUG grepContent: path='{s}' bool={} pats={d} tokens={d}\n", .{ display_path, opts.has_boolean_expr, opts.patterns.items.len, opts.expr_tokens.items.len }) catch "";
+        defer if (dbg.len > 0) allocator.free(dbg);
+        std.io.getStdErr().writeAll(dbg) catch {};
+    }
+
     // Check if content is binary
     if (isBinaryContent(content)) {
         // For binary files, just check if pattern exists and report
