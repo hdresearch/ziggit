@@ -209,21 +209,32 @@ fn isNativeCommand(command: []const u8) bool {
 }
 
 fn levenshteinDistance(allocator: std.mem.Allocator, s: []const u8, t: []const u8) u32 {
+    // Damerau-Levenshtein: supports transpositions as cost 1
     if (s.len == 0) return @intCast(t.len);
     if (t.len == 0) return @intCast(s.len);
+    const prev2_row = allocator.alloc(u32, t.len + 1) catch return @intCast(@max(s.len, t.len));
+    defer allocator.free(prev2_row);
     const prev_row = allocator.alloc(u32, t.len + 1) catch return @intCast(@max(s.len, t.len));
     defer allocator.free(prev_row);
     const curr_row = allocator.alloc(u32, t.len + 1) catch return @intCast(@max(s.len, t.len));
     defer allocator.free(curr_row);
     for (0..t.len + 1) |j| {
         prev_row[j] = @intCast(j);
+        prev2_row[j] = @intCast(j);
     }
     for (0..s.len) |ii| {
         curr_row[0] = @intCast(ii + 1);
         for (0..t.len) |j| {
             const cost: u32 = if (std.ascii.toLower(s[ii]) == std.ascii.toLower(t[j])) 0 else 1;
             curr_row[j + 1] = @min(@min(curr_row[j] + 1, prev_row[j + 1] + 1), prev_row[j] + cost);
+            if (ii > 0 and j > 0 and
+                std.ascii.toLower(s[ii]) == std.ascii.toLower(t[j - 1]) and
+                std.ascii.toLower(s[ii - 1]) == std.ascii.toLower(t[j]))
+            {
+                curr_row[j + 1] = @min(curr_row[j + 1], prev2_row[j - 1] + 1);
+            }
         }
+        @memcpy(prev2_row, prev_row);
         @memcpy(prev_row, curr_row);
     }
     return curr_row[t.len];
