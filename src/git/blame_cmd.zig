@@ -39,7 +39,7 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
         else if (std.mem.startsWith(u8, arg, "--abbrev=")) {
             abl = std.fmt.parseInt(usize, arg["--abbrev=".len..], 10) catch 7;
             if (abl < 4) abl = 4;
-            if (abl > 40) abl = 40;
+            // Don't cap at 40 - let display logic handle it
         }
         else if (std.mem.eql(u8, arg, "-l") or std.mem.eql(u8, arg, "--no-abbrev")) { abl = 40; }
         else if (std.mem.startsWith(u8, arg, "-L")) {
@@ -893,7 +893,7 @@ fn oD(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []con
     const hash_str = blk: {
         if (bb2 and e.is_boundary) {
             // -b: blank boundary - spaces matching boundary display width
-            const spaces = try a.alloc(u8, boundary_total);
+            const spaces = try a.alloc(u8, field_width);
             @memset(spaces, ' ');
             break :blk spaces;
         } else if (e.is_boundary) {
