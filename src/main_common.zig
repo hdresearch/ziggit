@@ -3189,10 +3189,10 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
                     entry.sha1 = new_sha1;
                     // Update stat info
                     const stat = std.fs.cwd().statFile(fp) catch continue;
-                    entry.mtime_s = @intCast(@divFloor(stat.mtime, 1_000_000_000));
-                    entry.mtime_ns = @intCast(@mod(stat.mtime, 1_000_000_000));
-                    entry.ctime_s = @intCast(@divFloor(stat.ctime, 1_000_000_000));
-                    entry.ctime_ns = @intCast(@mod(stat.ctime, 1_000_000_000));
+                    entry.mtime_sec = @intCast(@divFloor(stat.mtime, 1_000_000_000));
+                    entry.mtime_nsec = @intCast(@mod(stat.mtime, 1_000_000_000));
+                    entry.ctime_sec = @intCast(@divFloor(stat.ctime, 1_000_000_000));
+                    entry.ctime_nsec = @intCast(@mod(stat.ctime, 1_000_000_000));
                     entry.file_size = @intCast(stat.size);
                 }
             }
