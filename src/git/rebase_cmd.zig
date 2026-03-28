@@ -429,8 +429,11 @@ fn startRebase(git_path: []const u8, repo_root: []const u8, allocator: std.mem.A
         if (is_fast_forward) break :blk false;
         if (commits_to_replay.items.len == 0 and std.mem.eql(u8, head_hash, onto_hash))
             break :blk true;
-        // onto == merge_base means HEAD is already based on onto - noop
-        if (std.mem.eql(u8, onto_hash, merge_base))
+        // onto == merge_base and onto == head means HEAD is already on the right base with nothing to replay
+        if (commits_to_replay.items.len == 0 and std.mem.eql(u8, onto_hash, merge_base))
+            break :blk true;
+        // When there are commits, check if they're already based on onto
+        if (commits_to_replay.items.len > 0 and opts.onto == null and std.mem.eql(u8, onto_hash, merge_base))
             break :blk true;
         break :blk false;
     };
@@ -545,19 +548,14 @@ fn startRebase(git_path: []const u8, repo_root: []const u8, allocator: std.mem.A
         }
         // If noop: todo has no actions, or only picks that match original (same order)
         if (!has_action) {
-            // Nothing to do
+            // Nothing to do - this is an error in interactive mode
+            try platform_impl.writeStderr("error: nothing to do\n");
             cleanupRebaseState(git_path, allocator);
-            if (!opts.quiet) {
-                try platform_impl.writeStdout("Successfully rebased and updated ");
-                if (std.mem.eql(u8, current_branch_name, "HEAD")) {
-                    try platform_impl.writeStdout("HEAD.\n");
-                } else {
-                    const ref_msg = try std.fmt.allocPrint(allocator, "refs/heads/{s}.\n", .{current_branch_name});
-                    defer allocator.free(ref_msg);
-                    try platform_impl.writeStdout(ref_msg);
-                }
+            // Restore original branch
+            if (!std.mem.eql(u8, current_branch_name, "HEAD")) {
+                refs.updateHEAD(git_path, current_branch_name, platform_impl, allocator) catch {};
             }
-            return;
+            std.process.exit(1);
         }
 
         // If was originally noop and editor didn't change the order/actions,
@@ -594,6 +592,65 @@ fn startRebase(git_path: []const u8, repo_root: []const u8, allocator: std.mem.A
                     try platform_impl.writeStdout(msg);
                 }
                 return;
+            }
+        }
+    }
+
+    // Check for untracked files that would be overwritten by checkout to onto
+    {
+        const onto_tree = getCommitTree(git_path, onto_hash, allocator, platform_impl) catch null;
+        defer if (onto_tree) |ot| allocator.free(ot);
+        const head_tree = getCommitTree(git_path, head_hash, allocator, platform_impl) catch null;
+        defer if (head_tree) |ht| allocator.free(ht);
+
+        if (onto_tree) |ot| {
+            var onto_entries = std.StringHashMap(FileEntry).init(allocator);
+            defer onto_entries.deinit();
+            collectTreeEntriesFlat(git_path, ot, "", &onto_entries, allocator, platform_impl) catch {};
+
+            var head_entries = std.StringHashMap(FileEntry).init(allocator);
+            defer head_entries.deinit();
+            if (head_tree) |ht| {
+                collectTreeEntriesFlat(git_path, ht, "", &head_entries, allocator, platform_impl) catch {};
+            }
+
+            // Also load index to check tracked files
+            var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch null;
+            defer if (idx) |*i| i.deinit();
+            var indexed_paths = std.StringHashMap(void).init(allocator);
+            defer indexed_paths.deinit();
+            if (idx) |i| {
+                for (i.entries.items) |ie| {
+                    indexed_paths.put(ie.path, {}) catch {};
+                }
+            }
+
+            var untracked_conflicts = std.array_list.Managed([]const u8).init(allocator);
+            defer untracked_conflicts.deinit();
+
+            var it = onto_entries.iterator();
+            while (it.next()) |entry| {
+                const path = entry.key_ptr.*;
+                // If the file is in onto but not in HEAD's tree AND not in index, check if it exists on disk
+                if (head_entries.get(path) == null and indexed_paths.get(path) == null) {
+                    const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, path }) catch continue;
+                    defer allocator.free(full_path);
+                    if (std.fs.cwd().statFile(full_path)) |_| {
+                        untracked_conflicts.append(path) catch {};
+                    } else |_| {}
+                }
+            }
+
+            if (untracked_conflicts.items.len > 0) {
+                try platform_impl.writeStderr("error: The following untracked working tree files would be overwritten by checkout:\n");
+                for (untracked_conflicts.items) |path| {
+                    const msg = std.fmt.allocPrint(allocator, "\t{s}\n", .{path}) catch continue;
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                }
+                try platform_impl.writeStderr("Please move or remove them before you switch branches.\nAborting\n");
+                cleanupRebaseState(git_path, allocator);
+                std.process.exit(1);
             }
         }
     }
@@ -934,22 +991,20 @@ fn executeSquashFixup(git_path: []const u8, item: TodoItem, dir_name: []const u8
     // Cherry-pick
     const result = cherryPickCommit(git_path, full_hash, allocator, platform_impl);
     if (result) |new_hash| {
-        allocator.free(new_hash);
+        defer allocator.free(new_hash);
 
-        // Get current HEAD (the new commit from cherry-pick)
-        const current_head = (refs.getCurrentCommit(git_path, platform_impl, allocator) catch null) orelse return;
-        defer allocator.free(current_head);
+        // Get the pre-cherry-pick HEAD (the commit we're squashing into)
+        const prev_head = (refs.getCurrentCommit(git_path, platform_impl, allocator) catch null) orelse return;
+        defer allocator.free(prev_head);
 
-        // Get parent of current HEAD (the commit we want to squash into)
-        const parent_hash = getCommitFirstParent(git_path, current_head, allocator, platform_impl) catch return;
-        defer allocator.free(parent_hash);
-
-        // Get the tree from current HEAD (has the squashed changes)
-        const current_tree = getCommitTree(git_path, current_head, allocator, platform_impl) catch return;
+        // Get the tree from the cherry-picked result (has the squashed changes)
+        const current_tree = getCommitTree(git_path, new_hash, allocator, platform_impl) catch return;
         defer allocator.free(current_tree);
 
-        // Get the parent of the parent (grandparent) for the squashed commit's parent
-        const grandparent = getCommitFirstParent(git_path, parent_hash, allocator, platform_impl) catch null;
+        // The parent of the squashed commit is the parent of the previous HEAD
+        // (since we're merging prev_head and new_hash into one commit)
+        const parent_hash = prev_head;
+        const grandparent = getCommitFirstParent(git_path, prev_head, allocator, platform_impl) catch null;
         defer if (grandparent) |gp| allocator.free(gp);
 
         // Build new message
@@ -968,9 +1023,34 @@ fn executeSquashFixup(git_path: []const u8, item: TodoItem, dir_name: []const u8
             defer if (existing_squash) |es| allocator.free(es);
 
             if (existing_squash) |es| {
-                new_message = try std.fmt.allocPrint(allocator, "{s}\n\n{s}", .{ es, std.mem.trim(u8, this_msg, "\n") });
+                // Parse existing count and increment
+                var count: usize = 2;
+                if (std.mem.indexOf(u8, es, "# This is a combination of ")) |pos| {
+                    const rest = es[pos + "# This is a combination of ".len..];
+                    if (std.mem.indexOf(u8, rest, " commits")) |end| {
+                        count = std.fmt.parseInt(usize, rest[0..end], 10) catch 2;
+                    }
+                }
+                count += 1;
+                // Update the count in the header and append new message
+                const count_str = try std.fmt.allocPrint(allocator, "{d}", .{count});
+                defer allocator.free(count_str);
+                var updated = std.array_list.Managed(u8).init(allocator);
+                // Replace count in first line
+                if (std.mem.indexOf(u8, es, "# This is a combination of ")) |pos| {
+                    const prefix_end = pos + "# This is a combination of ".len;
+                    try updated.appendSlice(es[0..prefix_end]);
+                    try updated.appendSlice(count_str);
+                    if (std.mem.indexOfPos(u8, es, prefix_end, " commits")) |cnt_end| {
+                        try updated.appendSlice(es[cnt_end..]);
+                    }
+                } else {
+                    try updated.appendSlice(es);
+                }
+                new_message = try std.fmt.allocPrint(allocator, "{s}\n\n# This is the commit message #{d}:\n\n{s}", .{ updated.items, count, std.mem.trim(u8, this_msg, "\n") });
+                updated.deinit();
             } else {
-                new_message = try std.fmt.allocPrint(allocator, "# This is a combination of commits.\n# This is the 1st commit message:\n\n{s}\n\n# This is the commit message #2:\n\n{s}", .{ std.mem.trim(u8, prev_msg, "\n"), std.mem.trim(u8, this_msg, "\n") });
+                new_message = try std.fmt.allocPrint(allocator, "# This is a combination of 2 commits.\n# This is the 1st commit message:\n\n{s}\n\n# This is the commit message #2:\n\n{s}", .{ std.mem.trim(u8, prev_msg, "\n"), std.mem.trim(u8, this_msg, "\n") });
             }
             // Save for subsequent squashes
             platform_impl.fs.writeFile(sq_msg_path, new_message) catch {};
@@ -979,13 +1059,19 @@ fn executeSquashFixup(git_path: []const u8, item: TodoItem, dir_name: []const u8
             const commit_msg_path = try std.fmt.allocPrint(allocator, "{s}/COMMIT_EDITMSG", .{git_path});
             defer allocator.free(commit_msg_path);
             platform_impl.fs.writeFile(commit_msg_path, new_message) catch {};
-            _ = try invokeCommitEditor(commit_msg_path, git_path, allocator, platform_impl);
-            const edited_msg = platform_impl.fs.readFile(allocator, commit_msg_path) catch null;
-            if (edited_msg) |em| {
+            const editor_ok = invokeCommitEditor(commit_msg_path, git_path, allocator, platform_impl) catch false;
+            if (editor_ok) {
+                const edited_msg = platform_impl.fs.readFile(allocator, commit_msg_path) catch null;
+                if (edited_msg) |em| {
+                    allocator.free(new_message);
+                    new_message = try stripCommentLines(em, allocator);
+                    allocator.free(em);
+                }
+            } else {
+                // No editor or editor failed - strip comments from the default message
+                const stripped = try stripCommentLines(new_message, allocator);
                 allocator.free(new_message);
-                // Strip comment lines
-                new_message = try stripCommentLines(em, allocator);
-                allocator.free(em);
+                new_message = stripped;
             }
         } else {
             // Fixup: keep the parent's message
@@ -1021,7 +1107,7 @@ fn executeSquashFixup(git_path: []const u8, item: TodoItem, dir_name: []const u8
         const action_name: []const u8 = if (is_squash) "squash" else "fixup";
         const sq_msg = std.fmt.allocPrint(allocator, "{s} ({s}): {s}", .{ reflog_action, action_name, subject }) catch null;
         defer if (sq_msg) |sm| allocator.free(sm);
-        if (sq_msg) |sm| writeReflogEntry(git_path, "HEAD", current_head, squash_hash, sm, allocator, platform_impl) catch {};
+        if (sq_msg) |sm| writeReflogEntry(git_path, "HEAD", prev_head, squash_hash, sm, allocator, platform_impl) catch {};
 
         // Update index/working tree to match
         checkoutCommitTree(git_path, squash_hash, allocator, platform_impl) catch {};
@@ -1685,14 +1771,198 @@ fn writeStoppedSha(git_path: []const u8, dir_name: []const u8, hash: []const u8,
     platform_impl.fs.writeFile(path, hash) catch {};
 }
 
+fn formatMode(mode: u32) []const u8 {
+    return switch (mode) {
+        0o100644 => "100644",
+        0o100755 => "100755",
+        0o120000 => "120000",
+        0o160000 => "160000",
+        0o040000 => "040000",
+        else => "100644",
+    };
+}
+
 fn writePatchFile(git_path: []const u8, dir_name: []const u8, commit_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const Platform) !void {
-    // Write a simple patch file showing the diff
     const patch_path = try std.fmt.allocPrint(allocator, "{s}/{s}/patch", .{ git_path, dir_name });
     defer allocator.free(patch_path);
-    // For now write a simple message
-    const content = try std.fmt.allocPrint(allocator, "diff for {s}\n", .{commit_hash});
-    defer allocator.free(content);
-    platform_impl.fs.writeFile(patch_path, content) catch {};
+
+    // Generate a real unified diff between commit's parent and the commit
+    const commit_obj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch {
+        const content = try std.fmt.allocPrint(allocator, "diff for {s}\n", .{commit_hash});
+        defer allocator.free(content);
+        platform_impl.fs.writeFile(patch_path, content) catch {};
+        return;
+    };
+    defer commit_obj.deinit(allocator);
+
+    const commit_tree = getCommitTree(git_path, commit_hash, allocator, platform_impl) catch return;
+    defer allocator.free(commit_tree);
+    const parent_hash = getCommitFirstParent(git_path, commit_hash, allocator, platform_impl) catch null;
+    defer if (parent_hash) |ph| allocator.free(ph);
+    const parent_tree = if (parent_hash) |ph|
+        getCommitTree(git_path, ph, allocator, platform_impl) catch null
+    else
+        null;
+    defer if (parent_tree) |pt| allocator.free(pt);
+
+    // Collect entries from both trees
+    var parent_entries = std.StringHashMap(FileEntry).init(allocator);
+    defer parent_entries.deinit();
+    var commit_entries = std.StringHashMap(FileEntry).init(allocator);
+    defer commit_entries.deinit();
+
+    if (parent_tree) |pt| {
+        collectTreeEntriesFlat(git_path, pt, "", &parent_entries, allocator, platform_impl) catch {};
+    }
+    collectTreeEntriesFlat(git_path, commit_tree, "", &commit_entries, allocator, platform_impl) catch {};
+
+    var output = std.array_list.Managed(u8).init(allocator);
+    defer output.deinit();
+
+    // Collect all paths
+    var all_paths = std.StringHashMap(void).init(allocator);
+    defer all_paths.deinit();
+    {
+        var it = parent_entries.iterator();
+        while (it.next()) |e| all_paths.put(e.key_ptr.*, {}) catch {};
+    }
+    {
+        var it = commit_entries.iterator();
+        while (it.next()) |e| all_paths.put(e.key_ptr.*, {}) catch {};
+    }
+
+    var path_list = std.array_list.Managed([]const u8).init(allocator);
+    defer path_list.deinit();
+    {
+        var it = all_paths.iterator();
+        while (it.next()) |e| path_list.append(e.key_ptr.*) catch {};
+    }
+    std.mem.sort([]const u8, path_list.items, {}, struct {
+        pub fn f(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.f);
+
+    for (path_list.items) |path| {
+        const pe = parent_entries.get(path);
+        const ce = commit_entries.get(path);
+        if (pe != null and ce != null and std.mem.eql(u8, &pe.?.sha1, &ce.?.sha1)) continue;
+
+        var old_hex_buf: [40]u8 = undefined;
+        var new_hex_buf: [40]u8 = undefined;
+        const old_hex: []const u8 = if (pe) |p| blk: {
+            for (p.sha1, 0..) |b, bi| {
+                old_hex_buf[bi * 2] = "0123456789abcdef"[b >> 4];
+                old_hex_buf[bi * 2 + 1] = "0123456789abcdef"[b & 0xf];
+            }
+            break :blk &old_hex_buf;
+        } else "0000000000000000000000000000000000000000";
+        const new_hex: []const u8 = if (ce) |c| blk: {
+            for (c.sha1, 0..) |b, bi| {
+                new_hex_buf[bi * 2] = "0123456789abcdef"[b >> 4];
+                new_hex_buf[bi * 2 + 1] = "0123456789abcdef"[b & 0xf];
+            }
+            break :blk &new_hex_buf;
+        } else "0000000000000000000000000000000000000000";
+
+        const old_mode_str = if (pe) |p| formatMode(p.mode) else "000000";
+        const new_mode_str = if (ce) |c| formatMode(c.mode) else "000000";
+
+        try output.appendSlice("diff --git a/");
+        try output.appendSlice(path);
+        try output.appendSlice(" b/");
+        try output.appendSlice(path);
+        try output.append('\n');
+
+        if (pe == null) {
+            try output.appendSlice("new file mode ");
+            try output.appendSlice(new_mode_str);
+            try output.append('\n');
+        } else if (ce == null) {
+            try output.appendSlice("deleted file mode ");
+            try output.appendSlice(old_mode_str);
+            try output.append('\n');
+        }
+
+        try output.appendSlice("index ");
+        try output.appendSlice(old_hex[0..7]);
+        try output.appendSlice("..");
+        try output.appendSlice(new_hex[0..7]);
+        if (pe != null and ce != null) {
+            try output.append(' ');
+            try output.appendSlice(new_mode_str);
+        }
+        try output.append('\n');
+
+        // Read file contents for diff
+        const old_content = if (pe) |_| (objects.GitObject.load(old_hex, git_path, platform_impl, allocator) catch null) else null;
+        defer if (old_content) |oc| oc.deinit(allocator);
+        const new_content = if (ce) |_| (objects.GitObject.load(new_hex, git_path, platform_impl, allocator) catch null) else null;
+        defer if (new_content) |nc| nc.deinit(allocator);
+
+        const old_data = if (old_content) |oc| oc.data else "";
+        const new_data = if (new_content) |nc| nc.data else "";
+
+        if (pe == null) {
+            try output.appendSlice("--- /dev/null\n+++ b/");
+        } else if (ce == null) {
+            try output.appendSlice("--- a/");
+            try output.appendSlice(path);
+            try output.appendSlice("\n+++ /dev/null\n");
+        } else {
+            try output.appendSlice("--- a/");
+            try output.appendSlice(path);
+            try output.appendSlice("\n+++ b/");
+        }
+        if (pe != null and ce != null) {
+            try output.appendSlice(path);
+            try output.append('\n');
+        } else if (pe == null) {
+            try output.appendSlice(path);
+            try output.append('\n');
+        }
+
+        // Simple line-by-line diff
+        var old_lines_count: usize = 0;
+        var new_lines_count: usize = 0;
+        {
+            var it = std.mem.splitScalar(u8, old_data, '\n');
+            while (it.next()) |_| old_lines_count += 1;
+            if (old_data.len > 0 and old_data[old_data.len - 1] == '\n') old_lines_count -= 1;
+        }
+        {
+            var it = std.mem.splitScalar(u8, new_data, '\n');
+            while (it.next()) |_| new_lines_count += 1;
+            if (new_data.len > 0 and new_data[new_data.len - 1] == '\n') new_lines_count -= 1;
+        }
+
+        const hunk_header = try std.fmt.allocPrint(allocator, "@@ -{d} +{d} @@\n", .{
+            if (old_lines_count == 0) @as(usize, 0) else old_lines_count,
+            if (new_lines_count == 0) @as(usize, 0) else new_lines_count,
+        });
+        defer allocator.free(hunk_header);
+        try output.appendSlice(hunk_header);
+
+        // Output old lines as removed, new lines as added
+        if (old_data.len > 0) {
+            var it = std.mem.splitScalar(u8, std.mem.trimRight(u8, old_data, "\n"), '\n');
+            while (it.next()) |line| {
+                try output.append('-');
+                try output.appendSlice(line);
+                try output.append('\n');
+            }
+        }
+        if (new_data.len > 0) {
+            var it = std.mem.splitScalar(u8, std.mem.trimRight(u8, new_data, "\n"), '\n');
+            while (it.next()) |line| {
+                try output.append('+');
+                try output.appendSlice(line);
+                try output.append('\n');
+            }
+        }
+    }
+
+    platform_impl.fs.writeFile(patch_path, output.items) catch {};
 }
 
 fn saveRebaseState(git_path: []const u8, todo_content: []const u8, onto_hash: []const u8, orig_head: []const u8, branch_name: []const u8, upstream_hash: []const u8, apply_mode: bool, opts: *RebaseOpts, allocator: std.mem.Allocator, platform_impl: *const Platform) !void {
@@ -2543,6 +2813,23 @@ fn cherryPickCommit(git_path: []const u8, commit_hash: []const u8, allocator: st
     const current_hash = (try refs.getCurrentCommit(git_path, platform_impl, allocator)) orelse return error.NoHead;
     defer allocator.free(current_hash);
 
+    // Fast-forward optimization: if the commit's parent is current HEAD,
+    // we can reuse the original commit directly (no need to re-create it)
+    if (parent_hash) |ph| {
+        if (std.mem.eql(u8, ph, current_hash)) {
+            // The commit's parent is our current HEAD - just advance to this commit
+            const repo_root = std.fs.path.dirname(git_path) orelse ".";
+            clearTrackedFiles(git_path, repo_root, allocator, platform_impl) catch {};
+            const t_obj = objects.GitObject.load(commit_tree, git_path, platform_impl, allocator) catch return error.InvalidCommit;
+            defer t_obj.deinit(allocator);
+            if (t_obj.type == .tree) {
+                checkoutTreeRecursive(git_path, t_obj.data, repo_root, "", allocator, platform_impl) catch {};
+            }
+            updateIndexFromTree(git_path, commit_tree, allocator, platform_impl) catch {};
+            return try allocator.dupe(u8, commit_hash);
+        }
+    }
+
     const current_tree = try getCommitTree(git_path, current_hash, allocator, platform_impl);
     defer allocator.free(current_tree);
 
@@ -2569,7 +2856,7 @@ fn cherryPickCommit(git_path: []const u8, commit_hash: []const u8, allocator: st
         new_tree = try allocator.dupe(u8, current_tree);
     } else {
         // 3-way merge needed
-        const has_conflicts = try threeWayMerge(git_path, base_tree, current_tree, commit_tree, allocator, platform_impl);
+        const has_conflicts = try threeWayMerge(git_path, base_tree, current_tree, commit_tree, commit_hash, allocator, platform_impl);
         if (has_conflicts) {
             return error.MergeConflict;
         }
@@ -2588,7 +2875,7 @@ fn cherryPickCommit(git_path: []const u8, commit_hash: []const u8, allocator: st
     return try new_commit.store(git_path, platform_impl, allocator);
 }
 
-fn threeWayMerge(git_path: []const u8, base_tree: []const u8, ours_tree: []const u8, theirs_tree: []const u8, allocator: std.mem.Allocator, platform_impl: *const Platform) !bool {
+fn threeWayMerge(git_path: []const u8, base_tree: []const u8, ours_tree: []const u8, theirs_tree: []const u8, theirs_commit: []const u8, allocator: std.mem.Allocator, platform_impl: *const Platform) !bool {
     // Simplified 3-way merge: collect entries from all three trees,
     // merge file by file
     var base_entries = std.StringHashMap(FileEntry).init(allocator);
@@ -2648,10 +2935,13 @@ fn threeWayMerge(git_path: []const u8, base_tree: []const u8, ours_tree: []const
                 // Conflict!
                 has_conflicts = true;
                 // Write conflict markers
-                try writeConflictFile(git_path, repo_root, path, base, ours.?, theirs.?, allocator, platform_impl);
+                try writeConflictFile(git_path, repo_root, path, base, ours.?, theirs.?, theirs_commit, allocator, platform_impl);
                 // Add to index as unmerged (stages 1,2,3)
-                // For simplicity, add as stage 0 with theirs
-                try addIndexEntry(&idx, path, theirs.?.sha1, theirs.?.mode, repo_root, allocator);
+                if (base) |b| {
+                    try addIndexEntryStaged(&idx, path, b.sha1, b.mode, repo_root, allocator, 1);
+                }
+                try addIndexEntryStaged(&idx, path, ours.?.sha1, ours.?.mode, repo_root, allocator, 2);
+                try addIndexEntryStaged(&idx, path, theirs.?.sha1, theirs.?.mode, repo_root, allocator, 3);
             }
         } else if (ours != null and theirs == null) {
             if (base != null and std.mem.eql(u8, &base.?.sha1, &ours.?.sha1)) {
@@ -2728,6 +3018,10 @@ fn collectTreeEntriesFlat(git_path: []const u8, tree_hash: []const u8, prefix: [
 }
 
 fn addIndexEntry(idx: *index_mod.Index, path: []const u8, sha1: [20]u8, mode: u32, repo_root: []const u8, allocator: std.mem.Allocator) !void {
+    try addIndexEntryStaged(idx, path, sha1, mode, repo_root, allocator, 0);
+}
+
+fn addIndexEntryStaged(idx: *index_mod.Index, path: []const u8, sha1: [20]u8, mode: u32, repo_root: []const u8, allocator: std.mem.Allocator, stage: u2) !void {
     const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, path });
     defer allocator.free(full_path);
     const stat = std.fs.cwd().statFile(full_path) catch std.fs.File.Stat{
@@ -2739,7 +3033,12 @@ fn addIndexEntry(idx: *index_mod.Index, path: []const u8, sha1: [20]u8, mode: u3
         .atime = 0,
         .kind = .file,
     };
-    const entry = index_mod.IndexEntry.init(try allocator.dupe(u8, path), stat, sha1);
+    var entry = index_mod.IndexEntry.init(try allocator.dupe(u8, path), stat, sha1);
+    if (stage > 0) {
+        // Set stage bits in flags (bits 12-13)
+        const path_len: u16 = @intCast(@min(path.len, 0xFFF));
+        entry.flags = (@as(u16, stage) << 12) | path_len;
+    }
     try idx.entries.append(entry);
 }
 
@@ -2761,7 +3060,7 @@ fn writeFileFromBlob(git_path: []const u8, repo_root: []const u8, path: []const 
     std.fs.cwd().writeFile(.{ .sub_path = full_path, .data = blob_obj.data }) catch {};
 }
 
-fn writeConflictFile(git_path: []const u8, repo_root: []const u8, path: []const u8, base: ?FileEntry, ours: FileEntry, theirs: FileEntry, allocator: std.mem.Allocator, platform_impl: *const Platform) !void {
+fn writeConflictFile(git_path: []const u8, repo_root: []const u8, path: []const u8, base: ?FileEntry, ours: FileEntry, theirs: FileEntry, theirs_commit: []const u8, allocator: std.mem.Allocator, platform_impl: *const Platform) !void {
     // Read file contents
     var ours_hex: [40]u8 = undefined;
     for (ours.sha1, 0..) |b, bi| {
@@ -2783,10 +3082,21 @@ fn writeConflictFile(git_path: []const u8, repo_root: []const u8, path: []const 
 
     _ = base;
 
-    // Write simple conflict markers
-    // Get short hash for theirs
-    const theirs_short = theirs_hex[0..7];
-    // Get commit subject if available
+    // Write simple conflict markers with commit info
+    const theirs_label = blk: {
+        if (theirs_commit.len >= 7) {
+            const short = theirs_commit[0..7];
+            const subj = getCommitSubject(theirs_commit, git_path, platform_impl, allocator) catch null;
+            defer if (subj) |s| allocator.free(s);
+            if (subj) |s| {
+                break :blk std.fmt.allocPrint(allocator, "{s} ({s})", .{ short, s }) catch break :blk allocator.dupe(u8, short) catch break :blk @as(?[]u8, null);
+            }
+            break :blk allocator.dupe(u8, short) catch null;
+        }
+        break :blk @as(?[]u8, null);
+    };
+    defer if (theirs_label) |tl| allocator.free(tl);
+    const theirs_short = theirs_label orelse theirs_hex[0..7];
     const conflict_content = std.fmt.allocPrint(allocator, "<<<<<<< HEAD\n{s}=======\n{s}>>>>>>> {s}\n", .{ ours_blob.data, theirs_blob.data, theirs_short }) catch return;
     defer allocator.free(conflict_content);
 

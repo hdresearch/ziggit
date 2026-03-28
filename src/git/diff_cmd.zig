@@ -2887,6 +2887,7 @@ const LogOpts = struct {
     line_prefix: []const u8 = "",
     format_string: ?[]const u8 = null,
     format_is_separator: bool = false,
+    walk_reflog: bool = false,
 
     const DiffMergesMode = enum { default, off, on, first_parent, combined, dense_combined, separate };
     const DecorateMode = enum { no, short, full };
@@ -3079,7 +3080,21 @@ fn formatRfc2822Date(person: []const u8, allocator: std.mem.Allocator) ?[]u8 {
     return null;
 }
 
+const ReflogInfo = struct {
+    selector: []const u8,
+    message: []const u8,
+    who: []const u8,
+};
+
 fn writeFormattedCommit(format: []const u8, hash: []const u8, data: []const u8, pi: *const pm.Platform, allocator: std.mem.Allocator) !void {
+    return writeFormattedCommitInner(format, hash, data, pi, allocator, null);
+}
+
+fn writeFormattedCommitWithReflog(format: []const u8, hash: []const u8, data: []const u8, pi: *const pm.Platform, allocator: std.mem.Allocator, reflog_info: *const ReflogInfo) !void {
+    return writeFormattedCommitInner(format, hash, data, pi, allocator, reflog_info);
+}
+
+fn writeFormattedCommitInner(format: []const u8, hash: []const u8, data: []const u8, pi: *const pm.Platform, allocator: std.mem.Allocator, reflog_info: ?*const ReflogInfo) !void {
     // Parse commit fields
     var tree_hash: []const u8 = "";
     var parent_hashes_list = std.array_list.Managed([]const u8).init(allocator);
@@ -3211,6 +3226,25 @@ fn writeFormattedCommit(format: []const u8, hash: []const u8, data: []const u8, 
             } else if (c == 'D') {
                 // %D = decorations without wrapping
                 i += 2;
+            } else if (c == 'g' and i + 2 < format.len) {
+                const gc = format[i + 2];
+                if (gc == 's') {
+                    // %gs = reflog subject
+                    if (reflog_info) |ri| try output.appendSlice(ri.message);
+                } else if (gc == 'd') {
+                    // %gd = reflog selector (short)
+                    if (reflog_info) |ri| try output.appendSlice(ri.selector);
+                } else if (gc == 'D') {
+                    // %gD = reflog selector (full)
+                    if (reflog_info) |ri| try output.appendSlice(ri.selector);
+                } else if (gc == 'n') {
+                    // %gn = reflog identity name
+                    if (reflog_info) |ri| try output.appendSlice(parsePersonName(ri.who));
+                } else if (gc == 'e') {
+                    // %ge = reflog identity email
+                    if (reflog_info) |ri| try output.appendSlice(parsePersonEmail(ri.who));
+                }
+                i += 3;
             } else if (c == 'G' and i + 2 < format.len) {
                 i += 3;
             } else if (c == 'C' and i + 2 < format.len) {
@@ -3906,7 +3940,7 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
         } else if (std.mem.eql(u8, arg, "--pretty") or std.mem.eql(u8, arg, "--pretty=medium")) {
             // default format
         } else if (std.mem.eql(u8, arg, "-g") or std.mem.eql(u8, arg, "--walk-reflogs")) {
-            // Accept - TODO
+            lo.walk_reflog = true;
         } else if (std.mem.eql(u8, arg, "--source") or std.mem.eql(u8, arg, "--quiet") or
             std.mem.eql(u8, arg, "--use-mailmap") or std.mem.eql(u8, arg, "--no-mailmap") or
             std.mem.eql(u8, arg, "--no-diff-merges") or std.mem.eql(u8, arg, "--color") or
@@ -4059,6 +4093,128 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
                 }
             } else |_| {}
         }
+    }
+
+    // Reflog walking mode (-g / --walk-reflogs)
+    if (lo.walk_reflog) {
+        const ref_name = if (committish_list.items.len > 0) committish_list.items[0] else "HEAD";
+        // Build reflog path - check refs/heads/ first for branch names
+        var reflog_content: ?[]u8 = null;
+        var reflog_path2: ?[]u8 = null;
+        defer if (reflog_path2) |p2| allocator.free(p2);
+        if (!std.mem.eql(u8, ref_name, "HEAD") and !std.mem.startsWith(u8, ref_name, "refs/")) {
+            reflog_path2 = try std.fmt.allocPrint(allocator, "{s}/logs/refs/heads/{s}", .{ git_path, ref_name });
+            reflog_content = pi.fs.readFile(allocator, reflog_path2.?) catch null;
+        }
+        const reflog_path = try std.fmt.allocPrint(allocator, "{s}/logs/{s}", .{ git_path, ref_name });
+        defer allocator.free(reflog_path);
+        if (reflog_content == null) {
+            reflog_content = pi.fs.readFile(allocator, reflog_path) catch null;
+        }
+        if (reflog_content) |content| {
+            defer allocator.free(content);
+            const ReflogEntry = struct {
+                old_hash: []u8,
+                new_hash: []u8,
+                who: []u8,
+                message: []u8,
+            };
+            var reflog_entries = std.array_list.Managed(ReflogEntry).init(allocator);
+            defer {
+                for (reflog_entries.items) |*e| {
+                    allocator.free(e.old_hash);
+                    allocator.free(e.new_hash);
+                    allocator.free(e.who);
+                    allocator.free(e.message);
+                }
+                reflog_entries.deinit();
+            }
+            var lines = std.mem.splitScalar(u8, content, '\n');
+            while (lines.next()) |line| {
+                if (line.len < 82) continue;
+                const old_h = line[0..40];
+                const new_h = line[41..81];
+                const rest = line[82..];
+                var msg: []const u8 = "";
+                var who: []const u8 = rest;
+                if (std.mem.indexOf(u8, rest, "\t")) |tab_pos| {
+                    who = rest[0..tab_pos];
+                    msg = rest[tab_pos + 1 ..];
+                }
+                try reflog_entries.append(.{
+                    .old_hash = try allocator.dupe(u8, old_h),
+                    .new_hash = try allocator.dupe(u8, new_h),
+                    .who = try allocator.dupe(u8, who),
+                    .message = try allocator.dupe(u8, msg),
+                });
+            }
+            // Walk in reverse (newest first)
+            var count: u32 = 0;
+            var entry_idx: usize = reflog_entries.items.len;
+            while (entry_idx > 0 and (lo.max_count == null or count < lo.max_count.?)) {
+                entry_idx -= 1;
+                const entry = reflog_entries.items[entry_idx];
+                const ref_for_selector = if (committish_list.items.len > 0) ref_name else "HEAD";
+                const selector = try std.fmt.allocPrint(allocator, "{s}@{{{d}}}", .{ ref_for_selector, reflog_entries.items.len - 1 - entry_idx });
+                defer allocator.free(selector);
+                if (lo.format_string) |fmt| {
+                    if (lo.format_is_separator and count > 0) {
+                        try pi.writeStdout("\n");
+                    }
+                    // Load commit object for standard fields
+                    const obj = objects.GitObject.load(entry.new_hash, git_path, pi, allocator) catch null;
+                    defer if (obj) |o| o.deinit(allocator);
+                    const obj_data = if (obj) |o| o.data else "";
+                    const ri = ReflogInfo{
+                        .selector = selector,
+                        .message = entry.message,
+                        .who = entry.who,
+                    };
+                    try writeFormattedCommitWithReflog(fmt, entry.new_hash, obj_data, pi, allocator, &ri);
+                    if (!lo.format_is_separator) {
+                        try pi.writeStdout("\n");
+                    }
+                } else if (lo.oneline) {
+                    const short_hash = if (entry.new_hash.len >= 7) entry.new_hash[0..7] else entry.new_hash;
+                    const out_line = try std.fmt.allocPrint(allocator, "{s} {s}: {s}\n", .{ short_hash, selector, entry.message });
+                    defer allocator.free(out_line);
+                    try pi.writeStdout(out_line);
+                } else {
+                    // Default format
+                    const out_hdr = try std.fmt.allocPrint(allocator, "commit {s} ({s})\n", .{ entry.new_hash, selector });
+                    defer allocator.free(out_hdr);
+                    try pi.writeStdout(out_hdr);
+                    const obj = objects.GitObject.load(entry.new_hash, git_path, pi, allocator) catch null;
+                    defer if (obj) |o| o.deinit(allocator);
+                    if (obj) |o| {
+                        const author_f = extractField(o.data, "author ");
+                        const name_f = parsePersonName(author_f);
+                        const email_f = parsePersonEmail(author_f);
+                        const author_out = try std.fmt.allocPrint(allocator, "Reflog: {s} ({s})\nReflog message: {s}\nAuthor: {s} <{s}>\n", .{ selector, name_f, entry.message, name_f, email_f });
+                        defer allocator.free(author_out);
+                        try pi.writeStdout(author_out);
+                        const date_str = formatGitDate(author_f, allocator);
+                        defer if (date_str) |d| allocator.free(d);
+                        if (date_str) |d| {
+                            const date_out = try std.fmt.allocPrint(allocator, "Date:   {s}\n", .{d});
+                            defer allocator.free(date_out);
+                            try pi.writeStdout(date_out);
+                        }
+                        const cmsg = extractMessage(o.data);
+                        try pi.writeStdout("\n");
+                        var msg_iter = std.mem.splitScalar(u8, std.mem.trimRight(u8, cmsg, "\n"), '\n');
+                        while (msg_iter.next()) |ml| {
+                            const indented = try std.fmt.allocPrint(allocator, "    {s}\n", .{ml});
+                            defer allocator.free(indented);
+                            try pi.writeStdout(indented);
+                        }
+                        try pi.writeStdout("\n");
+                    }
+                }
+                count += 1;
+            }
+        }
+        return;
     }
 
     // Show mode: just show the specified commits (don't walk history for non-show)
