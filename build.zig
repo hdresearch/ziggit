@@ -20,4 +20,16 @@ pub fn build(b: *std.Build) void {
     exe.linkLibC();
     exe.linkSystemLibrary("z");
     b.installArtifact(exe);
+
+    // Install shell helper scripts needed by git test suite
+    const shell_scripts = [_][]const u8{
+        "git-sh-setup",
+        "git-sh-i18n",
+    };
+    for (shell_scripts) |script| {
+        b.getInstallStep().dependOn(&b.addInstallFile(
+            b.path(b.fmt("shell-scripts/{s}", .{script})),
+            b.fmt("bin/{s}", .{script}),
+        ).step);
+    }
 }
