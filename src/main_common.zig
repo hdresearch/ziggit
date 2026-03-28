@@ -13277,12 +13277,21 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                 try platform_impl.writeStdout(out);
             }
         } else |_| {
-            if (!quiet) {
-                const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\nUse '--' to separate paths from revisions, like this:\n'git <command> [<revision>...] -- [<file>...]'\n", .{arg});
-                defer allocator.free(msg);
-                try platform_impl.writeStderr(msg);
+            // For --short mode with a valid hex string, just truncate (like real git)
+            if (short != null and arg.len == 40 and isValidHexString(arg)) {
+                const n = short.?;
+                const s = if (n > 40) @as(u8, 40) else n;
+                const out = try std.fmt.allocPrint(allocator, "{s}\n", .{arg[0..s]});
+                defer allocator.free(out);
+                try platform_impl.writeStdout(out);
+            } else {
+                if (!quiet) {
+                    const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\nUse '--' to separate paths from revisions, like this:\n'git <command> [<revision>...] -- [<file>...]'\n", .{arg});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                }
+                std.process.exit(128);
             }
-            std.process.exit(128);
         }
     }
 }
