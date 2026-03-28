@@ -9450,22 +9450,65 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     defer positionals.deinit();
     var new_style_sub = false;
     var do_all = false;
+    var action_name: ?[]const u8 = null;
 
     var i: usize = 0;
     while (i < config_args.items.len) : (i += 1) {
         const arg = config_args.items[i];
         if (std.mem.eql(u8, arg, "--list") or std.mem.eql(u8, arg, "-l")) {
+            if (action != .none and action != .list) {
+                const em = try std.fmt.allocPrint(allocator, "error: options '--list' and '{s}' cannot be used together\n", .{action_name orelse "--unknown"});
+                defer allocator.free(em);
+                try platform_impl.writeStderr(em);
+                std.process.exit(129);
+            }
             action = .list;
+            action_name = "--list";
         } else if (std.mem.eql(u8, arg, "--get")) {
+            if (action != .none and action != .get) {
+                const em = try std.fmt.allocPrint(allocator, "error: options '--get' and '{s}' cannot be used together\n", .{action_name orelse "--unknown"});
+                defer allocator.free(em);
+                try platform_impl.writeStderr(em);
+                std.process.exit(129);
+            }
             action = .get;
+            action_name = "--get";
         } else if (std.mem.eql(u8, arg, "--get-all")) {
+            if (action != .none and action != .get_all) {
+                const em = try std.fmt.allocPrint(allocator, "error: options '--get-all' and '{s}' cannot be used together\n", .{action_name orelse "--unknown"});
+                defer allocator.free(em);
+                try platform_impl.writeStderr(em);
+                std.process.exit(129);
+            }
             action = .get_all;
+            action_name = "--get-all";
         } else if (std.mem.eql(u8, arg, "--get-regexp")) {
+            if (action != .none and action != .get_regexp) {
+                const em = try std.fmt.allocPrint(allocator, "error: options '--get-regexp' and '{s}' cannot be used together\n", .{action_name orelse "--unknown"});
+                defer allocator.free(em);
+                try platform_impl.writeStderr(em);
+                std.process.exit(129);
+            }
             action = .get_regexp;
+            action_name = "--get-regexp";
         } else if (std.mem.eql(u8, arg, "--unset")) {
+            if (action != .none and action != .unset) {
+                const em = try std.fmt.allocPrint(allocator, "error: options '--unset' and '{s}' cannot be used together\n", .{action_name orelse "--unknown"});
+                defer allocator.free(em);
+                try platform_impl.writeStderr(em);
+                std.process.exit(129);
+            }
             action = .unset;
+            action_name = "--unset";
         } else if (std.mem.eql(u8, arg, "--unset-all")) {
+            if (action != .none and action != .unset_all) {
+                const em = try std.fmt.allocPrint(allocator, "error: options '--unset-all' and '{s}' cannot be used together\n", .{action_name orelse "--unknown"});
+                defer allocator.free(em);
+                try platform_impl.writeStderr(em);
+                std.process.exit(129);
+            }
             action = .unset_all;
+            action_name = "--unset-all";
         } else if (std.mem.eql(u8, arg, "--add") or std.mem.eql(u8, arg, "--append")) {
             action = .add;
         } else if (std.mem.eql(u8, arg, "--remove-section")) {
@@ -9654,6 +9697,12 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         } else if (std.mem.eql(u8, arg, "edit") and positionals.items.len == 0 and action == .none) {
             new_style_sub = true;
             action = .edit;
+        } else if (std.mem.startsWith(u8, arg, "--no-") and !std.mem.eql(u8, arg, "--no-type")) {
+            // Negated options like --no-get are not supported
+            const em = try std.fmt.allocPrint(allocator, "error: unknown option `{s}'\n", .{arg[2..]});
+            defer allocator.free(em);
+            try platform_impl.writeStderr(em);
+            std.process.exit(129);
         } else {
             try positionals.append(arg);
         }
@@ -11491,7 +11540,16 @@ fn cfgRenameSection(cfg_path: []const u8, old_name: []const u8, new_name: []cons
     var first_line = true;
 
     var line_iter = std.mem.splitSequence(u8, content, "\n");
+    var line_num: usize = 0;
     while (line_iter.next()) |raw_line| {
+        line_num += 1;
+        // Check for overly-long lines (git limit is 512KB)
+        if (raw_line.len > 512 * 1024) {
+            const em = try std.fmt.allocPrint(allocator, "error: refusing to work with overly long line in '{s}' on line {d}\n", .{ cfg_path, line_num });
+            defer allocator.free(em);
+            try platform_impl.writeStderr(em);
+            std.process.exit(1);
+        }
         const trimmed = std.mem.trim(u8, std.mem.trimRight(u8, raw_line, "\r"), " \t");
         if (trimmed.len > 0 and trimmed[0] == '[') {
             const close = std.mem.indexOf(u8, trimmed, "]");
