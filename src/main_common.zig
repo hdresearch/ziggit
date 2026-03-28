@@ -4239,19 +4239,6 @@ fn outputDiffEntries(diff_entries: []const DiffStatEntry, diff_output_mode: anyt
             defer allocator.free(line);
             try platform_impl.writeStdout(line);
         }
-    } else if (diff_output_mode == .summary) {
-        for (diff_entries) |e| {
-            if (e.is_new) {
-                const line = try std.fmt.allocPrint(allocator, " create mode 100644 {s}\n", .{e.path});
-                defer allocator.free(line);
-                try platform_impl.writeStdout(line);
-            } else if (e.is_deleted) {
-                const line = try std.fmt.allocPrint(allocator, " delete mode 100644 {s}\n", .{e.path});
-                defer allocator.free(line);
-                try platform_impl.writeStdout(line);
-            }
-
-
 
 
     // no_patch, patch_with_stat, patch_with_raw: handled elsewhere or no output
