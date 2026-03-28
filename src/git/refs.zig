@@ -254,6 +254,11 @@ fn resolveRefOnce(git_dir: []const u8, ref_name: []const u8, platform_impl: anyt
         // Try common locations for short ref names
         try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_dir, ref_name });
     defer allocator.free(ref_path);
+
+    {
+        const dbg_path = std.fmt.allocPrint(allocator, "DEBUG resolveRefOnce: trying path='{s}' for ref='{s}'\n", .{ ref_path, ref_name }) catch null;
+        if (dbg_path) |d| { defer allocator.free(d); const f = std.fs.File{ .handle = 2 }; f.writeAll(d) catch {}; }
+    }
     
     const content = platform_impl.fs.readFile(allocator, ref_path) catch |err| switch (err) {
         error.FileNotFound => {
