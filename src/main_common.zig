@@ -26549,10 +26549,18 @@ fn nativeCmdPrune(allocator: std.mem.Allocator, args: [][]const u8, command_inde
     var verbose = false;
     var dry_run = false;
     var expire: []const u8 = "";
+    var no_expire = false;
+    var positional_args = std.ArrayList([]const u8).init(allocator);
+    defer positional_args.deinit();
+    var saw_dashdash = false;
 
     var i = command_index + 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
+        if (saw_dashdash) {
+            positional_args.append(arg) catch {};
+            continue;
+        }
         if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
             verbose = true;
         } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--dry-run")) {
@@ -26561,20 +26569,28 @@ fn nativeCmdPrune(allocator: std.mem.Allocator, args: [][]const u8, command_inde
             expire = arg["--expire=".len..];
         } else if (std.mem.eql(u8, arg, "--expire")) {
             i += 1;
-            if (i < args.len) expire = args[i];
+            if (i < args.len) {
+                expire = args[i];
+            } else {
+                try platform_impl.writeStderr("error: option `expire' requires a value\n");
+                std.process.exit(128);
+            }
+        } else if (std.mem.eql(u8, arg, "--no-expire")) {
+            no_expire = true;
         } else if (std.mem.eql(u8, arg, "--progress") or std.mem.eql(u8, arg, "--no-progress")) {
             // Accepted
         } else if (std.mem.eql(u8, arg, "-h")) {
             try platform_impl.writeStderr("usage: git prune [-n] [-v] [--progress] [--expire <time>] [--] [<head>...]\n");
             std.process.exit(129);
         } else if (std.mem.eql(u8, arg, "--")) {
-            // Remaining args are heads
-            break;
+            saw_dashdash = true;
         } else if (std.mem.startsWith(u8, arg, "-")) {
-            const msg = std.fmt.allocPrint(allocator, "error: unknown option '{s}'\nusage: git prune [-n] [-v] [--progress] [--expire <time>] [--] [<head>...]\n", .{arg}) catch unreachable;
+            const msg = std.fmt.allocPrint(allocator, "error: unknown option `{s}'\nusage: git prune [-n] [-v] [--progress] [--expire <time>] [--] [<head>...]\n", .{arg}) catch unreachable;
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);
             std.process.exit(128);
+        } else {
+            positional_args.append(arg) catch {};
         }
     }
 
@@ -26584,8 +26600,20 @@ fn nativeCmdPrune(allocator: std.mem.Allocator, args: [][]const u8, command_inde
         unreachable;
     };
 
+    // Validate positional args are valid object refs
+    for (positional_args.items) |pos_arg| {
+        // Try to resolve the arg as an object reference
+        const resolved = resolveRevision(git_dir, pos_arg, platform_impl, allocator) catch {
+            const msg = std.fmt.allocPrint(allocator, "fatal: not a valid object name: '{s}'\n", .{pos_arg}) catch unreachable;
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        };
+        allocator.free(resolved);
+    }
+
     // Validate expire value before proceeding
-    if (expire.len > 0) {
+    if (!no_expire and expire.len > 0) {
         _ = parseExpireTime(expire) catch {
             const msg = std.fmt.allocPrint(allocator, "fatal: malformed expiration date '{s}'\n", .{expire}) catch unreachable;
             defer allocator.free(msg);
@@ -26594,6 +26622,8 @@ fn nativeCmdPrune(allocator: std.mem.Allocator, args: [][]const u8, command_inde
         };
     }
 
+    _ = verbose;
+    _ = dry_run;
     try doNativePrune(allocator, git_dir, platform_impl, expire);
 }
 
