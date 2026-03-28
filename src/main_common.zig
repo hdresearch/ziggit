@@ -13332,7 +13332,7 @@ pub fn resolveRevision(git_path: []const u8, rev: []const u8, platform_impl: *co
         } else |_| {}
     }
 
-    // Try refs/<rev> directly
+    // Try <rev> as direct path under .git
     {
         const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, rev });
         defer allocator.free(ref_path);
@@ -13340,7 +13340,21 @@ pub fn resolveRevision(git_path: []const u8, rev: []const u8, platform_impl: *co
             defer allocator.free(content);
             const trimmed = std.mem.trim(u8, content, " \t\n\r");
             if (std.mem.startsWith(u8, trimmed, "ref: ")) {
-                // Symbolic ref - recurse
+                const target = trimmed[5..];
+                return resolveRevision(git_path, target, platform_impl, allocator);
+            }
+            if (trimmed.len == 40 and isValidHexString(trimmed)) return try allocator.dupe(u8, trimmed);
+        } else |_| {}
+    }
+
+    // Try refs/<rev> for shorthand like tags/X -> refs/tags/X
+    if (!std.mem.startsWith(u8, rev, "refs/")) {
+        const ref_path_short = try std.fmt.allocPrint(allocator, "{s}/refs/{s}", .{ git_path, rev });
+        defer allocator.free(ref_path_short);
+        if (platform_impl.fs.readFile(allocator, ref_path_short)) |content| {
+            defer allocator.free(content);
+            const trimmed = std.mem.trim(u8, content, " \t\n\r");
+            if (std.mem.startsWith(u8, trimmed, "ref: ")) {
                 const target = trimmed[5..];
                 return resolveRevision(git_path, target, platform_impl, allocator);
             }
@@ -13355,7 +13369,7 @@ pub fn resolveRevision(git_path: []const u8, rev: []const u8, platform_impl: *co
         if (platform_impl.fs.readFile(allocator, packed_refs_path)) |packed_content| {
             defer allocator.free(packed_content);
             // Try different ref prefixes in packed-refs
-            const prefixes = [_][]const u8{ "refs/heads/", "refs/tags/", "refs/remotes/", "" };
+            const prefixes = [_][]const u8{ "refs/heads/", "refs/tags/", "refs/remotes/", "refs/", "" };
             for (prefixes) |prefix| {
                 const full_ref = try std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, rev });
                 defer allocator.free(full_ref);
@@ -14032,6 +14046,110 @@ fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                     }
                 } else |_| {}
             }
+        }
+
+        // Handle ^@ (all parents)
+        if (std.mem.endsWith(u8, arg, "^@")) {
+            const brev1 = arg[0 .. arg.len - 2];
+            if (resolveRevision(git_path, brev1, platform_impl, allocator)) |bh1| {
+                defer allocator.free(bh1);
+                const obj1 = objects.GitObject.load(bh1, git_path, platform_impl, allocator) catch {
+                    const e1 = try std.fmt.allocPrint(allocator, "fatal: bad revision '{s}'\n", .{arg});
+                    defer allocator.free(e1);
+                    try platform_impl.writeStderr(e1);
+                    std.process.exit(128);
+                };
+                defer obj1.deinit(allocator);
+                if (obj1.type != .commit) {
+                    const e2 = try std.fmt.allocPrint(allocator, "fatal: bad revision '{s}'\n", .{arg});
+                    defer allocator.free(e2);
+                    try platform_impl.writeStderr(e2);
+                    std.process.exit(128);
+                }
+                var lns1 = std.mem.splitSequence(u8, obj1.data, "\n");
+                while (lns1.next()) |ln1| {
+                    if (ln1.len == 0) break;
+                    if (std.mem.startsWith(u8, ln1, "parent ")) {
+                        const p1 = ln1["parent ".len..];
+                        const o1 = try std.fmt.allocPrint(allocator, "{s}\n", .{p1});
+                        defer allocator.free(o1);
+                        try platform_impl.writeStdout(o1);
+                    }
+                }
+                continue;
+            } else |_| {}
+        }
+        // Handle ^! (commit excluding parents)
+        if (std.mem.endsWith(u8, arg, "^!")) {
+            const brev2 = arg[0 .. arg.len - 2];
+            if (resolveRevision(git_path, brev2, platform_impl, allocator)) |bh2| {
+                defer allocator.free(bh2);
+                const o2a = try std.fmt.allocPrint(allocator, "{s}\n", .{bh2});
+                defer allocator.free(o2a);
+                try platform_impl.writeStdout(o2a);
+                const obj2 = objects.GitObject.load(bh2, git_path, platform_impl, allocator) catch continue;
+                defer obj2.deinit(allocator);
+                if (obj2.type == .commit) {
+                    var lns2 = std.mem.splitSequence(u8, obj2.data, "\n");
+                    while (lns2.next()) |ln2| {
+                        if (ln2.len == 0) break;
+                        if (std.mem.startsWith(u8, ln2, "parent ")) {
+                            const p2 = ln2["parent ".len..];
+                            const o2b = try std.fmt.allocPrint(allocator, "^{s}\n", .{p2});
+                            defer allocator.free(o2b);
+                            try platform_impl.writeStdout(o2b);
+                        }
+                    }
+                }
+                continue;
+            } else |_| {}
+        }
+        // Handle ^-N (parent range shorthand)
+        if (std.mem.indexOf(u8, arg, "^-")) |cdp1| {
+            const brev3 = arg[0..cdp1];
+            const dsuf1 = arg[cdp1 + 2 ..];
+            const dn1: u32 = if (dsuf1.len == 0) 1 else std.fmt.parseInt(u32, dsuf1, 10) catch 0;
+            if (dn1 == 0) {
+                const e3 = try std.fmt.allocPrint(allocator, "fatal: bad revision '{s}'\n", .{arg});
+                defer allocator.free(e3);
+                try platform_impl.writeStderr(e3);
+                std.process.exit(128);
+            }
+            if (resolveRevision(git_path, brev3, platform_impl, allocator)) |bh3| {
+                defer allocator.free(bh3);
+                const ps1 = try std.fmt.allocPrint(allocator, "{s}^{d}", .{ brev3, dn1 });
+                defer allocator.free(ps1);
+                if (resolveRevision(git_path, ps1, platform_impl, allocator)) |ph3| {
+                    defer allocator.free(ph3);
+                    if (symbolic_full_name) {
+                        const n1 = try std.fmt.allocPrint(allocator, "^{s}^{d}\n", .{ brev3, dn1 });
+                        defer allocator.free(n1);
+                        try platform_impl.writeStdout(n1);
+                        const p3 = try std.fmt.allocPrint(allocator, "{s}\n", .{brev3});
+                        defer allocator.free(p3);
+                        try platform_impl.writeStdout(p3);
+                    } else {
+                        const n2 = try std.fmt.allocPrint(allocator, "^{s}\n", .{ph3});
+                        defer allocator.free(n2);
+                        try platform_impl.writeStdout(n2);
+                        const p4 = try std.fmt.allocPrint(allocator, "{s}\n", .{bh3});
+                        defer allocator.free(p4);
+                        try platform_impl.writeStdout(p4);
+                    }
+                    continue;
+                } else |_| {}
+            } else |_| {}
+        }
+        // Handle ^<rev> negation prefix
+        if (arg.len > 1 and arg[0] == '^' and arg[1] != '{' and arg[1] != '-' and arg[1] != '@' and arg[1] != '!') {
+            const nrev1 = arg[1..];
+            if (resolveRevision(git_path, nrev1, platform_impl, allocator)) |nh1| {
+                defer allocator.free(nh1);
+                const no1 = try std.fmt.allocPrint(allocator, "^{s}\n", .{nh1});
+                defer allocator.free(no1);
+                try platform_impl.writeStdout(no1);
+                continue;
+            } else |_| {}
         }
 
         // Try to resolve as revision
