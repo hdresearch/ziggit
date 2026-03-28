@@ -620,14 +620,14 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 var autocorrect_val: i32 = 0; // default: no autocorrect
                 // Check config override first
                 if (getConfigOverride("help.autocorrect")) |ov| {
-                    autocorrect_val = std.fmt.parseInt(i32, ov, 10) catch 0;
+                    autocorrect_val = parseAutocorrectValue(ov);
                 } else {
                     // Try reading from git config
                     if (findGitDirectory(allocator, &platform_impl)) |git_path2| {
                         defer allocator.free(git_path2);
                         if (getConfigValueByKey(git_path2, "help.autocorrect", allocator)) |val| {
                             defer allocator.free(val);
-                            autocorrect_val = std.fmt.parseInt(i32, val, 10) catch 0;
+                            autocorrect_val = parseAutocorrectValue(val);
                         }
                     } else |_| {}
                 }
