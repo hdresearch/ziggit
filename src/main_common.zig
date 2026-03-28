@@ -4737,6 +4737,15 @@ fn collectStagedDiffEntries(index: *const index_mod.Index, git_path: []const u8,
     return has_diff;
 }
 
+fn countLinesInContent(content: []const u8) usize {
+    if (content.len == 0) return 0;
+    var count: usize = 0;
+    var iter = std.mem.splitScalar(u8, content, '\n');
+    while (iter.next()) |_| count += 1;
+    if (content[content.len - 1] == '\n') count -= 1;
+    return count;
+}
+
 fn countInsertionsDeletions(old_content: []const u8, new_content: []const u8, insertions: *usize, deletions: *usize) void {
     // Count lines in old and new
     var old_lines = std.array_list.Managed([]const u8).init(std.heap.page_allocator);
@@ -28359,7 +28368,17 @@ fn collectTreeDiffEntries(allocator: std.mem.Allocator, tree1_hash: []const u8, 
                 continue;
             }
             if (!matchesPathspecs(full_name, pathspecs)) { allocator.free(full_name); continue; }
-            try diff_entries_out.append(.{ .path = full_name, .insertions = 1, .deletions = 1, .is_binary = false, .is_new = false, .is_deleted = false, .old_hash = "", .new_hash = "" });
+            {
+                var ins: usize = 0;
+                var dels: usize = 0;
+                const old_ct = loadBlobContent(allocator, e1.?.hash, git_path, platform_impl) catch "";
+                defer if (old_ct.len > 0) allocator.free(old_ct);
+                const new_ct = loadBlobContent(allocator, e2.?.hash, git_path, platform_impl) catch "";
+                defer if (new_ct.len > 0) allocator.free(new_ct);
+                countInsertionsDeletions(old_ct, new_ct, &ins, &dels);
+                const is_bin = isBinaryContent(old_ct) or isBinaryContent(new_ct);
+                try diff_entries_out.append(.{ .path = full_name, .insertions = ins, .deletions = dels, .is_binary = is_bin, .is_new = false, .is_deleted = false, .old_hash = "", .new_hash = "" });
+            }
         } else if (e1 != null and e2 == null) {
             if (isTreeMode(e1.?.mode)) {
                 try collectTreeDiffEntries(allocator, e1.?.hash, "4b825dc642cb6eb9a060e54bf899d69f82cf0101", full_name, git_path, pathspecs, platform_impl, diff_entries_out);
@@ -28367,7 +28386,13 @@ fn collectTreeDiffEntries(allocator: std.mem.Allocator, tree1_hash: []const u8, 
                 continue;
             }
             if (!matchesPathspecs(full_name, pathspecs)) { allocator.free(full_name); continue; }
-            try diff_entries_out.append(.{ .path = full_name, .insertions = 0, .deletions = 1, .is_binary = false, .is_new = false, .is_deleted = true, .old_hash = "", .new_hash = "" });
+            {
+                const old_ct = loadBlobContent(allocator, e1.?.hash, git_path, platform_impl) catch "";
+                defer if (old_ct.len > 0) allocator.free(old_ct);
+                const lc = countLinesInContent(old_ct);
+                const is_bin = isBinaryContent(old_ct);
+                try diff_entries_out.append(.{ .path = full_name, .insertions = 0, .deletions = lc, .is_binary = is_bin, .is_new = false, .is_deleted = true, .old_hash = "", .new_hash = "" });
+            }
         } else if (e2 != null) {
             if (isTreeMode(e2.?.mode)) {
                 try collectTreeDiffEntries(allocator, "4b825dc642cb6eb9a060e54bf899d69f82cf0101", e2.?.hash, full_name, git_path, pathspecs, platform_impl, diff_entries_out);
@@ -28375,7 +28400,13 @@ fn collectTreeDiffEntries(allocator: std.mem.Allocator, tree1_hash: []const u8, 
                 continue;
             }
             if (!matchesPathspecs(full_name, pathspecs)) { allocator.free(full_name); continue; }
-            try diff_entries_out.append(.{ .path = full_name, .insertions = 1, .deletions = 0, .is_binary = false, .is_new = true, .is_deleted = false, .old_hash = "", .new_hash = "" });
+            {
+                const new_ct = loadBlobContent(allocator, e2.?.hash, git_path, platform_impl) catch "";
+                defer if (new_ct.len > 0) allocator.free(new_ct);
+                const lc = countLinesInContent(new_ct);
+                const is_bin = isBinaryContent(new_ct);
+                try diff_entries_out.append(.{ .path = full_name, .insertions = lc, .deletions = 0, .is_binary = is_bin, .is_new = true, .is_deleted = false, .old_hash = "", .new_hash = "" });
+            }
         } else {
             allocator.free(full_name);
         }
