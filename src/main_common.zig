@@ -28223,62 +28223,34 @@ fn collectFilesFromTree(allocator: std.mem.Allocator, tree_hash_str: []const u8,
 }
 
 fn outputStatForTwoTrees(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, git_path: []const u8, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform) !void {
-    // Collect diff entries
     var diff_entries = std.array_list.Managed(DiffStatEntry).init(allocator);
     defer {
         for (diff_entries.items) |*de| allocator.free(de.path);
         diff_entries.deinit();
     }
     try collectTreeDiffEntries(allocator, tree1_hash, tree2_hash, "", git_path, pathspecs, platform_impl, &diff_entries);
-    
     if (diff_entries.items.len == 0) return;
-    
-    // Find max filename width
-    var max_name_len: usize = 0;
-    var total_ins: usize = 0;
-    var total_del: usize = 0;
+    try formatDiffStat(diff_entries.items, platform_impl, allocator);
+}
+
+fn outputSummaryForTwoTrees(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, git_path: []const u8, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform) !void {
+    var diff_entries = std.array_list.Managed(DiffStatEntry).init(allocator);
+    defer {
+        for (diff_entries.items) |*de| allocator.free(de.path);
+        diff_entries.deinit();
+    }
+    try collectTreeDiffEntries(allocator, tree1_hash, tree2_hash, "", git_path, pathspecs, platform_impl, &diff_entries);
     for (diff_entries.items) |de| {
-        if (de.path.len > max_name_len) max_name_len = de.path.len;
-        total_ins += de.insertions;
-        total_del += de.deletions;
+        if (de.is_new) {
+            const out = try std.fmt.allocPrint(allocator, " create mode 100644 {s}\n", .{de.path});
+            defer allocator.free(out);
+            try platform_impl.writeStdout(out);
+        } else if (de.is_deleted) {
+            const out = try std.fmt.allocPrint(allocator, " delete mode 100644 {s}\n", .{de.path});
+            defer allocator.free(out);
+            try platform_impl.writeStdout(out);
+        }
     }
-    
-    for (diff_entries.items) |de| {
-        const padding = max_name_len - de.path.len;
-        const pad_buf = try allocator.alloc(u8, padding);
-        defer allocator.free(pad_buf);
-        @memset(pad_buf, ' ');
-        
-        const total = de.insertions + de.deletions;
-        const plus_buf = try allocator.alloc(u8, de.insertions);
-        defer allocator.free(plus_buf);
-        @memset(plus_buf, '+');
-        const minus_buf = try allocator.alloc(u8, de.deletions);
-        defer allocator.free(minus_buf);
-        @memset(minus_buf, '-');
-        
-        const line = try std.fmt.allocPrint(allocator, " {s}{s} | {d} {s}{s}\n", .{ de.path, pad_buf, total, plus_buf, minus_buf });
-        defer allocator.free(line);
-        try platform_impl.writeStdout(line);
-    }
-    
-    const summary = try std.fmt.allocPrint(allocator, " {d} file{s} changed", .{
-        diff_entries.items.len,
-        if (diff_entries.items.len != 1) "s" else "",
-    });
-    defer allocator.free(summary);
-    try platform_impl.writeStdout(summary);
-    if (total_ins > 0) {
-        const added = try std.fmt.allocPrint(allocator, ", {d} insertion{s}(+)", .{ total_ins, if (total_ins != 1) "s" else "" });
-        defer allocator.free(added);
-        try platform_impl.writeStdout(added);
-    }
-    if (total_del > 0) {
-        const removed = try std.fmt.allocPrint(allocator, ", {d} deletion{s}(-)", .{ total_del, if (total_del != 1) "s" else "" });
-        defer allocator.free(removed);
-        try platform_impl.writeStdout(removed);
-    }
-    try platform_impl.writeStdout("\n");
 }
 
 fn outputSummaryForEmptyTree(allocator: std.mem.Allocator, tree_hash_str: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
