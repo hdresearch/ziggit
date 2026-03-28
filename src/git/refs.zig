@@ -374,6 +374,15 @@ pub fn updateRef(git_dir: []const u8, ref_name: []const u8, hash: []const u8, pl
         try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_dir, ref_name });
     defer allocator.free(ref_path);
 
+    // Handle D/F conflicts: if the ref path itself is a directory, remove it
+    // (e.g., creating refs/heads/dir when refs/heads/dir/ exists as empty directory)
+    if (std.fs.cwd().openDir(ref_path, .{})) |dir| {
+        var d = dir;
+        d.close();
+        // It's a directory - try to remove it (will fail if non-empty, which is correct)
+        std.fs.cwd().deleteTree(ref_path) catch {};
+    } else |_| {}
+
     // Create parent directory if it doesn't exist (recursively for nested refs like a/b/c)
     const parent_dir = std.fs.path.dirname(ref_path).?;
     std.fs.cwd().makePath(parent_dir) catch |err| switch (err) {
@@ -563,6 +572,24 @@ pub fn deleteBranch(git_dir: []const u8, branch_name: []const u8, platform_impl:
     defer allocator.free(ref_path);
 
     try platform_impl.fs.deleteFile(ref_path);
+
+    // Clean up empty parent directories (e.g., refs/heads/dir/ after deleting refs/heads/dir/file)
+    cleanupEmptyRefParents(git_dir, branch_name, allocator);
+}
+
+/// Remove empty parent directories after deleting a ref under refs/heads/
+fn cleanupEmptyRefParents(git_dir: []const u8, branch_name: []const u8, allocator: std.mem.Allocator) void {
+    const full_ref = std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name}) catch return;
+    defer allocator.free(full_ref);
+    var current: []const u8 = full_ref;
+    while (std.mem.lastIndexOfScalar(u8, current, '/')) |slash| {
+        current = current[0..slash];
+        // Don't remove refs/heads or refs itself
+        if (current.len <= "refs/heads".len) break;
+        const dir_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, current }) catch break;
+        defer allocator.free(dir_path);
+        std.fs.cwd().deleteDir(dir_path) catch break; // Stop on first non-empty dir
+    }
 }
 
 pub fn getBranchCommit(git_dir: []const u8, branch_name: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !?[]u8 {
