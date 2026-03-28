@@ -680,9 +680,10 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
                 es[idx].orig_line = t2t[idx] + 1;
                 // Set previous to first parent
                 if (pars.items.len > 0) {
-                    const ph = pars.items[0];
-                    const cl2 = @min(40, ph.len);
-                    @memcpy(es[idx].previous_hash[0..cl2], ph[0..cl2]);
+                    const prev_h = pars.items[0];
+                    const pcl = @min(40, prev_h.len);
+                    @memset(&es[idx].previous_hash, 0);
+                    @memcpy(es[idx].previous_hash[0..pcl], prev_h[0..pcl]);
                     es[idx].has_previous = true;
                 }
                 ub[idx] = false;
