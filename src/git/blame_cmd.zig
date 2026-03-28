@@ -64,6 +64,12 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
             }
         }
     }
+    // If no file path found but we have a revision, treat it as the file path
+    // (common in bare repos where the file doesn't exist on disk)
+    if (fp == null and rv != null) {
+        fp = rv;
+        rv = null;
+    }
     if (fp == null) { try pi.writeStderr("usage: git blame [<options>] [<rev>] [--] <file>\n"); std.process.exit(128); }
 
     const gp = mc.findGitDirectory(a, pi) catch {
