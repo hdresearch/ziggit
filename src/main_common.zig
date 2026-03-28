@@ -17616,13 +17616,6 @@ fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         return;
     }
 
-    // Find .git directory first
-    const git_path = findGitDirectory(allocator, platform_impl) catch {
-        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
-        std.process.exit(128);
-    };
-    defer allocator.free(git_path);
-
     var show_type = false;
     var show_size = false;
     var show_pretty = false;
@@ -17636,17 +17629,24 @@ fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var filters = false;
     var path_opt: ?[]const u8 = null;
     var object_ref: ?[]const u8 = null;
+    // Track cmdmode order for conflict reporting
+    var cmdmode_first: ?[]const u8 = null;
+    var cmdmode_second: ?[]const u8 = null;
 
     // Parse arguments
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-t")) {
             show_type = true;
+            if (cmdmode_first == null) { cmdmode_first = "-t"; } else if (cmdmode_second == null) { cmdmode_second = "-t"; }
         } else if (std.mem.eql(u8, arg, "-s")) {
             show_size = true;
+            if (cmdmode_first == null) { cmdmode_first = "-s"; } else if (cmdmode_second == null) { cmdmode_second = "-s"; }
         } else if (std.mem.eql(u8, arg, "-p")) {
             show_pretty = true;
+            if (cmdmode_first == null) { cmdmode_first = "-p"; } else if (cmdmode_second == null) { cmdmode_second = "-p"; }
         } else if (std.mem.eql(u8, arg, "-e")) {
             show_exists = true;
+            if (cmdmode_first == null) { cmdmode_first = "-e"; } else if (cmdmode_second == null) { cmdmode_second = "-e"; }
         } else if (std.mem.eql(u8, arg, "--batch")) {
             batch_mode = true;
         } else if (std.mem.startsWith(u8, arg, "--batch=")) {
@@ -17663,8 +17663,10 @@ fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             follow_symlinks = true;
         } else if (std.mem.eql(u8, arg, "--textconv")) {
             textconv = true;
+            if (cmdmode_first == null) { cmdmode_first = "--textconv"; } else if (cmdmode_second == null) { cmdmode_second = "--textconv"; }
         } else if (std.mem.eql(u8, arg, "--filters")) {
             filters = true;
+            if (cmdmode_first == null) { cmdmode_first = "--filters"; } else if (cmdmode_second == null) { cmdmode_second = "--filters"; }
         } else if (std.mem.startsWith(u8, arg, "--path=")) {
             path_opt = arg["--path=".len..];
         } else if (std.mem.eql(u8, arg, "--path")) {
@@ -17674,7 +17676,7 @@ fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         }
     }
 
-    // Count cmdmode options (mutually exclusive)
+    // Count cmdmode options (mutually exclusive: -e, -p, -t, -s, --textconv, --filters)
     var cmdmode_count: u32 = 0;
     if (show_type) cmdmode_count += 1;
     if (show_size) cmdmode_count += 1;
@@ -17683,59 +17685,117 @@ fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     if (textconv) cmdmode_count += 1;
     if (filters) cmdmode_count += 1;
 
-    // Check for incompatible option combinations
+    // Check for incompatible cmdmode combinations
     if (cmdmode_count > 1) {
-        try platform_impl.writeStderr("error: switch `e' is incompatible with -t, -s, -p, --textconv, --filters\n");
+        const first = cmdmode_first orelse "-e";
+        const second = cmdmode_second orelse "-e";
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "error: {s} cannot be used together with {s}\n", .{ second, first }) catch "error: options cannot be used together\n";
+        try platform_impl.writeStderr(msg);
         std.process.exit(129);
     }
-    
+
+    // --batch-all-objects with -e requires batch mode
     if (batch_all and (show_exists or show_type or show_size or show_pretty)) {
-        try platform_impl.writeStderr("fatal: --batch-all-objects cannot be combined with cmdmode options\n");
+        const mode_name = if (show_exists) "-e" else if (show_type) "-t" else if (show_size) "-s" else "-p";
+        var buf2: [256]u8 = undefined;
+        const msg2 = std.fmt.bufPrint(&buf2, "error: --batch-all-objects cannot be used together with {s}\n", .{mode_name}) catch "error: options cannot be used together\n";
+        try platform_impl.writeStderr(msg2);
         std.process.exit(129);
     }
-    
-    if ((batch_mode or batch_check) and (show_exists or show_type or show_size or show_pretty or follow_symlinks)) {
-        try platform_impl.writeStderr("fatal: options are incompatible\n");
+
+    // -e/-p/-t/-s are incompatible with --batch/--batch-check
+    if ((batch_mode or batch_check) and (show_exists or show_type or show_size or show_pretty)) {
+        const mode_name = if (show_exists) "-e" else if (show_type) "-t" else if (show_size) "-s" else "-p";
+        const batch_name = if (batch_mode) "--batch" else "--batch-check";
+        var buf3: [256]u8 = undefined;
+        const msg3 = std.fmt.bufPrint(&buf3, "error: {s} is incompatible with {s}\n", .{ mode_name, batch_name }) catch "fatal: options are incompatible\n";
+        try platform_impl.writeStderr(msg3);
         std.process.exit(129);
     }
-    
+
+    // -e/-p/-t/-s are incompatible with --follow-symlinks
     if (follow_symlinks and (show_exists or show_type or show_size or show_pretty)) {
-        try platform_impl.writeStderr("fatal: options are incompatible\n");
+        const mode_name = if (show_exists) "-e" else if (show_type) "-t" else if (show_size) "-s" else "-p";
+        var buf4: [256]u8 = undefined;
+        const msg4 = std.fmt.bufPrint(&buf4, "error: {s} is incompatible with --follow-symlinks\n", .{mode_name}) catch "fatal: options are incompatible\n";
+        try platform_impl.writeStderr(msg4);
         std.process.exit(129);
     }
-    
+
+    // --path is incompatible with --batch/--batch-check
     if (path_opt != null and (batch_mode or batch_check)) {
-        try platform_impl.writeStderr("fatal: --path is incompatible with --batch\n");
+        const batch_name = if (batch_mode) "--batch" else "--batch-check";
+        var buf5: [256]u8 = undefined;
+        const msg5 = std.fmt.bufPrint(&buf5, "fatal: --path is incompatible with {s}\n", .{batch_name}) catch "fatal: --path is incompatible with --batch\n";
+        try platform_impl.writeStderr(msg5);
         std.process.exit(129);
     }
-    
-    // Options that require an object argument
+
+    // -e/-p/-t/-s with --path and positional arg (HEAD:path form) is incompatible
+    if (path_opt != null and (show_exists or show_type or show_size or show_pretty) and object_ref != null) {
+        if (std.mem.indexOf(u8, object_ref.?, ":") != null) {
+            const mode_name = if (show_exists) "-e" else if (show_type) "-t" else if (show_size) "-s" else "-p";
+            var buf6: [256]u8 = undefined;
+            const msg6 = std.fmt.bufPrint(&buf6, "error: --path=foo is incompatible with {s} HEAD:some-path.txt\n", .{mode_name}) catch "fatal: options are incompatible\n";
+            try platform_impl.writeStderr(msg6);
+            std.process.exit(129);
+        }
+    }
+
+    // --textconv/--filters require an object when not in batch mode
     if (!batch_mode and !batch_check and !batch_all) {
         if (textconv and object_ref == null) {
-            try platform_impl.writeStderr("fatal: --textconv requires a revision\n");
+            try platform_impl.writeStderr("fatal: <object> required with --textconv\n");
             std.process.exit(129);
         }
         if (filters and object_ref == null) {
-            try platform_impl.writeStderr("fatal: --filters requires a revision\n");
+            try platform_impl.writeStderr("fatal: <object> required with --filters\n");
             std.process.exit(129);
         }
         if (show_exists and object_ref == null) {
-            try platform_impl.writeStderr("fatal: -e requires a revision\n");
+            try platform_impl.writeStderr("fatal: <object> required with -e\n");
             std.process.exit(129);
         }
         if (show_type and object_ref == null) {
-            try platform_impl.writeStderr("fatal: -t requires a revision\n");
+            try platform_impl.writeStderr("fatal: <object> required with -t\n");
             std.process.exit(129);
         }
         if (show_size and object_ref == null) {
-            try platform_impl.writeStderr("fatal: -s requires a revision\n");
+            try platform_impl.writeStderr("fatal: <object> required with -s\n");
             std.process.exit(129);
         }
         if (show_pretty and object_ref == null) {
-            try platform_impl.writeStderr("fatal: -p requires a revision\n");
+            try platform_impl.writeStderr("fatal: <object> required with -p\n");
             std.process.exit(129);
         }
     }
+
+    // --textconv/--filters incompatible with --batch/--batch-check (when also a cmdmode)
+    if ((batch_mode or batch_check) and (textconv or filters)) {
+        const cw_name = if (textconv) "--textconv" else "--filters";
+        const batch_name = if (batch_mode) "--batch" else "--batch-check";
+        var buf7: [256]u8 = undefined;
+        const msg7 = std.fmt.bufPrint(&buf7, "error: {s} is incompatible with {s}\n", .{ cw_name, batch_name }) catch "fatal: options are incompatible\n";
+        try platform_impl.writeStderr(msg7);
+        std.process.exit(129);
+    }
+
+    // --follow-symlinks incompatible with --textconv/--filters
+    if (follow_symlinks and (textconv or filters)) {
+        const cw_name = if (textconv) "--textconv" else "--filters";
+        var buf8: [256]u8 = undefined;
+        const msg8 = std.fmt.bufPrint(&buf8, "error: {s} is incompatible with --follow-symlinks\n", .{cw_name}) catch "fatal: options are incompatible\n";
+        try platform_impl.writeStderr(msg8);
+        std.process.exit(129);
+    }
+
+    // Find .git directory (after argument validation)
+    const git_path = findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
 
     if (batch_mode or batch_check) {
         // Batch mode: read object names from stdin
