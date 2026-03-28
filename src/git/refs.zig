@@ -374,6 +374,45 @@ pub fn updateHEAD(git_dir: []const u8, branch_or_hash: []const u8, platform_impl
     try platform_impl.fs.writeFile(head_path, content);
 }
 
+/// Update HEAD to point to a new commit hash, preserving symbolic ref if HEAD points to a branch.
+/// If HEAD is a symbolic ref (e.g. ref: refs/heads/main), updates the branch ref instead.
+/// If HEAD is detached, updates HEAD directly.
+pub fn updateHEADCommit(git_dir: []const u8, new_hash: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !void {
+    const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir});
+    defer allocator.free(head_path);
+
+    const head_content = platform_impl.fs.readFile(allocator, head_path) catch {
+        // Can't read HEAD, just write hash directly
+        const content = try std.fmt.allocPrint(allocator, "{s}\n", .{new_hash});
+        defer allocator.free(content);
+        try platform_impl.fs.writeFile(head_path, content);
+        return;
+    };
+    defer allocator.free(head_content);
+
+    const trimmed = std.mem.trim(u8, head_content, " \t\n\r");
+    if (std.mem.startsWith(u8, trimmed, "ref: ")) {
+        // HEAD is a symbolic ref - update the target ref
+        const ref_name = trimmed["ref: ".len..];
+        const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_name });
+        defer allocator.free(ref_path);
+
+        // Ensure parent directory exists
+        if (std.fs.path.dirname(ref_path)) |dir| {
+            std.fs.cwd().makePath(dir) catch {};
+        }
+
+        const hash_content = try std.fmt.allocPrint(allocator, "{s}\n", .{new_hash});
+        defer allocator.free(hash_content);
+        try platform_impl.fs.writeFile(ref_path, hash_content);
+    } else {
+        // HEAD is detached - update directly
+        const content = try std.fmt.allocPrint(allocator, "{s}\n", .{new_hash});
+        defer allocator.free(content);
+        try platform_impl.fs.writeFile(head_path, content);
+    }
+}
+
 pub fn listBranches(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !std.array_list.Managed([]u8) {
     var branches = std.array_list.Managed([]u8).init(allocator);
     
