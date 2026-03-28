@@ -27095,6 +27095,7 @@ fn doNativePrune(allocator: std.mem.Allocator, git_dir: []const u8, platform_imp
 }
 
 fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platform_impl: anytype, quiet: bool) !void {
+    _ = quiet;
 
     // Simple repack: collect all loose objects and write them into a pack file
     // Also consolidate existing packs
