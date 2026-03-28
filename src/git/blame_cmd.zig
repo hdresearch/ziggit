@@ -20,6 +20,7 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
     var cf: ?[]const u8 = null;
     var abl: usize = 7;
     var show_progress = false;
+    var first_parent = false;
     var lr = std.array_list.Managed([]const u8).init(a);
     defer lr.deinit();
 
@@ -51,6 +52,7 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
         }
         else if (std.mem.eql(u8, arg, "--progress")) { show_progress = true; }
         else if (std.mem.eql(u8, arg, "--no-progress")) { show_progress = false; }
+        else if (std.mem.eql(u8, arg, "--first-parent")) { first_parent = true; }
         else if (std.mem.eql(u8, arg, "--exclude-promisor-objects")) {
             try pi.writeStderr("fatal: --exclude-promisor-objects not supported for blame\n");
             std.process.exit(1);
@@ -225,7 +227,7 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
         }
         const uwd = bu and cfc != null and !std.mem.eql(u8, fc, cfc.?);
         const wcl: ?[]const []const u8 = if (uwd and cf == null and rv == null) cl2.items else null;
-        try trav(a, gp, sh, fp.?, lines.items, es, wcl);
+        try trav(a, gp, sh, fp.?, lines.items, es, wcl, first_parent);
     }
 
     // Mark all entries as boundary if ^rev was used
@@ -308,11 +310,9 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
                         if (o >= s) { e = 1; } else { e = s - o + 1; }
                         if (e < s) { const t = s; s = e; e = t; }
                     } else if (ess.len > 1 and ess[0] == '^' and ess[1] == '/') {
-                        e = resolveRegex(ess[1..], lines.items, 0) orelse {
-                            try pi.writeStderr("fatal: -L: no match\n");
-                            std.process.exit(128);
-                            unreachable;
-                        };
+                        // ^/RE/ is not valid as end specifier in -L range
+                        try pi.writeStderr("fatal: -L invalid line range\n");
+                        std.process.exit(128);
                     } else if (ess[0] == '/') {
                         e = resolveRegex(ess, lines.items, if (s > 0) s - 1 else 0) orelse {
                             try pi.writeStderr("fatal: -L: no match\n");
@@ -482,22 +482,13 @@ fn resolveFuncname(pattern: []const u8, file_lines: []const []const u8, search_f
     if (pattern.len == 0) return null;
     
     // Find the first line matching the function pattern starting from search_from
+    // No wrapping - relative search only goes forward
     var found_line: ?usize = null;
     var i: usize = search_from;
     while (i < file_lines.len) : (i += 1) {
         if (isFuncDefMatch(file_lines[i], pattern)) {
             found_line = i;
             break;
-        }
-    }
-    // Wrap around if not found
-    if (found_line == null and search_from > 0) {
-        i = 0;
-        while (i < search_from) : (i += 1) {
-            if (isFuncDefMatch(file_lines[i], pattern)) {
-                found_line = i;
-                break;
-            }
         }
     }
     
@@ -588,10 +579,8 @@ fn resolveRegex(spec: []const u8, file_lines: []const []const u8, start_from: us
     return null;
 }
 
-/// Simple regex-like matching: supports basic substring matching with some regex features
+/// Regex-like matching: supports anchors, `.`, `[...]`, `[^...]`, `\` escapes, `*`, `+`, `?`
 fn simpleMatch(line: []const u8, pattern: []const u8) bool {
-    // For basic patterns, do substring search
-    // Handle common regex escapes and anchors
     var anchored_start = false;
     var anchored_end = false;
     var pat = pattern;
@@ -603,56 +592,137 @@ fn simpleMatch(line: []const u8, pattern: []const u8) bool {
         anchored_end = true;
         pat = pat[0 .. pat.len - 1];
     }
-    // Remove escapes for literal matching
-    var cleaned: [1024]u8 = undefined;
-    var ci: usize = 0;
-    var pi2: usize = 0;
-    while (pi2 < pat.len and ci < cleaned.len) {
-        if (pat[pi2] == '\\' and pi2 + 1 < pat.len) {
-            pi2 += 1;
-            cleaned[ci] = pat[pi2];
-            ci += 1;
-            pi2 += 1;
-        } else if (pat[pi2] == '.') {
-            // . matches any character - use as wildcard marker
-            cleaned[ci] = 0; // sentinel for wildcard
-            ci += 1;
-            pi2 += 1;
-        } else {
-            cleaned[ci] = pat[pi2];
-            ci += 1;
-            pi2 += 1;
-        }
-    }
-    const clean = cleaned[0..ci];
 
-    if (anchored_start and anchored_end) {
-        return matchWithWildcard(line, clean);
-    } else if (anchored_start) {
-        if (line.len < clean.len) return false;
-        return matchWithWildcard(line[0..clean.len], clean);
+    if (anchored_start) {
+        return regexMatchAt(line, 0, pat, anchored_end);
     } else if (anchored_end) {
-        if (line.len < clean.len) return false;
-        return matchWithWildcard(line[line.len - clean.len ..], clean);
-    } else {
-        // Substring match
-        if (clean.len == 0) return true;
-        if (line.len < clean.len) return false;
+        // Try matching at every position, require consuming to end
         var si: usize = 0;
-        while (si <= line.len - clean.len) : (si += 1) {
-            if (matchWithWildcard(line[si .. si + clean.len], clean)) return true;
+        while (si <= line.len) : (si += 1) {
+            if (regexMatchAt(line, si, pat, true)) return true;
+        }
+        return false;
+    } else {
+        // Substring match at any position
+        if (pat.len == 0) return true;
+        var si: usize = 0;
+        while (si <= line.len) : (si += 1) {
+            if (regexMatchAt(line, si, pat, false)) return true;
         }
         return false;
     }
 }
 
-fn matchWithWildcard(text: []const u8, pattern: []const u8) bool {
-    if (text.len != pattern.len) return false;
-    for (0..text.len) |i| {
-        if (pattern[i] == 0) continue; // wildcard matches anything
-        if (text[i] != pattern[i]) return false;
+/// Try to match pattern starting at line[pos..], return true if matched
+fn regexMatchAt(line: []const u8, start: usize, pat: []const u8, must_reach_end: bool) bool {
+    return regexMatchImpl(line, start, pat, 0, must_reach_end);
+}
+
+fn regexMatchImpl(line: []const u8, li: usize, pat: []const u8, pi: usize, must_reach_end: bool) bool {
+    var lpos = li;
+    var ppos = pi;
+
+    while (ppos < pat.len) {
+        // Parse current element
+        const elem_start = ppos;
+        var elem_end = ppos;
+
+        if (pat[ppos] == '\\' and ppos + 1 < pat.len) {
+            elem_end = ppos + 2;
+        } else if (pat[ppos] == '[') {
+            // Find closing ]
+            var bi = ppos + 1;
+            if (bi < pat.len and pat[bi] == '^') bi += 1;
+            if (bi < pat.len and pat[bi] == ']') bi += 1;
+            while (bi < pat.len and pat[bi] != ']') : (bi += 1) {}
+            if (bi < pat.len) elem_end = bi + 1 else elem_end = pat.len;
+        } else if (pat[ppos] == '.') {
+            elem_end = ppos + 1;
+        } else {
+            elem_end = ppos + 1;
+        }
+
+        // Check for quantifier
+        const has_star = elem_end < pat.len and pat[elem_end] == '*';
+        const has_plus = elem_end < pat.len and pat[elem_end] == '+';
+        const has_question = elem_end < pat.len and pat[elem_end] == '?';
+        const next_ppos = if (has_star or has_plus or has_question) elem_end + 1 else elem_end;
+
+        if (has_star or has_question) {
+            // Try 0 matches first (non-greedy for correctness via backtracking)
+            if (regexMatchImpl(line, lpos, pat, next_ppos, must_reach_end)) return true;
+            if (has_star) {
+                // Try 1+ matches
+                var count: usize = 0;
+                while (lpos + count < line.len and matchOneElement(line[lpos + count], pat[elem_start..elem_end])) {
+                    count += 1;
+                    if (regexMatchImpl(line, lpos + count, pat, next_ppos, must_reach_end)) return true;
+                }
+            } else {
+                // ? - try 1 match
+                if (lpos < line.len and matchOneElement(line[lpos], pat[elem_start..elem_end])) {
+                    if (regexMatchImpl(line, lpos + 1, pat, next_ppos, must_reach_end)) return true;
+                }
+            }
+            return false;
+        } else if (has_plus) {
+            // Must match at least 1
+            var count: usize = 0;
+            while (lpos + count < line.len and matchOneElement(line[lpos + count], pat[elem_start..elem_end])) {
+                count += 1;
+            }
+            // Try from max down to 1 (greedy)
+            while (count > 0) : (count -= 1) {
+                if (regexMatchImpl(line, lpos + count, pat, next_ppos, must_reach_end)) return true;
+            }
+            return false;
+        } else {
+            // Exactly 1 match required
+            if (lpos >= line.len) return false;
+            if (!matchOneElement(line[lpos], pat[elem_start..elem_end])) return false;
+            lpos += 1;
+            ppos = elem_end;
+        }
     }
+
+    // Pattern consumed
+    if (must_reach_end) return lpos == line.len;
     return true;
+}
+
+/// Match a single character against a pattern element
+fn matchOneElement(ch: u8, elem: []const u8) bool {
+    if (elem.len == 0) return false;
+    if (elem[0] == '.') return true; // . matches any
+    if (elem[0] == '\\' and elem.len >= 2) return ch == elem[1];
+    if (elem[0] == '[') return matchCharClass(ch, elem);
+    return ch == elem[0];
+}
+
+/// Match character against a character class [...]
+fn matchCharClass(ch: u8, elem: []const u8) bool {
+    if (elem.len < 2) return false;
+    var i: usize = 1;
+    var negated = false;
+    if (i < elem.len and elem[i] == '^') { negated = true; i += 1; }
+    const end = if (elem[elem.len - 1] == ']') elem.len - 1 else elem.len;
+    var matched = false;
+    // Handle ] as first char in class
+    if (i < end and elem[i] == ']') {
+        if (ch == ']') matched = true;
+        i += 1;
+    }
+    while (i < end) {
+        if (i + 2 < end and elem[i + 1] == '-') {
+            // Range a-z
+            if (ch >= elem[i] and ch <= elem[i + 2]) matched = true;
+            i += 3;
+        } else {
+            if (ch == elem[i]) matched = true;
+            i += 1;
+        }
+    }
+    return if (negated) !matched else matched;
 }
 
 fn gf(gp: []const u8, ch: []const u8, fp2: []const u8, a2: std.mem.Allocator) ![]const u8 {
@@ -661,7 +731,7 @@ fn gf(gp: []const u8, ch: []const u8, fp2: []const u8, a2: std.mem.Allocator) ![
     return try mc.readGitObjectContent(gp, bh, a2);
 }
 
-fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, tl: []const []const u8, es: []B.BlameEntry, wl: ?[]const []const u8) !void {
+fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, tl: []const []const u8, es: []B.BlameEntry, wl: ?[]const []const u8, first_parent_only: bool) !void {
     var ub = try a.alloc(bool, tl.len);
     defer a.free(ub);
     @memset(ub, true);
@@ -726,7 +796,8 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
         const fap = try a.alloc(bool, tl.len);
         defer a.free(fap);
         @memset(fap, false);
-        for (pars.items) |ph| {
+        const pars_to_check = if (first_parent_only and pars.items.len > 1) pars.items[0..1] else pars.items;
+        for (pars_to_check) |ph| {
             const pf = gf(gp, ph, fp2, a) catch continue;
             defer a.free(pf);
             var pl = B.splitLines(a, pf) catch continue;
