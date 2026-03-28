@@ -18067,7 +18067,7 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
                     // Write an empty index (not delete — git writes empty index)
                     writeEmptyIndex(allocator, index_path) catch {};
                 },
-                .hard => {
+                .hard, .merge => {
                     // Clear the index and remove tracked files
                     const repo_root = std.fs.path.dirname(git_path) orelse ".";
                     removeTrackedFiles(allocator, index_path, repo_root) catch {};
