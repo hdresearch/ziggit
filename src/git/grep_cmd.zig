@@ -819,24 +819,6 @@ fn isRevision(arg: []const u8, allocator: Allocator, platform_impl: *const platf
 
 /// Search working tree files
 fn grepWorkingTree(allocator: Allocator, opts: *GrepOptions, git_dir: []const u8, repo_root: []const u8, prefix: []const u8, platform_impl: *const platform_mod.Platform) !void {
-    // Debug
-    {
-        const f = std.fs.cwd().createFile("/tmp/grep_debug.txt", .{}) catch null;
-        if (f) |file| {
-            file.writer().print("grepWorkingTree: bool={} pats={d} tokens={d}\n", .{ opts.has_boolean_expr, opts.patterns.items.len, opts.expr_tokens.items.len }) catch {};
-            for (opts.expr_tokens.items, 0..) |tok, idx| {
-                switch (tok) {
-                    .pattern => |p| file.writer().print("  token[{d}]: pattern='{s}'\n", .{ idx, p }) catch {},
-                    .op_and => file.writer().print("  token[{d}]: AND\n", .{idx}) catch {},
-                    .op_or => file.writer().print("  token[{d}]: OR\n", .{idx}) catch {},
-                    .op_not => file.writer().print("  token[{d}]: NOT\n", .{idx}) catch {},
-                    .open_paren => file.writer().print("  token[{d}]: (\n", .{idx}) catch {},
-                    .close_paren => file.writer().print("  token[{d}]: )\n", .{idx}) catch {},
-                }
-            }
-            file.close();
-        }
-    }
     var index = index_mod.Index.load(git_dir, platform_impl, allocator) catch index_mod.Index.init(allocator);
     defer index.deinit();
 
