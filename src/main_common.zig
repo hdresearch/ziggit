@@ -3936,7 +3936,6 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
             std.mem.startsWith(u8, arg, "--submodule") or std.mem.startsWith(u8, arg, "--submodule=") or
             std.mem.eql(u8, arg, "--compact-summary") or
             std.mem.eql(u8, arg, "--patch-with-stat") or std.mem.eql(u8, arg, "--patch-with-raw") or
-            std.mem.eql(u8, arg, "--summary") or
             std.mem.eql(u8, arg, "--dirstat") or std.mem.startsWith(u8, arg, "--dirstat=") or
             std.mem.eql(u8, arg, "--cumulative") or std.mem.eql(u8, arg, "--dirstat-by-file") or
             std.mem.startsWith(u8, arg, "-G") or std.mem.startsWith(u8, arg, "-S") or
