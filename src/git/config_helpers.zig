@@ -292,3 +292,305 @@ pub fn getUserInfo(git_dir: []const u8, allocator: std.mem.Allocator) !UserInfo 
     
     return helpers.getUserInfo();
 }
+
+/// Split a command line string respecting single and double quotes.
+/// Returns error.UnclosedQuote if there's an unmatched quote.
+/// This mimics git's split_cmdline() function.
+pub fn splitCmdline(input: []const u8, allocator: std.mem.Allocator) ![][]const u8 {
+    var words = std.array_list.Managed([]const u8).init(allocator);
+    errdefer {
+        for (words.items) |w| allocator.free(w);
+        words.deinit();
+    }
+
+    var buf = std.array_list.Managed(u8).init(allocator);
+    defer buf.deinit();
+
+    var i: usize = 0;
+    while (i < input.len) {
+        // Skip whitespace
+        while (i < input.len and (input[i] == ' ' or input[i] == '\t')) : (i += 1) {}
+        if (i >= input.len) break;
+
+        buf.clearRetainingCapacity();
+        while (i < input.len and input[i] != ' ' and input[i] != '\t') {
+            if (input[i] == '\\' and i + 1 < input.len) {
+                i += 1;
+                try buf.append(input[i]);
+                i += 1;
+            } else if (input[i] == '"') {
+                i += 1; // skip opening quote
+                while (i < input.len and input[i] != '"') {
+                    if (input[i] == '\\' and i + 1 < input.len) {
+                        i += 1;
+                        try buf.append(input[i]);
+                        i += 1;
+                    } else {
+                        try buf.append(input[i]);
+                        i += 1;
+                    }
+                }
+                if (i >= input.len) return error.UnclosedQuote;
+                i += 1; // skip closing quote
+            } else if (input[i] == '\'') {
+                i += 1; // skip opening quote
+                while (i < input.len and input[i] != '\'') {
+                    try buf.append(input[i]);
+                    i += 1;
+                }
+                if (i >= input.len) return error.UnclosedQuote;
+                i += 1; // skip closing quote
+            } else {
+                try buf.append(input[i]);
+                i += 1;
+            }
+        }
+        if (buf.items.len > 0) {
+            try words.append(try allocator.dupe(u8, buf.items));
+        }
+    }
+
+    return try words.toOwnedSlice();
+}
+
+/// Validate pre-command config: check core.bare is valid boolean if set via -c,
+/// and check hasconfig:remote.*.url violations.
+/// Called from main before command dispatch.
+pub fn validatePreCommandConfig(platform_impl: anytype) void {
+    const main_mod = @import("../main_common.zig");
+    const allocator = std.heap.page_allocator;
+
+    // Check core.bare boolean validity
+    if (main_mod.global_config_overrides) |overrides| {
+        for (overrides.items) |entry| {
+            if (std.ascii.eqlIgnoreCase(entry.key, "core.bare")) {
+                const val = entry.value;
+                if (!isValidBool(val)) {
+                    platform_impl.writeStderr("fatal: bad boolean config value '") catch {};
+                    platform_impl.writeStderr(val) catch {};
+                    platform_impl.writeStderr("' for 'core.bare'\n") catch {};
+                    std.process.exit(128);
+                }
+            }
+        }
+    }
+
+    // Check hasconfig:remote.*.url violations
+    // If the repo config uses includeIf hasconfig:remote.*.url and the included file
+    // defines remote URLs, that's forbidden.
+    const git_path = main_mod.findGitDirectory(allocator, platform_impl) catch return;
+    defer allocator.free(git_path);
+
+    const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch return;
+    defer allocator.free(config_path);
+
+    const content = std.fs.cwd().readFileAlloc(allocator, config_path, 10 * 1024 * 1024) catch return;
+    defer allocator.free(content);
+
+    // Scan for includeIf "hasconfig:remote.*.url:..." directives
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    var in_hasconfig_include = false;
+    var include_path: ?[]const u8 = null;
+
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+
+        // Check for [includeIf "hasconfig:remote.*.url:..."]
+        if (std.mem.startsWith(u8, trimmed, "[includeIf \"hasconfig:remote.")) {
+            in_hasconfig_include = true;
+            include_path = null;
+            continue;
+        }
+        if (trimmed.len > 0 and trimmed[0] == '[') {
+            in_hasconfig_include = false;
+            include_path = null;
+            continue;
+        }
+
+        if (in_hasconfig_include) {
+            // Look for path = ...
+            if (std.mem.startsWith(u8, trimmed, "path")) {
+                const after_path = std.mem.trimLeft(u8, trimmed[4..], " \t");
+                if (after_path.len > 0 and after_path[0] == '=') {
+                    var val = std.mem.trim(u8, after_path[1..], " \t");
+                    // Remove surrounding quotes
+                    if (val.len >= 2 and val[0] == '"' and val[val.len - 1] == '"') {
+                        val = val[1 .. val.len - 1];
+                    }
+                    include_path = val;
+                }
+            }
+        }
+
+        if (include_path) |ipath| {
+            // Read the included file and check for remote URLs
+            const inc_content = std.fs.cwd().readFileAlloc(allocator, ipath, 10 * 1024 * 1024) catch {
+                include_path = null;
+                continue;
+            };
+            defer allocator.free(inc_content);
+
+            if (configHasRemoteUrl(inc_content)) {
+                platform_impl.writeStderr("fatal: remote URLs cannot be configured in file directly or indirectly included by includeIf.hasconfig:remote.*.url\n") catch {};
+                std.process.exit(128);
+            }
+            include_path = null;
+        }
+    }
+}
+
+fn configHasRemoteUrl(content: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    var in_remote_section = false;
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len > 0 and trimmed[0] == '[') {
+            // Check for [remote "..."]
+            in_remote_section = std.mem.startsWith(u8, trimmed, "[remote ");
+            continue;
+        }
+        if (in_remote_section) {
+            const kv = std.mem.trim(u8, trimmed, " \t");
+            if (std.mem.startsWith(u8, kv, "url")) {
+                const after = std.mem.trimLeft(u8, kv[3..], " \t");
+                if (after.len > 0 and after[0] == '=') {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+fn isValidBool(val: []const u8) bool {
+    if (val.len == 0) return true; // empty = true in git
+    const lower_bufs = [_][]const u8{
+        "true", "false", "yes", "no", "on", "off", "1", "0",
+    };
+    for (lower_bufs) |valid| {
+        if (std.ascii.eqlIgnoreCase(val, valid)) return true;
+    }
+    return false;
+}
+
+/// Set GIT_CONFIG_PARAMETERS environment variable from global_config_overrides.
+/// This ensures child processes (e.g., shell aliases) inherit -c overrides.
+pub fn setConfigParametersEnv(allocator: std.mem.Allocator) void {
+    const main_mod = @import("../main_common.zig");
+    const overrides = main_mod.global_config_overrides orelse return;
+    if (overrides.items.len == 0) return;
+
+    // Build GIT_CONFIG_PARAMETERS format: 'key=value' 'key=value' ...
+    var buf = std.array_list.Managed(u8).init(allocator);
+    defer buf.deinit();
+
+    for (overrides.items) |entry| {
+        if (buf.items.len > 0) buf.append(' ') catch return;
+        buf.append('\'') catch return;
+        // Escape single quotes in key and value
+        for (entry.key) |c| {
+            if (c == '\'') {
+                buf.appendSlice("'\\''") catch return;
+            } else {
+                buf.append(c) catch return;
+            }
+        }
+        buf.append('=') catch return;
+        for (entry.value) |c| {
+            if (c == '\'') {
+                buf.appendSlice("'\\''") catch return;
+            } else {
+                buf.append(c) catch return;
+            }
+        }
+        buf.append('\'') catch return;
+    }
+
+    // Null-terminate for C setenv
+    buf.append(0) catch return;
+    const c_str: [*:0]const u8 = @ptrCast(buf.items[0 .. buf.items.len - 1 :0]);
+    _ = main_mod.cSetenv("GIT_CONFIG_PARAMETERS", c_str, 1);
+}
+
+/// Resolve alias from config, respecting GIT_CONFIG_NOSYSTEM and GIT_CONFIG_SYSTEM.
+/// Returns the alias value or null if not found.
+pub fn resolveAliasFromConfig(allocator: std.mem.Allocator, name: []const u8, platform_impl: anytype) ?[]u8 {
+    const main_mod = @import("../main_common.zig");
+    const alias_key = std.fmt.allocPrint(allocator, "alias.{s}", .{name}) catch return null;
+    defer allocator.free(alias_key);
+    const alias_subsection_key = std.fmt.allocPrint(allocator, "alias.{s}.command", .{name}) catch return null;
+    defer allocator.free(alias_subsection_key);
+
+    // Check -c overrides first
+    if (main_mod.global_config_overrides) |overrides| {
+        for (overrides.items) |entry| {
+            if (std.ascii.eqlIgnoreCase(entry.key, alias_key)) {
+                return allocator.dupe(u8, entry.value) catch null;
+            }
+            if (std.ascii.eqlIgnoreCase(entry.key, alias_subsection_key)) {
+                return allocator.dupe(u8, entry.value) catch null;
+            }
+        }
+    }
+
+    // Try local config (.git/config)
+    if (main_mod.findGitDirectory(allocator, platform_impl)) |git_path| {
+        defer allocator.free(git_path);
+        const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch return null;
+        defer allocator.free(config_path);
+        if (platform_impl.fs.readFile(allocator, config_path)) |content| {
+            defer allocator.free(content);
+            if (main_mod.parseConfigValue(content, alias_key, allocator) catch null) |val| return val;
+            if (main_mod.parseConfigValue(content, alias_subsection_key, allocator) catch null) |val| return val;
+        } else |_| {}
+    } else |_| {}
+
+    // Try global config (~/.gitconfig)
+    if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
+        defer allocator.free(home);
+        const global_config = std.fmt.allocPrint(allocator, "{s}/.gitconfig", .{home}) catch return null;
+        defer allocator.free(global_config);
+        if (platform_impl.fs.readFile(allocator, global_config)) |content| {
+            defer allocator.free(content);
+            if (main_mod.parseConfigValue(content, alias_key, allocator) catch null) |val| return val;
+            if (main_mod.parseConfigValue(content, alias_subsection_key, allocator) catch null) |val| return val;
+        } else |_| {}
+
+        // Try XDG config
+        const xdg_config = std.fmt.allocPrint(allocator, "{s}/.config/git/config", .{home}) catch return null;
+        defer allocator.free(xdg_config);
+        if (platform_impl.fs.readFile(allocator, xdg_config)) |content| {
+            defer allocator.free(content);
+            if (main_mod.parseConfigValue(content, alias_key, allocator) catch null) |val| return val;
+            if (main_mod.parseConfigValue(content, alias_subsection_key, allocator) catch null) |val| return val;
+        } else |_| {}
+    } else |_| {}
+
+    // Try system config - respect GIT_CONFIG_NOSYSTEM and GIT_CONFIG_SYSTEM
+    const nosystem = std.process.getEnvVarOwned(allocator, "GIT_CONFIG_NOSYSTEM") catch null;
+    const skip_system = blk: {
+        if (nosystem) |ns| {
+            defer allocator.free(ns);
+            // GIT_CONFIG_NOSYSTEM=true/1/yes means skip system config
+            if (ns.len > 0 and !std.mem.eql(u8, ns, "0") and !std.ascii.eqlIgnoreCase(ns, "false") and !std.ascii.eqlIgnoreCase(ns, "no")) {
+                break :blk true;
+            }
+        }
+        break :blk false;
+    };
+
+    if (!skip_system) {
+        // Check GIT_CONFIG_SYSTEM for custom system config path
+        const system_path = std.process.getEnvVarOwned(allocator, "GIT_CONFIG_SYSTEM") catch null;
+        const sys_config_path: []const u8 = system_path orelse "/etc/gitconfig";
+        defer if (system_path) |sp| allocator.free(sp);
+
+        if (platform_impl.fs.readFile(allocator, sys_config_path)) |content| {
+            defer allocator.free(content);
+            if (main_mod.parseConfigValue(content, alias_key, allocator) catch null) |val| return val;
+            if (main_mod.parseConfigValue(content, alias_subsection_key, allocator) catch null) |val| return val;
+        } else |_| {}
+    }
+
+    return null;
+}

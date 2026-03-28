@@ -6,6 +6,7 @@ const index_mod = @import("index.zig");
 const config_mod = @import("config.zig");
 const diff_stats = @import("diff_stats.zig");
 const mc = @import("../main_common.zig");
+const config_helpers = @import("config_helpers.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -679,6 +680,17 @@ fn applyConfigDefaults(git_path: []const u8, opts: *MergeOpts, allocator: Alloca
     }
 
     if (merge_options_val) |mopts| {
+        // Validate quote syntax in mergeoptions (git's split_cmdline behavior)
+        const split_words = config_helpers.splitCmdline(mopts, allocator) catch |err| {
+            if (err == error.UnclosedQuote) {
+                const errmsg = std.fmt.allocPrint(allocator, "fatal: Bad branch.{s}.mergeoptions string: unclosed quote\n", .{short_branch}) catch "fatal: Bad mergeoptions string: unclosed quote\n";
+                writeStderr(platform_impl, errmsg);
+                std.process.exit(128);
+            }
+            return;
+        };
+        for (split_words) |w| allocator.free(w);
+        allocator.free(split_words);
         // Parse space-separated options - branch config is lower priority than command line
         var iter = std.mem.tokenizeAny(u8, mopts, " \t");
         while (iter.next()) |opt| {
