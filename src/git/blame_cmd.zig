@@ -96,6 +96,31 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
         // Handle ^REV syntax (boundary commit)
         const actual_rev = if (r.len > 0 and r[0] == '^') r[1..] else r;
         hh = mc.resolveRevision(gp, actual_rev, pi, a) catch (refs.resolveRef(gp, actual_rev, pi, a) catch null);
+        // Dereference tag objects to commits (follow chain)
+        if (hh) |h| {
+            var cur_h = h;
+            var depth: u32 = 0;
+            while (depth < 10) : (depth += 1) {
+                const data = mc.readGitObjectContent(gp, cur_h, a) catch break;
+                defer a.free(data);
+                if (std.mem.startsWith(u8, data, "object ") and data.len > 47) {
+                    if (std.mem.indexOf(u8, data, "\n")) |nl| {
+                        const target = data["object ".len..nl];
+                        if (target.len >= 40) {
+                            const new_h = a.dupe(u8, target[0..40]) catch break;
+                            if (cur_h.ptr != h.ptr) a.free(cur_h);
+                            cur_h = new_h;
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+            if (cur_h.ptr != h.ptr) {
+                a.free(h);
+                hh = cur_h;
+            }
+        }
     } else { hh = refs.resolveRef(gp, "HEAD", pi, a) catch null; }
 
     var fc: []const u8 = "";
