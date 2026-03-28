@@ -15227,6 +15227,8 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             try exclude_files.append(arg["--exclude-from=".len..]);
         } else if (std.mem.eql(u8, arg, "--exclude-per-directory")) {
             _ = args.next();
+        } else if (std.mem.startsWith(u8, arg, "--exclude-per-directory=")) {
+            // Accept the = form (ignore for now)
         } else if (std.mem.startsWith(u8, arg, "--format=")) {
             format_str = arg["--format=".len..];
         } else if (std.mem.eql(u8, arg, "--format")) {
@@ -20246,6 +20248,7 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     var verbose = false;
 
     var replace_mode = false;
+    var again_mode = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--add")) {
             add_mode = true;
@@ -20263,6 +20266,8 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             ignore_missing = true;
         } else if (std.mem.eql(u8, arg, "--unmerged")) {
             unmerged_mode = true;
+        } else if (std.mem.eql(u8, arg, "--again") or std.mem.eql(u8, arg, "-g")) {
+            again_mode = true;
         } else if (std.mem.eql(u8, arg, "--ignore-submodules")) {
             // silently accept
         } else if (std.mem.eql(u8, arg, "--cacheinfo")) {
@@ -20684,6 +20689,42 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         if (refresh_failed) {
             idx.save(git_dir, platform_impl) catch {};
             std.process.exit(1);
+        }
+    }
+
+    // Handle --again: re-stage entries that differ between index and worktree
+    if (again_mode) {
+        const repo_root2 = std.fs.path.dirname(git_dir) orelse ".";
+        var i_ag: usize = 0;
+        while (i_ag < idx.entries.items.len) {
+            const entry = idx.entries.items[i_ag];
+            const full_path2 = if (repo_root2.len > 0 and !std.mem.eql(u8, repo_root2, "."))
+                std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root2, entry.path }) catch { i_ag += 1; continue; }
+            else
+                allocator.dupe(u8, entry.path) catch { i_ag += 1; continue; };
+            defer allocator.free(full_path2);
+
+            if (std.fs.cwd().access(full_path2, .{})) |_| {
+                if (platform_impl.fs.readFile(allocator, full_path2)) |file_content| {
+                    defer allocator.free(file_content);
+                    const new_hash = objects.hashAndStore(file_content, "blob", git_dir, platform_impl, allocator) catch { i_ag += 1; continue; };
+                    defer allocator.free(new_hash);
+                    if (!std.mem.eql(u8, new_hash, entry.hash)) {
+                        idx.entries.items[i_ag].hash = allocator.dupe(u8, new_hash) catch { i_ag += 1; continue; };
+                        if (std.fs.cwd().statFile(full_path2)) |stat| {
+                            idx.entries.items[i_ag].size = @intCast(@min(stat.size, std.math.maxInt(u32)));
+                        } else |_| {}
+                        modified = true;
+                    }
+                } else |_| {}
+            } else |_| {
+                if (remove_mode) {
+                    _ = idx.entries.orderedRemove(i_ag);
+                    modified = true;
+                    continue;
+                }
+            }
+            i_ag += 1;
         }
     }
 
