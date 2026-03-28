@@ -911,16 +911,18 @@ fn grepWorkingTree(allocator: Allocator, opts: *GrepOptions, git_dir: []const u8
         } else {
             if (opts.files_without_match) {
                 // Print files that DON'T match
-                const quoted = quotePathIfNeeded(display_path, allocator, opts.null_separator);
-                defer allocator.free(quoted);
-                if (opts.null_separator) {
-                    const out = std.fmt.allocPrint(allocator, "{s}\x00", .{quoted}) catch continue;
-                    defer allocator.free(out);
-                    platform_impl.writeStdout(out) catch {};
-                } else {
-                    const out = std.fmt.allocPrint(allocator, "{s}\n", .{quoted}) catch continue;
-                    defer allocator.free(out);
-                    platform_impl.writeStdout(out) catch {};
+                if (!opts.quiet) {
+                    const quoted = quotePathIfNeeded(display_path, allocator, opts.null_separator);
+                    defer allocator.free(quoted);
+                    if (opts.null_separator) {
+                        const out = std.fmt.allocPrint(allocator, "{s}\x00", .{quoted}) catch continue;
+                        defer allocator.free(out);
+                        platform_impl.writeStdout(out) catch {};
+                    } else {
+                        const out = std.fmt.allocPrint(allocator, "{s}\n", .{quoted}) catch continue;
+                        defer allocator.free(out);
+                        platform_impl.writeStdout(out) catch {};
+                    }
                 }
                 found_match = true;
             }
@@ -1956,35 +1958,36 @@ fn isValidRegex(pattern: []const u8, extended: bool) bool {
     if (in_bracket) return false;
 
     // Check for unmatched parentheses
+    // In both BRE and ERE, unmatched ( or ) is invalid
+    // In BRE: \( and \) are grouping, bare ( and ) are literal
+    // In ERE: ( and ) are grouping, \( and \) are literal
+    // BUT: git treats bare ( and ) as invalid even in BRE mode
     var paren_depth: i32 = 0;
     i = 0;
     while (i < pattern.len) : (i += 1) {
         if (pattern[i] == '\\' and i + 1 < pattern.len) {
-            if (extended) {
-                i += 1;
-                continue;
-            }
-            // In BRE, \( and \) are grouping
-            if (pattern[i + 1] == '(') {
-                paren_depth += 1;
-                i += 1;
-                continue;
-            }
-            if (pattern[i + 1] == ')') {
-                paren_depth -= 1;
-                if (paren_depth < 0) return false;
-                i += 1;
-                continue;
+            if (!extended) {
+                // In BRE, \( and \) are grouping
+                if (pattern[i + 1] == '(') {
+                    paren_depth += 1;
+                    i += 1;
+                    continue;
+                }
+                if (pattern[i + 1] == ')') {
+                    paren_depth -= 1;
+                    if (paren_depth < 0) return false;
+                    i += 1;
+                    continue;
+                }
             }
             i += 1;
             continue;
         }
-        if (extended) {
-            if (pattern[i] == '(') paren_depth += 1;
-            if (pattern[i] == ')') {
-                paren_depth -= 1;
-                if (paren_depth < 0) return false;
-            }
+        // Both BRE and ERE: bare ( and ) count as parens for validation
+        if (pattern[i] == '(') paren_depth += 1;
+        if (pattern[i] == ')') {
+            paren_depth -= 1;
+            if (paren_depth < 0) return false;
         }
     }
     if (paren_depth != 0) return false;
