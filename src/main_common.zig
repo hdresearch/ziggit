@@ -33907,7 +33907,7 @@ fn nativeCmdRevert(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     const git_path = try findGitDirectory(allocator, platform_impl);
     defer allocator.free(git_path);
 
-    var positionals = std.array_list.ArrayListAligned([]const u8, null).init(allocator);
+    var positionals = std.ArrayList([]const u8).init(allocator);
     defer positionals.deinit();
 
     var i: usize = command_index + 1;
