@@ -1060,6 +1060,26 @@ fn State(comptime PlatformType: type) type {
     };
 }
 
+fn isInvalidPath(path: []const u8) bool {
+    if (path.len == 0) return false;
+    // Check for . and ..
+    if (std.mem.eql(u8, path, ".") or std.mem.eql(u8, path, "..")) return true;
+    // Check for .git or .gitmodules at root level or in any path component
+    var iter = std.mem.splitScalar(u8, path, '/');
+    while (iter.next()) |component| {
+        if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return true;
+        if (std.mem.eql(u8, component, ".git") or std.mem.eql(u8, component, ".GIT")) return true;
+        if (std.mem.eql(u8, component, ".gitmodules")) return true;
+        // Also check for .git case-insensitive-ish variants like .gIt etc.
+        if (component.len == 4 and (component[0] == '.') and
+            (component[1] == 'g' or component[1] == 'G') and
+            (component[2] == 'i' or component[2] == 'I') and
+            (component[3] == 't' or component[3] == 'T'))
+            return true;
+    }
+    return false;
+}
+
 fn normalizeMode(mode: []const u8) []const u8 {
     if (std.mem.eql(u8, mode, "644")) return "100644";
     if (std.mem.eql(u8, mode, "755")) return "100755";
