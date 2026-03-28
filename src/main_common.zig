@@ -121,7 +121,7 @@ const NATIVE_COMMANDS = [_][]const u8{
     "column", "check-ignore", "check-attr",
     "switch", "restore", "worktree", "stripspace", "checkout-index",
     "show-branch", "blame", "annotate", "ls-remote", "upload-pack", "receive-pack", "send-pack", "check-ref-format", "last-modified", "refs",
-    "rebase", "cherry-pick", "daemon", "bisect",
+    "rebase", "cherry-pick", "revert", "daemon", "bisect",
     "grep", "notes", "format-patch", "whatchanged", "for-each-repo", "bugreport", "diagnose",
 };
 
