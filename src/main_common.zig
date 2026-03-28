@@ -30907,10 +30907,8 @@ fn outputCombinedRaw(allocator: std.mem.Allocator, parent_hashes: []const []cons
             }
         }
         
-        // For --cc (dense), only show files that differ from ALL parents
-        if (dense and !differs_from_all) continue;
-        // For -c, show files that differ from any parent
-        if (!dense and !differs_from_any) continue;
+        // Both -c and --cc show only files that differ from ALL parents
+        if (!differs_from_all) continue;
         
         // Build the raw line
         var line = std.array_list.Managed(u8).init(allocator);
