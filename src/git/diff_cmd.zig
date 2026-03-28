@@ -2814,6 +2814,8 @@ const LogOpts = struct {
     no_prefix: bool = false,
     combined_style: CombinedStyle = .none,
     line_prefix: []const u8 = "",
+    format_string: ?[]const u8 = null,
+    format_is_separator: bool = false,
 
     const DiffMergesMode = enum { default, off, on, first_parent, combined, dense_combined, separate };
     const DecorateMode = enum { no, short, full };
