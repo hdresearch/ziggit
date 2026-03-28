@@ -20110,7 +20110,7 @@ fn cmdHashObject(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         while (lines.next()) |line| {
             const trimmed = std.mem.trimRight(u8, line, "\r");
             if (trimmed.len == 0) continue;
-            try hashOneFile(allocator, trimmed, obj_type, write_object, git_dir, platform_impl);
+            try hashOneFile(allocator, trimmed, obj_type, write_object, literally, git_dir, platform_impl);
         }
     } else if (stdin_mode) {
         // Read data from stdin first
@@ -20119,14 +20119,14 @@ fn cmdHashObject(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             unreachable;
         };
         defer allocator.free(data);
-        try hashData(allocator, data, obj_type, write_object, git_dir, platform_impl);
+        try hashData(allocator, data, obj_type, write_object, literally, git_dir, platform_impl);
         // Then process any file arguments
         for (files.items) |file_path| {
-            try hashOneFile(allocator, file_path, obj_type, write_object, git_dir, platform_impl);
+            try hashOneFile(allocator, file_path, obj_type, write_object, literally, git_dir, platform_impl);
         }
     } else if (files.items.len > 0) {
         for (files.items) |file_path| {
-            try hashOneFile(allocator, file_path, obj_type, write_object, git_dir, platform_impl);
+            try hashOneFile(allocator, file_path, obj_type, write_object, literally, git_dir, platform_impl);
         }
     } else {
         try platform_impl.writeStderr("usage: git hash-object [-t <type>] [-w] [--stdin | --stdin-paths | <file>...]\n");
@@ -20134,7 +20134,7 @@ fn cmdHashObject(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     }
 }
 
-fn hashOneFile(allocator: std.mem.Allocator, file_path: []const u8, obj_type: []const u8, write_object: bool, git_dir: ?[]const u8, platform_impl: *const platform_mod.Platform) !void {
+fn hashOneFile(allocator: std.mem.Allocator, file_path: []const u8, obj_type: []const u8, write_object: bool, literally: bool, git_dir: ?[]const u8, platform_impl: *const platform_mod.Platform) !void {
     const data = std.fs.cwd().readFileAlloc(allocator, file_path, 100 * 1024 * 1024) catch {
         const msg = try std.fmt.allocPrint(allocator, "fatal: Cannot open '{s}': No such file or directory\n", .{file_path});
         defer allocator.free(msg);
@@ -20143,10 +20143,89 @@ fn hashOneFile(allocator: std.mem.Allocator, file_path: []const u8, obj_type: []
         unreachable;
     };
     defer allocator.free(data);
-    try hashData(allocator, data, obj_type, write_object, git_dir, platform_impl);
+    try hashData(allocator, data, obj_type, write_object, literally, git_dir, platform_impl);
 }
 
-fn hashData(allocator: std.mem.Allocator, data: []const u8, obj_type: []const u8, write_object: bool, git_dir: ?[]const u8, platform_impl: *const platform_mod.Platform) !void {
+fn validateTreeObject(data: []const u8, platform_impl: *const platform_mod.Platform) !void {
+    // A tree entry is: mode SP name NUL sha1(20 bytes)
+    // Minimum valid entry: "100644 x\0" + 20 bytes = 30 bytes
+    if (data.len > 0 and data.len < 24) {
+        try platform_impl.writeStderr("error: too-short tree object\n");
+        return error.InvalidTree;
+    }
+
+    var pos: usize = 0;
+    var last_name: ?[]const u8 = null;
+    while (pos < data.len) {
+        // Parse mode
+        const mode_start = pos;
+        while (pos < data.len and data[pos] != ' ') : (pos += 1) {}
+        if (pos >= data.len) {
+            try platform_impl.writeStderr("error: too-short tree object\n");
+            return error.InvalidTree;
+        }
+        const mode_str = data[mode_start..pos];
+        // Validate mode: must be valid octal and a known git mode
+        const valid_modes = [_][]const u8{ "40000", "100644", "100755", "120000", "160000", "100664" };
+        var mode_valid = false;
+        for (valid_modes) |vm| {
+            if (std.mem.eql(u8, mode_str, vm)) {
+                mode_valid = true;
+                break;
+            }
+        }
+        if (!mode_valid) {
+            try platform_impl.writeStderr("error: malformed mode in tree entry\n");
+            return error.InvalidTree;
+        }
+        pos += 1; // skip space
+
+        // Parse name (until NUL)
+        const name_start = pos;
+        while (pos < data.len and data[pos] != 0) : (pos += 1) {}
+        if (pos >= data.len) {
+            try platform_impl.writeStderr("error: too-short tree object\n");
+            return error.InvalidTree;
+        }
+        const name = data[name_start..pos];
+        if (name.len == 0) {
+            try platform_impl.writeStderr("error: empty filename in tree entry\n");
+            return error.InvalidTree;
+        }
+
+        // Check for duplicate filenames
+        if (last_name) |ln| {
+            if (std.mem.eql(u8, ln, name)) {
+                try platform_impl.writeStderr("error: duplicate filename in tree\n");
+                return error.InvalidTree;
+            }
+        }
+        last_name = name;
+
+        pos += 1; // skip NUL
+
+        // Read 20-byte SHA1
+        if (pos + 20 > data.len) {
+            try platform_impl.writeStderr("error: too-short tree object\n");
+            return error.InvalidTree;
+        }
+        // Check for null SHA1
+        var all_zero = true;
+        for (data[pos .. pos + 20]) |b| {
+            if (b != 0) {
+                all_zero = false;
+                break;
+            }
+        }
+        if (all_zero) {
+            try platform_impl.writeStderr("error: empty filename in tree entry\n");
+            return error.InvalidTree;
+        }
+        pos += 20;
+    }
+}
+
+fn hashData(allocator: std.mem.Allocator, data: []const u8, obj_type: []const u8, write_object: bool, literally: bool, git_dir: ?[]const u8, platform_impl: *const platform_mod.Platform) !void {
     const parsed_type = objects.ObjectType.fromString(obj_type) orelse {
         const msg = try std.fmt.allocPrint(allocator, "fatal: invalid object type \"{s}\"\n", .{obj_type});
         defer allocator.free(msg);
@@ -20154,6 +20233,36 @@ fn hashData(allocator: std.mem.Allocator, data: []const u8, obj_type: []const u8
         std.process.exit(128);
         unreachable;
     };
+    // Validate object format unless --literally is set
+    if (!literally) {
+        switch (parsed_type) {
+            .tree => {
+                // Validate tree object format
+                validateTreeObject(data, platform_impl) catch {
+                    std.process.exit(128);
+                    unreachable;
+                };
+            },
+            .commit => {
+                // Minimal commit validation: must have "tree " line
+                if (!std.mem.startsWith(u8, data, "tree ")) {
+                    platform_impl.writeStderr("fatal: corrupt commit\n") catch {};
+                    std.process.exit(128);
+                    unreachable;
+                }
+            },
+            .tag => {
+                // Minimal tag validation: must have "object " line
+                if (!std.mem.startsWith(u8, data, "object ")) {
+                    platform_impl.writeStderr("fatal: corrupt tag\n") catch {};
+                    std.process.exit(128);
+                    unreachable;
+                }
+            },
+            else => {},
+        }
+    }
+
     const obj = objects.GitObject.init(parsed_type, data);
     const hash = try obj.hash(allocator);
     defer allocator.free(hash);
