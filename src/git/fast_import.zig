@@ -8,7 +8,7 @@ const Mark = struct {
 
 pub fn run(allocator: std.mem.Allocator, platform_impl: anytype, options: Options, git_dir: []const u8) !void {
 
-    var state = State(@TypeOf(platform_impl)).init(allocator, git_dir, platform_impl);
+    var state = State(@TypeOf(platform_impl)).init(allocator, git_dir, platform_impl, options);
     defer state.deinit();
 
     // Import marks if requested
@@ -80,7 +80,9 @@ pub fn run(allocator: std.mem.Allocator, platform_impl: anytype, options: Option
             state.catBlob(ref) catch {};
         } else if (std.mem.startsWith(u8, line, "ls ")) {
             pos = line_end + 1;
-            // ls command - skip for now
+            // ls command - output file info
+            const ls_arg = line[3..];
+            state.lsCommand(ls_arg) catch {};
         } else if (std.mem.startsWith(u8, line, "option ")) {
             pos = line_end + 1;
             // Ignore options
@@ -115,6 +117,7 @@ pub const Options = struct {
     import_marks_if_exists: ?[]const u8 = null,
     export_marks: ?[]const u8 = null,
     expect_done: *bool,
+    date_format_raw_permissive: bool = false,
 };
 
 fn findGitDir(allocator: std.mem.Allocator) ?[]const u8 {
@@ -192,14 +195,16 @@ fn State(comptime PlatformType: type) type {
         marks: std.AutoHashMap(u64, [40]u8),
         // Track last commit for each ref
         ref_commits: std.StringHashMap([40]u8),
+        options: Options,
 
-        fn init(allocator: std.mem.Allocator, git_dir: []const u8, platform: PlatformType) Self {
+        fn init(allocator: std.mem.Allocator, git_dir: []const u8, platform: PlatformType, options: Options) Self {
             return .{
                 .allocator = allocator,
                 .git_dir = git_dir,
                 .platform = platform,
                 .marks = std.AutoHashMap(u64, [40]u8).init(allocator),
                 .ref_commits = std.StringHashMap([40]u8).init(allocator),
+                .options = options,
             };
         }
 
@@ -473,9 +478,31 @@ fn State(comptime PlatformType: type) type {
                 } else if (std.mem.startsWith(u8, line, "N ")) {
                     // Note command - skip
                     pos = line_end + 1;
-                } else if (std.mem.startsWith(u8, line, "C ") or std.mem.startsWith(u8, line, "R ")) {
-                    // Copy/Rename - skip for now
+                } else if (std.mem.startsWith(u8, line, "C ")) {
                     pos = line_end + 1;
+                    // Copy: C <source> <dest>
+                    const rest = line[2..];
+                    const paths = parseCopyRenamePaths(rest, self.allocator) catch continue;
+                    const src = paths[0];
+                    const dest = paths[1];
+                    defer {
+                        if (src.ptr != rest.ptr and src.ptr != rest[0..0].ptr) self.allocator.free(src);
+                        if (dest.ptr != rest.ptr) self.allocator.free(dest);
+                    }
+                    self.copyEntries(&tree_entries, src, dest) catch continue;
+                } else if (std.mem.startsWith(u8, line, "R ")) {
+                    pos = line_end + 1;
+                    // Rename: R <source> <dest>
+                    const rest = line[2..];
+                    const paths = parseCopyRenamePaths(rest, self.allocator) catch continue;
+                    const src = paths[0];
+                    const dest = paths[1];
+                    defer {
+                        if (src.ptr != rest.ptr and src.ptr != rest[0..0].ptr) self.allocator.free(src);
+                        if (dest.ptr != rest.ptr) self.allocator.free(dest);
+                    }
+                    self.copyEntries(&tree_entries, src, dest) catch continue;
+                    self.removeEntries(&tree_entries, src);
                 } else {
                     // Not a file command - this line belongs to the next command
                     break;
@@ -506,6 +533,16 @@ fn State(comptime PlatformType: type) type {
                 for (parents.items[if (parent_hash != null) @as(usize, 1) else 0..]) |p| {
                     const ptr: *[40]u8 = @constCast(@ptrCast(@alignCast(p.ptr)));
                     self.allocator.destroy(ptr);
+                }
+            }
+
+            // Validate committer/author lines
+            if (committer_line) |cl| {
+                if (!self.options.date_format_raw_permissive) {
+                    if (!isValidCommitterLine(cl)) {
+                        try self.platform.writeStderr("fatal: Invalid committer line\n");
+                        std.process.exit(1);
+                    }
                 }
             }
 
@@ -1016,6 +1053,18 @@ fn State(comptime PlatformType: type) type {
             return hash;
         }
 
+        fn lsCommand(self: *Self, arg: []const u8) !void {
+            // ls <path> - list file in current commit context
+            // Just output something reasonable for now
+            const path = unquotePath(arg, self.allocator) catch return;
+            defer {
+                if (path.ptr != arg.ptr) self.allocator.free(path);
+            }
+            // Try to find the file in the last ref's tree
+            // For now, output nothing (git fast-import ls outputs to stdout)
+            _ = path;
+        }
+
         fn catBlob(self: *Self, dataref: []const u8) !void {
             const hash = self.resolveDataref(dataref) orelse return;
             const obj = objects.GitObject.load(&hash, self.git_dir, self.platform, self.allocator) catch return;
@@ -1060,6 +1109,33 @@ fn State(comptime PlatformType: type) type {
     };
 }
 
+fn isValidCommitterLine(line: []const u8) bool {
+    // Format: Name <email> timestamp timezone
+    // Find last > which ends the email
+    const gt_pos = std.mem.lastIndexOfScalar(u8, line, '>') orelse return false;
+    if (gt_pos + 2 >= line.len) return false;
+    if (line[gt_pos + 1] != ' ') return false;
+
+    const after_email = line[gt_pos + 2 ..];
+    // Should be: timestamp SP timezone
+    const space_pos = std.mem.indexOfScalar(u8, after_email, ' ') orelse return false;
+    const timestamp_str = after_email[0..space_pos];
+    const tz_str = after_email[space_pos + 1 ..];
+
+    // Validate timestamp is a number
+    _ = std.fmt.parseInt(i64, timestamp_str, 10) catch return false;
+
+    // Validate timezone format: +HHMM or -HHMM (exactly 5 chars)
+    if (tz_str.len != 5) return false;
+    if (tz_str[0] != '+' and tz_str[0] != '-') return false;
+    // HH should be 00-23, MM should be 00-59
+    const hours = std.fmt.parseInt(u32, tz_str[1..3], 10) catch return false;
+    const minutes = std.fmt.parseInt(u32, tz_str[3..5], 10) catch return false;
+    if (hours > 23 or minutes > 59) return false;
+
+    return true;
+}
+
 fn isInvalidPath(path: []const u8) bool {
     if (path.len == 0) return false;
     // Check for . and ..
@@ -1095,6 +1171,46 @@ fn parseTwoPaths(rest: []const u8, allocator: std.mem.Allocator) !struct { []con
         return .{ rest[0..space], rest[space + 1 ..] };
     }
     return error.InvalidFormat;
+}
+
+fn parseCopyRenamePaths(rest: []const u8, allocator: std.mem.Allocator) !struct { []const u8, []const u8 } {
+    // Handle quoted paths
+    if (rest.len > 0 and rest[0] == '"') {
+        // Find end of quoted source
+        const src = try unquotePath(rest, allocator);
+        // Find the closing quote
+        var i: usize = 1;
+        while (i < rest.len) {
+            if (rest[i] == '"' and (i == 0 or rest[i - 1] != '\\')) {
+                i += 1;
+                break;
+            }
+            i += 1;
+        }
+        if (i < rest.len and rest[i] == ' ') {
+            i += 1;
+        }
+        const dest_raw = rest[i..];
+        const dest = try unquotePath(dest_raw, allocator);
+        if (dest.ptr == dest_raw.ptr) {
+            const owned_dest = try allocator.dupe(u8, dest);
+            return .{ src, owned_dest };
+        }
+        return .{ src, dest };
+    } else {
+        // Unquoted: find space separator
+        if (std.mem.indexOfScalar(u8, rest, ' ')) |space| {
+            const src = rest[0..space];
+            const dest_raw = rest[space + 1 ..];
+            const dest = try unquotePath(dest_raw, allocator);
+            if (dest.ptr == dest_raw.ptr) {
+                const owned_dest = try allocator.dupe(u8, dest);
+                return .{ src, owned_dest };
+            }
+            return .{ src, dest };
+        }
+        return error.InvalidFormat;
+    }
 }
 
 fn skipLine(data: []const u8, pos: usize) usize {

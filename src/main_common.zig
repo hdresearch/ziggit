@@ -38743,6 +38743,10 @@ fn cmdFastImport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             options.import_marks_if_exists = arg["--import-marks-if-exists=".len..];
         } else if (std.mem.startsWith(u8, arg, "--export-marks=")) {
             options.export_marks = arg["--export-marks=".len..];
+        } else if (std.mem.eql(u8, arg, "--date-format=raw-permissive")) {
+            options.date_format_raw_permissive = true;
+        } else if (std.mem.startsWith(u8, arg, "--date-format=")) {
+            // raw is default, others accepted
         }
     }
 
