@@ -26686,7 +26686,9 @@ fn parseExpireTime(expire: []const u8) error{InvalidFormat}!i128 {
     return now - 14 * 86400;
 }
 
-fn doNativePrune(allocator: std.mem.Allocator, git_dir: []const u8, platform_impl: anytype, expire: []const u8) !void {
+fn doNativePrune(allocator: std.mem.Allocator, git_dir: []const u8, platform_impl: anytype, expire: []const u8, _verbose: bool, _dry_run: bool) !void {
+    _ = _verbose;
+    _ = _dry_run;
     _ = platform_impl;
 
     const expire_cutoff = parseExpireTime(expire) catch std.time.timestamp() - 14 * 86400;
