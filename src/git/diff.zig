@@ -556,71 +556,78 @@ fn generateHunksFromEditsWithOptions(
     if (edits.len == 0) return;
     
     const context_lines = options.context_lines;
-    var current_hunk: ?DiffHunk = null;
-    var last_change_idx: usize = 0;
     
+    // First pass: find change ranges
+    var change_starts = std.array_list.Managed(usize).init(allocator);
+    defer change_starts.deinit();
+    var change_ends = std.array_list.Managed(usize).init(allocator);
+    defer change_ends.deinit();
+    
+    var in_change = false;
     for (edits, 0..) |edit, idx| {
-        switch (edit.type) {
-            .keep => {
-                if (current_hunk != null) {
-                    // Add context line to current hunk
-                    try current_hunk.?.addLine(.context, old_lines[edit.old_index], allocator);
-                    
-                    // Check if we should close this hunk
-                    var consecutive_context: usize = 0;
-                    var check_idx = idx;
-                    while (check_idx < edits.len and edits[check_idx].type == .keep) : (check_idx += 1) {
-                        consecutive_context += 1;
-                        if (consecutive_context > context_lines * 2) {
-                            // Close current hunk
-                            try hunks.append(current_hunk.?);
-                            current_hunk = null;
-                            break;
-                        }
-                    }
-                }
-            },
-            .delete, .insert => {
-                if (current_hunk == null) {
-                    // Start new hunk with context
-                    current_hunk = DiffHunk.init(allocator);
-                    const start_context = if (edit.old_index >= context_lines) context_lines else edit.old_index;
-                    current_hunk.?.old_start = @intCast(edit.old_index - start_context + 1);
-                    current_hunk.?.new_start = @intCast(edit.new_index - start_context + 1);
-                    
-                    // Add leading context
-                    var ctx_idx: usize = edit.old_index - start_context;
-                    while (ctx_idx < edit.old_index) : (ctx_idx += 1) {
-                        try current_hunk.?.addLine(.context, old_lines[ctx_idx], allocator);
-                    }
-                }
-                
-                // Add the actual change
-                switch (edit.type) {
-                    .delete => try current_hunk.?.addLine(.remove, old_lines[edit.old_index], allocator),
-                    .insert => try current_hunk.?.addLine(.add, new_lines[edit.new_index], allocator),
-                    else => unreachable,
-                }
-                
-                last_change_idx = idx;
-            },
+        if (edit.type != .keep) {
+            if (!in_change) { try change_starts.append(idx); in_change = true; }
+        } else {
+            if (in_change) { try change_ends.append(idx); in_change = false; }
         }
     }
+    if (in_change) try change_ends.append(edits.len);
+    if (change_starts.items.len == 0) return;
     
-    // Close final hunk if exists
-    if (current_hunk != null) {
-        // Add trailing context
-        const remaining_lines = if (edits[last_change_idx].old_index + 1 < old_lines.len) 
-            old_lines.len - (edits[last_change_idx].old_index + 1)
-        else 
-            0;
-        const max_context = @min(context_lines, remaining_lines);
-        var ctx_idx: usize = 0;
-        while (ctx_idx < max_context and edits[last_change_idx].old_index + 1 + ctx_idx < old_lines.len) : (ctx_idx += 1) {
-            try current_hunk.?.addLine(.context, old_lines[edits[last_change_idx].old_index + 1 + ctx_idx], allocator);
+    // Group changes within 2*context_lines of each other
+    var group_starts = std.array_list.Managed(usize).init(allocator);
+    defer group_starts.deinit();
+    var group_ends = std.array_list.Managed(usize).init(allocator);
+    defer group_ends.deinit();
+    
+    try group_starts.append(0);
+    var gi: usize = 1;
+    while (gi < change_starts.items.len) : (gi += 1) {
+        const gap = change_starts.items[gi] - change_ends.items[gi - 1];
+        if (gap > context_lines * 2) {
+            try group_ends.append(gi - 1);
+            try group_starts.append(gi);
+        }
+    }
+    try group_ends.append(change_starts.items.len - 1);
+    
+    // Create hunks
+    for (group_starts.items, group_ends.items) |gs, ge| {
+        var hunk = DiffHunk.init(allocator);
+        const first_edit = edits[change_starts.items[gs]];
+        const lead_ctx = @min(context_lines, first_edit.old_index);
+        const lead_new_ctx = @min(context_lines, first_edit.new_index);
+        hunk.old_start = @intCast(first_edit.old_index - lead_ctx + 1);
+        hunk.new_start = @intCast(first_edit.new_index - lead_new_ctx + 1);
+        
+        var ci: usize = first_edit.old_index - lead_ctx;
+        while (ci < first_edit.old_index) : (ci += 1) {
+            try hunk.addLine(.context, old_lines[ci], allocator);
         }
         
-        try hunks.append(current_hunk.?);
+        var ei: usize = change_starts.items[gs];
+        const last_change_end = change_ends.items[ge];
+        while (ei < last_change_end) : (ei += 1) {
+            switch (edits[ei].type) {
+                .keep => try hunk.addLine(.context, old_lines[edits[ei].old_index], allocator),
+                .delete => try hunk.addLine(.remove, old_lines[edits[ei].old_index], allocator),
+                .insert => try hunk.addLine(.add, new_lines[edits[ei].new_index], allocator),
+            }
+        }
+        
+        const last_edit = edits[last_change_end - 1];
+        const trail_old_start = switch (last_edit.type) {
+            .delete => last_edit.old_index + 1,
+            .insert => last_edit.old_index,
+            .keep => last_edit.old_index + 1,
+        };
+        const remaining = if (trail_old_start < old_lines.len) old_lines.len - trail_old_start else 0;
+        const trail_ctx = @min(context_lines, remaining);
+        var ti: usize = 0;
+        while (ti < trail_ctx) : (ti += 1) {
+            try hunk.addLine(.context, old_lines[trail_old_start + ti], allocator);
+        }
+        try hunks.append(hunk);
     }
 }
 
