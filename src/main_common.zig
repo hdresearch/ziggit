@@ -25883,7 +25883,7 @@ fn nativeCmdPrune(allocator: std.mem.Allocator, args: [][]const u8, command_inde
     try doNativePrune(allocator, git_dir, platform_impl, expire);
 }
 
-fn parseExpireTime(expire: []const u8) ParseExpireError!i128 {
+fn parseExpireTime(expire: []const u8) error{InvalidFormat}!i128 {
     // Parse expire time strings like "1.day", "2.weeks.ago", "now", "never"
     if (expire.len == 0 or std.mem.eql(u8, expire, "now")) return std.math.maxInt(i128); // prune everything
     if (std.mem.eql(u8, expire, "never")) return 0; // prune nothing
