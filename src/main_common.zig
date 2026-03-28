@@ -11019,6 +11019,7 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     var verbose = false;
     var quiet = false;
     var follow_tags = false;
+    var follow_tags = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
@@ -11040,6 +11041,8 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
             verbose = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             quiet = true;
+        } else if (std.mem.eql(u8, arg, "--follow-tags")) {
+            follow_tags = true;
         } else if (std.mem.eql(u8, arg, "--follow-tags")) {
             follow_tags = true;
         } else if (std.mem.eql(u8, arg, "-h")) {
@@ -11285,6 +11288,21 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
                     } else |_| {}
                 }
                 defer if (resolved_branch) |b| allocator.free(b);
+                // Check for ambiguous refspec (both branch and tag exist)
+                if (!std.mem.startsWith(u8, push_src, "refs/") and !std.mem.eql(u8, push_src, "HEAD")) {
+                    const ambig_branch = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, push_src });
+                    defer allocator.free(ambig_branch);
+                    const ambig_tag = try std.fmt.allocPrint(allocator, "{s}/refs/tags/{s}", .{ git_path, push_src });
+                    defer allocator.free(ambig_tag);
+                    const ab = if (std.fs.cwd().access(ambig_branch, .{})) true else |_| false;
+                    const at = if (std.fs.cwd().access(ambig_tag, .{})) true else |_| false;
+                    if (ab and at) {
+                        const amsg = try std.fmt.allocPrint(allocator, "error: src refspec {s} matches more than one\nerror: failed to push some refs to '{s}'\n", .{ push_src, actual_url });
+                        defer allocator.free(amsg);
+                        try platform_impl.writeStderr(amsg);
+                        std.process.exit(1);
+                    }
+                }
                 const full_refspec = if (std.mem.startsWith(u8, push_src, "refs/"))
                     try std.fmt.allocPrint(allocator, "{s}:{s}", .{ push_src, push_dst })
                 else
@@ -11293,6 +11311,36 @@ fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
                 try pushRefspec(allocator, git_path, remote_git_dir, full_refspec, force_this, dry_run, quiet, platform_impl);
             }
         }
+    }
+
+    // Handle --follow-tags: push annotated tags
+    if (follow_tags) {
+        const ftags_dir = try std.fmt.allocPrint(allocator, "{s}/refs/tags", .{git_path});
+        defer allocator.free(ftags_dir);
+        if (std.fs.cwd().openDir(ftags_dir, .{ .iterate = true })) |ftd_val| {
+            var ftd = ftd_val;
+            defer ftd.close();
+            var ftiter = ftd.iterate();
+            while (ftiter.next() catch null) |ftentry| {
+                if (ftentry.kind != .file) continue;
+                const ft_ref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ ftags_dir, ftentry.name }) catch continue;
+                defer allocator.free(ft_ref_path);
+                const ft_hash_raw = std.fs.cwd().readFileAlloc(allocator, ft_ref_path, 256) catch continue;
+                defer allocator.free(ft_hash_raw);
+                const ft_hash = std.mem.trim(u8, ft_hash_raw, " \t\r\n");
+                const ft_remote_path = std.fmt.allocPrint(allocator, "{s}/refs/tags/{s}", .{ remote_git_dir, ftentry.name }) catch continue;
+                defer allocator.free(ft_remote_path);
+                if (std.fs.cwd().access(ft_remote_path, .{})) {
+                    continue;
+                } else |_| {}
+                const ft_obj = objects.GitObject.load(ft_hash, git_path, platform_impl, allocator) catch continue;
+                defer ft_obj.deinit(allocator);
+                if (ft_obj.type != .tag) continue;
+                const ft_refspec = std.fmt.allocPrint(allocator, "refs/tags/{s}:refs/tags/{s}", .{ ftentry.name, ftentry.name }) catch continue;
+                defer allocator.free(ft_refspec);
+                pushRefspec(allocator, git_path, remote_git_dir, ft_refspec, false, dry_run, quiet, platform_impl) catch {};
+            }
+        } else |_| {}
     }
 
     // Handle --follow-tags: push annotated tags
