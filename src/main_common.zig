@@ -8676,8 +8676,8 @@ fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     }
     if (pull_is_local) {
         const lp = if (std.mem.startsWith(u8, remote_url, "file://")) remote_url["file://".len..] else remote_url;
-        const empty_refspecs: []const []const u8 = &.{};
-        performLocalFetch(allocator, git_path, lp, remote, false, empty_refspecs, platform_impl, true) catch |err| {
+        const pull_fetch_refspecs: []const []const u8 = if (pull_positionals.items.len > 1) pull_positionals.items[1..] else &.{};
+        performLocalFetch(allocator, git_path, lp, remote, false, pull_fetch_refspecs, platform_impl, true) catch |err| {
             const emsg = try std.fmt.allocPrint(allocator, "fatal: fetch failed: {}\n", .{err});
             defer allocator.free(emsg);
             try platform_impl.writeStderr(emsg);
@@ -35961,18 +35961,88 @@ fn performLocalFetch(allocator: std.mem.Allocator, git_path: []const u8, source_
             const hnl = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.hash}); defer allocator.free(hnl);
             std.fs.cwd().writeFile(.{ .sub_path = drp, .data = hnl }) catch {};
         } } } } }
-    // FETCH_HEAD
+    // Opportunistic tracking update: when explicit refspecs are given on cmdline without destinations,
+    // use configured remote fetch refspecs to update tracking refs
+    if (cmd_refspecs.len > 0) {
+        // Get configured remote fetch refspecs
+        var cfg_fetch: ?[]u8 = null;
+        if (cfgc.len > 0) cfg_fetch = parseConfigValue(cfgc, fkey, allocator) catch null;
+        defer if (cfg_fetch) |cf| allocator.free(cf);
+        if (cfg_fetch) |cfg_rs| {
+            var crs2 = @as([]const u8, cfg_rs);
+            var cfg_force2 = false;
+            if (crs2.len > 0 and crs2[0] == '+') { cfg_force2 = true; crs2 = crs2[1..]; }
+            const colon2 = std.mem.indexOf(u8, crs2, ":") orelse crs2.len;
+            if (colon2 < crs2.len) {
+                const cfg_src2 = crs2[0..colon2];
+                const cfg_dst2 = crs2[colon2 + 1 ..];
+                if (cfg_dst2.len > 0) {
+                    for (srl.items) |entry| {
+                        // Check if this ref was fetched by an explicit refspec
+                        var was_fetched = false;
+                        for (cmd_refspecs) |crs3| {
+                            var cs3 = crs3;
+                            if (cs3.len > 0 and cs3[0] == '+') cs3 = cs3[1..];
+                            if (std.mem.indexOf(u8, cs3, ":")) |_| continue; // has dest, already handled
+                            if (t5Match(entry.name, cs3) != null) { was_fetched = true; break; }
+                        }
+                        if (!was_fetched) continue;
+                        if (t5Match(entry.name, cfg_src2)) |suffix3| {
+                            const tracking_ref2 = t5Map(allocator, suffix3, cfg_dst2) catch continue;
+                            defer allocator.free(tracking_ref2);
+                            const tracking_path2 = std.fmt.allocPrint(allocator, "{s}/{s}", .{git_path, tracking_ref2}) catch continue;
+                            defer allocator.free(tracking_path2);
+                            if (std.mem.lastIndexOfScalar(u8, tracking_path2, '/')) |ls| std.fs.cwd().makePath(tracking_path2[0..ls]) catch {};
+                            const hnl3 = std.fmt.allocPrint(allocator, "{s}\n", .{entry.hash}) catch continue;
+                            defer allocator.free(hnl3);
+                            std.fs.cwd().writeFile(.{ .sub_path = tracking_path2, .data = hnl3 }) catch {};
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // FETCH_HEAD - write for explicitly fetched refs
+    // Build FETCH_HEAD with proper for-merge status
+    var fh_buf = std.array_list.Managed(u8).init(allocator);
+    defer fh_buf.deinit();
+    if (cmd_refspecs.len > 0) {
+        // When explicit refspecs are given, FETCH_HEAD comes from matched refs
+        for (cmd_refspecs) |crs4| {
+            var cs4 = crs4;
+            if (cs4.len > 0 and cs4[0] == '+') cs4 = cs4[1..];
+            if (std.mem.indexOf(u8, cs4, ":")) |colon4| cs4 = cs4[0..colon4];
+            for (srl.items) |entry| {
+                if (t5Match(entry.name, cs4) != null) {
+                    const desc = if (std.mem.startsWith(u8, entry.name, "refs/heads/"))
+                        std.fmt.allocPrint(allocator, "branch '{s}' of {s}", .{ entry.name["refs/heads/".len..], source_path }) catch continue
+                    else if (std.mem.startsWith(u8, entry.name, "refs/tags/"))
+                        std.fmt.allocPrint(allocator, "tag '{s}' of {s}", .{ entry.name["refs/tags/".len..], source_path }) catch continue
+                    else
+                        std.fmt.allocPrint(allocator, "'{s}' of {s}", .{ entry.name, source_path }) catch continue;
+                    defer allocator.free(desc);
+                    const line = std.fmt.allocPrint(allocator, "{s}\t\t{s}\n", .{entry.hash, desc}) catch continue;
+                    defer allocator.free(line);
+                    fh_buf.appendSlice(line) catch {};
+                }
+            }
+        }
+    }
     const fhp = try std.fmt.allocPrint(allocator, "{s}/FETCH_HEAD", .{git_path}); defer allocator.free(fhp);
-    const shp = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{src_git_dir}); defer allocator.free(shp);
-    if (std.fs.cwd().readFileAlloc(allocator, shp, 4096)) |hc| { defer allocator.free(hc);
-        const tr = std.mem.trim(u8, hc, " \t\r\n");
-        var hh: ?[]const u8 = null; var ho = false;
-        if (std.mem.startsWith(u8, tr, "ref: ")) { hh = (refs.resolveRef(src_git_dir, tr["ref: ".len..], platform_impl, allocator) catch null); ho = true; }
-        else if (tr.len >= 40) { hh = tr[0..40]; }
-        if (hh) |h| { const bn = if (std.mem.startsWith(u8, tr, "ref: refs/heads/")) tr["ref: refs/heads/".len..] else "HEAD";
-            const fhc = try std.fmt.allocPrint(allocator, "{s}\t\tbranch '{s}' of {s}\n", .{h, bn, source_path}); defer allocator.free(fhc);
-            std.fs.cwd().writeFile(.{ .sub_path = fhp, .data = fhc }) catch {};
-            if (ho) allocator.free(h); } } else |_| {}
+    if (fh_buf.items.len > 0) {
+        std.fs.cwd().writeFile(.{ .sub_path = fhp, .data = fh_buf.items }) catch {};
+    } else {
+        const shp = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{src_git_dir}); defer allocator.free(shp);
+        if (std.fs.cwd().readFileAlloc(allocator, shp, 4096)) |hc| { defer allocator.free(hc);
+            const tr = std.mem.trim(u8, hc, " \t\r\n");
+            var hh: ?[]const u8 = null; var ho = false;
+            if (std.mem.startsWith(u8, tr, "ref: ")) { hh = (refs.resolveRef(src_git_dir, tr["ref: ".len..], platform_impl, allocator) catch null); ho = true; }
+            else if (tr.len >= 40) { hh = tr[0..40]; }
+            if (hh) |h| { const bn = if (std.mem.startsWith(u8, tr, "ref: refs/heads/")) tr["ref: refs/heads/".len..] else "HEAD";
+                const fhc = try std.fmt.allocPrint(allocator, "{s}\t\tbranch '{s}' of {s}\n", .{h, bn, source_path}); defer allocator.free(fhc);
+                std.fs.cwd().writeFile(.{ .sub_path = fhp, .data = fhc }) catch {};
+                if (ho) allocator.free(h); } } else |_| {}
+    }
     // Create remote HEAD symbolic ref
     {
         const src_head_p2 = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{src_git_dir});
