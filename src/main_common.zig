@@ -31349,14 +31349,14 @@ fn outputCombinedSummary(allocator: std.mem.Allocator, parent_hashes: []const []
     
     for (all_names3.items) |file_name| {
         const merge_info = merge_files2.get(file_name) orelse continue;
-        var in_all_parents = true;
+        var in_any_parent = false;
         for (parent_file_maps2.items) |pf| {
-            if (!pf.contains(file_name)) {
-                in_all_parents = false;
+            if (pf.contains(file_name)) {
+                in_any_parent = true;
                 break;
             }
         }
-        if (!in_all_parents) {
+        if (!in_any_parent) {
             var mode_str: []const u8 = merge_info.mode;
             if (mode_str.len < 6) mode_str = "100644";
             const out = try std.fmt.allocPrint(allocator, " create mode {s} {s}\n", .{ mode_str, file_name });
