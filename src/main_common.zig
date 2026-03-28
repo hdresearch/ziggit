@@ -5916,7 +5916,10 @@ fn clearWorkingDirectory(repo_root: []const u8, allocator: std.mem.Allocator, pl
     
     // Only delete files that are in the index (tracked files)
     for (idx.entries.items) |entry| {
-        dir.deleteFile(entry.path) catch {};
+        dir.deleteFile(entry.path) catch {
+            // If it's a directory (file was replaced by dir), remove the directory tree
+            dir.deleteTree(entry.path) catch {};
+        };
         // Try to remove empty parent directories
         if (std.fs.path.dirname(entry.path)) |parent| {
             dir.deleteDir(parent) catch {};
@@ -6059,10 +6062,6 @@ fn populateIndexFromTree(git_path: []const u8, tree_data: []const u8, repo_root:
         // Check if this is a tree (directory) or blob (file)
         if (std.mem.startsWith(u8, mode_str, "40000")) {
             // This is a tree (subdirectory) - recurse into it
-            const subtree_obj = objects.GitObject.load(try allocator.alloc(u8, 40), git_path, platform_impl, allocator) catch continue;
-            defer allocator.free(subtree_obj.data);
-            
-            // Convert hash to hex for loading
             const hash_hex = try allocator.alloc(u8, 40);
             defer allocator.free(hash_hex);
             _ = try std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes});
