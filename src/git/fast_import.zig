@@ -804,8 +804,9 @@ fn State(comptime PlatformType: type) type {
                 if (null_pos + 21 > tree_obj.data.len) break;
                 const hash_bytes = tree_obj.data[null_pos + 1 .. null_pos + 21];
 
-                var hex_hash: [40]u8 = undefined;
-                const hex_arr = std.fmt.bytesToHex(hash_bytes[0..20].*, .lower);
+                const hex_hash2 = std.fmt.bytesToHex(hash_bytes[0..20].*, .lower);
+
+
                 @memcpy(&hex_hash, &hex_arr);
 
                 const full_path = if (prefix.len > 0)
