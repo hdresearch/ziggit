@@ -6176,6 +6176,95 @@ fn checkoutTreeRecursive(git_path: []const u8, tree_data: []const u8, repo_root:
 }
 
 /// Update index to match the checked out tree
+fn updateIndexAfterMerge(git_path: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    const repo_root = std.fs.path.dirname(git_path) orelse ".";
+    var index = index_mod.Index.load(git_path, platform_impl, allocator) catch {
+        return;
+    };
+    defer index.deinit();
+
+    var i: usize = 0;
+    while (i < index.entries.items.len) {
+        const entry = index.entries.items[i];
+        const file_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path }) catch {
+            i += 1;
+            continue;
+        };
+        defer allocator.free(file_path);
+
+        const file_exists = blk: {
+            _ = std.fs.cwd().statFile(file_path) catch break :blk false;
+            break :blk true;
+        };
+        if (!file_exists) {
+            allocator.free(index.entries.items[i].path);
+            _ = index.entries.orderedRemove(i);
+        } else {
+            const file_content = platform_impl.fs.readFile(file_path, allocator) catch {
+                i += 1;
+                continue;
+            };
+            defer allocator.free(file_content);
+            const blob_obj = objects.createBlobObject(file_content, allocator) catch {
+                i += 1;
+                continue;
+            };
+            defer blob_obj.deinit(allocator);
+            const hash_hex = blob_obj.store(git_path, platform_impl, allocator) catch {
+                i += 1;
+                continue;
+            };
+            defer allocator.free(hash_hex);
+            var new_sha1: [20]u8 = undefined;
+            var bi: usize = 0;
+            while (bi < 20) : (bi += 1) {
+                new_sha1[bi] = std.fmt.parseInt(u8, hash_hex[bi * 2 .. bi * 2 + 2], 16) catch 0;
+            }
+            index.entries.items[i].sha1 = new_sha1;
+            i += 1;
+        }
+    }
+
+    var dir = std.fs.cwd().openDir(repo_root, .{ .iterate = true }) catch {
+        index.save(git_path, platform_impl) catch {};
+        return;
+    };
+    defer dir.close();
+    var it = dir.iterate();
+    while (it.next() catch null) |ent| {
+        if (ent.kind != .file) continue;
+        if (std.mem.startsWith(u8, ent.name, ".")) continue;
+
+        var found_in_index = false;
+        for (index.entries.items) |idx_entry| {
+            if (std.mem.eql(u8, idx_entry.path, ent.name)) {
+                found_in_index = true;
+                break;
+            }
+        }
+        if (!found_in_index) {
+            const new_file_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, ent.name }) catch continue;
+            defer allocator.free(new_file_path);
+            const new_content = platform_impl.fs.readFile(new_file_path, allocator) catch continue;
+            defer allocator.free(new_content);
+            const new_blob = objects.createBlobObject(new_content, allocator) catch continue;
+            defer new_blob.deinit(allocator);
+            const new_hash_hex = new_blob.store(git_path, platform_impl, allocator) catch continue;
+            defer allocator.free(new_hash_hex);
+            var sha1_val: [20]u8 = undefined;
+            var bj: usize = 0;
+            while (bj < 20) : (bj += 1) {
+                sha1_val[bj] = std.fmt.parseInt(u8, new_hash_hex[bj * 2 .. bj * 2 + 2], 16) catch 0;
+            }
+            const stat_val = std.fs.cwd().statFile(new_file_path) catch continue;
+            const new_entry = index_mod.IndexEntry.init(allocator.dupe(u8, ent.name) catch continue, stat_val, sha1_val);
+            index.entries.append(new_entry) catch continue;
+        }
+    }
+
+    index.save(git_path, platform_impl) catch {};
+}
+
 fn updateIndexFromTree(git_path: []const u8, tree_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     // Create a new index based on the tree
     var index = index_mod.Index.init(allocator);
@@ -6704,6 +6793,9 @@ fn performThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_h
     
     // Perform the merge
     const conflicts_found = try mergeTreesWithConflicts(git_path, base_tree, current_tree, target_tree, allocator, platform_impl);
+    
+    // Update index to reflect merged working tree
+    updateIndexAfterMerge(git_path, allocator, platform_impl) catch {};
     
     if (conflicts_found) {
         try writeMergeState(git_path, target_hash, actual_msg, allocator, platform_impl);
