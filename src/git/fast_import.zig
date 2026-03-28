@@ -807,7 +807,7 @@ fn State(comptime PlatformType: type) type {
         }
 
         fn removeEntries(self: *Self, entries: *std.StringArrayHashMap(TreeFileEntry), src: []const u8) void {
-            var to_remove = std.ArrayList([]const u8).init(self.allocator);
+            var to_remove = std.array_list.Managed([]const u8).init(self.allocator);
             defer to_remove.deinit();
 
             var it = entries.iterator();
