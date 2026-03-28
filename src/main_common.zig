@@ -33627,7 +33627,7 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
             defer allocator.free(config_content);
             // Check for rebase.rebaseMerges
             if (!has_rebase_merges) {
-                if (getConfigValue(config_content, "rebase", "rebasemerges")) |val| {
+                if (findConfigValue(config_content, "rebase", null, "rebasemerges")) |val| {
                     const trimmed = std.mem.trim(u8, val, " \t\r\n");
                     if (!std.mem.eql(u8, trimmed, "false") and trimmed.len > 0) {
                         has_rebase_merges = true;
