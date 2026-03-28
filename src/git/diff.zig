@@ -129,10 +129,10 @@ fn writeHunkHeaderWithContext(writer: anytype, old_start: usize, old_count: usiz
 
     // Find function context line: search backwards from hunk start for a line
     // that starts with a letter, $, or _ (default funcname pattern)
+    // Search from the line BEFORE the hunk start (1-indexed old_start -> 0-indexed old_start-2)
     if (old_lines) |lines| {
-        // Search from the line just before the hunk start (0-indexed: old_start - 2)
-        if (actual_old_start > 0) {
-            const search_start = if (actual_old_start >= 2) actual_old_start - 2 else 0;
+        if (actual_old_start >= 2) {
+            const search_start = actual_old_start - 2; // 0-indexed line before hunk
             var i: usize = search_start + 1;
             while (i > 0) {
                 i -= 1;
