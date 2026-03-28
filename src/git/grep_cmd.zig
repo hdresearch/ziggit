@@ -1675,25 +1675,36 @@ fn matchRegex(line: []const u8, pattern: []const u8, opts: *GrepOptions, extende
 
 /// Get column of first match (1-based)
 fn getMatchColumn(line: []const u8, opts: *GrepOptions, eff_pt: PatternType, allocator: Allocator) ?usize {
-    if (opts.invert_match) {
-        return 1; // For inverted matches, column is always 1
+    // For --invert-match with boolean expressions, find earliest match across all patterns
+    // For --invert-match without boolean, return 1
+    if (opts.invert_match and !opts.has_boolean_expr) {
+        return 1;
     }
 
+    // Find the earliest match position across all patterns
+    var earliest: ?usize = null;
     for (opts.patterns.items) |pat| {
+        var pos: ?usize = null;
         if (eff_pt == .fixed) {
             if (opts.case_insensitive) {
-                if (indexOfIgnoreCase(line, pat)) |idx| return idx + 1;
+                pos = indexOfIgnoreCase(line, pat);
             } else {
-                if (std.mem.indexOf(u8, line, pat)) |idx| return idx + 1;
+                pos = std.mem.indexOf(u8, line, pat);
             }
         } else {
             if (opts.word_match) {
-                if (regexWordMatchPos(line, pat, eff_pt == .extended, opts.case_insensitive, allocator)) |pos| return pos + 1;
+                pos = regexWordMatchPos(line, pat, eff_pt == .extended, opts.case_insensitive, allocator);
             } else {
-                if (regexMatch(line, pat, eff_pt == .extended, opts.case_insensitive, allocator)) |pos| return pos + 1;
+                pos = regexMatch(line, pat, eff_pt == .extended, opts.case_insensitive, allocator);
+            }
+        }
+        if (pos) |p| {
+            if (earliest == null or p < earliest.?) {
+                earliest = p;
             }
         }
     }
+    if (earliest) |e| return e + 1;
     return 1;
 }
 
