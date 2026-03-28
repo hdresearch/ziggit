@@ -33606,7 +33606,10 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
             keep_base = true;
         } else if (std.mem.eql(u8, arg, "--no-fork-point") or std.mem.eql(u8, arg, "--fork-point")) {
             // ignore for now
-        } else if (std.mem.startsWith(u8, arg, "-C") or std.mem.startsWith(u8, arg, "-c")) {
+        } else if (std.mem.startsWith(u8, arg, "-C") and arg.len > 2 and std.ascii.isDigit(arg[2])) {
+            // -C<n> implies --apply
+            apply_mode = true;
+        } else if (std.mem.startsWith(u8, arg, "-c")) {
             // skip -c key=value
         } else if (std.mem.eql(u8, arg, "-")) {
             try positionals.append(arg);
@@ -33616,6 +33619,32 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     }
 
 
+    // Check rebase config options that imply merge mode
+    {
+        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+        defer allocator.free(config_path);
+        if (platform_impl.fs.readFile(allocator, config_path)) |config_content| {
+            defer allocator.free(config_content);
+            // Check for rebase.rebaseMerges
+            if (!has_rebase_merges) {
+                if (getConfigValue(config_content, "rebase", "rebasemerges")) |val| {
+                    const trimmed = std.mem.trim(u8, val, " \t\r\n");
+                    if (!std.mem.eql(u8, trimmed, "false") and trimmed.len > 0) {
+                        has_rebase_merges = true;
+                    }
+                }
+            }
+            // Check for rebase.updateRefs
+            if (!has_update_refs) {
+                if (getConfigValue(config_content, "rebase", "updaterefs")) |val| {
+                    const trimmed = std.mem.trim(u8, val, " \t\r\n");
+                    if (std.mem.eql(u8, trimmed, "true")) {
+                        has_update_refs = true;
+                    }
+                }
+            }
+        } else |_| {}
+    }
     // Check for incompatible options
     // --apply/--whitespace are incompatible with merge-backend options
     if (apply_mode or whitespace_opt) {
