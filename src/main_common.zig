@@ -729,15 +729,6 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                     } else |_| {}
                 }
 
-                // Debug: print autocorrect_val
-                {
-                    const dbg_msg = std.fmt.allocPrint(allocator, "DEBUG_AC: val={d}\n", .{autocorrect_val}) catch "";
-                    if (dbg_msg.len > 0) {
-                        defer allocator.free(dbg_msg);
-                        platform_impl.writeStderr(dbg_msg) catch {};
-                    }
-                }
-
                 if (autocorrect_val == -2) {
                     // never: don't show similar commands, just exit
                     std.process.exit(1);
