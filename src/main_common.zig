@@ -19794,7 +19794,7 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
                 };
             if (std.mem.eql(u8, file_path, "-")) {
                 // Read from stdin
-                const stdin_content = platform_impl.readStdin(allocator) catch "";
+                const stdin_content = readStdin(allocator, 10 * 1024 * 1024) catch "";
                 if (stdin_content.len > 0) {
                     var line_iter = std.mem.splitScalar(u8, stdin_content, '\n');
                     while (line_iter.next()) |line| {
