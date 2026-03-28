@@ -4240,6 +4240,7 @@ fn outputDiffEntries(diff_entries: []const DiffStatEntry, diff_output_mode: anyt
             try platform_impl.writeStdout(line);
         }
 
+    }
 
     // no_patch, patch_with_stat, patch_with_raw: handled elsewhere or no output
 }
