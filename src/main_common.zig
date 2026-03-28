@@ -705,16 +705,36 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         const env_count_str2 = std.process.getEnvVarOwned(allocator, "GIT_CONFIG_COUNT") catch null;
         defer if (env_count_str2) |ecs2| allocator.free(ecs2);
         if (env_count_str2) |ecs2| {
-            if (std.fmt.parseInt(usize, ecs2, 10)) |count2| {
+            const trimmed_count = std.mem.trim(u8, ecs2, " \t");
+            if (trimmed_count.len == 0) {
+                // Empty count: treat as no config pairs (ignore)
+            } else if (std.fmt.parseInt(usize, trimmed_count, 10)) |count2| {
+                if (count2 > 1000000) {
+                    const fe = std.fs.File{ .handle = std.posix.STDERR_FILENO };
+                    _ = fe.write("error: too many entries for GIT_CONFIG_COUNT\n") catch {};
+                    std.process.exit(128);
+                }
                 var env_idx2: usize = 0;
                 while (env_idx2 < count2) : (env_idx2 += 1) {
                     const key_env_name2 = std.fmt.allocPrint(allocator, "GIT_CONFIG_KEY_{d}", .{env_idx2}) catch continue;
                     defer allocator.free(key_env_name2);
                     const val_env_name2 = std.fmt.allocPrint(allocator, "GIT_CONFIG_VALUE_{d}", .{env_idx2}) catch continue;
                     defer allocator.free(val_env_name2);
-                    const env_key2 = std.process.getEnvVarOwned(allocator, key_env_name2) catch continue;
+                    const env_key2 = std.process.getEnvVarOwned(allocator, key_env_name2) catch {
+                        const fe = std.fs.File{ .handle = std.posix.STDERR_FILENO };
+                        const em = std.fmt.allocPrint(allocator, "error: missing config key GIT_CONFIG_KEY_{d}\n", .{env_idx2}) catch continue;
+                        defer allocator.free(em);
+                        _ = fe.write(em) catch {};
+                        std.process.exit(128);
+                    };
                     defer allocator.free(env_key2);
-                    const env_val2 = std.process.getEnvVarOwned(allocator, val_env_name2) catch continue;
+                    const env_val2 = std.process.getEnvVarOwned(allocator, val_env_name2) catch {
+                        const fe = std.fs.File{ .handle = std.posix.STDERR_FILENO };
+                        const em = std.fmt.allocPrint(allocator, "error: missing config value GIT_CONFIG_VALUE_{d}\n", .{env_idx2}) catch continue;
+                        defer allocator.free(em);
+                        _ = fe.write(em) catch {};
+                        std.process.exit(128);
+                    };
                     defer allocator.free(env_val2);
                     const setting2 = std.fmt.allocPrint(allocator, "{s}={s}", .{env_key2, env_val2}) catch continue;
                     defer allocator.free(setting2);
@@ -722,7 +742,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 }
             } else |_| {
                 const fe = std.fs.File{ .handle = std.posix.STDERR_FILENO };
-                _ = fe.write("fatal: bad config variable count\n") catch {};
+                _ = fe.write("error: bogus count in GIT_CONFIG_COUNT\n") catch {};
                 std.process.exit(128);
             }
         }
