@@ -2167,33 +2167,44 @@ fn matchesMaxDepth(path: []const u8, max_depth_opt: ?i32, pathspecs: []const []c
         if (std.mem.indexOf(u8, spec, "*") != null) return true;
     }
 
-    // Count depth of path relative to its pathspec base
-    // The depth is the number of '/' in the path relative to the search root
-    var effective_path = path;
-
-    // If pathspecs are given, measure depth relative to pathspec
+    // If pathspecs are given, check if ANY pathspec allows this path at the given depth
     if (pathspecs.len > 0) {
         for (pathspecs) |spec| {
             const full_spec = if (prefix.len > 0 and !std.mem.startsWith(u8, spec, "/"))
                 std.fmt.allocPrint(std.heap.page_allocator, "{s}{s}", .{ prefix, spec }) catch spec
             else
                 spec;
-            if (std.mem.startsWith(u8, path, full_spec) and full_spec.len < path.len) {
+
+            var effective_path = path;
+            var matched = false;
+
+            if (std.mem.eql(u8, full_spec, ".") or std.mem.eql(u8, full_spec, "./")) {
+                effective_path = path;
+                matched = true;
+            } else if (std.mem.startsWith(u8, path, full_spec) and full_spec.len < path.len) {
                 if (full_spec.len > 0 and path[full_spec.len] == '/') {
                     effective_path = path[full_spec.len + 1 ..];
-                    break;
+                    matched = true;
                 }
+            } else if (std.mem.eql(u8, path, full_spec)) {
+                // Exact match - depth 0
+                return true;
             }
-            if (std.mem.eql(u8, full_spec, ".")) {
-                effective_path = path;
-                break;
+
+            if (matched) {
+                var depth: i32 = 0;
+                for (effective_path) |c| {
+                    if (c == '/') depth += 1;
+                }
+                if (depth <= max_depth) return true;
             }
         }
+        return false;
     }
 
-    // Count slashes
+    // No pathspecs - count slashes in full path
     var depth: i32 = 0;
-    for (effective_path) |c| {
+    for (path) |c| {
         if (c == '/') depth += 1;
     }
 
