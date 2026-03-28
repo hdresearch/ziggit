@@ -112,11 +112,14 @@ const Edit = struct {
 
 fn writeHunkHeader(writer: anytype, old_start: usize, old_count: usize, new_start: usize, new_count: usize) !void {
     // Git format: omit count when it's 1, show 0 explicitly
+    // When count is 0, start should be 0 too (git convention)
+    const actual_old_start = if (old_count == 0) 0 else old_start;
+    const actual_new_start = if (new_count == 0) 0 else new_start;
     try writer.writeAll("@@ -");
-    try writer.print("{}", .{old_start});
+    try writer.print("{}", .{actual_old_start});
     if (old_count != 1) try writer.print(",{}", .{old_count});
     try writer.writeAll(" +");
-    try writer.print("{}", .{new_start});
+    try writer.print("{}", .{actual_new_start});
     if (new_count != 1) try writer.print(",{}", .{new_count});
     try writer.writeAll(" @@\n");
 }
