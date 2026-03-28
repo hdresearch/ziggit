@@ -33978,12 +33978,14 @@ fn nativeCmdCherryPick(allocator: std.mem.Allocator, args: [][]const u8, command
                     checkoutCommitTree(git_path, orig_hash, allocator, platform_impl) catch {};
                 }
             } else |_| {}
-            // Clean up state files
+            // Clean up state files and sequencer
             cleanupMergeState(git_path, allocator);
+            cleanupSequencer(git_path, allocator);
             return;
         } else if (std.mem.eql(u8, arg, "--continue") or std.mem.eql(u8, arg, "--skip")) {
-            // Basic: just clean up state
+            // Basic: just clean up state and sequencer
             cleanupMergeState(git_path, allocator);
+            cleanupSequencer(git_path, allocator);
             return;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             try positionals.append(arg);
