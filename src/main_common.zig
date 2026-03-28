@@ -8832,6 +8832,34 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             }
             config_type = new_t;
             type_count += 1;
+        } else if (std.mem.eql(u8, arg, "--type")) {
+            i += 1;
+            if (i >= config_args.items.len) { try platform_impl.writeStderr("error: --type requires a value\n"); std.process.exit(129); }
+            const type_str = config_args.items[i];
+            const new_t2: ConfigType = if (std.mem.eql(u8, type_str, "bool"))
+                .bool_type
+            else if (std.mem.eql(u8, type_str, "int"))
+                .int_type
+            else if (std.mem.eql(u8, type_str, "bool-or-int"))
+                .bool_or_int
+            else if (std.mem.eql(u8, type_str, "path"))
+                .path_type
+            else if (std.mem.eql(u8, type_str, "expiry-date"))
+                .expiry_date
+            else if (std.mem.eql(u8, type_str, "color"))
+                .color_type
+            else {
+                const emsg2 = try std.fmt.allocPrint(allocator, "error: unrecognized --type argument, {s}\n", .{type_str});
+                defer allocator.free(emsg2);
+                try platform_impl.writeStderr(emsg2);
+                std.process.exit(1);
+            };
+            if (type_count > 0 and config_type != new_t2) {
+                try platform_impl.writeStderr("error: only one type at a time\n");
+                std.process.exit(129);
+            }
+            config_type = new_t2;
+            type_count += 1;
         } else if (std.mem.startsWith(u8, arg, "--type=")) {
             const type_str = arg["--type=".len..];
             const new_t: ConfigType = if (std.mem.eql(u8, type_str, "bool"))
