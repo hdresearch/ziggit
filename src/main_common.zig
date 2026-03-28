@@ -30010,6 +30010,7 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
     var reverse_diff = false;
     var stdin_mode = false;
     var line_prefix: []const u8 = "";
+    var dt_exit_code = false;
     var tree_refs = std.array_list.Managed([]const u8).init(allocator);
     defer tree_refs.deinit();
     var pathspecs = std.array_list.Managed([]const u8).init(allocator);
@@ -30090,6 +30091,8 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
             compact_summary = true;
         } else if (std.mem.eql(u8, arg, "-R")) {
             reverse_diff = true;
+        } else if (std.mem.eql(u8, arg, "--exit-code")) {
+            dt_exit_code = true;
         } else if (std.mem.eql(u8, arg, "--stdin")) {
             stdin_mode = true;
         } else if (std.mem.startsWith(u8, arg, "--line-prefix=")) {
@@ -30189,8 +30192,8 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
         }
     }
     
-    // If --quiet, exit 1 when there were differences
-    if (quiet and had_diff) {
+    // If --quiet or --exit-code, exit 1 when there were differences
+    if ((quiet or dt_exit_code) and had_diff) {
         std.process.exit(1);
     }
 }
