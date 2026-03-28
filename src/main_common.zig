@@ -31243,28 +31243,34 @@ fn outputCombinedStat(allocator: std.mem.Allocator, parent_hashes: []const []con
         files_changed += 1;
     }
     
-    // Output stat lines
+    // Calculate max changes for number width
+    var max_changes: usize = 0;
     for (changed.items) |cf| {
         const total = cf.insertions + cf.deletions;
-        const bar_len = @min(total, 40);
-        var bar = std.array_list.Managed(u8).init(allocator);
-        defer bar.deinit();
-        if (total > 0) {
-            const plus_len = if (bar_len > 0) (cf.insertions * bar_len + total - 1) / total else 0;
-            const minus_len = bar_len - plus_len;
-            for (0..plus_len) |_| try bar.append('+');
-            for (0..minus_len) |_| try bar.append('-');
-        }
-        const out = try std.fmt.allocPrint(allocator, " {s}{s} | {d:>4} {s}\n", .{
-            cf.name,
-            (" " ** 80)[0..@min(80, if (max_name_len > cf.name.len) max_name_len - cf.name.len else 0)],
-            total,
-            bar.items,
-        });
-        defer allocator.free(out);
-        try platform_impl.writeStdout(out);
+        if (total > max_changes) max_changes = total;
     }
-    try formatDiffStatSummary(files_changed, total_ins, total_dels, platform_impl, allocator);
+    const num_width = countDigitsUsize(max_changes);
+
+    // Output stat lines - use DiffStatEntry and formatDiffStat for consistent formatting
+    var stat_entries = std.array_list.Managed(DiffStatEntry).init(allocator);
+    defer {
+        for (stat_entries.items) |*se| allocator.free(se.path);
+        stat_entries.deinit();
+    }
+    for (changed.items) |cf| {
+        try stat_entries.append(.{
+            .path = try allocator.dupe(u8, cf.name),
+            .insertions = cf.insertions,
+            .deletions = cf.deletions,
+            .is_binary = false,
+            .is_new = false,
+            .is_deleted = false,
+            .old_mode = null,
+            .new_mode = null,
+        });
+    }
+    _ = num_width;
+    try formatDiffStat(stat_entries.items, platform_impl, allocator);
 }
 
 fn countLines(content: []const u8) usize {
