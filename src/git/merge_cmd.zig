@@ -36,6 +36,7 @@ const MergeOpts = struct {
     no_commit: bool = false,
     explicit_commit: bool = false,
     strategy: ?[]const u8 = null,
+    octopus_strategies: ?[]const u8 = null, // space-separated list from pull.octopus
     signoff: bool = false,
     stat: ?bool = null, // null = default (true)
     log: ?bool = null,
@@ -464,6 +465,31 @@ pub fn cmdMerge(allocator: Allocator, args: *pm.ArgIterator, platform_impl: *con
                 writeStderr(platform_impl, "fatal: Not possible to fast-forward, aborting.\n");
                 std.process.exit(128);
             }
+            // Check if strategy supports octopus (multiple heads)
+            if (opts.strategy) |strat| {
+                if (!std.mem.eql(u8, strat, "octopus")) {
+                    // If we have a list of strategies from pull.octopus, try each in order
+                    if (opts.octopus_strategies) |strats| {
+                        var found_octopus = false;
+                        var strat_iter = std.mem.tokenizeAny(u8, strats, " \t");
+                        while (strat_iter.next()) |s| {
+                            if (std.mem.eql(u8, s, "octopus")) {
+                                found_octopus = true;
+                                break;
+                            }
+                        }
+                        if (found_octopus) {
+                            // Use octopus strategy from the list
+                            return doOctopusMerge(git_path, current_hash, current_branch, &opts, non_merged.items, allocator, platform_impl);
+                        }
+                    }
+                    // Non-octopus strategies can't handle multiple targets
+                    const emsg = std.fmt.allocPrint(allocator, "Merge strategy '{s}' does not support merging multiple heads.\n", .{strat}) catch "Merge strategy does not support merging multiple heads.\n";
+                    defer if (!std.mem.eql(u8, emsg, "Merge strategy does not support merging multiple heads.\n")) allocator.free(emsg);
+                    writeStderr(platform_impl, emsg);
+                    std.process.exit(2);
+                }
+            }
             return doOctopusMerge(git_path, current_hash, current_branch, &opts, non_merged.items, allocator, platform_impl);
         }
 
@@ -575,6 +601,52 @@ fn applyConfigDefaults(git_path: []const u8, opts: *MergeOpts, allocator: Alloca
         }
     }
 
+    // pull.octopus config for default octopus strategy
+    if (opts.strategy == null and opts.targets.items.len > 1) {
+        if (mc.getConfigOverride("pull.octopus")) |val| {
+            opts.octopus_strategies = allocator.dupe(u8, val) catch null;
+            // Also set strategy to first valid one
+            var strat_iter = std.mem.tokenizeAny(u8, val, " \t");
+            if (strat_iter.next()) |first_strat| {
+                if (isValidStrategy(first_strat)) {
+                    opts.strategy = allocator.dupe(u8, first_strat) catch null;
+                }
+            }
+        } else if (cfg) |c| {
+            if (c.get("pull", null, "octopus")) |val| {
+                opts.octopus_strategies = allocator.dupe(u8, val) catch null;
+                var strat_iter = std.mem.tokenizeAny(u8, val, " \t");
+                if (strat_iter.next()) |first_strat| {
+                    if (isValidStrategy(first_strat)) {
+                        opts.strategy = allocator.dupe(u8, first_strat) catch null;
+                    }
+                }
+            }
+        }
+    }
+
+    // pull.twohead / config for default two-head strategy
+    if (opts.strategy == null and opts.targets.items.len <= 1) {
+        if (mc.getConfigOverride("pull.twohead")) |val| {
+            // pull.twohead can be a space-separated list of strategies; use first one
+            var strat_iter = std.mem.tokenizeAny(u8, val, " \t");
+            if (strat_iter.next()) |first_strat| {
+                if (isValidStrategy(first_strat)) {
+                    opts.strategy = allocator.dupe(u8, first_strat) catch null;
+                }
+            }
+        } else if (cfg) |c| {
+            if (c.get("pull", null, "twohead")) |val| {
+                var strat_iter = std.mem.tokenizeAny(u8, val, " \t");
+                if (strat_iter.next()) |first_strat| {
+                    if (isValidStrategy(first_strat)) {
+                        opts.strategy = allocator.dupe(u8, first_strat) catch null;
+                    }
+                }
+            }
+        }
+    }
+
     // branch.<name>.mergeoptions config
     const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch return;
     defer allocator.free(current_branch);
@@ -649,12 +721,15 @@ fn invokeEditor(git_path: []const u8, message: []const u8, allocator: Allocator)
     const merge_msg_path = std.fmt.allocPrint(allocator, "{s}/MERGE_MSG", .{git_path}) catch return null;
     defer allocator.free(merge_msg_path);
 
-    // Write the message
+    // Write the message (ensure trailing newline like real git)
     var f = std.fs.cwd().createFile(merge_msg_path, .{}) catch return null;
     f.writeAll(message) catch {
         f.close();
         return null;
     };
+    if (message.len == 0 or message[message.len - 1] != '\n') {
+        f.writeAll("\n") catch {};
+    }
     f.close();
 
     // Get editor
@@ -1174,12 +1249,66 @@ fn doSquashMerge(git_path: []const u8, current_hash: []const u8, target_hash: []
 }
 
 fn doOursStrategy(git_path: []const u8, current_hash: []const u8, target_hash: []const u8, current_branch: []const u8, merge_target: []const u8, opts: *MergeOpts, allocator: Allocator, platform_impl: *const pm.Platform) void {
-    // Keep our tree, just create merge commit
+    // Keep our tree exactly as-is, just create merge commit with two parents
     const merge_msg = opts.message orelse (buildMergeMessage(merge_target, current_branch, git_path, allocator, platform_impl) catch "Merge");
     const should_free = opts.message == null and !std.mem.eql(u8, merge_msg, "Merge");
     defer if (should_free) allocator.free(@constCast(merge_msg));
 
-    createMergeCommit(git_path, current_hash, target_hash, current_branch, merge_msg, allocator, platform_impl);
+    // Use our tree hash directly (don't scan work tree which may have stale files)
+    const tree_hash = getCommitTree(git_path, current_hash, allocator, platform_impl) catch {
+        writeStderr(platform_impl, "fatal: unable to get tree from HEAD\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(tree_hash);
+
+    const author_line = getAuthorString(allocator) catch blk: {
+        const ts = std.time.timestamp();
+        break :blk std.fmt.allocPrint(allocator, "User <user@example.com> {d} +0000", .{ts}) catch return;
+    };
+    defer allocator.free(author_line);
+    const committer_line = getCommitterString(allocator) catch blk: {
+        const ts = std.time.timestamp();
+        break :blk std.fmt.allocPrint(allocator, "User <user@example.com> {d} +0000", .{ts}) catch return;
+    };
+    defer allocator.free(committer_line);
+
+    const parents = [_][]const u8{ current_hash, target_hash };
+    const commit_obj = objects.createCommitObject(tree_hash, &parents, author_line, committer_line, merge_msg, allocator) catch return;
+    defer commit_obj.deinit(allocator);
+
+    const new_hash = commit_obj.store(git_path, platform_impl, allocator) catch return;
+    defer allocator.free(new_hash);
+
+    refs.updateRef(git_path, current_branch, new_hash, platform_impl, allocator) catch {};
+
+    // Write reflog
+    const short_branch = if (std.mem.startsWith(u8, current_branch, "refs/heads/")) current_branch["refs/heads/".len..] else current_branch;
+    const reflog_msg = std.fmt.allocPrint(allocator, "merge {s}: Merge made by the 'ours' strategy.", .{merge_target}) catch return;
+    defer allocator.free(reflog_msg);
+    writeReflogEntry(git_path, std.fmt.allocPrint(allocator, "refs/heads/{s}", .{short_branch}) catch return, current_hash, new_hash, reflog_msg, allocator, platform_impl);
+
+    // Ensure work tree matches our tree (remove stale files from previous merges)
+    {
+        const our_tree = getCommitTree(git_path, current_hash, allocator, platform_impl) catch return;
+        defer allocator.free(our_tree);
+        var our_files = TreeFileMap.init(allocator);
+        defer freeTreeMap(&our_files, allocator);
+        parseTreeToMap(git_path, our_tree, "", &our_files, allocator, platform_impl);
+
+        const repo_root = std.fs.path.dirname(git_path) orelse ".";
+        // Scan work tree for files not in our tree and remove them
+        var dir = std.fs.cwd().openDir(repo_root, .{ .iterate = true }) catch return;
+        defer dir.close();
+        var walker = dir.iterate();
+        while (walker.next() catch null) |entry| {
+            if (entry.kind != .file) continue;
+            if (std.mem.eql(u8, entry.name, ".gitignore")) continue;
+            if (!our_files.contains(entry.name)) {
+                dir.deleteFile(entry.name) catch {};
+            }
+        }
+    }
+
     writeStdout(platform_impl, "Merge made by the 'ours' strategy.\n");
 }
 
@@ -1227,8 +1356,11 @@ fn doThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_hash: 
 
     var final_msg = if (final_msg_buf.items.len > 0) final_msg_buf.items else merge_msg;
 
-    // If --edit, invoke editor on the message
+    // If --edit, write merge state first (so killed process can be continued)
     if (opts.edit orelse false) {
+        // Write MERGE_HEAD, MERGE_MSG, MERGE_MODE so --continue works if killed
+        writeMergeState(git_path, target_hash, final_msg, allocator, platform_impl);
+
         if (invokeEditor(git_path, final_msg, allocator)) |edited_msg| {
             // Strip comment lines (starting with #) and trailing whitespace
             var clean_buf = std.array_list.Managed(u8).init(allocator);
@@ -1247,6 +1379,9 @@ fn doThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_hash: 
     }
 
     createMergeCommit(git_path, current_hash, target_hash, current_branch, final_msg, allocator, platform_impl);
+
+    // Clean up merge state files after successful commit
+    cleanupMergeState(git_path, allocator);
 
     // Show diffstat (compare old HEAD to new merge commit)
     const show_stat = opts.stat orelse true;
@@ -1905,13 +2040,13 @@ fn buildSquashMsg(git_path: []const u8, current_hash: []const u8, merge_target: 
 fn buildSquashMsgMultiple(buf: *std.array_list.Managed(u8), git_path: []const u8, _: []const u8, targets: []const []const u8, allocator: Allocator, platform_impl: *const pm.Platform) void {
     // Walk all targets and collect commits in timestamp-descending order (like git log)
     // This matches git log --no-merges ^HEAD <targets> behavior
-    const CommitInfo = struct {
+    const SquashCommitInfo = struct {
         hash: []const u8,
         timestamp: i64,
         data: []const u8,
     };
 
-    var commits = std.array_list.Managed(CommitInfo).init(allocator);
+    var commits = std.array_list.Managed(SquashCommitInfo).init(allocator);
     defer {
         for (commits.items) |ci| {
             allocator.free(ci.hash);
@@ -2001,14 +2136,14 @@ fn buildSquashMsgMultiple(buf: *std.array_list.Managed(u8), git_path: []const u8
     }
 
     // Sort by timestamp descending (matching git log order)
-    std.mem.sort(CommitInfo, commits.items, {}, struct {
-        fn cmp(_: void, a: CommitInfo, b: CommitInfo) bool {
+    std.mem.sort(SquashCommitInfo, commits.items, {}, struct {
+        fn cmp(_: void, a: SquashCommitInfo, b: SquashCommitInfo) bool {
             return a.timestamp > b.timestamp;
         }
     }.cmp);
 
     for (commits.items) |ci| {
-        formatCommitForSquash(ci.data, ci.hash, buf, allocator);
+        formatCommitForSquash(ci.data, ci.hash, buf);
     }
 }
 
@@ -2045,7 +2180,7 @@ fn buildSquashMsgInto(buf: *std.array_list.Managed(u8), git_path: []const u8, _:
 
         if (parent_count <= 1) {
             // Format this commit
-            formatCommitForSquash(obj.data, commit, buf, allocator);
+            formatCommitForSquash(obj.data, commit, buf);
         }
 
         allocator.free(commit);
@@ -2073,11 +2208,12 @@ fn collectAncestorSet(git_path: []const u8, hash: []const u8, set: *std.StringHa
     }
 }
 
-fn formatCommitForSquash(data: []const u8, hash: []const u8, buf: *std.array_list.Managed(u8), _: Allocator) void {
+fn formatCommitForSquash(data: []const u8, hash: []const u8, buf: *std.array_list.Managed(u8)) void {
     const msg_start = std.mem.indexOf(u8, data, "\n\n") orelse return;
     const headers = data[0..msg_start];
     const msg_body = data[msg_start + 2 ..];
 
+    // Extract author info - use medium format (Author + Date on separate lines) matching git log
     var author_name_email: []const u8 = "";
     var author_ts: []const u8 = "";
     var author_tz: []const u8 = "";
@@ -2086,11 +2222,9 @@ fn formatCommitForSquash(data: []const u8, hash: []const u8, buf: *std.array_lis
     while (hl_iter.next()) |hl| {
         if (std.mem.startsWith(u8, hl, "author ")) {
             const author_str = hl["author ".len..];
-            // Parse: "Name <email> timestamp tz"
             if (std.mem.lastIndexOf(u8, author_str, ">")) |gt| {
                 author_name_email = author_str[0 .. gt + 1];
                 const rest = std.mem.trim(u8, author_str[gt + 1 ..], " ");
-                // Split timestamp and tz
                 if (std.mem.indexOf(u8, rest, " ")) |sp| {
                     author_ts = rest[0..sp];
                     author_tz = rest[sp + 1 ..];
@@ -2107,10 +2241,12 @@ fn formatCommitForSquash(data: []const u8, hash: []const u8, buf: *std.array_lis
     buf.appendSlice("Author: ") catch {};
     buf.appendSlice(author_name_email) catch {};
     buf.append('\n') catch {};
+
+    // Format date in git log medium format
+    const page_alloc = @import("std").heap.page_allocator;
+    const formatted_date = formatGitDate(author_ts, author_tz, page_alloc);
+    defer if (formatted_date.len > 0) page_alloc.free(formatted_date);
     buf.appendSlice("Date:   ") catch {};
-    // Format the date
-    const formatted_date = formatGitDate(author_ts, author_tz, @import("std").heap.page_allocator);
-    defer if (formatted_date.len > 0) @import("std").heap.page_allocator.free(formatted_date);
     if (formatted_date.len > 0) {
         buf.appendSlice(formatted_date) catch {};
     } else {
@@ -2130,7 +2266,6 @@ fn formatCommitForSquash(data: []const u8, hash: []const u8, buf: *std.array_lis
         buf.appendSlice(ml) catch {};
         buf.append('\n') catch {};
     }
-    // Add trailing blank line (matching git log format)
     buf.append('\n') catch {};
 }
 
@@ -2554,12 +2689,25 @@ fn appendConflictInfo(buf: *std.array_list.Managed(u8), conflict_files: []const 
     const is_scissors = if (cleanup) |c| std.ascii.eqlIgnoreCase(c, "scissors") else false;
 
     if (is_scissors) {
-        buf.appendSlice("\n# ------------------------ >8 ------------------------\n") catch {};
+        // Always ensure blank line before scissors
+        if (buf.items.len > 0 and buf.items[buf.items.len - 1] != '\n') {
+            buf.append('\n') catch {};
+        }
+        // Ensure double newline (blank line) before scissors
+        if (buf.items.len < 2 or buf.items[buf.items.len - 1] != '\n' or buf.items[buf.items.len - 2] != '\n') {
+            buf.append('\n') catch {};
+        }
+        buf.appendSlice("# ------------------------ >8 ------------------------\n") catch {};
         buf.appendSlice("# Do not modify or remove the line above.\n") catch {};
         buf.appendSlice("# Everything below it will be ignored.\n#\n") catch {};
         buf.appendSlice("# Conflicts:\n") catch {};
     } else {
-        buf.appendSlice("\n# Conflicts:\n") catch {};
+        // Don't add extra blank line if buffer already ends with one
+        const ends_with_blank = buf.items.len >= 2 and buf.items[buf.items.len - 1] == '\n' and buf.items[buf.items.len - 2] == '\n';
+        if (!ends_with_blank) {
+            buf.append('\n') catch {};
+        }
+        buf.appendSlice("# Conflicts:\n") catch {};
     }
     for (conflict_files) |f| {
         buf.appendSlice("#\t") catch {};
@@ -2589,6 +2737,15 @@ fn writeMergeState(git_path: []const u8, target_hash: []const u8, message: []con
     const merge_mode_path = std.fmt.allocPrint(allocator, "{s}/MERGE_MODE", .{git_path}) catch return;
     defer allocator.free(merge_mode_path);
     platform_impl.fs.writeFile(merge_mode_path, "") catch {};
+}
+
+fn cleanupMergeState(git_path: []const u8, allocator: Allocator) void {
+    const files = [_][]const u8{ "MERGE_HEAD", "MERGE_MSG", "MERGE_MODE" };
+    for (files) |f| {
+        const path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, f }) catch continue;
+        defer allocator.free(path);
+        std.fs.cwd().deleteFile(path) catch {};
+    }
 }
 
 fn writeReflogEntry(git_path: []const u8, ref_name: []const u8, old_hash: []const u8, new_hash: []const u8, message: []const u8, allocator: Allocator, _: *const pm.Platform) void {
