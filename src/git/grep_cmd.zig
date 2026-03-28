@@ -1290,7 +1290,7 @@ fn grepContent(allocator: Allocator, opts: *GrepOptions, display_path: []const u
     {
         const dbg = std.fmt.allocPrint(allocator, "DEBUG grepContent: path='{s}' bool={} pats={d} tokens={d}\n", .{ display_path, opts.has_boolean_expr, opts.patterns.items.len, opts.expr_tokens.items.len }) catch "";
         defer if (dbg.len > 0) allocator.free(dbg);
-        std.io.getStdErr().writeAll(dbg) catch {};
+        // debug removed
     }
 
     // Check if content is binary
