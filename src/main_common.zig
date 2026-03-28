@@ -28454,6 +28454,12 @@ fn collectTreeDiffEntries(allocator: std.mem.Allocator, tree1_hash: []const u8, 
                 allocator.free(full_name);
                 continue;
             }
+            // Mode-only change: same hash, different mode
+            if (std.mem.eql(u8, e1.?.hash, e2.?.hash)) {
+                if (!matchesPathspecs(full_name, pathspecs)) { allocator.free(full_name); continue; }
+                try diff_entries_out.append(.{ .path = full_name, .insertions = 0, .deletions = 0, .is_binary = false, .is_new = false, .is_deleted = false, .old_hash = "", .new_hash = "" });
+                continue;
+            }
             if (isTreeMode(e1.?.mode) and isTreeMode(e2.?.mode)) {
                 try collectTreeDiffEntries(allocator, e1.?.hash, e2.?.hash, full_name, git_path, pathspecs, platform_impl, diff_entries_out);
                 allocator.free(full_name);
