@@ -25925,7 +25925,7 @@ fn parseExpireTime(expire: []const u8) error{InvalidFormat}!i128 {
 fn doNativePrune(allocator: std.mem.Allocator, git_dir: []const u8, platform_impl: anytype, expire: []const u8) !void {
     _ = platform_impl;
 
-    const expire_cutoff = parseExpireTime(expire);
+    const expire_cutoff = parseExpireTime(expire) catch std.time.timestamp() - 14 * 86400;
 
     // First, remove stale temporary files in objects/
     const objects_dir_path_tmp = std.fmt.allocPrint(allocator, "{s}/objects", .{git_dir}) catch return;
