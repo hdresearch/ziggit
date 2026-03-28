@@ -1,6 +1,8 @@
 const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 const wildmatch_mod = @import("wildmatch.zig");
+const fetch_cmd = @import("git/fetch_cmd.zig");
+const push_cmd = @import("git/push_cmd.zig");
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 const cSetenv = setenv;
@@ -1031,11 +1033,11 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "merge")) {
         try cmdMerge(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "fetch")) {
-        try cmdFetch(allocator, &args_iter, &platform_impl);
+        try fetch_cmd.cmdFetch(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "pull")) {
         try cmdPull(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "push")) {
-        try cmdPush(allocator, &args_iter, &platform_impl);
+        try push_cmd.cmdPush(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "describe")) {
         try cmdDescribe(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "tag")) {
