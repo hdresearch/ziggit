@@ -164,6 +164,7 @@ const refs = if (@import("builtin").target.os.tag != .freestanding) @import("git
 const tree_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/tree.zig") else void;
 const gitignore_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/gitignore.zig") else void;
 const config_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/config.zig") else void;
+const config_cmd_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/config_cmd.zig") else void;
 const diff_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/diff.zig") else void;
 const diff_stats_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/diff_stats.zig") else void;
 const diff_cmd_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/diff_cmd.zig") else void;
@@ -1007,7 +1008,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "ls-tree")) {
         try nativeCmdLsTree(allocator, all_original_args.items, command_index, &platform_impl);
     } else if (std.mem.eql(u8, command, "config")) {
-        try cmdConfig(allocator, &args_iter, &platform_impl);
+        try config_cmd_mod.run(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "version")) {
         try cmdVersion(allocator, &args_iter, &platform_impl);
     // Commands that forward to real git for full compatibility
