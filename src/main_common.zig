@@ -31480,7 +31480,7 @@ fn outputCombinedDiffHunks(allocator: std.mem.Allocator, parent_contents: []cons
     var hunk_header = std.array_list.Managed(u8).init(allocator);
     defer hunk_header.deinit();
     // Use @@@ markers with num_parents @ signs
-    for (0..num_parents) |_| try hunk_header.append('@');
+    for (0..num_parents + 1) |_| try hunk_header.append('@');
     try hunk_header.append(' ');
     for (parent_lines_list.items) |pl| {
         try hunk_header.append('-');
@@ -31503,7 +31503,7 @@ fn outputCombinedDiffHunks(allocator: std.mem.Allocator, parent_contents: []cons
         try hunk_header.appendSlice(s);
     }
     try hunk_header.append(' ');
-    for (0..num_parents) |_| try hunk_header.append('@');
+    for (0..num_parents + 1) |_| try hunk_header.append('@');
     try hunk_header.append('\n');
     try platform_impl.writeStdout(hunk_header.items);
     
