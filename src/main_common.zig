@@ -6459,10 +6459,10 @@ fn clearWorkingDirectory(repo_root: []const u8, allocator: std.mem.Allocator, pl
     defer dir.close();
     
     // Collect parent dirs for later cleanup
-    var parent_dirs = std.ArrayList([]const u8).init(allocator);
+    var parent_dirs: std.ArrayListUnmanaged([]const u8) = .{};
     defer {
         for (parent_dirs.items) |p| allocator.free(p);
-        parent_dirs.deinit();
+        parent_dirs.deinit(allocator);
     }
     
     // Only delete files that are in the index (tracked files)
@@ -6472,7 +6472,7 @@ fn clearWorkingDirectory(repo_root: []const u8, allocator: std.mem.Allocator, pl
         };
         // Collect parent dirs
         if (std.fs.path.dirname(entry.path)) |parent| {
-            parent_dirs.append(allocator.dupe(u8, parent) catch continue) catch {};
+            parent_dirs.append(allocator, allocator.dupe(u8, parent) catch continue) catch {};
         }
     }
     
