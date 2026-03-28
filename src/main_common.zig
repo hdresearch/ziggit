@@ -33620,6 +33620,24 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
 
 
     // Check rebase config options that imply merge mode
+    // First check -c command-line overrides
+    if (!has_rebase_merges) {
+        if (getConfigOverride("rebase.rebasemerges")) |val| {
+            const trimmed = std.mem.trim(u8, val, " \t\r\n");
+            if (!std.mem.eql(u8, trimmed, "false") and trimmed.len > 0) {
+                has_rebase_merges = true;
+            }
+        }
+    }
+    if (!has_update_refs) {
+        if (getConfigOverride("rebase.updaterefs")) |val| {
+            const trimmed = std.mem.trim(u8, val, " \t\r\n");
+            if (std.mem.eql(u8, trimmed, "true")) {
+                has_update_refs = true;
+            }
+        }
+    }
+    // Then check .git/config file
     {
         const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
         defer allocator.free(config_path);
