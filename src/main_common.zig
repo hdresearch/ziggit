@@ -28837,14 +28837,18 @@ fn nativeCmdMv(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             std.process.exit(128);
         }
         
-        // Check target doesn't exist (unless -f)
+        // Check target doesn't exist (unless -f or case-change rename)
         if (!force) {
             if ((std.fs.cwd().statFile(target) catch null) != null) {
-                if (skip_errors) continue;
-                const msg = try std.fmt.allocPrint(allocator, "fatal: destination exists, source={s}, destination={s}\n", .{ src, target });
-                defer allocator.free(msg);
-                try platform_impl.writeStderr(msg);
-                std.process.exit(128);
+                // Allow case-change rename: same name different case
+                const is_case_change = std.ascii.eqlIgnoreCase(src, target) and !std.mem.eql(u8, src, target);
+                if (!is_case_change) {
+                    if (skip_errors) continue;
+                    const msg = try std.fmt.allocPrint(allocator, "fatal: destination exists, source={s}, destination={s}\n", .{ src, target });
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(128);
+                }
             }
         }
         
