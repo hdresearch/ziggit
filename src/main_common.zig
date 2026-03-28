@@ -13426,7 +13426,20 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             std.process.exit(128);
         };
         const start_point = args.next();
-        refs.createBranch(git_path, branch_name, start_point, platform_impl, allocator) catch |err| switch (err) {
+        // Resolve start_point using resolveRevision for complex refs like HEAD~1
+        const resolved_sp_force: ?[]const u8 = if (start_point) |sp|
+            resolveRevision(git_path, sp, platform_impl, allocator) catch null
+        else
+            null;
+        defer if (resolved_sp_force) |rsp| allocator.free(rsp);
+        
+        if (start_point != null and resolved_sp_force == null) {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: not a valid object name: '{s}'\n", .{start_point.?});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        }
+        refs.createBranch(git_path, branch_name, resolved_sp_force, platform_impl, allocator) catch |err| switch (err) {
             error.NoCommitsYet => {
                 try platform_impl.writeStderr("fatal: not a valid object name: 'master'\n");
                 std.process.exit(128);
@@ -13460,7 +13473,20 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             std.process.exit(128);
         };
         const start_point = args.next();
-        refs.createBranch(git_path, branch_name, start_point, platform_impl, allocator) catch |err| switch (err) {
+        // Resolve start_point using resolveRevision for complex refs
+        const resolved_sp_reflog: ?[]const u8 = if (start_point) |sp|
+            resolveRevision(git_path, sp, platform_impl, allocator) catch null
+        else
+            null;
+        defer if (resolved_sp_reflog) |rsp| allocator.free(rsp);
+        
+        if (start_point != null and resolved_sp_reflog == null) {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: not a valid object name: '{s}'\n", .{start_point.?});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        }
+        refs.createBranch(git_path, branch_name, resolved_sp_reflog, platform_impl, allocator) catch |err| switch (err) {
             error.NoCommitsYet => {
                 try platform_impl.writeStderr("fatal: not a valid object name: 'master'\n");
                 std.process.exit(128);
