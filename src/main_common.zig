@@ -11679,8 +11679,9 @@ fn cfgUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, value_r
     if (mod_sec_key) |msk| {
         for (msk) |*c| c.* = std.ascii.toLower(c.*);
     }
-    const mod_secs: []const []const u8 = if (mod_sec_key) |msk| &[_][]const u8{msk} else &[_][]const u8{};
-    const cleaned = try cfgRemoveEmptySectionsFiltered(result.items, mod_secs, allocator);
+    const cleaned = try cfgRemoveEmptySections(result.items, allocator);
+
+
     defer allocator.free(cleaned);
     try platform_impl.fs.writeFile(cfg_path, cleaned);
 }
