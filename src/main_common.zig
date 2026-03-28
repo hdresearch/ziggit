@@ -26371,9 +26371,9 @@ fn nativeCmdPackRefs(allocator: std.mem.Allocator, args: [][]const u8, command_i
             prune_flag = false;
         }
     }
-    _ = all_flag;
+    
 
-    const git_dir = try findGitDir(allocator);
+    const git_dir = try findGitDir();
     try packRefsImpl(allocator, git_dir, prune_flag);
 }
 
