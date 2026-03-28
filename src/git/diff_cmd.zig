@@ -82,6 +82,9 @@ const FileChange = struct {
     is_new: bool,
     is_deleted: bool,
     is_binary: bool,
+    is_rename: bool = false,
+    rename_from: ?[]const u8 = null,
+    similarity: u8 = 0,
 };
 
 pub fn cmdDiff(allocator: std.mem.Allocator, args: *pm.ArgIterator, platform_impl: *const pm.Platform) !void {
@@ -136,6 +139,11 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *pm.ArgIterator, platform_imp
         }
         if (mc.getConfigOverride("diff.dstprefix")) |val| {
             opts.dst_prefix = val;
+        }
+        if (mc.getConfigOverride("diff.renames")) |val| {
+            if (std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "0")) {
+                opts.no_renames = true;
+            }
         }
     }
 
@@ -436,15 +444,20 @@ fn freeChange(allocator: std.mem.Allocator, c: *FileChange) void {
     if (c.new_content.len > 0) allocator.free(c.new_content);
 }
 
-fn collectTreeChanges(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, prefix: []const u8, git_path: []const u8, pathspecs: []const []const u8, pi: *const pm.Platform, out: *std.array_list.Managed(FileChange)) !void {
-    const t1o = objects.GitObject.load(tree1_hash, git_path, pi, allocator) catch return;
-    defer t1o.deinit(allocator);
-    const t2o = objects.GitObject.load(tree2_hash, git_path, pi, allocator) catch return;
-    defer t2o.deinit(allocator);
+const EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf899d69f82cf0101";
 
-    var p1 = tree_mod.parseTree(t1o.data, allocator) catch return;
+fn collectTreeChanges(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, prefix: []const u8, git_path: []const u8, pathspecs: []const []const u8, pi: *const pm.Platform, out: *std.array_list.Managed(FileChange)) !void {
+    const is_empty1 = std.mem.eql(u8, tree1_hash, EMPTY_TREE_HASH);
+    const is_empty2 = std.mem.eql(u8, tree2_hash, EMPTY_TREE_HASH);
+
+    const t1o = if (!is_empty1) (objects.GitObject.load(tree1_hash, git_path, pi, allocator) catch return) else null;
+    defer if (t1o) |o| o.deinit(allocator);
+    const t2o = if (!is_empty2) (objects.GitObject.load(tree2_hash, git_path, pi, allocator) catch return) else null;
+    defer if (t2o) |o| o.deinit(allocator);
+
+    var p1 = if (t1o) |o| (tree_mod.parseTree(o.data, allocator) catch return) else std.array_list.Managed(tree_mod.TreeEntry).init(allocator);
     defer p1.deinit();
-    var p2 = tree_mod.parseTree(t2o.data, allocator) catch return;
+    var p2 = if (t2o) |o| (tree_mod.parseTree(o.data, allocator) catch return) else std.array_list.Managed(tree_mod.TreeEntry).init(allocator);
     defer p2.deinit();
 
     var m1 = std.StringHashMap(tree_mod.TreeEntry).init(allocator);
@@ -651,6 +664,184 @@ fn globMatch(pattern: []const u8, str: []const u8) bool {
     return pi == pattern.len;
 }
 
+/// Simple POSIX-like regex matcher supporting: . * + ? ^ $ [...] [^...]
+/// Used for -I<regex> pattern matching
+fn simpleRegexMatch(pattern: []const u8, str: []const u8) bool {
+    // If pattern starts with ^, must match from start
+    if (pattern.len > 0 and pattern[0] == '^') {
+        return regexMatchAt(pattern[1..], str, 0);
+    }
+    // Otherwise, try matching at every position
+    var i: usize = 0;
+    while (i <= str.len) : (i += 1) {
+        if (regexMatchAt(pattern, str, i)) return true;
+    }
+    return false;
+}
+
+fn regexMatchAt(pattern: []const u8, str: []const u8, start: usize) bool {
+    var pi: usize = 0;
+    var si: usize = start;
+
+    while (pi < pattern.len) {
+        // Check for $ at end of pattern
+        if (pattern[pi] == '$' and pi + 1 == pattern.len) {
+            return si == str.len;
+        }
+
+        // Check for quantifier (* + ?) on next char
+        const has_star = pi + 1 < pattern.len and pattern[pi + 1] == '*';
+        const has_plus = pi + 1 < pattern.len and pattern[pi + 1] == '+';
+        const has_question = pi + 1 < pattern.len and pattern[pi + 1] == '?';
+
+        if (pattern[pi] == '[') {
+            // Character class
+            const class_end = findClassEnd(pattern, pi);
+            if (class_end == 0) return false;
+            const class_pattern = pattern[pi .. class_end + 1];
+            const advance = class_end + 1;
+
+            const has_star2 = advance < pattern.len and pattern[advance] == '*';
+            const has_plus2 = advance < pattern.len and pattern[advance] == '+';
+            const has_q2 = advance < pattern.len and pattern[advance] == '?';
+
+            if (has_star2 or has_plus2) {
+                const min_count: usize = if (has_plus2) 1 else 0;
+                const quant_advance = advance + 1;
+                // Greedy: match as many as possible, then backtrack
+                var count: usize = 0;
+                while (si + count < str.len and matchCharClass(class_pattern, str[si + count])) count += 1;
+                while (count >= min_count) : (count -= 1) {
+                    if (regexMatchAt(pattern[quant_advance..], str, si + count)) return true;
+                    if (count == 0) break;
+                }
+                return false;
+            } else if (has_q2) {
+                if (si < str.len and matchCharClass(class_pattern, str[si])) {
+                    if (regexMatchAt(pattern[advance + 1 ..], str, si + 1)) return true;
+                }
+                return regexMatchAt(pattern[advance + 1 ..], str, si);
+            } else {
+                if (si >= str.len or !matchCharClass(class_pattern, str[si])) return false;
+                pi = advance;
+                si += 1;
+                continue;
+            }
+        }
+
+        if (pattern[pi] == '\\' and pi + 1 < pattern.len) {
+            // Escaped character
+            const esc_char = pattern[pi + 1];
+            const pat_advance: usize = 2;
+            const has_star3 = pi + 2 < pattern.len and pattern[pi + 2] == '*';
+            const has_plus3 = pi + 2 < pattern.len and pattern[pi + 2] == '+';
+
+            if (has_star3 or has_plus3) {
+                const min_count: usize = if (has_plus3) 1 else 0;
+                var count: usize = 0;
+                while (si + count < str.len and str[si + count] == esc_char) count += 1;
+                while (count >= min_count) : (count -= 1) {
+                    if (regexMatchAt(pattern[pat_advance + 1 ..], str, si + count)) return true;
+                    if (count == 0) break;
+                }
+                return false;
+            }
+            if (si >= str.len or str[si] != esc_char) return false;
+            pi += 2;
+            si += 1;
+            continue;
+        }
+
+        if (pattern[pi] == '.' and (has_star or has_plus)) {
+            // .* or .+
+            const min_count: usize = if (has_plus) 1 else 0;
+            var count: usize = str.len - si;
+            while (count >= min_count) : (count -= 1) {
+                if (regexMatchAt(pattern[pi + 2 ..], str, si + count)) return true;
+                if (count == 0) break;
+            }
+            return false;
+        }
+        if (pattern[pi] == '.' and has_question) {
+            if (si < str.len) {
+                if (regexMatchAt(pattern[pi + 2 ..], str, si + 1)) return true;
+            }
+            return regexMatchAt(pattern[pi + 2 ..], str, si);
+        }
+        if (pattern[pi] == '.') {
+            if (si >= str.len) return false;
+            pi += 1;
+            si += 1;
+            continue;
+        }
+
+        // Literal character with quantifier
+        if (has_star or has_plus) {
+            const ch = pattern[pi];
+            const min_count: usize = if (has_plus) 1 else 0;
+            var count: usize = 0;
+            while (si + count < str.len and str[si + count] == ch) count += 1;
+            while (count >= min_count) : (count -= 1) {
+                if (regexMatchAt(pattern[pi + 2 ..], str, si + count)) return true;
+                if (count == 0) break;
+            }
+            return false;
+        }
+        if (has_question) {
+            if (si < str.len and str[si] == pattern[pi]) {
+                if (regexMatchAt(pattern[pi + 2 ..], str, si + 1)) return true;
+            }
+            return regexMatchAt(pattern[pi + 2 ..], str, si);
+        }
+
+        // Literal match
+        if (si >= str.len or str[si] != pattern[pi]) return false;
+        pi += 1;
+        si += 1;
+    }
+
+    return true; // pattern exhausted (no $ anchor means we don't need to be at end of str)
+}
+
+fn findClassEnd(pattern: []const u8, start: usize) usize {
+    // Find matching ] for character class starting at pattern[start] == '['
+    var i = start + 1;
+    if (i < pattern.len and pattern[i] == '^') i += 1;
+    if (i < pattern.len and pattern[i] == ']') i += 1; // ] as first char in class
+    while (i < pattern.len) : (i += 1) {
+        if (pattern[i] == ']') return i;
+    }
+    return 0; // no matching ]
+}
+
+fn matchCharClass(class: []const u8, ch: u8) bool {
+    // class is like "[abc]" or "[^abc]" or "[a-z]" or "[^a-z0-9]"
+    if (class.len < 2 or class[0] != '[') return false;
+    var negate = false;
+    var i: usize = 1;
+    if (i < class.len and class[i] == '^') {
+        negate = true;
+        i += 1;
+    }
+    var matched = false;
+    // Handle ] as first char after [^ or [
+    if (i < class.len and class[i] == ']') {
+        if (ch == ']') matched = true;
+        i += 1;
+    }
+    while (i < class.len and class[i] != ']') {
+        if (i + 2 < class.len and class[i + 1] == '-' and class[i + 2] != ']') {
+            // Range
+            if (ch >= class[i] and ch <= class[i + 2]) matched = true;
+            i += 3;
+        } else {
+            if (ch == class[i]) matched = true;
+            i += 1;
+        }
+    }
+    return if (negate) !matched else matched;
+}
+
 fn abbreviateHash(hash: []const u8, len: u32) []const u8 {
     if (len >= 40) return hash;
     return hash[0..@min(len, hash.len)];
@@ -848,35 +1039,285 @@ fn outputPatch(changes: []const FileChange, opts: *const DiffOpts, pi: *const pm
     const sp = opts.getEffectiveSrcPrefix();
     const dp = opts.getEffectiveDstPrefix();
     const lp = opts.line_prefix;
+    const has_ignore = opts.ignore_regex.items.len > 0 or opts.ignore_blank_lines;
 
     for (changes) |c| {
+        // Skip 100% similarity renames (only show header)
+        if (c.is_rename and c.similarity == 100) {
+            try outputDiffHeader(c, sp, dp, lp, opts, pi, allocator);
+            continue;
+        }
+
         if (c.is_binary) {
+            const src_p = c.rename_from orelse c.path;
             const header = try std.fmt.allocPrint(allocator, "{s}diff --git {s}{s} {s}{s}\n{s}Binary files {s}{s} and {s}{s} differ\n", .{
-                lp, sp, c.path, dp, c.path,
-                lp, sp, c.path, dp, c.path,
+                lp, sp, src_p, dp, c.path,
+                lp, sp, src_p, dp, c.path,
             });
             defer allocator.free(header);
             try pi.writeStdout(header);
             continue;
         }
 
-        // Diff header
-        try outputDiffHeader(c, sp, dp, lp, opts, pi, allocator);
+        if (has_ignore) {
+            // Generate hunks first, filter, then output
+            const hunks_text = generateFilteredHunks(c.old_content, c.new_content, opts, allocator) catch "";
+            defer if (hunks_text.len > 0) allocator.free(hunks_text);
+            if (hunks_text.len == 0) continue; // all hunks filtered out
 
-        // Generate and output hunks
-        if (c.old_content.len > 0 or c.new_content.len > 0) {
-            try outputDiffHunks(c.old_content, c.new_content, opts.context_lines, lp, pi, allocator);
+            try outputDiffHeader(c, sp, dp, lp, opts, pi, allocator);
+            if (lp.len > 0) {
+                // Prepend line prefix to each line
+                var lines_it = std.mem.splitScalar(u8, hunks_text, '\n');
+                while (lines_it.next()) |line| {
+                    if (line.len > 0) {
+                        try pi.writeStdout(lp);
+                        try pi.writeStdout(line);
+                        try pi.writeStdout("\n");
+                    }
+                }
+            } else {
+                try pi.writeStdout(hunks_text);
+            }
+        } else {
+            // Diff header
+            try outputDiffHeader(c, sp, dp, lp, opts, pi, allocator);
+
+            // Generate and output hunks
+            if (c.old_content.len > 0 or c.new_content.len > 0) {
+                try outputDiffHunks(c.old_content, c.new_content, opts.context_lines, lp, pi, allocator);
+            }
         }
     }
 }
 
+const FilteredStats = struct {
+    has_changes: bool,
+    ins: usize,
+    dels: usize,
+};
+
+/// Get filtered stats for a file (with -I filtering applied)
+fn getFilteredStats(c: FileChange, opts: *const DiffOpts, allocator: std.mem.Allocator) FilteredStats {
+    if (opts.ignore_regex.items.len == 0 and !opts.ignore_blank_lines) {
+        return .{ .has_changes = true, .ins = c.insertions, .dels = c.deletions };
+    }
+    if (c.is_binary) return .{ .has_changes = true, .ins = c.insertions, .dels = c.deletions };
+    if (c.is_new or c.is_deleted) return .{ .has_changes = true, .ins = c.insertions, .dels = c.deletions };
+
+    const hunks = generateFilteredHunks(c.old_content, c.new_content, opts, allocator) catch
+        return .{ .has_changes = true, .ins = c.insertions, .dels = c.deletions };
+    defer if (hunks.len > 0) allocator.free(hunks);
+
+    if (hunks.len == 0) return .{ .has_changes = false, .ins = 0, .dels = 0 };
+
+    // Count insertions/deletions in filtered hunks
+    var ins: usize = 0;
+    var dels: usize = 0;
+    var lines_it = std.mem.splitScalar(u8, hunks, '\n');
+    while (lines_it.next()) |line| {
+        if (line.len > 0 and line[0] == '+') ins += 1;
+        if (line.len > 0 and line[0] == '-') dels += 1;
+    }
+    return .{ .has_changes = true, .ins = ins, .dels = dels };
+}
+
+/// Generate filtered hunks text (with -I filtering applied). Returns empty string if all hunks filtered.
+fn generateFilteredHunks(old_content: []const u8, new_content: []const u8, opts: *const DiffOpts, allocator: std.mem.Allocator) ![]u8 {
+    // Generate diff with large context to allow re-splitting after filtering
+    const big_ctx: u32 = 10000; // huge context so we get one big hunk
+    const diff_output = diff_mod.generateUnifiedDiffWithHashesAndContext(
+        old_content, new_content, "placeholder", "0", "0", big_ctx, allocator,
+    ) catch return try allocator.dupe(u8, "");
+    defer allocator.free(diff_output);
+
+    // Collect all diff lines (skip headers)
+    var diff_lines = std.array_list.Managed(DiffLine).init(allocator);
+    defer diff_lines.deinit();
+
+    var lines = std.mem.splitScalar(u8, diff_output, '\n');
+    var in_hunk = false;
+    var old_line: usize = 0;
+    var new_line: usize = 0;
+
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "@@")) {
+            in_hunk = true;
+            // Parse hunk header for start positions
+            // Format: @@ -old_start,old_count +new_start,new_count @@
+            const old_start = parseHunkStart(line, '-') orelse 1;
+            const new_start = parseHunkStart(line, '+') orelse 1;
+            old_line = old_start;
+            new_line = new_start;
+            continue;
+        }
+        if (!in_hunk) continue;
+        if (line.len == 0) continue;
+
+        const kind: DiffLineKind = if (line[0] == '+') .add else if (line[0] == '-') .del else .ctx;
+        const content = if (line.len > 0) line[1..] else "";
+        const ignored = if (kind != .ctx) lineMatchesIgnorePatterns(content, opts) else false;
+
+        try diff_lines.append(.{
+            .kind = kind,
+            .content = line,
+            .old_pos = if (kind != .add) old_line else 0,
+            .new_pos = if (kind != .del) new_line else 0,
+            .ignored = ignored,
+        });
+
+        if (kind == .ctx) { old_line += 1; new_line += 1; }
+        if (kind == .del) { old_line += 1; }
+        if (kind == .add) { new_line += 1; }
+    }
+
+    // Find ranges of non-ignored changes
+    var change_indices = std.array_list.Managed(usize).init(allocator);
+    defer change_indices.deinit();
+    for (diff_lines.items, 0..) |dl, idx| {
+        if (dl.kind != .ctx and !dl.ignored) {
+            try change_indices.append(idx);
+        }
+    }
+
+    if (change_indices.items.len == 0) return try allocator.dupe(u8, "");
+
+    // Group changes into hunks with context_lines context
+    var result = std.array_list.Managed(u8).init(allocator);
+    defer result.deinit();
+
+    const ctx = opts.context_lines;
+    var hunk_start: ?usize = null;
+    var hunk_end: usize = 0;
+
+    for (change_indices.items) |ci| {
+        const this_start = if (ci >= ctx) ci - ctx else 0;
+        const this_end = @min(ci + ctx + 1, diff_lines.items.len);
+
+        if (hunk_start == null) {
+            hunk_start = this_start;
+            hunk_end = this_end;
+        } else if (this_start <= hunk_end) {
+            // Overlapping or adjacent - merge
+            hunk_end = @max(hunk_end, this_end);
+        } else {
+            // Output previous hunk
+            try outputFilteredHunk(diff_lines.items, hunk_start.?, hunk_end, &result);
+            hunk_start = this_start;
+            hunk_end = this_end;
+        }
+    }
+    // Output last hunk
+    if (hunk_start) |hs| {
+        try outputFilteredHunk(diff_lines.items, hs, hunk_end, &result);
+    }
+
+    if (result.items.len == 0) return try allocator.dupe(u8, "");
+    return try result.toOwnedSlice();
+}
+
+const DiffLineKind = enum { ctx, add, del };
+
+const DiffLine = struct {
+    kind: DiffLineKind,
+    content: []const u8,
+    old_pos: usize,
+    new_pos: usize,
+    ignored: bool,
+};
+
+fn parseHunkStart(header: []const u8, marker: u8) ?usize {
+    var i: usize = 0;
+    while (i < header.len) : (i += 1) {
+        if (header[i] == marker and i + 1 < header.len) {
+            i += 1;
+            var num: usize = 0;
+            while (i < header.len and header[i] >= '0' and header[i] <= '9') : (i += 1) {
+                num = num * 10 + (header[i] - '0');
+            }
+            return if (num > 0) num else null;
+        }
+    }
+    return null;
+}
+
+fn outputFilteredHunk(diff_lines: []const DiffLine, start: usize, end: usize, result: *std.array_list.Managed(u8)) !void {
+    // Calculate old and new line ranges
+    var old_start: usize = 0;
+    var old_count: usize = 0;
+    var new_start: usize = 0;
+    var new_count: usize = 0;
+    var first_old = true;
+    var first_new = true;
+
+    for (diff_lines[start..end]) |dl| {
+        if (dl.kind == .ctx or dl.kind == .del) {
+            if (first_old) { old_start = dl.old_pos; first_old = false; }
+            old_count += 1;
+        }
+        if (dl.kind == .ctx or dl.kind == .add) {
+            if (first_new) { new_start = dl.new_pos; first_new = false; }
+            new_count += 1;
+        }
+    }
+
+    if (old_start == 0) old_start = 1;
+    if (new_start == 0) new_start = 1;
+
+    // Write hunk header
+    const w = result.writer();
+    try w.print("@@ -{d},{d} +{d},{d} @@\n", .{ old_start, old_count, new_start, new_count });
+
+    // Write lines
+    for (diff_lines[start..end]) |dl| {
+        try result.appendSlice(dl.content);
+        try result.append('\n');
+    }
+}
+
+fn lineMatchesIgnorePatterns(content: []const u8, opts: *const DiffOpts) bool {
+    // Check --ignore-blank-lines
+    if (opts.ignore_blank_lines) {
+        var all_space = true;
+        for (content) |ch| {
+            if (ch != ' ' and ch != '\t' and ch != '\r') {
+                all_space = false;
+                break;
+            }
+        }
+        if (all_space) return true;
+    }
+
+    // Check -I patterns
+    for (opts.ignore_regex.items) |pattern| {
+        if (simpleRegexMatch(pattern, content)) return true;
+    }
+    return false;
+}
+
 fn outputDiffHeader(c: FileChange, sp: []const u8, dp: []const u8, lp: []const u8, opts: *const DiffOpts, pi: *const pm.Platform, allocator: std.mem.Allocator) !void {
+    const src_path = c.rename_from orelse c.path;
+
     // diff --git line
-    const git_line = try std.fmt.allocPrint(allocator, "{s}diff --git {s}{s} {s}{s}\n", .{ lp, sp, c.path, dp, c.path });
+    const git_line = try std.fmt.allocPrint(allocator, "{s}diff --git {s}{s} {s}{s}\n", .{ lp, sp, src_path, dp, c.path });
     defer allocator.free(git_line);
     try pi.writeStdout(git_line);
 
-    if (c.is_new) {
+    if (c.is_rename) {
+        if (c.similarity == 100) {
+            const sim = try std.fmt.allocPrint(allocator, "{s}similarity index 100%\n{s}rename from {s}\n{s}rename to {s}\n", .{
+                lp, lp, src_path, lp, c.path,
+            });
+            defer allocator.free(sim);
+            try pi.writeStdout(sim);
+        } else {
+            const sim = try std.fmt.allocPrint(allocator, "{s}rename from {s}\n{s}rename to {s}\n", .{
+                lp, src_path, lp, c.path,
+            });
+            defer allocator.free(sim);
+            try pi.writeStdout(sim);
+        }
+    } else if (c.is_new) {
         const mode = if (c.new_mode.len > 0 and !std.mem.eql(u8, c.new_mode, "000000")) c.new_mode else "100644";
         const nm = try std.fmt.allocPrint(allocator, "{s}new file mode {s}\n", .{ lp, mode });
         defer allocator.free(nm);
@@ -888,6 +1329,9 @@ fn outputDiffHeader(c: FileChange, sp: []const u8, dp: []const u8, lp: []const u
         try pi.writeStdout(dm);
     }
 
+    // For rename with 100% similarity, skip index and --- +++ lines
+    if (c.is_rename and c.similarity == 100) return;
+
     // index line
     const abbrev_len = opts.getAbbrevLen();
     const full = opts.full_index;
@@ -895,7 +1339,9 @@ fn outputDiffHeader(c: FileChange, sp: []const u8, dp: []const u8, lp: []const u
     const old_h = abbreviateHash(c.old_hash, olen);
     const new_h = abbreviateHash(c.new_hash, olen);
 
-    if (c.is_new or c.is_deleted) {
+    if (c.is_rename) {
+        // For renames with changes, don't show index line but show --- +++
+    } else if (c.is_new or c.is_deleted) {
         const idx = try std.fmt.allocPrint(allocator, "{s}index {s}..{s}\n", .{ lp, old_h, new_h });
         defer allocator.free(idx);
         try pi.writeStdout(idx);
@@ -922,7 +1368,7 @@ fn outputDiffHeader(c: FileChange, sp: []const u8, dp: []const u8, lp: []const u
         defer allocator.free(b_line);
         try pi.writeStdout(b_line);
     } else {
-        const a_line = try std.fmt.allocPrint(allocator, "{s}--- {s}{s}\n", .{ lp, sp, c.path });
+        const a_line = try std.fmt.allocPrint(allocator, "{s}--- {s}{s}\n", .{ lp, sp, src_path });
         defer allocator.free(a_line);
         try pi.writeStdout(a_line);
         const b_line = try std.fmt.allocPrint(allocator, "{s}+++ {s}{s}\n", .{ lp, dp, c.path });
@@ -954,12 +1400,11 @@ fn outputDiffHunks(old_content: []const u8, new_content: []const u8, context_lin
 }
 
 fn doCombinedDiff(allocator: std.mem.Allocator, ref_list: []const []const u8, git_path: []const u8, opts: *const DiffOpts, pi: *const pm.Platform) !void {
-    // Combined diff: first ref is the base, diff against the merge of others
-    // In git, `diff A B C` shows a combined diff comparing A,B,C
-    // Actually it's: diff the tree of the first against each subsequent, show combined format
+    // Combined diff: refs[0] is the result, refs[1..] are parents
+    // Shows how result differs from each parent
     if (ref_list.len < 2) return;
 
-    // Resolve all trees
+    // Resolve all trees: first is result, rest are parents
     var trees = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (trees.items) |t| allocator.free(t);
@@ -969,40 +1414,62 @@ fn doCombinedDiff(allocator: std.mem.Allocator, ref_list: []const []const u8, gi
         const t = resolveToTree(allocator, r, git_path, pi) catch continue;
         try trees.append(t);
     }
-
     if (trees.items.len < 2) return;
 
-    // Collect files from all trees
-    var all_files = std.StringHashMap(void).init(allocator);
-    defer all_files.deinit();
+    const result_tree = trees.items[0];
+    const parent_trees = trees.items[1..];
 
-    var tree_files = std.array_list.Managed(std.StringHashMap(TreeFileInfo)).init(allocator);
+    // Collect files from all trees
+    var result_files = std.StringHashMap(TreeFileInfo).init(allocator);
     defer {
-        for (tree_files.items) |*tf| {
-            var it = tf.iterator();
+        var it = result_files.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.hash);
+            allocator.free(entry.value_ptr.mode);
+        }
+        result_files.deinit();
+    }
+    try collectAllTreeFiles(allocator, result_tree, "", git_path, pi, &result_files);
+
+    var parent_file_maps = std.array_list.Managed(std.StringHashMap(TreeFileInfo)).init(allocator);
+    defer {
+        for (parent_file_maps.items) |*pf| {
+            var it = pf.iterator();
             while (it.next()) |entry| {
                 allocator.free(entry.key_ptr.*);
                 allocator.free(entry.value_ptr.hash);
                 allocator.free(entry.value_ptr.mode);
             }
-            tf.deinit();
+            pf.deinit();
         }
-        tree_files.deinit();
+        parent_file_maps.deinit();
+    }
+    for (parent_trees) |pt| {
+        var pf = std.StringHashMap(TreeFileInfo).init(allocator);
+        try collectAllTreeFiles(allocator, pt, "", git_path, pi, &pf);
+        try parent_file_maps.append(pf);
     }
 
-    for (trees.items) |tree_hash| {
-        var files = std.StringHashMap(TreeFileInfo).init(allocator);
-        try collectAllTreeFiles(allocator, tree_hash, "", git_path, pi, &files);
-        var it = files.keyIterator();
+    // Collect all file names
+    var all_files = std.StringHashMap(void).init(allocator);
+    defer all_files.deinit();
+    {
+        var it = result_files.keyIterator();
         while (it.next()) |k| all_files.put(k.*, {}) catch {};
-        try tree_files.append(files);
+    }
+    for (parent_file_maps.items) |*pf| {
+        var it = pf.keyIterator();
+        while (it.next()) |k| all_files.put(k.*, {}) catch {};
     }
 
-    // Sort file names
+    // Sort
     var sorted = std.array_list.Managed([]const u8).init(allocator);
     defer sorted.deinit();
-    var fk = all_files.keyIterator();
-    while (fk.next()) |k| try sorted.append(k.*);
+    {
+        var fk = all_files.keyIterator();
+        while (fk.next()) |k| try sorted.append(k.*);
+    }
     std.mem.sort([]const u8, sorted.items, {}, struct {
         fn cmp(_: void, a: []const u8, b: []const u8) bool {
             return std.mem.order(u8, a, b) == .lt;
@@ -1011,31 +1478,96 @@ fn doCombinedDiff(allocator: std.mem.Allocator, ref_list: []const []const u8, gi
 
     const lp = opts.line_prefix;
 
-    // For each file, check if it differs between trees
     for (sorted.items) |fname| {
-        // Get hash/content from each tree
-        var hashes = std.array_list.Managed(?[]const u8).init(allocator);
-        defer hashes.deinit();
-        for (tree_files.items) |tf| {
-            if (tf.get(fname)) |info| {
-                try hashes.append(info.hash);
+        const result_info = result_files.get(fname);
+        const result_hash = if (result_info) |ri| ri.hash else null;
+
+        // Check if file differs from at least one parent
+        var differs_from_any = false;
+        for (parent_file_maps.items) |pf| {
+            const parent_info = pf.get(fname);
+            const parent_hash = if (parent_info) |pp| pp.hash else null;
+            if (result_hash == null and parent_hash == null) continue;
+            if (result_hash == null or parent_hash == null) { differs_from_any = true; break; }
+            if (!std.mem.eql(u8, result_hash.?, parent_hash.?)) { differs_from_any = true; break; }
+        }
+        if (!differs_from_any) continue;
+
+        // Check if ALL parents differ (only show in combined diff if all parents differ)
+        var all_parents_differ = true;
+        for (parent_file_maps.items) |pf| {
+            const parent_info = pf.get(fname);
+            const parent_hash = if (parent_info) |pp| pp.hash else null;
+            // Both null means file doesn't exist in either → same
+            if (result_hash == null and parent_hash == null) {
+                all_parents_differ = false;
+                break;
+            }
+            // Both exist and same hash → same
+            if (result_hash != null and parent_hash != null and std.mem.eql(u8, result_hash.?, parent_hash.?)) {
+                all_parents_differ = false;
+                break;
+            }
+        }
+        if (!all_parents_differ) continue;
+
+        // Load contents
+        var parent_contents = std.array_list.Managed([]const u8).init(allocator);
+        defer {
+            for (parent_contents.items) |c| if (c.len > 0) allocator.free(c);
+            parent_contents.deinit();
+        }
+        var parent_hashes = std.array_list.Managed([]const u8).init(allocator);
+        defer parent_hashes.deinit();
+
+        for (parent_file_maps.items) |pf| {
+            const pi2 = pf.get(fname);
+            if (pi2) |pp| {
+                try parent_hashes.append(pp.hash);
+                const content = loadBlob(allocator, pp.hash, git_path, pi) catch try allocator.dupe(u8, "");
+                try parent_contents.append(content);
             } else {
-                try hashes.append(null);
+                try parent_hashes.append("0000000000000000000000000000000000000000");
+                try parent_contents.append(try allocator.dupe(u8, ""));
             }
         }
 
-        // Check if all match the last tree
-        var all_same = true;
-        const last_hash = hashes.items[hashes.items.len - 1];
-        for (hashes.items[0 .. hashes.items.len - 1]) |h| {
-            if (h == null and last_hash == null) continue;
-            if (h == null or last_hash == null) { all_same = false; break; }
-            if (!std.mem.eql(u8, h.?, last_hash.?)) { all_same = false; break; }
-        }
-        if (all_same) continue;
+        const result_content = if (result_hash) |rh|
+            (loadBlob(allocator, rh, git_path, pi) catch try allocator.dupe(u8, ""))
+        else
+            try allocator.dupe(u8, "");
+        defer allocator.free(result_content);
 
-        // Output combined diff for this file
-        try outputCombinedFileDiff(allocator, fname, hashes.items, tree_files.items, git_path, lp, pi);
+        // Output header
+        const header = try std.fmt.allocPrint(allocator, "{s}diff --cc {s}\n", .{ lp, fname });
+        defer allocator.free(header);
+        try pi.writeStdout(header);
+
+        // Index line
+        {
+            var idx = std.array_list.Managed(u8).init(allocator);
+            defer idx.deinit();
+            try idx.appendSlice(lp);
+            try idx.appendSlice("index ");
+            for (parent_hashes.items, 0..) |ph, j| {
+                if (j > 0) try idx.append(',');
+                try idx.appendSlice(ph[0..@min(7, ph.len)]);
+            }
+            try idx.appendSlice("..");
+            if (result_hash) |rh| {
+                try idx.appendSlice(rh[0..@min(7, rh.len)]);
+            } else {
+                try idx.appendSlice("0000000");
+            }
+            try idx.append('\n');
+            try pi.writeStdout(idx.items);
+        }
+
+        const dash = try std.fmt.allocPrint(allocator, "{s}--- a/{s}\n{s}+++ b/{s}\n", .{ lp, fname, lp, fname });
+        defer allocator.free(dash);
+        try pi.writeStdout(dash);
+
+        try outputCombinedHunksNew(allocator, parent_contents.items, result_content, lp, pi);
     }
 }
 
@@ -1071,213 +1603,177 @@ fn collectAllTreeFiles(allocator: std.mem.Allocator, tree_hash: []const u8, pref
     }
 }
 
-fn outputCombinedFileDiff(allocator: std.mem.Allocator, fname: []const u8, hashes: []const ?[]const u8, tree_files: []const std.StringHashMap(TreeFileInfo), git_path: []const u8, lp: []const u8, pi: *const pm.Platform) !void {
-    _ = tree_files;
-    // Load contents
-    var contents = std.array_list.Managed([]const u8).init(allocator);
+// Old combined diff helpers removed - using new LCS-based approach
+
+fn outputCombinedHunksNew(allocator: std.mem.Allocator, parent_contents: []const []const u8, result_content: []const u8, lp: []const u8, pi: *const pm.Platform) !void {
+    const num_parents = parent_contents.len;
+    if (num_parents == 0) return;
+
+    const result_lines = splitLines(allocator, result_content) catch return;
+    defer result_lines.deinit();
+
+    var parent_lines_list = std.array_list.Managed(std.array_list.Managed([]const u8)).init(allocator);
     defer {
-        for (contents.items) |c| if (c.len > 0) allocator.free(c);
-        contents.deinit();
+        for (parent_lines_list.items) |*pl| pl.deinit();
+        parent_lines_list.deinit();
+    }
+    for (parent_contents) |pc| {
+        const pl = splitLines(allocator, pc) catch return;
+        try parent_lines_list.append(pl);
     }
 
-    for (hashes) |h| {
-        if (h) |hash| {
-            const content = loadBlob(allocator, hash, git_path, pi) catch try allocator.dupe(u8, "");
-            try contents.append(content);
-        } else {
-            try contents.append(try allocator.dupe(u8, ""));
+    // For each parent, compute LCS with result
+    var parent_in_result = std.array_list.Managed([]bool).init(allocator);
+    defer {
+        for (parent_in_result.items) |pr| allocator.free(pr);
+        parent_in_result.deinit();
+    }
+    var parent_in_parent = std.array_list.Managed([]bool).init(allocator);
+    defer {
+        for (parent_in_parent.items) |pp| allocator.free(pp);
+        parent_in_parent.deinit();
+    }
+
+    for (parent_lines_list.items) |parent_lines| {
+        const in_result = try allocator.alloc(bool, result_lines.items.len);
+        @memset(in_result, false);
+        const in_parent = try allocator.alloc(bool, parent_lines.items.len);
+        @memset(in_parent, false);
+        computeLCS(parent_lines.items, result_lines.items, in_parent, in_result, allocator);
+        try parent_in_result.append(in_result);
+        try parent_in_parent.append(in_parent);
+    }
+
+    // Build combined output line by line
+    var output = std.array_list.Managed(u8).init(allocator);
+    defer output.deinit();
+
+    var parent_pos = try allocator.alloc(usize, num_parents);
+    defer allocator.free(parent_pos);
+    @memset(parent_pos, 0);
+
+    for (0..result_lines.items.len) |ri| {
+        // Before this result line, output any deleted lines from parents
+        for (0..num_parents) |p| {
+            while (parent_pos[p] < parent_lines_list.items[p].items.len and
+                !parent_in_parent.items[p][parent_pos[p]])
+            {
+                for (0..num_parents) |pp| {
+                    try output.append(if (pp == p) @as(u8, '-') else ' ');
+                }
+                try output.appendSlice(parent_lines_list.items[p].items[parent_pos[p]]);
+                try output.append('\n');
+                parent_pos[p] += 1;
+            }
+        }
+
+        // Output result line with markers
+        for (0..num_parents) |p| {
+            if (parent_in_result.items[p][ri]) {
+                try output.append(' ');
+                if (parent_pos[p] < parent_lines_list.items[p].items.len) {
+                    parent_pos[p] += 1;
+                }
+            } else {
+                try output.append('+');
+            }
+        }
+        try output.appendSlice(result_lines.items[ri]);
+        try output.append('\n');
+    }
+
+    // Output remaining deleted lines from parents
+    for (0..num_parents) |p| {
+        while (parent_pos[p] < parent_lines_list.items[p].items.len) {
+            if (!parent_in_parent.items[p][parent_pos[p]]) {
+                for (0..num_parents) |pp| {
+                    try output.append(if (pp == p) @as(u8, '-') else ' ');
+                }
+                try output.appendSlice(parent_lines_list.items[p].items[parent_pos[p]]);
+                try output.append('\n');
+            }
+            parent_pos[p] += 1;
         }
     }
 
-    if (contents.items.len < 2) return;
+    if (output.items.len == 0) return;
 
-    // Build index line with hashes from each tree
-    var index_line = std.array_list.Managed(u8).init(allocator);
-    defer index_line.deinit();
-    try index_line.appendSlice(lp);
-    try index_line.appendSlice("index ");
-    for (hashes[0 .. hashes.len - 1], 0..) |h, idx| {
-        if (idx > 0) try index_line.append(',');
-        if (h) |hash| {
-            try index_line.appendSlice(hash[0..@min(7, hash.len)]);
-        } else {
-            try index_line.appendSlice("0000000");
-        }
+    // Output hunk header
+    var header = std.array_list.Managed(u8).init(allocator);
+    defer header.deinit();
+    try header.appendSlice(lp);
+    for (0..num_parents + 1) |_| try header.append('@');
+    for (0..num_parents) |p| {
+        try header.appendSlice(" -");
+        const total = parent_lines_list.items[p].items.len;
+        try header.writer().print("{d},{d}", .{ if (total > 0) @as(usize, 1) else @as(usize, 0), total });
     }
-    try index_line.appendSlice("..");
-    if (hashes[hashes.len - 1]) |hash| {
-        try index_line.appendSlice(hash[0..@min(7, hash.len)]);
+    try header.appendSlice(" +");
+    try header.writer().print("{d},{d}", .{ if (result_lines.items.len > 0) @as(usize, 1) else @as(usize, 0), result_lines.items.len });
+    try header.append(' ');
+    for (0..num_parents + 1) |_| try header.append('@');
+    try header.append('\n');
+    try pi.writeStdout(header.items);
+
+    // Output lines with line prefix
+    if (lp.len > 0) {
+        var lines_it = std.mem.splitScalar(u8, output.items, '\n');
+        while (lines_it.next()) |line| {
+            if (line.len > 0) {
+                try pi.writeStdout(lp);
+                try pi.writeStdout(line);
+                try pi.writeStdout("\n");
+            }
+        }
     } else {
-        try index_line.appendSlice("0000000");
+        try pi.writeStdout(output.items);
     }
-    try index_line.append('\n');
-
-    // Header
-    const header = try std.fmt.allocPrint(allocator, "{s}diff --cc {s}\n", .{ lp, fname });
-    defer allocator.free(header);
-    try pi.writeStdout(header);
-    try pi.writeStdout(index_line.items);
-
-    const dash_line = try std.fmt.allocPrint(allocator, "{s}--- a/{s}\n{s}+++ b/{s}\n", .{ lp, fname, lp, fname });
-    defer allocator.free(dash_line);
-    try pi.writeStdout(dash_line);
-
-    // Generate combined hunks
-    try outputCombinedHunks(allocator, contents.items, lp, pi);
 }
 
-fn outputCombinedHunks(allocator: std.mem.Allocator, contents: []const []const u8, lp: []const u8, pi: *const pm.Platform) !void {
-    if (contents.len < 2) return;
-
-    // Split all contents into lines
-    var all_lines = std.array_list.Managed(std.array_list.Managed([]const u8)).init(allocator);
-    defer {
-        for (all_lines.items) |*al| al.deinit();
-        all_lines.deinit();
+fn splitLines(allocator: std.mem.Allocator, content: []const u8) !std.array_list.Managed([]const u8) {
+    var lines = std.array_list.Managed([]const u8).init(allocator);
+    if (content.len > 0) {
+        var it = std.mem.splitScalar(u8, content, '\n');
+        while (it.next()) |line| try lines.append(line);
+        if (lines.items.len > 0 and content[content.len - 1] == '\n') _ = lines.pop();
     }
+    return lines;
+}
 
-    for (contents) |c| {
-        var lines = std.array_list.Managed([]const u8).init(allocator);
-        if (c.len > 0) {
-            var it = std.mem.splitScalar(u8, c, '\n');
-            while (it.next()) |line| try lines.append(line);
-            if (lines.items.len > 0 and c[c.len - 1] == '\n') _ = lines.pop();
-        }
-        try all_lines.append(lines);
-    }
+fn computeLCS(parent_lines: []const []const u8, result_lines: []const []const u8, in_parent: []bool, in_result: []bool, allocator: std.mem.Allocator) void {
+    const n = parent_lines.len;
+    const m = result_lines.len;
+    if (n == 0 or m == 0) return;
 
-    const result_lines = all_lines.items[all_lines.items.len - 1].items;
-    const num_parents = all_lines.items.len - 1;
+    const dp = allocator.alloc(u16, (n + 1) * (m + 1)) catch return;
+    defer allocator.free(dp);
+    @memset(dp, 0);
 
-    // For each line in the result, determine which parents it comes from
-    var parent_indices = try allocator.alloc(usize, num_parents);
-    defer allocator.free(parent_indices);
-    @memset(parent_indices, 0);
-
-    // Simple approach: walk through result lines, for each parent track position
-    var hunk_lines = std.array_list.Managed(u8).init(allocator);
-    defer hunk_lines.deinit();
-
-    var hunk_old_starts = try allocator.alloc(usize, num_parents);
-    defer allocator.free(hunk_old_starts);
-    var hunk_old_counts = try allocator.alloc(usize, num_parents);
-    defer allocator.free(hunk_old_counts);
-
-    @memset(hunk_old_starts, 1);
-    @memset(hunk_old_counts, 0);
-
-    var result_start: usize = 1;
-    var result_count: usize = 0;
-    var in_hunk = false;
-
-    for (result_lines) |result_line| {
-        // Check which parents have this line
-        var prefixes = try allocator.alloc(u8, num_parents);
-        defer allocator.free(prefixes);
-
-        for (0..num_parents) |p| {
-            const parent_lines = all_lines.items[p].items;
-            if (parent_indices[p] < parent_lines.len and
-                std.mem.eql(u8, parent_lines[parent_indices[p]], result_line))
-            {
-                prefixes[p] = ' ';
-                parent_indices[p] += 1;
+    for (0..n) |i| {
+        for (0..m) |j| {
+            if (std.mem.eql(u8, parent_lines[i], result_lines[j])) {
+                dp[(i + 1) * (m + 1) + (j + 1)] = dp[i * (m + 1) + j] + 1;
             } else {
-                prefixes[p] = '+';
+                const up = dp[i * (m + 1) + (j + 1)];
+                const left = dp[(i + 1) * (m + 1) + j];
+                dp[(i + 1) * (m + 1) + (j + 1)] = @max(up, left);
             }
-        }
-
-        // Check if this line is in all parents
-        var all_match = true;
-        for (prefixes) |p| {
-            if (p != ' ') { all_match = false; break; }
-        }
-
-        if (!all_match) {
-            if (!in_hunk) {
-                in_hunk = true;
-                hunk_lines.clearRetainingCapacity();
-                for (0..num_parents) |p| {
-                    hunk_old_starts[p] = parent_indices[p]; // will be adjusted
-                    hunk_old_counts[p] = 0;
-                }
-                result_start = result_count + 1;
-            }
-        }
-
-        if (in_hunk) {
-            for (prefixes) |p| try hunk_lines.append(p);
-            try hunk_lines.appendSlice(result_line);
-            try hunk_lines.append('\n');
-            for (0..num_parents) |p| {
-                if (prefixes[p] == ' ') hunk_old_counts[p] += 1;
-            }
-        }
-
-        result_count += 1;
-    }
-
-    // Handle lines only in parents (deleted lines)
-    for (0..num_parents) |p| {
-        while (parent_indices[p] < all_lines.items[p].items.len) {
-            if (!in_hunk) {
-                in_hunk = true;
-                hunk_lines.clearRetainingCapacity();
-                for (0..num_parents) |pp| {
-                    hunk_old_starts[pp] = parent_indices[pp] + 1;
-                    hunk_old_counts[pp] = 0;
-                }
-                result_start = result_count + 1;
-            }
-            // Output deleted line
-            for (0..num_parents) |pp| {
-                if (pp == p) {
-                    try hunk_lines.append('-');
-                } else {
-                    try hunk_lines.append(' ');
-                }
-            }
-            try hunk_lines.appendSlice(all_lines.items[p].items[parent_indices[p]]);
-            try hunk_lines.append('\n');
-            hunk_old_counts[p] += 1;
-            parent_indices[p] += 1;
         }
     }
 
-    if (in_hunk and hunk_lines.items.len > 0) {
-        // Output hunk header
-        var header = std.array_list.Managed(u8).init(allocator);
-        defer header.deinit();
-        try header.appendSlice(lp);
-        try header.appendSlice("@@@");
-        // Actually for N parents, use N+1 @ signs
-        // Wait, git uses @@@ for 2-parent merge (3 @s), @@@@ for 3-parent, etc.
-        // The header format is: @@@ -old1,count1 -old2,count2 +new,count @@@
-        // Let me fix this:
-        header.clearRetainingCapacity();
-        try header.appendSlice(lp);
-        // N+1 @ signs
-        for (0..num_parents + 1) |_| try header.append('@');
-        for (0..num_parents) |p| {
-            try header.appendSlice(" -");
-            const start = if (hunk_old_counts[p] > 0) hunk_old_starts[p] else 0;
-            const count = hunk_old_counts[p] + result_count - result_start + 1; // approximate
-            _ = start;
-            _ = count;
-            // Use the parent's line count
-            const parent_total = all_lines.items[p].items.len;
-            try header.writer().print("{d}", .{if (parent_total > 0) @as(usize, 1) else @as(usize, 0)});
-            if (parent_total != 1) try header.writer().print(",{d}", .{parent_total});
+    var i: usize = n;
+    var j: usize = m;
+    while (i > 0 and j > 0) {
+        if (std.mem.eql(u8, parent_lines[i - 1], result_lines[j - 1])) {
+            in_parent[i - 1] = true;
+            in_result[j - 1] = true;
+            i -= 1;
+            j -= 1;
+        } else if (dp[(i - 1) * (m + 1) + j] > dp[i * (m + 1) + (j - 1)]) {
+            i -= 1;
+        } else {
+            j -= 1;
         }
-        try header.appendSlice(" +");
-        try header.writer().print("{d}", .{if (result_lines.len > 0) @as(usize, 1) else @as(usize, 0)});
-        if (result_lines.len != 1) try header.writer().print(",{d}", .{result_lines.len});
-        try header.append(' ');
-        for (0..num_parents + 1) |_| try header.append('@');
-        try header.append('\n');
-
-        try pi.writeStdout(header.items);
-        try pi.writeStdout(hunk_lines.items);
     }
 }
 
@@ -1552,6 +2048,44 @@ fn doRefToIndexDiff(allocator: std.mem.Allocator, ref_name: []const u8, index: *
         }
     }
 
+    // Check for files in tree but not in index (deleted files)
+    var index_paths = std.StringHashMap(void).init(allocator);
+    defer index_paths.deinit();
+    for (index.entries.items) |entry| {
+        index_paths.put(entry.path, {}) catch {};
+    }
+
+    var tree_it = tree_files.iterator();
+    while (tree_it.next()) |entry| {
+        const tree_path = entry.key_ptr.*;
+        if (index_paths.contains(tree_path)) continue;
+        if (pathspecs.len > 0 and !matchPathspec(tree_path, pathspecs)) continue;
+
+        const tree_info = entry.value_ptr.*;
+        const old_c = loadBlob(allocator, tree_info.hash, git_path, pi) catch try allocator.dupe(u8, "");
+        try changes.append(.{
+            .path = try allocator.dupe(u8, tree_path),
+            .old_hash = try allocator.dupe(u8, tree_info.hash),
+            .new_hash = try allocator.dupe(u8, "0000000000000000000000000000000000000000"),
+            .old_mode = try allocator.dupe(u8, tree_info.mode),
+            .new_mode = try allocator.dupe(u8, "000000"),
+            .old_content = old_c,
+            .new_content = try allocator.dupe(u8, ""),
+            .insertions = 0,
+            .deletions = diff_stats.countLines(old_c),
+            .is_new = false,
+            .is_deleted = true,
+            .is_binary = diff_stats.isBinContent(old_c),
+        });
+    }
+
+    // Sort changes by path
+    std.mem.sort(FileChange, changes.items, {}, struct {
+        fn cmp(_: void, a: FileChange, b: FileChange) bool {
+            return std.mem.order(u8, a.path, b.path) == .lt;
+        }
+    }.cmp);
+
     try outputChanges(changes.items, opts, pi, allocator);
 }
 
@@ -1684,7 +2218,7 @@ const IndexFileInfo = struct {
 
 fn doIndexToHeadDiff(allocator: std.mem.Allocator, index: *const index_mod.Index, git_path: []const u8, opts: *const DiffOpts, pathspecs: []const []const u8, pi: *const pm.Platform) !void {
     // Get HEAD tree
-    const head_commit = refs.getCurrentCommit(git_path, pi, allocator) catch return;
+    const head_commit = refs.getCurrentCommit(git_path, pi, allocator) catch null;
     defer if (head_commit) |hc| allocator.free(hc);
 
     if (head_commit == null) {
@@ -1793,33 +2327,186 @@ fn doWorkingTreeDiff(allocator: std.mem.Allocator, index: *const index_mod.Index
     try outputChanges(changes.items, opts, pi, allocator);
 }
 
-fn outputChanges(changes: []const FileChange, opts: *const DiffOpts, pi: *const pm.Platform, allocator: std.mem.Allocator) !void {
-    if (opts.quiet) return;
+fn detectRenames(changes: *std.array_list.Managed(FileChange), allocator: std.mem.Allocator) void {
+    // Find added and deleted files
+    var deleted_indices = std.array_list.Managed(usize).init(allocator);
+    defer deleted_indices.deinit();
+    var added_indices = std.array_list.Managed(usize).init(allocator);
+    defer added_indices.deinit();
+
+    for (changes.items, 0..) |c, i| {
+        if (c.is_deleted and !c.is_rename) deleted_indices.append(i) catch {};
+        if (c.is_new and !c.is_rename) added_indices.append(i) catch {};
+    }
+
+    // For each added file, find best matching deleted file
+    var matched_deleted = std.AutoHashMap(usize, void).init(allocator);
+    defer matched_deleted.deinit();
+    var rename_pairs = std.array_list.Managed([2]usize).init(allocator);
+    defer rename_pairs.deinit();
+
+    for (added_indices.items) |ai| {
+        var best_di: ?usize = null;
+        var best_sim: u8 = 0;
+
+        for (deleted_indices.items) |di| {
+            if (matched_deleted.contains(di)) continue;
+
+            const sim = computeSimilarity(changes.items[di].old_content, changes.items[ai].new_content);
+            // Also check basename similarity
+            const basename_bonus: u8 = if (sameBasename(changes.items[di].path, changes.items[ai].path)) 10 else 0;
+            const total_sim = @min(@as(u16, sim) + basename_bonus, 100);
+
+            if (total_sim > best_sim and total_sim >= 50) {
+                best_sim = @intCast(total_sim);
+                best_di = di;
+            }
+        }
+
+        if (best_di) |di| {
+            matched_deleted.put(di, {}) catch {};
+            rename_pairs.append(.{ di, ai }) catch {};
+        }
+    }
+
+    // Convert pairs to rename changes
+    for (rename_pairs.items) |pair| {
+        const di = pair[0];
+        const ai = pair[1];
+
+        // Mark deleted as consumed
+        changes.items[di].is_deleted = false;
+        changes.items[di].is_rename = true; // mark for removal
+
+        // Convert added to rename
+        changes.items[ai].is_new = false;
+        changes.items[ai].is_rename = true;
+        changes.items[ai].rename_from = changes.items[di].path;
+        changes.items[ai].old_hash = changes.items[di].old_hash;
+        changes.items[ai].old_mode = changes.items[di].old_mode;
+        changes.items[ai].old_content = changes.items[di].old_content;
+
+        // Recalculate stats
+        const stats = diff_stats.countInsDels(changes.items[ai].old_content, changes.items[ai].new_content);
+        changes.items[ai].insertions = stats.ins;
+        changes.items[ai].deletions = stats.dels;
+        changes.items[ai].similarity = computeSimilarity(changes.items[ai].old_content, changes.items[ai].new_content);
+    }
+
+    // Remove consumed deleted entries (iterate backwards to keep indices valid)
+    var i: usize = changes.items.len;
+    while (i > 0) {
+        i -= 1;
+        if (changes.items[i].is_rename and changes.items[i].rename_from == null) {
+            // This is the old deleted entry marked for removal
+            _ = changes.orderedRemove(i);
+        }
+    }
+}
+
+fn computeSimilarity(content1: []const u8, content2: []const u8) u8 {
+    if (content1.len == 0 and content2.len == 0) return 100;
+    if (content1.len == 0 or content2.len == 0) return 0;
+
+    // Count matching lines
+    var lines1 = std.mem.splitScalar(u8, content1, '\n');
+    var count1: usize = 0;
+    while (lines1.next()) |_| count1 += 1;
+
+    var lines2 = std.mem.splitScalar(u8, content2, '\n');
+    var count2: usize = 0;
+    while (lines2.next()) |_| count2 += 1;
+
+    // Simple: count lines that appear in both (bag similarity)
+    // For better accuracy, we'd use LCS, but this is sufficient for basic rename detection
+    var matching: usize = 0;
+    var l1_iter = std.mem.splitScalar(u8, content1, '\n');
+    while (l1_iter.next()) |line1| {
+        var l2_iter = std.mem.splitScalar(u8, content2, '\n');
+        while (l2_iter.next()) |line2| {
+            if (std.mem.eql(u8, line1, line2)) {
+                matching += 1;
+                break;
+            }
+        }
+    }
+
+    const total = @max(count1, count2);
+    if (total == 0) return 100;
+    return @intCast(@min(matching * 100 / total, 100));
+}
+
+fn sameBasename(path1: []const u8, path2: []const u8) bool {
+    const base1 = if (std.mem.lastIndexOf(u8, path1, "/")) |pos| path1[pos + 1 ..] else path1;
+    const base2 = if (std.mem.lastIndexOf(u8, path2, "/")) |pos| path2[pos + 1 ..] else path2;
+    return std.mem.eql(u8, base1, base2);
+}
+
+fn outputChanges(changes_slice: []const FileChange, opts: *const DiffOpts, pi: *const pm.Platform, allocator: std.mem.Allocator) !void {
+    if (opts.quiet and !(opts.exit_code)) return;
+
+    // Apply rename detection if enabled
+    var rename_list: ?std.array_list.Managed(FileChange) = null;
+    defer if (rename_list) |*rl| rl.deinit();
+
+    const changes = if (!opts.no_renames) blk: {
+        rename_list = std.array_list.Managed(FileChange).init(allocator);
+        for (changes_slice) |c| rename_list.?.append(c) catch {};
+        detectRenames(&rename_list.?, allocator);
+        break :blk rename_list.?.items;
+    } else changes_slice;
+
+    const has_ignore = opts.ignore_regex.items.len > 0 or opts.ignore_blank_lines;
+
+    // For -I filtering with non-patch modes, we need to filter changes
+    var filtered_changes: ?std.array_list.Managed(FileChange) = null;
+    defer if (filtered_changes) |*fc| fc.deinit();
+
+    const effective_changes = if (has_ignore and (opts.output_mode == .raw or opts.output_mode == .name_only or
+        opts.output_mode == .name_status or opts.output_mode == .stat or opts.output_mode == .shortstat))
+    blk: {
+        filtered_changes = std.array_list.Managed(FileChange).init(allocator);
+        for (changes) |c| {
+            const filtered = getFilteredStats(c, opts, allocator);
+            if (filtered.has_changes) {
+                var fc = c;
+                fc.insertions = filtered.ins;
+                fc.deletions = filtered.dels;
+                filtered_changes.?.append(fc) catch {};
+            }
+        }
+        break :blk filtered_changes.?.items;
+    } else changes;
+
+    if (opts.quiet) {
+        if (effective_changes.len > 0) std.process.exit(1);
+        return;
+    }
 
     switch (opts.output_mode) {
-        .stat => try outputStat(changes, pi, allocator),
-        .shortstat => try outputShortStat(changes, pi, allocator),
-        .numstat => try outputNumStat(changes, pi, allocator),
-        .name_only => try outputNameOnly(changes, pi, allocator),
-        .name_status => try outputNameStatus(changes, pi, allocator),
-        .raw => try outputRaw(changes, opts, pi, allocator),
-        .summary => try outputSummary(changes, pi, allocator),
-        .dirstat => try outputDirStat(changes, pi, allocator),
+        .stat => try outputStat(effective_changes, pi, allocator),
+        .shortstat => try outputShortStat(effective_changes, pi, allocator),
+        .numstat => try outputNumStat(effective_changes, pi, allocator),
+        .name_only => try outputNameOnly(effective_changes, pi, allocator),
+        .name_status => try outputNameStatus(effective_changes, pi, allocator),
+        .raw => try outputRaw(effective_changes, opts, pi, allocator),
+        .summary => try outputSummary(effective_changes, pi, allocator),
+        .dirstat => try outputDirStat(effective_changes, pi, allocator),
         .patch => try outputPatch(changes, opts, pi, allocator),
         .patch_with_stat => {
-            try outputStat(changes, pi, allocator);
+            try outputStat(effective_changes, pi, allocator);
             try pi.writeStdout("\n");
             try outputPatch(changes, opts, pi, allocator);
         },
         .patch_with_raw => {
-            try outputRaw(changes, opts, pi, allocator);
+            try outputRaw(effective_changes, opts, pi, allocator);
             try pi.writeStdout("\n");
             try outputPatch(changes, opts, pi, allocator);
         },
         .no_patch => {},
     }
 
-    if ((opts.exit_code or opts.quiet) and changes.len > 0) {
+    if (opts.exit_code and effective_changes.len > 0) {
         std.process.exit(1);
     }
 }
