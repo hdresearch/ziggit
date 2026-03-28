@@ -9592,10 +9592,10 @@ fn isValidConfigKey(key: []const u8) bool {
     const dot = std.mem.indexOfScalar(u8, key, '.') orelse return false;
     if (dot == 0) return false;
     
-    // Section must start with letter
-    if (!std.ascii.isAlphabetic(key[0])) return false;
+    // Section must contain only alphanumeric and dash, and start with alphanumeric
+    if (!std.ascii.isAlphanumeric(key[0])) return false;
     for (key[0..dot]) |c| {
-        if (!std.ascii.isAlphanumeric(c) and c != '-') return false;
+        if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '.') return false;
     }
     
     // Find the last dot - variable name is after it
