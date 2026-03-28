@@ -667,7 +667,21 @@ fn State(comptime PlatformType: type) type {
                     const from_ref = line[5..];
                     pos = line_end + 1;
 
-                    if (self.resolveDataref(from_ref)) |hash| {
+                    // Check for zero OID (delete ref)
+                    const is_zero = blk: {
+                        for (from_ref) |c| {
+                            if (c != '0') break :blk false;
+                        }
+                        break :blk from_ref.len == 40;
+                    };
+
+                    if (is_zero) {
+                        // Delete the ref
+                        self.deleteRef(ref_name) catch {};
+                        if (self.ref_commits.fetchRemove(ref_name)) |old| {
+                            self.allocator.free(old.key);
+                        }
+                    } else if (self.resolveDataref(from_ref)) |hash| {
                         try refs.updateRef(self.git_dir, ref_name, &hash, self.platform, self.allocator);
                         // Update local cache
                         const ref_copy = try self.allocator.dupe(u8, ref_name);
@@ -695,8 +709,8 @@ fn State(comptime PlatformType: type) type {
                 }
             }
 
-            // Skip blank line after reset
-            if (pos < data.len and data[pos] == '\n') {
+            // Skip blank lines after reset
+            while (pos < data.len and data[pos] == '\n') {
                 pos += 1;
             }
 
