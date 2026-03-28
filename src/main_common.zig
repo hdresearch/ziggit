@@ -6427,10 +6427,6 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             std.process.exit(1);
         };
 
-        // Remove the index to start fresh
-        const index_path = try std.fmt.allocPrint(allocator, "{s}/index", .{git_path});
-        defer allocator.free(index_path);
-        std.fs.cwd().deleteFile(index_path) catch {};
 
         const success_msg = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
         defer allocator.free(success_msg);
