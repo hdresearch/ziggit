@@ -982,7 +982,7 @@ fn skipLine(data: []const u8, pos: usize) usize {
 fn unquotePath(path: []const u8, allocator: std.mem.Allocator) ![]const u8 {
     if (path.len >= 2 and path[0] == '"' and path[path.len - 1] == '"') {
         // Unquote C-style string
-        var result = std.ArrayList(u8).init(self.allocator);
+        var result = std.ArrayList(u8).init(allocator);
         defer result.deinit();
 
         var i: usize = 1;
