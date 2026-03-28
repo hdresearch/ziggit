@@ -21597,6 +21597,11 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                         }
                         return err;
                     };
+                    if (verbose) {
+                        const vmsg = try std.fmt.allocPrint(allocator, "add '{s}'\n", .{path});
+                        defer allocator.free(vmsg);
+                        try platform_impl.writeStdout(vmsg);
+                    }
                     modified = true;
                 }
             } else {
