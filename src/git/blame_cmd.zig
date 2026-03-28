@@ -854,7 +854,8 @@ fn oC(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []con
     } else {
         const dn = if (se2) try std.fmt.allocPrint(a, "<{s}>", .{e.author_email}) else try a.dupe(u8, e.author_name);
         defer a.free(dn);
-        const pn = try B.padR(a, dn, mal2);
+        // Use at least dn.len + 1 to ensure a space before the author name (for awk parsing)
+        const pn = try B.padR(a, dn, @max(mal2, dn.len + 1));
         defer a.free(pn);
         const ds = if (srt2) try std.fmt.allocPrint(a, "{d} {s}", .{ e.author_time, e.author_tz }) else try B.fmtTs(a, e.author_time, e.author_tz);
         defer a.free(ds);
