@@ -25870,10 +25870,20 @@ fn nativeCmdPrune(allocator: std.mem.Allocator, args: [][]const u8, command_inde
         unreachable;
     };
 
+    // Validate expire value before proceeding
+    if (expire.len > 0) {
+        _ = parseExpireTime(expire) catch {
+            const msg = std.fmt.allocPrint(allocator, "fatal: malformed expiration date '{s}'\n", .{expire}) catch unreachable;
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        };
+    }
+
     try doNativePrune(allocator, git_dir, platform_impl, expire);
 }
 
-fn parseExpireTime(expire: []const u8) i128 {
+fn parseExpireTime(expire: []const u8) ParseExpireError!i128 {
     // Parse expire time strings like "1.day", "2.weeks.ago", "now", "never"
     if (expire.len == 0 or std.mem.eql(u8, expire, "now")) return std.math.maxInt(i128); // prune everything
     if (std.mem.eql(u8, expire, "never")) return 0; // prune nothing
