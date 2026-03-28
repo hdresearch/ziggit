@@ -27,21 +27,7 @@ pub fn build(b: *std.Build) void {
     const fix_wrapper = b.addSystemCommand(&.{
         "sh", "-c",
         \\DEST="$1"
-        \\if [ -f "$DEST" ] && head -c 2 "$DEST" | grep -q '#!'; then
-        \\  # Find the real ELF binary in zig-cache
-        \\  REAL=$(find "$(dirname "$DEST")/../../.zig-cache/o" -name ziggit -type f 2>/dev/null | while read f; do
-        \\    head -c 4 "$f" | grep -q ELF && echo "$f"
-        \\  done | sort -t/ -k1 | tail -1)
-        \\  if [ -z "$REAL" ]; then
-        \\    REAL=$(find "$PWD/.zig-cache/o" -name ziggit -type f 2>/dev/null | while read f; do
-        \\      head -c 4 "$f" | grep -q ELF && echo "$f"
-        \\    done | sort -t/ -k1 | tail -1)
-        \\  fi
-        \\  if [ -n "$REAL" ] && [ -f "$REAL" ]; then
-        \\    cp "$REAL" "$DEST"
-        \\    chmod +x "$DEST"
-        \\  fi
-        \\fi
+        \\for f in $(ls -t "$PWD"/.zig-cache/o/*/ziggit 2>/dev/null); do head -c 4 "$f" | grep -q ELF && cp "$f" "$DEST" && chmod +x "$DEST" && break; done
         ,
         "--",
         b.getInstallPath(.bin, "ziggit"),
