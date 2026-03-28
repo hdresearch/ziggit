@@ -297,7 +297,7 @@ fn findSimilarCommands(allocator: std.mem.Allocator, typo: []const u8, platform_
             result2.append(c.name) catch continue;
         }
     }
-    return result2.toOwnedSlice() catch &[_][]const u8{};
+    return result2.toOwnedSlice(allocator) catch &[_][]const u8{};
 }
 
 fn parseGitConfigParameters(allocator: std.mem.Allocator, params: []const u8) void {
