@@ -7,13 +7,13 @@ const Mark = struct {
 };
 
 pub fn run(allocator: std.mem.Allocator, platform_impl: anytype, options: Options) !void {
-    const git_dir = findGitDir(allocator, platform_impl) orelse {
+    const git_dir = findGitDir(allocator) orelse {
         try platform_impl.writeStderr("fatal: not a git repository\n");
         std.process.exit(128);
     };
     defer allocator.free(git_dir);
 
-    var state = State.init(allocator, git_dir, platform_impl);
+    var state = State(@TypeOf(platform_impl)).init(allocator, git_dir, platform_impl);
     defer state.deinit();
 
     // Import marks if requested
