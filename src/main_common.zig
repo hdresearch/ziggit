@@ -34269,7 +34269,6 @@ fn cmdWebBrowse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         child.stdout_behavior = .Inherit;
         child.stderr_behavior = .Inherit;
         try child.spawn();
-        if (stdout.len > 0) try platform_impl.writeStdout(stdout);
     } else if (browser_path) |bp| {
         defer allocator.free(bp);
         const full_cmd2 = std.fmt.allocPrint(allocator, "{s} {s}", .{ bp, actual_url }) catch return;
@@ -34279,7 +34278,6 @@ fn cmdWebBrowse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         child2.stdout_behavior = .Inherit;
         child2.stderr_behavior = .Inherit;
         try child2.spawn();
-        if (stdout2.len > 0) try platform_impl.writeStdout(stdout2);
     } else {
         try platform_impl.writeStderr("No suitable browser detected.\n");
         std.process.exit(1);
