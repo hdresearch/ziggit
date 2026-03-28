@@ -19869,7 +19869,7 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             .hard, .merge_mode => {
                 // Clear old tracked files first (using OLD index), then checkout target tree
                 const repo_root_for_clear = std.fs.path.dirname(git_path) orelse ".";
-                clearWorkingDirectory(repo_root_for_clear, allocator, platform_impl);
+                clearWorkingDirectory(repo_root_for_clear, allocator, platform_impl) catch {};
                 // Now update index to match target commit
                 resetIndex(git_path, target_hash, platform_impl, allocator) catch {};
                 // Checkout the target tree into working directory
