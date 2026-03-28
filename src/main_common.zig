@@ -18220,6 +18220,19 @@ fn removeTrackedFiles(allocator: std.mem.Allocator, index_path: []const u8, repo
 }
 
 /// Clean up merge/cherry-pick/revert state files
+/// Clean up sequencer state directory
+fn cleanupSequencer(git_path: []const u8, allocator: std.mem.Allocator) void {
+    const files_to_del = [_][]const u8{ "todo", "abort-safety", "head", "opts" };
+    for (files_to_del) |name| {
+        const fpath = std.fmt.allocPrint(allocator, "{s}/sequencer/{s}", .{ git_path, name }) catch continue;
+        defer allocator.free(fpath);
+        std.fs.cwd().deleteFile(fpath) catch {};
+    }
+    const seq_dir = std.fmt.allocPrint(allocator, "{s}/sequencer", .{git_path}) catch return;
+    defer allocator.free(seq_dir);
+    std.fs.cwd().deleteDir(seq_dir) catch {};
+}
+
 fn cleanupMergeState(git_path: []const u8, allocator: std.mem.Allocator) void {
     const state_files = [_][]const u8{
         "MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "SQUASH_MSG",
