@@ -9150,7 +9150,8 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             std.process.exit(128);
         };
         defer allocator.free(cfg_path);
-        try configUnsetValue(cfg_path, key, do_unset_all, allocator, platform_impl);
+        const unset_value_regex: ?[]const u8 = if (positionals.items.len >= 2) positionals.items[1] else null;
+        try configUnsetValue(cfg_path, key, do_unset_all, unset_value_regex, allocator, platform_impl);
         return;
     }
 
@@ -9217,9 +9218,19 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             };
         }
         const key = positionals.items[0];
-        const val = configLookup(sources.items, key, allocator, platform_impl) catch |err| switch (err) {
-            error.OutOfMemory => return err,
-            else => null,
+        // Support optional value_regex for --get
+        const get_value_regex: ?[]const u8 = if (positionals.items.len >= 2 and (do_get or do_get_all)) positionals.items[1] else null;
+        const val = if (get_value_regex) |regex| blk: {
+            // Get with value regex filter
+            break :blk configLookupWithRegex(sources.items, key, regex, allocator, platform_impl) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => @as(?[]u8, null),
+            };
+        } else blk: {
+            break :blk configLookup(sources.items, key, allocator, platform_impl) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => @as(?[]u8, null),
+            };
         };
         defer if (val) |v| allocator.free(v);
         const effective_val = val orelse default_value;
@@ -9262,6 +9273,39 @@ fn configLookup(sources: []const ConfigSource, key: []const u8, allocator: std.m
     if (getConfigOverride(key)) |override_val| {
         if (result) |prev| allocator.free(prev);
         return try allocator.dupe(u8, override_val);
+    }
+    return result orelse error.KeyNotFound;
+}
+
+fn configLookupWithRegex(sources: []const ConfigSource, key: []const u8, regex: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
+    // Like configLookup but filters by value regex
+    const negate = regex.len > 0 and regex[0] == '!';
+    const pattern = if (negate) regex[1..] else regex;
+    var result: ?[]u8 = null;
+    for (sources) |source| {
+        const content = platform_impl.fs.readFile(allocator, source.path) catch continue;
+        defer allocator.free(content);
+        // Get all values for this key
+        var all_vals = std.array_list.Managed([]const u8).init(allocator);
+        defer {
+            for (all_vals.items) |v| allocator.free(v);
+            all_vals.deinit();
+        }
+        try parseConfigGetAll(content, key, &all_vals, allocator);
+        for (all_vals.items) |v| {
+            const matches = simpleRegexMatch(v, pattern);
+            if (negate != matches) { // (!negate && matches) || (negate && !matches)
+                if (result) |prev| allocator.free(prev);
+                result = try allocator.dupe(u8, v);
+            }
+        }
+    }
+    if (getConfigOverride(key)) |override_val| {
+        const matches = simpleRegexMatch(override_val, pattern);
+        if (negate != matches) {
+            if (result) |prev| allocator.free(prev);
+            return try allocator.dupe(u8, override_val);
+        }
     }
     return result orelse error.KeyNotFound;
 }
@@ -9837,7 +9881,7 @@ fn formatSectionHeader(section_key: []const u8, allocator: std.mem.Allocator) ![
     return try allocator.dupe(u8, section_key);
 }
 
-fn configUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+fn configUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, value_regex: ?[]const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     const last_dot = std.mem.lastIndexOf(u8, key, ".") orelse {
         try platform_impl.writeStderr("error: key does not contain a section\n");
         std.process.exit(2);
@@ -9875,6 +9919,16 @@ fn configUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, allo
             if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
                 const k = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
                 if (std.ascii.eqlIgnoreCase(k, key_part)) {
+                    // Check value regex if provided
+                    if (value_regex) |regex| {
+                        const existing_val = std.mem.trim(u8, trimmed[eq_pos + 1 ..], " \t");
+                        if (!simpleRegexMatch(existing_val, regex)) {
+                            // Value doesn't match - don't unset this entry
+                            try result.appendSlice(line);
+                            try result.append('\n');
+                            continue;
+                        }
+                    }
                     found = true;
                     found_count += 1;
                     if (unset_all or found_count == 1) {
