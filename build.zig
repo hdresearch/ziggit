@@ -27,7 +27,26 @@ pub fn build(b: *std.Build) void {
     const fix_wrapper = b.addSystemCommand(&.{
         "sh", "-c",
         \\DEST="$1"
-        \\for f in $(ls -t "$PWD"/.zig-cache/o/*/ziggit 2>/dev/null); do head -c 4 "$f" | grep -q ELF && cp "$f" "$DEST" && chmod +x "$DEST" && break; done
+        \\BEST=""
+        \\BEST_TIME=0
+        \\for f in "$PWD"/.zig-cache/o/*/ziggit; do
+        \\  [ -f "$f" ] || continue
+        \\  MAGIC=$(head -c 4 "$f" 2>/dev/null || true)
+        \\  case "$MAGIC" in
+        \\    *ELF*)
+        \\      T=$(stat -c %Y "$f" 2>/dev/null || echo 0)
+        \\      if [ "$T" -gt "$BEST_TIME" ]; then
+        \\        BEST_TIME="$T"
+        \\        BEST="$f"
+        \\      fi
+        \\      ;;
+        \\  esac
+        \\done
+        \\if [ -n "$BEST" ]; then
+        \\  rm -f "$DEST"
+        \\  cp "$BEST" "$DEST"
+        \\  chmod +x "$DEST"
+        \\fi
         ,
         "--",
         b.getInstallPath(.bin, "ziggit"),
