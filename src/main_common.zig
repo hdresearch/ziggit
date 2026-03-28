@@ -504,10 +504,72 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                     }
                 }
             }
-            // Command not found - error (pure Zig, no git forwarding)
+            // Command not found - check help.autocorrect config
             const error_msg = std.fmt.allocPrint(allocator, "git: '{s}' is not a git command. See 'git --help'.\n", .{command}) catch "git: invalid command. See 'git --help'.\n";
             defer if (error_msg.ptr != "ziggit: invalid command. See 'ziggit --help'.\n".ptr) allocator.free(error_msg);
             try platform_impl.writeStderr(error_msg);
+
+            // Find similar commands for autocorrect
+            const candidates = findSimilarCommands(allocator, command, &platform_impl) catch &[_][]const u8{};
+
+            if (candidates.len > 0) {
+                // Read help.autocorrect config
+                var autocorrect_val: i32 = 0; // default: no autocorrect
+                // Check config override first
+                if (getConfigOverride("help.autocorrect")) |ov| {
+                    autocorrect_val = std.fmt.parseInt(i32, ov, 10) catch 0;
+                } else {
+                    // Try reading from git config
+                    if (findGitDirectory(allocator, &platform_impl)) |git_path2| {
+                        defer allocator.free(git_path2);
+                        if (getConfigValueByKey(git_path2, "help.autocorrect", allocator)) |val| {
+                            defer allocator.free(val);
+                            autocorrect_val = std.fmt.parseInt(i32, val, 10) catch 0;
+                        }
+                    } else |_| {}
+                }
+
+                if (autocorrect_val == 0) {
+                    // Show candidates but don't run
+                    try platform_impl.writeStderr("\nThe most similar command");
+                    if (candidates.len == 1) {
+                        try platform_impl.writeStderr(" is\n");
+                    } else {
+                        try platform_impl.writeStderr("s are\n");
+                    }
+                    for (candidates) |cand| {
+                        const cand_msg = std.fmt.allocPrint(allocator, "\t{s}\n", .{cand}) catch continue;
+                        defer allocator.free(cand_msg);
+                        try platform_impl.writeStderr(cand_msg);
+                    }
+                    std.process.exit(1);
+                } else if (autocorrect_val < 0) {
+                    // Immediate: run the best match
+                    const best = candidates[0];
+                    const auto_msg = std.fmt.allocPrint(allocator, "Assuming you meant '{s}'\n", .{best}) catch "";
+                    defer if (auto_msg.len > 0) allocator.free(auto_msg);
+                    try platform_impl.writeStderr(auto_msg);
+                    // Replace command with the best match and restart
+                    all_original_args.items[command_index] = best;
+                    command = best;
+                    alias_depth = 0;
+                    continue;
+                } else {
+                    // Positive value: wait N deciseconds then run
+                    const best = candidates[0];
+                    const delay_msg = std.fmt.allocPrint(allocator, "\nRunning '{s}' in {d}.{d} seconds...\n", .{ best, @divTrunc(autocorrect_val, 10), @mod(autocorrect_val, 10) }) catch "";
+                    defer if (delay_msg.len > 0) allocator.free(delay_msg);
+                    try platform_impl.writeStderr(delay_msg);
+                    // Sleep for deciseconds
+                    const ns: u64 = @as(u64, @intCast(autocorrect_val)) * 100_000_000;
+                    std.time.sleep(ns);
+                    all_original_args.items[command_index] = best;
+                    command = best;
+                    alias_depth = 0;
+                    continue;
+                }
+            }
+
             std.process.exit(1);
         }
     }
