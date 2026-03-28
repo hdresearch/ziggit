@@ -21,27 +21,17 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("z");
 
     const install_artifact = b.addInstallArtifact(exe, .{});
-    b.getInstallStep().dependOn(&install_artifact.step);
 
     // Fix Zig's wrapper script issue: replace shell wrapper with actual binary
+    // This must run AFTER install_artifact completes (which creates the wrapper)
     const fix_wrapper = b.addSystemCommand(&.{
         "sh", "-c",
         \\DEST="$1"
-        \\BEST=""
-        \\BEST_TIME=0
-        \\for f in "$PWD"/.zig-cache/o/*/ziggit; do
-        \\  [ -f "$f" ] || continue
-        \\  MAGIC=$(head -c 4 "$f" 2>/dev/null || true)
-        \\  case "$MAGIC" in
-        \\    *ELF*)
-        \\      T=$(stat -c %Y "$f" 2>/dev/null || echo 0)
-        \\      if [ "$T" -gt "$BEST_TIME" ]; then
-        \\        BEST_TIME="$T"
-        \\        BEST="$f"
-        \\      fi
-        \\      ;;
-        \\  esac
-        \\done
+        \\BEST=$(ls -t .zig-cache/o/*/ziggit 2>/dev/null | while read f; do
+        \\  if od -A n -t x1 -N 4 "$f" 2>/dev/null | grep -q '7f 45 4c 46'; then
+        \\    echo "$f"; break
+        \\  fi
+        \\done)
         \\if [ -n "$BEST" ]; then
         \\  rm -f "$DEST"
         \\  cp "$BEST" "$DEST"
@@ -52,7 +42,6 @@ pub fn build(b: *std.Build) void {
         b.getInstallPath(.bin, "ziggit"),
     });
     fix_wrapper.step.dependOn(&install_artifact.step);
-    b.getInstallStep().dependOn(&fix_wrapper.step);
 
     // Install shell helper scripts needed by git test suite
     const shell_scripts = [_][]const u8{
