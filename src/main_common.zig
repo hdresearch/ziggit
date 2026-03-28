@@ -15473,22 +15473,44 @@ fn showCommitHeaderOnly(git_object: objects.GitObject, commit_hash: []const u8, 
 }
 
 fn showCommitDefault(git_object: objects.GitObject, commit_hash: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
-    _ = git_path; // TODO: Use for diff display
+    try showCommitWithOpts(git_object, commit_hash, git_path, platform_impl, allocator, .{});
+}
+
+const ShowCommitOpts = struct {
+    show_patch: bool = true,
+    show_stat: bool = false,
+    show_summary: bool = false,
+    patch_with_stat: bool = false,
+    patch_with_raw: bool = false,
+    show_raw: bool = false,
+    show_combined: bool = false,
+    show_cc: bool = false,
+    show_m: bool = false,
+    first_parent: bool = false,
+    no_diff_merges: bool = false,
+    diff_merges_first_parent: bool = false,
+    show_root: bool = false,
+    pathspecs: []const []const u8 = &[_][]const u8{},
+    line_prefix: []const u8 = "",
+};
+
+fn showCommitWithOpts(git_object: objects.GitObject, commit_hash: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, opts: ShowCommitOpts) !void {
     // Show commit header
     const header = try std.fmt.allocPrint(allocator, "commit {s}\n", .{commit_hash});
     defer allocator.free(header);
     try platform_impl.writeStdout(header);
 
     // Parse commit data to extract info
-    var lines = std.mem.splitSequence(u8, git_object.data, "\n");
+    var hdr_lines = std.mem.splitSequence(u8, git_object.data, "\n");
     var tree_hash: ?[]const u8 = null;
     var author_line: ?[]const u8 = null;
-    var committer_line: ?[]const u8 = null;
+    var parent_hashes_list = std.array_list.Managed([]const u8).init(allocator);
+    defer parent_hashes_list.deinit();
     var empty_line_found = false;
     var message = std.array_list.Managed(u8).init(allocator);
     defer message.deinit();
 
-    while (lines.next()) |line| {
+    while (hdr_lines.next()) |line| {
         if (empty_line_found) {
             try message.appendSlice(line);
             try message.append('\n');
@@ -15498,46 +15520,102 @@ fn showCommitDefault(git_object: objects.GitObject, commit_hash: []const u8, git
             tree_hash = line["tree ".len..];
         } else if (std.mem.startsWith(u8, line, "author ")) {
             author_line = line["author ".len..];
-        } else if (std.mem.startsWith(u8, line, "committer ")) {
-            committer_line = line["committer ".len..];
+        } else if (std.mem.startsWith(u8, line, "parent ")) {
+            try parent_hashes_list.append(line["parent ".len..]);
         }
     }
 
-    // Display author and committer
+    const is_merge = parent_hashes_list.items.len > 1;
+
+    // Show Merge line for merge commits
+    if (is_merge) {
+        var merge_line = std.array_list.Managed(u8).init(allocator);
+        defer merge_line.deinit();
+        try merge_line.appendSlice("Merge:");
+        for (parent_hashes_list.items) |ph| {
+            try merge_line.appendSlice(" ");
+            try merge_line.appendSlice(ph[0..@min(7, ph.len)]);
+        }
+        try merge_line.appendSlice("\n");
+        try platform_impl.writeStdout(merge_line.items);
+    }
+
+    // Display author with parsed format
     if (author_line) |author| {
-        const author_output = try std.fmt.allocPrint(allocator, "Author: {s}\n", .{author});
+        const a_name = parseAuthorName(author);
+        const a_email = parseAuthorEmail(author);
+        const author_output = try std.fmt.allocPrint(allocator, "Author: {s} <{s}>\n", .{ a_name, a_email });
         defer allocator.free(author_output);
         try platform_impl.writeStdout(author_output);
-    }
-    
-    if (committer_line) |committer| {
-        if (author_line == null or !std.mem.eql(u8, author_line.?, committer)) {
-            const committer_output = try std.fmt.allocPrint(allocator, "Committer: {s}\n", .{committer});
-            defer allocator.free(committer_output);
-            try platform_impl.writeStdout(committer_output);
+        
+        const date_str = parseAuthorDateGitFmt(author, allocator);
+        defer if (date_str) |d| allocator.free(d);
+        if (date_str) |d| {
+            const date_output = try std.fmt.allocPrint(allocator, "Date:   {s}\n", .{d});
+            defer allocator.free(date_output);
+            try platform_impl.writeStdout(date_output);
         }
     }
 
     // Display commit message
     try platform_impl.writeStdout("\n");
     if (message.items.len > 0) {
-        // Indent commit message
-        const msg_lines = std.mem.splitSequence(u8, std.mem.trimRight(u8, message.items, "\n"), "\n");
-        var msg_iter = msg_lines;
+        const msg_text = std.mem.trimRight(u8, message.items, "\n");
+        var msg_iter = std.mem.splitSequence(u8, msg_text, "\n");
         while (msg_iter.next()) |msg_line| {
-            const indented = try std.fmt.allocPrint(allocator, "    {s}\n", .{msg_line});
-            defer allocator.free(indented);
-            try platform_impl.writeStdout(indented);
+            if (msg_line.len == 0) {
+                try platform_impl.writeStdout("    \n");
+            } else {
+                const indented = try std.fmt.allocPrint(allocator, "    {s}\n", .{msg_line});
+                defer allocator.free(indented);
+                try platform_impl.writeStdout(indented);
+            }
         }
     }
     try platform_impl.writeStdout("\n");
 
-    // Show diff against parent (if any)
-    if (tree_hash) |tree| {
-        _ = tree; // TODO: Implement diff display
-        // For now, just show that there are changes
-        try platform_impl.writeStdout("diff --git a/... b/...\n");
-        try platform_impl.writeStdout("(diff display not yet implemented)\n");
+    // Show diff
+    const this_tree = tree_hash orelse return;
+    
+    if (is_merge) {
+        // For merge commits, show combined diff (--cc format) by default
+        if (!opts.no_diff_merges) {
+            try outputCombinedDiff(allocator, parent_hashes_list.items, this_tree, git_path, true, platform_impl);
+        }
+    } else if (parent_hashes_list.items.len == 1) {
+        // Normal commit - diff against parent
+        const parent_hash = parent_hashes_list.items[0];
+        const parent_obj = objects.GitObject.load(parent_hash, git_path, platform_impl, allocator) catch return;
+        defer parent_obj.deinit(allocator);
+        var parent_tree: ?[]const u8 = null;
+        var piter = std.mem.splitScalar(u8, parent_obj.data, '\n');
+        while (piter.next()) |line| {
+            if (line.len == 0) break;
+            if (std.mem.startsWith(u8, line, "tree ")) {
+                parent_tree = line["tree ".len..];
+                break;
+            }
+        }
+        if (parent_tree) |pt| {
+            if (opts.show_stat or opts.patch_with_stat) {
+                try outputStatForTwoTrees(allocator, pt, this_tree, git_path, opts.pathspecs, platform_impl);
+            }
+            if (opts.show_summary) {
+                try outputSummaryForTwoTrees(allocator, pt, this_tree, git_path, opts.pathspecs, platform_impl);
+            }
+            if (opts.show_patch or opts.patch_with_stat) {
+                try platform_impl.writeStdout("\n");
+            }
+            if (opts.show_patch or (!opts.show_stat and !opts.show_summary and !opts.show_raw)) {
+                _ = try diffTwoTreesPatch(allocator, pt, this_tree, "", git_path, false, opts.pathspecs, platform_impl);
+            }
+        }
+    } else {
+        // Root commit - show diff against empty tree if showroot
+        if (opts.show_root) {
+            const dt_opts = DiffTreeOpts{ .recursive = true, .show_patch = true, .show_root = true };
+            try diffTreeWithEmptyOpts(allocator, this_tree, &dt_opts, git_path, platform_impl);
+        }
     }
 }
 
@@ -28718,17 +28796,97 @@ fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, opts:
     
     var tree_hash: ?[]const u8 = null;
     var parent_hash: ?[]const u8 = null;
+    var all_parent_hashes = std.array_list.Managed([]const u8).init(allocator);
+    defer all_parent_hashes.deinit();
     var line_iter = std.mem.splitScalar(u8, commit_obj.data, '\n');
     while (line_iter.next()) |line| {
         if (line.len == 0) break;
         if (std.mem.startsWith(u8, line, "tree ")) {
             tree_hash = line["tree ".len..];
         } else if (std.mem.startsWith(u8, line, "parent ")) {
+            try all_parent_hashes.append(line["parent ".len..]);
             if (parent_hash == null) parent_hash = line["parent ".len..];
         }
     }
     
     const this_tree = tree_hash orelse return false;
+    const is_merge = all_parent_hashes.items.len > 1;
+    
+    // For merge commits without -m, -c, or --cc, produce no output
+    if (is_merge and !opts.show_m and !opts.show_combined and !opts.show_cc) {
+        return false;
+    }
+    
+    // For merge commits with -m, diff against each parent
+    if (is_merge and opts.show_m) {
+        var had_any = false;
+        for (all_parent_hashes.items) |ph| {
+            const parent_obj2 = objects.GitObject.load(ph, git_path, platform_impl, allocator) catch continue;
+            defer parent_obj2.deinit(allocator);
+            var pt2: ?[]const u8 = null;
+            var piter2 = std.mem.splitScalar(u8, parent_obj2.data, '\n');
+            while (piter2.next()) |pline| {
+                if (pline.len == 0) break;
+                if (std.mem.startsWith(u8, pline, "tree ")) {
+                    pt2 = pline["tree ".len..];
+                    break;
+                }
+            }
+            if (pt2) |parent_tree| {
+                var quiet_opts2 = opts.*;
+                quiet_opts2.quiet = true;
+                const has_diff2 = try diffTwoTreesFiltered(allocator, parent_tree, this_tree, "", &quiet_opts2, pathspecs, platform_impl);
+                if (has_diff2) {
+                    had_any = true;
+                    if (!quiet) {
+                        if (!no_commit_id) {
+                            if (opts.show_pretty) {
+                                try outputPrettyCommitHeader(allocator, commit_hash, commit_obj.data, opts, platform_impl);
+                            } else {
+                                const id_line = try std.fmt.allocPrint(allocator, "{s}\n", .{commit_hash});
+                                defer allocator.free(id_line);
+                                try platform_impl.writeStdout(id_line);
+                            }
+                        }
+                        _ = try diffTwoTreesFiltered(allocator, parent_tree, this_tree, "", opts, pathspecs, platform_impl);
+                    }
+                }
+            }
+        }
+        return had_any;
+    }
+    
+    // For merge commits with -c or --cc, show combined diff
+    if (is_merge and (opts.show_combined or opts.show_cc)) {
+        if (!quiet and !no_commit_id) {
+            if (opts.show_pretty) {
+                try outputPrettyCommitHeader(allocator, commit_hash, commit_obj.data, opts, platform_impl);
+            } else {
+                const id_line = try std.fmt.allocPrint(allocator, "{s}\n", .{commit_hash});
+                defer allocator.free(id_line);
+                try platform_impl.writeStdout(id_line);
+            }
+        }
+        if (!quiet) {
+            if (opts.show_stat) {
+                try outputCombinedStat(allocator, all_parent_hashes.items, this_tree, git_path, opts.show_cc, platform_impl);
+            }
+            if (opts.show_summary) {
+                try outputCombinedSummary(allocator, all_parent_hashes.items, this_tree, git_path, opts.show_cc, platform_impl);
+            }
+            if (opts.show_shortstat) {
+                try outputCombinedShortStat(allocator, all_parent_hashes.items, this_tree, git_path, opts.show_cc, platform_impl);
+            }
+            if (opts.show_patch or opts.patch_with_stat) {
+                if (opts.patch_with_stat) {
+                    try outputCombinedStat(allocator, all_parent_hashes.items, this_tree, git_path, opts.show_cc, platform_impl);
+                    try platform_impl.writeStdout("\n");
+                }
+                try outputCombinedDiff(allocator, all_parent_hashes.items, this_tree, git_path, opts.show_cc, platform_impl);
+            }
+        }
+        return true;
+    }
     
     if (parent_hash == null) {
         if (show_root) {
@@ -28797,10 +28955,13 @@ fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, opts:
     }
     
     if (parent_tree) |pt| {
+        // Check for any changes (content or mode)
         var quiet_opts = opts.*;
         quiet_opts.quiet = true;
         const has_diff = try diffTwoTreesFiltered(allocator, pt, this_tree, "", &quiet_opts, pathspecs, platform_impl);
-        if (has_diff) {
+        // Also check for mode-only changes for --summary
+        const has_mode_change = if (opts.show_summary and !has_diff) try hasModeChanges(allocator, pt, this_tree, git_path, platform_impl) else false;
+        if (has_diff or has_mode_change) {
             if (!quiet) {
                 if (!no_commit_id) {
                     if (opts.show_pretty) {
@@ -28811,10 +28972,14 @@ fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, opts:
                         try platform_impl.writeStdout(id_line);
                     }
                 }
-                if (opts.patch_with_stat) {
-                    // Output stat before patch
+                if (opts.show_stat or opts.patch_with_stat) {
                     try outputStatForTwoTrees(allocator, pt, this_tree, git_path, pathspecs, platform_impl);
-                    try platform_impl.writeStdout("\n");
+                    if (opts.patch_with_stat) {
+                        try platform_impl.writeStdout("\n");
+                    }
+                }
+                if (opts.show_summary) {
+                    try outputSummaryForTwoTrees(allocator, pt, this_tree, git_path, pathspecs, platform_impl);
                 }
                 if (opts.patch_with_raw) {
                     // Output raw before patch
@@ -28824,7 +28989,14 @@ fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, opts:
                     _ = try diffTwoTreesFiltered(allocator, pt, this_tree, "", &raw_opts, pathspecs, platform_impl);
                     try platform_impl.writeStdout("\n");
                 }
-                _ = try diffTwoTreesFiltered(allocator, pt, this_tree, "", opts, pathspecs, platform_impl);
+                if (opts.show_raw and !opts.show_stat and !opts.show_summary and !opts.patch_with_stat) {
+                    _ = try diffTwoTreesFiltered(allocator, pt, this_tree, "", opts, pathspecs, platform_impl);
+                }
+                if (opts.show_patch and !opts.patch_with_raw) {
+                    var patch_opts = opts.*;
+                    patch_opts.show_patch = true;
+                    _ = try diffTwoTreesFiltered(allocator, pt, this_tree, "", &patch_opts, pathspecs, platform_impl);
+                }
             }
             return true;
         }
@@ -29022,6 +29194,612 @@ fn outputSummaryForEmptyTree(allocator: std.mem.Allocator, tree_hash_str: []cons
         const out = try std.fmt.allocPrint(allocator, " create mode 100644 {s}\n", .{f.name});
         defer allocator.free(out);
         try platform_impl.writeStdout(out);
+    }
+}
+
+fn outputSummaryForTwoTrees(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, git_path: []const u8, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform) !void {
+    // Collect all files from both trees to detect mode changes, new/deleted files
+    var files1 = std.StringHashMap(TreeFileInfo).init(allocator);
+    defer {
+        var it = files1.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.hash);
+            allocator.free(entry.value_ptr.mode);
+        }
+        files1.deinit();
+    }
+    var files2 = std.StringHashMap(TreeFileInfo).init(allocator);
+    defer {
+        var it = files2.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.hash);
+            allocator.free(entry.value_ptr.mode);
+        }
+        files2.deinit();
+    }
+    try collectTreeFiles(allocator, tree1_hash, "", git_path, platform_impl, &files1);
+    try collectTreeFiles(allocator, tree2_hash, "", git_path, platform_impl, &files2);
+    
+    // Collect and sort names
+    var all_names_map = std.StringHashMap(void).init(allocator);
+    defer all_names_map.deinit();
+    var kit1 = files1.keyIterator();
+    while (kit1.next()) |key| all_names_map.put(key.*, {}) catch {};
+    var kit2 = files2.keyIterator();
+    while (kit2.next()) |key| all_names_map.put(key.*, {}) catch {};
+    var sorted_names = std.array_list.Managed([]const u8).init(allocator);
+    defer sorted_names.deinit();
+    var snit = all_names_map.keyIterator();
+    while (snit.next()) |key| try sorted_names.append(key.*);
+    std.mem.sort([]const u8, sorted_names.items, {}, struct {
+        fn cmp(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.cmp);
+    
+    for (sorted_names.items) |file_name| {
+        if (!matchesPathspecs(file_name, pathspecs)) continue;
+        const f1 = files1.get(file_name);
+        const f2 = files2.get(file_name);
+        if (f1 != null and f2 != null) {
+            // Mode change
+            if (!std.mem.eql(u8, f1.?.mode, f2.?.mode)) {
+                var mb1: [6]u8 = undefined;
+                var mb2: [6]u8 = undefined;
+                const out = try std.fmt.allocPrint(allocator, " mode change {s} => {s} {s}\n", .{ padMode6(&mb1, f1.?.mode), padMode6(&mb2, f2.?.mode), file_name });
+                defer allocator.free(out);
+                try platform_impl.writeStdout(out);
+            }
+        } else if (f1 == null and f2 != null) {
+            var mb2: [6]u8 = undefined;
+            const out = try std.fmt.allocPrint(allocator, " create mode {s} {s}\n", .{ padMode6(&mb2, f2.?.mode), file_name });
+            defer allocator.free(out);
+            try platform_impl.writeStdout(out);
+        } else if (f1 != null and f2 == null) {
+            var mb1: [6]u8 = undefined;
+            const out = try std.fmt.allocPrint(allocator, " delete mode {s} {s}\n", .{ padMode6(&mb1, f1.?.mode), file_name });
+            defer allocator.free(out);
+            try platform_impl.writeStdout(out);
+        }
+    }
+}
+
+fn hasModeChanges(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) !bool {
+    var files1 = std.StringHashMap(TreeFileInfo).init(allocator);
+    defer {
+        var it = files1.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.hash);
+            allocator.free(entry.value_ptr.mode);
+        }
+        files1.deinit();
+    }
+    var files2 = std.StringHashMap(TreeFileInfo).init(allocator);
+    defer {
+        var it = files2.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.hash);
+            allocator.free(entry.value_ptr.mode);
+        }
+        files2.deinit();
+    }
+    try collectTreeFiles(allocator, tree1_hash, "", git_path, platform_impl, &files1);
+    try collectTreeFiles(allocator, tree2_hash, "", git_path, platform_impl, &files2);
+    
+    var kit = files1.keyIterator();
+    while (kit.next()) |key| {
+        const f1 = files1.get(key.*) orelse continue;
+        const f2 = files2.get(key.*) orelse continue;
+        if (!std.mem.eql(u8, f1.mode, f2.mode)) return true;
+    }
+    return false;
+}
+
+fn getTreeForCommit(allocator: std.mem.Allocator, commit_hash: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) ![]u8 {
+    const obj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch return error.ObjectNotFound;
+    defer obj.deinit(allocator);
+    var iter = std.mem.splitScalar(u8, obj.data, '\n');
+    while (iter.next()) |line| {
+        if (line.len == 0) break;
+        if (std.mem.startsWith(u8, line, "tree ")) {
+            return allocator.dupe(u8, line["tree ".len..]);
+        }
+    }
+    return error.ObjectNotFound;
+}
+
+fn getParentsForCommit(allocator: std.mem.Allocator, commit_hash: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) !std.array_list.Managed([]u8) {
+    const obj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch return error.ObjectNotFound;
+    defer obj.deinit(allocator);
+    var parents = std.array_list.Managed([]u8).init(allocator);
+    var iter = std.mem.splitScalar(u8, obj.data, '\n');
+    while (iter.next()) |line| {
+        if (line.len == 0) break;
+        if (std.mem.startsWith(u8, line, "parent ")) {
+            try parents.append(try allocator.dupe(u8, line["parent ".len..]));
+        }
+    }
+    return parents;
+}
+
+/// Collect files from a tree recursively into a flat list with full paths
+fn collectTreeFiles(allocator: std.mem.Allocator, tree_hash: []const u8, prefix: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, result: *std.StringHashMap(TreeFileInfo)) !void {
+    const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch return;
+    defer tree_obj.deinit(allocator);
+    var entries = tree_mod.parseTree(tree_obj.data, allocator) catch return;
+    defer entries.deinit();
+    for (entries.items) |entry| {
+        const full_name = if (prefix.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, entry.name })
+        else
+            try allocator.dupe(u8, entry.name);
+        if (isTreeMode(entry.mode)) {
+            try collectTreeFiles(allocator, entry.hash, full_name, git_path, platform_impl, result);
+            allocator.free(full_name);
+        } else {
+            try result.put(full_name, .{ .hash = try allocator.dupe(u8, entry.hash), .mode = try allocator.dupe(u8, entry.mode) });
+        }
+    }
+}
+
+const TreeFileInfo = struct {
+    hash: []const u8,
+    mode: []const u8,
+};
+
+/// Output combined stat for merge commits
+fn outputCombinedStat(allocator: std.mem.Allocator, parent_hashes: []const []const u8, merge_tree_hash: []const u8, git_path: []const u8, dense: bool, platform_impl: *const platform_mod.Platform) !void {
+    // Get files that differ from all parents (or any parent for -c)
+    var merge_files = std.StringHashMap(TreeFileInfo).init(allocator);
+    defer {
+        var it = merge_files.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.hash);
+            allocator.free(entry.value_ptr.mode);
+        }
+        merge_files.deinit();
+    }
+    try collectTreeFiles(allocator, merge_tree_hash, "", git_path, platform_impl, &merge_files);
+    
+    var parent_file_maps = std.array_list.Managed(std.StringHashMap(TreeFileInfo)).init(allocator);
+    defer {
+        for (parent_file_maps.items) |*pf| {
+            var it = pf.iterator();
+            while (it.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+                allocator.free(entry.value_ptr.hash);
+                allocator.free(entry.value_ptr.mode);
+            }
+            pf.deinit();
+        }
+        parent_file_maps.deinit();
+    }
+    for (parent_hashes) |ph| {
+        const parent_tree = getTreeForCommit(allocator, ph, git_path, platform_impl) catch {
+            try parent_file_maps.append(std.StringHashMap(TreeFileInfo).init(allocator));
+            continue;
+        };
+        defer allocator.free(parent_tree);
+        var pf = std.StringHashMap(TreeFileInfo).init(allocator);
+        try collectTreeFiles(allocator, parent_tree, "", git_path, platform_impl, &pf);
+        try parent_file_maps.append(pf);
+    }
+    
+    var total_ins: usize = 0;
+    var total_dels: usize = 0;
+    var files_changed: usize = 0;
+    var max_name_len: usize = 0;
+    
+    // Collect changed files
+    const ChangedFile = struct { name: []const u8, insertions: usize, deletions: usize };
+    var changed = std.array_list.Managed(ChangedFile).init(allocator);
+    defer changed.deinit();
+    
+    var name_it = merge_files.keyIterator();
+    var all_names2 = std.array_list.Managed([]const u8).init(allocator);
+    defer all_names2.deinit();
+    while (name_it.next()) |key| try all_names2.append(key.*);
+    std.mem.sort([]const u8, all_names2.items, {}, struct {
+        fn cmp(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.cmp);
+    
+    for (all_names2.items) |file_name| {
+        const merge_info = merge_files.get(file_name) orelse continue;
+        var differs_from_all = true;
+        var same_as_some = false;
+        for (parent_file_maps.items) |pf| {
+            if (pf.get(file_name)) |pi| {
+                if (std.mem.eql(u8, pi.hash, merge_info.hash)) {
+                    same_as_some = true;
+                    differs_from_all = false;
+                }
+            }
+        }
+        if (dense and same_as_some) continue;
+        if (!dense and !differs_from_all and same_as_some) continue;
+        
+        // Count insertions/deletions (simplified - count against first differing parent)
+        var ins: usize = 0;
+        var dels: usize = 0;
+        const merge_content = loadBlobContent(allocator, merge_info.hash, git_path, platform_impl) catch "";
+        defer if (merge_content.len > 0) allocator.free(merge_content);
+        
+        for (parent_file_maps.items) |pf| {
+            if (pf.get(file_name)) |pi| {
+                if (!std.mem.eql(u8, pi.hash, merge_info.hash)) {
+                    const parent_content = loadBlobContent(allocator, pi.hash, git_path, platform_impl) catch "";
+                    defer if (parent_content.len > 0) allocator.free(parent_content);
+                    ins = countLines(merge_content);
+                    dels = countLines(parent_content);
+                    // Simple approximation: common lines
+                    const common = @min(ins, dels);
+                    if (ins >= common) ins -= common;
+                    if (dels >= common) dels -= common;
+                    break;
+                }
+            } else {
+                ins = countLines(merge_content);
+                break;
+            }
+        }
+        
+        if (file_name.len > max_name_len) max_name_len = file_name.len;
+        try changed.append(.{ .name = file_name, .insertions = ins, .deletions = dels });
+        total_ins += ins;
+        total_dels += dels;
+        files_changed += 1;
+    }
+    
+    // Output stat lines
+    for (changed.items) |cf| {
+        const total = cf.insertions + cf.deletions;
+        const bar_len = @min(total, 40);
+        var bar = std.array_list.Managed(u8).init(allocator);
+        defer bar.deinit();
+        if (total > 0) {
+            const plus_len = if (bar_len > 0) (cf.insertions * bar_len + total - 1) / total else 0;
+            const minus_len = bar_len - plus_len;
+            for (0..plus_len) |_| try bar.append('+');
+            for (0..minus_len) |_| try bar.append('-');
+        }
+        const out = try std.fmt.allocPrint(allocator, " {s}{s} | {d:>4} {s}\n", .{
+            cf.name,
+            (" " ** 80)[0..@min(80, if (max_name_len > cf.name.len) max_name_len - cf.name.len else 0)],
+            total,
+            bar.items,
+        });
+        defer allocator.free(out);
+        try platform_impl.writeStdout(out);
+    }
+    try formatDiffStatSummary(files_changed, total_ins, total_dels, platform_impl, allocator);
+}
+
+fn countLines(content: []const u8) usize {
+    if (content.len == 0) return 0;
+    var count: usize = 0;
+    var iter = std.mem.splitScalar(u8, content, '\n');
+    while (iter.next()) |_| count += 1;
+    if (content[content.len - 1] == '\n') count -= 1;
+    return count;
+}
+
+/// Output combined summary for merge commits
+fn outputCombinedSummary(allocator: std.mem.Allocator, parent_hashes: []const []const u8, merge_tree_hash: []const u8, git_path: []const u8, dense: bool, platform_impl: *const platform_mod.Platform) !void {
+    _ = dense;
+    // Check for new files in merge that don't exist in any parent
+    var merge_files2 = std.StringHashMap(TreeFileInfo).init(allocator);
+    defer {
+        var it = merge_files2.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.hash);
+            allocator.free(entry.value_ptr.mode);
+        }
+        merge_files2.deinit();
+    }
+    try collectTreeFiles(allocator, merge_tree_hash, "", git_path, platform_impl, &merge_files2);
+    
+    var parent_file_maps2 = std.array_list.Managed(std.StringHashMap(TreeFileInfo)).init(allocator);
+    defer {
+        for (parent_file_maps2.items) |*pf| {
+            var it = pf.iterator();
+            while (it.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+                allocator.free(entry.value_ptr.hash);
+                allocator.free(entry.value_ptr.mode);
+            }
+            pf.deinit();
+        }
+        parent_file_maps2.deinit();
+    }
+    for (parent_hashes) |ph| {
+        const parent_tree = getTreeForCommit(allocator, ph, git_path, platform_impl) catch {
+            try parent_file_maps2.append(std.StringHashMap(TreeFileInfo).init(allocator));
+            continue;
+        };
+        defer allocator.free(parent_tree);
+        var pf = std.StringHashMap(TreeFileInfo).init(allocator);
+        try collectTreeFiles(allocator, parent_tree, "", git_path, platform_impl, &pf);
+        try parent_file_maps2.append(pf);
+    }
+    
+    var all_names3 = std.array_list.Managed([]const u8).init(allocator);
+    defer all_names3.deinit();
+    var nit = merge_files2.keyIterator();
+    while (nit.next()) |key| try all_names3.append(key.*);
+    std.mem.sort([]const u8, all_names3.items, {}, struct {
+        fn cmp(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.cmp);
+    
+    for (all_names3.items) |file_name| {
+        const merge_info = merge_files2.get(file_name) orelse continue;
+        var in_all_parents = true;
+        for (parent_file_maps2.items) |pf| {
+            if (!pf.contains(file_name)) {
+                in_all_parents = false;
+                break;
+            }
+        }
+        if (!in_all_parents) {
+            var mode_str: []const u8 = merge_info.mode;
+            if (mode_str.len < 6) mode_str = "100644";
+            const out = try std.fmt.allocPrint(allocator, " create mode {s} {s}\n", .{ mode_str, file_name });
+            defer allocator.free(out);
+            try platform_impl.writeStdout(out);
+        }
+    }
+}
+
+/// Output combined shortstat for merge commits
+fn outputCombinedShortStat(allocator: std.mem.Allocator, parent_hashes: []const []const u8, merge_tree_hash: []const u8, git_path: []const u8, dense: bool, platform_impl: *const platform_mod.Platform) !void {
+    _ = parent_hashes;
+    _ = merge_tree_hash;
+    _ = git_path;
+    _ = dense;
+    // Simplified: just output a placeholder for now
+    try platform_impl.writeStdout(" 0 files changed\n");
+    _ = allocator;
+}
+
+/// Output combined diff (--cc format) for a merge commit
+fn outputCombinedDiff(allocator: std.mem.Allocator, parent_hashes: []const []const u8, merge_tree_hash: []const u8, git_path: []const u8, dense: bool, platform_impl: *const platform_mod.Platform) !void {
+    // Collect files from merge tree
+    var merge_files = std.StringHashMap(TreeFileInfo).init(allocator);
+    defer {
+        var it = merge_files.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.hash);
+            allocator.free(entry.value_ptr.mode);
+        }
+        merge_files.deinit();
+    }
+    try collectTreeFiles(allocator, merge_tree_hash, "", git_path, platform_impl, &merge_files);
+    
+    // Collect files from each parent tree
+    var parent_files = std.array_list.Managed(std.StringHashMap(TreeFileInfo)).init(allocator);
+    defer {
+        for (parent_files.items) |*pf| {
+            var it = pf.iterator();
+            while (it.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+                allocator.free(entry.value_ptr.hash);
+                allocator.free(entry.value_ptr.mode);
+            }
+            pf.deinit();
+        }
+        parent_files.deinit();
+    }
+    for (parent_hashes) |ph| {
+        const parent_tree = getTreeForCommit(allocator, ph, git_path, platform_impl) catch {
+            try parent_files.append(std.StringHashMap(TreeFileInfo).init(allocator));
+            continue;
+        };
+        defer allocator.free(parent_tree);
+        var pf = std.StringHashMap(TreeFileInfo).init(allocator);
+        try collectTreeFiles(allocator, parent_tree, "", git_path, platform_impl, &pf);
+        try parent_files.append(pf);
+    }
+    
+    // Collect all file names from merge tree
+    var all_names = std.array_list.Managed([]const u8).init(allocator);
+    defer all_names.deinit();
+    var name_iter = merge_files.keyIterator();
+    while (name_iter.next()) |key| try all_names.append(key.*);
+    std.mem.sort([]const u8, all_names.items, {}, struct {
+        fn cmp(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.cmp);
+    
+    for (all_names.items) |file_name| {
+        const merge_info = merge_files.get(file_name) orelse continue;
+        
+        // Check if file differs from any parent
+        var differs_from_any = false;
+        var all_same_as_some_parent = false;
+        for (parent_files.items) |pf| {
+            if (pf.get(file_name)) |pi| {
+                if (std.mem.eql(u8, pi.hash, merge_info.hash)) {
+                    all_same_as_some_parent = true;
+                } else {
+                    differs_from_any = true;
+                }
+            } else {
+                differs_from_any = true;
+            }
+        }
+        
+        if (!differs_from_any) continue;
+        // In dense (--cc) mode, skip files that match at least one parent
+        if (dense and all_same_as_some_parent) continue;
+        
+        // Load merge content
+        const merge_content = loadBlobContent(allocator, merge_info.hash, git_path, platform_impl) catch "";
+        defer if (merge_content.len > 0) allocator.free(merge_content);
+        
+        // Load parent contents
+        var parent_contents = std.array_list.Managed([]const u8).init(allocator);
+        defer {
+            for (parent_contents.items) |pc| {
+                if (pc.len > 0) allocator.free(pc);
+            }
+            parent_contents.deinit();
+        }
+        var parent_short_hashes = std.array_list.Managed([]const u8).init(allocator);
+        defer parent_short_hashes.deinit();
+        
+        for (parent_files.items) |pf| {
+            if (pf.get(file_name)) |pi| {
+                const content = loadBlobContent(allocator, pi.hash, git_path, platform_impl) catch "";
+                try parent_contents.append(content);
+                try parent_short_hashes.append(pi.hash[0..@min(7, pi.hash.len)]);
+            } else {
+                try parent_contents.append("");
+                try parent_short_hashes.append("0000000");
+            }
+        }
+        
+        // Output combined diff header
+        const merge_short = merge_info.hash[0..@min(7, merge_info.hash.len)];
+        
+        // diff --cc filename
+        const diff_hdr = try std.fmt.allocPrint(allocator, "diff --cc {s}\n", .{file_name});
+        defer allocator.free(diff_hdr);
+        try platform_impl.writeStdout(diff_hdr);
+        
+        // index line: index hash1,hash2..merge_hash
+        var idx_line = std.array_list.Managed(u8).init(allocator);
+        defer idx_line.deinit();
+        try idx_line.appendSlice("index ");
+        for (parent_short_hashes.items, 0..) |psh, i| {
+            if (i > 0) try idx_line.append(',');
+            try idx_line.appendSlice(psh);
+        }
+        try idx_line.appendSlice("..");
+        try idx_line.appendSlice(merge_short);
+        try idx_line.append('\n');
+        try platform_impl.writeStdout(idx_line.items);
+        
+        // --- a/file and +++ b/file
+        const minus_line = try std.fmt.allocPrint(allocator, "--- a/{s}\n+++ b/{s}\n", .{ file_name, file_name });
+        defer allocator.free(minus_line);
+        try platform_impl.writeStdout(minus_line);
+        
+        // Generate combined diff hunks
+        try outputCombinedDiffHunks(allocator, parent_contents.items, merge_content, platform_impl);
+    }
+}
+
+/// Generate combined diff hunks for --cc format
+fn outputCombinedDiffHunks(allocator: std.mem.Allocator, parent_contents: []const []const u8, merge_content: []const u8, platform_impl: *const platform_mod.Platform) !void {
+    const num_parents = parent_contents.len;
+    
+    // Split all contents into lines
+    var merge_lines = std.array_list.Managed([]const u8).init(allocator);
+    defer merge_lines.deinit();
+    {
+        var iter = std.mem.splitScalar(u8, merge_content, '\n');
+        while (iter.next()) |line| try merge_lines.append(line);
+        // Remove trailing empty line from final newline
+        if (merge_lines.items.len > 0 and merge_lines.items[merge_lines.items.len - 1].len == 0) {
+            _ = merge_lines.pop();
+        }
+    }
+    
+    var parent_lines_list = std.array_list.Managed(std.array_list.Managed([]const u8)).init(allocator);
+    defer {
+        for (parent_lines_list.items) |*pl| pl.deinit();
+        parent_lines_list.deinit();
+    }
+    for (parent_contents) |pc| {
+        var pl = std.array_list.Managed([]const u8).init(allocator);
+        var iter = std.mem.splitScalar(u8, pc, '\n');
+        while (iter.next()) |line| try pl.append(line);
+        if (pl.items.len > 0 and pl.items[pl.items.len - 1].len == 0) {
+            _ = pl.pop();
+        }
+        try parent_lines_list.append(pl);
+    }
+    
+    // Compute LCS-based diff for each parent against merge
+    // For simplicity, we'll use a line-by-line approach
+    // Mark each merge line with which parents it came from
+    
+    // For each parent, compute which merge lines match
+    var parent_matches = std.array_list.Managed([]bool).init(allocator);
+    defer {
+        for (parent_matches.items) |pm| allocator.free(pm);
+        parent_matches.deinit();
+    }
+    
+    for (parent_lines_list.items) |pl| {
+        const matches = try allocator.alloc(bool, merge_lines.items.len);
+        @memset(matches, false);
+        
+        // Simple LCS matching
+        var pi: usize = 0;
+        for (merge_lines.items, 0..) |ml, mi| {
+            if (pi < pl.items.len and std.mem.eql(u8, ml, pl.items[pi])) {
+                matches[mi] = true;
+                pi += 1;
+            }
+        }
+        try parent_matches.append(matches);
+    }
+    
+    // Build hunk header
+    // @@@ -start1,len1 -start2,len2 +start_merge,len_merge @@@
+    var hunk_header = std.array_list.Managed(u8).init(allocator);
+    defer hunk_header.deinit();
+    // Use @@@ markers with num_parents @ signs
+    for (0..num_parents) |_| try hunk_header.append('@');
+    try hunk_header.append(' ');
+    for (parent_lines_list.items) |pl| {
+        try hunk_header.append('-');
+        const len = pl.items.len;
+        if (len == 1) {
+            try hunk_header.appendSlice("1");
+        } else {
+            const s = try std.fmt.allocPrint(allocator, "1,{d}", .{len});
+            defer allocator.free(s);
+            try hunk_header.appendSlice(s);
+        }
+        try hunk_header.append(' ');
+    }
+    try hunk_header.append('+');
+    if (merge_lines.items.len == 1) {
+        try hunk_header.appendSlice("1");
+    } else {
+        const s = try std.fmt.allocPrint(allocator, "1,{d}", .{merge_lines.items.len});
+        defer allocator.free(s);
+        try hunk_header.appendSlice(s);
+    }
+    try hunk_header.append(' ');
+    for (0..num_parents) |_| try hunk_header.append('@');
+    try hunk_header.append('\n');
+    try platform_impl.writeStdout(hunk_header.items);
+    
+    // Output lines with combined prefix
+    for (merge_lines.items, 0..) |line, i| {
+        for (parent_matches.items) |pm| {
+            if (pm[i]) {
+                try platform_impl.writeStdout(" ");
+            } else {
+                try platform_impl.writeStdout("+");
+            }
+        }
+        try platform_impl.writeStdout(line);
+        try platform_impl.writeStdout("\n");
     }
 }
 
