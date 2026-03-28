@@ -2474,7 +2474,7 @@ fn doWorkingTreeDiff(allocator: std.mem.Allocator, index: *const index_mod.Index
     defer unmerged_paths.deinit();
     for (index.entries.items) |entry| {
         const stage = (entry.flags >> 12) & 0x3;
-        if (stage > 0) unmerged_paths.put(entry.path, {}) catch {};
+        if (stage > 0) try unmerged_paths.put(entry.path, {});
     }
 
     // Track paths already processed (for handling multiple stage entries)
