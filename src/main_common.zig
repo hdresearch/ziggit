@@ -29471,7 +29471,7 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
                 try outputSummaryForTwoTrees(allocator, tree1, tree2, git_path, pathspecs.items, platform_impl);
             }
         } else {
-            had_diff = try diffTwoTreesFiltered(allocator, tree1, tree2, "", &dt_opts, pathspecs.items, platform_impl);
+            _ = try diffTwoTreesFiltered(allocator, tree1, tree2, "", &dt_opts, pathspecs.items, platform_impl);
         }
     }
     
