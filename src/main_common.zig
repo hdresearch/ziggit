@@ -17712,6 +17712,11 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                     continue;
                 }
             }
+            // When --unmerged is set, only show entries with stage > 0
+            if (unmerged_flag) {
+                const stage_check = (entry.flags >> 12) & 0x3;
+                if (stage_check == 0) continue;
+            }
             if (stage) {
                 const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
                 defer allocator.free(hash_str);
