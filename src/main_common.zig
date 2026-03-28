@@ -9055,11 +9055,11 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     if (config_file != null and std.mem.eql(u8, config_file.?, "-")) {
         switch (action) {
             .set, .replace_all, .add, .unset, .unset_all, .rename_section, .remove_section => {
-                try platform_impl.writeStderr("error: writing to stdin is not supported\n");
+                try platform_impl.writeStderr("fatal: writing to stdin is not supported\n");
                 std.process.exit(128);
             },
             .edit => {
-                try platform_impl.writeStderr("error: editing stdin is not supported\n");
+                try platform_impl.writeStderr("fatal: editing stdin is not supported\n");
                 std.process.exit(128);
             },
             else => {},
@@ -9783,9 +9783,19 @@ fn cfgFormatType(value: []const u8, config_type: ConfigType, allocator: std.mem.
                 return try allocator.dupe(u8, "true");
             if (std.mem.eql(u8, lower, "false") or std.mem.eql(u8, lower, "no") or std.mem.eql(u8, lower, "off") or std.mem.eql(u8, lower, "0"))
                 return try allocator.dupe(u8, "false");
-            if (std.fmt.parseInt(i64, std.mem.trim(u8, value, " \t"), 10)) |num|
+            const tbm2 = std.mem.trim(u8, value, " \t");
+            if (std.fmt.parseInt(i64, tbm2, 10)) |num|
                 return try allocator.dupe(u8, if (num != 0) "true" else "false")
-            else |_| {}
+            else |_| {
+                if (tbm2.len > 1) {
+                    const lbm2 = tbm2[tbm2.len - 1];
+                    if (lbm2 == 'k' or lbm2 == 'K' or lbm2 == 'm' or lbm2 == 'M' or lbm2 == 'g' or lbm2 == 'G') {
+                        if (std.fmt.parseInt(i64, tbm2[0 .. tbm2.len - 1], 10)) |n3|
+                            return try allocator.dupe(u8, if (n3 != 0) "true" else "false")
+                        else |_| {}
+                    }
+                }
+            }
             const em = try std.fmt.allocPrint(allocator, "fatal: bad boolean config value '{s}'\n", .{value});
             defer allocator.free(em);
             try platform_impl.writeStderr(em);
@@ -9941,9 +9951,19 @@ fn cfgFormatTypeSilent(value: []const u8, config_type: ConfigType, allocator: st
                 return try allocator.dupe(u8, "true");
             if (std.mem.eql(u8, lower, "false") or std.mem.eql(u8, lower, "no") or std.mem.eql(u8, lower, "off") or std.mem.eql(u8, lower, "0"))
                 return try allocator.dupe(u8, "false");
-            if (std.fmt.parseInt(i64, std.mem.trim(u8, value, " \t"), 10)) |num|
+            const tb2 = std.mem.trim(u8, value, " \t");
+            if (std.fmt.parseInt(i64, tb2, 10)) |num|
                 return try allocator.dupe(u8, if (num != 0) "true" else "false")
-            else |_| {}
+            else |_| {
+                if (tb2.len > 1) {
+                    const lb2 = tb2[tb2.len - 1];
+                    if (lb2 == 'k' or lb2 == 'K' or lb2 == 'm' or lb2 == 'M' or lb2 == 'g' or lb2 == 'G') {
+                        if (std.fmt.parseInt(i64, tb2[0 .. tb2.len - 1], 10)) |n2|
+                            return try allocator.dupe(u8, if (n2 != 0) "true" else "false")
+                        else |_| {}
+                    }
+                }
+            }
             return error.InvalidValue;
         },
         .int_type => {
