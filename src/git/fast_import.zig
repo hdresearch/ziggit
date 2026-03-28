@@ -717,6 +717,70 @@ fn State(comptime PlatformType: type) type {
             return pos;
         }
 
+        fn deleteRef(self: *Self, ref_name: []const u8) !void {
+            const ref_path = try std.fs.path.join(self.allocator, &.{ self.git_dir, ref_name });
+            defer self.allocator.free(ref_path);
+            std.fs.cwd().deleteFile(ref_path) catch {};
+        }
+
+        fn copyEntries(self: *Self, entries: *std.StringArrayHashMap(TreeFileEntry), src: []const u8, dest: []const u8) !void {
+            var to_add = std.ArrayList(struct { path: []u8, entry: TreeFileEntry }).init(self.allocator);
+            defer to_add.deinit();
+
+            var it = entries.iterator();
+            while (it.next()) |entry| {
+                const path = entry.key_ptr.*;
+                if (std.mem.eql(u8, path, src)) {
+                    const new_path = try self.allocator.dupe(u8, dest);
+                    const new_mode = try self.allocator.dupe(u8, entry.value_ptr.mode);
+                    const new_hash = try self.allocator.dupe(u8, entry.value_ptr.hash);
+                    try to_add.append(.{ .path = new_path, .entry = .{ .mode = new_mode, .hash = new_hash } });
+                } else if (std.mem.startsWith(u8, path, src) and path.len > src.len and path[src.len] == '/') {
+                    const suffix = path[src.len..];
+                    const new_path = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ dest, suffix });
+                    const new_mode = try self.allocator.dupe(u8, entry.value_ptr.mode);
+                    const new_hash = try self.allocator.dupe(u8, entry.value_ptr.hash);
+                    try to_add.append(.{ .path = new_path, .entry = .{ .mode = new_mode, .hash = new_hash } });
+                }
+            }
+
+            for (to_add.items) |item| {
+                if (entries.fetchSwapRemove(item.path)) |old| {
+                    self.allocator.free(old.key);
+                    self.allocator.free(old.value.hash);
+                    self.allocator.free(old.value.mode);
+                }
+                entries.put(item.path, item.entry) catch {
+                    self.allocator.free(item.path);
+                    self.allocator.free(item.entry.mode);
+                    self.allocator.free(item.entry.hash);
+                };
+            }
+        }
+
+        fn removeEntries(self: *Self, entries: *std.StringArrayHashMap(TreeFileEntry), src: []const u8) void {
+            var to_remove = std.ArrayList([]const u8).init(self.allocator);
+            defer to_remove.deinit();
+
+            var it = entries.iterator();
+            while (it.next()) |entry| {
+                const path = entry.key_ptr.*;
+                if (std.mem.eql(u8, path, src) or
+                    (std.mem.startsWith(u8, path, src) and path.len > src.len and path[src.len] == '/'))
+                {
+                    to_remove.append(path) catch continue;
+                }
+            }
+
+            for (to_remove.items) |path| {
+                if (entries.fetchSwapRemove(path)) |old| {
+                    self.allocator.free(old.key);
+                    self.allocator.free(old.value.hash);
+                    self.allocator.free(old.value.mode);
+                }
+            }
+        }
+
         const DataResult = struct {
             content: []u8,
             end_pos: usize,
