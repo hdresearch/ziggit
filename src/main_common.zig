@@ -21664,11 +21664,14 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     var ignore_missing = false;
     var unmerged_mode = false;
     var verbose = false;
+    var info_only = false;
 
     var replace_mode = false;
     var again_mode = false;
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--add")) {
+        if (std.mem.eql(u8, arg, "--info-only")) {
+            info_only = true;
+        } else if (std.mem.eql(u8, arg, "--add")) {
             add_mode = true;
         } else if (std.mem.eql(u8, arg, "--remove")) {
             remove_mode = true;
