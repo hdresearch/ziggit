@@ -10832,7 +10832,10 @@ fn cfgSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add:
                     cur_sub = try sb.toOwnedSlice();
                 } else if (std.mem.indexOf(u8, inner, ".")) |d| {
                     cur_sec = try allocator.dupe(u8, std.mem.trim(u8, inner[0..d], " \t"));
-                    cur_sub = try allocator.dupe(u8, inner[d + 1 ..]);
+                    // Old-style [section.sub] - subsection is case-insensitive (lowercased)
+                    const oldsub1 = try allocator.dupe(u8, inner[d + 1 ..]);
+                    for (oldsub1) |*c| c.* = std.ascii.toLower(c.*);
+                    cur_sub = oldsub1;
                 } else {
                     cur_sec = try allocator.dupe(u8, std.mem.trim(u8, inner, " \t"));
                 }
@@ -11123,7 +11126,10 @@ fn cfgUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, value_r
                     cur_sub = try sb.toOwnedSlice();
                 } else if (std.mem.indexOf(u8, inner, ".")) |d| {
                     cur_sec = try allocator.dupe(u8, std.mem.trim(u8, inner[0..d], " \t"));
-                    cur_sub = try allocator.dupe(u8, inner[d + 1 ..]);
+                    // Old-style [section.sub] - subsection is case-insensitive (lowercased)
+                    const oldsub2 = try allocator.dupe(u8, inner[d + 1 ..]);
+                    for (oldsub2) |*c| c.* = std.ascii.toLower(c.*);
+                    cur_sub = oldsub2;
                 } else {
                     cur_sec = try allocator.dupe(u8, std.mem.trim(u8, inner, " \t"));
                 }
