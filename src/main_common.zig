@@ -10723,7 +10723,7 @@ fn cfgParseKey(key: []const u8, allocator: std.mem.Allocator) !CfgParsedKey {
 fn cfgSectionMatches(file_section: []const u8, file_subsection: ?[]const u8, parsed: CfgParsedKey) bool {
     if (!std.ascii.eqlIgnoreCase(file_section, parsed.section)) return false;
     if (parsed.subsection) |ps| {
-        if (file_subsection) |fs| return std.ascii.eqlIgnoreCase(fs, ps);
+        if (file_subsection) |fs| return std.mem.eql(u8, fs, ps);
         return false;
     }
     return file_subsection == null;
