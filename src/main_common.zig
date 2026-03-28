@@ -27995,6 +27995,24 @@ fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, opts:
                     // Output stat before patch
                     try outputStatForTwoTrees(allocator, pt, this_tree, git_path, pathspecs, platform_impl);
                     try platform_impl.writeStdout("\n");
+                } else if (opts.show_stat or opts.show_shortstat) {
+                    // Output stat only
+                    if (opts.show_shortstat) {
+                        var se = std.array_list.Managed(DiffStatEntry).init(allocator);
+                        defer { for (se.items) |*de| allocator.free(de.path); se.deinit(); }
+                        try collectTreeDiffEntries(allocator, pt, this_tree, "", git_path, pathspecs, platform_impl, &se);
+                        try formatDiffShortStat(se.items, platform_impl, allocator);
+                    } else {
+                        try outputStatForTwoTrees(allocator, pt, this_tree, git_path, pathspecs, platform_impl);
+                    }
+                    if (opts.show_summary) {
+                        try outputSummaryForTwoTrees(allocator, pt, this_tree, git_path, pathspecs, platform_impl);
+                    }
+                    return true;
+                }
+                if (opts.show_summary and !opts.show_stat and !opts.show_patch and !opts.patch_with_stat and !opts.patch_with_raw) {
+                    try outputSummaryForTwoTrees(allocator, pt, this_tree, git_path, pathspecs, platform_impl);
+                    return true;
                 }
                 if (opts.patch_with_raw) {
                     // Output raw before patch
