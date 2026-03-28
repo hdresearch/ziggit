@@ -25983,6 +25983,13 @@ fn nativeCmdMktree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
         // or: <mode> SP <type> SP <hash> TAB <name>
         if (std.mem.indexOfScalar(u8, line, '\t')) |tab_idx| {
             const name = line[tab_idx + 1..];
+            // Reject recursive ls-tree output (paths with '/')
+            if (std.mem.indexOfScalar(u8, name, '/') != null) {
+                try platform_impl.writeStderr("fatal: path with slash in mktree input: ");
+                try platform_impl.writeStderr(name);
+                try platform_impl.writeStderr("\n");
+                std.process.exit(128);
+            }
             const prefix = line[0..tab_idx];
             // Split prefix by spaces
             var parts = std.mem.splitScalar(u8, prefix, ' ');
@@ -25992,6 +25999,32 @@ fn nativeCmdMktree(allocator: std.mem.Allocator, args: [][]const u8, command_ind
             try entries.append(objects.TreeEntry.init(mode, name, hash));
         }
     }
+
+    // Sort entries by name (git tree sorting: directories get trailing '/' for comparison)
+    const SortCtx = struct {
+        pub fn lessThan(_: @This(), a: objects.TreeEntry, b: objects.TreeEntry) bool {
+            // Git sorts tree entries by comparing names, but directories have
+            // an implicit trailing '/' for comparison purposes
+            const a_is_dir = std.mem.eql(u8, a.mode, "040000") or std.mem.eql(u8, a.mode, "40000");
+            const b_is_dir = std.mem.eql(u8, b.mode, "040000") or std.mem.eql(u8, b.mode, "40000");
+            const a_name = a.name;
+            const b_name = b.name;
+
+            // Compare byte by byte, appending '/' to directory names
+            var ai: usize = 0;
+            var bi: usize = 0;
+            while (true) {
+                const ac: u8 = if (ai < a_name.len) a_name[ai] else if (a_is_dir and ai == a_name.len) '/' else 0;
+                const bc: u8 = if (bi < b_name.len) b_name[bi] else if (b_is_dir and bi == b_name.len) '/' else 0;
+                if (ac == 0 and bc == 0) return false;
+                if (ac < bc) return true;
+                if (ac > bc) return false;
+                ai += 1;
+                bi += 1;
+            }
+        }
+    };
+    std.mem.sort(objects.TreeEntry, entries.items, SortCtx{}, SortCtx.lessThan);
 
     // Create tree object
     const tree_obj = objects.createTreeObject(entries.items, allocator) catch {
