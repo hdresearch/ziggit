@@ -197,6 +197,109 @@ fn isNativeCommand(command: []const u8) bool {
     return false;
 }
 
+fn levenshteinDistance(allocator: std.mem.Allocator, s: []const u8, t: []const u8) u32 {
+    if (s.len == 0) return @intCast(t.len);
+    if (t.len == 0) return @intCast(s.len);
+    const prev_row = allocator.alloc(u32, t.len + 1) catch return @intCast(@max(s.len, t.len));
+    defer allocator.free(prev_row);
+    const curr_row = allocator.alloc(u32, t.len + 1) catch return @intCast(@max(s.len, t.len));
+    defer allocator.free(curr_row);
+    for (0..t.len + 1) |j| {
+        prev_row[j] = @intCast(j);
+    }
+    for (0..s.len) |ii| {
+        curr_row[0] = @intCast(ii + 1);
+        for (0..t.len) |j| {
+            const cost: u32 = if (std.ascii.toLower(s[ii]) == std.ascii.toLower(t[j])) 0 else 1;
+            curr_row[j + 1] = @min(@min(curr_row[j] + 1, prev_row[j + 1] + 1), prev_row[j] + cost);
+        }
+        @memcpy(prev_row, curr_row);
+    }
+    return curr_row[t.len];
+}
+
+fn findSimilarCommands(allocator: std.mem.Allocator, typo: []const u8, platform_impl: *const platform_mod.Platform) ![]const []const u8 {
+    const Candidate = struct { name: []const u8, dist: u32 };
+    var candidates = std.ArrayList(Candidate).init(allocator);
+    defer candidates.deinit();
+    for (NATIVE_COMMANDS) |cmd| {
+        const d = levenshteinDistance(allocator, typo, cmd);
+        if (d <= 3 and d < typo.len) {
+            candidates.append(.{ .name = cmd, .dist = d }) catch continue;
+        }
+    }
+    if (findGitDirectory(allocator, platform_impl)) |git_path| {
+        defer allocator.free(git_path);
+        const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch null;
+        if (config_path) |cp| {
+            defer allocator.free(cp);
+            if (platform_impl.fs.readFile(allocator, cp)) |content| {
+                defer allocator.free(content);
+                var lines_iter2 = std.mem.splitScalar(u8, content, '\n');
+                var in_alias = false;
+                while (lines_iter2.next()) |line2| {
+                    const tr2 = std.mem.trim(u8, line2, " \t\r");
+                    if (tr2.len > 0 and tr2[0] == '[') {
+                        in_alias = std.ascii.startsWithIgnoreCase(tr2, "[alias]");
+                        continue;
+                    }
+                    if (in_alias) {
+                        if (std.mem.indexOf(u8, tr2, "=")) |eq| {
+                            const aname = std.mem.trim(u8, tr2[0..eq], " \t");
+                            if (aname.len > 0) {
+                                const d = levenshteinDistance(allocator, typo, aname);
+                                if (d <= 3 and d < typo.len) {
+                                    const duped = allocator.dupe(u8, aname) catch continue;
+                                    candidates.append(.{ .name = duped, .dist = d }) catch continue;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else |_| {}
+        }
+    } else |_| {}
+    const path_env2 = std.posix.getenv("PATH") orelse "";
+    if (path_env2.len > 0) {
+        var piter = std.mem.splitScalar(u8, path_env2, ':');
+        while (piter.next()) |dir2| {
+            if (dir2.len == 0) continue;
+            var idir = std.fs.cwd().openDir(dir2, .{ .iterate = true }) catch continue;
+            defer idir.close();
+            var dit2 = idir.iterate();
+            while (dit2.next() catch null) |ent| {
+                if (std.mem.startsWith(u8, ent.name, "git-")) {
+                    const cname = ent.name[4..];
+                    const d = levenshteinDistance(allocator, typo, cname);
+                    if (d <= 3 and d < typo.len) {
+                        const duped = allocator.dupe(u8, cname) catch continue;
+                        candidates.append(.{ .name = duped, .dist = d }) catch continue;
+                    }
+                }
+            }
+        }
+    }
+    if (candidates.items.len == 0) return &[_][]const u8{};
+    std.mem.sort(Candidate, candidates.items, {}, struct {
+        fn lt(_: void, a: Candidate, b: Candidate) bool {
+            if (a.dist != b.dist) return a.dist < b.dist;
+            return std.mem.lessThan(u8, a.name, b.name);
+        }
+    }.lt);
+    var result2 = std.ArrayList([]const u8).init(allocator);
+    var seen2 = std.StringHashMap(void).init(allocator);
+    defer seen2.deinit();
+    const best = candidates.items[0].dist;
+    for (candidates.items) |c| {
+        if (c.dist > best + 1) break;
+        if (!seen2.contains(c.name)) {
+            seen2.put(c.name, {}) catch continue;
+            result2.append(c.name) catch continue;
+        }
+    }
+    return result2.toOwnedSlice() catch &[_][]const u8{};
+}
+
 fn parseGitConfigParameters(allocator: std.mem.Allocator, params: []const u8) void {
     var i: usize = 0;
     while (i < params.len) {
