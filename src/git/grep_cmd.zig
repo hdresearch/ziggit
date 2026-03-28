@@ -223,7 +223,7 @@ pub fn cmdGrep(allocator: Allocator, args: *platform_mod.ArgIterator, platform_i
                     std.process.exit(128);
                 }
                 try opts.patterns.append(raw_args.items[i]);
-                try expr_tokens.append(.{ .pattern = raw_args.items[i] });
+                try opts.expr_tokens.append(.{ .pattern = raw_args.items[i] });
                 has_explicit_pattern = true;
                 continue;
             }
@@ -238,27 +238,27 @@ pub fn cmdGrep(allocator: Allocator, args: *platform_mod.ArgIterator, platform_i
                 continue;
             }
             if (std.mem.eql(u8, arg, "--and")) {
-                try expr_tokens.append(.op_and);
+                try opts.expr_tokens.append(.op_and);
                 has_boolean_op = true;
                 continue;
             }
             if (std.mem.eql(u8, arg, "--or")) {
-                try expr_tokens.append(.op_or);
+                try opts.expr_tokens.append(.op_or);
                 has_boolean_op = true;
                 continue;
             }
             if (std.mem.eql(u8, arg, "--not")) {
-                try expr_tokens.append(.op_not);
+                try opts.expr_tokens.append(.op_not);
                 has_boolean_op = true;
                 continue;
             }
             if (std.mem.eql(u8, arg, "(")) {
-                try expr_tokens.append(.open_paren);
+                try opts.expr_tokens.append(.open_paren);
                 has_boolean_op = true;
                 continue;
             }
             if (std.mem.eql(u8, arg, ")")) {
-                try expr_tokens.append(.close_paren);
+                try opts.expr_tokens.append(.close_paren);
                 has_boolean_op = true;
                 continue;
             }
@@ -578,7 +578,7 @@ pub fn cmdGrep(allocator: Allocator, args: *platform_mod.ArgIterator, platform_i
             // Fall through to treat as pattern if no explicit -e
             if (!has_explicit_pattern and opts.patterns.items.len == 0) {
                 try opts.patterns.append(arg);
-                try expr_tokens.append(.{ .pattern = arg });
+                try opts.expr_tokens.append(.{ .pattern = arg });
                 has_explicit_pattern = true;
                 continue;
             }
@@ -590,7 +590,7 @@ pub fn cmdGrep(allocator: Allocator, args: *platform_mod.ArgIterator, platform_i
         if (!has_explicit_pattern and opts.patterns.items.len == 0 and opts.pattern_files.items.len == 0) {
             // First non-option is the pattern
             try opts.patterns.append(arg);
-            try expr_tokens.append(.{ .pattern = arg });
+            try opts.expr_tokens.append(.{ .pattern = arg });
             has_explicit_pattern = true;
         } else {
             // Could be tree-ish or pathspec
@@ -631,7 +631,7 @@ pub fn cmdGrep(allocator: Allocator, args: *platform_mod.ArgIterator, platform_i
             if (line.len == 0) continue; // skip empty lines
             const duped = try allocator.dupe(u8, line);
             try opts.patterns.append(duped);
-            try expr_tokens.append(.{ .pattern = duped });
+            try opts.expr_tokens.append(.{ .pattern = duped });
         }
     }
 
@@ -667,7 +667,7 @@ pub fn cmdGrep(allocator: Allocator, args: *platform_mod.ArgIterator, platform_i
     if (has_boolean_op) {
         // Validate expr tokens: --and requires patterns on both sides
         var prev_was_op = true; // start as true to catch leading --and
-        for (expr_tokens.items) |tok| {
+        for (opts.expr_tokens.items) |tok| {
             switch (tok) {
                 .op_and => {
                     if (prev_was_op) {
