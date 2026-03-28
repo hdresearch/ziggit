@@ -10393,14 +10393,7 @@ fn cfgFormatTypeWithContext(value: []const u8, config_type: ConfigType, key_name
         },
         .path_type => {
             const trimmed = std.mem.trim(u8, value, " \t");
-            if (trimmed.len == 0) {
-                if (key_name) |kn| {
-                    const em = try std.fmt.allocPrint(allocator, "fatal: missing value for '{s}'\n", .{kn});
-                    defer allocator.free(em);
-                    try platform_impl.writeStderr(em);
-                }
-                std.process.exit(128);
-            }
+            if (trimmed.len == 0) return try allocator.dupe(u8, "");
             if (trimmed[0] == '~' and (trimmed.len == 1 or trimmed[1] == '/')) {
                 const h = std.process.getEnvVarOwned(allocator, "HOME") catch {
                     if (key_name) |kn| {
