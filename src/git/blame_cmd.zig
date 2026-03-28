@@ -13,6 +13,7 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
     var srt = false;
     var suppress = false;
     var blank_boundary = false;
+    var incremental = false;
     var fp: ?[]const u8 = null;
     var rv: ?[]const u8 = null;
     var cf: ?[]const u8 = null;
