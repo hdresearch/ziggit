@@ -169,10 +169,18 @@ pub fn resolveRef(git_dir: []const u8, ref_name: []const u8, platform_impl: anyt
         
         if (resolved.is_symbolic) {
             // Update current_ref for next iteration
+            {
+                const dbg2 = std.fmt.allocPrint(allocator, "DEBUG resolveRef loop: symbolic ref '{s}' -> '{s}'\n", .{ current_ref, resolved.target }) catch null;
+                if (dbg2) |d| { defer allocator.free(d); const f = std.fs.File{ .handle = 2 }; f.writeAll(d) catch {}; }
+            }
             allocator.free(current_ref);
             current_ref = try allocator.dupe(u8, resolved.target);
             allocator.free(resolved.target);
         } else {
+            {
+                const dbg3 = std.fmt.allocPrint(allocator, "DEBUG resolveRef loop: direct hash ref '{s}' -> '{s}'\n", .{ current_ref, resolved.target }) catch null;
+                if (dbg3) |d| { defer allocator.free(d); const f = std.fs.File{ .handle = 2 }; f.writeAll(d) catch {}; }
+            }
             // Found final hash, check if it's an annotated tag
             const final_hash = try resolveAnnotatedTag(git_dir, resolved.target, platform_impl, allocator);
             allocator.free(resolved.target);
