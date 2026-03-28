@@ -10488,8 +10488,8 @@ fn formatConfigType(value: []const u8, config_type: ConfigType, allocator: std.m
     }
 }
 
-fn configSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add: bool, comment: ?[]const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
-    try cfgSetValue(cfg_path, key, value, do_add, false, null, false, comment, allocator, platform_impl);
+fn configSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add: bool, replace_all: bool, value_regex: ?[]const u8, comment: ?[]const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    try cfgSetValue(cfg_path, key, value, do_add, replace_all, value_regex, false, comment, allocator, platform_impl);
 }
 
 fn configUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
