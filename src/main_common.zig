@@ -34229,7 +34229,7 @@ fn cmdWebBrowse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Pipe;
         try child.spawn();
-        const stdout = child.stdout.?.reader.readAllAlloc(allocator, 1024 * 1024) catch "";
+        const stdout = child.stdout.?.readToEndAlloc(allocator, 1024 * 1024) catch "";
         defer if (stdout.len > 0) allocator.free(stdout);
         _ = child.wait() catch {};
         if (stdout.len > 0) try platform_impl.writeStdout(stdout);
@@ -34242,7 +34242,7 @@ fn cmdWebBrowse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         child2.stdout_behavior = .Pipe;
         child2.stderr_behavior = .Pipe;
         try child2.spawn();
-        const stdout2 = child2.stdout.?.reader.readAllAlloc(allocator, 1024 * 1024) catch "";
+        const stdout2 = child2.stdout.?.readToEndAlloc(allocator, 1024 * 1024) catch "";
         defer if (stdout2.len > 0) allocator.free(stdout2);
         _ = child2.wait() catch {};
         if (stdout2.len > 0) try platform_impl.writeStdout(stdout2);
@@ -34254,7 +34254,7 @@ fn cmdWebBrowse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
 
 fn cmdFastImport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     _ = args;
-    const stdin_content = std.io.getStdIn().reader.readAllAlloc(allocator, 256 * 1024 * 1024) catch "";
+    const stdin_content = std.io.getStdIn().readToEndAlloc(allocator, 256 * 1024 * 1024) catch "";
     defer if (stdin_content.len > 0) allocator.free(stdin_content);
     if (stdin_content.len == 0) return;
     if (std.mem.startsWith(u8, stdin_content, "tag ") or
