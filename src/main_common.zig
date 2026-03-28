@@ -30942,6 +30942,14 @@ fn outputCombinedRaw(allocator: std.mem.Allocator, parent_hashes: []const []cons
         try line.appendSlice(merge_mode);
         try line.append(' ');
         
+        // Determine ellipsis suffix for abbreviated hashes
+        const hash_suffix: []const u8 = if (opts.abbrev_len != null) blk: {
+            if (std.posix.getenv("GIT_PRINT_SHA1_ELLIPSIS")) |v| {
+                if (std.mem.eql(u8, v, "yes")) break :blk "...";
+            }
+            break :blk "";
+        } else "";
+        
         // Hashes for each parent
         for (parent_file_maps.items, 0..) |*pf, i| {
             if (i > 0) try line.append(' ');
@@ -30951,6 +30959,7 @@ fn outputCombinedRaw(allocator: std.mem.Allocator, parent_hashes: []const []cons
                     const alen = if (abl == 0) @as(usize, 7) else abl;
                     const effective = @min(alen, pi.hash.len);
                     try line.appendSlice(pi.hash[0..effective]);
+                    try line.appendSlice(hash_suffix);
                 } else {
                     try line.appendSlice(pi.hash);
                 }
@@ -30958,6 +30967,7 @@ fn outputCombinedRaw(allocator: std.mem.Allocator, parent_hashes: []const []cons
                 if (opts.abbrev_len) |abl| {
                     const alen = if (abl == 0) @as(usize, 7) else abl;
                     for (0..alen) |_| try line.append('0');
+                    try line.appendSlice(hash_suffix);
                 } else {
                     try line.appendSlice(null_hash);
                 }
@@ -30969,6 +30979,7 @@ fn outputCombinedRaw(allocator: std.mem.Allocator, parent_hashes: []const []cons
             const alen = if (abl == 0) @as(usize, 7) else abl;
             const effective = @min(alen, merge_hash.len);
             try line.appendSlice(merge_hash[0..effective]);
+            try line.appendSlice(hash_suffix);
         } else {
             try line.appendSlice(merge_hash);
         }
