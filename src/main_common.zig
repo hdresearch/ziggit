@@ -37901,23 +37901,35 @@ fn cmdWebBrowse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
 }
 
 fn cmdFastImport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
-    _ = args;
-    const stdin_content = (std.fs.File{ .handle = std.posix.STDIN_FILENO }).readToEndAlloc(allocator, 256 * 1024 * 1024) catch "";
-    defer if (stdin_content.len > 0) allocator.free(stdin_content);
-    if (stdin_content.len == 0) return;
-    if (std.mem.startsWith(u8, stdin_content, "tag ") or
-        std.mem.startsWith(u8, stdin_content, "reset ") or
-        std.mem.startsWith(u8, stdin_content, "commit ") or
-        std.mem.startsWith(u8, stdin_content, "blob ") or
-        std.mem.startsWith(u8, stdin_content, "feature ") or
-        std.mem.startsWith(u8, stdin_content, "done") or
-        std.mem.startsWith(u8, stdin_content, "progress "))
-    {
-        try platform_impl.writeStderr("fatal: premature end of input\n");
-        std.process.exit(1);
+    const fast_import = @import("git/fast_import.zig");
+    var expect_done = false;
+    var options = fast_import.Options{
+        .expect_done = &expect_done,
+    };
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--done")) {
+            expect_done = true;
+        } else if (std.mem.eql(u8, arg, "--force")) {
+            options.force = true;
+        } else if (std.mem.eql(u8, arg, "--quiet")) {
+            options.quiet = true;
+        } else if (std.mem.eql(u8, arg, "--stats")) {
+            options.stats = true;
+        } else if (std.mem.startsWith(u8, arg, "--import-marks=")) {
+            options.import_marks = arg["--import-marks=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--import-marks-if-exists=")) {
+            options.import_marks_if_exists = arg["--import-marks-if-exists=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--export-marks=")) {
+            options.export_marks = arg["--export-marks=".len..];
+        }
     }
-    try platform_impl.writeStderr("fatal: unsupported command\n");
-    std.process.exit(1);
+
+    fast_import.run(allocator, platform_impl, options) catch |e| {
+        const msg = std.fmt.allocPrint(allocator, "fatal: fast-import error: {}\n", .{e}) catch "fatal: fast-import error\n";
+        platform_impl.writeStderr(msg) catch {};
+        std.process.exit(1);
+    };
 }
 
 fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
