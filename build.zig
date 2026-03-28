@@ -20,17 +20,7 @@ pub fn build(b: *std.Build) void {
     exe.linkLibC();
     exe.linkSystemLibrary("z");
 
-    const install_artifact = b.addInstallArtifact(exe, .{});
-
-    // Fix Zig's wrapper script issue: replace shell wrapper with actual binary
-    // This must run AFTER install_artifact completes (which creates the wrapper)
-    const fix_wrapper = b.addSystemCommand(&.{
-        "sh", "-c",
-        "DEST=\"$1\"; for f in .zig-cache/o/*/ziggit; do [ -f \"$f\" ] || continue; SZ=$(wc -c < \"$f\"); if [ \"$SZ\" -gt 1000 ]; then rm -f \"$DEST\"; cp \"$f\" \"$DEST\"; chmod +x \"$DEST\"; break; fi; done",
-        "--",
-        b.getInstallPath(.bin, "ziggit"),
-    });
-    fix_wrapper.step.dependOn(&install_artifact.step);
+    b.installArtifact(exe);
 
     // Install shell helper scripts needed by git test suite
     const shell_scripts = [_][]const u8{
@@ -46,6 +36,5 @@ pub fn build(b: *std.Build) void {
 
     // Create git -> ziggit symlink so test suite can find 'git' command
     const symlink = b.addSystemCommand(&.{ "ln", "-sf", "ziggit", b.getInstallPath(.bin, "git") });
-    symlink.step.dependOn(&fix_wrapper.step);
     b.getInstallStep().dependOn(&symlink.step);
 }
