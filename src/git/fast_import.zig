@@ -284,7 +284,7 @@ fn State(comptime PlatformType: type) type {
             var committer_line: ?[]const u8 = null;
             var encoding_line: ?[]const u8 = null;
             var from_ref: ?[]const u8 = null;
-            var merge_refs = std.ArrayList([]const u8).init(self.allocator);
+            var merge_refs = std.array_list.Managed([]const u8).init(self.allocator);
             defer merge_refs.deinit();
 
             // Parse headers
@@ -478,7 +478,7 @@ fn State(comptime PlatformType: type) type {
             defer self.allocator.free(tree_hash);
 
             // Build parent list
-            var parents = std.ArrayList([]const u8).init(self.allocator);
+            var parents = std.array_list.Managed([]const u8).init(self.allocator);
             defer parents.deinit();
 
             if (parent_hash) |*ph| {
@@ -511,7 +511,7 @@ fn State(comptime PlatformType: type) type {
             }
 
             // Build commit content manually to support encoding header
-            var commit_content = std.ArrayList(u8).init(self.allocator);
+            var commit_content = std.array_list.Managed(u8).init(self.allocator);
             defer commit_content.deinit();
 
             try commit_content.writer().print("tree {s}\n", .{tree_hash});
@@ -621,7 +621,7 @@ fn State(comptime PlatformType: type) type {
             };
 
             // Build tag object
-            var tag_content = std.ArrayList(u8).init(self.allocator);
+            var tag_content = std.array_list.Managed(u8).init(self.allocator);
             defer tag_content.deinit();
 
             try tag_content.writer().print("object {s}\ntype {s}\ntag {s}\n", .{ &target_hash, type_str, tag_name });
@@ -723,7 +723,7 @@ fn State(comptime PlatformType: type) type {
                 pos = line_end + 1;
 
                 // Find end delimiter
-                var content = std.ArrayList(u8).init(self.allocator);
+                var content = std.array_list.Managed(u8).init(self.allocator);
                 defer content.deinit();
 
                 while (pos < data.len) {
@@ -852,7 +852,7 @@ fn State(comptime PlatformType: type) type {
                 dirs.deinit();
             }
 
-            var direct_entries = std.ArrayList(objects.TreeEntry).init(self.allocator);
+            var direct_entries = std.array_list.Managed(objects.TreeEntry).init(self.allocator);
             defer direct_entries.deinit();
 
             var it = entries.iterator();
@@ -982,7 +982,7 @@ fn skipLine(data: []const u8, pos: usize) usize {
 fn unquotePath(path: []const u8, allocator: std.mem.Allocator) ![]const u8 {
     if (path.len >= 2 and path[0] == '"' and path[path.len - 1] == '"') {
         // Unquote C-style string
-        var result = std.ArrayList(u8).init(allocator);
+        var result = std.array_list.Managed(u8).init(allocator);
         defer result.deinit();
 
         var i: usize = 1;
