@@ -1581,6 +1581,7 @@ fn lineMatches(line: []const u8, opts: *GrepOptions, eff_pt: PatternType, alloca
 
 fn evaluateBooleanExpr(line: []const u8, opts: *GrepOptions, eff_pt: PatternType, allocator: Allocator) bool {
     if (!opts.expr_tokens_initialized or opts.expr_tokens.items.len == 0) return false;
+    _ = std.posix.write(2, "EVAL CALLED\n") catch 0;
     var pos: usize = 0;
     return evalExprOr(line, opts, eff_pt, allocator, opts.expr_tokens.items, &pos);
 }
