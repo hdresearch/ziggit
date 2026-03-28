@@ -11363,7 +11363,7 @@ const ColorAttrEntry = union(enum) {
     reset: void, // empty entry for reset (produces just ';')
 };
 
-fn parseColorWord(word: []const u8, fg_color: *i16, bg_color: *i16, attrs: *std.ArrayList(ColorAttrEntry), fg_set: *bool, bg_set: *bool) !void {
+fn parseColorWord(word: []const u8, fg_color: *i16, bg_color: *i16, attrs: *std.array_list.AlignedManaged(ColorAttrEntry, null), fg_set: *bool, bg_set: *bool) !void {
     // Check for "bright" prefix colors
     if (word.len > 6 and std.mem.startsWith(u8, word, "bright")) {
         const base = parseColorName(word[6..]);
