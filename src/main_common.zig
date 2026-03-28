@@ -6245,7 +6245,7 @@ fn updateIndexAfterMerge(git_path: []const u8, allocator: std.mem.Allocator, pla
         if (!found_in_index) {
             const new_file_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, ent.name }) catch continue;
             defer allocator.free(new_file_path);
-            const new_content = platform_impl.fs.readFile(new_file_path, allocator) catch continue;
+            const new_content = platform_impl.fs.readFile(allocator, new_file_path) catch continue;
             defer allocator.free(new_content);
             const new_blob = objects.createBlobObject(new_content, allocator) catch continue;
             defer new_blob.deinit(allocator);
