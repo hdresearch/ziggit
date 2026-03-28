@@ -19755,11 +19755,16 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
     var reset_paths = std.array_list.Managed([]const u8).init(allocator);
     defer reset_paths.deinit();
     var seen_separator = false;
+    var quiet = false;
+    var intent_to_add = false;
+    _ = quiet;
 
     while (args.next()) |arg| {
         if (seen_separator) {
             try reset_paths.append(arg);
         } else if (std.mem.eql(u8, arg, "--")) {
+            seen_separator = true;
+        } else if (std.mem.eql(u8, arg, "--end-of-options")) {
             seen_separator = true;
         } else if (std.mem.eql(u8, arg, "--soft")) {
             reset_mode = .soft;
@@ -19770,9 +19775,52 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
         } else if (std.mem.eql(u8, arg, "--merge") or std.mem.eql(u8, arg, "--keep")) {
             reset_mode = .merge_mode;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
-            // Accepted
-        } else if (std.mem.eql(u8, arg, "-N") or std.mem.eql(u8, arg, "--no-refresh")) {
-            // Accepted
+            quiet = true;
+        } else if (std.mem.eql(u8, arg, "-N") or std.mem.eql(u8, arg, "--no-refresh") or std.mem.eql(u8, arg, "--refresh")) {
+            if (std.mem.eql(u8, arg, "-N")) intent_to_add = true;
+        } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--patch")) {
+            // Patch mode not supported
+            try platform_impl.writeStderr("fatal: interactive reset not supported\n");
+            std.process.exit(1);
+            return;
+        } else if (std.mem.eql(u8, arg, "--pathspec-from-file") or std.mem.startsWith(u8, arg, "--pathspec-from-file=")) {
+            // Read paths from file
+            const file_path = if (std.mem.startsWith(u8, arg, "--pathspec-from-file="))
+                arg["--pathspec-from-file=".len..]
+            else
+                args.next() orelse {
+                    try platform_impl.writeStderr("fatal: --pathspec-from-file requires a value\n");
+                    std.process.exit(128);
+                    return;
+                };
+            if (std.mem.eql(u8, file_path, "-")) {
+                // Read from stdin
+                const stdin_content = platform_impl.readStdin(allocator) catch "";
+                if (stdin_content.len > 0) {
+                    var line_iter = std.mem.splitScalar(u8, stdin_content, '\n');
+                    while (line_iter.next()) |line| {
+                        const trimmed = std.mem.trimRight(u8, line, "\r");
+                        if (trimmed.len > 0) try reset_paths.append(trimmed);
+                    }
+                }
+            } else {
+                const content = std.fs.cwd().readFileAlloc(allocator, file_path, 10 * 1024 * 1024) catch {
+                    const errmsg = try std.fmt.allocPrint(allocator, "fatal: could not open '{s}' for reading: No such file or directory\n", .{file_path});
+                    defer allocator.free(errmsg);
+                    try platform_impl.writeStderr(errmsg);
+                    std.process.exit(128);
+                    return;
+                };
+                defer allocator.free(content);
+                var line_iter = std.mem.splitScalar(u8, content, '\n');
+                while (line_iter.next()) |line| {
+                    const trimmed = std.mem.trimRight(u8, line, "\r");
+                    if (trimmed.len > 0) try reset_paths.append(trimmed);
+                }
+            }
+        } else if (std.mem.eql(u8, arg, "--pathspec-file-nul") or std.mem.eql(u8, arg, "-z")) {
+            // NUL delimiter mode - handled in conjunction with --pathspec-from-file
+            // We'll handle this by re-parsing - for now just accept the flag
         } else if (std.mem.startsWith(u8, arg, "-") and arg.len > 1) {
             // Strip leading dashes for error message
             var opt_name = arg;
@@ -19786,6 +19834,37 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             target_ref = arg;
         } else {
             try reset_paths.append(arg);
+        }
+    }
+
+    // Validate: --soft and --hard/--keep/--merge cannot be used with paths
+    if (reset_paths.items.len > 0 or seen_separator) {
+        if (reset_mode == .soft) {
+            try platform_impl.writeStderr("fatal: Cannot do soft reset with paths.\n");
+            std.process.exit(1);
+            return;
+        }
+        if (reset_mode == .hard) {
+            try platform_impl.writeStderr("fatal: Cannot do hard reset with paths.\n");
+            std.process.exit(1);
+            return;
+        }
+        if (reset_mode == .merge_mode) {
+            try platform_impl.writeStderr("fatal: Cannot do merge/keep reset with paths.\n");
+            std.process.exit(1);
+            return;
+        }
+    }
+
+    // Check if MERGE_HEAD exists - --soft reset should fail with pending merge
+    {
+        const merge_head_path = try std.fmt.allocPrint(allocator, "{s}/MERGE_HEAD", .{git_path});
+        defer allocator.free(merge_head_path);
+        const merge_head_exists = if (std.fs.cwd().access(merge_head_path, .{})) |_| true else |_| false;
+        if (merge_head_exists and reset_mode == .soft) {
+            try platform_impl.writeStderr("fatal: Cannot do a soft reset in the middle of a merge.\n");
+            std.process.exit(128);
+            return;
         }
     }
 
