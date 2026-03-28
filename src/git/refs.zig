@@ -95,8 +95,17 @@ pub fn resolveRef(git_dir: []const u8, ref_name: []const u8, platform_impl: anyt
         // Check for circular references
         for (seen_refs.items) |seen_ref| {
             if (std.mem.eql(u8, seen_ref, current_ref)) {
+                {
+                    const dbg2 = std.fmt.allocPrint(allocator, "DEBUG resolveRef: CIRCULAR ref='{s}'\n", .{current_ref}) catch null;
+                    if (dbg2) |d| { defer allocator.free(d); const f = std.fs.File{ .handle = 2 }; f.writeAll(d) catch {}; }
+                }
                 return error.CircularRef;
             }
+        }
+        
+        {
+            const dbg3 = std.fmt.allocPrint(allocator, "DEBUG resolveRef: depth={d} current_ref='{s}'\n", .{depth, current_ref}) catch null;
+            if (dbg3) |d| { defer allocator.free(d); const f = std.fs.File{ .handle = 2 }; f.writeAll(d) catch {}; }
         }
         
         // Track this ref to detect cycles
