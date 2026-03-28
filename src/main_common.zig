@@ -17441,11 +17441,13 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             eol_flag = true;
         } else if (std.mem.eql(u8, arg, "--full-name") or std.mem.eql(u8, arg, "--recurse-submodules") or
             std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "-f") or
-            std.mem.eql(u8, arg, "-u") or std.mem.eql(u8, arg, "--unmerged") or
             std.mem.eql(u8, arg, "--debug") or
             std.mem.eql(u8, arg, "--sparse"))
         {
             // Known but not fully implemented flags - accept silently
+        } else if (std.mem.eql(u8, arg, "-u") or std.mem.eql(u8, arg, "--unmerged")) {
+            unmerged_flag = true;
+            stage = true;
         } else if (std.mem.eql(u8, arg, "-x") or std.mem.eql(u8, arg, "--exclude")) {
             if (args.next()) |pat| try exclude_patterns.append(pat);
         } else if (std.mem.startsWith(u8, arg, "--exclude=")) {
