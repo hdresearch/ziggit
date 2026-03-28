@@ -6677,6 +6677,31 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
 
         // For detached HEAD (resolved hash), just update HEAD directly
         if (resolved_target != null) {
+            // Get old branch name and hash for reflog before changing HEAD
+            var old_branch_det: ?[]u8 = null;
+            defer if (old_branch_det) |obn| allocator.free(obn);
+            var old_hash_det: ?[]u8 = null;
+            defer if (old_hash_det) |ohh| allocator.free(ohh);
+            {
+                const head_path_r = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+                defer allocator.free(head_path_r);
+                if (platform_impl.fs.readFile(allocator, head_path_r)) |head_data| {
+                    defer allocator.free(head_data);
+                    const trimmed_h = std.mem.trim(u8, head_data, " \t\r\n");
+                    if (std.mem.startsWith(u8, trimmed_h, "ref: refs/heads/")) {
+                        old_branch_det = try allocator.dupe(u8, trimmed_h["ref: refs/heads/".len..]);
+                        const ref_p = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, trimmed_h["ref: ".len..] });
+                        defer allocator.free(ref_p);
+                        if (platform_impl.fs.readFile(allocator, ref_p)) |hash_data| {
+                            defer allocator.free(hash_data);
+                            old_hash_det = try allocator.dupe(u8, std.mem.trim(u8, hash_data, " \t\r\n"));
+                        } else |_| {}
+                    } else if (trimmed_h.len >= 40) {
+                        old_hash_det = try allocator.dupe(u8, trimmed_h[0..40]);
+                    }
+                } else |_| {}
+            }
+
             // This is a detached HEAD checkout
             try checkoutCommitTree(git_path, actual_target, allocator, platform_impl);
             
@@ -6686,6 +6711,15 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             const head_content = try std.fmt.allocPrint(allocator, "{s}\n", .{actual_target});
             defer allocator.free(head_content);
             platform_impl.fs.writeFile(head_path, head_content) catch {};
+
+            // Write reflog entry
+            {
+                const from_det = if (old_branch_det) |obn| obn else if (old_hash_det) |ohh| ohh else "HEAD";
+                const reflog_msg_det = try std.fmt.allocPrint(allocator, "checkout: moving from {s} to {s}", .{ from_det, target });
+                defer allocator.free(reflog_msg_det);
+                const oh_det = if (old_hash_det) |ohh| ohh else "0000000000000000000000000000000000000000";
+                writeReflogEntry(git_path, "HEAD", oh_det, actual_target, reflog_msg_det, allocator, platform_impl) catch {};
+            }
             
             if (!quiet) {
                 const det_msg = try std.fmt.allocPrint(allocator, "Note: switching to '{s}'.\nHEAD is now at {s}\n", .{ target, actual_target[0..7] });
@@ -36752,7 +36786,9 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     // Resolve "-" to the previous branch name (like @{-1})
     var resolved_dash_upstream: ?[]u8 = null;
     defer if (resolved_dash_upstream) |r| allocator.free(r);
+    var original_upstream_display: ?[]const u8 = null;
     if (upstream_arg != null and std.mem.eql(u8, upstream_arg.?, "-")) {
+        original_upstream_display = "@{-1}";
         resolved_dash_upstream = resolvePreviousBranch(git_path, 1, allocator, platform_impl) catch null;
         if (resolved_dash_upstream) |rb| {
             upstream_arg = rb;
@@ -36939,7 +36975,7 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
         if (!quiet) {
             // For fast-forward, output "Fast-forwarded X to Y." to stdout
             const ff_branch = if (std.mem.eql(u8, current_branch_name, "HEAD")) "HEAD" else current_branch_name;
-            const ff_upstream_name = upstream_arg orelse "upstream";
+            const ff_upstream_name = original_upstream_display orelse upstream_arg orelse "upstream";
             const ff_msg = try std.fmt.allocPrint(allocator, "Fast-forwarded {s} to {s}.\n", .{ ff_branch, ff_upstream_name });
             defer allocator.free(ff_msg);
             try platform_impl.writeStdout(ff_msg);
@@ -36966,7 +37002,7 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     defer allocator.free(reflog_action);
 
     // Write reflog entry for detach: "rebase (start): checkout <upstream>"
-    const upstream_name = upstream_arg orelse "upstream";
+    const upstream_name = original_upstream_display orelse upstream_arg orelse "upstream";
     const start_msg = try std.fmt.allocPrint(allocator, "{s} (start): checkout {s}", .{ reflog_action, upstream_name });
     defer allocator.free(start_msg);
     writeReflogEntry(git_path, "HEAD", head_hash, onto_hash, start_msg, allocator, platform_impl) catch {};
@@ -37166,17 +37202,6 @@ fn saveRebaseState(git_path: []const u8, commits: *std.array_list.Managed([]u8),
         todo.appendSlice(c) catch {};
         todo.append('\n') catch {};
     }
-    // Debug: check what we're writing
-    {
-        const debug = std.fmt.allocPrint(allocator, "DEBUG: todo len={d} commits={d}\n", .{ todo.items.len, commits.items.len }) catch "";
-        defer if (debug.len > 0) allocator.free(debug);
-        if (debug.len > 0) platform_impl.writeStderr(debug) catch {};
-        for (commits.items, 0..) |c, ci| {
-            const d2 = std.fmt.allocPrint(allocator, "DEBUG: commit[{d}] len={d} = '{s}'\n", .{ ci, c.len, c }) catch "";
-            defer if (d2.len > 0) allocator.free(d2);
-            if (d2.len > 0) platform_impl.writeStderr(d2) catch {};
-        }
-    }
     write(rebase_dir, "git-rebase-todo", todo.items, allocator, platform_impl);
 
     // Write total and current (msgnum)
@@ -37194,6 +37219,184 @@ fn saveRebaseState(git_path: []const u8, commits: *std.array_list.Managed([]u8),
             write(rebase_dir, patch_num, c, allocator, platform_impl);
         }
     }
+}
+
+fn copyRebaseNotes(git_path: []const u8, old_commit: []const u8, new_commit: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    // Check if notes.rewrite.rebase is true
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+    defer allocator.free(config_path);
+    const config_content = platform_impl.fs.readFile(allocator, config_path) catch return;
+    defer allocator.free(config_content);
+
+    // Check notes.rewrite.rebase
+    var rewrite_rebase = false;
+    if (findConfigValue(config_content, "notes", null, "rewrite.rebase")) |val| {
+        const trimmed = std.mem.trim(u8, val, " \t\r\n");
+        rewrite_rebase = std.mem.eql(u8, trimmed, "true");
+    }
+    // Also check notes "rewrite" subsection
+    if (!rewrite_rebase) {
+        if (findConfigValue(config_content, "notes \"rewrite\"", null, "rebase")) |val| {
+            const trimmed = std.mem.trim(u8, val, " \t\r\n");
+            rewrite_rebase = std.mem.eql(u8, trimmed, "true");
+        }
+    }
+    if (!rewrite_rebase) return;
+
+    // Get rewrite ref pattern (default: refs/notes/commits)
+    var rewrite_ref: []const u8 = "refs/notes/commits";
+    if (findConfigValue(config_content, "notes", null, "rewriteref")) |val| {
+        const trimmed = std.mem.trim(u8, val, " \t\r\n");
+        if (trimmed.len > 0) rewrite_ref = trimmed;
+    }
+    if (findConfigValue(config_content, "notes", null, "rewriteRef")) |val| {
+        const trimmed = std.mem.trim(u8, val, " \t\r\n");
+        if (trimmed.len > 0) rewrite_ref = trimmed;
+    }
+
+    // Handle glob pattern like "refs/notes/*"
+    // For simplicity, if it's a glob, try refs/notes/commits
+    const actual_refs: [1][]const u8 = .{
+        if (std.mem.indexOf(u8, rewrite_ref, "*") != null) "refs/notes/commits" else rewrite_ref,
+    };
+
+    for (actual_refs) |notes_ref| {
+        // Read the current notes commit
+        const notes_commit_hash = refs.getRef(git_path, notes_ref, platform_impl, allocator) catch continue;
+        defer allocator.free(notes_commit_hash);
+
+        // Get the notes tree
+        const notes_tree_hash = getCommitTree(git_path, notes_commit_hash, allocator, platform_impl) catch continue;
+        defer allocator.free(notes_tree_hash);
+
+        // Look up old_commit in the notes tree
+        // Notes store entries by the full hash of the commit being annotated
+        // The entry name is the hash of the commit
+        const note_blob = lookupTreeEntry(git_path, notes_tree_hash, old_commit, allocator, platform_impl) catch continue;
+        defer allocator.free(note_blob);
+
+        // Now we need to add a new entry in the notes tree mapping new_commit -> same blob
+        // Read the blob content
+        const blob_obj = objects.GitObject.load(note_blob, git_path, platform_impl, allocator) catch continue;
+        defer blob_obj.deinit(allocator);
+
+        // Create a new notes tree with the additional entry
+        // First, read all existing tree entries
+        const tree_obj = objects.GitObject.load(notes_tree_hash, git_path, platform_impl, allocator) catch continue;
+        defer tree_obj.deinit(allocator);
+
+        // Build new tree with the added entry
+        var new_tree_data = std.ArrayList(u8).init(allocator);
+        defer new_tree_data.deinit();
+
+        // Copy existing entries
+        var pos: usize = 0;
+        while (pos < tree_obj.data.len) {
+            // Parse entry: <mode> <name>\0<20-byte-sha1>
+            const space_pos = std.mem.indexOf(u8, tree_obj.data[pos..], " ") orelse break;
+            const null_pos = std.mem.indexOf(u8, tree_obj.data[pos + space_pos..], &[_]u8{0}) orelse break;
+            const entry_end = pos + space_pos + null_pos + 1 + 20;
+            if (entry_end > tree_obj.data.len) break;
+            const entry_name = tree_obj.data[pos + space_pos + 1 .. pos + space_pos + null_pos];
+
+            // Skip old entry for new_commit if it exists (we'll add it fresh)
+            if (!std.mem.eql(u8, entry_name, new_commit)) {
+                new_tree_data.appendSlice(tree_obj.data[pos..entry_end]) catch break;
+            }
+            pos = entry_end;
+        }
+
+        // Add new entry: "100644 <new_commit>\0<20-byte-sha1>"
+        new_tree_data.appendSlice("100644 ") catch continue;
+        new_tree_data.appendSlice(new_commit) catch continue;
+        new_tree_data.append(0) catch continue;
+        // Convert hex hash to binary
+        var bin_hash: [20]u8 = undefined;
+        for (0..20) |bi| {
+            bin_hash[bi] = std.fmt.parseInt(u8, note_blob[bi * 2 .. bi * 2 + 2], 16) catch 0;
+        }
+        new_tree_data.appendSlice(&bin_hash) catch continue;
+
+        // Write the new tree object
+        const new_tree_obj = objects.GitObject{ .type = .tree, .data = new_tree_data.items };
+        const new_tree_hash = new_tree_obj.writeToRepo(git_path, platform_impl, allocator) catch continue;
+        defer allocator.free(new_tree_hash);
+
+        // Create a new notes commit
+        const committer_name = std.process.getEnvVarOwned(allocator, "GIT_COMMITTER_NAME") catch allocator.dupe(u8, "C O Mitter") catch continue;
+        defer allocator.free(committer_name);
+        const committer_email = std.process.getEnvVarOwned(allocator, "GIT_COMMITTER_EMAIL") catch allocator.dupe(u8, "committer@example.com") catch continue;
+        defer allocator.free(committer_email);
+        const timestamp = std.time.timestamp();
+        const committer_str = std.fmt.allocPrint(allocator, "{s} <{s}> {d} +0000", .{ committer_name, committer_email, timestamp }) catch continue;
+        defer allocator.free(committer_str);
+        var parents: [1][]const u8 = .{notes_commit_hash};
+        const notes_commit_obj = objects.createCommitObject(new_tree_hash, &parents, committer_str, committer_str, "Notes added by 'git notes copy'", allocator) catch continue;
+        defer notes_commit_obj.deinit(allocator);
+        const new_notes_hash = notes_commit_obj.writeToRepo(git_path, platform_impl, allocator) catch continue;
+        defer allocator.free(new_notes_hash);
+
+        // Update the notes ref
+        refs.updateRef(git_path, notes_ref, new_notes_hash, platform_impl, allocator) catch {};
+    }
+}
+
+fn lookupTreeEntry(git_path: []const u8, tree_hash: []const u8, name: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
+    const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch return error.NotFound;
+    defer tree_obj.deinit(allocator);
+
+    var pos: usize = 0;
+    while (pos < tree_obj.data.len) {
+        const space_pos = std.mem.indexOf(u8, tree_obj.data[pos..], " ") orelse break;
+        const null_pos = std.mem.indexOf(u8, tree_obj.data[pos + space_pos..], &[_]u8{0}) orelse break;
+        const entry_end = pos + space_pos + null_pos + 1 + 20;
+        if (entry_end > tree_obj.data.len) break;
+        const entry_name = tree_obj.data[pos + space_pos + 1 .. pos + space_pos + null_pos];
+        const sha1_bytes = tree_obj.data[pos + space_pos + null_pos + 1 .. entry_end];
+
+        if (std.mem.eql(u8, entry_name, name)) {
+            // Convert binary hash to hex
+            var hex_buf: [40]u8 = undefined;
+            for (sha1_bytes, 0..) |b, bi| {
+                const hex = std.fmt.bytesToHex([1]u8{b}, .lower);
+                hex_buf[bi * 2] = hex[0];
+                hex_buf[bi * 2 + 1] = hex[1];
+            }
+            return try allocator.dupe(u8, &hex_buf);
+        }
+        pos = entry_end;
+    }
+
+    // Also try looking up in fanout directories (notes use 2-char prefix dirs)
+    if (name.len >= 2) {
+        const dir_name = name[0..2];
+        const file_name = name[2..];
+        // Look for the directory entry
+        pos = 0;
+        while (pos < tree_obj.data.len) {
+            const space_pos = std.mem.indexOf(u8, tree_obj.data[pos..], " ") orelse break;
+            const null_pos = std.mem.indexOf(u8, tree_obj.data[pos + space_pos..], &[_]u8{0}) orelse break;
+            const entry_end = pos + space_pos + null_pos + 1 + 20;
+            if (entry_end > tree_obj.data.len) break;
+            const mode = tree_obj.data[pos .. pos + space_pos];
+            const entry_name = tree_obj.data[pos + space_pos + 1 .. pos + space_pos + null_pos];
+            const sha1_bytes = tree_obj.data[pos + space_pos + null_pos + 1 .. entry_end];
+
+            if (std.mem.eql(u8, entry_name, dir_name) and std.mem.eql(u8, mode, "40000")) {
+                // This is a subtree, look inside it
+                var sub_hash: [40]u8 = undefined;
+                for (sha1_bytes, 0..) |b, bi| {
+                    const hex = std.fmt.bytesToHex([1]u8{b}, .lower);
+                    sub_hash[bi * 2] = hex[0];
+                    sub_hash[bi * 2 + 1] = hex[1];
+                }
+                return lookupTreeEntry(git_path, &sub_hash, file_name, allocator, platform_impl);
+            }
+            pos = entry_end;
+        }
+    }
+
+    return error.NotFound;
 }
 
 fn replayCommits(git_path: []const u8, repo_root: []const u8, commits: *std.array_list.Managed([]u8), start_idx: usize, branch_name: []const u8, quiet: bool, apply_mode: bool, reflog_action: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
@@ -37230,6 +37433,8 @@ fn replayCommits(git_path: []const u8, repo_root: []const u8, commits: *std.arra
             const pick_msg = std.fmt.allocPrint(allocator, "{s} (pick): {s}", .{ reflog_action, subject }) catch null;
             defer if (pick_msg) |pm| allocator.free(pm);
             if (pick_msg) |pm| writeReflogEntry(git_path, "HEAD", old_head orelse commit_hash, new_hash, pm, allocator, platform_impl) catch {};
+            // Copy notes from old commit to new commit if configured
+            copyRebaseNotes(git_path, commit_hash, new_hash, allocator, platform_impl) catch {};
         } else |err| {
             if (err == error.MergeConflict) {
                 // Stop and let user resolve
