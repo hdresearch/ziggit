@@ -16,6 +16,7 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
     var incremental = false;
     var fp: ?[]const u8 = null;
     var rv: ?[]const u8 = null;
+    var rev_is_boundary = false;
     var cf: ?[]const u8 = null;
     var abl: usize = 7;
     var show_progress = false;
@@ -106,6 +107,7 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
     defer if (hh) |h| a.free(h);
     if (rv) |r| {
         // Handle ^REV syntax (boundary commit)
+        if (r.len > 0 and r[0] == '^') rev_is_boundary = true;
         const actual_rev = if (r.len > 0 and r[0] == '^') r[1..] else r;
         hh = mc.resolveRevision(gp, actual_rev, pi, a) catch (refs.resolveRef(gp, actual_rev, pi, a) catch null);
         // Dereference tag objects to commits (follow chain)
@@ -224,6 +226,13 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
         const uwd = bu and cfc != null and !std.mem.eql(u8, fc, cfc.?);
         const wcl: ?[]const []const u8 = if (uwd and cf == null and rv == null) cl2.items else null;
         try trav(a, gp, sh, fp.?, lines.items, es, wcl);
+    }
+
+    // Mark all entries as boundary if ^rev was used
+    if (rev_is_boundary) {
+        for (es) |*e| {
+            e.is_boundary = true;
+        }
     }
 
     // -L ranges
