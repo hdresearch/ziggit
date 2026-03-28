@@ -331,6 +331,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
     var blob_ref: ?[]const u8 = null;
     var url_match: ?[]const u8 = null;
     var includes_flag = false;
+    var no_includes_explicit = false;
 
     var i: usize = 0;
     while (i < config_args.items.len) : (i += 1) {
@@ -538,6 +539,9 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
             action_name = "--get-urlmatch";
         } else if (std.mem.eql(u8, arg, "--includes")) {
             includes_flag = true;
+        } else if (std.mem.eql(u8, arg, "--no-includes")) {
+            includes_flag = false;
+            no_includes_explicit = true;
         } else if (std.mem.eql(u8, arg, "--url") or std.mem.startsWith(u8, arg, "--url=")) {
             if (std.mem.startsWith(u8, arg, "--url=")) {
                 url_match = arg["--url=".len..];
@@ -629,6 +633,22 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
     // url_match on subcommand get implies get_urlmatch behavior
     if (url_match != null and action == .get) {
         action = .get_urlmatch;
+    }
+
+    // --blob validation: cannot combine with file/system/global/local scopes
+    if (blob_ref != null) {
+        if (use_system or use_global or use_local or use_worktree or config_file != null) {
+            try platform_impl.writeStderr("error: --blob and --system/--global/--local/--worktree/--file are mutually exclusive\n");
+            std.process.exit(129);
+        }
+        // --blob is read-only: cannot use with write operations
+        switch (action) {
+            .set, .replace_all, .add, .unset, .unset_all, .rename_section, .remove_section, .edit => {
+                try platform_impl.writeStderr("error: writing config blobs is not supported\n");
+                std.process.exit(1);
+            },
+            else => {},
+        }
     }
 
     const git_path_opt: ?[]const u8 = main_mod.findGitDirectory(allocator, platform_impl) catch null;
@@ -773,7 +793,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
     }
 
     // Follow includes only when not restricted to a single scope
-    const follow_includes = includes_flag or (!use_global and !use_system and !use_local and !use_worktree and config_file == null);
+    const follow_includes = if (no_includes_explicit) false else (includes_flag or (!use_global and !use_system and !use_local and !use_worktree and config_file == null));
 
     // Build our own config override list with proper has_equals tracking
     var cfg_overrides = buildConfigOverrides(allocator) catch |e| {
@@ -1715,6 +1735,24 @@ fn collectEntriesWithIncludes(
     git_path_opt: ?[]const u8,
     follow_includes: bool,
 ) !void {
+    return collectEntriesWithIncludesD(content, source_path, scope, allocator, platform_impl, all_entries, git_path_opt, follow_includes, 0);
+}
+
+fn collectEntriesWithIncludesD(
+    content: []const u8,
+    source_path: []const u8,
+    scope: []const u8,
+    allocator: Allocator,
+    platform_impl: *const platform_mod.Platform,
+    all_entries: *std.array_list.Managed(CfgEntry),
+    git_path_opt: ?[]const u8,
+    follow_includes: bool,
+    depth: u32,
+) !void {
+    if (depth > 10) {
+        try platform_impl.writeStderr("fatal: exceeded maximum include depth (10) while expanding includes\n");
+        std.process.exit(128);
+    }
     var entries = std.array_list.Managed(CfgEntry).init(allocator);
     defer {
         for (entries.items) |*e| e.deinit(allocator);
@@ -1744,7 +1782,7 @@ fn collectEntriesWithIncludes(
             const display_path = computeIncludeDisplayPath(source_path, e.value, allocator) catch inc_path;
             const needs_free_dp = !std.mem.eql(u8, display_path, inc_path);
             defer if (needs_free_dp) allocator.free(display_path);
-            collectEntriesWithIncludes(inc_content, display_path, scope, allocator, platform_impl, all_entries, git_path_opt, true) catch continue;
+            collectEntriesWithIncludesD(inc_content, display_path, scope, allocator, platform_impl, all_entries, git_path_opt, true, depth + 1) catch continue;
             continue;
         }
         // Check for includeIf.*.path
@@ -1778,7 +1816,7 @@ fn collectEntriesWithIncludes(
                         const display_path = computeIncludeDisplayPath(source_path, e.value, allocator) catch inc_path;
                         const needs_free_dp = !std.mem.eql(u8, display_path, inc_path);
                         defer if (needs_free_dp) allocator.free(display_path);
-                        collectEntriesWithIncludes(inc_content, display_path, scope, allocator, platform_impl, all_entries, git_path_opt, true) catch continue;
+                        collectEntriesWithIncludesD(inc_content, display_path, scope, allocator, platform_impl, all_entries, git_path_opt, true, depth + 1) catch continue;
                     }
                     continue;
                 }
@@ -1841,12 +1879,12 @@ fn evaluateIncludeCondition(condition: []const u8, source_path: []const u8, allo
 }
 
 fn evaluateIncludeConditionEx(condition: []const u8, source_path: []const u8, allocator: Allocator, platform_impl: *const platform_mod.Platform, git_path_opt: ?[]const u8, all_config_entries: ?[]const CfgEntry) bool {
-    _ = source_path;
     _ = platform_impl;
     if (std.mem.startsWith(u8, condition, "gitdir:") or std.mem.startsWith(u8, condition, "gitdir/i:")) {
         // gitdir condition
         const gp = git_path_opt orelse return false;
-        const pattern = if (std.mem.startsWith(u8, condition, "gitdir/i:"))
+        const icase = std.mem.startsWith(u8, condition, "gitdir/i:");
+        const pattern = if (icase)
             condition["gitdir/i:".len..]
         else
             condition["gitdir:".len..];
@@ -1856,16 +1894,88 @@ fn evaluateIncludeConditionEx(condition: []const u8, source_path: []const u8, al
             const home = std.process.getEnvVarOwned(allocator, "HOME") catch return false;
             defer allocator.free(home);
             expanded_pattern = std.fmt.allocPrint(allocator, "{s}{s}", .{ home, pattern[1..] }) catch return false;
+        } else if (pattern.len > 0 and pattern[0] == '.' and pattern.len > 1 and pattern[1] == '/') {
+            // Relative to the config file's directory
+            if (std.fs.path.dirname(source_path)) |dir| {
+                expanded_pattern = std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, pattern[2..] }) catch return false;
+            } else {
+                expanded_pattern = allocator.dupe(u8, pattern) catch return false;
+            }
         } else {
             expanded_pattern = allocator.dupe(u8, pattern) catch return false;
         }
         defer allocator.free(expanded_pattern);
-        // Simple glob match
-        return simpleGlobMatch(gp, expanded_pattern);
+        // Git's gitdir matching rules:
+        // 1. If pattern doesn't start with /, ~/, or ./, prepend **/
+        // 2. If pattern ends with /, append **
+        var match_pattern: []u8 = undefined;
+        const needs_prefix = expanded_pattern.len > 0 and expanded_pattern[0] != '/' and
+            !(expanded_pattern.len > 1 and expanded_pattern[0] == '~' and expanded_pattern[1] == '/');
+        const needs_suffix = expanded_pattern.len > 0 and expanded_pattern[expanded_pattern.len - 1] == '/';
+        if (needs_prefix and needs_suffix) {
+            match_pattern = std.fmt.allocPrint(allocator, "**/{s}**", .{expanded_pattern}) catch return false;
+        } else if (needs_prefix) {
+            match_pattern = std.fmt.allocPrint(allocator, "**/{s}", .{expanded_pattern}) catch return false;
+        } else if (needs_suffix) {
+            match_pattern = std.fmt.allocPrint(allocator, "{s}**", .{expanded_pattern}) catch return false;
+        } else {
+            match_pattern = allocator.dupe(u8, expanded_pattern) catch return false;
+        }
+        defer allocator.free(match_pattern);
+        // Resolve realpath of git directory for comparison
+        var gp_real: []u8 = undefined;
+        var gp_real_needs_free = false;
+        if (std.fs.cwd().realpathAlloc(allocator, gp)) |rp| {
+            gp_real = rp;
+            gp_real_needs_free = true;
+        } else |_| {
+            gp_real = allocator.dupe(u8, gp) catch return false;
+            gp_real_needs_free = true;
+        }
+        defer if (gp_real_needs_free) allocator.free(gp_real);
+        // Normalize: ensure both git dir and pattern end with /
+        const gp_with_slash = if (gp_real.len > 0 and gp_real[gp_real.len - 1] != '/')
+            (std.fmt.allocPrint(allocator, "{s}/", .{gp_real}) catch return false)
+        else
+            (allocator.dupe(u8, gp_real) catch return false);
+        defer allocator.free(gp_with_slash);
+        const pat_with_slash = if (match_pattern.len > 0 and match_pattern[match_pattern.len - 1] != '/' and
+            !(match_pattern.len > 1 and match_pattern[match_pattern.len - 1] == '*'))
+            (std.fmt.allocPrint(allocator, "{s}/", .{match_pattern}) catch return false)
+        else
+            (allocator.dupe(u8, match_pattern) catch return false);
+        defer allocator.free(pat_with_slash);
+        if (icase) {
+            const lower_gp = std.ascii.allocLowerString(allocator, gp_with_slash) catch return false;
+            defer allocator.free(lower_gp);
+            const lower_pat = std.ascii.allocLowerString(allocator, pat_with_slash) catch return false;
+            defer allocator.free(lower_pat);
+            return simpleGlobMatch(lower_gp, lower_pat);
+        }
+        return simpleGlobMatch(gp_with_slash, pat_with_slash);
     }
     if (std.mem.startsWith(u8, condition, "onbranch:")) {
         // onbranch condition - check current branch
-        return false; // TODO
+        const gp = git_path_opt orelse return false;
+        const branch_pattern = condition["onbranch:".len..];
+        // Read HEAD to get current branch
+        const head_path = std.fmt.allocPrint(allocator, "{s}/HEAD", .{gp}) catch return false;
+        defer allocator.free(head_path);
+        const head_content = std.fs.cwd().readFileAlloc(allocator, head_path, 4096) catch return false;
+        defer allocator.free(head_content);
+        const trimmed = std.mem.trim(u8, head_content, " \t\r\n");
+        const branch_name = if (std.mem.startsWith(u8, trimmed, "ref: refs/heads/"))
+            trimmed["ref: refs/heads/".len..]
+        else
+            return false; // detached HEAD
+        // Match branch name against pattern
+        // If pattern ends with /, append **
+        if (branch_pattern.len > 0 and branch_pattern[branch_pattern.len - 1] == '/') {
+            const full_pattern = std.fmt.allocPrint(allocator, "{s}**", .{branch_pattern}) catch return false;
+            defer allocator.free(full_pattern);
+            return simpleGlobMatch(branch_name, full_pattern);
+        }
+        return simpleGlobMatch(branch_name, branch_pattern);
     }
     if (std.mem.startsWith(u8, condition, "hasconfig:remote.")) {
         // hasconfig:remote.*.url:PATTERN
@@ -2226,6 +2336,12 @@ fn cfgFormatType(value: []const u8, config_type: ConfigType, allocator: Allocato
                 try platform_impl.writeStderr("fatal: no path for 'path' type\n");
                 std.process.exit(128);
             }
+            // Handle :(optional) prefix
+            if (std.mem.startsWith(u8, trimmed, ":(optional)")) {
+                const path = trimmed[":(optional)".len..];
+                std.fs.cwd().access(path, .{}) catch return error.InvalidValue;
+                return try allocator.dupe(u8, path);
+            }
             if (trimmed[0] == '~' and (trimmed.len == 1 or trimmed[1] == '/')) {
                 const h = std.process.getEnvVarOwned(allocator, "HOME") catch {
                     try platform_impl.writeStderr("fatal: failed to expand user dir in: '~/'\n");
@@ -2389,7 +2505,23 @@ fn cfgFormatTypeSilent(value: []const u8, config_type: ConfigType, allocator: Al
             }
             return error.InvalidValue;
         },
-        .path_type => return try allocator.dupe(u8, std.mem.trim(u8, value, " \t")),
+        .path_type => {
+            const trimmed = std.mem.trim(u8, value, " \t");
+            // Handle :(optional) prefix - if file doesn't exist, skip entry
+            if (std.mem.startsWith(u8, trimmed, ":(optional)")) {
+                const path = trimmed[":(optional)".len..];
+                // Check if file exists
+                std.fs.cwd().access(path, .{}) catch return error.InvalidValue;
+                return try allocator.dupe(u8, path);
+            }
+            if (trimmed.len > 0 and trimmed[0] == '~' and (trimmed.len == 1 or trimmed[1] == '/')) {
+                const h = std.process.getEnvVarOwned(allocator, "HOME") catch return try allocator.dupe(u8, trimmed);
+                defer allocator.free(h);
+                if (trimmed.len == 1) return try allocator.dupe(u8, h);
+                return try std.fmt.allocPrint(allocator, "{s}{s}", .{ h, trimmed[1..] });
+            }
+            return try allocator.dupe(u8, trimmed);
+        },
         .expiry_date => {
             const trimmed = std.mem.trim(u8, value, " \t");
             if (std.mem.eql(u8, trimmed, "never") or std.mem.eql(u8, trimmed, "false")) return try allocator.dupe(u8, "0");
@@ -3457,23 +3589,31 @@ fn cfgRemoveSection(cfg_path: []const u8, section_name: []const u8, allocator: A
 
 // ============ Color functions ============
 
+fn startsWithIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (haystack.len < needle.len) return false;
+    for (haystack[0..needle.len], needle) |h, n| {
+        if (std.ascii.toLower(h) != std.ascii.toLower(n)) return false;
+    }
+    return true;
+}
+
 fn parseColorName(word: []const u8) ?i16 {
-    if (std.mem.eql(u8, word, "normal") or std.mem.eql(u8, word, "default")) return -1;
-    if (std.mem.eql(u8, word, "black")) return 0;
-    if (std.mem.eql(u8, word, "red")) return 1;
-    if (std.mem.eql(u8, word, "green")) return 2;
-    if (std.mem.eql(u8, word, "yellow")) return 3;
-    if (std.mem.eql(u8, word, "blue")) return 4;
-    if (std.mem.eql(u8, word, "magenta")) return 5;
-    if (std.mem.eql(u8, word, "cyan")) return 6;
-    if (std.mem.eql(u8, word, "white")) return 7;
+    if (std.ascii.eqlIgnoreCase(word, "normal") or std.ascii.eqlIgnoreCase(word, "default")) return -1;
+    if (std.ascii.eqlIgnoreCase(word, "black")) return 0;
+    if (std.ascii.eqlIgnoreCase(word, "red")) return 1;
+    if (std.ascii.eqlIgnoreCase(word, "green")) return 2;
+    if (std.ascii.eqlIgnoreCase(word, "yellow")) return 3;
+    if (std.ascii.eqlIgnoreCase(word, "blue")) return 4;
+    if (std.ascii.eqlIgnoreCase(word, "magenta")) return 5;
+    if (std.ascii.eqlIgnoreCase(word, "cyan")) return 6;
+    if (std.ascii.eqlIgnoreCase(word, "white")) return 7;
     return null;
 }
 
 fn colorToAnsiAlloc(allocator: Allocator, color_str: []const u8) ![]u8 {
     const trimmed = std.mem.trim(u8, color_str, " \t");
     if (trimmed.len == 0) return try allocator.dupe(u8, "");
-    if (std.mem.eql(u8, trimmed, "normal") or std.mem.eql(u8, trimmed, "-1")) {
+    if (std.ascii.eqlIgnoreCase(trimmed, "normal") or std.mem.eql(u8, trimmed, "-1")) {
         return try allocator.dupe(u8, "");
     }
 
@@ -3505,23 +3645,23 @@ fn colorToAnsiAlloc(allocator: Allocator, color_str: []const u8) ![]u8 {
             continue;
         }
         // Attributes
-        if (std.mem.eql(u8, word, "reset")) { has_reset = true; continue; }
-        if (std.mem.eql(u8, word, "bold")) { try attrs.append(1); continue; }
-        if (std.mem.eql(u8, word, "dim")) { try attrs.append(2); continue; }
-        if (std.mem.eql(u8, word, "italic")) { try attrs.append(3); continue; }
-        if (std.mem.eql(u8, word, "ul")) { try attrs.append(4); continue; }
-        if (std.mem.eql(u8, word, "blink")) { try attrs.append(5); continue; }
-        if (std.mem.eql(u8, word, "reverse")) { try attrs.append(7); continue; }
-        if (std.mem.eql(u8, word, "strike")) { try attrs.append(9); continue; }
-        if (std.mem.eql(u8, word, "nobold") or std.mem.eql(u8, word, "no-bold")) { try attrs.append(22); continue; }
-        if (std.mem.eql(u8, word, "nodim") or std.mem.eql(u8, word, "no-dim")) { try attrs.append(22); continue; }
-        if (std.mem.eql(u8, word, "noitalic") or std.mem.eql(u8, word, "no-italic")) { try attrs.append(23); continue; }
-        if (std.mem.eql(u8, word, "noul") or std.mem.eql(u8, word, "no-ul")) { try attrs.append(24); continue; }
-        if (std.mem.eql(u8, word, "noblink") or std.mem.eql(u8, word, "no-blink")) { try attrs.append(25); continue; }
-        if (std.mem.eql(u8, word, "noreverse") or std.mem.eql(u8, word, "no-reverse")) { try attrs.append(27); continue; }
-        if (std.mem.eql(u8, word, "nostrike") or std.mem.eql(u8, word, "no-strike")) { try attrs.append(29); continue; }
+        if (std.ascii.eqlIgnoreCase(word, "reset")) { has_reset = true; continue; }
+        if (std.ascii.eqlIgnoreCase(word, "bold")) { try attrs.append(1); continue; }
+        if (std.ascii.eqlIgnoreCase(word, "dim")) { try attrs.append(2); continue; }
+        if (std.ascii.eqlIgnoreCase(word, "italic")) { try attrs.append(3); continue; }
+        if (std.ascii.eqlIgnoreCase(word, "ul")) { try attrs.append(4); continue; }
+        if (std.ascii.eqlIgnoreCase(word, "blink")) { try attrs.append(5); continue; }
+        if (std.ascii.eqlIgnoreCase(word, "reverse")) { try attrs.append(7); continue; }
+        if (std.ascii.eqlIgnoreCase(word, "strike")) { try attrs.append(9); continue; }
+        if (std.ascii.eqlIgnoreCase(word, "nobold") or std.ascii.eqlIgnoreCase(word, "no-bold")) { try attrs.append(22); continue; }
+        if (std.ascii.eqlIgnoreCase(word, "nodim") or std.ascii.eqlIgnoreCase(word, "no-dim")) { try attrs.append(22); continue; }
+        if (std.ascii.eqlIgnoreCase(word, "noitalic") or std.ascii.eqlIgnoreCase(word, "no-italic")) { try attrs.append(23); continue; }
+        if (std.ascii.eqlIgnoreCase(word, "noul") or std.ascii.eqlIgnoreCase(word, "no-ul")) { try attrs.append(24); continue; }
+        if (std.ascii.eqlIgnoreCase(word, "noblink") or std.ascii.eqlIgnoreCase(word, "no-blink")) { try attrs.append(25); continue; }
+        if (std.ascii.eqlIgnoreCase(word, "noreverse") or std.ascii.eqlIgnoreCase(word, "no-reverse")) { try attrs.append(27); continue; }
+        if (std.ascii.eqlIgnoreCase(word, "nostrike") or std.ascii.eqlIgnoreCase(word, "no-strike")) { try attrs.append(29); continue; }
         // Bright colors
-        if (word.len > 6 and std.mem.startsWith(u8, word, "bright")) {
+        if (word.len > 6 and startsWithIgnoreCase(word, "bright")) {
             if (parseColorName(word[6..])) |b| {
                 if (b >= 0) {
                     if (!fg_set) { fg_color = b + 8; fg_set = true; } else { bg_color = b + 8; bg_set = true; }
@@ -3832,34 +3972,27 @@ fn urlMatchSpecificity(pattern: []const u8, url: []const u8) usize {
         if (!urlPathMatches(p.path, u.path)) return 0;
     }
 
-    // Calculate specificity based on git's URL matching rules.
-    // Git computes a score where:
-    // 1. Path length is the PRIMARY factor (longer path prefix = more specific)
-    // 2. User match adds minor specificity (tiebreaker when paths are equal)
-    // 3. Exact host > wildcard host
-    // 4. Port adds minor specificity
-    // Use bit-shifting to ensure path dominates
+    // Git's URL matching uses cmp_matches from urlmatch.c which compares:
+    // 1. hostmatch_len (pattern's host length) - larger wins
+    // 2. pathmatch_len (matched path prefix length) - larger wins
+    // 3. user_matched (user specified in pattern) - matched > not matched
+    // We encode this as a single number with proper weighting.
     var specificity: usize = 1;
 
-    // Path specificity (highest weight - shifted left significantly)
+    // Host match length is the PRIMARY factor (shifted to dominate)
+    // This is the pattern's host length, so exact hosts like "sub.example.com" (15)
+    // beat wildcard hosts like "*.example.com" (13)
+    specificity += p.host.len * 1000000;
+
+    // Path match length is SECONDARY factor
+    // pathmatch_len in git = length of matched path prefix including implicit trailing /
     var path_len = p.path.len;
     while (path_len > 0 and p.path[path_len - 1] == '/') path_len -= 1;
-    specificity += path_len * 10000;
+    // Add 1 for the implicit trailing / (same as git's url_match_prefix)
+    specificity += (path_len + 1) * 100;
 
-    // Host specificity: exact > wildcard
-    if (p.host.len > 0) {
-        if (std.mem.indexOfScalar(u8, p.host, '*') != null) {
-            specificity += p.host.len; // wildcard: less specific
-        } else {
-            specificity += p.host.len + 100; // exact: more specific
-        }
-    }
-
-    // User adds minor specificity (only matters as tiebreaker)
-    if (p.user.len > 0) specificity += p.user.len + 50;
-
-    // Port adds minor specificity
-    if (p.port.len > 0) specificity += 10;
+    // User match is tertiary tiebreaker
+    if (p.user.len > 0) specificity += 10;
 
     return specificity;
 }
@@ -3913,22 +4046,31 @@ fn defaultPort(scheme: []const u8) []const u8 {
 }
 
 fn urlHostMatches(pattern_host: []const u8, url_host: []const u8) bool {
-    // Support wildcard * at the start of pattern host
-    if (pattern_host.len > 0 and pattern_host[0] == '*') {
-        // *.example.com matches foo.example.com but NOT deep.nested.example.com
-        const suffix = pattern_host[1..]; // ".example.com"
-        if (suffix.len == 0) return true;
-        if (url_host.len > suffix.len) {
-            if (!std.ascii.eqlIgnoreCase(url_host[url_host.len - suffix.len ..], suffix)) return false;
-            // Check that the prefix (the part matching *) has no dots (single level)
-            const prefix = url_host[0 .. url_host.len - suffix.len];
-            if (std.mem.indexOfScalar(u8, prefix, '.') != null) return false;
-            return true;
+    // Match host segment-by-segment (split on '.')
+    // A '*' segment matches any single segment
+    var pat_rest = pattern_host;
+    var url_rest = url_host;
+
+    while (pat_rest.len > 0 and url_rest.len > 0) {
+        // Find next segment in pattern
+        const pat_dot = std.mem.indexOfScalar(u8, pat_rest, '.');
+        const pat_seg = if (pat_dot) |d| pat_rest[0..d] else pat_rest;
+        // Find next segment in url
+        const url_dot = std.mem.indexOfScalar(u8, url_rest, '.');
+        const url_seg = if (url_dot) |d| url_rest[0..d] else url_rest;
+
+        if (pat_seg.len == 1 and pat_seg[0] == '*') {
+            // Wildcard matches any single segment
+        } else if (!std.ascii.eqlIgnoreCase(pat_seg, url_seg)) {
+            return false;
         }
-        // Exact match with suffix (e.g., *.example.com doesn't match example.com)
-        return false;
+
+        // Advance past segment and dot
+        pat_rest = if (pat_dot) |d| pat_rest[d + 1 ..] else &[_]u8{};
+        url_rest = if (url_dot) |d| url_rest[d + 1 ..] else &[_]u8{};
     }
-    return std.ascii.eqlIgnoreCase(pattern_host, url_host);
+
+    return pat_rest.len == 0 and url_rest.len == 0;
 }
 
 fn urlPathMatches(pattern_path: []const u8, url_path: []const u8) bool {
