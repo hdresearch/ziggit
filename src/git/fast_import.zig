@@ -6,12 +6,7 @@ const Mark = struct {
     hash: [40]u8,
 };
 
-pub fn run(allocator: std.mem.Allocator, platform_impl: anytype, options: Options) !void {
-    const git_dir = findGitDir(allocator) orelse {
-        try platform_impl.writeStderr("fatal: not a git repository\n");
-        std.process.exit(128);
-    };
-    defer allocator.free(git_dir);
+pub fn run(allocator: std.mem.Allocator, platform_impl: anytype, options: Options, git_dir: []const u8) !void {
 
     var state = State(@TypeOf(platform_impl)).init(allocator, git_dir, platform_impl);
     defer state.deinit();
