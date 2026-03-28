@@ -26282,7 +26282,7 @@ fn packRefsImpl(allocator: std.mem.Allocator, git_dir: []const u8, prune: bool) 
             std.fs.cwd().deleteFile(full_path) catch {};
         }
         // Clean up empty directories
-        cleanEmptyRefDirs(allocator, git_dir, "refs");
+        cleanEmptyRefDirs2(allocator, git_dir, "refs");
     }
 }
 
@@ -26324,7 +26324,7 @@ fn collectLooseRefs(allocator: std.mem.Allocator, git_dir: []const u8, prefix: [
     }
 }
 
-fn cleanEmptyRefDirs(allocator: std.mem.Allocator, git_dir: []const u8, prefix: []const u8) void {
+fn cleanEmptyRefDirs2(allocator: std.mem.Allocator, git_dir: []const u8, prefix: []const u8) void {
     const dir_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, prefix }) catch return;
     defer allocator.free(dir_path);
 
@@ -26347,7 +26347,7 @@ fn cleanEmptyRefDirs(allocator: std.mem.Allocator, git_dir: []const u8, prefix: 
     for (subdirs.items) |subdir| {
         const child_prefix = std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, subdir }) catch continue;
         defer allocator.free(child_prefix);
-        cleanEmptyRefDirs(allocator, git_dir, child_prefix);
+        cleanEmptyRefDirs2(allocator, git_dir, child_prefix);
     }
 
     // Try to remove this dir if empty (and not the "refs" root itself)
