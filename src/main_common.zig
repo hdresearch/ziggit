@@ -3964,7 +3964,6 @@ fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
             std.mem.startsWith(u8, arg, "-U") or std.mem.startsWith(u8, arg, "--unified=") or
             std.mem.startsWith(u8, arg, "--diff-filter=") or
             std.mem.startsWith(u8, arg, "--submodule") or std.mem.startsWith(u8, arg, "--submodule=") or
-            std.mem.eql(u8, arg, "--compact-summary") or
             std.mem.startsWith(u8, arg, "--dirstat=") or
             std.mem.startsWith(u8, arg, "-G") or std.mem.startsWith(u8, arg, "-S") or
             std.mem.eql(u8, arg, "--pickaxe-regex") or std.mem.eql(u8, arg, "--pickaxe-all") or
