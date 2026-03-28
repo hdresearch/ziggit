@@ -33984,6 +33984,40 @@ fn nativeCmdCherryPick(allocator: std.mem.Allocator, args: [][]const u8, command
         std.process.exit(1);
     }
 
+    // Save ORIG_HEAD for abort
+    const orig_head_save = std.fmt.allocPrint(allocator, "{s}/ORIG_HEAD", .{git_path}) catch null;
+    defer if (orig_head_save) |p| allocator.free(p);
+    if (orig_head_save) |ohp| {
+        if (refs.getCurrentCommit(git_path, platform_impl, allocator) catch null) |cur| {
+            defer allocator.free(cur);
+            platform_impl.fs.writeFile(ohp, cur) catch {};
+        }
+    }
+
+    // Create sequencer state for multi-commit cherry-picks
+    if (positionals.items.len > 1) {
+        const seq_dir = std.fmt.allocPrint(allocator, "{s}/sequencer", .{git_path}) catch null;
+        defer if (seq_dir) |d| allocator.free(d);
+        if (seq_dir) |d| {
+            std.fs.cwd().makePath(d) catch {};
+            // Write todo file with all commits
+            var todo_buf = std.array_list.Managed(u8).init(allocator);
+            defer todo_buf.deinit();
+            for (positionals.items) |ref| {
+                const hash = resolveRevision(git_path, ref, platform_impl, allocator) catch continue;
+                defer allocator.free(hash);
+                const subj = getCommitSubject(hash, git_path, platform_impl, allocator) catch "";
+                defer if (subj.len > 0) allocator.free(subj);
+                const line = std.fmt.allocPrint(allocator, "pick {s} {s}\n", .{ hash[0..@min(7, hash.len)], subj }) catch continue;
+                defer allocator.free(line);
+                todo_buf.appendSlice(line) catch {};
+            }
+            const todo_path = std.fmt.allocPrint(allocator, "{s}/todo", .{d}) catch null;
+            defer if (todo_path) |tp| allocator.free(tp);
+            if (todo_path) |tp| platform_impl.fs.writeFile(tp, todo_buf.items) catch {};
+        }
+    }
+
     // Resolve each commit and cherry-pick
     for (positionals.items) |commit_ref| {
         const commit_hash = resolveRevision(git_path, commit_ref, platform_impl, allocator) catch {
