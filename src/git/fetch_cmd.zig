@@ -371,17 +371,37 @@ pub fn copyMissingPackFiles(src: []const u8, dst: []const u8) void {
     }
 }
 
+/// Public wrappers for use by push_cmd
+pub fn refspecMatchPub(ref_name: []const u8, pattern: []const u8) ?[]const u8 {
+    return refspecMatch(ref_name, pattern);
+}
+
+pub fn refspecMapPub(allocator: std.mem.Allocator, suffix: []const u8, dst_pattern: []const u8) ![]u8 {
+    return refspecMap(allocator, suffix, dst_pattern);
+}
+
 /// Match a ref name against a refspec pattern.
-/// Returns the suffix if matched (empty string for exact match).
+/// Supports glob patterns like refs/pull/*/head where * matches one or more path components.
+/// Returns the matched wildcard portion if matched (empty string for exact match).
 fn refspecMatch(ref_name: []const u8, pattern: []const u8) ?[]const u8 {
-    if (std.mem.endsWith(u8, pattern, "*")) {
-        const pfx = pattern[0 .. pattern.len - 1];
-        if (std.mem.startsWith(u8, ref_name, pfx)) return ref_name[pfx.len..];
+    if (std.mem.indexOfScalar(u8, pattern, '*')) |star_pos| {
+        const prefix = pattern[0..star_pos];
+        const suffix_pat = pattern[star_pos + 1 ..];
+        if (std.mem.startsWith(u8, ref_name, prefix)) {
+            const rest = ref_name[prefix.len..];
+            if (suffix_pat.len == 0) {
+                return rest;
+            }
+            // Find suffix_pat at the end of rest
+            if (rest.len >= suffix_pat.len and std.mem.eql(u8, rest[rest.len - suffix_pat.len ..], suffix_pat)) {
+                return rest[0 .. rest.len - suffix_pat.len];
+            }
+        }
     } else if (std.mem.eql(u8, ref_name, pattern)) {
         return "";
     }
     // Short refspec: "main" matches "refs/heads/main"
-    if (!std.mem.startsWith(u8, pattern, "refs/")) {
+    if (!std.mem.startsWith(u8, pattern, "refs/") and std.mem.indexOfScalar(u8, pattern, '*') == null) {
         if (std.mem.startsWith(u8, ref_name, "refs/heads/")) {
             if (std.mem.eql(u8, ref_name["refs/heads/".len..], pattern)) return "";
         }
@@ -393,9 +413,12 @@ fn refspecMatch(ref_name: []const u8, pattern: []const u8) ?[]const u8 {
 }
 
 /// Map a suffix through a destination pattern.
+/// Supports glob patterns like refs/remotes/origin/pr/* where * is replaced by the suffix.
 fn refspecMap(allocator: std.mem.Allocator, suffix: []const u8, dst_pattern: []const u8) ![]u8 {
-    if (std.mem.endsWith(u8, dst_pattern, "*")) {
-        return std.fmt.allocPrint(allocator, "{s}{s}", .{ dst_pattern[0 .. dst_pattern.len - 1], suffix });
+    if (std.mem.indexOfScalar(u8, dst_pattern, '*')) |star_pos| {
+        const prefix = dst_pattern[0..star_pos];
+        const suffix_pat = dst_pattern[star_pos + 1 ..];
+        return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ prefix, suffix, suffix_pat });
     }
     if (!std.mem.startsWith(u8, dst_pattern, "refs/") and dst_pattern.len > 0) {
         return std.fmt.allocPrint(allocator, "refs/heads/{s}", .{dst_pattern});
@@ -485,6 +508,7 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     var has_refmap = false;
     var refmap_value: ?[]const u8 = null;
     var prune_tags = false;
+    var set_upstream = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
@@ -501,6 +525,8 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             prune = false;
         } else if (std.mem.eql(u8, arg, "--prune-tags")) {
             prune_tags = true;
+        } else if (std.mem.eql(u8, arg, "--set-upstream")) {
+            set_upstream = true;
         } else if (std.mem.eql(u8, arg, "--force") or std.mem.eql(u8, arg, "-f")) {
             force = true;
         } else if (std.mem.eql(u8, arg, "--update-head-ok")) {
@@ -554,6 +580,12 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             // other unknown flags, ignore
         } else if (remote_name_arg == null) {
             remote_name_arg = arg;
+        } else if (std.mem.eql(u8, arg, "tag")) {
+            // "tag <name>" is shorthand for "refs/tags/<name>:refs/tags/<name>"
+            if (args.next()) |tag_name| {
+                const tag_refspec = try std.fmt.allocPrint(allocator, "refs/tags/{s}:refs/tags/{s}", .{ tag_name, tag_name });
+                try cmd_refspecs.append(tag_refspec);
+            }
         } else {
             try cmd_refspecs.append(arg);
         }
@@ -711,6 +743,38 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             } else |_| {}
         }
         try performLocalFetch(allocator, git_path, local_path, remote_name, quiet, cmd_refspecs.items, platform_impl, effective_tags != .no, force, append_mode, effective_prune, dry_run, write_fetch_head and !dry_run, update_head_ok, has_refmap, refmap_value, effective_prune_tags);
+
+        // Handle --set-upstream
+        if (set_upstream and cmd_refspecs.items.len > 0 and is_named_remote) {
+            // The first refspec determines the merge target
+            const first_refspec = cmd_refspecs.items[0];
+            // Resolve it to a full ref name
+            var merge_ref: []u8 = undefined;
+            if (std.mem.startsWith(u8, first_refspec, "refs/")) {
+                // Strip everything after : if present
+                if (std.mem.indexOf(u8, first_refspec, ":")) |colon| {
+                    merge_ref = try allocator.dupe(u8, first_refspec[0..colon]);
+                } else {
+                    merge_ref = try allocator.dupe(u8, first_refspec);
+                }
+            } else {
+                var raw = first_refspec;
+                if (raw.len > 0 and raw[0] == '+') raw = raw[1..];
+                if (std.mem.indexOf(u8, raw, ":")) |colon| raw = raw[0..colon];
+                merge_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{raw});
+            }
+            defer allocator.free(merge_ref);
+
+            // Get current branch
+            if (refs.getCurrentBranch(git_path, platform_impl, allocator)) |current_branch| {
+                defer allocator.free(current_branch);
+                // Write config
+                const cfg_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+                defer allocator.free(cfg_path);
+                setUpstreamConfig(allocator, cfg_path, current_branch, remote_name, merge_ref);
+            } else |_| {}
+        }
+
         return;
     }
 
@@ -804,9 +868,59 @@ fn performLocalFetch(
         }
     }
 
-    // Print "From" line (like real git)
+    // Print "From" line (like real git) - resolve to absolute path preserving structure
+    var from_display: []u8 = undefined;
+    var from_display_owned = false;
+    {
+        const raw_path = source_path;
+        // Resolve the parent directory and append the basename to preserve
+        // URL structure (e.g., "." stays as "/path/to/." not "/path/to")
+        const basename = std.fs.path.basename(raw_path);
+        const parent_path = std.fs.path.dirname(raw_path);
+
+        if (parent_path) |parent| {
+            if (std.fs.cwd().realpathAlloc(allocator, parent)) |rp| {
+                from_display = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ rp, basename });
+                from_display_owned = true;
+                allocator.free(rp);
+            } else |_| {
+                // If parent resolution fails, try direct
+                if (std.fs.cwd().realpathAlloc(allocator, raw_path)) |resolved| {
+                    from_display = resolved;
+                    from_display_owned = true;
+                } else |_| {
+                    from_display = try allocator.dupe(u8, raw_path);
+                    from_display_owned = true;
+                }
+            }
+        } else {
+            // No parent directory - path is just a basename like "."
+            if (std.fs.cwd().realpathAlloc(allocator, ".")) |cwd_resolved| {
+                if (std.mem.eql(u8, basename, ".") or std.mem.eql(u8, basename, "..")) {
+                    // For "." or "..", resolve fully
+                    if (std.fs.cwd().realpathAlloc(allocator, raw_path)) |resolved| {
+                        from_display = resolved;
+                        from_display_owned = true;
+                        allocator.free(cwd_resolved);
+                    } else |_| {
+                        from_display = cwd_resolved;
+                        from_display_owned = true;
+                    }
+                } else {
+                    from_display = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd_resolved, basename });
+                    from_display_owned = true;
+                    allocator.free(cwd_resolved);
+                }
+            } else |_| {
+                from_display = try allocator.dupe(u8, raw_path);
+                from_display_owned = true;
+            }
+        }
+    }
+    defer if (from_display_owned) allocator.free(from_display);
+
     if (!quiet) {
-        const from_msg = try std.fmt.allocPrint(allocator, "From {s}\n", .{source_path});
+        const from_msg = try std.fmt.allocPrint(allocator, "From {s}\n", .{from_display});
         defer allocator.free(from_msg);
         try platform_impl.writeStderr(from_msg);
     }
@@ -918,7 +1032,7 @@ fn performLocalFetch(
                 }
 
                 // Build description for FETCH_HEAD
-                const branch_desc = buildFetchHeadDesc(allocator, entry.name, source_path) catch null;
+                const branch_desc = buildFetchHeadDesc(allocator, entry.name, from_display) catch null;
 
                 if (branch_desc) |desc| {
                     try fetch_head_entries.append(.{
@@ -948,18 +1062,36 @@ fn performLocalFetch(
                             std.process.exit(128);
                         }
 
-                        if (!dry_run) {
+                        {
                             const drp = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, dn });
                             defer allocator.free(drp);
                             if (std.mem.lastIndexOfScalar(u8, drp, '/')) |ls| std.fs.cwd().makePath(drp[0..ls]) catch {};
 
-                            // Check fast-forward
+                            // Read old value for status output
+                            var old_hash_val: ?[]u8 = null;
+                            defer if (old_hash_val) |oh| allocator.free(oh);
+                            if (readFileContent(allocator, drp)) |old_content| {
+                                const ot = std.mem.trim(u8, old_content, " \t\r\n");
+                                if (ot.len >= 40) {
+                                    old_hash_val = allocator.dupe(u8, ot[0..40]) catch null;
+                                }
+                                allocator.free(old_content);
+                            } else |_| {}
+
+                            // Check fast-forward / tag rejection
                             if (!force_ref) {
-                                if (readFileContent(allocator, drp)) |old_content| {
-                                    defer allocator.free(old_content);
-                                    const old_hash = std.mem.trim(u8, old_content, " \t\r\n");
-                                    if (old_hash.len >= 40 and !std.mem.eql(u8, old_hash[0..40], entry.hash)) {
-                                        if (!isAncestor(git_path, old_hash[0..40], entry.hash, allocator, platform_impl)) {
+                                if (old_hash_val) |old_hash| {
+                                    if (!std.mem.eql(u8, old_hash, entry.hash)) {
+                                        // Tags cannot be updated without force
+                                        if (std.mem.startsWith(u8, dn, "refs/tags/")) {
+                                            const tag_name = dn["refs/tags/".len..];
+                                            const emsg = try std.fmt.allocPrint(allocator, " t [tag update]      {s} -> {s}  (would clobber existing tag)\n", .{ tag_name, tag_name });
+                                            defer allocator.free(emsg);
+                                            try platform_impl.writeStderr(emsg);
+                                            fetch_failed = true;
+                                            continue;
+                                        }
+                                        if (!isAncestor(git_path, old_hash, entry.hash, allocator, platform_impl)) {
                                             const emsg = try std.fmt.allocPrint(allocator, " ! [rejected]        {s} -> {s}  (non-fast-forward)\n", .{ entry.name, dn });
                                             defer allocator.free(emsg);
                                             try platform_impl.writeStderr(emsg);
@@ -967,12 +1099,39 @@ fn performLocalFetch(
                                             continue;
                                         }
                                     }
-                                } else |_| {}
+                                }
                             }
 
-                            const hnl = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.hash});
-                            defer allocator.free(hnl);
-                            std.fs.cwd().writeFile(.{ .sub_path = drp, .data = hnl }) catch {};
+                            if (!dry_run) {
+                                const hnl = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.hash});
+                                defer allocator.free(hnl);
+                                std.fs.cwd().writeFile(.{ .sub_path = drp, .data = hnl }) catch {};
+                            }
+
+                            // Print status line
+                            if (!quiet) {
+                                const display_src = formatRefDisplay(entry.name);
+                                const display_dst = formatRefDisplay(dn);
+                                if (old_hash_val) |old_hash| {
+                                    if (!std.mem.eql(u8, old_hash, entry.hash)) {
+                                        // Updated ref
+                                        const smsg = try std.fmt.allocPrint(allocator, "   {s}..{s}  {s} -> {s}\n", .{ old_hash[0..7], entry.hash[0..7], display_src, display_dst });
+                                        defer allocator.free(smsg);
+                                        try platform_impl.writeStderr(smsg);
+                                    }
+                                } else {
+                                    // New ref
+                                    const kind = if (std.mem.startsWith(u8, entry.name, "refs/tags/"))
+                                        "new tag"
+                                    else if (std.mem.startsWith(u8, entry.name, "refs/heads/"))
+                                        "new branch"
+                                    else
+                                        "new ref";
+                                    const smsg = try std.fmt.allocPrint(allocator, " * [{s}]      {s} -> {s}\n", .{ kind, display_src, display_dst });
+                                    defer allocator.free(smsg);
+                                    try platform_impl.writeStderr(smsg);
+                                }
+                            }
                         }
                     }
                 }
@@ -1130,7 +1289,7 @@ fn performLocalFetch(
             defer if (hh_owned) allocator.free(hh.?);
             if (hh) |h| {
                 const bn = if (std.mem.startsWith(u8, tr, "ref: refs/heads/")) tr["ref: refs/heads/".len..] else "HEAD";
-                const line = try std.fmt.allocPrint(allocator, "{s}\t\tbranch '{s}' of {s}\n", .{ h, bn, source_path });
+                const line = try std.fmt.allocPrint(allocator, "{s}\t\tbranch '{s}' of {s}\n", .{ h, bn, from_display });
                 defer allocator.free(line);
                 try fh_content.appendSlice(line);
             }
@@ -1193,10 +1352,46 @@ fn performLocalFetch(
             if (std.mem.startsWith(u8, entry.name, "refs/tags/")) {
                 const dtp = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, entry.name });
                 defer allocator.free(dtp);
+
+                // Check if tag already exists locally
+                var tag_is_new = false;
+                var tag_changed = false;
+                if (readFileContent(allocator, dtp)) |existing| {
+                    const existing_hash = std.mem.trim(u8, existing, " \t\r\n");
+                    if (existing_hash.len >= 40 and !std.mem.eql(u8, existing_hash[0..40], entry.hash)) {
+                        tag_changed = true;
+                    }
+                    allocator.free(existing);
+                } else |_| {
+                    tag_is_new = true;
+                }
+
+                // Don't overwrite existing tags with different values unless forced
+                if (tag_changed and !force_flag) {
+                    if (!quiet) {
+                        const tag_name = entry.name["refs/tags/".len..];
+                        const wmsg = try std.fmt.allocPrint(allocator, " t [tag update]      {s} -> {s}  (would clobber existing tag)\n", .{ tag_name, tag_name });
+                        defer allocator.free(wmsg);
+                        try platform_impl.writeStderr(wmsg);
+                    }
+                    fetch_failed = true;
+                    continue;
+                }
+
                 if (std.mem.lastIndexOfScalar(u8, dtp, '/')) |ls| std.fs.cwd().makePath(dtp[0..ls]) catch {};
-                const hnl = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.hash});
-                defer allocator.free(hnl);
-                std.fs.cwd().writeFile(.{ .sub_path = dtp, .data = hnl }) catch {};
+                if (!dry_run) {
+                    const hnl = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.hash});
+                    defer allocator.free(hnl);
+                    std.fs.cwd().writeFile(.{ .sub_path = dtp, .data = hnl }) catch {};
+                }
+
+                // Print status for new tags
+                if (!quiet and tag_is_new) {
+                    const tag_name = entry.name["refs/tags/".len..];
+                    const smsg = try std.fmt.allocPrint(allocator, " * [new tag]         {s} -> {s}\n", .{ tag_name, tag_name });
+                    defer allocator.free(smsg);
+                    try platform_impl.writeStderr(smsg);
+                }
             }
         }
     }
@@ -1205,6 +1400,14 @@ fn performLocalFetch(
         std.process.exit(1);
     }
 
+}
+
+/// Format a ref name for display (strip common prefixes)
+fn formatRefDisplay(ref_name: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, ref_name, "refs/heads/")) return ref_name["refs/heads/".len..];
+    if (std.mem.startsWith(u8, ref_name, "refs/tags/")) return ref_name["refs/tags/".len..];
+    if (std.mem.startsWith(u8, ref_name, "refs/remotes/")) return ref_name["refs/remotes/".len..];
+    return ref_name;
 }
 
 const FetchHeadEntry = struct {
@@ -1227,39 +1430,46 @@ fn buildFetchHeadDesc(allocator: std.mem.Allocator, ref_name: []const u8, source
 }
 
 fn pruneStaleRefs(allocator: std.mem.Allocator, git_path: []const u8, refspecs_raw: []const []u8, remote_refs: []const RefEntry) !void {
-    // For each refspec with a destination pattern (e.g., +refs/heads/*:refs/remotes/origin/*)
-    // find local refs matching the destination pattern that don't have a corresponding
-    // source ref on the remote.
+    // Parse all refspecs into src/dst pairs
+    const ParsedRefspec = struct { src: []const u8, dst: []const u8 };
+    var parsed = std.array_list.Managed(ParsedRefspec).init(allocator);
+    defer parsed.deinit();
+
     for (refspecs_raw) |rs_raw| {
         var rs = @as([]const u8, rs_raw);
         if (rs.len > 0 and rs[0] == '+') rs = rs[1..];
         const colon_pos = std.mem.indexOf(u8, rs, ":") orelse continue;
         const src_pattern = rs[0..colon_pos];
         const dst_pattern = rs[colon_pos + 1 ..];
+        if (std.mem.indexOfScalar(u8, dst_pattern, '*') == null) continue;
+        if (std.mem.indexOfScalar(u8, src_pattern, '*') == null) continue;
+        parsed.append(.{ .src = src_pattern, .dst = dst_pattern }) catch continue;
+    }
 
-        // Only handle glob patterns
-        if (!std.mem.endsWith(u8, dst_pattern, "*")) continue;
-        if (!std.mem.endsWith(u8, src_pattern, "*")) continue;
+    if (parsed.items.len == 0) return;
 
-        const dst_prefix = dst_pattern[0 .. dst_pattern.len - 1];
-        const src_prefix = src_pattern[0 .. src_pattern.len - 1];
-
-        // Collect all local refs matching the dst pattern
-        var local_refs = collectAllRefs(allocator, git_path) catch continue;
-        defer {
-            for (local_refs.items) |e| {
-                allocator.free(e.name);
-                allocator.free(e.hash);
-            }
-            local_refs.deinit();
+    // Collect all local refs
+    var local_refs = collectAllRefs(allocator, git_path) catch return;
+    defer {
+        for (local_refs.items) |e| {
+            allocator.free(e.name);
+            allocator.free(e.hash);
         }
+        local_refs.deinit();
+    }
 
-        for (local_refs.items) |local_entry| {
-            if (!std.mem.startsWith(u8, local_entry.name, dst_prefix)) continue;
-            const suffix = local_entry.name[dst_prefix.len..];
+    for (local_refs.items) |local_entry| {
+        // For each local ref, check if it's covered by any destination pattern
+        var covered_by_any = false;
+        var should_prune = false;
 
-            // Check if corresponding source ref exists on remote
-            const expected_src = std.fmt.allocPrint(allocator, "{s}{s}", .{ src_prefix, suffix }) catch continue;
+        for (parsed.items) |ps| {
+            // Check if local ref matches this destination pattern
+            const suffix = refspecMatch(local_entry.name, ps.dst) orelse continue;
+            covered_by_any = true;
+
+            // Map suffix back to source pattern to find expected remote ref
+            const expected_src = refspecMap(allocator, suffix, ps.src) catch continue;
             defer allocator.free(expected_src);
 
             var found_on_remote = false;
@@ -1270,13 +1480,36 @@ fn pruneStaleRefs(allocator: std.mem.Allocator, git_path: []const u8, refspecs_r
                 }
             }
 
-            if (!found_on_remote) {
-                // Delete the local ref
+            if (found_on_remote) {
+                // This ref is still live via this refspec
+                should_prune = false;
+                break;
+            } else {
+                should_prune = true;
+            }
+        }
+
+        if (covered_by_any and should_prune) {
+            // Check that no OTHER refspec would fetch this ref
+            var kept_by_other = false;
+            for (parsed.items) |ps2| {
+                for (remote_refs) |remote_entry| {
+                    if (refspecMatch(remote_entry.name, ps2.src)) |rsuffix| {
+                        const mapped_dst = refspecMap(allocator, rsuffix, ps2.dst) catch continue;
+                        defer allocator.free(mapped_dst);
+                        if (std.mem.eql(u8, mapped_dst, local_entry.name)) {
+                            kept_by_other = true;
+                            break;
+                        }
+                    }
+                }
+                if (kept_by_other) break;
+            }
+
+            if (!kept_by_other) {
                 const ref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, local_entry.name }) catch continue;
                 defer allocator.free(ref_path);
                 std.fs.cwd().deleteFile(ref_path) catch {};
-
-                // Also remove from packed-refs
                 removeFromPackedRefs(allocator, git_path, local_entry.name);
             }
         }
@@ -1327,6 +1560,92 @@ fn removeFromPackedRefs(allocator: std.mem.Allocator, git_path: []const u8, ref_
     }
 
     std.fs.cwd().writeFile(.{ .sub_path = packed_path, .data = new_content.items }) catch {};
+}
+
+fn setUpstreamConfig(allocator: std.mem.Allocator, config_path: []const u8, branch: []const u8, remote: []const u8, merge_ref: []const u8) void {
+    const content = readFileContent(allocator, config_path) catch "";
+    const content_owned = content.len > 0;
+
+    const section = std.fmt.allocPrint(allocator, "[branch \"{s}\"]", .{branch}) catch return;
+    defer allocator.free(section);
+
+    var new_content = std.array_list.Managed(u8).init(allocator);
+    defer new_content.deinit();
+
+    var found_section = false;
+    var in_branch_section = false;
+    var wrote_remote = false;
+    var wrote_merge = false;
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+
+        if (trimmed.len > 0 and trimmed[0] == '[') {
+            if (in_branch_section) {
+                if (!wrote_remote) {
+                    const r_line = std.fmt.allocPrint(allocator, "\tremote = {s}\n", .{remote}) catch continue;
+                    defer allocator.free(r_line);
+                    new_content.appendSlice(r_line) catch {};
+                }
+                if (!wrote_merge) {
+                    const m_line = std.fmt.allocPrint(allocator, "\tmerge = {s}\n", .{merge_ref}) catch continue;
+                    defer allocator.free(m_line);
+                    new_content.appendSlice(m_line) catch {};
+                }
+            }
+            in_branch_section = false;
+            wrote_remote = false;
+            wrote_merge = false;
+
+            if (std.mem.startsWith(u8, trimmed, section)) {
+                found_section = true;
+                in_branch_section = true;
+            }
+        }
+
+        if (in_branch_section) {
+            if (std.mem.startsWith(u8, trimmed, "remote =") or std.mem.startsWith(u8, trimmed, "remote=")) {
+                const r_line = std.fmt.allocPrint(allocator, "\tremote = {s}\n", .{remote}) catch continue;
+                defer allocator.free(r_line);
+                new_content.appendSlice(r_line) catch {};
+                wrote_remote = true;
+                continue;
+            }
+            if (std.mem.startsWith(u8, trimmed, "merge =") or std.mem.startsWith(u8, trimmed, "merge=")) {
+                const m_line = std.fmt.allocPrint(allocator, "\tmerge = {s}\n", .{merge_ref}) catch continue;
+                defer allocator.free(m_line);
+                new_content.appendSlice(m_line) catch {};
+                wrote_merge = true;
+                continue;
+            }
+        }
+
+        new_content.appendSlice(line) catch {};
+        new_content.append('\n') catch {};
+    }
+
+    if (in_branch_section) {
+        if (!wrote_remote) {
+            const r_line = std.fmt.allocPrint(allocator, "\tremote = {s}\n", .{remote}) catch return;
+            defer allocator.free(r_line);
+            new_content.appendSlice(r_line) catch {};
+        }
+        if (!wrote_merge) {
+            const m_line = std.fmt.allocPrint(allocator, "\tmerge = {s}\n", .{merge_ref}) catch return;
+            defer allocator.free(m_line);
+            new_content.appendSlice(m_line) catch {};
+        }
+    }
+
+    if (!found_section) {
+        const new_section = std.fmt.allocPrint(allocator, "{s}\n\tremote = {s}\n\tmerge = {s}\n", .{ section, remote, merge_ref }) catch return;
+        defer allocator.free(new_section);
+        new_content.appendSlice(new_section) catch {};
+    }
+
+    if (content_owned) allocator.free(content);
+    std.fs.cwd().writeFile(.{ .sub_path = config_path, .data = new_content.items }) catch {};
 }
 
 pub fn touchTraceFiles() void {
