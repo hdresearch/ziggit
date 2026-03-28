@@ -21805,6 +21805,29 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                     modified = true;
                 }
             }
+            // Apply verbose output for file add
+            if (verbose and modified) {
+                const vmsg = std.fmt.allocPrint(allocator, "add '{s}'\n", .{arg}) catch "";
+                if (vmsg.len > 0) {
+                    defer allocator.free(vmsg);
+                    platform_impl.writeStdout(vmsg) catch {};
+                }
+            }
+            // Apply chmod mode if set
+            if (chmod_mode) |cm| {
+                setIndexEntryMode(&idx, arg, cm) catch {};
+                modified = true;
+                if (verbose) {
+                    const chmod_str = if (cm == 0o100755) "+x" else "-x";
+                    const cmsg = std.fmt.allocPrint(allocator, "chmod {s} '{s}'\n", .{ chmod_str, arg }) catch "";
+                    if (cmsg.len > 0) {
+                        defer allocator.free(cmsg);
+                        platform_impl.writeStdout(cmsg) catch {};
+                    }
+                }
+                // Reset chmod mode after applying
+                chmod_mode = null;
+            }
         } else {
             // Unknown option starting with -
             if (std.mem.eql(u8, arg, "-h")) {
