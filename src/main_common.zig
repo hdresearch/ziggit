@@ -30278,7 +30278,10 @@ fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, opts:
             }
         }
         if (!quiet) {
-            if (opts.show_stat) {
+            if (opts.show_raw and !opts.show_patch and !opts.patch_with_stat and !opts.patch_with_raw) {
+                try outputCombinedRaw(allocator, all_parent_hashes.items, this_tree, git_path, opts, platform_impl);
+            }
+            if (opts.show_stat or (opts.patch_with_stat and !opts.show_patch)) {
                 try outputCombinedStat(allocator, all_parent_hashes.items, this_tree, git_path, opts.show_cc, platform_impl);
             }
             if (opts.show_summary) {
@@ -30292,6 +30295,11 @@ fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, opts:
                     try outputCombinedStat(allocator, all_parent_hashes.items, this_tree, git_path, opts.show_cc, platform_impl);
                     try platform_impl.writeStdout("\n");
                 }
+                try outputCombinedDiff(allocator, all_parent_hashes.items, this_tree, git_path, opts.show_cc, platform_impl);
+            }
+            if (opts.patch_with_raw) {
+                try outputCombinedRaw(allocator, all_parent_hashes.items, this_tree, git_path, opts, platform_impl);
+                try platform_impl.writeStdout("\n");
                 try outputCombinedDiff(allocator, all_parent_hashes.items, this_tree, git_path, opts.show_cc, platform_impl);
             }
         }
@@ -30714,6 +30722,181 @@ const TreeFileInfo = struct {
     hash: []const u8,
     mode: []const u8,
 };
+
+/// Output combined raw diff for merge commits (::mode mode mode hash hash hash SS\tpath)
+fn outputCombinedRaw(allocator: std.mem.Allocator, parent_hashes: []const []const u8, merge_tree_hash: []const u8, git_path: []const u8, opts: *const DiffTreeOpts, platform_impl: *const platform_mod.Platform) !void {
+    const dense = opts.show_cc;
+    // Collect merge tree files
+    var merge_files = std.StringHashMap(TreeFileInfo).init(allocator);
+    defer {
+        var it = merge_files.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.hash);
+            allocator.free(entry.value_ptr.mode);
+        }
+        merge_files.deinit();
+    }
+    try collectTreeFiles(allocator, merge_tree_hash, "", git_path, platform_impl, &merge_files);
+    
+    // Collect parent tree files
+    var parent_file_maps = std.array_list.Managed(std.StringHashMap(TreeFileInfo)).init(allocator);
+    defer {
+        for (parent_file_maps.items) |*pf| {
+            var pit = pf.iterator();
+            while (pit.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+                allocator.free(entry.value_ptr.hash);
+                allocator.free(entry.value_ptr.mode);
+            }
+            pf.deinit();
+        }
+        parent_file_maps.deinit();
+    }
+    for (parent_hashes) |ph| {
+        const parent_tree = getTreeForCommit(allocator, ph, git_path, platform_impl) catch {
+            try parent_file_maps.append(std.StringHashMap(TreeFileInfo).init(allocator));
+            continue;
+        };
+        defer allocator.free(parent_tree);
+        var pf = std.StringHashMap(TreeFileInfo).init(allocator);
+        try collectTreeFiles(allocator, parent_tree, "", git_path, platform_impl, &pf);
+        try parent_file_maps.append(pf);
+    }
+    
+    // Collect and sort all file names
+    var all_names = std.array_list.Managed([]const u8).init(allocator);
+    defer all_names.deinit();
+    {
+        var name_it = merge_files.keyIterator();
+        while (name_it.next()) |key| try all_names.append(key.*);
+    }
+    // Also add files that exist in parents but not in merge (deleted)
+    for (parent_file_maps.items) |*pf| {
+        var pit = pf.keyIterator();
+        while (pit.next()) |key| {
+            var found = false;
+            for (all_names.items) |existing| {
+                if (std.mem.eql(u8, existing, key.*)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) try all_names.append(key.*);
+        }
+    }
+    std.mem.sort([]const u8, all_names.items, {}, struct {
+        fn cmp(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.cmp);
+    
+    const num_parents = parent_hashes.len;
+    const null_hash = "0000000000000000000000000000000000000000";
+    
+    for (all_names.items) |file_name| {
+        const merge_info = merge_files.get(file_name);
+        const merge_hash = if (merge_info) |mi| mi.hash else null_hash;
+        const merge_mode = if (merge_info) |mi| mi.mode else "000000";
+        
+        // Check if file differs from each parent
+        var statuses = std.array_list.Managed(u8).init(allocator);
+        defer statuses.deinit();
+        var differs_from_any = false;
+        var differs_from_all = true;
+        
+        for (parent_file_maps.items) |*pf| {
+            const parent_info = pf.get(file_name);
+            if (parent_info) |pi| {
+                if (std.mem.eql(u8, pi.hash, merge_hash) and std.mem.eql(u8, pi.mode, merge_mode)) {
+                    try statuses.append(' ');
+                    differs_from_all = false;
+                } else {
+                    try statuses.append('M');
+                    differs_from_any = true;
+                }
+            } else {
+                // File doesn't exist in parent = added
+                if (merge_info != null) {
+                    try statuses.append('A');
+                    differs_from_any = true;
+                } else {
+                    try statuses.append(' ');
+                    differs_from_all = false;
+                }
+            }
+        }
+        
+        // For --cc (dense), only show files that differ from ALL parents
+        if (dense and !differs_from_all) continue;
+        // For -c, show files that differ from any parent
+        if (!dense and !differs_from_any) continue;
+        
+        // Build the raw line
+        var line = std.array_list.Managed(u8).init(allocator);
+        defer line.deinit();
+        
+        // Colons (one per parent)
+        for (0..num_parents) |_| try line.append(':');
+        
+        // Modes for each parent
+        for (parent_file_maps.items, 0..) |*pf, i| {
+            if (i > 0) try line.append(' ');
+            const parent_info = pf.get(file_name);
+            if (parent_info) |pi| {
+                try line.appendSlice(pi.mode);
+            } else {
+                try line.appendSlice("000000");
+            }
+        }
+        // Merge mode
+        try line.append(' ');
+        try line.appendSlice(merge_mode);
+        try line.append(' ');
+        
+        // Hashes for each parent
+        for (parent_file_maps.items, 0..) |*pf, i| {
+            if (i > 0) try line.append(' ');
+            const parent_info = pf.get(file_name);
+            if (parent_info) |pi| {
+                if (opts.abbrev_len) |abl| {
+                    const alen = if (abl == 0) @as(usize, 7) else abl;
+                    const effective = @min(alen, pi.hash.len);
+                    try line.appendSlice(pi.hash[0..effective]);
+                } else {
+                    try line.appendSlice(pi.hash);
+                }
+            } else {
+                if (opts.abbrev_len) |abl| {
+                    const alen = if (abl == 0) @as(usize, 7) else abl;
+                    for (0..alen) |_| try line.append('0');
+                } else {
+                    try line.appendSlice(null_hash);
+                }
+            }
+        }
+        // Merge hash
+        try line.append(' ');
+        if (opts.abbrev_len) |abl| {
+            const alen = if (abl == 0) @as(usize, 7) else abl;
+            const effective = @min(alen, merge_hash.len);
+            try line.appendSlice(merge_hash[0..effective]);
+        } else {
+            try line.appendSlice(merge_hash);
+        }
+        try line.append(' ');
+        
+        // Status characters
+        try line.appendSlice(statuses.items);
+        
+        // Tab + filename
+        try line.append('\t');
+        try line.appendSlice(file_name);
+        try line.append('\n');
+        
+        try platform_impl.writeStdout(line.items);
+    }
+}
 
 /// Output combined stat for merge commits
 fn outputCombinedStat(allocator: std.mem.Allocator, parent_hashes: []const []const u8, merge_tree_hash: []const u8, git_path: []const u8, dense: bool, platform_impl: *const platform_mod.Platform) !void {
