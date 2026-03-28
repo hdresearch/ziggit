@@ -26,6 +26,7 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
         else if (std.mem.eql(u8, arg, "-e") or std.mem.eql(u8, arg, "--show-email")) { se = true; se_explicit = true; }
         else if (std.mem.eql(u8, arg, "--no-show-email")) { se = false; se_explicit = true; }
         else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--porcelain")) { sp = true; }
+        else if (std.mem.eql(u8, arg, "--incremental")) { incremental = true; }
         else if (std.mem.eql(u8, arg, "--line-porcelain")) { slp = true; }
         else if (std.mem.eql(u8, arg, "-t")) { srt = true; }
         else if (std.mem.eql(u8, arg, "-s")) { suppress = true; }
