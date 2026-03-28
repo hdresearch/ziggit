@@ -764,11 +764,12 @@ fn oD(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []con
     }
 }
 
-fn oP(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []const u8, ln: usize, sh2: bool, fp2: []const u8) !void {
+fn oP(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []const u8, ln: usize, sh2: bool, fp2: []const u8, is_group_start: bool, group_count: usize) !void {
     if (sh2) {
         const boundary_line = if (e.is_boundary) "boundary\n" else "";
-        const h = try std.fmt.allocPrint(a, "{s} {d} {d} 1\nauthor {s}\nauthor-mail <{s}>\nauthor-time {d}\nauthor-tz {s}\ncommitter {s}\ncommitter-mail <{s}>\ncommitter-time {d}\ncommitter-tz {s}\nsummary {s}\n{s}filename {s}\n", .{
-            &e.commit_hash, ln, ln, e.author_name, e.author_email, e.author_time, e.author_tz,
+        const gc = if (is_group_start) group_count else @as(usize, 1);
+        const h = try std.fmt.allocPrint(a, "{s} {d} {d} {d}\nauthor {s}\nauthor-mail <{s}>\nauthor-time {d}\nauthor-tz {s}\ncommitter {s}\ncommitter-mail <{s}>\ncommitter-time {d}\ncommitter-tz {s}\nsummary {s}\n{s}filename {s}\n", .{
+            &e.commit_hash, ln, ln, gc, e.author_name, e.author_email, e.author_time, e.author_tz,
             e.committer_name, e.committer_email, e.committer_time, e.committer_tz, e.summary, boundary_line, fp2,
         });
         defer a.free(h);
