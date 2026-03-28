@@ -36083,11 +36083,18 @@ fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_ind
     try refs.updateHEAD(git_path, onto_hash, platform_impl, allocator);
     checkoutCommitTree(git_path, onto_hash, allocator, platform_impl) catch {};
 
-    // Write reflog entry for detach
-    writeReflogEntry(git_path, "HEAD", head_hash, onto_hash, "rebase: checkout", allocator, platform_impl) catch {};
+    // Determine reflog action prefix
+    const reflog_action = std.process.getEnvVarOwned(allocator, "GIT_REFLOG_ACTION") catch try allocator.dupe(u8, "rebase");
+    defer allocator.free(reflog_action);
+
+    // Write reflog entry for detach: "rebase (start): checkout <upstream>"
+    const upstream_name = upstream_arg orelse "upstream";
+    const start_msg = try std.fmt.allocPrint(allocator, "{s} (start): checkout {s}", .{ reflog_action, upstream_name });
+    defer allocator.free(start_msg);
+    writeReflogEntry(git_path, "HEAD", head_hash, onto_hash, start_msg, allocator, platform_impl) catch {};
 
     // Replay each commit
-    try replayCommits(git_path, repo_root, &commits_to_replay, 0, current_branch_name, quiet, apply_mode, allocator, platform_impl);
+    try replayCommits(git_path, repo_root, &commits_to_replay, 0, current_branch_name, quiet, apply_mode, reflog_action, allocator, platform_impl);
 }
 
 fn checkRebaseClean(git_path: []const u8, repo_root: []const u8, head_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
@@ -36300,7 +36307,7 @@ fn saveRebaseState(git_path: []const u8, commits: *std.array_list.Managed([]u8),
     }
 }
 
-fn replayCommits(git_path: []const u8, repo_root: []const u8, commits: *std.array_list.Managed([]u8), start_idx: usize, branch_name: []const u8, quiet: bool, apply_mode: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+fn replayCommits(git_path: []const u8, repo_root: []const u8, commits: *std.array_list.Managed([]u8), start_idx: usize, branch_name: []const u8, quiet: bool, apply_mode: bool, reflog_action: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     _ = repo_root;
     var idx = start_idx;
     while (idx < commits.items.len) : (idx += 1) {
@@ -36323,9 +36330,17 @@ fn replayCommits(git_path: []const u8, repo_root: []const u8, commits: *std.arra
         const result = cherryPickCommit(git_path, commit_hash, allocator, platform_impl);
         if (result) |new_hash| {
             defer allocator.free(new_hash);
+            // Get current HEAD before updating (for reflog old hash)
+            const old_head = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
+            defer if (old_head) |oh| allocator.free(oh);
             // Update HEAD to new commit
             try refs.updateHEAD(git_path, new_hash, platform_impl, allocator);
-            writeReflogEntry(git_path, "HEAD", commit_hash, new_hash, "rebase: pick", allocator, platform_impl) catch {};
+            // Write reflog: "rebase (pick): <subject>"
+            const subject = getCommitSubject(commit_hash, git_path, platform_impl, allocator) catch try allocator.dupe(u8, "");
+            defer allocator.free(subject);
+            const pick_msg = std.fmt.allocPrint(allocator, "{s} (pick): {s}", .{ reflog_action, subject }) catch null;
+            defer if (pick_msg) |pm| allocator.free(pm);
+            if (pick_msg) |pm| writeReflogEntry(git_path, "HEAD", old_head orelse commit_hash, new_hash, pm, allocator, platform_impl) catch {};
         } else |err| {
             if (err == error.MergeConflict) {
                 // Stop and let user resolve
@@ -36373,15 +36388,22 @@ fn replayCommits(git_path: []const u8, repo_root: []const u8, commits: *std.arra
         }
         // Update the original branch to point to new HEAD
         try refs.updateRef(git_path, branch_name, head_hash, platform_impl, allocator);
-        // Write reflog for the branch
+        // Write reflog for the branch: "rebase (finish): refs/heads/<branch> onto <onto_hash>"
         const branch_reflog_name = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name});
         defer allocator.free(branch_reflog_name);
-        const rebase_msg = try std.fmt.allocPrint(allocator, "rebase finished: {s} onto {s}", .{ branch_reflog_name, head_hash });
+        // Read onto hash from rebase state
+        const onto_for_reflog = readRebaseFile(git_path, "onto", allocator, platform_impl) orelse try allocator.dupe(u8, head_hash);
+        defer allocator.free(onto_for_reflog);
+        const onto_trimmed_reflog = std.mem.trim(u8, onto_for_reflog, " \t\n\r");
+        const rebase_msg = try std.fmt.allocPrint(allocator, "{s} (finish): {s} onto {s}", .{ reflog_action, branch_reflog_name, onto_trimmed_reflog });
         defer allocator.free(rebase_msg);
-        writeReflogEntry(git_path, branch_name, old_branch_hash, head_hash, rebase_msg, allocator, platform_impl) catch {};
+        writeReflogEntry(git_path, branch_reflog_name, old_branch_hash, head_hash, rebase_msg, allocator, platform_impl) catch {};
         // Restore HEAD to point to branch
         try refs.updateHEAD(git_path, branch_name, platform_impl, allocator);
-        writeReflogEntry(git_path, "HEAD", head_hash, head_hash, "rebase finished", allocator, platform_impl) catch {};
+        // HEAD reflog: "rebase (finish): returning to refs/heads/<branch>"
+        const finish_head_msg = try std.fmt.allocPrint(allocator, "{s} (finish): returning to {s}", .{ reflog_action, branch_reflog_name });
+        defer allocator.free(finish_head_msg);
+        writeReflogEntry(git_path, "HEAD", head_hash, head_hash, finish_head_msg, allocator, platform_impl) catch {};
     }
 
     // Clean up rebase state
@@ -36640,6 +36662,14 @@ fn rebaseContinue(git_path: []const u8, repo_root: []const u8, allocator: std.me
         defer allocator.free(new_hash);
 
         try refs.updateHEAD(git_path, new_hash, platform_impl, allocator);
+        // Write reflog for continue: "rebase (continue): <subject>"
+        const continue_reflog_action = std.process.getEnvVarOwned(allocator, "GIT_REFLOG_ACTION") catch try allocator.dupe(u8, "rebase");
+        defer allocator.free(continue_reflog_action);
+        const continue_subject = getCommitSubject(commit_hash, git_path, platform_impl, allocator) catch try allocator.dupe(u8, "");
+        defer allocator.free(continue_subject);
+        const continue_msg = try std.fmt.allocPrint(allocator, "{s} (continue): {s}", .{ continue_reflog_action, continue_subject });
+        defer allocator.free(continue_msg);
+        writeReflogEntry(git_path, "HEAD", current_head, new_hash, continue_msg, allocator, platform_impl) catch {};
     }
 
     _ = total;
@@ -36649,7 +36679,9 @@ fn rebaseContinue(git_path: []const u8, repo_root: []const u8, allocator: std.me
     else
         "HEAD";
 
-    try replayCommits(git_path, ".", &commits, current_idx, branch_name, quiet, false, allocator, platform_impl);
+    const reflog_action_continue = std.process.getEnvVarOwned(allocator, "GIT_REFLOG_ACTION") catch try allocator.dupe(u8, "rebase");
+    defer allocator.free(reflog_action_continue);
+    try replayCommits(git_path, ".", &commits, current_idx, branch_name, quiet, false, reflog_action_continue, allocator, platform_impl);
 }
 
 fn rebaseSkip(git_path: []const u8, repo_root: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform, quiet: bool) !void {
@@ -36701,7 +36733,9 @@ fn rebaseSkip(git_path: []const u8, repo_root: []const u8, allocator: std.mem.Al
         "HEAD";
 
     // Skip current and continue with next
-    try replayCommits(git_path, ".", &commits, current_idx, branch_name, quiet, false, allocator, platform_impl);
+    const reflog_action_skip = std.process.getEnvVarOwned(allocator, "GIT_REFLOG_ACTION") catch try allocator.dupe(u8, "rebase");
+    defer allocator.free(reflog_action_skip);
+    try replayCommits(git_path, ".", &commits, current_idx, branch_name, quiet, false, reflog_action_skip, allocator, platform_impl);
 }
 
 fn rebaseShowCurrentPatch(git_path: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
