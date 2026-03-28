@@ -524,6 +524,34 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     // All commands are handled natively — always process -C, -c, etc.
     const is_native_handler = true;
 
+    // Process GIT_CONFIG_COUNT before -c args (environment config comes first)
+    {
+        const env_count_str2 = std.process.getEnvVarOwned(allocator, "GIT_CONFIG_COUNT") catch null;
+        defer if (env_count_str2) |ecs2| allocator.free(ecs2);
+        if (env_count_str2) |ecs2| {
+            if (std.fmt.parseInt(usize, ecs2, 10)) |count2| {
+                var env_idx2: usize = 0;
+                while (env_idx2 < count2) : (env_idx2 += 1) {
+                    const key_env_name2 = std.fmt.allocPrint(allocator, "GIT_CONFIG_KEY_{d}", .{env_idx2}) catch continue;
+                    defer allocator.free(key_env_name2);
+                    const val_env_name2 = std.fmt.allocPrint(allocator, "GIT_CONFIG_VALUE_{d}", .{env_idx2}) catch continue;
+                    defer allocator.free(val_env_name2);
+                    const env_key2 = std.process.getEnvVarOwned(allocator, key_env_name2) catch continue;
+                    defer allocator.free(env_key2);
+                    const env_val2 = std.process.getEnvVarOwned(allocator, val_env_name2) catch continue;
+                    defer allocator.free(env_val2);
+                    const setting2 = std.fmt.allocPrint(allocator, "{s}={s}", .{env_key2, env_val2}) catch continue;
+                    defer allocator.free(setting2);
+                    addConfigOverride(allocator, setting2) catch continue;
+                }
+            } else |_| {
+                const fe = std.fs.File{ .handle = std.posix.STDERR_FILENO };
+                _ = fe.write("fatal: bad config variable count\n") catch {};
+                std.process.exit(128);
+            }
+        }
+    }
+
     // Process global flags and execute
     var arg_index: usize = 0;
     
@@ -9578,29 +9606,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         }
     }
 
-    // Process GIT_CONFIG_COUNT environment config pairs
-    {
-        const env_count_str = std.process.getEnvVarOwned(allocator, "GIT_CONFIG_COUNT") catch null;
-        defer if (env_count_str) |ecs| allocator.free(ecs);
-        if (env_count_str) |ecs| {
-            if (std.fmt.parseInt(usize, ecs, 10)) |count| {
-                var env_idx: usize = 0;
-                while (env_idx < count) : (env_idx += 1) {
-                    const key_env_name = std.fmt.allocPrint(allocator, "GIT_CONFIG_KEY_{d}", .{env_idx}) catch continue;
-                    defer allocator.free(key_env_name);
-                    const val_env_name = std.fmt.allocPrint(allocator, "GIT_CONFIG_VALUE_{d}", .{env_idx}) catch continue;
-                    defer allocator.free(val_env_name);
-                    const env_key = std.process.getEnvVarOwned(allocator, key_env_name) catch continue;
-                    defer allocator.free(env_key);
-                    const env_val = std.process.getEnvVarOwned(allocator, val_env_name) catch continue;
-                    defer allocator.free(env_val);
-                    const setting = std.fmt.allocPrint(allocator, "{s}={s}", .{env_key, env_val}) catch continue;
-                    defer allocator.free(setting);
-                    addConfigOverride(allocator, setting) catch continue;
-                }
-            } else |_| {}
-        }
-    }
+    // GIT_CONFIG_COUNT is processed globally (before -c) in zigzitMain
 
         // Validate --fixed-value requires value-pattern
     if (fixed_value) {
