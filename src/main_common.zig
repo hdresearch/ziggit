@@ -14051,15 +14051,10 @@ pub fn resolveRevision(git_path: []const u8, rev: []const u8, platform_impl: *co
 
     // Try HEAD
     if (std.mem.eql(u8, rev, "HEAD") or std.mem.eql(u8, rev, "@")) {
-        const head_commit = refs.getCurrentCommit(git_path, platform_impl, allocator) catch |e| {
-            const err_msg = try std.fmt.allocPrint(allocator, "DEBUG: getCurrentCommit failed for HEAD, git_path={s}, err={}\n", .{git_path, e});
-            defer allocator.free(err_msg);
-            try platform_impl.writeStderr(err_msg);
+        const head_commit = refs.getCurrentCommit(git_path, platform_impl, allocator) catch {
             return error.BadRevision;
         };
-        if (head_commit == null) {
-            try platform_impl.writeStderr("DEBUG: getCurrentCommit returned null for HEAD\n");
-        }
+        if (head_commit == null) {}
         return head_commit orelse error.BadRevision;
     }
 

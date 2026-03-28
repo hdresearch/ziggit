@@ -95,31 +95,14 @@ pub fn resolveRef(git_dir: []const u8, ref_name: []const u8, platform_impl: anyt
         // Check for circular references
         for (seen_refs.items) |seen_ref| {
             if (std.mem.eql(u8, seen_ref, current_ref)) {
-                {
-                    const dbg2 = std.fmt.allocPrint(allocator, "DEBUG resolveRef: CIRCULAR ref='{s}'\n", .{current_ref}) catch null;
-                    if (dbg2) |d| { defer allocator.free(d); const f = std.fs.File{ .handle = 2 }; f.writeAll(d) catch {}; }
-                }
                 return error.CircularRef;
             }
-        }
-        
-        {
-            const dbg3 = std.fmt.allocPrint(allocator, "DEBUG resolveRef: depth={d} current_ref='{s}'\n", .{depth, current_ref}) catch null;
-            if (dbg3) |d| { defer allocator.free(d); const f = std.fs.File{ .handle = 2 }; f.writeAll(d) catch {}; }
         }
         
         // Track this ref to detect cycles
         try seen_refs.append(try allocator.dupe(u8, current_ref));
         
         const resolved = resolveRefOnce(git_dir, current_ref, platform_impl, allocator) catch |err| {
-            {
-                const dbg = std.fmt.allocPrint(allocator, "DEBUG resolveRef: failed ref='{s}' git_dir='{s}' err={any}\n", .{ current_ref, git_dir, err }) catch null;
-                if (dbg) |d| {
-                    defer allocator.free(d);
-                    const stderr_file = std.fs.File{ .handle = 2 };
-                    stderr_file.writeAll(d) catch {};
-                }
-            }
             // Enhanced fallback logic for different ref name formats
             if (std.mem.eql(u8, current_ref, "HEAD")) {
                 return err; // HEAD should always exist in a valid repo
@@ -177,19 +160,10 @@ pub fn resolveRef(git_dir: []const u8, ref_name: []const u8, platform_impl: anyt
         };
         
         if (resolved.is_symbolic) {
-            // Update current_ref for next iteration
-            {
-                const dbg2 = std.fmt.allocPrint(allocator, "DEBUG resolveRef loop: symbolic ref '{s}' -> '{s}'\n", .{ current_ref, resolved.target }) catch null;
-                if (dbg2) |d| { defer allocator.free(d); const f = std.fs.File{ .handle = 2 }; f.writeAll(d) catch {}; }
-            }
             allocator.free(current_ref);
             current_ref = try allocator.dupe(u8, resolved.target);
             allocator.free(resolved.target);
         } else {
-            {
-                const dbg3 = std.fmt.allocPrint(allocator, "DEBUG resolveRef loop: direct hash ref '{s}' -> '{s}'\n", .{ current_ref, resolved.target }) catch null;
-                if (dbg3) |d| { defer allocator.free(d); const f = std.fs.File{ .handle = 2 }; f.writeAll(d) catch {}; }
-            }
             // Found final hash, check if it's an annotated tag
             const final_hash = try resolveAnnotatedTag(git_dir, resolved.target, platform_impl, allocator);
             allocator.free(resolved.target);
@@ -255,11 +229,6 @@ fn resolveRefOnce(git_dir: []const u8, ref_name: []const u8, platform_impl: anyt
         try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_dir, ref_name });
     defer allocator.free(ref_path);
 
-    {
-        const dbg_path = std.fmt.allocPrint(allocator, "DEBUG resolveRefOnce: trying path='{s}' for ref='{s}'\n", .{ ref_path, ref_name }) catch null;
-        if (dbg_path) |d| { defer allocator.free(d); const f = std.fs.File{ .handle = 2 }; f.writeAll(d) catch {}; }
-    }
-    
     const content = platform_impl.fs.readFile(allocator, ref_path) catch |err| switch (err) {
         error.FileNotFound => {
             // Try packed-refs
