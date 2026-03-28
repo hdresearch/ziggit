@@ -9727,16 +9727,19 @@ fn cfgOutputList(content: []const u8, source_path: []const u8, scope: []const u8
         const term: []const u8 = if (null_term) "\x00" else "\n";
         var out = std.array_list.Managed(u8).init(allocator);
         defer out.deinit();
+        if (config_type != .none and !name_only) {
+            // For type filtering, silently skip entries that can't be converted
+            _ = cfgFormatTypeSilent(cfgEffectiveValue(e), config_type, allocator) catch continue;
+        }
         if (show_scope) { try out.appendSlice(scope); try out.append('\t'); }
         if (show_origin) {
-            if (std.mem.eql(u8, source_path, "standard input")) try out.appendSlice("standard input:")
-            else { try out.appendSlice("file:"); try out.appendSlice(source_path); }
+            try cfgAppendOrigin(&out, source_path);
             try out.append('\t');
         }
         if (name_only) {
             try out.appendSlice(e.full_key);
         } else if (config_type != .none) {
-            const fmt2 = cfgFormatType(cfgEffectiveValue(e), config_type, allocator, platform_impl) catch continue;
+            const fmt2 = cfgFormatTypeSilent(cfgEffectiveValue(e), config_type, allocator) catch continue;
             defer allocator.free(fmt2);
             try out.appendSlice(e.full_key);
             if (null_term) try out.append('\n') else try out.append('=');
@@ -9751,6 +9754,31 @@ fn cfgOutputList(content: []const u8, source_path: []const u8, scope: []const u8
         }
         try out.appendSlice(term);
         try platform_impl.writeStdout(out.items);
+    }
+}
+
+fn cfgAppendOrigin(out: *std.array_list.Managed(u8), source_path: []const u8) !void {
+    if (std.mem.eql(u8, source_path, "standard input")) {
+        try out.appendSlice("standard input:");
+    } else if (std.mem.eql(u8, source_path, "command line")) {
+        try out.appendSlice("command line:");
+    } else {
+        // Check if the path needs quoting (contains special chars)
+        var needs_quote = false;
+        for (source_path) |c| {
+            if (c == '"' or c == ' ' or c == '(' or c == ')') { needs_quote = true; break; }
+        }
+        if (needs_quote) {
+            try out.appendSlice("file:\"");
+            for (source_path) |c| {
+                if (c == '"') { try out.appendSlice("\\\""); }
+                else try out.append(c);
+            }
+            try out.append('"');
+        } else {
+            try out.appendSlice("file:");
+            try out.appendSlice(source_path);
+        }
     }
 }
 
