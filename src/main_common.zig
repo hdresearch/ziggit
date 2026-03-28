@@ -12716,7 +12716,7 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         defer allocator.free(src_hash2);
         const dst_ref_path3 = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, copy_dst });
         defer allocator.free(dst_ref_path3);
-        try std.fs.cwd().writeFile(.{ .sub_path = dst_ref_path3, .data = src_hash2 });
+        try std.fs.cwd().writeFile(.{ .sub_path = dst_ref_path3, .data = src_hash2 orelse "" });
     } else if (std.mem.eql(u8, first_arg.?, "--no-sort") or std.mem.startsWith(u8, first_arg.?, "--sort=") or
         std.mem.eql(u8, first_arg.?, "--sort") or std.mem.startsWith(u8, first_arg.?, "--track=") or
         std.mem.eql(u8, first_arg.?, "--no-track") or std.mem.eql(u8, first_arg.?, "--no-column") or
