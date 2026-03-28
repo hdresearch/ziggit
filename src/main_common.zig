@@ -584,6 +584,15 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         }
     }
     
+    // Process GIT_CONFIG_PARAMETERS environment variable
+    {
+        const params_str = std.process.getEnvVarOwned(allocator, "GIT_CONFIG_PARAMETERS") catch null;
+        if (params_str) |params| {
+            defer allocator.free(params);
+            parseGitConfigParameters(allocator, params);
+        }
+    }
+
     // Create args iterator for the remaining arguments (after the command)
     var remaining_args = std.array_list.Managed([]const u8).init(allocator);
     defer remaining_args.deinit();
