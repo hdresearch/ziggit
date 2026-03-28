@@ -33858,7 +33858,23 @@ fn nativeCmdCherryPick(allocator: std.mem.Allocator, args: [][]const u8, command
         } else {
             const new_hash = cherryPickCommit(git_path, commit_hash, allocator, platform_impl) catch |err| {
                 if (err == error.MergeConflict) {
-                    try platform_impl.writeStderr("error: could not apply commit\n");
+                    // Write CHERRY_PICK_HEAD
+                    const cp_path2 = std.fmt.allocPrint(allocator, "{s}/CHERRY_PICK_HEAD", .{git_path}) catch "";
+                    defer if (cp_path2.len > 0) allocator.free(cp_path2);
+                    if (cp_path2.len > 0) platform_impl.fs.writeFile(cp_path2, commit_hash) catch {};
+                    // Write MERGE_MSG with commit message
+                    const mm_path3 = std.fmt.allocPrint(allocator, "{s}/MERGE_MSG", .{git_path}) catch "";
+                    defer if (mm_path3.len > 0) allocator.free(mm_path3);
+                    if (mm_path3.len > 0) {
+                        const cm_msg2 = getCommitMessage(git_path, commit_hash, allocator, platform_impl) catch null;
+                        defer if (cm_msg2) |m| allocator.free(m);
+                        if (cm_msg2) |m| platform_impl.fs.writeFile(mm_path3, m) catch {};
+                    }
+                    const subj3 = getCommitSubject(commit_hash, git_path, platform_impl, allocator) catch "";
+                    defer if (subj3.len > 0) allocator.free(subj3);
+                    const err_msg3 = std.fmt.allocPrint(allocator, "error: could not apply {s}... {s}\n", .{ commit_hash[0..@min(7, commit_hash.len)], subj3 }) catch "";
+                    defer if (err_msg3.len > 0) allocator.free(err_msg3);
+                    if (err_msg3.len > 0) try platform_impl.writeStderr(err_msg3);
                     std.process.exit(1);
                 }
                 return err;
