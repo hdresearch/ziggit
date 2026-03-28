@@ -34230,53 +34230,44 @@ fn getConfigValueByKey(git_path: []const u8, key: []const u8, allocator: std.mem
 
 fn cmdWebBrowse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     var browser: ?[]const u8 = null;
-    var url: ?[]const u8 = null;
+    var url_val: ?[]const u8 = null;
     while (args.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, "--browser=")) {
-            browser = arg["--browser=".len..];
-        } else if (std.mem.eql(u8, arg, "-b")) {
-            browser = args.next();
-        } else if (!std.mem.startsWith(u8, arg, "-")) {
-            url = arg;
-        }
+        if (std.mem.startsWith(u8, arg, "--browser=")) browser = arg["--browser=".len..]
+        else if (!std.mem.startsWith(u8, arg, "-")) url_val = arg;
     }
-    if (url == null) {
-        try platform_impl.writeStderr("usage: git web--browse [--browser=browser] <url>\n");
-        std.process.exit(1);
-    }
+    if (url_val == null) { try platform_impl.writeStderr("usage: git web--browse\n"); std.process.exit(1); }
     const git_path = findGitDirectory(allocator, platform_impl) catch null;
     defer if (git_path) |p| allocator.free(p);
-    var cmd_str: ?[]const u8 = null;
-    var browser_path: ?[]const u8 = null;
+    var run_cmd: ?[]const u8 = null;
     if (browser) |b| {
         if (git_path) |gp| {
-            const key1 = std.fmt.allocPrint(allocator, "browser.{s}.cmd", .{b}) catch null;
-            defer if (key1) |k| allocator.free(k);
-            if (key1) |k| cmd_str = getConfigValueByKey(gp, k, allocator);
-            const key2 = std.fmt.allocPrint(allocator, "browser.{s}.path", .{b}) catch null;
-            defer if (key2) |k| allocator.free(k);
-            if (key2) |k| browser_path = getConfigValueByKey(gp, k, allocator);
+            const k1 = std.fmt.allocPrint(allocator, "browser.{s}.cmd", .{b}) catch null;
+            defer if (k1) |k| allocator.free(k);
+            if (k1) |k| run_cmd = getConfigValueByKey(gp, k, allocator);
+            if (run_cmd == null) {
+                const k2 = std.fmt.allocPrint(allocator, "browser.{s}.path", .{b}) catch null;
+                defer if (k2) |k| allocator.free(k);
+                if (k2) |k| {
+                    const pv = getConfigValueByKey(gp, k, allocator);
+                    if (pv) |pval| {
+                        run_cmd = std.fmt.allocPrint(allocator, "\"{s}\"", .{pval}) catch null;
+                        allocator.free(pval);
+                    }
+                }
+            }
         }
     }
-    const actual_url = url.?;
-    if (cmd_str) |c| {
-        defer allocator.free(c);
-        const full_cmd = std.fmt.allocPrint(allocator, "{s} {s}", .{ c, actual_url }) catch return;
-        defer allocator.free(full_cmd);
-        const argv = [_][]const u8{ "/bin/sh", "-c", full_cmd };
-        var child = std.process.Child.init(&argv, allocator);
-        child.stdout_behavior = .Inherit;
-        child.stderr_behavior = .Inherit;
-        try child.spawn();
-    } else if (browser_path) |bp| {
-        defer allocator.free(bp);
-        const full_cmd2 = std.fmt.allocPrint(allocator, "{s} {s}", .{ bp, actual_url }) catch return;
-        defer allocator.free(full_cmd2);
-        const argv2 = [_][]const u8{ "/bin/sh", "-c", full_cmd2 };
-        var child2 = std.process.Child.init(&argv2, allocator);
-        child2.stdout_behavior = .Inherit;
-        child2.stderr_behavior = .Inherit;
-        try child2.spawn();
+    if (run_cmd) |rc| {
+        defer allocator.free(rc);
+        const sc = std.fmt.allocPrint(allocator, "{s} \"$@\"", .{rc}) catch return;
+        defer allocator.free(sc);
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &[_][]const u8{ "/bin/sh", "-c", sc, "--", url_val.? },
+        }) catch return;
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        if (result.stdout.len > 0) try platform_impl.writeStdout(result.stdout);
     } else {
         try platform_impl.writeStderr("No suitable browser detected.\n");
         std.process.exit(1);
