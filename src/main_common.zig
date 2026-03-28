@@ -3935,11 +3935,14 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     var format_is_separator = false; // true for "format:", false for "tformat:" / "--format="
     var max_count: ?u32 = null;
     var committish: ?[]const u8 = null;
+    var walk_reflog = false;
     
     // Parse arguments
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--oneline")) {
             oneline = true;
+        } else if (std.mem.eql(u8, arg, "-g") or std.mem.eql(u8, arg, "--walk-reflogs")) {
+            walk_reflog = true;
         } else if (std.mem.startsWith(u8, arg, "--format=")) {
             format_string = arg["--format=".len..]; 
         } else if (std.mem.startsWith(u8, arg, "--pretty=format:")) {
@@ -4012,10 +4015,118 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
 
     // Fast path for common case: log --format=%H -1 (just output HEAD commit hash)
     if (format_string != null and std.mem.eql(u8, format_string.?, "%H") and 
-        (max_count == 1) and committish == null) {
+        (max_count == 1) and committish == null and !walk_reflog) {
         const output = try std.fmt.allocPrint(allocator, "{s}\n", .{start_commit});
         defer allocator.free(output);
         try platform_impl.writeStdout(output);
+        return;
+    }
+
+    // Reflog walking mode (-g)
+    if (walk_reflog) {
+        // Determine which reflog to read
+        const ref_name = committish orelse "HEAD";
+        // Build reflog path
+        const reflog_path = try std.fmt.allocPrint(allocator, "{s}/logs/{s}", .{ git_path, ref_name });
+        defer allocator.free(reflog_path);
+        // Try refs/heads/<name> if direct path doesn't exist
+        var reflog_content: ?[]u8 = platform_impl.fs.readFile(allocator, reflog_path) catch null;
+        var reflog_path2: ?[]u8 = null;
+        defer if (reflog_path2) |p2| allocator.free(p2);
+        if (reflog_content == null and !std.mem.eql(u8, ref_name, "HEAD") and !std.mem.startsWith(u8, ref_name, "refs/")) {
+            reflog_path2 = try std.fmt.allocPrint(allocator, "{s}/logs/refs/heads/{s}", .{ git_path, ref_name });
+            reflog_content = platform_impl.fs.readFile(allocator, reflog_path2.?) catch null;
+        }
+        if (reflog_content) |content| {
+            defer allocator.free(content);
+            // Parse reflog entries (newest first)
+            var reflog_entries = std.array_list.Managed(ReflogEntry).init(allocator);
+            defer {
+                for (reflog_entries.items) |*e| {
+                    allocator.free(e.old_hash);
+                    allocator.free(e.new_hash);
+                    allocator.free(e.who);
+                    allocator.free(e.message);
+                }
+                reflog_entries.deinit();
+            }
+            var lines = std.mem.splitScalar(u8, content, '\n');
+            while (lines.next()) |line| {
+                if (line.len == 0) continue;
+                // Format: <old_hash> <new_hash> <who> <timestamp> <tz>\t<message>
+                if (line.len < 82) continue; // minimum: 40 + 1 + 40 + 1 = 82
+                const old_h = line[0..40];
+                const new_h = line[41..81];
+                // Rest after space is: "name <email> timestamp tz\tmessage"
+                const rest = line[82..];
+                var msg: []const u8 = "";
+                var who: []const u8 = rest;
+                if (std.mem.indexOf(u8, rest, "\t")) |tab_pos| {
+                    who = rest[0..tab_pos];
+                    msg = rest[tab_pos + 1 ..];
+                }
+                try reflog_entries.append(.{
+                    .old_hash = try allocator.dupe(u8, old_h),
+                    .new_hash = try allocator.dupe(u8, new_h),
+                    .who = try allocator.dupe(u8, who),
+                    .message = try allocator.dupe(u8, msg),
+                });
+            }
+            // Walk in reverse (newest first)
+            var count: u32 = 0;
+            var entry_idx: usize = reflog_entries.items.len;
+            while (entry_idx > 0 and (max_count == null or count < max_count.?)) {
+                entry_idx -= 1;
+                const entry = reflog_entries.items[entry_idx];
+                const ref_for_selector = if (committish != null) ref_name else "HEAD";
+                const selector = try std.fmt.allocPrint(allocator, "{s}@{{{d}}}", .{ ref_for_selector, reflog_entries.items.len - 1 - entry_idx });
+                defer allocator.free(selector);
+                if (format_string) |fmt| {
+                    if (format_is_separator and count > 0) {
+                        try platform_impl.writeStdout("\n");
+                    }
+                    try outputFormattedCommitWithReflog(fmt, entry.new_hash, selector, entry.message, entry.who, allocator, platform_impl);
+                    if (!format_is_separator) {
+                        try platform_impl.writeStdout("\n");
+                    }
+                } else if (oneline) {
+                    const short_hash = if (entry.new_hash.len >= 7) entry.new_hash[0..7] else entry.new_hash;
+                    const out_line = try std.fmt.allocPrint(allocator, "{s} {s}: {s}\n", .{ short_hash, selector, entry.message });
+                    defer allocator.free(out_line);
+                    try platform_impl.writeStdout(out_line);
+                } else {
+                    // Default format
+                    const out_hdr = try std.fmt.allocPrint(allocator, "commit {s} ({s})\n", .{ entry.new_hash, selector });
+                    defer allocator.free(out_hdr);
+                    try platform_impl.writeStdout(out_hdr);
+                    // Load commit for author/date/message
+                    if (objects.GitObject.load(entry.new_hash, git_path, platform_impl, allocator) catch null) |commit_obj| {
+                        defer commit_obj.deinit(allocator);
+                        const cdata = commit_obj.data;
+                        if (extractHeaderField(cdata, "author").len > 0) {
+                            const al = extractHeaderField(cdata, "author");
+                            const out_author = try std.fmt.allocPrint(allocator, "Reflog: {s} ({s})\nReflog message: {s}\nAuthor: {s}\n", .{ selector, getPersonName(al), entry.message, al });
+                            defer allocator.free(out_author);
+                            try platform_impl.writeStdout(out_author);
+                        }
+                        const cmsg = extractObjectMessage(cdata);
+                        try platform_impl.writeStdout("\n");
+                        var msg_iter = std.mem.splitScalar(u8, std.mem.trimRight(u8, cmsg, "\n"), '\n');
+                        while (msg_iter.next()) |ml| {
+                            if (ml.len == 0) {
+                                try platform_impl.writeStdout("\n");
+                            } else {
+                                const indented = try std.fmt.allocPrint(allocator, "    {s}\n", .{ml});
+                                defer allocator.free(indented);
+                                try platform_impl.writeStdout(indented);
+                            }
+                        }
+                        try platform_impl.writeStdout("\n");
+                    }
+                }
+                count += 1;
+            }
+        }
         return;
     }
     
@@ -4439,11 +4550,186 @@ fn outputFormattedCommit(format: []const u8, commit_hash: []const u8, allocator:
     try platform_impl.writeStdout(output.items);
 }
 
+const ReflogEntry = struct {
+    old_hash: []u8,
+    new_hash: []u8,
+    who: []u8,
+    message: []u8,
+};
+
 const ParsedIdent = struct {
     name: []const u8,
     email: []const u8,
     date: []const u8,
 };
+
+fn outputFormattedCommitWithReflog(format: []const u8, commit_hash: []const u8, selector: []const u8, reflog_msg: []const u8, reflog_who: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    // Load commit object for standard fields
+    const git_path = findGitDirectory(allocator, platform_impl) catch return;
+    defer allocator.free(git_path);
+
+    const commit_obj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch return;
+    defer commit_obj.deinit(allocator);
+
+    var tree_hash: []const u8 = "";
+    var author_full: []const u8 = "";
+    var committer_full: []const u8 = "";
+    var subject: []const u8 = "";
+    var body_buf = std.array_list.Managed(u8).init(allocator);
+    defer body_buf.deinit();
+    var raw_message: []const u8 = "";
+
+    if (std.mem.indexOf(u8, commit_obj.data, "\n\n")) |sep_pos| {
+        raw_message = commit_obj.data[sep_pos + 2 ..];
+    }
+    var lines_iter = std.mem.splitSequence(u8, commit_obj.data, "\n");
+    var in_body = false;
+    var first_body_line = true;
+    while (lines_iter.next()) |line| {
+        if (in_body) {
+            if (first_body_line) {
+                subject = line;
+                first_body_line = false;
+            } else {
+                if (body_buf.items.len > 0) body_buf.append('\n') catch {};
+                body_buf.appendSlice(line) catch {};
+            }
+        } else if (line.len == 0) {
+            in_body = true;
+        } else if (std.mem.startsWith(u8, line, "tree ")) {
+            tree_hash = line["tree ".len..];
+        } else if (std.mem.startsWith(u8, line, "author ")) {
+            author_full = line["author ".len..];
+        } else if (std.mem.startsWith(u8, line, "committer ")) {
+            committer_full = line["committer ".len..];
+        }
+    }
+
+    var output = std.array_list.Managed(u8).init(allocator);
+    defer output.deinit();
+
+    var i: usize = 0;
+    while (i < format.len) {
+        if (format[i] == '%' and i + 1 < format.len) {
+            const c = format[i + 1];
+            if (c == 'g' and i + 2 < format.len) {
+                const gc = format[i + 2];
+                if (gc == 's') {
+                    // %gs = reflog subject
+                    try output.appendSlice(reflog_msg);
+                    i += 3;
+                } else if (gc == 'd') {
+                    // %gd = reflog selector (short)
+                    try output.appendSlice(selector);
+                    i += 3;
+                } else if (gc == 'D') {
+                    // %gD = reflog selector (full)
+                    try output.appendSlice(selector);
+                    i += 3;
+                } else if (gc == 'n') {
+                    // %gn = reflog identity name
+                    const parsed_who = parseIdentField(reflog_who);
+                    try output.appendSlice(parsed_who.name);
+                    i += 3;
+                } else if (gc == 'e') {
+                    // %ge = reflog identity email
+                    const parsed_who = parseIdentField(reflog_who);
+                    try output.appendSlice(parsed_who.email);
+                    i += 3;
+                } else {
+                    try output.append('%');
+                    i += 1;
+                }
+            } else if (c == 'H') {
+                try output.appendSlice(commit_hash);
+                i += 2;
+            } else if (c == 'h') {
+                try output.appendSlice(if (commit_hash.len >= 7) commit_hash[0..7] else commit_hash);
+                i += 2;
+            } else if (c == 'T') {
+                try output.appendSlice(tree_hash);
+                i += 2;
+            } else if (c == 't') {
+                try output.appendSlice(if (tree_hash.len >= 7) tree_hash[0..7] else tree_hash);
+                i += 2;
+            } else if (c == 's') {
+                try output.appendSlice(subject);
+                i += 2;
+            } else if (c == 'B') {
+                const trimmed_raw = std.mem.trimRight(u8, raw_message, "\n");
+                try output.appendSlice(trimmed_raw);
+                try output.append('\n');
+                i += 2;
+            } else if (c == 'b') {
+                try output.appendSlice(std.mem.trimRight(u8, body_buf.items, "\n"));
+                i += 2;
+            } else if (c == 'n') {
+                try output.append('\n');
+                i += 2;
+            } else if (c == '%') {
+                try output.append('%');
+                i += 2;
+            } else if (c == 'a' and i + 2 < format.len) {
+                const spec = format[i + 2];
+                const parsed = parseIdentField(author_full);
+                if (spec == 'n') {
+                    try output.appendSlice(parsed.name);
+                } else if (spec == 'e') {
+                    try output.appendSlice(parsed.email);
+                } else if (spec == 'd' or spec == 'D' or spec == 'i' or spec == 'I') {
+                    try output.appendSlice(parsed.date);
+                } else {
+                    try output.appendSlice(author_full);
+                }
+                i += 3;
+            } else if (c == 'c' and i + 2 < format.len) {
+                const spec = format[i + 2];
+                const parsed = parseIdentField(committer_full);
+                if (spec == 'n') {
+                    try output.appendSlice(parsed.name);
+                } else if (spec == 'e') {
+                    try output.appendSlice(parsed.email);
+                } else if (spec == 'd' or spec == 'D' or spec == 'i' or spec == 'I') {
+                    try output.appendSlice(parsed.date);
+                } else {
+                    try output.appendSlice(committer_full);
+                }
+                i += 3;
+            } else if (c == 'x' and i + 3 < format.len) {
+                const hex_str = format[i + 2 .. i + 4];
+                const byte_val = std.fmt.parseInt(u8, hex_str, 16) catch 0;
+                try output.append(byte_val);
+                i += 4;
+            } else if (c == 'C' and i + 2 < format.len and format[i + 2] == '(') {
+                var j = i + 3;
+                while (j < format.len and format[j] != ')') : (j += 1) {}
+                i = if (j < format.len) j + 1 else j;
+            } else if (c == 'd' or c == 'D') {
+                i += 2;
+            } else {
+                try output.append(format[i]);
+                try output.append(format[i + 1]);
+                i += 2;
+            }
+        } else if (format[i] == '\\' and i + 1 < format.len) {
+            if (format[i + 1] == 'n') {
+                try output.append('\n');
+                i += 2;
+            } else if (format[i + 1] == 't') {
+                try output.append('\t');
+                i += 2;
+            } else {
+                try output.append(format[i]);
+                i += 1;
+            }
+        } else {
+            try output.append(format[i]);
+            i += 1;
+        }
+    }
+
+    try platform_impl.writeStdout(output.items);
+}
 
 fn parseIdentField(ident: []const u8) ParsedIdent {
     // Parse "Name <email> timestamp timezone"
@@ -36879,6 +37165,17 @@ fn saveRebaseState(git_path: []const u8, commits: *std.array_list.Managed([]u8),
         todo.appendSlice("pick ") catch {};
         todo.appendSlice(c) catch {};
         todo.append('\n') catch {};
+    }
+    // Debug: check what we're writing
+    {
+        const debug = std.fmt.allocPrint(allocator, "DEBUG: todo len={d} commits={d}\n", .{ todo.items.len, commits.items.len }) catch "";
+        defer if (debug.len > 0) allocator.free(debug);
+        if (debug.len > 0) platform_impl.writeStderr(debug) catch {};
+        for (commits.items, 0..) |c, ci| {
+            const d2 = std.fmt.allocPrint(allocator, "DEBUG: commit[{d}] len={d} = '{s}'\n", .{ ci, c.len, c }) catch "";
+            defer if (d2.len > 0) allocator.free(d2);
+            if (d2.len > 0) platform_impl.writeStderr(d2) catch {};
+        }
     }
     write(rebase_dir, "git-rebase-todo", todo.items, allocator, platform_impl);
 
