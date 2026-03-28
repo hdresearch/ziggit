@@ -30178,9 +30178,7 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
             show_pretty = true;
         } else if (std.mem.eql(u8, arg, "--cc")) {
             show_cc = true;
-            show_patch = true;
             show_raw = false;
-            recursive = true;
         } else if (std.mem.eql(u8, arg, "-c")) {
             show_combined = true;
             show_raw = false;
@@ -30209,6 +30207,17 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
             try tree_refs.append(arg);
         }
     }
+    // --cc defaults to patch mode if no other format flags given
+    if (show_cc and !show_patch and !show_stat and !show_shortstat and !show_summary and !patch_with_stat and !patch_with_raw) {
+        show_patch = true;
+        recursive = true;
+    }
+    // --cc with --stat should show stat only (not patch)
+    // --cc with --patch-with-stat should show both
+    if (show_cc) {
+        recursive = true;
+    }
+
     // Build options struct
     const dt_opts = DiffTreeOpts{
         .recursive = recursive,
