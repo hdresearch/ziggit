@@ -3815,6 +3815,16 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
 
             if (obj.type != .commit) continue;
 
+            if (lo.format_string) |fmt| {
+                if (lo.format_is_separator and idx > 0) {
+                    try pi.writeStdout("\n");
+                }
+                try writeFormattedCommit(fmt, hash, obj.data, pi, allocator);
+                if (!lo.format_is_separator) {
+                    try pi.writeStdout("\n");
+                }
+                continue;
+            }
             try writeCommitHeader(hash, obj.data, &lo, idx == start_hashes.items.len - 1, pi, allocator, git_path);
 
             const parents = try getAllParents(obj.data, allocator);
@@ -3968,7 +3978,16 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
         }
 
         // Output commit header
-        if (!lo.oneline) {
+        if (lo.format_string) |fmt| {
+            if (lo.format_is_separator and !first) {
+                try pi.writeStdout("\n");
+            }
+            first = false;
+            try writeFormattedCommit(fmt, cur_hash, obj.data, pi, allocator);
+            if (!lo.format_is_separator) {
+                try pi.writeStdout("\n");
+            }
+        } else if (!lo.oneline) {
             if (!first) try pi.writeStdout("\n");
             first = false;
             try writeCommitHeader(cur_hash, obj.data, &lo, false, pi, allocator, git_path);
