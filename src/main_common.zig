@@ -1672,6 +1672,15 @@ fn initRepositoryInDir(git_dir: []const u8, bare: bool, template_dir: ?[]const u
         break :blk try allocator.dupe(u8, "master");
     };
     defer allocator.free(default_branch);
+
+    // Validate branch name
+    if (!isValidBranchName(default_branch)) {
+        const msg = try std.fmt.allocPrint(allocator, "fatal: invalid branch name: '{s}'\n", .{default_branch});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        std.process.exit(128);
+    }
+
     const head_content = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{default_branch});
     defer allocator.free(head_content);
     try platform_impl.fs.writeFile(head_path, head_content);
@@ -11065,6 +11074,25 @@ fn isValidHashPrefix(hash: []const u8) bool {
     return true;
 }
 
+fn isValidBranchName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    if (name[0] == '-') return false;
+    if (name[0] == '.') return false;
+    if (std.mem.endsWith(u8, name, ".lock")) return false;
+    if (std.mem.endsWith(u8, name, ".")) return false;
+    if (std.mem.eql(u8, name, "@")) return false;
+    for (name) |c| {
+        if (c <= 0x20 or c == 0x7f) return false; // control chars and space
+        if (c == '~' or c == '^' or c == ':' or c == '\\') return false;
+        if (c == '?' or c == '*' or c == '[') return false;
+    }
+    // Check for ".." and "@{"
+    if (std.mem.indexOf(u8, name, "..") != null) return false;
+    if (std.mem.indexOf(u8, name, "@{") != null) return false;
+    if (std.mem.indexOf(u8, name, "//") != null) return false;
+    return true;
+}
+
 fn isValidHexString(s: []const u8) bool {
     for (s) |c| {
         if (!std.ascii.isHex(c)) return false;
@@ -11851,27 +11879,25 @@ fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         // Read old branch hash
         const old_ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, old_name });
         defer allocator.free(old_ref_path);
-        const old_hash = std.fs.cwd().readFileAlloc(allocator, old_ref_path, 4096) catch {
-            const msg = try std.fmt.allocPrint(allocator, "error: refname refs/heads/{s} not found\n", .{old_name});
-            defer allocator.free(msg);
-            try platform_impl.writeStderr(msg);
-            std.process.exit(128);
-            unreachable;
-        };
+        const old_hash_result = std.fs.cwd().readFileAlloc(allocator, old_ref_path, 4096);
+        const is_unborn = if (old_hash_result) |_| false else |_| true;
+        const old_hash = if (old_hash_result) |h| h else |_| try allocator.dupe(u8, "");
         defer allocator.free(old_hash);
 
-        // Write new branch ref
-        const new_ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, new_name });
-        defer allocator.free(new_ref_path);
-        // Create parent directories if needed (for branch names with slashes)
-        if (std.fs.path.dirname(new_ref_path)) |parent_dir| {
-            std.fs.cwd().makePath(parent_dir) catch {};
-        }
-        try std.fs.cwd().writeFile(.{ .sub_path = new_ref_path, .data = old_hash });
+        if (!is_unborn) {
+            // Write new branch ref
+            const new_ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, new_name });
+            defer allocator.free(new_ref_path);
+            // Create parent directories if needed (for branch names with slashes)
+            if (std.fs.path.dirname(new_ref_path)) |parent_dir| {
+                std.fs.cwd().makePath(parent_dir) catch {};
+            }
+            try std.fs.cwd().writeFile(.{ .sub_path = new_ref_path, .data = old_hash });
 
-        // Delete old branch ref (if different name)
-        if (!std.mem.eql(u8, old_name, new_name)) {
-            std.fs.cwd().deleteFile(old_ref_path) catch {};
+            // Delete old branch ref (if different name)
+            if (!std.mem.eql(u8, old_name, new_name)) {
+                std.fs.cwd().deleteFile(old_ref_path) catch {};
+            }
         }
 
         // Update HEAD if it pointed to the old branch
