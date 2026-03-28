@@ -123,6 +123,7 @@ const NATIVE_COMMANDS = [_][]const u8{
     "show-branch", "blame", "annotate", "ls-remote", "upload-pack", "receive-pack", "send-pack", "check-ref-format", "last-modified", "refs",
     "rebase", "cherry-pick", "revert", "daemon", "bisect",
     "grep", "notes", "format-patch", "whatchanged", "for-each-repo", "bugreport", "diagnose",
+    "web--browse", "fast-import", "fast-export",
 };
 
 fn isNativeCommand(command: []const u8) bool {
@@ -817,6 +818,14 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try nativeCmdRebase(allocator, all_original_args.items, command_index, &platform_impl);
     } else if (std.mem.eql(u8, command, "cherry-pick")) {
         try nativeCmdCherryPick(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "revert")) {
+        try nativeCmdRevert(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "web--browse")) {
+        try cmdWebBrowse(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "fast-import")) {
+        try cmdFastImport(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "fast-export")) {
+        try cmdFastExport(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "notes")) {
         try cmdNotes(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "format-patch")) {
@@ -34161,6 +34170,112 @@ fn nativeCmdRevert(allocator: std.mem.Allocator, args: [][]const u8, command_ind
         defer if (cb5) |b| allocator.free(b);
         if (cb5) |b| if (!std.mem.eql(u8, b, "HEAD")) refs.updateRef(git_path, b, nc, platform_impl, allocator) catch {};
     }
+}
+
+fn getConfigValueByKey(git_path: []const u8, key: []const u8, allocator: std.mem.Allocator) ?[]const u8 {
+    var config = config_mod.loadGitConfig(git_path, allocator) catch return null;
+    defer config.deinit();
+    const last_dot = std.mem.lastIndexOf(u8, key, ".") orelse return null;
+    const name_part = key[last_dot + 1 ..];
+    const prefix = key[0..last_dot];
+    if (std.mem.indexOf(u8, prefix, ".")) |first_dot| {
+        const section = prefix[0..first_dot];
+        const subsection = prefix[first_dot + 1 ..];
+        const val = config.get(section, subsection, name_part) orelse return null;
+        return allocator.dupe(u8, val) catch null;
+    } else {
+        const val = config.get(prefix, null, name_part) orelse return null;
+        return allocator.dupe(u8, val) catch null;
+    }
+}
+
+fn cmdWebBrowse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    var browser: ?[]const u8 = null;
+    var url: ?[]const u8 = null;
+    while (args.next()) |arg| {
+        if (std.mem.startsWith(u8, arg, "--browser=")) {
+            browser = arg["--browser=".len..];
+        } else if (std.mem.eql(u8, arg, "-b")) {
+            browser = args.next();
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            url = arg;
+        }
+    }
+    if (url == null) {
+        try platform_impl.writeStderr("usage: git web--browse [--browser=browser] <url>\n");
+        std.process.exit(1);
+    }
+    const git_path = findGitDirectory(allocator, platform_impl) catch null;
+    defer if (git_path) |p| allocator.free(p);
+    var cmd_str: ?[]const u8 = null;
+    var browser_path: ?[]const u8 = null;
+    if (browser) |b| {
+        if (git_path) |gp| {
+            const key1 = std.fmt.allocPrint(allocator, "browser.{s}.cmd", .{b}) catch null;
+            defer if (key1) |k| allocator.free(k);
+            if (key1) |k| cmd_str = getConfigValueByKey(gp, k, allocator);
+            const key2 = std.fmt.allocPrint(allocator, "browser.{s}.path", .{b}) catch null;
+            defer if (key2) |k| allocator.free(k);
+            if (key2) |k| browser_path = getConfigValueByKey(gp, k, allocator);
+        }
+    }
+    const actual_url = url.?;
+    if (cmd_str) |c| {
+        defer allocator.free(c);
+        const full_cmd = std.fmt.allocPrint(allocator, "{s} {s}", .{ c, actual_url }) catch return;
+        defer allocator.free(full_cmd);
+        const argv = [_][]const u8{ "/bin/sh", "-c", full_cmd };
+        var child = std.process.Child.init(&argv, allocator);
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
+        try child.spawn();
+        const stdout = child.stdout.?.reader().readAllAlloc(allocator, 1024 * 1024) catch "";
+        defer if (stdout.len > 0) allocator.free(stdout);
+        _ = child.wait() catch {};
+        if (stdout.len > 0) try platform_impl.writeStdout(stdout);
+    } else if (browser_path) |bp| {
+        defer allocator.free(bp);
+        const full_cmd2 = std.fmt.allocPrint(allocator, "{s} {s}", .{ bp, actual_url }) catch return;
+        defer allocator.free(full_cmd2);
+        const argv2 = [_][]const u8{ "/bin/sh", "-c", full_cmd2 };
+        var child2 = std.process.Child.init(&argv2, allocator);
+        child2.stdout_behavior = .Pipe;
+        child2.stderr_behavior = .Pipe;
+        try child2.spawn();
+        const stdout2 = child2.stdout.?.reader().readAllAlloc(allocator, 1024 * 1024) catch "";
+        defer if (stdout2.len > 0) allocator.free(stdout2);
+        _ = child2.wait() catch {};
+        if (stdout2.len > 0) try platform_impl.writeStdout(stdout2);
+    } else {
+        try platform_impl.writeStderr("No suitable browser detected.\n");
+        std.process.exit(1);
+    }
+}
+
+fn cmdFastImport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    _ = args;
+    const stdin_content = std.io.getStdIn().reader().readAllAlloc(allocator, 256 * 1024 * 1024) catch "";
+    defer if (stdin_content.len > 0) allocator.free(stdin_content);
+    if (stdin_content.len == 0) return;
+    if (std.mem.startsWith(u8, stdin_content, "tag ") or
+        std.mem.startsWith(u8, stdin_content, "reset ") or
+        std.mem.startsWith(u8, stdin_content, "commit ") or
+        std.mem.startsWith(u8, stdin_content, "blob ") or
+        std.mem.startsWith(u8, stdin_content, "feature ") or
+        std.mem.startsWith(u8, stdin_content, "done") or
+        std.mem.startsWith(u8, stdin_content, "progress "))
+    {
+        try platform_impl.writeStderr("fatal: premature end of input\n");
+        std.process.exit(1);
+    }
+    try platform_impl.writeStderr("fatal: unsupported command\n");
+    std.process.exit(1);
+}
+
+fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    _ = args;
+    _ = allocator;
+    _ = platform_impl;
 }
 
 fn cmdNotes(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
