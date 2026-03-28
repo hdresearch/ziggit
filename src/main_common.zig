@@ -19111,76 +19111,144 @@ fn getCommitterString(allocator: std.mem.Allocator) ![]u8 {
 }
 
 fn simpleRegexMatch(text: []const u8, pattern: []const u8) bool {
-    // Simple regex-like matching for config --get-regexp
-    // Supports: . (any char), \. (literal dot), * (zero or more of prev), ^ and $ anchors
-    // For most git tests, substring match with basic regex is sufficient
-    
-    // Try to match pattern at any position in text (unanchored by default)
     var anchored_start = false;
     var anchored_end = false;
-    var effective_pattern = pattern;
-    if (effective_pattern.len > 0 and effective_pattern[0] == '^') {
-        anchored_start = true;
-        effective_pattern = effective_pattern[1..];
-    }
-    if (effective_pattern.len > 0 and effective_pattern[effective_pattern.len - 1] == '$' and
-        (effective_pattern.len < 2 or effective_pattern[effective_pattern.len - 2] != '\\')) {
+    var ep = pattern;
+    if (ep.len > 0 and ep[0] == '^') { anchored_start = true; ep = ep[1..]; }
+    if (ep.len > 0 and ep[ep.len - 1] == '$' and (ep.len < 2 or ep[ep.len - 2] != '\\')) {
         anchored_end = true;
-        effective_pattern = effective_pattern[0..effective_pattern.len - 1];
+        ep = ep[0 .. ep.len - 1];
     }
-    
-    // Convert regex pattern to a simple literal with dots as wildcards
-    // First, unescape common patterns
-    var i: usize = 0;
-    var literal_buf: [512]u8 = undefined;
-    var wild_at: [512]bool = undefined;
-    var li: usize = 0;
-    while (i < effective_pattern.len and li < 511) {
-        if (i + 1 < effective_pattern.len and effective_pattern[i] == '\\') {
-            // Escaped char - use literal
-            literal_buf[li] = effective_pattern[i + 1];
-            wild_at[li] = false;
-            li += 1;
-            i += 2;
-        } else if (effective_pattern[i] == '.') {
-            // Any single char
-            literal_buf[li] = '.';
-            wild_at[li] = true;
-            li += 1;
-            i += 1;
-        } else {
-            literal_buf[li] = effective_pattern[i];
-            wild_at[li] = false;
-            li += 1;
-            i += 1;
-        }
-    }
-    
-    if (li == 0) return true; // empty pattern matches everything
-    
-    const start: usize = if (anchored_start) 0 else 0;
-    const end: usize = if (anchored_start) 1 else if (text.len >= li) text.len - li + 1 else 0;
-    
-    var ti: usize = start;
-    while (ti < end) : (ti += 1) {
-        var match = true;
-        var mi: usize = 0;
-        while (mi < li) : (mi += 1) {
-            if (ti + mi >= text.len) {
-                match = false;
-                break;
-            }
-            if (!wild_at[mi] and literal_buf[mi] != text[ti + mi]) {
-                match = false;
-                break;
-            }
-        }
-        if (match) {
-            if (anchored_end and ti + li != text.len) continue;
+    const end_pos: usize = if (anchored_start) 1 else text.len + 1;
+    var ti: usize = 0;
+    while (ti < end_pos) : (ti += 1) {
+        if (simpleRegexMatchAt(text, ti, ep, 0)) |match_end| {
+            if (anchored_end and match_end != text.len) continue;
             return true;
         }
     }
     return false;
+}
+
+fn simpleRegexMatchAt(text: []const u8, tpos: usize, pat: []const u8, ppos: usize) ?usize {
+    var tp = tpos;
+    var pp = ppos;
+    while (pp < pat.len) {
+        if (pat[pp] == '[') {
+            const close = std.mem.indexOfPos(u8, pat, pp + 1, "]") orelse return null;
+            const class = pat[pp + 1 .. close];
+            const next_pp = close + 1;
+            const cq: u8 = if (next_pp < pat.len and (pat[next_pp] == '*' or pat[next_pp] == '+' or pat[next_pp] == '?')) pat[next_pp] else 0;
+            if (cq == '*' or cq == '?') {
+                if (simpleRegexMatchAt(text, tp, pat, next_pp + 1)) |end| return end;
+            }
+            if (cq == '*' or cq == '+') {
+                var tp2 = tp;
+                while (tp2 < text.len and matchCharClass(text[tp2], class)) tp2 += 1;
+                while (tp2 >= tp) {
+                    if (simpleRegexMatchAt(text, tp2, pat, next_pp + 1)) |end| return end;
+                    if (tp2 == tp) break;
+                    tp2 -= 1;
+                }
+                return null;
+            }
+            if (cq == '?') {
+                if (tp < text.len and matchCharClass(text[tp], class)) {
+                    if (simpleRegexMatchAt(text, tp + 1, pat, next_pp + 1)) |end| return end;
+                }
+                return simpleRegexMatchAt(text, tp, pat, next_pp + 1);
+            }
+            if (tp >= text.len) return null;
+            if (!matchCharClass(text[tp], class)) return null;
+            tp += 1; pp = next_pp; continue;
+        }
+        if (pat[pp] == '\\' and pp + 1 < pat.len) {
+            if (tp >= text.len or text[tp] != pat[pp + 1]) return null;
+            tp += 1; pp += 2; continue;
+        }
+        const has_quant = pp + 1 < pat.len and (pat[pp + 1] == '*' or pat[pp + 1] == '+' or pat[pp + 1] == '?');
+        if (pat[pp] == '.' and !has_quant) {
+            if (tp >= text.len) return null;
+            tp += 1; pp += 1; continue;
+        }
+        if (pat[pp] == '.' and has_quant) {
+            const quant = pat[pp + 1];
+            if (quant == '*') {
+                var tp2 = text.len;
+                while (tp2 >= tp) {
+                    if (simpleRegexMatchAt(text, tp2, pat, pp + 2)) |end| return end;
+                    if (tp2 == 0) break;
+                    tp2 -= 1;
+                }
+                return null;
+            }
+            if (quant == '+') {
+                if (tp >= text.len) return null;
+                var tp2 = text.len;
+                while (tp2 > tp) {
+                    if (simpleRegexMatchAt(text, tp2, pat, pp + 2)) |end| return end;
+                    tp2 -= 1;
+                }
+                return null;
+            }
+            if (quant == '?') {
+                if (tp < text.len) {
+                    if (simpleRegexMatchAt(text, tp + 1, pat, pp + 2)) |end| return end;
+                }
+                return simpleRegexMatchAt(text, tp, pat, pp + 2);
+            }
+        }
+        if (has_quant) {
+            const lit = pat[pp];
+            const quant = pat[pp + 1];
+            if (quant == '*') {
+                var tp2 = tp;
+                while (tp2 < text.len and text[tp2] == lit) tp2 += 1;
+                while (tp2 >= tp) {
+                    if (simpleRegexMatchAt(text, tp2, pat, pp + 2)) |end| return end;
+                    if (tp2 == tp) break;
+                    tp2 -= 1;
+                }
+                return null;
+            }
+            if (quant == '+') {
+                if (tp >= text.len or text[tp] != lit) return null;
+                var tp2 = tp;
+                while (tp2 < text.len and text[tp2] == lit) tp2 += 1;
+                while (tp2 > tp) {
+                    if (simpleRegexMatchAt(text, tp2, pat, pp + 2)) |end| return end;
+                    tp2 -= 1;
+                }
+                return null;
+            }
+            if (quant == '?') {
+                if (tp < text.len and text[tp] == lit) {
+                    if (simpleRegexMatchAt(text, tp + 1, pat, pp + 2)) |end| return end;
+                }
+                return simpleRegexMatchAt(text, tp, pat, pp + 2);
+            }
+        }
+        if (tp >= text.len or text[tp] != pat[pp]) return null;
+        tp += 1; pp += 1;
+    }
+    return tp;
+}
+
+fn matchCharClass(c: u8, class: []const u8) bool {
+    var negated = false;
+    var idx: usize = 0;
+    if (idx < class.len and class[idx] == '^') { negated = true; idx += 1; }
+    var matched = false;
+    while (idx < class.len) {
+        if (idx + 2 < class.len and class[idx + 1] == '-') {
+            if (c >= class[idx] and c <= class[idx + 2]) matched = true;
+            idx += 3;
+        } else {
+            if (c == class[idx]) matched = true;
+            idx += 1;
+        }
+    }
+    return if (negated) !matched else matched;
 }
 
 fn simpleGlobMatch(pattern: []const u8, text: []const u8) bool {
