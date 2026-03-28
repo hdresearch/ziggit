@@ -21825,8 +21825,8 @@ fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                         platform_impl.writeStdout(cmsg) catch {};
                     }
                 }
-                // Reset chmod mode after applying
-                chmod_mode = null;
+                // Don't reset chmod_mode - it persists for subsequent paths
+                // A new --chmod flag will override it
             }
         } else {
             // Unknown option starting with -
