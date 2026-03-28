@@ -1049,6 +1049,23 @@ fn State(comptime PlatformType: type) type {
     };
 }
 
+fn normalizeMode(mode: []const u8) []const u8 {
+    if (std.mem.eql(u8, mode, "644")) return "100644";
+    if (std.mem.eql(u8, mode, "755")) return "100755";
+    if (std.mem.eql(u8, mode, "120000")) return "120000";
+    if (std.mem.eql(u8, mode, "160000")) return "160000";
+    if (std.mem.eql(u8, mode, "040000") or std.mem.eql(u8, mode, "40000")) return "40000";
+    return mode;
+}
+
+fn parseTwoPaths(rest: []const u8, allocator: std.mem.Allocator) !struct { []const u8, []const u8 } {
+    _ = allocator;
+    if (std.mem.indexOfScalar(u8, rest, ' ')) |space| {
+        return .{ rest[0..space], rest[space + 1 ..] };
+    }
+    return error.InvalidFormat;
+}
+
 fn skipLine(data: []const u8, pos: usize) usize {
     const end = std.mem.indexOfPos(u8, data, pos, "\n") orelse data.len;
     return end + 1;
