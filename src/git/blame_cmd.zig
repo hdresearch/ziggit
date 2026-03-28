@@ -868,23 +868,25 @@ fn oC(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []con
 
 fn oD(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []const u8, ln: usize, se2: bool, _: bool, mal2: usize, lnw2: usize, abl2: usize, suppress2: bool, bb2: bool) !void {
     // Total visual width for hash field is min(abl2+1, 40) chars
-    // For non-boundary: show min(abbrev+1, 40) hex chars
-    // For boundary: ^HASH where HASH is min(abbrev, 40) hex chars  
-    // For -b boundary: spaces matching the width
-    const hex_width = @min(abl2 + 1, 40);
-    const boundary_hex = @min(abl2, 40);
+    // Hash display rules:
+    // Non-boundary: min(abbrev+1, 40) hex chars
+    // Boundary: ^HASH where HASH = min(abbrev+1, 40) - 1 hex chars
+    // Exception: when abbrev > 40, show full 40 hex (non-boundary) or ^+40 hex (boundary)
+    const field_width: usize = if (abl2 > 40) 40 else @min(abl2 + 1, 40);
+    const boundary_total: usize = if (abl2 > 40) 41 else field_width;
     const hash_str = blk: {
         if (bb2 and e.is_boundary) {
-            // -b: blank boundary - spaces for boundary width (^ + hex)
-            const spaces = try a.alloc(u8, boundary_hex + 1);
+            // -b: blank boundary - spaces matching boundary display width
+            const spaces = try a.alloc(u8, boundary_total);
             @memset(spaces, ' ');
             break :blk spaces;
         } else if (e.is_boundary) {
-            // ^hash format: ^ + boundary_hex hex chars
-            break :blk try std.fmt.allocPrint(a, "^{s}", .{e.commit_hash[0..boundary_hex]});
+            // ^hash format
+            const hex_count = boundary_total - 1;
+            break :blk try std.fmt.allocPrint(a, "^{s}", .{e.commit_hash[0..hex_count]});
         } else {
-            // non-boundary: hex_width hex chars
-            break :blk try std.fmt.allocPrint(a, "{s}", .{e.commit_hash[0..hex_width]});
+            // non-boundary: field_width hex chars
+            break :blk try std.fmt.allocPrint(a, "{s}", .{e.commit_hash[0..field_width]});
         }
     };
     defer a.free(hash_str);
