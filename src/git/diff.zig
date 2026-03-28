@@ -231,7 +231,75 @@ pub fn generateUnifiedDiffWithHashes(old_content: []const u8, new_content: []con
     return try result.toOwnedSlice();
 }
 
+pub fn generateUnifiedDiffWithHashesAndContext(old_content: []const u8, new_content: []const u8, file_path: []const u8, old_hash: []const u8, new_hash: []const u8, context_lines: u32, allocator: std.mem.Allocator) ![]u8 {
+    var old_lines = std.array_list.Managed([]const u8).init(allocator);
+    defer old_lines.deinit();
+    
+    var new_lines = std.array_list.Managed([]const u8).init(allocator);
+    defer new_lines.deinit();
+    
+    if (old_content.len > 0) {
+        var old_iter = std.mem.splitSequence(u8, old_content, "\n");
+        while (old_iter.next()) |line| {
+            try old_lines.append(line);
+        }
+        if (old_lines.items.len > 0 and old_content[old_content.len - 1] == '\n') {
+            _ = old_lines.pop();
+        }
+    }
+    
+    if (new_content.len > 0) {
+        var new_iter = std.mem.splitSequence(u8, new_content, "\n");
+        while (new_iter.next()) |line| {
+            try new_lines.append(line);
+        }
+        if (new_lines.items.len > 0 and new_content[new_content.len - 1] == '\n') {
+            _ = new_lines.pop();
+        }
+    }
+    
+    var hunks = std.array_list.Managed(DiffHunk).init(allocator);
+    defer {
+        for (hunks.items) |*hunk| {
+            hunk.deinit(allocator);
+        }
+        hunks.deinit();
+    }
+    
+    try generateDiffHunksWithContext(old_lines.items, new_lines.items, &hunks, allocator, context_lines);
+    
+    if (hunks.items.len == 0) {
+        return try allocator.dupe(u8, "");
+    }
+    
+    var result = std.array_list.Managed(u8).init(allocator);
+    defer result.deinit();
+    
+    const writer = result.writer();
+    
+    try writeDiffHeader(writer, file_path, old_hash, new_hash, old_content, new_content);
+    
+    for (hunks.items) |hunk| {
+        try writeHunkHeaderWithContext(writer, hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count, old_lines.items);
+        
+        for (hunk.lines.items) |line| {
+            const prefix = switch (line.type) {
+                .context => " ",
+                .add => "+",
+                .remove => "-",
+            };
+            try writer.print("{s}{s}\n", .{ prefix, line.content });
+        }
+    }
+    
+    return try result.toOwnedSlice();
+}
+
 fn generateDiffHunks(old_lines: []const []const u8, new_lines: []const []const u8, hunks: *std.array_list.Managed(DiffHunk), allocator: std.mem.Allocator) !void {
+    return generateDiffHunksWithContext(old_lines, new_lines, hunks, allocator, 3);
+}
+
+fn generateDiffHunksWithContext(old_lines: []const []const u8, new_lines: []const []const u8, hunks: *std.array_list.Managed(DiffHunk), allocator: std.mem.Allocator, context_lines: u32) !void {
     if (old_lines.len == 0 and new_lines.len == 0) return;
     
     // Use Myers diff algorithm to find the longest common subsequence
@@ -243,7 +311,7 @@ fn generateDiffHunks(old_lines: []const []const u8, new_lines: []const []const u
     defer edits.deinit();
     
     // Group edits into hunks with context
-    try generateHunksFromEdits(old_lines, new_lines, edits.items, hunks, allocator);
+    try generateHunksFromEditsWithContext(old_lines, new_lines, edits.items, hunks, allocator, context_lines);
 }
 
 fn findLCS(old_lines: []const []const u8, new_lines: []const []const u8, allocator: std.mem.Allocator) !std.array_list.Managed(usize) {
@@ -330,9 +398,12 @@ fn generateEditScript(old_lines: []const []const u8, new_lines: []const []const 
 }
 
 fn generateHunksFromEdits(old_lines: []const []const u8, new_lines: []const []const u8, edits: []const Edit, hunks: *std.array_list.Managed(DiffHunk), allocator: std.mem.Allocator) !void {
+    return generateHunksFromEditsWithContext(old_lines, new_lines, edits, hunks, allocator, 3);
+}
+
+fn generateHunksFromEditsWithContext(old_lines: []const []const u8, new_lines: []const []const u8, edits: []const Edit, hunks: *std.array_list.Managed(DiffHunk), allocator: std.mem.Allocator, context_lines: u32) !void {
     if (edits.len == 0) return;
     
-    const context_lines = 3;
     var current_hunk: ?DiffHunk = null;
     var last_change_idx: usize = 0;
     
