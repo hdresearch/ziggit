@@ -17371,6 +17371,7 @@ fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var modified_flag = false;
     var others = false;
     var stage = false;
+    var unmerged_flag = false;
     var directory = false;
     var no_empty_directory = false;
     var error_unmatch = false;
