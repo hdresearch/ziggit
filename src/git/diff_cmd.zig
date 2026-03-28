@@ -3006,6 +3006,188 @@ fn formatRfc2822Date(person: []const u8, allocator: std.mem.Allocator) ?[]u8 {
     return null;
 }
 
+fn writeFormattedCommit(format: []const u8, hash: []const u8, data: []const u8, pi: *const pm.Platform, allocator: std.mem.Allocator) !void {
+    // Parse commit fields
+    var tree_hash: []const u8 = "";
+    var parent_hashes_list = std.array_list.Managed([]const u8).init(allocator);
+    defer parent_hashes_list.deinit();
+    var author_full: []const u8 = "";
+    var committer_full: []const u8 = "";
+    var subject: []const u8 = "";
+    var body_buf = std.array_list.Managed(u8).init(allocator);
+    defer body_buf.deinit();
+    var raw_message: []const u8 = "";
+
+    if (std.mem.indexOf(u8, data, "\n\n")) |sep_pos| {
+        raw_message = data[sep_pos + 2 ..];
+    }
+    var lines_iter = std.mem.splitSequence(u8, data, "\n");
+    var in_body = false;
+    var first_body_line = true;
+    while (lines_iter.next()) |line| {
+        if (in_body) {
+            if (first_body_line) {
+                subject = line;
+                first_body_line = false;
+            } else {
+                if (body_buf.items.len > 0) body_buf.append('\n') catch {};
+                body_buf.appendSlice(line) catch {};
+            }
+        } else if (line.len == 0) {
+            in_body = true;
+        } else if (std.mem.startsWith(u8, line, "tree ")) {
+            tree_hash = line["tree ".len..];
+        } else if (std.mem.startsWith(u8, line, "parent ")) {
+            parent_hashes_list.append(line["parent ".len..]) catch {};
+        } else if (std.mem.startsWith(u8, line, "author ")) {
+            author_full = line["author ".len..];
+        } else if (std.mem.startsWith(u8, line, "committer ")) {
+            committer_full = line["committer ".len..];
+        }
+    }
+
+    var output = std.array_list.Managed(u8).init(allocator);
+    defer output.deinit();
+
+    var i: usize = 0;
+    while (i < format.len) {
+        if (format[i] == '%' and i + 1 < format.len) {
+            const c = format[i + 1];
+            if (c == 'H') {
+                try output.appendSlice(hash);
+                i += 2;
+            } else if (c == 'h') {
+                try output.appendSlice(if (hash.len >= 7) hash[0..7] else hash);
+                i += 2;
+            } else if (c == 'T') {
+                try output.appendSlice(tree_hash);
+                i += 2;
+            } else if (c == 't') {
+                try output.appendSlice(if (tree_hash.len >= 7) tree_hash[0..7] else tree_hash);
+                i += 2;
+            } else if (c == 'P') {
+                for (parent_hashes_list.items, 0..) |ph, pi2| {
+                    if (pi2 > 0) try output.append(' ');
+                    try output.appendSlice(ph);
+                }
+                i += 2;
+            } else if (c == 'p') {
+                for (parent_hashes_list.items, 0..) |ph, pi2| {
+                    if (pi2 > 0) try output.append(' ');
+                    try output.appendSlice(if (ph.len >= 7) ph[0..7] else ph);
+                }
+                i += 2;
+            } else if (c == 's') {
+                try output.appendSlice(subject);
+                i += 2;
+            } else if (c == 'f') {
+                // %f = sanitized subject for filename
+                for (subject) |ch| {
+                    if (std.ascii.isAlphanumeric(ch)) {
+                        try output.append(ch);
+                    } else {
+                        try output.append('-');
+                    }
+                }
+                i += 2;
+            } else if (c == 'b') {
+                try output.appendSlice(std.mem.trimRight(u8, body_buf.items, "\n"));
+                i += 2;
+            } else if (c == 'B') {
+                const trimmed_raw = std.mem.trimRight(u8, raw_message, "\n");
+                try output.appendSlice(trimmed_raw);
+                try output.append('\n');
+                i += 2;
+            } else if (c == 'n') {
+                try output.append('\n');
+                i += 2;
+            } else if (c == '%') {
+                try output.append('%');
+                i += 2;
+            } else if (c == 'a' and i + 2 < format.len) {
+                const spec = format[i + 2];
+                if (spec == 'n') {
+                    try output.appendSlice(parsePersonName(author_full));
+                } else if (spec == 'e' or spec == 'E') {
+                    try output.appendSlice(parsePersonEmail(author_full));
+                } else if (spec == 'd' or spec == 'D' or spec == 'i' or spec == 'I') {
+                    const date_str = formatGitDate(author_full, allocator);
+                    defer if (date_str) |d| allocator.free(d);
+                    if (date_str) |d| try output.appendSlice(d);
+                } else {
+                    try output.appendSlice(author_full);
+                }
+                i += 3;
+            } else if (c == 'c' and i + 2 < format.len) {
+                const spec = format[i + 2];
+                if (spec == 'n') {
+                    try output.appendSlice(parsePersonName(committer_full));
+                } else if (spec == 'e' or spec == 'E') {
+                    try output.appendSlice(parsePersonEmail(committer_full));
+                } else if (spec == 'd' or spec == 'D' or spec == 'i' or spec == 'I') {
+                    const date_str = formatGitDate(committer_full, allocator);
+                    defer if (date_str) |d| allocator.free(d);
+                    if (date_str) |d| try output.appendSlice(d);
+                } else {
+                    try output.appendSlice(committer_full);
+                }
+                i += 3;
+            } else if (c == 'd') {
+                // %d = decorations (simplified - empty)
+                i += 2;
+            } else if (c == 'D') {
+                // %D = decorations without wrapping
+                i += 2;
+            } else if (c == 'G' and i + 2 < format.len) {
+                i += 3;
+            } else if (c == 'C' and i + 2 < format.len) {
+                if (i + 2 < format.len and format[i + 2] == '(') {
+                    var j = i + 3;
+                    while (j < format.len and format[j] != ')') : (j += 1) {}
+                    i = if (j < format.len) j + 1 else j;
+                } else {
+                    i += 3;
+                }
+            } else if (c == 'x' and i + 3 < format.len) {
+                const hex_str = format[i + 2 .. i + 4];
+                const byte_val = std.fmt.parseInt(u8, hex_str, 16) catch 0;
+                try output.append(byte_val);
+                i += 4;
+            } else if (c == 'w' and i + 2 < format.len and format[i + 2] == '(') {
+                // %w() - rewrap, skip
+                var j = i + 3;
+                while (j < format.len and format[j] != ')') : (j += 1) {}
+                i = if (j < format.len) j + 1 else j;
+            } else if (c == '(' and i + 2 < format.len) {
+                // %(trailers), %(describe), etc - skip
+                var j = i + 2;
+                while (j < format.len and format[j] != ')') : (j += 1) {}
+                i = if (j < format.len) j + 1 else j;
+            } else {
+                try output.append(format[i]);
+                try output.append(format[i + 1]);
+                i += 2;
+            }
+        } else if (format[i] == '\\' and i + 1 < format.len) {
+            if (format[i + 1] == 'n') {
+                try output.append('\n');
+                i += 2;
+            } else if (format[i + 1] == 't') {
+                try output.append('\t');
+                i += 2;
+            } else {
+                try output.append(format[i]);
+                i += 1;
+            }
+        } else {
+            try output.append(format[i]);
+            i += 1;
+        }
+    }
+
+    try pi.writeStdout(output.items);
+}
+
 fn writeCommitHeader(hash: []const u8, data: []const u8, lo: *const LogOpts, is_last: bool, pi: *const pm.Platform, allocator: std.mem.Allocator, git_path: []const u8) !void {
     _ = is_last;
     const author = extractField(data, "author ");
