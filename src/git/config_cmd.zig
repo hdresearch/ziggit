@@ -833,7 +833,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
     }
 
     // Follow includes only when not restricted to a single scope
-    const follow_includes = if (no_includes_explicit) false else (includes_flag or (!use_global and !use_system and !use_local and !use_worktree and config_file == null));
+    const follow_includes = if (no_includes_explicit) false else (includes_flag or (!use_global and !use_system and !use_local and !use_worktree and config_file == null) or (config_file != null and std.mem.eql(u8, config_file.?, "-")));
 
     // Build our own config override list with proper has_equals tracking
     var cfg_overrides = buildConfigOverrides(allocator) catch |e| {
@@ -1008,7 +1008,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
             if (blob_content) |bc| {
                 const bdn = blob_display_name orelse "blob:";
                 try cfgValidateAndReport(bc, bdn, allocator, platform_impl);
-                try collectEntriesWithIncludes(bc, bdn, "command", allocator, platform_impl, &all_entries, git_path_opt, false);
+                try collectEntriesWithIncludes(bc, bdn, "command", allocator, platform_impl, &all_entries, git_path_opt, !no_includes_explicit);
             }
 
             if (blob_content == null) {
@@ -1390,7 +1390,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
             if (blob_content) |bc| {
                 const bdn = blob_display_name orelse "blob:";
                 cfgValidateAndReport(bc, bdn, allocator, platform_impl) catch {};
-                collectEntriesWithIncludes(bc, bdn, "command", allocator, platform_impl, &all_entries, git_path_opt, false) catch {};
+                collectEntriesWithIncludes(bc, bdn, "command", allocator, platform_impl, &all_entries, git_path_opt, !no_includes_explicit) catch {};
             }
             if (blob_content == null) for (sources.items) |source| {
                 const content = cfgReadSource(source.path, allocator, platform_impl) orelse continue;
@@ -1516,7 +1516,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
             if (blob_content) |bc| {
                 const bdn = blob_display_name orelse "blob:";
                 cfgValidateAndReport(bc, bdn, allocator, platform_impl) catch {};
-                collectEntriesWithIncludes(bc, bdn, "command", allocator, platform_impl, &all_entries, git_path_opt, false) catch {};
+                collectEntriesWithIncludes(bc, bdn, "command", allocator, platform_impl, &all_entries, git_path_opt, !no_includes_explicit) catch {};
             }
             if (blob_content == null) for (sources.items) |source| {
                 const content = cfgReadSource(source.path, allocator, platform_impl) orelse continue;
@@ -1882,6 +1882,16 @@ fn collectEntriesWithIncludesD(
                 .source_scope = src_scope_dup_inc,
             });
             // Then follow the include
+            // Reject relative includes from blob/stdin sources
+            const inc_val = e.value;
+            const is_abs_or_home = inc_val.len > 0 and (inc_val[0] == '/' or (inc_val[0] == '~' and inc_val.len > 1 and inc_val[1] == '/'));
+            if (!is_abs_or_home and (std.mem.startsWith(u8, source_path, "blob:") or std.mem.eql(u8, source_path, "standard input") or std.mem.eql(u8, source_path, "-"))) {
+                // Relative includes from blobs/stdin are not allowed
+                const em2 = std.fmt.allocPrint(allocator, "error: relative config includes must come from files\nerror: bad config line {d} in {s}\n", .{ e.line_number, source_path }) catch continue;
+                defer allocator.free(em2);
+                platform_impl.writeStderr(em2) catch {};
+                std.process.exit(1);
+            }
             const inc_path = resolveIncludePath(e.value, source_path, allocator) catch continue;
             defer allocator.free(inc_path);
             const inc_content = platform_impl.fs.readFile(allocator, inc_path) catch continue;
@@ -2076,14 +2086,53 @@ fn evaluateIncludeConditionEx(condition: []const u8, source_path: []const u8, al
         else
             (allocator.dupe(u8, match_pattern) catch return false);
         defer allocator.free(pat_with_slash);
+        // Also try matching against the un-resolved (symlink-preserving) path
+        // PWD env var preserves symlinks unlike realpath
+        const gp_unresolv: ?[]u8 = blk_unresolv: {
+            const pwd = std.posix.getenv("PWD") orelse break :blk_unresolv null;
+            // Check if git dir is under pwd (the common case: pwd + "/.git")
+            const pwd_git = std.fmt.allocPrint(allocator, "{s}/.git", .{pwd}) catch break :blk_unresolv null;
+            // Verify this actually points to the same place as gp_real
+            const pwd_git_real = std.fs.cwd().realpathAlloc(allocator, pwd_git) catch {
+                allocator.free(pwd_git);
+                break :blk_unresolv null;
+            };
+            defer allocator.free(pwd_git_real);
+            if (std.mem.eql(u8, pwd_git_real, gp_real)) {
+                // pwd_git is a valid un-resolved alias for gp_real
+                if (pwd_git.len > 0 and pwd_git[pwd_git.len - 1] != '/') {
+                    const with_slash = std.fmt.allocPrint(allocator, "{s}/", .{pwd_git}) catch {
+                        allocator.free(pwd_git);
+                        break :blk_unresolv null;
+                    };
+                    allocator.free(pwd_git);
+                    break :blk_unresolv with_slash;
+                }
+                break :blk_unresolv pwd_git;
+            }
+            allocator.free(pwd_git);
+            break :blk_unresolv null;
+        };
+        defer if (gp_unresolv) |u| allocator.free(u);
+
         if (icase) {
-            const lower_gp = std.ascii.allocLowerString(allocator, gp_with_slash) catch return false;
-            defer allocator.free(lower_gp);
             const lower_pat = std.ascii.allocLowerString(allocator, pat_with_slash) catch return false;
             defer allocator.free(lower_pat);
-            return simpleGlobMatch(lower_gp, lower_pat);
+            const lower_gp = std.ascii.allocLowerString(allocator, gp_with_slash) catch return false;
+            defer allocator.free(lower_gp);
+            if (simpleGlobMatch(lower_gp, lower_pat)) return true;
+            if (gp_unresolv) |u| {
+                const lower_u = std.ascii.allocLowerString(allocator, u) catch return false;
+                defer allocator.free(lower_u);
+                if (simpleGlobMatch(lower_u, lower_pat)) return true;
+            }
+            return false;
         }
-        return simpleGlobMatch(gp_with_slash, pat_with_slash);
+        if (simpleGlobMatch(gp_with_slash, pat_with_slash)) return true;
+        if (gp_unresolv) |u| {
+            if (simpleGlobMatch(u, pat_with_slash)) return true;
+        }
+        return false;
     }
     if (std.mem.startsWith(u8, condition, "onbranch:")) {
         // onbranch condition - check current branch
