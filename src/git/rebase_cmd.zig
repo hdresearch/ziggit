@@ -429,8 +429,8 @@ fn startRebase(git_path: []const u8, repo_root: []const u8, allocator: std.mem.A
         if (is_fast_forward) break :blk false;
         if (commits_to_replay.items.len == 0 and std.mem.eql(u8, head_hash, onto_hash))
             break :blk true;
-        // onto == merge_base means HEAD is already based on onto - noop only if no commits to replay
-        if (std.mem.eql(u8, onto_hash, merge_base) and commits_to_replay.items.len == 0)
+        // onto == merge_base means HEAD is already based on onto - noop
+        if (std.mem.eql(u8, onto_hash, merge_base))
             break :blk true;
         break :blk false;
     };
@@ -597,9 +597,6 @@ fn startRebase(git_path: []const u8, repo_root: []const u8, allocator: std.mem.A
             }
         }
     }
-
-    // Check for untracked files that would be overwritten by checkout
-    try checkUntrackedConflicts(git_path, onto_hash, allocator, platform_impl);
 
     // Detach HEAD at onto
     try refs.updateHEAD(git_path, onto_hash, platform_impl, allocator);
@@ -894,6 +891,8 @@ fn executePick(git_path: []const u8, hash: []const u8, original_line: []const u8
         if (err == error.MergeConflict) {
             // Write current state for continue
             try appendDone(git_path, dir_name, original_line, allocator, platform_impl);
+            // Write stopped-sha
+            try writeStoppedSha(git_path, dir_name, full_hash, allocator, platform_impl);
             // Write MERGE_MSG
             const msg2 = getCommitMessage(git_path, full_hash, allocator, platform_impl) catch null;
             if (msg2) |m| {
@@ -907,10 +906,13 @@ fn executePick(git_path: []const u8, hash: []const u8, original_line: []const u8
 
             const subj = getCommitSubject(full_hash, git_path, platform_impl, allocator) catch try allocator.dupe(u8, "");
             defer allocator.free(subj);
-            const err_msg = try std.fmt.allocPrint(allocator, "CONFLICT (content): Merge conflict. could not apply {s}... {s}\n", .{ hash[0..@min(7, hash.len)], subj });
+            const err_msg = try std.fmt.allocPrint(allocator, "error: could not apply {s}... {s}\n", .{ hash[0..@min(7, hash.len)], subj });
             defer allocator.free(err_msg);
             try platform_impl.writeStderr(err_msg);
             try platform_impl.writeStderr("hint: Resolve all conflicts manually, mark them as resolved with\nhint: \"git add/rm <conflicted_files>\", then run \"git rebase --continue\".\nhint: You can instead skip this commit: run \"git rebase --skip\".\nhint: To abort and get back to the state before \"git rebase\", run \"git rebase --abort\".\n");
+            const could_not_msg = try std.fmt.allocPrint(allocator, "Could not apply {s}... {s}\n", .{ hash[0..@min(7, hash.len)], subj });
+            defer allocator.free(could_not_msg);
+            try platform_impl.writeStderr(could_not_msg);
             std.process.exit(1);
         }
         // Other error - append to done and continue
@@ -1306,6 +1308,9 @@ fn commitResolvedConflict(git_path: []const u8, commit_hash: []const u8, dir_nam
     const new_hash = try new_commit.store(git_path, platform_impl, allocator);
     defer allocator.free(new_hash);
 
+    const old_head_for_reflog = try allocator.dupe(u8, current_head);
+    defer allocator.free(old_head_for_reflog);
+
     try refs.updateHEAD(git_path, new_hash, platform_impl, allocator);
 
     const reflog_action_str = getReflogAction(allocator);
@@ -1315,7 +1320,7 @@ fn commitResolvedConflict(git_path: []const u8, commit_hash: []const u8, dir_nam
     const action_name: []const u8 = if (is_apply_mode) "pick" else "continue";
     const msg2 = try std.fmt.allocPrint(allocator, "{s} ({s}): {s}", .{ reflog_action_str, action_name, subject });
     defer allocator.free(msg2);
-    writeReflogEntry(git_path, "HEAD", current_head, new_hash, msg2, allocator, platform_impl) catch {};
+    writeReflogEntry(git_path, "HEAD", old_head_for_reflog, new_hash, msg2, allocator, platform_impl) catch {};
 
     _ = dir_name;
 }
@@ -2073,6 +2078,14 @@ fn checkRebaseClean(git_path: []const u8, repo_root: []const u8, head_hash: []co
 }
 
 fn checkUntrackedConflicts(git_path: []const u8, onto_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const Platform) !void {
+    // Check for untracked files in the worktree that would conflict with files
+    // that need to be checked out during the rebase (i.e., new files in the
+    // commits being replayed or onto target that don't exist in HEAD).
+
+    // We need to check what files will be added to the worktree during rebase.
+    // The most important case: files in onto's tree that are NOT in HEAD tree
+    // and NOT in the index, but DO exist on disk as untracked files.
+
     // Get the tree of the onto commit
     const onto_tree = getCommitTree(git_path, onto_hash, allocator, platform_impl) catch return;
     defer allocator.free(onto_tree);
@@ -2083,30 +2096,31 @@ fn checkUntrackedConflicts(git_path: []const u8, onto_hash: []const u8, allocato
     const head_tree = getCommitTree(git_path, head_hash, allocator, platform_impl) catch return;
     defer allocator.free(head_tree);
 
+    // If onto tree == head tree, no conflicts possible
+    if (std.mem.eql(u8, onto_tree, head_tree)) return;
+
     // Collect files in onto tree but not in HEAD tree
-    var onto_files = std.StringHashMap(void).init(allocator);
-    defer onto_files.deinit();
+    var onto_entries = std.array_list.Managed(TreeFileEntry).init(allocator);
+    defer {
+        for (onto_entries.items) |*e| allocator.free(e.path);
+        onto_entries.deinit();
+    }
+    collectTreeEntriesForCheck(git_path, onto_tree, "", &onto_entries, allocator, platform_impl) catch {};
+
+    var onto_map = std.StringHashMap([20]u8).init(allocator);
+    defer onto_map.deinit();
+    for (onto_entries.items) |e| onto_map.put(e.path, e.sha1) catch {};
+
+    var head_entries = std.array_list.Managed(TreeFileEntry).init(allocator);
+    defer {
+        for (head_entries.items) |*e| allocator.free(e.path);
+        head_entries.deinit();
+    }
+    collectTreeEntriesForCheck(git_path, head_tree, "", &head_entries, allocator, platform_impl) catch {};
+
     var head_files = std.StringHashMap(void).init(allocator);
     defer head_files.deinit();
-
-    {
-        var entries = std.array_list.Managed(TreeFileEntry).init(allocator);
-        defer {
-            for (entries.items) |*e| allocator.free(e.path);
-            entries.deinit();
-        }
-        collectTreeEntriesForCheck(git_path, onto_tree, "", &entries, allocator, platform_impl) catch {};
-        for (entries.items) |e| onto_files.put(e.path, {}) catch {};
-    }
-    {
-        var entries = std.array_list.Managed(TreeFileEntry).init(allocator);
-        defer {
-            for (entries.items) |*e| allocator.free(e.path);
-            entries.deinit();
-        }
-        collectTreeEntriesForCheck(git_path, head_tree, "", &entries, allocator, platform_impl) catch {};
-        for (entries.items) |e| head_files.put(e.path, {}) catch {};
-    }
+    for (head_entries.items) |e| head_files.put(e.path, {}) catch {};
 
     // Also load the current index to know what's tracked
     var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch return;
@@ -2125,7 +2139,7 @@ fn checkUntrackedConflicts(git_path: []const u8, onto_hash: []const u8, allocato
     var dir = std.fs.cwd().openDir(repo_root, .{}) catch return;
     defer dir.close();
 
-    var it = onto_files.iterator();
+    var it = onto_map.iterator();
     while (it.next()) |entry| {
         const path = entry.key_ptr.*;
         if (!head_files.contains(path) and !indexed_files.contains(path)) {
@@ -2252,8 +2266,8 @@ fn checkoutCommitTree(git_path: []const u8, commit_hash: []const u8, allocator: 
 
     const repo_root = std.fs.path.dirname(git_path) orelse ".";
 
-    // Clear working directory (except .git)
-    clearWorkingDirectory(repo_root, allocator, platform_impl) catch {};
+    // Only remove tracked files (from index), leave untracked files alone
+    clearTrackedFiles(git_path, repo_root, allocator, platform_impl) catch {};
 
     // Load tree and checkout
     const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch return;
@@ -2264,6 +2278,35 @@ fn checkoutCommitTree(git_path: []const u8, commit_hash: []const u8, allocator: 
 
     // Update index
     updateIndexFromTree(git_path, tree_hash, allocator, platform_impl) catch {};
+}
+
+fn clearTrackedFiles(git_path: []const u8, repo_root: []const u8, allocator: std.mem.Allocator, platform_impl: *const Platform) !void {
+    // Only remove files that are in the current index (tracked files)
+    // Leave untracked files alone to match real git behavior
+    var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch return;
+    defer idx.deinit();
+
+    for (idx.entries.items) |entry| {
+        const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path }) catch continue;
+        defer allocator.free(full_path);
+        std.fs.cwd().deleteFile(full_path) catch {};
+    }
+
+    // Try to remove now-empty directories (best effort)
+    // Collect unique directory paths from index entries
+    var dirs = std.StringHashMap(void).init(allocator);
+    defer dirs.deinit();
+    for (idx.entries.items) |entry| {
+        if (std.mem.lastIndexOfScalar(u8, entry.path, '/')) |slash| {
+            dirs.put(entry.path[0..slash], {}) catch {};
+        }
+    }
+    var dir_it = dirs.iterator();
+    while (dir_it.next()) |d| {
+        const dir_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, d.key_ptr.* }) catch continue;
+        defer allocator.free(dir_path);
+        std.fs.cwd().deleteDir(dir_path) catch {};
+    }
 }
 
 fn clearWorkingDirectory(repo_root: []const u8, allocator: std.mem.Allocator, platform_impl: *const Platform) !void {
@@ -2476,6 +2519,7 @@ fn cherryPickCommit(git_path: []const u8, commit_hash: []const u8, allocator: st
     var tree_hash: ?[]const u8 = null;
     var parent_hash: ?[]const u8 = null;
     var author_line: ?[]const u8 = null;
+    var committer_line_orig: ?[]const u8 = null;
     var lines_iter = std.mem.splitSequence(u8, commit_obj.data, "\n");
     var header_end: usize = 0;
     var pos: usize = 0;
@@ -2488,6 +2532,7 @@ fn cherryPickCommit(git_path: []const u8, commit_hash: []const u8, allocator: st
         if (std.mem.startsWith(u8, line, "tree ")) tree_hash = line["tree ".len..];
         if (std.mem.startsWith(u8, line, "parent ") and parent_hash == null) parent_hash = line["parent ".len..];
         if (std.mem.startsWith(u8, line, "author ")) author_line = line["author ".len..];
+        if (std.mem.startsWith(u8, line, "committer ")) committer_line_orig = line["committer ".len..];
         pos += line.len + 1;
     }
 
@@ -2511,7 +2556,7 @@ fn cherryPickCommit(git_path: []const u8, commit_hash: []const u8, allocator: st
     if (std.mem.eql(u8, base_tree, current_tree)) {
         new_tree = try allocator.dupe(u8, commit_tree);
         const repo_root = std.fs.path.dirname(git_path) orelse ".";
-        clearWorkingDirectory(repo_root, allocator, platform_impl) catch {};
+        clearTrackedFiles(git_path, repo_root, allocator, platform_impl) catch {};
         const t_obj = objects.GitObject.load(commit_tree, git_path, platform_impl, allocator) catch return error.InvalidCommit;
         defer t_obj.deinit(allocator);
         if (t_obj.type == .tree) {
