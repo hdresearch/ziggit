@@ -27852,6 +27852,65 @@ fn collectFilesFromTree(allocator: std.mem.Allocator, tree_hash_str: []const u8,
     }
 }
 
+fn outputStatForTwoTrees(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, git_path: []const u8, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform) !void {
+    // Collect diff entries
+    var diff_entries = std.array_list.Managed(DiffStatEntry).init(allocator);
+    defer {
+        for (diff_entries.items) |*de| allocator.free(de.path);
+        diff_entries.deinit();
+    }
+    try collectTreeDiffEntries(allocator, tree1_hash, tree2_hash, "", git_path, pathspecs, platform_impl, &diff_entries);
+    
+    if (diff_entries.items.len == 0) return;
+    
+    // Find max filename width
+    var max_name_len: usize = 0;
+    var total_added: usize = 0;
+    var total_removed: usize = 0;
+    for (diff_entries.items) |de| {
+        if (de.path.len > max_name_len) max_name_len = de.path.len;
+        total_added += de.added;
+        total_removed += de.removed;
+    }
+    
+    for (diff_entries.items) |de| {
+        const padding = max_name_len - de.path.len;
+        const pad_buf = try allocator.alloc(u8, padding);
+        defer allocator.free(pad_buf);
+        @memset(pad_buf, ' ');
+        
+        const total = de.added + de.removed;
+        var plus_buf = try allocator.alloc(u8, de.added);
+        defer allocator.free(plus_buf);
+        @memset(plus_buf, '+');
+        var minus_buf = try allocator.alloc(u8, de.removed);
+        defer allocator.free(minus_buf);
+        @memset(minus_buf, '-');
+        
+        const line = try std.fmt.allocPrint(allocator, " {s}{s} | {d} {s}{s}\n", .{ de.path, pad_buf, total, plus_buf, minus_buf });
+        defer allocator.free(line);
+        try platform_impl.writeStdout(line);
+    }
+    
+    const summary = try std.fmt.allocPrint(allocator, " {d} file{s} changed", .{
+        diff_entries.items.len,
+        if (diff_entries.items.len != 1) "s" else "",
+    });
+    defer allocator.free(summary);
+    try platform_impl.writeStdout(summary);
+    if (total_added > 0) {
+        const added = try std.fmt.allocPrint(allocator, ", {d} insertion{s}(+)", .{ total_added, if (total_added != 1) "s" else "" });
+        defer allocator.free(added);
+        try platform_impl.writeStdout(added);
+    }
+    if (total_removed > 0) {
+        const removed = try std.fmt.allocPrint(allocator, ", {d} deletion{s}(-)", .{ total_removed, if (total_removed != 1) "s" else "" });
+        defer allocator.free(removed);
+        try platform_impl.writeStdout(removed);
+    }
+    try platform_impl.writeStdout("\n");
+}
+
 fn outputSummaryForEmptyTree(allocator: std.mem.Allocator, tree_hash_str: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
     var files = std.array_list.Managed(FileStatEntry).init(allocator);
     defer {
