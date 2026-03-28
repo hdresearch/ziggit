@@ -9053,7 +9053,9 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         }
     } else if (use_local) {
         if (git_path_opt) |gp| {
-            const p = try std.fmt.allocPrint(allocator, "{s}/config", .{gp});
+            const abs_p = try std.fmt.allocPrint(allocator, "{s}/config", .{gp});
+            defer allocator.free(abs_p);
+            const p = try cfgMakeRelativePath(abs_p, allocator);
             try sources.append(.{ .path = p, .scope = "local", .needs_free = true });
         }
     } else {
@@ -9086,7 +9088,9 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
             }
         }
         if (git_path_opt) |gp| {
-            const p = try std.fmt.allocPrint(allocator, "{s}/config", .{gp});
+            const abs_p = try std.fmt.allocPrint(allocator, "{s}/config", .{gp});
+            defer allocator.free(abs_p);
+            const p = try cfgMakeRelativePath(abs_p, allocator);
             try sources.append(.{ .path = p, .scope = "local", .needs_free = true });
         }
     }
@@ -9891,6 +9895,53 @@ fn cfgParseDate(date_str: []const u8, allocator: std.mem.Allocator) ?[]u8 {
     return allocator.dupe(u8, trimmed) catch null;
 }
 
+fn cfgMakeRelativePath(abs_path: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    const cwd = std.fs.cwd().realpathAlloc(allocator, ".") catch return try allocator.dupe(u8, abs_path);
+    defer allocator.free(cwd);
+    if (std.mem.startsWith(u8, abs_path, cwd)) {
+        const rel = abs_path[cwd.len..];
+        if (rel.len > 0 and rel[0] == '/') return try allocator.dupe(u8, rel[1..]);
+        if (rel.len == 0) return try allocator.dupe(u8, ".");
+    }
+    return try allocator.dupe(u8, abs_path);
+}
+
+fn cfgRemoveEmptySections(cont: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    var lines_list = std.array_list.Managed([]const u8).init(allocator);
+    defer lines_list.deinit();
+    var iter_sec = std.mem.splitSequence(u8, cont, "\n");
+    while (iter_sec.next()) |line| try lines_list.append(line);
+    const lines_arr = lines_list.items;
+    var res = std.array_list.Managed(u8).init(allocator);
+    defer res.deinit();
+    var idx_s: usize = 0;
+    while (idx_s < lines_arr.len) {
+        const line = lines_arr[idx_s];
+        const tr = std.mem.trim(u8, line, " \t\r");
+        if (tr.len > 0 and tr[0] == '[') {
+            var has_c = false;
+            var has_cm = false;
+            var j: usize = idx_s + 1;
+            while (j < lines_arr.len) {
+                const nl = std.mem.trim(u8, lines_arr[j], " \t\r");
+                if (nl.len > 0 and nl[0] == '[') break;
+                if (nl.len > 0 and (nl[0] == '#' or nl[0] == ';')) { has_cm = true; }
+                else if (nl.len > 0) { has_c = true; break; }
+                j += 1;
+            }
+            if (!has_c and !has_cm) { idx_s = j; continue; }
+        }
+        if (res.items.len > 0) try res.append('\n');
+        try res.appendSlice(line);
+        idx_s += 1;
+    }
+    if (cont.len > 0 and cont[cont.len - 1] == '\n') {
+        if (res.items.len > 0 and res.items[res.items.len - 1] != '\n')
+            try res.append('\n');
+    }
+    return try res.toOwnedSlice();
+}
+
 fn cfgAppendOrigin(out: *std.array_list.Managed(u8), source_path: []const u8) !void {
     if (std.mem.eql(u8, source_path, "standard input")) {
         try out.appendSlice("standard input:");
@@ -10498,7 +10549,9 @@ fn cfgUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, value_r
             try result.append('\n');
     }
 
-    try platform_impl.fs.writeFile(cfg_path, result.items);
+    const cleaned = try cfgRemoveEmptySections(result.items, allocator);
+    defer allocator.free(cleaned);
+    try platform_impl.fs.writeFile(cfg_path, cleaned);
 }
 
 fn cfgRenameSection(cfg_path: []const u8, old_name: []const u8, new_name: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
