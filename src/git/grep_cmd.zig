@@ -103,11 +103,13 @@ const GrepOptions = struct {
             .pattern_files = std.array_list.Managed([]const u8).init(allocator),
             .extended_regexp_values = std.array_list.Managed(bool).init(allocator),
             .pattern_type_values = std.array_list.Managed(?PatternType).init(allocator),
+            .expr_tokens = std.array_list.Managed(ExprToken).init(allocator),
         };
     }
 
     fn deinit(self: *GrepOptions) void {
         self.patterns.deinit();
+        self.expr_tokens.deinit();
         self.pathspecs.deinit();
         self.pattern_files.deinit();
         self.extended_regexp_values.deinit();
