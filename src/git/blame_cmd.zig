@@ -648,6 +648,7 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
                 if (ub[idx] and t2t[idx] != std.math.maxInt(usize)) {
                     B.setEntry(&es[idx], cur.hash, info, a) catch {};
                     es[idx].is_boundary = true;
+                    es[idx].orig_line = t2t[idx] + 1;
                     ub[idx] = false;
                 }
             }
@@ -676,6 +677,14 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
         for (act.items) |idx| {
             if (ub[idx] and !fap[idx] and t2t[idx] != std.math.maxInt(usize)) {
                 B.setEntry(&es[idx], cur.hash, info, a) catch {};
+                es[idx].orig_line = t2t[idx] + 1;
+                // Set previous to first parent
+                if (pars.items.len > 0) {
+                    const ph = pars.items[0];
+                    const cl2 = @min(40, ph.len);
+                    @memcpy(es[idx].previous_hash[0..cl2], ph[0..cl2]);
+                    es[idx].has_previous = true;
+                }
                 ub[idx] = false;
             }
         }
