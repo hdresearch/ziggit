@@ -1,5 +1,32 @@
 const std = @import("std");
 
+/// Unescape git config escape sequences: \n, \t, \\, \"
+fn unescapeConfigValue(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
+    // Quick check: if no backslashes, just dupe
+    if (std.mem.indexOf(u8, input, "\\") == null) {
+        return try allocator.dupe(u8, input);
+    }
+    var result = std.ArrayList(u8).init(allocator);
+    errdefer result.deinit();
+    var i: usize = 0;
+    while (i < input.len) {
+        if (input[i] == '\\' and i + 1 < input.len) {
+            switch (input[i + 1]) {
+                'n' => { try result.append('\n'); i += 2; },
+                't' => { try result.append('\t'); i += 2; },
+                '\\' => { try result.append('\\'); i += 2; },
+                '"' => { try result.append('"'); i += 2; },
+                'b' => { try result.append(0x08); i += 2; },
+                else => { try result.append(input[i]); i += 1; },
+            }
+        } else {
+            try result.append(input[i]);
+            i += 1;
+        }
+    }
+    return try result.toOwnedSlice();
+}
+
 /// Git configuration entry
 pub const ConfigEntry = struct {
     section: []const u8,
@@ -143,16 +170,19 @@ pub const GitConfig = struct {
                 const value = std.mem.trim(u8, trimmed[equals_pos + 1..], " \t");
                 
                 // Remove quotes from value if present
-                const clean_value = if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"')
+                const raw_value = if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"')
                     value[1..value.len - 1]
                 else
                     value;
+                
+                // Unescape git config escape sequences within quoted values
+                const clean_value = try unescapeConfigValue(self.allocator, raw_value);
                 
                 const entry = ConfigEntry{
                     .section = try self.allocator.dupe(u8, current_section.?),
                     .subsection = if (current_subsection) |sub| try self.allocator.dupe(u8, sub) else null,
                     .name = try self.allocator.dupe(u8, key),
-                    .value = try self.allocator.dupe(u8, clean_value),
+                    .value = clean_value,
                 };
                 
                 try self.entries.append(entry);
