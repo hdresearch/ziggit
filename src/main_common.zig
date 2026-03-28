@@ -9919,6 +9919,18 @@ fn cfgRemoveEmptySections(cont: []const u8, allocator: std.mem.Allocator) ![]u8 
         const line = lines_arr[idx_s];
         const tr = std.mem.trim(u8, line, " \t\r");
         if (tr.len > 0 and tr[0] == '[') {
+            // Check for inline content after ] on same line
+            const close_b = std.mem.indexOf(u8, tr, "]");
+            if (close_b) |cb| {
+                const after = std.mem.trim(u8, tr[cb + 1 ..], " \t");
+                if (after.len > 0 and after[0] != '#' and after[0] != ';') {
+                    // Has inline content, keep this section
+                    if (res.items.len > 0) try res.append('\n');
+                    try res.appendSlice(line);
+                    idx_s += 1;
+                    continue;
+                }
+            }
             var has_c = false;
             var has_cm = false;
             var j: usize = idx_s + 1;
