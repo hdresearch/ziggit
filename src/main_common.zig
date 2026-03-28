@@ -3163,7 +3163,40 @@ fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
         has_files = true;
         
         // Handle special cases like "." for current directory
-        if (std.mem.eql(u8, file_path, ".")) {
+        if (std.mem.eql(u8, file_path, ".") and update_flag and !add_all_flag) {
+            // For -u flag: only update files already tracked in the index
+            const repo_root_upd = std.fs.path.dirname(git_path) orelse ".";
+            for (index.entries.items) |*entry| {
+                const fp = if (repo_root_upd.len > 0 and !std.mem.eql(u8, repo_root_upd, "."))
+                    std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root_upd, entry.path }) catch continue
+                else
+                    allocator.dupe(u8, entry.path) catch continue;
+                defer allocator.free(fp);
+                // Check if file exists and re-add it to update the hash
+                if (platform_impl.fs.exists(fp) catch false) {
+                    const content = platform_impl.fs.readFile(allocator, fp) catch continue;
+                    defer allocator.free(content);
+                    const blob = objects.createBlobObject(content, allocator) catch continue;
+                    defer blob.deinit(allocator);
+                    const hash_str = blob.store(git_path, platform_impl, allocator) catch continue;
+                    defer allocator.free(hash_str);
+                    // Update index entry SHA1
+                    var new_sha1: [20]u8 = undefined;
+                    var hi: usize = 0;
+                    while (hi < 20) : (hi += 1) {
+                        new_sha1[hi] = std.fmt.parseInt(u8, hash_str[hi * 2 .. hi * 2 + 2], 16) catch 0;
+                    }
+                    entry.sha1 = new_sha1;
+                    // Update stat info
+                    const stat = std.fs.cwd().statFile(fp) catch continue;
+                    entry.mtime_s = @intCast(@divFloor(stat.mtime, 1_000_000_000));
+                    entry.mtime_ns = @intCast(@mod(stat.mtime, 1_000_000_000));
+                    entry.ctime_s = @intCast(@divFloor(stat.ctime, 1_000_000_000));
+                    entry.ctime_ns = @intCast(@mod(stat.ctime, 1_000_000_000));
+                    entry.file_size = @intCast(stat.size);
+                }
+            }
+        } else if (std.mem.eql(u8, file_path, ".")) {
             // Add all files in current directory (recursively)
             try addDirectoryRecursively(allocator, cwd, "", &index, git_path, platform_impl);
         } else {
