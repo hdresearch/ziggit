@@ -1760,10 +1760,32 @@ fn initRepositoryInDir(git_dir: []const u8, bare: bool, template_dir: ?[]const u
     const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_dir});
     defer allocator.free(config_path);
     
+    // Determine object format and ref format from environment
+    const env_obj_fmt = std.process.getEnvVarOwned(allocator, "GIT_DEFAULT_HASH") catch null;
+    defer if (env_obj_fmt) |v| allocator.free(v);
+    const env_ref_fmt = std.process.getEnvVarOwned(allocator, "GIT_DEFAULT_REF_FORMAT") catch null;
+    defer if (env_ref_fmt) |v| allocator.free(v);
+    // Also check _ZIGGIT_INIT_OBJECT_FORMAT and _ZIGGIT_INIT_REF_FORMAT for explicit --object-format/--ref-format
+    const explicit_obj_fmt = std.process.getEnvVarOwned(allocator, "_ZIGGIT_INIT_OBJECT_FORMAT") catch null;
+    defer if (explicit_obj_fmt) |v| allocator.free(v);
+    const explicit_ref_fmt = std.process.getEnvVarOwned(allocator, "_ZIGGIT_INIT_REF_FORMAT") catch null;
+    defer if (explicit_ref_fmt) |v| allocator.free(v);
+    
+    const effective_obj_fmt = explicit_obj_fmt orelse env_obj_fmt;
+    const effective_ref_fmt = explicit_ref_fmt orelse env_ref_fmt;
+    
+    const use_sha256 = if (effective_obj_fmt) |of| std.ascii.eqlIgnoreCase(of, "sha256") else false;
+    const use_reftable = if (effective_ref_fmt) |rf| std.ascii.eqlIgnoreCase(rf, "reftable") else false;
+    const needs_extensions = use_sha256 or use_reftable;
+    
     var config_buf = std.array_list.Managed(u8).init(allocator);
     defer config_buf.deinit();
     try config_buf.appendSlice("[core]\n");
-    try config_buf.appendSlice("\trepositoryformatversion = 0\n");
+    if (needs_extensions) {
+        try config_buf.appendSlice("\trepositoryformatversion = 1\n");
+    } else {
+        try config_buf.appendSlice("\trepositoryformatversion = 0\n");
+    }
     try config_buf.appendSlice("\tfilemode = true\n");
     if (bare) {
         try config_buf.appendSlice("\tbare = true\n");
@@ -1775,6 +1797,15 @@ fn initRepositoryInDir(git_dir: []const u8, bare: bool, template_dir: ?[]const u
         const shared_line = try std.fmt.allocPrint(allocator, "\tsharedRepository = {s}\n", .{s});
         defer allocator.free(shared_line);
         try config_buf.appendSlice(shared_line);
+    }
+    if (needs_extensions) {
+        try config_buf.appendSlice("[extensions]\n");
+        if (use_sha256) {
+            try config_buf.appendSlice("\tobjectformat = sha256\n");
+        }
+        if (use_reftable) {
+            try config_buf.appendSlice("\trefstorage = reftable\n");
+        }
     }
     try platform_impl.fs.writeFile(config_path, config_buf.items);
     
