@@ -29808,10 +29808,15 @@ fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index: us
                 try outputSummaryForTwoTrees(allocator, tree1, tree2, git_path, pathspecs.items, platform_impl);
             }
         } else {
-            _ = try diffTwoTreesFiltered(allocator, tree1, tree2, "", &dt_opts, pathspecs.items, platform_impl);
+            const d = try diffTwoTreesFiltered(allocator, tree1, tree2, "", &dt_opts, pathspecs.items, platform_impl);
+            if (d) had_diff = true;
         }
     }
     
+    // If --quiet, exit 1 when there were differences
+    if (quiet and had_diff) {
+        std.process.exit(1);
+    }
 }
 
 fn resolveToTree(allocator: std.mem.Allocator, ref_str: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) ![]u8 {
