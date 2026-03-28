@@ -399,16 +399,52 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
         group_sizes[gi] = gs;
     }
 
-    for (oi.items, 0..) |i, oi_idx| {
-        const e = es[i]; const line = lines.items[i]; const ln = i + 1;
-        if (sp or slp) {
-            const first_time = !seen_hashes.contains(&e.commit_hash);
-            if (first_time) seen_hashes.put(&e.commit_hash, {}) catch {};
-            const is_group_start = group_sizes[oi_idx] > 0;
-            try oP(pi, a, e, line, ln, first_time or slp, fp.?, is_group_start, if (is_group_start) group_sizes[oi_idx] else 0);
+    if (incremental) {
+        // Incremental output: group consecutive lines from same commit, output header per group
+        var idx: usize = 0;
+        while (idx < oi.items.len) {
+            const start_idx = idx;
+            const e = es[oi.items[idx]];
+            const start_ln = oi.items[idx] + 1;
+            idx += 1;
+            while (idx < oi.items.len and
+                std.mem.eql(u8, &es[oi.items[idx]].commit_hash, &e.commit_hash) and
+                oi.items[idx] == oi.items[idx - 1] + 1) : (idx += 1) {}
+            const count = idx - start_idx;
+            const orig_ln = if (e.orig_line > 0) e.orig_line else start_ln;
+            // Output header
+            const hdr = try std.fmt.allocPrint(a, "{s} {d} {d} {d}\n", .{ &e.commit_hash, orig_ln, start_ln, count });
+            defer a.free(hdr);
+            try pi.writeStdout(hdr);
+            // Author info
+            const ab = try std.fmt.allocPrint(a, "author {s}\nauthor-mail <{s}>\nauthor-time {d}\nauthor-tz {s}\ncommitter {s}\ncommitter-mail <{s}>\ncommitter-time {d}\ncommitter-tz {s}\nsummary {s}\n", .{
+                e.author_name, e.author_email, e.author_time, e.author_tz,
+                e.committer_name, e.committer_email, e.committer_time, e.committer_tz, e.summary,
+            });
+            defer a.free(ab);
+            try pi.writeStdout(ab);
+            if (e.has_previous) {
+                const pv = try std.fmt.allocPrint(a, "previous {s} {s}\n", .{ &e.previous_hash, fp.? });
+                defer a.free(pv);
+                try pi.writeStdout(pv);
+            }
+            if (e.is_boundary) try pi.writeStdout("boundary\n");
+            const fl = try std.fmt.allocPrint(a, "filename {s}\n", .{fp.?});
+            defer a.free(fl);
+            try pi.writeStdout(fl);
         }
-        else if (col) { try oC(pi, a, e, line, ln, se, srt, mal, lnw, abl, suppress, blank_boundary); }
-        else { try oD(pi, a, e, line, ln, se, srt, mal, lnw, abl, suppress, blank_boundary); }
+    } else {
+        for (oi.items, 0..) |i, oi_idx| {
+            const e = es[i]; const line = lines.items[i]; const ln = i + 1;
+            if (sp or slp) {
+                const first_time = !seen_hashes.contains(&e.commit_hash);
+                if (first_time) seen_hashes.put(&e.commit_hash, {}) catch {};
+                const is_group_start = group_sizes[oi_idx] > 0;
+                try oP(pi, a, e, line, ln, first_time or slp, fp.?, is_group_start, if (is_group_start) group_sizes[oi_idx] else 0);
+            }
+            else if (col) { try oC(pi, a, e, line, ln, se, srt, mal, lnw, abl, suppress, blank_boundary); }
+            else { try oD(pi, a, e, line, ln, se, srt, mal, lnw, abl, suppress, blank_boundary); }
+        }
     }
 }
 
