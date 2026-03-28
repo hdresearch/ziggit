@@ -79,6 +79,8 @@ const GrepOptions = struct {
     // Boolean expression support
     has_boolean_expr: bool = false,
     expr_root: ?*ExprNode = null,
+    expr_tokens: std.array_list.Managed(ExprToken),
+    expr_tokens_initialized: bool = false,
     // Pattern files
     pattern_files: std.array_list.Managed([]const u8),
     // Config-driven settings
