@@ -590,7 +590,6 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         if (params_str) |params| {
             defer allocator.free(params);
             // TODO: parseGitConfigParameters not yet implemented
-            _ = allocator;
             _ = params;
         }
     }
