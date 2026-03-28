@@ -121,7 +121,7 @@ pub const GitConfig = struct {
                 continue; // Skip extremely long lines instead of failing
             }
             
-            const trimmed = std.mem.trim(u8, line, " \t\r");
+            var trimmed = std.mem.trim(u8, line, " \t\r");
             
             // Skip empty lines and comments
             if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') {
@@ -130,12 +130,25 @@ pub const GitConfig = struct {
             
             // Section header: [section] or [section "subsection"]
             if (trimmed[0] == '[') {
-                if (trimmed.len < 3 or trimmed[trimmed.len - 1] != ']') {
+                // Find the closing ']' - there may be content after it on the same line
+                const close_bracket = blk: {
+                    // Handle subsection with quotes: [section "sub]section"] 
+                    var in_quotes = false;
+                    var bi: usize = 1;
+                    while (bi < trimmed.len) : (bi += 1) {
+                        if (trimmed[bi] == '"') in_quotes = !in_quotes;
+                        if (!in_quotes and trimmed[bi] == ']') break :blk bi;
+                    }
+                    break :blk null;
+                };
+                if (close_bracket == null or close_bracket.? < 2) {
                     // Malformed section header, skip it
                     continue;
                 }
-                
-                const section_content = trimmed[1..trimmed.len - 1];
+                const cb = close_bracket.?;
+                const section_content = trimmed[1..cb];
+                // Content after the section header on the same line (e.g., [test]key = value)
+                const after_header = std.mem.trim(u8, trimmed[cb + 1 ..], " \t");
                 
                 // Check for subsection: section "subsection"
                 if (std.mem.indexOf(u8, section_content, "\"")) |quote_start| {
@@ -155,22 +168,29 @@ pub const GitConfig = struct {
                             
                             current_section = try self.allocator.dupe(u8, section);
                             current_subsection = try self.allocator.dupe(u8, subsection);
+                            if (after_header.len == 0) continue;
+                            // Fall through to process after_header as key-value
+                            trimmed = after_header;
+                        } else {
                             continue;
                         }
+                    } else {
+                        continue;
                     }
-                    // Malformed quoted subsection, treat as simple section
+                } else {
+                    // Simple section without subsection
+                    const section = std.mem.trim(u8, section_content, " \t");
+                    if (section.len == 0) continue; // Skip empty section names
+                    
+                    if (current_section) |sec| self.allocator.free(sec);
+                    if (current_subsection) |sub| self.allocator.free(sub);
+                    
+                    current_section = try self.allocator.dupe(u8, section);
+                    current_subsection = null;
+                    if (after_header.len == 0) continue;
+                    // Fall through to process after_header as key-value
+                    trimmed = after_header;
                 }
-                
-                // Simple section without subsection
-                const section = std.mem.trim(u8, section_content, " \t");
-                if (section.len == 0) continue; // Skip empty section names
-                
-                if (current_section) |sec| self.allocator.free(sec);
-                if (current_subsection) |sub| self.allocator.free(sub);
-                
-                current_section = try self.allocator.dupe(u8, section);
-                current_subsection = null;
-                continue;
             }
             
             // Key-value pair: name = value
