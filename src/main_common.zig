@@ -34036,15 +34036,15 @@ fn nativeCmdRevert(allocator: std.mem.Allocator, args: [][]const u8, command_ind
         const revert_msg2 = std.fmt.allocPrint(allocator, "Revert \"{s}\"\n\nThis reverts commit {s}.\n", .{ subj, commit_hash }) catch continue;
         defer allocator.free(revert_msg2);
 
-        const committer = getCommitterString(allocator) catch try allocator.dupe(u8, "Unknown <unknown> 0 +0000");
-        defer allocator.free(committer);
+        const author_str = getAuthorString(allocator) catch try allocator.dupe(u8, "Unknown <unknown> 0 +0000");
+        defer allocator.free(author_str);
+        const committer_str = getCommitterString(allocator) catch try allocator.dupe(u8, "Unknown <unknown> 0 +0000");
+        defer allocator.free(committer_str);
 
-        const commit_content = std.fmt.allocPrint(allocator, "tree {s}\nparent {s}\nauthor {s}\ncommitter {s}\n\n{s}", .{
-            new_tree, current_hash, committer, committer, revert_msg2,
-        }) catch continue;
-        defer allocator.free(commit_content);
-
-        const new_commit = objects.writeObject(allocator, git_path, "commit", commit_content, platform_impl) catch continue;
+        const parents = [_][]const u8{current_hash};
+        const commit_obj2 = objects.createCommitObject(new_tree, &parents, author_str, committer_str, revert_msg2, allocator) catch continue;
+        defer commit_obj2.deinit(allocator);
+        const new_commit = commit_obj2.store(git_path, platform_impl, allocator) catch continue;
         defer allocator.free(new_commit);
 
         refs.updateHEAD(git_path, new_commit, platform_impl, allocator) catch {};
