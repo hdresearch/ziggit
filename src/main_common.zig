@@ -972,6 +972,19 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         }
     }
 
+    // Handle --git-completion-helper and --git-completion-helper-all
+    for (remaining_args_copy) |carg| {
+        if (std.mem.eql(u8, carg, "--git-completion-helper") or std.mem.eql(u8, carg, "--git-completion-helper-all")) {
+            const opts = getCompletionHelperOptions(command);
+            if (opts.len > 0) {
+                const cline = try std.fmt.allocPrint(allocator, "{s}\n", .{opts});
+                defer allocator.free(cline);
+                try platform_impl.writeStdout(cline);
+            }
+            std.process.exit(0);
+        }
+    }
+
     // Commands with native ziggit implementations
     if (std.mem.eql(u8, command, "init") or std.mem.eql(u8, command, "init-db")) {
         // Check for global --bare flag
