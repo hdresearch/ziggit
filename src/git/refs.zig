@@ -103,6 +103,14 @@ pub fn resolveRef(git_dir: []const u8, ref_name: []const u8, platform_impl: anyt
         try seen_refs.append(try allocator.dupe(u8, current_ref));
         
         const resolved = resolveRefOnce(git_dir, current_ref, platform_impl, allocator) catch |err| {
+            {
+                const dbg = std.fmt.allocPrint(allocator, "DEBUG resolveRef: failed ref='{s}' git_dir='{s}' err={any}\n", .{ current_ref, git_dir, err }) catch null;
+                if (dbg) |d| {
+                    defer allocator.free(d);
+                    const stderr_file = std.fs.File{ .handle = 2 };
+                    stderr_file.writeAll(d) catch {};
+                }
+            }
             // Enhanced fallback logic for different ref name formats
             if (std.mem.eql(u8, current_ref, "HEAD")) {
                 return err; // HEAD should always exist in a valid repo
