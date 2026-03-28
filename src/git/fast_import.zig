@@ -123,7 +123,7 @@ pub const Options = struct {
     expect_done: *bool,
 };
 
-fn findGitDir(allocator: std.mem.Allocator, platform_impl: anytype) ?[]const u8 {
+fn findGitDir(allocator: std.mem.Allocator) ?[]const u8 {
     // Check GIT_DIR env
     const env_map = std.process.getEnvMap(allocator) catch return null;
     defer {
