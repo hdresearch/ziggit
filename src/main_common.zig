@@ -9627,10 +9627,14 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 if (err == error.FileNotFound) try platform_impl.fs.writeFile(cfg_path, "");
                 break :blk @as([]u8, "");
             };
-            const editor = std.process.getEnvVarOwned(allocator, "GIT_EDITOR") catch
-                std.process.getEnvVarOwned(allocator, "VISUAL") catch
-                std.process.getEnvVarOwned(allocator, "EDITOR") catch
-                try allocator.dupe(u8, "vi");
+            // Editor priority: GIT_EDITOR env, core.editor config, VISUAL env, EDITOR env, vi
+            const editor = blk_editor: {
+                if (std.process.getEnvVarOwned(allocator, "GIT_EDITOR")) |e| break :blk_editor e else |_| {}
+                if (cfgLookup(sources.items, "core.editor", allocator, platform_impl)) |e| break :blk_editor e else |_| {}
+                if (std.process.getEnvVarOwned(allocator, "VISUAL")) |e| break :blk_editor e else |_| {}
+                if (std.process.getEnvVarOwned(allocator, "EDITOR")) |e| break :blk_editor e else |_| {}
+                break :blk_editor try allocator.dupe(u8, "vi");
+            };
             defer allocator.free(editor);
             var child_args2 = std.array_list.Managed([]const u8).init(allocator);
             defer child_args2.deinit();
@@ -9690,7 +9694,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                     defer allocator.free(content);
                     var ents = std.array_list.Managed(CfgEntry).init(allocator);
                     defer { for (ents.items) |*e| e.deinit(allocator); ents.deinit(); }
-                    cfgParseEntries(content, &ents, allocator) catch continue;
+                    cfgValidateAndReport(content, source.path, allocator, platform_impl) catch {}; cfgParseEntries(content, &ents, allocator) catch continue;
                     for (ents.items) |e| {
                         if (!cfgKeyMatches(e.full_key, key2)) continue;
                         if (vpat) |vp| {
@@ -9721,7 +9725,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                     defer allocator.free(content);
                     var ents = std.array_list.Managed(CfgEntry).init(allocator);
                     defer { for (ents.items) |*e| e.deinit(allocator); ents.deinit(); }
-                    cfgParseEntries(content, &ents, allocator) catch continue;
+                    cfgValidateAndReport(content, source.path, allocator, platform_impl) catch {}; cfgParseEntries(content, &ents, allocator) catch continue;
                     for (ents.items) |e| {
                         if (!cfgKeyMatches(e.full_key, key2)) continue;
                         if (vpat) |vp| {
@@ -9773,7 +9777,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 defer allocator.free(content);
                 var ents = std.array_list.Managed(CfgEntry).init(allocator);
                 defer { for (ents.items) |*e| e.deinit(allocator); ents.deinit(); }
-                cfgParseEntries(content, &ents, allocator) catch continue;
+                cfgValidateAndReport(content, source.path, allocator, platform_impl) catch {}; cfgParseEntries(content, &ents, allocator) catch continue;
                 for (ents.items) |e| {
                     if (!simpleRegexMatch(e.full_key, pattern)) continue;
                     if (vpat) |vp| { if (!simpleRegexMatch(e.value, vp)) continue; }
@@ -9902,6 +9906,83 @@ fn cfgReadSource(path: []const u8, allocator: std.mem.Allocator, platform_impl: 
     return platform_impl.fs.readFile(allocator, path) catch null;
 }
 
+const CfgParseError = struct {
+    line_number: usize,
+    message: []const u8,
+};
+
+/// Validate config content and return error info if invalid.
+/// Returns null if config is valid.
+fn cfgValidateConfig(content: []const u8, allocator: std.mem.Allocator) ?CfgParseError {
+    _ = allocator;
+    var line_iter = std.mem.splitSequence(u8, content, "\n");
+    var line_num: usize = 0;
+    while (line_iter.next()) |raw_line| {
+        line_num += 1;
+        const line = std.mem.trimRight(u8, raw_line, "\r");
+        const trimmed = std.mem.trim(u8, line, " \t");
+        if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') continue;
+
+        if (trimmed[0] == '[') {
+            // Check for incomplete section header
+            if (std.mem.indexOfScalar(u8, trimmed, ']') == null) {
+                return .{ .line_number = line_num, .message = "bad section header" };
+            }
+            continue;
+        }
+
+        // Check for incomplete quoted strings
+        if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq_pos| {
+            var raw_value = trimmed[eq_pos + 1 ..];
+            // Check for unterminated quotes across continuation lines
+            var in_quotes = false;
+            while (true) {
+                const tv = std.mem.trimRight(u8, raw_value, " \t");
+                var ii: usize = 0;
+                while (ii < tv.len) : (ii += 1) {
+                    if (tv[ii] == '\\' and ii + 1 < tv.len) { ii += 1; continue; }
+                    if (tv[ii] == '"') in_quotes = !in_quotes;
+                }
+                // Check for continuation
+                if (tv.len > 0 and tv[tv.len - 1] == '\\') {
+                    if (line_iter.next()) |nl| {
+                        line_num += 1;
+                        raw_value = std.mem.trimRight(u8, nl, "\r");
+                    } else break;
+                } else break;
+            }
+            if (in_quotes) {
+                return .{ .line_number = line_num, .message = "bad config line" };
+            }
+        } else {
+            // No = sign - could be boolean key or garbage
+            const cp = std.mem.indexOfScalar(u8, trimmed, '#') orelse std.mem.indexOfScalar(u8, trimmed, ';');
+            const clean = if (cp) |c| std.mem.trimRight(u8, trimmed[0..c], " \t") else trimmed;
+            if (clean.len > 0) {
+                // Check if this looks like a valid boolean key (single word, no spaces)
+                if (std.mem.indexOfScalar(u8, clean, ' ') != null or std.mem.indexOfScalar(u8, clean, '\t') != null) {
+                    return .{ .line_number = line_num, .message = "bad config line" };
+                }
+            }
+        }
+    }
+    return null;
+}
+
+fn cfgValidateAndReport(content: []const u8, source_path: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    if (cfgValidateConfig(content, allocator)) |err| {
+        const source_name = if (std.mem.eql(u8, source_path, "-")) "standard input" else source_path;
+        const em = try std.fmt.allocPrint(allocator, "fatal: bad config line {d} in {s}{s}\n", .{
+            err.line_number,
+            if (std.mem.eql(u8, source_path, "-")) @as([]const u8, "") else @as([]const u8, "file "),
+            source_name,
+        });
+        defer allocator.free(em);
+        try platform_impl.writeStderr(em);
+        std.process.exit(128);
+    }
+}
+
 fn cfgParseEntries(content: []const u8, entries: *std.array_list.Managed(CfgEntry), allocator: std.mem.Allocator) !void {
     var line_iter = std.mem.splitSequence(u8, content, "\n");
     var current_section: ?[]u8 = null;
@@ -9974,6 +10055,31 @@ fn cfgMakeKey(section: ?[]const u8, variable: []const u8, allocator: std.mem.All
     const last_dot = std.mem.lastIndexOfScalar(u8, full, '.') orelse return full;
     for (full[last_dot + 1 ..]) |*c| c.* = std.ascii.toLower(c.*);
     return full;
+}
+
+/// Normalize a config key like "Section.SubSection.Variable" ->
+/// lowercase section, preserve subsection case, lowercase variable
+fn cfgNormalizeKey(key_raw: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    const key = try allocator.dupe(u8, key_raw);
+    const last_dot = std.mem.lastIndexOfScalar(u8, key, '.') orelse {
+        // No dot - lowercase everything
+        for (key) |*c| c.* = std.ascii.toLower(c.*);
+        return key;
+    };
+    const first_dot = std.mem.indexOfScalar(u8, key, '.');
+    if (first_dot) |fd| {
+        if (fd < last_dot) {
+            // Three-level key: section.subsection.variable
+            // Lowercase section (before first dot) and variable (after last dot)
+            for (key[0..fd]) |*c| c.* = std.ascii.toLower(c.*);
+            for (key[last_dot + 1 ..]) |*c| c.* = std.ascii.toLower(c.*);
+        } else {
+            // Two-level key: section.variable - lowercase both
+            for (key[0..fd]) |*c| c.* = std.ascii.toLower(c.*);
+            for (key[last_dot + 1 ..]) |*c| c.* = std.ascii.toLower(c.*);
+        }
+    }
+    return key;
 }
 
 fn cfgParseSectionToKey(header: []const u8, allocator: std.mem.Allocator) ![]u8 {
@@ -10510,6 +10616,7 @@ fn cfgColorToAnsiAlloc(color: []const u8, allocator: std.mem.Allocator) ![]u8 {
 }
 
 fn cfgOutputList(content: []const u8, source_path: []const u8, scope: []const u8, null_term: bool, name_only: bool, show_origin: bool, show_scope: bool, config_type: ConfigType, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    try cfgValidateAndReport(content, source_path, allocator, platform_impl);
     var entries = std.array_list.Managed(CfgEntry).init(allocator);
     defer { for (entries.items) |*e| e.deinit(allocator); entries.deinit(); }
     try cfgParseEntries(content, &entries, allocator);
@@ -10519,8 +10626,7 @@ fn cfgOutputList(content: []const u8, source_path: []const u8, scope: []const u8
         defer out.deinit();
         if (show_scope) { try out.appendSlice(scope); try out.append('\t'); }
         if (show_origin) {
-            try out.appendSlice("file:");
-            try out.appendSlice(source_path);
+            try cfgAppendOrigin(&out, source_path);
             try out.append('\t');
         }
         if (name_only) {
