@@ -111,6 +111,10 @@ const Edit = struct {
 };
 
 fn writeHunkHeader(writer: anytype, old_start: usize, old_count: usize, new_start: usize, new_count: usize) !void {
+    try writeHunkHeaderWithContext(writer, old_start, old_count, new_start, new_count, null);
+}
+
+fn writeHunkHeaderWithContext(writer: anytype, old_start: usize, old_count: usize, new_start: usize, new_count: usize, old_lines: ?[]const []const u8) !void {
     // Git format: omit count when it's 1, show 0 explicitly
     // When count is 0, start should be 0 too (git convention)
     const actual_old_start = if (old_count == 0) 0 else old_start;
@@ -121,7 +125,35 @@ fn writeHunkHeader(writer: anytype, old_start: usize, old_count: usize, new_star
     try writer.writeAll(" +");
     try writer.print("{}", .{actual_new_start});
     if (new_count != 1) try writer.print(",{}", .{new_count});
-    try writer.writeAll(" @@\n");
+    try writer.writeAll(" @@");
+
+    // Find function context line: search backwards from hunk start for a line
+    // that starts with a letter, $, or _ (default funcname pattern)
+    if (old_lines) |lines| {
+        // Search from the line just before the hunk start (0-indexed: old_start - 2)
+        if (actual_old_start > 0) {
+            const search_start = if (actual_old_start >= 2) actual_old_start - 2 else 0;
+            var i: usize = search_start + 1;
+            while (i > 0) {
+                i -= 1;
+                if (i < lines.len) {
+                    const line = lines[i];
+                    if (line.len > 0 and isFuncnameByte(line[0])) {
+                        // Truncate to 40 chars like git
+                        const max_len = @min(line.len, 40);
+                        try writer.print(" {s}", .{line[0..max_len]});
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    try writer.writeAll("\n");
+}
+
+fn isFuncnameByte(c: u8) bool {
+    return std.ascii.isAlphabetic(c) or c == '$' or c == '_';
 }
 
 pub fn generateUnifiedDiff(old_content: []const u8, new_content: []const u8, file_path: []const u8, allocator: std.mem.Allocator) ![]u8 {
@@ -183,7 +215,7 @@ pub fn generateUnifiedDiffWithHashes(old_content: []const u8, new_content: []con
     
     // Hunks
     for (hunks.items) |hunk| {
-        try writeHunkHeader(writer, hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count);
+        try writeHunkHeaderWithContext(writer, hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count, old_lines.items);
         
         for (hunk.lines.items) |line| {
             const prefix = switch (line.type) {
@@ -497,7 +529,7 @@ pub fn generateUnifiedDiffWithOptions(
     
     // Hunks
     for (hunks.items) |hunk| {
-        try writeHunkHeader(writer, hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count);
+        try writeHunkHeaderWithContext(writer, hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count, old_lines.items);
         
         for (hunk.lines.items) |line| {
             const prefix = switch (line.type) {
