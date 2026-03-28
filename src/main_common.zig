@@ -31,11 +31,26 @@ fn initConfigOverrides(allocator: std.mem.Allocator) void {
 fn addConfigOverride(allocator: std.mem.Allocator, setting: []const u8) !void {
     initConfigOverrides(allocator);
     if (std.mem.indexOfScalar(u8, setting, '=')) |eq| {
-        const key = try allocator.dupe(u8, setting[0..eq]);
+        const key_raw = setting[0..eq];
+        if (key_raw.len == 0 or !cfgIsValidKey(key_raw)) {
+            const msg = std.fmt.allocPrint(allocator, "error: invalid key: {s}\nfatal: unable to parse command-line config\n", .{key_raw}) catch "";
+            defer if (msg.len > 0) allocator.free(msg);
+            const f = std.fs.File{ .handle = std.posix.STDERR_FILENO };
+            _ = f.write(msg) catch {};
+            std.process.exit(128);
+        }
+        const key = try allocator.dupe(u8, key_raw);
         const value = try allocator.dupe(u8, setting[eq + 1 ..]);
         try global_config_overrides.?.append(.{ .key = key, .value = value });
     } else {
         // key with no value means "true" (boolean)
+        if (setting.len == 0 or !cfgIsValidKey(setting)) {
+            const msg = std.fmt.allocPrint(allocator, "error: invalid key: {s}\nfatal: unable to parse command-line config\n", .{setting}) catch "";
+            defer if (msg.len > 0) allocator.free(msg);
+            const f = std.fs.File{ .handle = std.posix.STDERR_FILENO };
+            _ = f.write(msg) catch {};
+            std.process.exit(128);
+        }
         const key = try allocator.dupe(u8, setting);
         const value = try allocator.dupe(u8, "true");
         try global_config_overrides.?.append(.{ .key = key, .value = value });
