@@ -366,9 +366,10 @@ fn State(comptime PlatformType: type) type {
 
             // Parse file commands (M, D, deleteall, etc.)
             while (pos < data.len) {
+                // Skip blank lines between file commands
                 if (data[pos] == '\n') {
                     pos += 1;
-                    break; // Empty line ends commit
+                    continue;
                 }
 
                 const line_end = std.mem.indexOfPos(u8, data, pos, "\n") orelse data.len;
@@ -376,7 +377,7 @@ fn State(comptime PlatformType: type) type {
 
                 if (line.len == 0) {
                     pos = line_end + 1;
-                    break;
+                    continue;
                 }
 
                 if (std.mem.startsWith(u8, line, "M ")) {
@@ -385,7 +386,9 @@ fn State(comptime PlatformType: type) type {
                     // or M <mode> inline <path> followed by data
                     const rest = line[2..];
                     const space1 = std.mem.indexOfScalar(u8, rest, ' ') orelse continue;
-                    const mode = rest[0..space1];
+                    const raw_mode = rest[0..space1];
+                    // Normalize mode: 644 -> 100644, 755 -> 100755, etc.
+                    const mode = normalizeMode(raw_mode);
                     const after_mode = rest[space1 + 1 ..];
                     const space2 = std.mem.indexOfScalar(u8, after_mode, ' ') orelse continue;
                     const dataref = after_mode[0..space2];
