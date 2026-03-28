@@ -6939,15 +6939,37 @@ fn performThreeWayFileMerge(git_path: []const u8, base_files: *std.StringHashMap
             defer allocator.free(file_path);
             std.fs.cwd().deleteFile(file_path) catch {};
         } else if (base_hash != null and current_hash != null and target_hash == null) {
-            // File deleted in target branch
-            const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, filename });
-            defer allocator.free(file_path);
-            std.fs.cwd().deleteFile(file_path) catch {};
+            // File deleted in target branch but exists in current
+            if (std.mem.eql(u8, base_hash.?, current_hash.?)) {
+                // Not modified in current - safe to delete
+                const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, filename });
+                defer allocator.free(file_path);
+                std.fs.cwd().deleteFile(file_path) catch {};
+            } else {
+                // Modified in current but deleted in target - delete/modify conflict
+                conflicts_found = true;
+                const msg = try std.fmt.allocPrint(allocator, "CONFLICT (modify/delete): {s} deleted in theirs and modified in ours. Version ours of {s} left in tree.\n", .{ filename, filename });
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                // Leave the current version in the working tree
+                try writeFileFromBlob(git_path, filename, current_hash.?, repo_root, allocator, platform_impl);
+            }
         } else if (base_hash != null and current_hash == null and target_hash != null) {
-            // File deleted in current branch
-            const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, filename });
-            defer allocator.free(file_path);
-            std.fs.cwd().deleteFile(file_path) catch {};
+            // File deleted in current branch but exists in target
+            if (std.mem.eql(u8, base_hash.?, target_hash.?)) {
+                // Not modified in target - safe to keep deleted
+                const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, filename });
+                defer allocator.free(file_path);
+                std.fs.cwd().deleteFile(file_path) catch {};
+            } else {
+                // Modified in target but deleted in current - delete/modify conflict
+                conflicts_found = true;
+                const msg = try std.fmt.allocPrint(allocator, "CONFLICT (modify/delete): {s} deleted in ours and modified in theirs. Version theirs of {s} left in tree.\n", .{ filename, filename });
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                // Leave the target version in the working tree
+                try writeFileFromBlob(git_path, filename, target_hash.?, repo_root, allocator, platform_impl);
+            }
         } else if (current_hash != null and target_hash != null) {
             if (std.mem.eql(u8, current_hash.?, target_hash.?)) {
                 // No change needed - both have same content
