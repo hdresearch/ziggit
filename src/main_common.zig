@@ -30278,7 +30278,9 @@ fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, opts:
             }
         }
         if (!quiet) {
-            if (opts.show_raw and !opts.show_patch and !opts.patch_with_stat and !opts.patch_with_raw) {
+            // For -c/--cc, show combined raw by default (when no -p/--stat/etc.)
+            const show_combined_raw = opts.show_raw or (!opts.show_patch and !opts.patch_with_stat and !opts.patch_with_raw and !opts.show_stat and !opts.show_shortstat and !opts.show_summary);
+            if (show_combined_raw and !opts.show_patch and !opts.patch_with_stat and !opts.patch_with_raw and !opts.show_stat and !opts.show_shortstat) {
                 try outputCombinedRaw(allocator, all_parent_hashes.items, this_tree, git_path, opts, platform_impl);
             }
             if (opts.show_stat or (opts.patch_with_stat and !opts.show_patch)) {
