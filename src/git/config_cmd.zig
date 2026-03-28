@@ -7,6 +7,240 @@ const Allocator = std.mem.Allocator;
 // Re-export types from main_common
 const ConfigOverride = struct { key: []const u8, value: []const u8 };
 
+// Our own override struct that tracks has_equals for proper boolean handling
+const CfgOverride = struct {
+    key: []const u8,
+    value: []const u8,
+    has_equals: bool, // true if '=' was explicitly present (even with empty value)
+    source: []const u8, // "command" for -c, "environment" for --config-env
+};
+
+const BuildOverridesError = error{ BogusConfigParameters, OutOfMemory };
+
+fn buildConfigOverrides(allocator: Allocator) BuildOverridesError!std.array_list.Managed(CfgOverride) {
+    var overrides = std.array_list.Managed(CfgOverride).init(allocator);
+    errdefer {
+        for (overrides.items) |item| {
+            allocator.free(item.key);
+            allocator.free(item.value);
+        }
+        overrides.deinit();
+    }
+
+    // First, figure out how many GIT_CONFIG_PARAMETERS entries there are
+    // so we can skip them in main_mod's overrides (which includes both -c and GIT_CONFIG_PARAMETERS)
+    var gcp_count: usize = 0;
+    {
+        const params_str = std.process.getEnvVarOwned(allocator, "GIT_CONFIG_PARAMETERS") catch null;
+        if (params_str) |params| {
+            defer allocator.free(params);
+            var temp = std.array_list.Managed(CfgOverride).init(allocator);
+            defer {
+                for (temp.items) |item| {
+                    allocator.free(item.key);
+                    allocator.free(item.value);
+                }
+                temp.deinit();
+            }
+            parseGitConfigParams(params, &temp, allocator) catch |e| {
+                if (e == error.BogusConfigParameters) return error.BogusConfigParameters;
+                return error.OutOfMemory;
+            };
+            gcp_count = temp.items.len;
+        }
+    }
+
+    // Add -c overrides from main_mod (all except the last gcp_count entries)
+    if (main_mod.global_config_overrides) |mo_overrides| {
+        const total = mo_overrides.items.len;
+        const c_count = if (total >= gcp_count) total - gcp_count else 0;
+        for (mo_overrides.items[0..c_count]) |ov| {
+            const key_dup = try allocator.dupe(u8, ov.key);
+            const val_dup = try allocator.dupe(u8, ov.value);
+            try overrides.append(.{ .key = key_dup, .value = val_dup, .has_equals = true, .source = "command" });
+        }
+    }
+
+    // Handle --config-env from command line args (read from /proc/self/cmdline)
+    {
+        const cmdline = std.fs.cwd().readFileAlloc(allocator, "/proc/self/cmdline", 1024 * 1024) catch null;
+        if (cmdline) |cl| {
+            defer allocator.free(cl);
+            var arg_iter = std.mem.splitScalar(u8, cl, 0);
+            var prev_was_config_env = false;
+            while (arg_iter.next()) |arg| {
+                if (arg.len == 0) continue;
+                if (prev_was_config_env) {
+                    prev_was_config_env = false;
+                    // arg is "key=ENVVAR"
+                    processConfigEnvArg(arg, &overrides, allocator) catch continue;
+                } else if (std.mem.startsWith(u8, arg, "--config-env=")) {
+                    const rest = arg["--config-env=".len..];
+                    processConfigEnvArg(rest, &overrides, allocator) catch continue;
+                } else if (std.mem.eql(u8, arg, "--config-env")) {
+                    prev_was_config_env = true;
+                }
+            }
+        }
+    }
+
+    // Now add our properly parsed GIT_CONFIG_PARAMETERS entries
+    {
+        const params2 = std.process.getEnvVarOwned(allocator, "GIT_CONFIG_PARAMETERS") catch null;
+        if (params2) |params| {
+            defer allocator.free(params);
+            parseGitConfigParams(params, &overrides, allocator) catch |e| {
+                if (e == error.BogusConfigParameters) return error.BogusConfigParameters;
+                return error.OutOfMemory;
+            };
+        }
+    }
+
+    // GIT_CONFIG_COUNT/KEY_N/VALUE_N are already included from main_mod's overrides
+    // (they're processed first in zigzitMain, before -c and GIT_CONFIG_PARAMETERS)
+    // We need to mark the first entries from main_mod that came from GIT_CONFIG_COUNT
+    // with the "environment" source instead of "command"
+    {
+        const count_str = std.process.getEnvVarOwned(allocator, "GIT_CONFIG_COUNT") catch null;
+        if (count_str) |cs| {
+            defer allocator.free(cs);
+            const count = std.fmt.parseInt(usize, cs, 10) catch 0;
+            // The first 'count' entries from main_mod are GIT_CONFIG_COUNT entries
+            for (overrides.items[0..@min(count, overrides.items.len)]) |*ov| {
+                ov.source = "environment";
+            }
+        }
+    }
+
+    return overrides;
+}
+
+fn parseGitConfigParams(params: []const u8, overrides: *std.array_list.Managed(CfgOverride), allocator: Allocator) !void {
+    var i: usize = 0;
+    var key_buf = std.array_list.Managed(u8).init(allocator);
+    defer key_buf.deinit();
+    var val_buf = std.array_list.Managed(u8).init(allocator);
+    defer val_buf.deinit();
+
+    while (i < params.len) {
+        // Skip whitespace
+        while (i < params.len and (params[i] == ' ' or params[i] == '\t')) i += 1;
+        if (i >= params.len) break;
+
+        if (params[i] == '\'') {
+            const after_first = gcpExtract(params, i, &key_buf) orelse break;
+            i = after_first;
+
+            // Check if followed by = (new-style: 'key'='value' or 'key'=)
+            if (i < params.len and params[i] == '=') {
+                i += 1; // skip =
+                if (i < params.len and params[i] == '\'') {
+                    const after_val = gcpExtract(params, i, &val_buf) orelse break;
+                    i = after_val;
+                    // After closing quote, must be whitespace or end
+                    if (i < params.len and params[i] != ' ' and params[i] != '\t') return error.BogusConfigParameters;
+                    // New-style with quoted value
+                    const key_dup = try normalizeConfigKey(allocator, key_buf.items);
+                    const val_dup = try allocator.dupe(u8, val_buf.items);
+                    try overrides.append(.{ .key = key_dup, .value = val_dup, .has_equals = true, .source = "command" });
+                } else {
+                    // New-style: 'key'= with no quoted value (empty value)
+                    // Read unquoted value until whitespace
+                    const vs = i;
+                    while (i < params.len and params[i] != ' ' and params[i] != '\t') i += 1;
+                    const key_dup = try normalizeConfigKey(allocator, key_buf.items);
+                    const val_dup = try allocator.dupe(u8, params[vs..i]);
+                    try overrides.append(.{ .key = key_dup, .value = val_dup, .has_equals = true, .source = "command" });
+                }
+            } else if (i >= params.len or params[i] == ' ' or params[i] == '\t') {
+                // Old-style: 'key=value' all in one quoted string
+                const content = key_buf.items;
+                if (std.mem.indexOfScalar(u8, content, '=')) |eq| {
+                    const key_dup = try normalizeConfigKey(allocator, content[0..eq]);
+                    const val_dup = try allocator.dupe(u8, content[eq + 1 ..]);
+                    try overrides.append(.{ .key = key_dup, .value = val_dup, .has_equals = true, .source = "command" });
+                } else {
+                    // No = means boolean true
+                    const key_dup = try normalizeConfigKey(allocator, content);
+                    const val_dup = try allocator.dupe(u8, "");
+                    try overrides.append(.{ .key = key_dup, .value = val_dup, .has_equals = false, .source = "command" });
+                }
+            } else {
+                // Invalid character after closing quote (e.g., backslash) - bogus
+                return error.BogusConfigParameters;
+            }
+        } else {
+            const start2 = i;
+            while (i < params.len and params[i] != ' ' and params[i] != '\t') i += 1;
+            const entry = params[start2..i];
+            if (entry.len > 0) {
+                if (std.mem.indexOfScalar(u8, entry, '=')) |eq| {
+                    const key_dup = try normalizeConfigKey(allocator, entry[0..eq]);
+                    const val_dup = try allocator.dupe(u8, entry[eq + 1 ..]);
+                    try overrides.append(.{ .key = key_dup, .value = val_dup, .has_equals = true, .source = "command" });
+                } else {
+                    const key_dup = try normalizeConfigKey(allocator, entry);
+                    const val_dup = try allocator.dupe(u8, "");
+                    try overrides.append(.{ .key = key_dup, .value = val_dup, .has_equals = false, .source = "command" });
+                }
+            }
+        }
+    }
+}
+
+fn gcpExtract(params: []const u8, start: usize, buf: *std.array_list.Managed(u8)) ?usize {
+    var i = start;
+    if (i >= params.len or params[i] != '\'') return null;
+    i += 1;
+    buf.clearRetainingCapacity();
+    while (i < params.len) {
+        if (params[i] == '\'') {
+            // Check for '\'' escape (shell-style: end quote, escaped quote, start quote)
+            if (i + 3 < params.len and params[i + 1] == '\\' and params[i + 2] == '\'' and params[i + 3] == '\'') {
+                buf.append('\'') catch return null;
+                i += 4;
+                continue;
+            }
+            // Just a closing quote
+            i += 1;
+            return i;
+        }
+        buf.append(params[i]) catch return null;
+        i += 1;
+    }
+    return null; // unterminated
+}
+
+fn processConfigEnvArg(arg: []const u8, overrides: *std.array_list.Managed(CfgOverride), allocator: Allocator) !void {
+    // arg is "key=ENVVAR" - find the first = to split key from env var name
+    const eq = std.mem.indexOfScalar(u8, arg, '=') orelse return;
+    const key_raw = arg[0..eq];
+    const envvar_name = arg[eq + 1 ..];
+    if (key_raw.len == 0) return;
+    if (envvar_name.len == 0) return;
+    // Look up the environment variable
+    const val = std.process.getEnvVarOwned(allocator, envvar_name) catch |e| {
+        if (e == error.EnvironmentVariableNotFound) return;
+        return error.OutOfMemory;
+    };
+    const key_dup = try normalizeConfigKey(allocator, key_raw);
+    try overrides.append(.{ .key = key_dup, .value = val, .has_equals = true, .source = "command" });
+}
+
+fn normalizeConfigKey(allocator: Allocator, key: []const u8) ![]u8 {
+    var result = try allocator.dupe(u8, key);
+    // Normalize: lowercase section and variable parts, preserve subsection
+    if (std.mem.lastIndexOfScalar(u8, result, '.')) |last_dot| {
+        if (std.mem.indexOfScalar(u8, result, '.')) |first_dot| {
+            // Lowercase section (before first dot)
+            for (result[0..first_dot]) |*c| c.* = std.ascii.toLower(c.*);
+            // Lowercase variable (after last dot)
+            for (result[last_dot + 1 ..]) |*c| c.* = std.ascii.toLower(c.*);
+        }
+    }
+    return result;
+}
+
 pub const ConfigType = enum { none, bool_type, int_type, bool_or_int, path_type, expiry_date, color_type };
 
 pub const ConfigSource = struct {
@@ -541,6 +775,22 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
     // Follow includes only when not restricted to a single scope
     const follow_includes = includes_flag or (!use_global and !use_system and !use_local and !use_worktree and config_file == null);
 
+    // Build our own config override list with proper has_equals tracking
+    var cfg_overrides = buildConfigOverrides(allocator) catch |e| {
+        if (e == error.BogusConfigParameters) {
+            try platform_impl.writeStderr("error: bogus format in GIT_CONFIG_PARAMETERS\n");
+            std.process.exit(129);
+        }
+        return e;
+    };
+    defer {
+        for (cfg_overrides.items) |item| {
+            allocator.free(item.key);
+            allocator.free(item.value);
+        }
+        cfg_overrides.deinit();
+    }
+
     // Write path helper
     const getWritePath = struct {
         fn f(alloc: Allocator, cf: ?[]const u8, ug: bool, us: bool, home: ?[]const u8, gp: ?[]const u8, ecg: ?[]const u8, ecs: ?[]const u8, pi: *const platform_mod.Platform) ![]u8 {
@@ -691,30 +941,30 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
                 try platform_impl.writeStdout(out.items);
             }
             // Also list config overrides
-            if (main_mod.global_config_overrides) |overrides| {
-                for (overrides.items) |ov| {
-                    const term3: []const u8 = if (null_terminator) "\x00" else "\n";
-                    const origin_sep3: u8 = if (null_terminator) '\x00' else '\t';
-                    var out3 = std.array_list.Managed(u8).init(allocator);
-                    defer out3.deinit();
-                    if (show_scope) {
-                        try out3.appendSlice("command");
-                        try out3.append('\t');
-                    }
-                    if (show_origin) {
-                        try out3.appendSlice("command line:");
-                        try out3.append(origin_sep3);
-                    }
-                    if (show_names) {
-                        try out3.appendSlice(ov.key);
-                    } else {
-                        try out3.appendSlice(ov.key);
+            for (cfg_overrides.items) |ov| {
+                const term3: []const u8 = if (null_terminator) "\x00" else "\n";
+                const origin_sep3: u8 = if (null_terminator) '\x00' else '\t';
+                var out3 = std.array_list.Managed(u8).init(allocator);
+                defer out3.deinit();
+                if (show_scope) {
+                    try out3.appendSlice(ov.source);
+                    try out3.append('\t');
+                }
+                if (show_origin) {
+                    try out3.appendSlice("command line:");
+                    try out3.append(origin_sep3);
+                }
+                if (show_names) {
+                    try out3.appendSlice(ov.key);
+                } else {
+                    try out3.appendSlice(ov.key);
+                    if (ov.has_equals or ov.value.len > 0) {
                         if (null_terminator) try out3.append('\n') else try out3.append('=');
                         try out3.appendSlice(ov.value);
                     }
-                    try out3.appendSlice(term3);
-                    try platform_impl.writeStdout(out3.items);
                 }
+                try out3.appendSlice(term3);
+                try platform_impl.writeStdout(out3.items);
             }
             return;
         },
@@ -1068,11 +1318,15 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
                     last_scope = e.source_scope orelse "local";
                     last_origin = e.source_path orelse "";
                 }
-                if (main_mod.getConfigOverride(key2)) |ov| {
-                    if (last_val) |v| allocator.free(v);
-                    last_val = try allocator.dupe(u8, ov);
-                    last_scope = "command";
-                    last_origin = "";
+                // Check our own config overrides (last one wins)
+                for (cfg_overrides.items) |cov| {
+                    if (cfgKeyMatches(cov.key, key2)) {
+                        if (last_val) |v| allocator.free(v);
+                        last_val = try allocator.dupe(u8, if (cov.has_equals) cov.value else "true");
+                        last_has_equals = cov.has_equals;
+                        last_scope = cov.source;
+                        last_origin = "";
+                    }
                 }
                 const eff = last_val orelse if (default_value) |dv| blk: {
                     last_scope = "command";
@@ -1182,34 +1436,35 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
                 try platform_impl.writeStdout(out.items);
             }
             // Also check config overrides
-            if (main_mod.global_config_overrides) |overrides| {
-                for (overrides.items) |ov| {
-                    if (!simpleRegexMatch(ov.key, pattern)) continue;
-                    if (vpat) |vp| {
-                        if (!simpleRegexMatch(ov.value, vp)) continue;
-                    }
-                    found_any = true;
-                    const term2: []const u8 = if (null_terminator) "\x00" else "\n";
-                    var out2 = std.array_list.Managed(u8).init(allocator);
-                    defer out2.deinit();
-                    if (show_scope) {
-                        try out2.appendSlice("command");
-                        try out2.append('\t');
-                    }
-                    if (show_origin) {
-                        try out2.appendSlice("command line:");
-                        try out2.append('\t');
-                    }
-                    if (show_names) {
-                        try out2.appendSlice(ov.key);
-                    } else {
-                        try out2.appendSlice(ov.key);
-                        try out2.append(if (null_terminator) '\n' else ' ');
-                        try out2.appendSlice(ov.value);
-                    }
-                    try out2.appendSlice(term2);
-                    try platform_impl.writeStdout(out2.items);
+            for (cfg_overrides.items) |ov| {
+                if (!simpleRegexMatch(ov.key, pattern)) continue;
+                const ov_effective_value = if (ov.has_equals) ov.value else "true";
+                if (vpat) |vp| {
+                    if (!simpleRegexMatch(ov_effective_value, vp)) continue;
                 }
+                found_any = true;
+                const term2: []const u8 = if (null_terminator) "\x00" else "\n";
+                var out2 = std.array_list.Managed(u8).init(allocator);
+                defer out2.deinit();
+                if (show_scope) {
+                    try out2.appendSlice(ov.source);
+                    try out2.append('\t');
+                }
+                if (show_origin) {
+                    try out2.appendSlice("command line:");
+                    try out2.append('\t');
+                }
+                if (show_names) {
+                    try out2.appendSlice(ov.key);
+                } else {
+                    try out2.appendSlice(ov.key);
+                    if (ov_effective_value.len > 0) {
+                        try out2.append(if (null_terminator) '\n' else ' ');
+                        try out2.appendSlice(ov_effective_value);
+                    }
+                }
+                try out2.appendSlice(term2);
+                try platform_impl.writeStdout(out2.items);
             }
             if (!found_any) std.process.exit(1);
             return;
@@ -1837,6 +2092,8 @@ fn cfgAppendOrigin(out: *std.array_list.Managed(u8), source_path: []const u8) !v
         try out.appendSlice("standard input:");
     } else if (std.mem.eql(u8, source_path, "command line") or source_path.len == 0) {
         try out.appendSlice("command line:");
+    } else if (std.mem.startsWith(u8, source_path, "blob:")) {
+        try out.appendSlice(source_path);
     } else {
         var needs_quote = false;
         for (source_path) |c| {
@@ -2151,6 +2408,79 @@ fn cfgFormatTypeSilent(value: []const u8, config_type: ConfigType, allocator: Al
 }
 
 fn cfgParseDate(date_str: []const u8, allocator: Allocator) ?[]u8 {
+    // Normalize: replace dots with spaces (git's approxidate does this)
+    var normalized = allocator.alloc(u8, date_str.len) catch return null;
+    defer allocator.free(normalized);
+    for (date_str, 0..) |c, idx| {
+        normalized[idx] = if (c == '.') ' ' else c;
+    }
+
+    // Check if this looks like a relative date (contains words like weeks, days, etc.)
+    if (cfgIsRelativeDate(normalized)) {
+        // Git's approxidate treats relative references as "ago" by default
+        // Convert "3 weeks 5 days 00:00" to "3 weeks ago 5 days ago 00:00" for GNU date
+        if (cfgConvertRelativeDate(normalized, allocator)) |converted| {
+            defer allocator.free(converted);
+            if (cfgParseDateWith(converted, allocator)) |r| return r;
+        }
+    }
+
+    // Try the normalized string directly
+    if (cfgParseDateWith(normalized, allocator)) |r| return r;
+    // Try the original string
+    if (cfgParseDateWith(date_str, allocator)) |r| return r;
+    return null;
+}
+
+fn cfgIsRelativeDate(s: []const u8) bool {
+    const rel_words = [_][]const u8{ "second", "minute", "hour", "day", "week", "month", "year", "seconds", "minutes", "hours", "days", "weeks", "months", "years" };
+    var iter = std.mem.tokenizeAny(u8, s, " \t");
+    while (iter.next()) |word| {
+        var lower_buf: [20]u8 = undefined;
+        if (word.len > lower_buf.len) continue;
+        for (word, 0..) |c, i| lower_buf[i] = std.ascii.toLower(c);
+        const lower = lower_buf[0..word.len];
+        for (rel_words) |rw| {
+            if (std.mem.eql(u8, lower, rw)) return true;
+        }
+    }
+    return false;
+}
+
+fn cfgConvertRelativeDate(s: []const u8, allocator: Allocator) ?[]u8 {
+    // Convert "3 weeks 5 days 00:00" -> "3 weeks ago 5 days ago 00:00"
+    // by inserting "ago" after each relative unit
+    const rel_units = [_][]const u8{ "second", "minute", "hour", "day", "week", "month", "year", "seconds", "minutes", "hours", "days", "weeks", "months", "years" };
+    var result = std.array_list.Managed(u8).init(allocator);
+    var iter = std.mem.tokenizeAny(u8, s, " \t");
+    var has_ago = false;
+    // Check if "ago" is already present
+    var check_iter = std.mem.tokenizeAny(u8, s, " \t");
+    while (check_iter.next()) |w| {
+        if (std.mem.eql(u8, w, "ago")) { has_ago = true; break; }
+    }
+    if (has_ago) return null; // already has "ago", let date handle it
+
+    while (iter.next()) |word| {
+        if (result.items.len > 0) result.append(' ') catch return null;
+        result.appendSlice(word) catch return null;
+        // Check if this word is a relative unit
+        var lower_buf: [20]u8 = undefined;
+        if (word.len <= lower_buf.len) {
+            for (word, 0..) |c, i| lower_buf[i] = std.ascii.toLower(c);
+            const lower = lower_buf[0..word.len];
+            for (rel_units) |rw| {
+                if (std.mem.eql(u8, lower, rw)) {
+                    result.appendSlice(" ago") catch return null;
+                    break;
+                }
+            }
+        }
+    }
+    return result.toOwnedSlice() catch null;
+}
+
+fn cfgParseDateWith(date_str: []const u8, allocator: Allocator) ?[]u8 {
     const result = std.process.Child.run(.{
         .allocator = allocator,
         .argv = &[_][]const u8{ "date", "-d", date_str, "+%s" },
@@ -3502,31 +3832,33 @@ fn urlMatchSpecificity(pattern: []const u8, url: []const u8) usize {
         if (!urlPathMatches(p.path, u.path)) return 0;
     }
 
-    // Calculate specificity based on git's rules:
-    // - Exact host match > wildcard host match
-    // - Longer path > shorter path
-    // - User specified > no user
-    // - Port specified > no port
+    // Calculate specificity based on git's URL matching rules.
+    // Git computes a score where:
+    // 1. Path length is the PRIMARY factor (longer path prefix = more specific)
+    // 2. User match adds minor specificity (tiebreaker when paths are equal)
+    // 3. Exact host > wildcard host
+    // 4. Port adds minor specificity
+    // Use bit-shifting to ensure path dominates
     var specificity: usize = 1;
+
+    // Path specificity (highest weight - shifted left significantly)
+    var path_len = p.path.len;
+    while (path_len > 0 and p.path[path_len - 1] == '/') path_len -= 1;
+    specificity += path_len * 10000;
 
     // Host specificity: exact > wildcard
     if (p.host.len > 0) {
         if (std.mem.indexOfScalar(u8, p.host, '*') != null) {
             specificity += p.host.len; // wildcard: less specific
         } else {
-            specificity += p.host.len * 2 + 100; // exact: more specific
+            specificity += p.host.len + 100; // exact: more specific
         }
     }
 
-    // Path specificity
-    var path_len = p.path.len;
-    while (path_len > 0 and p.path[path_len - 1] == '/') path_len -= 1;
-    specificity += path_len * 4;
-
-    // User adds specificity
+    // User adds minor specificity (only matters as tiebreaker)
     if (p.user.len > 0) specificity += p.user.len + 50;
 
-    // Port adds specificity
+    // Port adds minor specificity
     if (p.port.len > 0) specificity += 10;
 
     return specificity;
