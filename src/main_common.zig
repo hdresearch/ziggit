@@ -34266,12 +34266,9 @@ fn cmdWebBrowse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         defer allocator.free(full_cmd);
         const argv = [_][]const u8{ "/bin/sh", "-c", full_cmd };
         var child = std.process.Child.init(&argv, allocator);
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
+        child.stdout_behavior = .Inherit;
+        child.stderr_behavior = .Inherit;
         try child.spawn();
-        const stdout = child.stdout.?.reader.readAllAlloc(allocator, 1024 * 1024) catch "";
-        defer if (stdout.len > 0) allocator.free(stdout);
-        _ = child.wait() catch {};
         if (stdout.len > 0) try platform_impl.writeStdout(stdout);
     } else if (browser_path) |bp| {
         defer allocator.free(bp);
@@ -34279,12 +34276,9 @@ fn cmdWebBrowse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         defer allocator.free(full_cmd2);
         const argv2 = [_][]const u8{ "/bin/sh", "-c", full_cmd2 };
         var child2 = std.process.Child.init(&argv2, allocator);
-        child2.stdout_behavior = .Pipe;
-        child2.stderr_behavior = .Pipe;
+        child2.stdout_behavior = .Inherit;
+        child2.stderr_behavior = .Inherit;
         try child2.spawn();
-        const stdout2 = child2.stdout.?.reader.readAllAlloc(allocator, 1024 * 1024) catch "";
-        defer if (stdout2.len > 0) allocator.free(stdout2);
-        _ = child2.wait() catch {};
         if (stdout2.len > 0) try platform_impl.writeStdout(stdout2);
     } else {
         try platform_impl.writeStderr("No suitable browser detected.\n");
@@ -34294,7 +34288,7 @@ fn cmdWebBrowse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
 
 fn cmdFastImport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     _ = args;
-    const stdin_content = std.io.getStdIn().reader.readAllAlloc(allocator, 256 * 1024 * 1024) catch "";
+    const stdin_content = (std.fs.File{ .handle = std.posix.STDIN_FILENO }).readToEndAlloc(allocator, 256 * 1024 * 1024) catch "";
     defer if (stdin_content.len > 0) allocator.free(stdin_content);
     if (stdin_content.len == 0) return;
     if (std.mem.startsWith(u8, stdin_content, "tag ") or
@@ -34810,7 +34804,7 @@ fn cmdForEachRepo(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     defer allocator.free(self_exe);
     var ca3 = [_][]const u8{ self_exe, "config", "--get-all", key };
     var ch3 = std.process.Child.init(&ca3, allocator);
-    ch3.stdout_behavior = .Pipe; ch3.stderr_behavior = .Pipe;
+    ch3.stdout_behavior = .Inherit; ch3.stderr_behavior = .Inherit;
     ch3.spawn() catch return;
     const so3 = ch3.stdout.?.readToEndAlloc(allocator, 1024 * 1024) catch return;
     defer allocator.free(so3);
