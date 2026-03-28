@@ -18127,11 +18127,11 @@ fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platf
             },
         }
         // Clean up merge/cherry-pick/revert state on hard/merge reset
-        if (reset_mode == .hard or reset_mode == .merge) {
+        if (reset_mode == .hard or reset_mode == .merge_mode) {
             cleanupMergeState(git_path, allocator);
         }
         // Output "HEAD is now at <short-hash> <subject>" for hard reset
-        if (reset_mode == .hard or reset_mode == .merge) {
+        if (reset_mode == .hard or reset_mode == .merge_mode) {
             const short_hash = if (target_hash.len >= 7) target_hash[0..7] else target_hash;
             const subj = getCommitSubject(target_hash, git_path, platform_impl, allocator) catch "";
             defer if (subj.len > 0) allocator.free(subj);
