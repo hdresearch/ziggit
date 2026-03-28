@@ -868,19 +868,23 @@ fn oC(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []con
 
 fn oD(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []const u8, ln: usize, se2: bool, _: bool, mal2: usize, lnw2: usize, abl2: usize, suppress2: bool, bb2: bool) !void {
     // Total visual width for hash field is min(abl2+1, 40) chars
-    const total_width = @min(abl2 + 1, 40);
+    // For non-boundary: show min(abbrev+1, 40) hex chars
+    // For boundary: ^HASH where HASH is min(abbrev, 40) hex chars  
+    // For -b boundary: spaces matching the width
+    const hex_width = @min(abl2 + 1, 40);
+    const boundary_hex = @min(abl2, 40);
     const hash_str = blk: {
         if (bb2 and e.is_boundary) {
-            // -b: blank boundary - spaces for the entire hash width
-            const spaces = try a.alloc(u8, total_width);
+            // -b: blank boundary - spaces for boundary width (^ + hex)
+            const spaces = try a.alloc(u8, boundary_hex + 1);
             @memset(spaces, ' ');
             break :blk spaces;
         } else if (e.is_boundary) {
-            // ^hash format: ^ + (total_width - 1) hex chars
-            break :blk try std.fmt.allocPrint(a, "^{s}", .{e.commit_hash[0..total_width - 1]});
+            // ^hash format: ^ + boundary_hex hex chars
+            break :blk try std.fmt.allocPrint(a, "^{s}", .{e.commit_hash[0..boundary_hex]});
         } else {
-            // non-boundary: total_width hex chars
-            break :blk try std.fmt.allocPrint(a, "{s}", .{e.commit_hash[0..total_width]});
+            // non-boundary: hex_width hex chars
+            break :blk try std.fmt.allocPrint(a, "{s}", .{e.commit_hash[0..hex_width]});
         }
     };
     defer a.free(hash_str);
