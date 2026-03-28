@@ -3713,7 +3713,32 @@ fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     }
 
     // Create commit object - use GIT_AUTHOR_DATE/GIT_COMMITTER_DATE if set
-    const author_info = getAuthorString(allocator) catch blk: {
+    // For --amend, preserve original commit's author info unless explicitly overridden
+    const author_info = if (amend) blk: {
+        // Try to get original author from the commit being amended
+        if (refs.getCurrentCommit(git_path, platform_impl, allocator) catch null) |cur_hash| {
+            defer allocator.free(cur_hash);
+            if (objects.GitObject.load(cur_hash, git_path, platform_impl, allocator) catch null) |cobj| {
+                defer cobj.deinit(allocator);
+                // Extract the author line from commit data
+                var clines = std.mem.splitSequence(u8, cobj.data, "\n");
+                while (clines.next()) |cline| {
+                    if (std.mem.startsWith(u8, cline, "author ")) {
+                        break :blk try allocator.dupe(u8, cline["author ".len..]);
+                    } else if (cline.len == 0) break;
+                }
+            }
+        }
+        break :blk getAuthorString(allocator) catch {
+            const timestamp = std.time.timestamp();
+            const tz_offset = getTimezoneOffset(timestamp);
+            const tz_sign: u8 = if (tz_offset < 0) '-' else '+';
+            const tz_abs: u32 = @intCast(if (tz_offset < 0) -tz_offset else tz_offset);
+            const tz_hours = tz_abs / 3600;
+            const tz_minutes = (tz_abs % 3600) / 60;
+            try std.fmt.allocPrint(allocator, "Unknown <unknown@unknown> {d} {c}{d:0>2}{d:0>2}", .{ timestamp, tz_sign, tz_hours, tz_minutes });
+        };
+    } else getAuthorString(allocator) catch blk: {
         const timestamp = std.time.timestamp();
         const tz_offset = getTimezoneOffset(timestamp);
         const tz_sign: u8 = if (tz_offset < 0) '-' else '+';
