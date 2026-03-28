@@ -4918,6 +4918,8 @@ const DiffStatEntry = struct {
     is_deleted: bool,
     old_hash: []const u8,
     new_hash: []const u8,
+    old_mode: []const u8 = "",
+    new_mode: []const u8 = "",
 };
 
 fn collectWorkingTreeDiffEntries(index: *const index_mod.Index, cwd: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, entries: *std.array_list.Managed(DiffStatEntry)) !bool {
@@ -30290,11 +30292,21 @@ fn outputSummaryForTwoTrees(allocator: std.mem.Allocator, tree1_hash: []const u8
     try collectTreeDiffEntries(allocator, tree1_hash, tree2_hash, "", git_path, pathspecs, platform_impl, &diff_entries);
     for (diff_entries.items) |de| {
         if (de.is_new) {
-            const out = try std.fmt.allocPrint(allocator, " create mode 100644 {s}\n", .{de.path});
+            const mode_str = if (de.new_mode.len > 0) de.new_mode else "100644";
+            const padded = try padMode(allocator, mode_str);
+            const out = try std.fmt.allocPrint(allocator, " create mode {s} {s}\n", .{padded, de.path});
             defer allocator.free(out);
             try platform_impl.writeStdout(out);
         } else if (de.is_deleted) {
-            const out = try std.fmt.allocPrint(allocator, " delete mode 100644 {s}\n", .{de.path});
+            const mode_str = if (de.old_mode.len > 0) de.old_mode else "100644";
+            const padded = try padMode(allocator, mode_str);
+            const out = try std.fmt.allocPrint(allocator, " delete mode {s} {s}\n", .{padded, de.path});
+            defer allocator.free(out);
+            try platform_impl.writeStdout(out);
+        } else if (de.old_mode.len > 0 and de.new_mode.len > 0 and !std.mem.eql(u8, de.old_mode, de.new_mode)) {
+            const padded_old = try padMode(allocator, de.old_mode);
+            const padded_new = try padMode(allocator, de.new_mode);
+            const out = try std.fmt.allocPrint(allocator, " mode change {s} => {s} {s}\n", .{padded_old, padded_new, de.path});
             defer allocator.free(out);
             try platform_impl.writeStdout(out);
         }
@@ -30302,15 +30314,19 @@ fn outputSummaryForTwoTrees(allocator: std.mem.Allocator, tree1_hash: []const u8
 }
 
 fn outputSummaryForEmptyTree(allocator: std.mem.Allocator, tree_hash_str: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
-    var files = std.array_list.Managed(FileStatEntry).init(allocator);
+    // Use collectTreeDiffEntries with empty tree to get proper mode info
+    var diff_entries = std.array_list.Managed(DiffStatEntry).init(allocator);
     defer {
-        for (files.items) |f| allocator.free(f.name);
-        files.deinit();
+        for (diff_entries.items) |*de| allocator.free(de.path);
+        diff_entries.deinit();
     }
-    try collectFilesFromTree(allocator, tree_hash_str, "", git_path, platform_impl, &files);
+    const empty_tree = "4b825dc642cb6eb9a060e54bf899d69f82cf0101";
+    try collectTreeDiffEntries(allocator, empty_tree, tree_hash_str, "", git_path, &.{}, platform_impl, &diff_entries);
     
-    for (files.items) |f| {
-        const out = try std.fmt.allocPrint(allocator, " create mode 100644 {s}\n", .{f.name});
+    for (diff_entries.items) |de| {
+        const mode_str = if (de.new_mode.len > 0) de.new_mode else "100644";
+        const padded = try padMode(allocator, mode_str);
+        const out = try std.fmt.allocPrint(allocator, " create mode {s} {s}\n", .{padded, de.path});
         defer allocator.free(out);
         try platform_impl.writeStdout(out);
     }
@@ -30987,7 +31003,7 @@ fn collectTreeDiffEntries(allocator: std.mem.Allocator, tree1_hash: []const u8, 
             // Mode-only change: same hash, different mode
             if (std.mem.eql(u8, e1.?.hash, e2.?.hash)) {
                 if (!matchesPathspecs(full_name, pathspecs)) { allocator.free(full_name); continue; }
-                try diff_entries_out.append(.{ .path = full_name, .insertions = 0, .deletions = 0, .is_binary = false, .is_new = false, .is_deleted = false, .old_hash = "", .new_hash = "" });
+                try diff_entries_out.append(.{ .path = full_name, .insertions = 0, .deletions = 0, .is_binary = false, .is_new = false, .is_deleted = false, .old_hash = "", .new_hash = "", .old_mode = try allocator.dupe(u8, e1.?.mode), .new_mode = try allocator.dupe(u8, e2.?.mode) });
                 continue;
             }
             if (isTreeMode(e1.?.mode) and isTreeMode(e2.?.mode)) {
@@ -30996,7 +31012,7 @@ fn collectTreeDiffEntries(allocator: std.mem.Allocator, tree1_hash: []const u8, 
                 continue;
             }
             if (!matchesPathspecs(full_name, pathspecs)) { allocator.free(full_name); continue; }
-            try diff_entries_out.append(.{ .path = full_name, .insertions = 1, .deletions = 1, .is_binary = false, .is_new = false, .is_deleted = false, .old_hash = "", .new_hash = "" });
+            try diff_entries_out.append(.{ .path = full_name, .insertions = 1, .deletions = 1, .is_binary = false, .is_new = false, .is_deleted = false, .old_hash = "", .new_hash = "", .old_mode = try allocator.dupe(u8, e1.?.mode), .new_mode = try allocator.dupe(u8, e2.?.mode) });
         } else if (e1 != null and e2 == null) {
             if (isTreeMode(e1.?.mode)) {
                 try collectTreeDiffEntries(allocator, e1.?.hash, "4b825dc642cb6eb9a060e54bf899d69f82cf0101", full_name, git_path, pathspecs, platform_impl, diff_entries_out);
@@ -31004,7 +31020,7 @@ fn collectTreeDiffEntries(allocator: std.mem.Allocator, tree1_hash: []const u8, 
                 continue;
             }
             if (!matchesPathspecs(full_name, pathspecs)) { allocator.free(full_name); continue; }
-            try diff_entries_out.append(.{ .path = full_name, .insertions = 0, .deletions = 1, .is_binary = false, .is_new = false, .is_deleted = true, .old_hash = "", .new_hash = "" });
+            try diff_entries_out.append(.{ .path = full_name, .insertions = 0, .deletions = 1, .is_binary = false, .is_new = false, .is_deleted = true, .old_hash = "", .new_hash = "", .old_mode = try allocator.dupe(u8, e1.?.mode), .new_mode = "" });
         } else if (e2 != null) {
             if (isTreeMode(e2.?.mode)) {
                 try collectTreeDiffEntries(allocator, "4b825dc642cb6eb9a060e54bf899d69f82cf0101", e2.?.hash, full_name, git_path, pathspecs, platform_impl, diff_entries_out);
@@ -31012,7 +31028,7 @@ fn collectTreeDiffEntries(allocator: std.mem.Allocator, tree1_hash: []const u8, 
                 continue;
             }
             if (!matchesPathspecs(full_name, pathspecs)) { allocator.free(full_name); continue; }
-            try diff_entries_out.append(.{ .path = full_name, .insertions = 1, .deletions = 0, .is_binary = false, .is_new = true, .is_deleted = false, .old_hash = "", .new_hash = "" });
+            try diff_entries_out.append(.{ .path = full_name, .insertions = 1, .deletions = 0, .is_binary = false, .is_new = true, .is_deleted = false, .old_hash = "", .new_hash = "", .old_mode = "", .new_mode = try allocator.dupe(u8, e2.?.mode) });
         } else {
             allocator.free(full_name);
         }
