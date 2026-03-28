@@ -38735,7 +38735,7 @@ fn cmdFastImport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     };
 }
 
-fn fastExportCollectTree(git_path: []const u8, tree_hash_str: []const u8, prefix: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, result: *std.ArrayList(FastExportEntry)) !void {
+fn fastExportCollectTree(git_path: []const u8, tree_hash_str: []const u8, prefix: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, result: *std.array_list.Managed(FastExportEntry)) !void {
     const tree_obj = objects.GitObject.load(tree_hash_str, git_path, platform_impl, allocator) catch return;
     defer tree_obj.deinit(allocator);
 
