@@ -11,6 +11,8 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
     var sp = false;
     var slp = false;
     var srt = false;
+    var suppress = false;
+    var blank_boundary = false;
     var fp: ?[]const u8 = null;
     var rv: ?[]const u8 = null;
     var cf: ?[]const u8 = null;
@@ -26,6 +28,8 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
         else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--porcelain")) { sp = true; }
         else if (std.mem.eql(u8, arg, "--line-porcelain")) { slp = true; }
         else if (std.mem.eql(u8, arg, "-t")) { srt = true; }
+        else if (std.mem.eql(u8, arg, "-s")) { suppress = true; }
+        else if (std.mem.eql(u8, arg, "-b")) { blank_boundary = true; }
         else if (std.mem.startsWith(u8, arg, "--contents=")) { cf = arg["--contents=".len..]; }
         else if (std.mem.eql(u8, arg, "--contents")) { cf = args.next(); }
         else if (std.mem.startsWith(u8, arg, "--abbrev=")) {
@@ -366,15 +370,38 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
 
     var seen_hashes = std.StringHashMap(void).init(a);
     defer seen_hashes.deinit();
-    for (oi.items) |i| {
+
+    // Compute group sizes for porcelain output
+    // A "group" is a maximal run of consecutive output lines with the same commit hash
+    var group_sizes = try a.alloc(usize, oi.items.len);
+    defer a.free(group_sizes);
+    @memset(group_sizes, 0);
+    if (oi.items.len > 0) {
+        var gi: usize = 0;
+        var gs: usize = 1;
+        var j: usize = 1;
+        while (j < oi.items.len) : (j += 1) {
+            if (std.mem.eql(u8, &es[oi.items[j]].commit_hash, &es[oi.items[j - 1]].commit_hash) and oi.items[j] == oi.items[j - 1] + 1) {
+                gs += 1;
+            } else {
+                group_sizes[gi] = gs;
+                gi = j;
+                gs = 1;
+            }
+        }
+        group_sizes[gi] = gs;
+    }
+
+    for (oi.items, 0..) |i, oi_idx| {
         const e = es[i]; const line = lines.items[i]; const ln = i + 1;
         if (sp or slp) {
             const first_time = !seen_hashes.contains(&e.commit_hash);
             if (first_time) seen_hashes.put(&e.commit_hash, {}) catch {};
-            try oP(pi, a, e, line, ln, first_time or slp, fp.?);
+            const is_group_start = group_sizes[oi_idx] > 0;
+            try oP(pi, a, e, line, ln, first_time or slp, fp.?, is_group_start, if (is_group_start) group_sizes[oi_idx] else 0);
         }
-        else if (col) { try oC(pi, a, e, line, ln, se, srt, mal, lnw, abl); }
-        else { try oD(pi, a, e, line, ln, se, srt, mal, lnw, abl); }
+        else if (col) { try oC(pi, a, e, line, ln, se, srt, mal, lnw, abl, suppress, blank_boundary); }
+        else { try oD(pi, a, e, line, ln, se, srt, mal, lnw, abl, suppress, blank_boundary); }
     }
 }
 
@@ -655,42 +682,77 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
     }
 }
 
-fn oC(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []const u8, ln: usize, se2: bool, srt2: bool, mal2: usize, lnw2: usize, abl2: usize) !void {
-    const dn = if (se2) try std.fmt.allocPrint(a, "<{s}>", .{e.author_email}) else try a.dupe(u8, e.author_name);
-    defer a.free(dn);
-    const pn = try B.padR(a, dn, mal2);
-    defer a.free(pn);
-    const ds = if (srt2) try std.fmt.allocPrint(a, "{d} {s}", .{ e.author_time, e.author_tz }) else try B.fmtTs(a, e.author_time, e.author_tz);
-    defer a.free(ds);
-    const pnum = try B.padN(a, ln, lnw2);
-    defer a.free(pnum);
-    // In column format (-c / annotate), no ^ prefix is shown; use abl+1 for all
+fn oC(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []const u8, ln: usize, se2: bool, srt2: bool, mal2: usize, lnw2: usize, abl2: usize, suppress2: bool, bb2: bool) !void {
     const effective_abl = @min(abl2 + 1, 40);
-    const out = try std.fmt.allocPrint(a, "{s}\t({s}\t{s}\t{s}){s}\n", .{ e.commit_hash[0..effective_abl], pn, ds, pnum, line });
-    defer a.free(out);
-    try so.writeStdout(out);
+    const hash_str = blk: {
+        if (bb2 and e.is_boundary) {
+            // blank boundary: spaces instead of hash
+            const spaces = try a.alloc(u8, effective_abl);
+            @memset(spaces, ' ');
+            break :blk spaces;
+        } else {
+            break :blk try a.dupe(u8, e.commit_hash[0..effective_abl]);
+        }
+    };
+    defer a.free(hash_str);
+    if (suppress2) {
+        const pnum = try B.padN(a, ln, lnw2);
+        defer a.free(pnum);
+        const out = try std.fmt.allocPrint(a, "{s}\t{s}){s}\n", .{ hash_str, pnum, line });
+        defer a.free(out);
+        try so.writeStdout(out);
+    } else {
+        const dn = if (se2) try std.fmt.allocPrint(a, "<{s}>", .{e.author_email}) else try a.dupe(u8, e.author_name);
+        defer a.free(dn);
+        const pn = try B.padR(a, dn, mal2);
+        defer a.free(pn);
+        const ds = if (srt2) try std.fmt.allocPrint(a, "{d} {s}", .{ e.author_time, e.author_tz }) else try B.fmtTs(a, e.author_time, e.author_tz);
+        defer a.free(ds);
+        const pnum = try B.padN(a, ln, lnw2);
+        defer a.free(pnum);
+        const out = try std.fmt.allocPrint(a, "{s}\t({s}\t{s}\t{s}){s}\n", .{ hash_str, pn, ds, pnum, line });
+        defer a.free(out);
+        try so.writeStdout(out);
+    }
 }
 
-fn oD(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []const u8, ln: usize, se2: bool, _: bool, mal2: usize, lnw2: usize, abl2: usize) !void {
-    const dn = if (se2) try std.fmt.allocPrint(a, "<{s}>", .{e.author_email}) else try a.dupe(u8, e.author_name);
-    defer a.free(dn);
-    const pn = try B.padR(a, dn, mal2);
-    defer a.free(pn);
-    const ds = try B.fmtTs(a, e.author_time, e.author_tz);
-    defer a.free(ds);
-    const pnum = try B.padN(a, ln, lnw2);
-    defer a.free(pnum);
-    // Non-boundary commits get +1 for alignment
-    const effective_abl = if (e.is_boundary) @min(abl2, 40) else @min(abl2 + 1, 40);
-    _ = effective_abl;
-    const hash_str = if (e.is_boundary)
-        try std.fmt.allocPrint(a, "^{s}", .{e.commit_hash[0..@min(abl2, 39)]})
-    else
-        try std.fmt.allocPrint(a, "{s}", .{e.commit_hash[0..@min(abl2 + 1, 40)]});
+fn oD(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []const u8, ln: usize, se2: bool, _: bool, mal2: usize, lnw2: usize, abl2: usize, suppress2: bool, bb2: bool) !void {
+    // Total visual width for hash field is min(abl2+1, 40) chars
+    const total_width = @min(abl2 + 1, 40);
+    const hash_str = blk: {
+        if (bb2 and e.is_boundary) {
+            // -b: blank boundary - spaces for the entire hash width
+            const spaces = try a.alloc(u8, total_width);
+            @memset(spaces, ' ');
+            break :blk spaces;
+        } else if (e.is_boundary) {
+            // ^hash format: ^ + (total_width - 1) hex chars
+            break :blk try std.fmt.allocPrint(a, "^{s}", .{e.commit_hash[0..total_width - 1]});
+        } else {
+            // non-boundary: total_width hex chars
+            break :blk try std.fmt.allocPrint(a, "{s}", .{e.commit_hash[0..total_width]});
+        }
+    };
     defer a.free(hash_str);
-    const out = try std.fmt.allocPrint(a, "{s} ({s} {s} {s}) {s}\n", .{ hash_str, pn, ds, pnum, line });
-    defer a.free(out);
-    try so.writeStdout(out);
+    if (suppress2) {
+        const pnum = try B.padN(a, ln, lnw2);
+        defer a.free(pnum);
+        const out = try std.fmt.allocPrint(a, "{s} {s}) {s}\n", .{ hash_str, pnum, line });
+        defer a.free(out);
+        try so.writeStdout(out);
+    } else {
+        const dn = if (se2) try std.fmt.allocPrint(a, "<{s}>", .{e.author_email}) else try a.dupe(u8, e.author_name);
+        defer a.free(dn);
+        const pn = try B.padR(a, dn, mal2);
+        defer a.free(pn);
+        const ds = try B.fmtTs(a, e.author_time, e.author_tz);
+        defer a.free(ds);
+        const pnum = try B.padN(a, ln, lnw2);
+        defer a.free(pnum);
+        const out = try std.fmt.allocPrint(a, "{s} ({s} {s} {s}) {s}\n", .{ hash_str, pn, ds, pnum, line });
+        defer a.free(out);
+        try so.writeStdout(out);
+    }
 }
 
 fn oP(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []const u8, ln: usize, sh2: bool, fp2: []const u8) !void {
