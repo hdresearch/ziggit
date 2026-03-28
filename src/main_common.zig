@@ -31265,8 +31265,8 @@ fn outputCombinedStat(allocator: std.mem.Allocator, parent_hashes: []const []con
             .is_binary = false,
             .is_new = false,
             .is_deleted = false,
-            .old_mode = null,
-            .new_mode = null,
+            .old_mode = "",
+            .new_mode = "",
         });
     }
     _ = num_width;
