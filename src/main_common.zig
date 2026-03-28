@@ -33466,6 +33466,11 @@ fn cmdFormatPatch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             subject_prefix = arg["--subject-prefix=".len..];
         } else if (std.mem.startsWith(u8, arg, "--start-number=")) {
             start_number = std.fmt.parseInt(usize, arg["--start-number=".len..], 10) catch 1;
+        } else if (std.mem.startsWith(u8, arg, "-") and arg.len > 1 and std.ascii.isDigit(arg[1])) {
+            // -N means last N commits from HEAD
+            const count = std.fmt.parseInt(usize, arg[1..], 10) catch 1;
+            const range = std.fmt.allocPrint(allocator, "HEAD~{d}..HEAD", .{count}) catch null;
+            if (range) |r| rev_range = r;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             rev_range = arg;
         }
