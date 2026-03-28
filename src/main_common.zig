@@ -311,25 +311,100 @@ fn findSimilarCommands(allocator: std.mem.Allocator, typo: []const u8, platform_
     return result2.toOwnedSlice(allocator) catch &[_][]const u8{};
 }
 
+fn gcpExtractQuoted(params: []const u8, start: usize, buf: *std.array_list.Managed(u8)) ?usize {
+    // Extract content of a single-quoted string starting at params[start] == '\''
+    // Handle '\'' shell escape (close-quote, backslash-single-quote, open-quote)
+    var i = start;
+    if (i >= params.len or params[i] != '\'') return null;
+    i += 1;
+    buf.clearRetainingCapacity();
+    while (i < params.len) {
+        if (params[i] == '\'') {
+            // Check for '\'' escape
+            if (i + 2 < params.len and params[i + 1] == '\\' and params[i + 2] == '\'' and i + 3 < params.len and params[i + 3] == '\'') {
+                buf.append('\'') catch return null;
+                i += 4; // skip '\\''
+                continue;
+            }
+            if (i + 2 < params.len and params[i + 1] == '\\' and params[i + 2] == '\'') {
+                buf.append('\'') catch return null;
+                i += 3; // skip '\\'  and treat rest as unquoted
+                return i;
+            }
+            i += 1; // skip closing quote
+            return i;
+        }
+        buf.append(params[i]) catch return null;
+        i += 1;
+    }
+    return null; // unterminated
+}
+
 fn parseGitConfigParameters(allocator: std.mem.Allocator, params: []const u8) void {
     var i: usize = 0;
+    var key_buf = std.array_list.Managed(u8).init(allocator);
+    defer key_buf.deinit();
+    var val_buf = std.array_list.Managed(u8).init(allocator);
+    defer val_buf.deinit();
+
     while (i < params.len) {
+        // Skip whitespace
         while (i < params.len and (params[i] == ' ' or params[i] == '\t')) i += 1;
         if (i >= params.len) break;
+
         if (params[i] == '\'') {
-            i += 1;
-            const start = i;
-            while (i < params.len and params[i] != '\'') i += 1;
-            const entry = params[start..i];
-            if (i < params.len) i += 1;
-            addConfigOverride(allocator, entry) catch {};
+            const after_first = gcpExtractQuoted(params, i, &key_buf) orelse break;
+            i = after_first;
+
+            // Check if followed by = (new-style: 'key'='value')
+            if (i < params.len and params[i] == '=') {
+                i += 1; // skip =
+                if (i < params.len and params[i] == '\'') {
+                    const after_val = gcpExtractQuoted(params, i, &val_buf) orelse break;
+                    i = after_val;
+                    // New-style: key and value are separate
+                    const key_dup = allocator.dupe(u8, key_buf.items) catch continue;
+                    const val_dup = allocator.dupe(u8, val_buf.items) catch { allocator.free(key_dup); continue; };
+                    gcpAddOverride(allocator, key_dup, val_dup);
+                } else {
+                    // 'key'=unquoted_value (unusual but handle it)
+                    const vs = i;
+                    while (i < params.len and params[i] != ' ' and params[i] != '\t') i += 1;
+                    var combined = std.array_list.Managed(u8).init(allocator);
+                    defer combined.deinit();
+                    combined.appendSlice(key_buf.items) catch continue;
+                    combined.append('=') catch continue;
+                    combined.appendSlice(params[vs..i]) catch continue;
+                    addConfigOverride(allocator, combined.items) catch {};
+                }
+            } else {
+                // Old-style: 'key=value' all in one
+                addConfigOverride(allocator, key_buf.items) catch {};
+            }
         } else {
-            const start = i;
+            const start2 = i;
             while (i < params.len and params[i] != ' ' and params[i] != '\t') i += 1;
-            const entry = params[start..i];
+            const entry = params[start2..i];
             if (entry.len > 0) addConfigOverride(allocator, entry) catch {};
         }
     }
+}
+
+fn gcpAddOverride(allocator: std.mem.Allocator, key: []u8, value: []u8) void {
+    initConfigOverrides(allocator);
+    // Normalize key: lowercase section and variable parts, preserve subsection
+    if (std.mem.lastIndexOfScalar(u8, key, '.')) |last_dot| {
+        if (std.mem.indexOfScalar(u8, key, '.')) |first_dot| {
+            if (first_dot < last_dot) {
+                for (key[0..first_dot]) |*c| c.* = std.ascii.toLower(c.*);
+                for (key[last_dot + 1 ..]) |*c| c.* = std.ascii.toLower(c.*);
+            } else {
+                for (key[0..first_dot]) |*c| c.* = std.ascii.toLower(c.*);
+                for (key[last_dot + 1 ..]) |*c| c.* = std.ascii.toLower(c.*);
+            }
+        }
+    }
+    global_config_overrides.?.append(.{ .key = key, .value = value }) catch {};
 }
 
 pub fn zigzitMain(allocator: std.mem.Allocator) !void {
