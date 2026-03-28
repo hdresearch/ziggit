@@ -250,7 +250,7 @@ fn findSimilarCommands(allocator: std.mem.Allocator, typo: []const u8, platform_
                                 const d = levenshteinDistance(allocator, typo, aname);
                                 if (d <= 3 and d < typo.len) {
                                     const duped = allocator.dupe(u8, aname) catch continue;
-                                    candidates.append(.{ .name = duped, .dist = d }) catch continue;
+                                    candidates.append(allocator, .{ .name = duped, .dist = d }) catch continue;
                                 }
                             }
                         }
@@ -273,7 +273,7 @@ fn findSimilarCommands(allocator: std.mem.Allocator, typo: []const u8, platform_
                     const d = levenshteinDistance(allocator, typo, cname);
                     if (d <= 3 and d < typo.len) {
                         const duped = allocator.dupe(u8, cname) catch continue;
-                        candidates.append(.{ .name = duped, .dist = d }) catch continue;
+                        candidates.append(allocator, .{ .name = duped, .dist = d }) catch continue;
                     }
                 }
             }
