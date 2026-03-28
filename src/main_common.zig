@@ -4240,8 +4240,22 @@ fn outputDiffEntries(diff_entries: []const DiffStatEntry, diff_output_mode: anyt
             defer allocator.free(line);
             try platform_impl.writeStdout(line);
         }
+    } else if (diff_output_mode == .summary) {
+        for (diff_entries) |e| {
+            if (e.is_new) {
+                const line = try std.fmt.allocPrint(allocator, " create mode 100644 {s}\n", .{e.path});
+                defer allocator.free(line);
+                try platform_impl.writeStdout(line);
+            } else if (e.is_deleted) {
+                const line = try std.fmt.allocPrint(allocator, " delete mode 100644 {s}\n", .{e.path});
+                defer allocator.free(line);
+                try platform_impl.writeStdout(line);
+            }
+        }
+    } else if (diff_output_mode == .dirstat) {
+        // Minimal dirstat - empty output for now
     }
-    // no_patch: no output
+    // no_patch, patch_with_stat, patch_with_raw: handled elsewhere or no output
 }
 
 fn collectRefDiffEntries(ref_name: []const u8, index: *const index_mod.Index, cwd: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, entries: *std.array_list.Managed(DiffStatEntry), is_cached: bool) !bool {
