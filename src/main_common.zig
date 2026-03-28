@@ -26590,7 +26590,7 @@ fn nativeCmdPrune(allocator: std.mem.Allocator, args: [][]const u8, command_inde
             try platform_impl.writeStderr(msg);
             std.process.exit(128);
         } else {
-            positional_args.append(arg) catch {};
+            positional_args.append(allocator, arg) catch {};
         }
     }
 
