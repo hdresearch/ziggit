@@ -6200,7 +6200,7 @@ fn updateIndexAfterMerge(git_path: []const u8, allocator: std.mem.Allocator, pla
             allocator.free(index.entries.items[i].path);
             _ = index.entries.orderedRemove(i);
         } else {
-            const file_content = platform_impl.fs.readFile(file_path, allocator) catch {
+            const file_content = platform_impl.fs.readFile(allocator, file_path) catch {
                 i += 1;
                 continue;
             };
