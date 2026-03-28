@@ -164,6 +164,7 @@ const gitignore_mod = if (@import("builtin").target.os.tag != .freestanding) @im
 const config_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/config.zig") else void;
 const diff_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/diff.zig") else void;
 const diff_stats_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/diff_stats.zig") else void;
+const diff_cmd_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/diff_cmd.zig") else void;
 const network = if (@import("builtin").target.os.tag != .freestanding) @import("git/network.zig") else void;
 const zlib_compat_mod = if (@import("builtin").target.os.tag != .freestanding) @import("git/zlib_compat.zig") else void;
 
@@ -1024,7 +1025,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "log")) {
         try cmdLog(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "diff")) {
-        try cmdDiff(allocator, &args_iter, &platform_impl);
+        try diff_cmd_mod.cmdDiff(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "branch")) {
         try cmdBranch(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "merge")) {
