@@ -184,7 +184,7 @@ const NATIVE_COMMANDS = [_][]const u8{
     "show-branch", "blame", "annotate", "ls-remote", "upload-pack", "receive-pack", "send-pack", "check-ref-format", "last-modified", "refs",
     "rebase", "cherry-pick", "revert", "daemon", "bisect",
     "grep", "notes", "format-patch", "whatchanged", "for-each-repo", "bugreport", "diagnose",
-    "web--browse", "fast-import", "fast-export",
+    "web--browse", "fast-import", "fast-export", "pack-refs",
 };
 
 fn isNativeCommand(command: []const u8) bool {
@@ -807,6 +807,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try nativeCmdPrune(allocator, all_original_args.items, command_index, &platform_impl);
     } else if (std.mem.eql(u8, command, "repack")) {
         try nativeCmdRepack(allocator, all_original_args.items, command_index, &platform_impl);
+    } else if (std.mem.eql(u8, command, "pack-refs")) {
+        try nativeCmdPackRefs(allocator, all_original_args.items, command_index, &platform_impl);
     } else if (std.mem.eql(u8, command, "pack-objects")) {
         try nativeCmdPackObjects(allocator, all_original_args.items, command_index, &platform_impl);
     } else if (std.mem.eql(u8, command, "index-pack")) {
@@ -26195,18 +26197,23 @@ fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platform_im
 }
 
 fn packRefs(allocator: std.mem.Allocator, git_dir: []const u8) !void {
-    // Pack loose refs into packed-refs file
-    var ref_list = std.array_list.Managed(RefEntry).init(allocator);
+    try packRefsImpl(allocator, git_dir, true);
+}
+
+fn packRefsImpl(allocator: std.mem.Allocator, git_dir: []const u8, prune: bool) !void {
+    // Collect all refs: both from packed-refs and loose refs
+    var ref_map = std.StringHashMap([]const u8).init(allocator);
     defer {
-        for (ref_list.items) |entry| {
-            allocator.free(entry.name);
-            allocator.free(entry.hash);
+        var it = ref_map.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.*);
         }
-        ref_list.deinit();
+        ref_map.deinit();
     }
 
     // Read existing packed-refs
-    const packed_refs_path = std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir}) catch return;
+    const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir});
     defer allocator.free(packed_refs_path);
     if (std.fs.cwd().readFileAlloc(allocator, packed_refs_path, 10 * 1024 * 1024)) |packed_content| {
         defer allocator.free(packed_content);
@@ -26217,17 +26224,157 @@ fn packRefs(allocator: std.mem.Allocator, git_dir: []const u8) !void {
                 const hash = line[0..space_idx];
                 const name = line[space_idx + 1..];
                 if (hash.len >= 40) {
-                    try ref_list.append(.{
-                        .name = try allocator.dupe(u8, name),
-                        .hash = try allocator.dupe(u8, hash[0..40]),
-                    });
+                    const name_dup = try allocator.dupe(u8, name);
+                    const hash_dup = try allocator.dupe(u8, hash[0..40]);
+                    const gop = try ref_map.getOrPut(name_dup);
+                    if (gop.found_existing) {
+                        allocator.free(name_dup);
+                        allocator.free(gop.value_ptr.*);
+                    }
+                    gop.value_ptr.* = hash_dup;
                 }
             }
         }
     } else |_| {}
 
-    // This is a simplified pack-refs - in practice we'd also collect loose refs
-    // and remove the loose files after packing
+    // Collect loose refs from refs/ directory
+    var loose_refs = std.array_list.Managed([]const u8).init(allocator);
+    defer {
+        for (loose_refs.items) |r| allocator.free(r);
+        loose_refs.deinit();
+    }
+    try collectLooseRefs(allocator, git_dir, "refs", &ref_map, &loose_refs);
+
+    // Write packed-refs file
+    var output = std.array_list.Managed(u8).init(allocator);
+    defer output.deinit();
+    try output.appendSlice("# pack-refs with: peeled fully-peeled sorted \n");
+
+    // Sort ref names
+    var names = std.array_list.Managed([]const u8).init(allocator);
+    defer names.deinit();
+    var it = ref_map.iterator();
+    while (it.next()) |entry| {
+        try names.append(entry.key_ptr.*);
+    }
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lessThan);
+
+    for (names.items) |name| {
+        if (ref_map.get(name)) |hash| {
+            try output.appendSlice(hash);
+            try output.append(' ');
+            try output.appendSlice(name);
+            try output.append('\n');
+        }
+    }
+
+    std.fs.cwd().writeFile(.{ .sub_path = packed_refs_path, .data = output.items }) catch {};
+
+    // Prune loose refs that are now packed
+    if (prune) {
+        for (loose_refs.items) |ref_path| {
+            const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, ref_path }) catch continue;
+            defer allocator.free(full_path);
+            std.fs.cwd().deleteFile(full_path) catch {};
+        }
+        // Clean up empty directories
+        cleanEmptyRefDirs(allocator, git_dir, "refs");
+    }
+}
+
+fn collectLooseRefs(allocator: std.mem.Allocator, git_dir: []const u8, prefix: []const u8, ref_map: *std.StringHashMap([]const u8), loose_refs: *std.array_list.Managed([]const u8)) !void {
+    const dir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, prefix });
+    defer allocator.free(dir_path);
+
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        const child_prefix = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, entry.name });
+        defer allocator.free(child_prefix);
+
+        if (entry.kind == .directory) {
+            try collectLooseRefs(allocator, git_dir, child_prefix, ref_map, loose_refs);
+        } else if (entry.kind == .file) {
+            // Read the file to get the hash
+            const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, child_prefix });
+            defer allocator.free(file_path);
+            const content = std.fs.cwd().readFileAlloc(allocator, file_path, 1024) catch continue;
+            defer allocator.free(content);
+            const trimmed = std.mem.trimRight(u8, content, " \t\r\n");
+            // Skip symbolic refs
+            if (std.mem.startsWith(u8, trimmed, "ref: ")) continue;
+            if (trimmed.len >= 40) {
+                const name_dup = try allocator.dupe(u8, child_prefix);
+                const hash_dup = try allocator.dupe(u8, trimmed[0..40]);
+                const gop = try ref_map.getOrPut(name_dup);
+                if (gop.found_existing) {
+                    allocator.free(name_dup);
+                    allocator.free(gop.value_ptr.*);
+                }
+                gop.value_ptr.* = hash_dup;
+                try loose_refs.append(try allocator.dupe(u8, child_prefix));
+            }
+        }
+    }
+}
+
+fn cleanEmptyRefDirs(allocator: std.mem.Allocator, git_dir: []const u8, prefix: []const u8) void {
+    const dir_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, prefix }) catch return;
+    defer allocator.free(dir_path);
+
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+
+    // Collect subdirectory names first
+    var subdirs = std.array_list.Managed([]const u8).init(allocator);
+    defer {
+        for (subdirs.items) |s| allocator.free(s);
+        subdirs.deinit();
+    }
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind == .directory) {
+            subdirs.append(allocator.dupe(u8, entry.name) catch continue) catch {};
+        }
+    }
+
+    for (subdirs.items) |subdir| {
+        const child_prefix = std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, subdir }) catch continue;
+        defer allocator.free(child_prefix);
+        cleanEmptyRefDirs(allocator, git_dir, child_prefix);
+    }
+
+    // Try to remove this dir if empty (and not the "refs" root itself)
+    if (!std.mem.eql(u8, prefix, "refs")) {
+        std.fs.cwd().deleteDir(dir_path) catch {};
+    }
+}
+
+fn nativeCmdPackRefs(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
+    _ = platform_impl;
+    var prune_flag = false;
+    var all_flag = false;
+    var i = command_index + 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--all")) {
+            all_flag = true;
+        } else if (std.mem.eql(u8, arg, "--prune")) {
+            prune_flag = true;
+        } else if (std.mem.eql(u8, arg, "--no-prune")) {
+            prune_flag = false;
+        }
+    }
+    _ = all_flag;
+
+    const git_dir = try findGitDir(allocator);
+    try packRefsImpl(allocator, git_dir, prune_flag);
 }
 
 fn cleanEmptyObjectDirs(allocator: std.mem.Allocator, git_dir: []const u8) !void {
