@@ -176,15 +176,6 @@ pub fn cmdGrep(allocator: Allocator, args: *platform_mod.ArgIterator, platform_i
     defer opts.deinit();
 
     // Expression tokens for boolean parsing
-    const ExprToken = union(enum) {
-        pattern: []const u8,
-        op_and,
-        op_or,
-        op_not,
-        open_paren,
-        close_paren,
-    };
-
     var expr_tokens = std.array_list.Managed(ExprToken).init(allocator);
     defer expr_tokens.deinit();
     var has_explicit_pattern = false;
