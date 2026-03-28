@@ -3405,16 +3405,34 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
     };
     defer allocator.free(git_path);
 
-    // Resolve starting commit
+    // Resolve starting commit (and optional stop commit for ranges)
     var start_commit: []u8 = undefined;
+    var stop_at_commit: ?[]u8 = null;
+    defer if (stop_at_commit) |sac| allocator.free(sac);
     if (committish) |commit_ref| {
-        // Try to resolve committish (branch, tag, or commit hash)
-        start_commit = resolveCommittish(git_path, commit_ref, platform_impl, allocator) catch {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\n", .{commit_ref});
-            defer allocator.free(msg);
-            try platform_impl.writeStderr(msg);
-            std.process.exit(128);
-        };
+        // Check for range syntax (A..B means commits reachable from B but not from A)
+        if (std.mem.indexOf(u8, commit_ref, "..")) |dot_pos| {
+            const ref1 = commit_ref[0..dot_pos];
+            const ref2_raw = commit_ref[dot_pos + 2 ..];
+            const ref2 = if (ref2_raw.len > 0 and ref2_raw[0] == '.') ref2_raw[1..] else ref2_raw;
+            const tip = if (ref2.len == 0) "HEAD" else ref2;
+            
+            stop_at_commit = resolveCommittish(git_path, ref1, platform_impl, allocator) catch null;
+            start_commit = resolveCommittish(git_path, tip, platform_impl, allocator) catch {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\n", .{commit_ref});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            };
+        } else {
+            // Try to resolve committish (branch, tag, or commit hash)
+            start_commit = resolveCommittish(git_path, commit_ref, platform_impl, allocator) catch {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\n", .{commit_ref});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            };
+        }
     } else {
         // Get current HEAD commit
         const current_commit = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
@@ -3450,6 +3468,10 @@ fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfor
 
     var count: u32 = 0;
     while (max_count == null or count < max_count.?) {
+        // Stop at range boundary
+        if (stop_at_commit) |sac| {
+            if (std.mem.eql(u8, commit_hash, sac)) break;
+        }
         // Avoid infinite loops
         if (visited.contains(commit_hash)) break;
         try visited.put(try allocator.dupe(u8, commit_hash), {});
