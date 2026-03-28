@@ -354,6 +354,19 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             }
         }
 
+        // Apply url.<base>.pushInsteadOf or url.<base>.insteadOf rewriting
+        if (remote_url_allocated) {
+            if (applyPushInsteadOf(allocator, remote_url, config_content)) |rewritten| {
+                if (remote_url_allocated) allocator.free(remote_url);
+                remote_url = rewritten;
+                remote_url_allocated = true;
+            } else if (fetch_cmd.applyInsteadOf(allocator, remote_url, config_content)) |rewritten| {
+                if (remote_url_allocated) allocator.free(remote_url);
+                remote_url = rewritten;
+                remote_url_allocated = true;
+            }
+        }
+
         if (!remote_url_allocated) {
             if (resolveSourceGitDir(allocator, remote)) |rgd| {
                 allocator.free(rgd);
@@ -651,19 +664,53 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             local_all_refs.deinit();
         }
 
-        for (remote_all_refs.items) |remote_entry| {
-            if (!std.mem.startsWith(u8, remote_entry.name, "refs/heads/")) continue;
-            var exists_locally = false;
-            for (local_all_refs.items) |local_entry| {
-                if (std.mem.eql(u8, local_entry.name, remote_entry.name)) {
-                    exists_locally = true;
-                    break;
+        // Determine which refspecs to use for pruning
+        if (refspecs_list.items.len > 0) {
+            // Use explicit refspecs to determine what to prune
+            for (refspecs_list.items) |rs_raw| {
+                var rs = rs_raw;
+                if (rs.len > 0 and rs[0] == '+') rs = rs[1..];
+                const colon = std.mem.indexOf(u8, rs, ":") orelse continue;
+                const src_pat = rs[0..colon];
+                const dst_pat = rs[colon + 1 ..];
+                if (std.mem.indexOfScalar(u8, src_pat, '*') == null or std.mem.indexOfScalar(u8, dst_pat, '*') == null) continue;
+
+                // For each remote ref matching dst_pat, check if there's a local ref matching src_pat
+                for (remote_all_refs.items) |remote_entry| {
+                    const suffix = fetch_cmd.refspecMatchPub(remote_entry.name, dst_pat) orelse continue;
+                    // Map back to src pattern
+                    const expected_local = fetch_cmd.refspecMapPub(allocator, suffix, src_pat) catch continue;
+                    defer allocator.free(expected_local);
+                    var found = false;
+                    for (local_all_refs.items) |local_entry| {
+                        if (std.mem.eql(u8, local_entry.name, expected_local)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        const ref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ remote_git_dir, remote_entry.name }) catch continue;
+                        defer allocator.free(ref_path);
+                        std.fs.cwd().deleteFile(ref_path) catch {};
+                    }
                 }
             }
-            if (!exists_locally) {
-                const ref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ remote_git_dir, remote_entry.name }) catch continue;
-                defer allocator.free(ref_path);
-                std.fs.cwd().deleteFile(ref_path) catch {};
+        } else {
+            // Default: prune refs/heads/* that don't exist locally
+            for (remote_all_refs.items) |remote_entry| {
+                if (!std.mem.startsWith(u8, remote_entry.name, "refs/heads/")) continue;
+                var exists_locally = false;
+                for (local_all_refs.items) |local_entry| {
+                    if (std.mem.eql(u8, local_entry.name, remote_entry.name)) {
+                        exists_locally = true;
+                        break;
+                    }
+                }
+                if (!exists_locally) {
+                    const ref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ remote_git_dir, remote_entry.name }) catch continue;
+                    defer allocator.free(ref_path);
+                    std.fs.cwd().deleteFile(ref_path) catch {};
+                }
             }
         }
     }
@@ -685,6 +732,53 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         } else |_| {}
     }
 
+}
+
+/// Apply url.<base>.pushInsteadOf rewriting to a URL
+fn applyPushInsteadOf(allocator: std.mem.Allocator, url: []const u8, config_content: []const u8) ?[]u8 {
+    var best_match: ?[]const u8 = null;
+    var best_base: ?[]const u8 = null;
+    var best_match_len: usize = 0;
+
+    var in_url_section = false;
+    var current_base: ?[]const u8 = null;
+    var lines = std.mem.splitScalar(u8, config_content, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0 or line[0] == '#' or line[0] == ';') continue;
+
+        if (line[0] == '[') {
+            in_url_section = false;
+            current_base = null;
+            if (std.mem.startsWith(u8, line, "[url \"")) {
+                const rest = line["[url \"".len..];
+                if (std.mem.indexOfScalar(u8, rest, '"')) |q| {
+                    current_base = rest[0..q];
+                    in_url_section = true;
+                }
+            }
+            continue;
+        }
+
+        if (in_url_section and current_base != null) {
+            if (std.mem.indexOfScalar(u8, line, '=')) |eq| {
+                const vkey = std.mem.trim(u8, line[0..eq], " \t");
+                const vval = std.mem.trim(u8, line[eq + 1 ..], " \t");
+                if (std.ascii.eqlIgnoreCase(vkey, "pushInsteadOf")) {
+                    if (std.mem.startsWith(u8, url, vval) and vval.len > best_match_len) {
+                        best_match = vval;
+                        best_base = current_base;
+                        best_match_len = vval.len;
+                    }
+                }
+            }
+        }
+    }
+
+    if (best_match != null and best_base != null) {
+        return std.fmt.allocPrint(allocator, "{s}{s}", .{ best_base.?, url[best_match_len..] }) catch null;
+    }
+    return null;
 }
 
 fn formatRefDisplay(ref_name: []const u8) []const u8 {

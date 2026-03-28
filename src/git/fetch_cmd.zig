@@ -194,6 +194,117 @@ fn readFileContent(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024);
 }
 
+/// Apply url.<base>.insteadOf rewriting to a URL
+pub fn applyInsteadOf(allocator: std.mem.Allocator, url: []const u8, config_content: []const u8) ?[]u8 {
+    // Find all url.<base>.insteadOf entries
+    var best_match: ?[]const u8 = null;
+    var best_base: ?[]const u8 = null;
+    var best_match_len: usize = 0;
+
+    var in_url_section = false;
+    var current_base: ?[]const u8 = null;
+    var lines = std.mem.splitScalar(u8, config_content, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0 or line[0] == '#' or line[0] == ';') continue;
+
+        if (line[0] == '[') {
+            in_url_section = false;
+            current_base = null;
+            // Parse [url "<base>"] section
+            if (std.mem.startsWith(u8, line, "[url \"")) {
+                const rest = line["[url \"".len..];
+                if (std.mem.indexOfScalar(u8, rest, '"')) |q| {
+                    current_base = rest[0..q];
+                    in_url_section = true;
+                }
+            }
+            continue;
+        }
+
+        if (in_url_section and current_base != null) {
+            if (std.mem.indexOfScalar(u8, line, '=')) |eq| {
+                const vkey = std.mem.trim(u8, line[0..eq], " \t");
+                const vval = std.mem.trim(u8, line[eq + 1 ..], " \t");
+                if (std.ascii.eqlIgnoreCase(vkey, "insteadOf")) {
+                    if (std.mem.startsWith(u8, url, vval) and vval.len > best_match_len) {
+                        best_match = vval;
+                        best_base = current_base;
+                        best_match_len = vval.len;
+                    }
+                }
+            }
+        }
+    }
+
+    if (best_match != null and best_base != null) {
+        // Replace the matched prefix with the base URL
+        return std.fmt.allocPrint(allocator, "{s}{s}", .{ best_base.?, url[best_match_len..] }) catch null;
+    }
+    return null;
+}
+
+/// Find a configured remote name whose URL matches the given URL.
+/// Handles file:// prefix and path normalization.
+fn findRemoteByUrl(allocator: std.mem.Allocator, config_content: []const u8, url: []const u8) ?[]u8 {
+    // Normalize the target URL
+    const target_path = if (std.mem.startsWith(u8, url, "file://"))
+        url["file://".len..]
+    else
+        url;
+
+    // Resolve target to absolute path
+    const abs_target = std.fs.cwd().realpathAlloc(allocator, target_path) catch null;
+    defer if (abs_target) |a| allocator.free(a);
+
+    var lines = std.mem.splitScalar(u8, config_content, '\n');
+    var current_remote: ?[]const u8 = null;
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0 or line[0] == '#' or line[0] == ';') continue;
+
+        if (line[0] == '[') {
+            current_remote = null;
+            if (std.mem.startsWith(u8, line, "[remote \"")) {
+                const rest = line["[remote \"".len..];
+                if (std.mem.indexOfScalar(u8, rest, '"')) |q| {
+                    current_remote = rest[0..q];
+                }
+            }
+            continue;
+        }
+        if (current_remote) |rn| {
+            if (std.mem.indexOfScalar(u8, line, '=')) |eq| {
+                const vkey = std.mem.trim(u8, line[0..eq], " \t");
+                if (std.ascii.eqlIgnoreCase(vkey, "url")) {
+                    const vval = std.mem.trim(u8, line[eq + 1 ..], " \t");
+                    // Compare URLs
+                    const cfg_path = if (std.mem.startsWith(u8, vval, "file://"))
+                        vval["file://".len..]
+                    else
+                        vval;
+
+                    // Direct comparison
+                    if (std.mem.eql(u8, cfg_path, target_path)) {
+                        return allocator.dupe(u8, rn) catch null;
+                    }
+                    // Resolve and compare
+                    if (abs_target) |at| {
+                        const abs_cfg = std.fs.cwd().realpathAlloc(allocator, cfg_path) catch null;
+                        defer if (abs_cfg) |a| allocator.free(a);
+                        if (abs_cfg) |ac| {
+                            if (std.mem.eql(u8, ac, at)) {
+                                return allocator.dupe(u8, rn) catch null;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return null;
+}
+
 pub const RefEntry = struct {
     name: []const u8,
     hash: []const u8,
@@ -384,6 +495,10 @@ pub fn refspecMapPub(allocator: std.mem.Allocator, suffix: []const u8, dst_patte
 /// Supports glob patterns like refs/pull/*/head where * matches one or more path components.
 /// Returns the matched wildcard portion if matched (empty string for exact match).
 fn refspecMatch(ref_name: []const u8, pattern: []const u8) ?[]const u8 {
+    return refspecMatchImpl(ref_name, pattern, false);
+}
+
+fn refspecMatchImpl(ref_name: []const u8, pattern: []const u8, strict: bool) ?[]const u8 {
     if (std.mem.indexOfScalar(u8, pattern, '*')) |star_pos| {
         const prefix = pattern[0..star_pos];
         const suffix_pat = pattern[star_pos + 1 ..];
@@ -400,13 +515,23 @@ fn refspecMatch(ref_name: []const u8, pattern: []const u8) ?[]const u8 {
     } else if (std.mem.eql(u8, ref_name, pattern)) {
         return "";
     }
-    // Short refspec: "main" matches "refs/heads/main"
+    // Short refspec: "main" matches "refs/heads/main", "refs/tags/main", etc.
     if (!std.mem.startsWith(u8, pattern, "refs/") and std.mem.indexOfScalar(u8, pattern, '*') == null) {
         if (std.mem.startsWith(u8, ref_name, "refs/heads/")) {
             if (std.mem.eql(u8, ref_name["refs/heads/".len..], pattern)) return "";
         }
-        if (std.mem.startsWith(u8, ref_name, "refs/tags/")) {
-            if (std.mem.eql(u8, ref_name["refs/tags/".len..], pattern)) return "";
+        if (!strict) {
+            if (std.mem.startsWith(u8, ref_name, "refs/tags/")) {
+                if (std.mem.eql(u8, ref_name["refs/tags/".len..], pattern)) return "";
+            }
+        }
+        // Also match refs/remotes/<name>/HEAD for remote DWIM
+        if (std.mem.startsWith(u8, ref_name, "refs/remotes/")) {
+            const rest = ref_name["refs/remotes/".len..];
+            if (std.mem.endsWith(u8, rest, "/HEAD")) {
+                const rname = rest[0 .. rest.len - "/HEAD".len];
+                if (std.mem.eql(u8, rname, pattern)) return "";
+            }
         }
     }
     return null;
@@ -509,6 +634,7 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     var refmap_value: ?[]const u8 = null;
     var prune_tags = false;
     var set_upstream = false;
+    var atomic = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
@@ -529,6 +655,8 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             set_upstream = true;
         } else if (std.mem.eql(u8, arg, "--force") or std.mem.eql(u8, arg, "-f")) {
             force = true;
+        } else if (std.mem.eql(u8, arg, "--atomic")) {
+            atomic = true;
         } else if (std.mem.eql(u8, arg, "--update-head-ok")) {
             update_head_ok = true;
         } else if (std.mem.eql(u8, arg, "--append") or std.mem.eql(u8, arg, "-a")) {
@@ -633,6 +761,8 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     // Resolve remote URL
     var remote_url_owned: ?[]u8 = null;
     defer if (remote_url_owned) |u| allocator.free(u);
+    var instead_of_url: ?[]u8 = null;
+    defer if (instead_of_url) |u| allocator.free(u);
     const remote_url: []const u8 = blk: {
         const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
         defer allocator.free(config_path);
@@ -641,6 +771,12 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             const url_key = try std.fmt.allocPrint(allocator, "remote.{s}.url", .{remote_name});
             defer allocator.free(url_key);
             if (getConfigValue(config_content, url_key, allocator)) |url| {
+                // Apply url.<base>.insteadOf rewriting
+                if (applyInsteadOf(allocator, url, config_content)) |rewritten| {
+                    instead_of_url = rewritten;
+                    allocator.free(url);
+                    break :blk rewritten;
+                }
                 remote_url_owned = url;
                 break :blk url;
             } else |_| {}
@@ -697,14 +833,33 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                         } else |_| {}
                     }
                 }
-                // Read prune config - fetch.prune is global, remote.<name>.prune is per-remote
+                // Determine which remote name to use for config lookups.
+                // For URL-based fetches, try to match the URL against configured remotes.
+                var matched_remote_name: ?[]u8 = null;
+                const prune_remote_name: []const u8 = if (is_named_remote) remote_name else blk_match: {
+                    matched_remote_name = findRemoteByUrl(allocator, config_content, remote_url);
+                    break :blk_match if (matched_remote_name) |m| m else "";
+                };
+                defer if (matched_remote_name) |m| allocator.free(m);
+                const has_prune_remote = is_named_remote or matched_remote_name != null;
+
+                // Read prune config - remote.<name>.prune overrides fetch.prune
                 if (!no_prune and !effective_prune) {
-                    if (is_named_remote) {
-                        const remote_prune_key = try std.fmt.allocPrint(allocator, "remote.{s}.prune", .{remote_name});
+                    if (has_prune_remote) {
+                        const remote_prune_key = try std.fmt.allocPrint(allocator, "remote.{s}.prune", .{prune_remote_name});
                         defer allocator.free(remote_prune_key);
                         if (getConfigValue(config_content, remote_prune_key, allocator)) |prune_val| {
                             defer allocator.free(prune_val);
-                            effective_prune = std.mem.eql(u8, prune_val, "true");
+                            if (std.mem.eql(u8, prune_val, "true")) {
+                                effective_prune = true;
+                            } else if (std.mem.eql(u8, prune_val, "false")) {
+                                // Explicitly disabled - don't fall through to fetch.prune
+                            } else {
+                                if (getConfigValue(config_content, "fetch.prune", allocator)) |fp| {
+                                    defer allocator.free(fp);
+                                    effective_prune = std.mem.eql(u8, fp, "true");
+                                } else |_| {}
+                            }
                         } else |_| {
                             if (getConfigValue(config_content, "fetch.prune", allocator)) |prune_val| {
                                 defer allocator.free(prune_val);
@@ -712,21 +867,33 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                             } else |_| {}
                         }
                     } else {
-                        // For non-named remotes, still check fetch.prune
+                        // No matching remote found, check fetch.prune
                         if (getConfigValue(config_content, "fetch.prune", allocator)) |prune_val| {
                             defer allocator.free(prune_val);
                             effective_prune = std.mem.eql(u8, prune_val, "true");
                         } else |_| {}
                     }
                 }
+                // Handle --no-prune explicitly overriding config
+                if (no_prune) effective_prune = false;
+
                 // Read pruneTags config
                 if (!effective_prune_tags) {
-                    if (is_named_remote) {
-                        const remote_prune_tags_key = try std.fmt.allocPrint(allocator, "remote.{s}.pruneTags", .{remote_name});
+                    if (has_prune_remote) {
+                        const remote_prune_tags_key = try std.fmt.allocPrint(allocator, "remote.{s}.pruneTags", .{prune_remote_name});
                         defer allocator.free(remote_prune_tags_key);
                         if (getConfigValue(config_content, remote_prune_tags_key, allocator)) |pt_val| {
                             defer allocator.free(pt_val);
-                            effective_prune_tags = std.mem.eql(u8, pt_val, "true");
+                            if (std.mem.eql(u8, pt_val, "true")) {
+                                effective_prune_tags = true;
+                            } else if (std.mem.eql(u8, pt_val, "false")) {
+                                // Explicitly disabled
+                            } else {
+                                if (getConfigValue(config_content, "fetch.pruneTags", allocator)) |fp| {
+                                    defer allocator.free(fp);
+                                    effective_prune_tags = std.mem.eql(u8, fp, "true");
+                                } else |_| {}
+                            }
                         } else |_| {
                             if (getConfigValue(config_content, "fetch.pruneTags", allocator)) |pt_val| {
                                 defer allocator.free(pt_val);
@@ -742,7 +909,7 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                 }
             } else |_| {}
         }
-        try performLocalFetch(allocator, git_path, local_path, remote_name, quiet, cmd_refspecs.items, platform_impl, effective_tags != .no, force, append_mode, effective_prune, dry_run, write_fetch_head and !dry_run, update_head_ok, has_refmap, refmap_value, effective_prune_tags);
+        try performLocalFetch(allocator, git_path, local_path, remote_name, quiet, cmd_refspecs.items, platform_impl, effective_tags != .no, force, append_mode, effective_prune, dry_run, write_fetch_head and !dry_run, update_head_ok, has_refmap, refmap_value, effective_prune_tags, is_named_remote);
 
         // Handle --set-upstream
         if (set_upstream and cmd_refspecs.items.len > 0 and is_named_remote) {
@@ -824,6 +991,7 @@ fn performLocalFetch(
     has_refmap: bool,
     refmap_value: ?[]const u8,
     do_prune_tags: bool,
+    is_named_remote: bool,
 ) !void {
     // Resolve source git dir
     const src_git_dir = resolveSourceGitDir(allocator, source_path) catch {
@@ -894,26 +1062,35 @@ fn performLocalFetch(
                 }
             }
         } else {
-            // No parent directory - path is just a basename like "."
-            if (std.fs.cwd().realpathAlloc(allocator, ".")) |cwd_resolved| {
-                if (std.mem.eql(u8, basename, ".") or std.mem.eql(u8, basename, "..")) {
-                    // For "." or "..", resolve fully
-                    if (std.fs.cwd().realpathAlloc(allocator, raw_path)) |resolved| {
-                        from_display = resolved;
-                        from_display_owned = true;
-                        allocator.free(cwd_resolved);
-                    } else |_| {
-                        from_display = cwd_resolved;
-                        from_display_owned = true;
-                    }
-                } else {
+            // No parent directory - path is just a basename like "." or ".."
+            if (std.mem.eql(u8, basename, ".")) {
+                // "." - resolve cwd and append "/."
+                if (std.fs.cwd().realpathAlloc(allocator, ".")) |cwd_resolved| {
+                    from_display = try std.fmt.allocPrint(allocator, "{s}/.", .{cwd_resolved});
+                    from_display_owned = true;
+                    allocator.free(cwd_resolved);
+                } else |_| {
+                    from_display = try allocator.dupe(u8, raw_path);
+                    from_display_owned = true;
+                }
+            } else if (std.mem.eql(u8, basename, "..")) {
+                // ".." - resolve parent
+                if (std.fs.cwd().realpathAlloc(allocator, "..")) |resolved| {
+                    from_display = resolved;
+                    from_display_owned = true;
+                } else |_| {
+                    from_display = try allocator.dupe(u8, raw_path);
+                    from_display_owned = true;
+                }
+            } else {
+                if (std.fs.cwd().realpathAlloc(allocator, ".")) |cwd_resolved| {
                     from_display = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd_resolved, basename });
                     from_display_owned = true;
                     allocator.free(cwd_resolved);
+                } else |_| {
+                    from_display = try allocator.dupe(u8, raw_path);
+                    from_display_owned = true;
                 }
-            } else |_| {
-                from_display = try allocator.dupe(u8, raw_path);
-                from_display_owned = true;
             }
         }
     }
@@ -946,6 +1123,28 @@ fn performLocalFetch(
             allocator.free(e.hash);
         }
         source_refs.deinit();
+    }
+
+    // Add HEAD to source refs if it resolves to a hash
+    {
+        const src_head_for_refs = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{src_git_dir});
+        defer allocator.free(src_head_for_refs);
+        if (readFileContent(allocator, src_head_for_refs)) |head_content| {
+            defer allocator.free(head_content);
+            const head_trimmed = std.mem.trim(u8, head_content, " \t\r\n");
+            var head_hash: ?[]u8 = null;
+            if (std.mem.startsWith(u8, head_trimmed, "ref: ")) {
+                head_hash = refs.resolveRef(src_git_dir, head_trimmed["ref: ".len..], platform_impl, allocator) catch null;
+            } else if (head_trimmed.len >= 40) {
+                head_hash = allocator.dupe(u8, head_trimmed[0..40]) catch null;
+            }
+            if (head_hash) |hh| {
+                try source_refs.append(.{
+                    .name = try allocator.dupe(u8, "HEAD"),
+                    .hash = hh,
+                });
+            }
+        } else |_| {}
     }
 
     // Detect current branch for refuse-fetch-into-current check (only for non-bare repos)
@@ -1006,7 +1205,7 @@ fn performLocalFetch(
 
     var fetch_failed = false;
 
-    for (refspecs.items) |rs| {
+    for (refspecs.items, 0..) |rs, refspec_idx| {
         var cs = rs;
         var dst: ?[]const u8 = null;
         var force_ref = force_flag;
@@ -1020,8 +1219,23 @@ fn performLocalFetch(
             cs = cs[0..c];
         }
 
+        var matched_any = false;
+        var matched_only_via_tag_dwim = false;
         for (source_refs.items) |entry| {
             if (refspecMatch(entry.name, cs)) |suffix| {
+                matched_any = true;
+                // Track if this match was only via tag DWIM (short name matching refs/tags/*)
+                if (!std.mem.startsWith(u8, cs, "refs/") and std.mem.indexOfScalar(u8, cs, '*') == null and
+                    std.mem.startsWith(u8, entry.name, "refs/tags/") and
+                    !std.mem.startsWith(u8, entry.name, "refs/heads/"))
+                {
+                    // Check if the pattern matches literally (not just via tag DWIM)
+                    if (!std.mem.eql(u8, entry.name, cs)) {
+                        matched_only_via_tag_dwim = true;
+                    }
+                } else {
+                    matched_only_via_tag_dwim = false;
+                }
                 // Determine if this ref is for-merge
                 var is_for_merge = false;
                 for (merge_refs.items) |mref| {
@@ -1135,6 +1349,16 @@ fn performLocalFetch(
                         }
                     }
                 }
+            }
+        }
+
+        // Check if explicit refspec matched nothing (error for non-glob refspecs)
+        if (cs.len > 0 and std.mem.indexOfScalar(u8, cs, '*') == null and cmd_refspecs.len > 0 and refspec_idx < cmd_refspecs.len) {
+            if (!matched_any or matched_only_via_tag_dwim) {
+                const err_msg = try std.fmt.allocPrint(allocator, "fatal: couldn't find remote ref {s}\n", .{cs});
+                defer allocator.free(err_msg);
+                try platform_impl.writeStderr(err_msg);
+                std.process.exit(128);
             }
         }
     }
@@ -1314,34 +1538,126 @@ fn performLocalFetch(
         }
     }
 
-    // Create remote HEAD symbolic ref
-    {
+    // Update remote HEAD symbolic ref (followRemoteHEAD feature)
+    // Only do this for named remotes and when no explicit refspecs were given on cmdline
+    if (is_named_remote and cmd_refspecs.len == 0) {
         const src_head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{src_git_dir});
         defer allocator.free(src_head_path);
         if (readFileContent(allocator, src_head_path)) |hcont| {
             defer allocator.free(hcont);
             const th = std.mem.trim(u8, hcont, " \t\r\n");
             if (std.mem.startsWith(u8, th, "ref: refs/heads/")) {
-                const def_branch = th["ref: refs/heads/".len..];
+                const remote_head_branch = th["ref: refs/heads/".len..];
                 const rh_path = try std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}/HEAD", .{ git_path, remote_name });
                 defer allocator.free(rh_path);
-                // Only create if tracking ref exists
-                const tracking_ref = try std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}/{s}", .{ git_path, remote_name, def_branch });
+                // Check if tracking ref for the remote HEAD branch exists
+                const tracking_ref = try std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}/{s}", .{ git_path, remote_name, remote_head_branch });
                 defer allocator.free(tracking_ref);
-                if (std.fs.cwd().access(tracking_ref, .{})) |_| {
-                    if (std.fs.path.dirname(rh_path)) |pd| std.fs.cwd().makePath(pd) catch {};
-                    // Check if HEAD already exists and points to something - don't overwrite unless initial
-                    const existing_head = readFileContent(allocator, rh_path) catch null;
-                    const should_create = if (existing_head) |eh| blk: {
-                        allocator.free(eh);
-                        break :blk false; // Don't overwrite existing remote HEAD
-                    } else true;
-                    if (should_create) {
-                        const sc = try std.fmt.allocPrint(allocator, "ref: refs/remotes/{s}/{s}\n", .{ remote_name, def_branch });
-                        defer allocator.free(sc);
-                        std.fs.cwd().writeFile(.{ .sub_path = rh_path, .data = sc }) catch {};
-                    }
-                } else |_| {}
+
+                // Read followRemoteHEAD config
+                var follow_mode: enum { always, warn, warn_if_not_branch, create, never } = .warn;
+                var warn_if_not_branch_name: []const u8 = "";
+                {
+                    const cfg_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+                    defer allocator.free(cfg_path);
+                    if (readFileContent(allocator, cfg_path)) |cfg_content| {
+                        defer allocator.free(cfg_content);
+                        const follow_key = try std.fmt.allocPrint(allocator, "remote.{s}.followRemoteHEAD", .{remote_name});
+                        defer allocator.free(follow_key);
+                        if (getConfigValue(cfg_content, follow_key, allocator)) |fval| {
+                            defer allocator.free(fval);
+                            if (std.mem.eql(u8, fval, "never")) {
+                                follow_mode = .never;
+                            } else if (std.mem.eql(u8, fval, "warn")) {
+                                follow_mode = .warn;
+                            } else if (std.mem.startsWith(u8, fval, "warn-if-not-")) {
+                                follow_mode = .warn_if_not_branch;
+                                warn_if_not_branch_name = fval["warn-if-not-".len..];
+                            } else if (std.mem.eql(u8, fval, "create")) {
+                                follow_mode = .create;
+                            } else if (std.mem.eql(u8, fval, "always")) {
+                                follow_mode = .always;
+                            }
+                        } else |_| {}
+                    } else |_| {}
+                }
+
+                if (follow_mode != .never) {
+                    if (std.fs.cwd().access(tracking_ref, .{})) |_| {
+                        if (std.fs.path.dirname(rh_path)) |pd| std.fs.cwd().makePath(pd) catch {};
+                        const new_symref = try std.fmt.allocPrint(allocator, "ref: refs/remotes/{s}/{s}\n", .{ remote_name, remote_head_branch });
+                        defer allocator.free(new_symref);
+
+                        const existing_head = readFileContent(allocator, rh_path) catch null;
+                        defer if (existing_head) |eh| allocator.free(eh);
+
+                        if (existing_head) |eh| {
+                            const existing_trimmed = std.mem.trim(u8, eh, " \t\r\n");
+                            // HEAD already exists
+                            if (std.mem.startsWith(u8, existing_trimmed, "ref: refs/remotes/")) {
+                                // It's a symref - check if it already points to the right place
+                                const expected_ref = try std.fmt.allocPrint(allocator, "ref: refs/remotes/{s}/{s}", .{ remote_name, remote_head_branch });
+                                defer allocator.free(expected_ref);
+                                if (!std.mem.eql(u8, existing_trimmed, expected_ref)) {
+                                    // HEAD changed
+                                    const current_branch_ref = existing_trimmed["ref: ".len..];
+                                    const current_branch_name = if (std.mem.startsWith(u8, current_branch_ref, "refs/remotes/")) blk_cn: {
+                                        const after_remotes = current_branch_ref["refs/remotes/".len..];
+                                        if (std.mem.indexOfScalar(u8, after_remotes, '/')) |slash| {
+                                            break :blk_cn after_remotes[slash + 1 ..];
+                                        }
+                                        break :blk_cn after_remotes;
+                                    } else current_branch_ref;
+                                    _ = current_branch_name;
+
+                                    if (follow_mode == .always) {
+                                        if (!dry_run) {
+                                            std.fs.cwd().writeFile(.{ .sub_path = rh_path, .data = new_symref }) catch {};
+                                        }
+                                    } else if (follow_mode == .warn) {
+                                        // Print warning to stdout
+                                        if (!quiet) {
+                                            const cur_ref_tail = existing_trimmed["ref: ".len..];
+                                            const cur_branch = if (std.mem.lastIndexOfScalar(u8, cur_ref_tail, '/')) |ls2| cur_ref_tail[ls2 + 1 ..] else cur_ref_tail;
+                                            const warn_msg = try std.fmt.allocPrint(allocator, "'HEAD' at '{s}' is '{s}', but we have '{s}' locally.\n", .{ remote_name, remote_head_branch, cur_branch });
+                                            defer allocator.free(warn_msg);
+                                            try platform_impl.writeStdout(warn_msg);
+                                        }
+                                    } else if (follow_mode == .warn_if_not_branch) {
+                                        // Only warn if remote HEAD branch does NOT match the configured branch name
+                                        if (!quiet and !std.mem.eql(u8, remote_head_branch, warn_if_not_branch_name)) {
+                                            const cur_ref_tail = existing_trimmed["ref: ".len..];
+                                            const cur_branch = if (std.mem.lastIndexOfScalar(u8, cur_ref_tail, '/')) |ls2| cur_ref_tail[ls2 + 1 ..] else cur_ref_tail;
+                                            const warn_msg = try std.fmt.allocPrint(allocator, "'HEAD' at '{s}' is '{s}', but we have '{s}' locally.\n", .{ remote_name, remote_head_branch, cur_branch });
+                                            defer allocator.free(warn_msg);
+                                            try platform_impl.writeStdout(warn_msg);
+                                        }
+                                    }
+                                }
+                            } else {
+                                // It's a detached HEAD (raw hash)
+                                if (follow_mode == .always) {
+                                    if (!dry_run) {
+                                        std.fs.cwd().writeFile(.{ .sub_path = rh_path, .data = new_symref }) catch {};
+                                    }
+                                } else if (follow_mode == .warn) {
+                                    if (!quiet) {
+                                        const warn_msg = try std.fmt.allocPrint(allocator, "'HEAD' at '{s}' is '{s}', but we have a detached HEAD pointing to '{s}' locally.\n", .{ remote_name, remote_head_branch, existing_trimmed });
+                                        defer allocator.free(warn_msg);
+                                        try platform_impl.writeStdout(warn_msg);
+                                    }
+                                }
+                            }
+                        } else {
+                            // No existing HEAD - create it
+                            if (follow_mode != .never) {
+                                if (!dry_run) {
+                                    std.fs.cwd().writeFile(.{ .sub_path = rh_path, .data = new_symref }) catch {};
+                                }
+                            }
+                        }
+                    } else |_| {}
+                }
             }
         } else |_| {}
     }
@@ -1646,6 +1962,104 @@ fn setUpstreamConfig(allocator: std.mem.Allocator, config_path: []const u8, bran
 
     if (content_owned) allocator.free(content);
     std.fs.cwd().writeFile(.{ .sub_path = config_path, .data = new_content.items }) catch {};
+}
+
+/// Implement "git remote set-head <remote> <branch>" or "git remote set-head -d <remote>"
+pub fn cmdRemoteSetHead(allocator: std.mem.Allocator, git_path: []const u8, sub_args: []const []const u8) void {
+    var remote_arg: ?[]const u8 = null;
+    var branch_arg: ?[]const u8 = null;
+    var delete_mode = false;
+    var auto_mode = false;
+
+    for (sub_args) |arg| {
+        if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--delete")) {
+            delete_mode = true;
+        } else if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--auto")) {
+            auto_mode = true;
+        } else if (remote_arg == null) {
+            remote_arg = arg;
+        } else if (branch_arg == null) {
+            branch_arg = arg;
+        }
+    }
+
+    const rname = remote_arg orelse return;
+
+    if (delete_mode) {
+        // Delete refs/remotes/<remote>/HEAD
+        const rh_path = std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}/HEAD", .{ git_path, rname }) catch return;
+        defer allocator.free(rh_path);
+        std.fs.cwd().deleteFile(rh_path) catch {};
+        return;
+    }
+
+    if (auto_mode) {
+        // Determine remote HEAD from remote repo
+        // Read config to get URL
+        const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch return;
+        defer allocator.free(config_path);
+        const config_content = readFileContent(allocator, config_path) catch return;
+        defer allocator.free(config_content);
+        const url_key = std.fmt.allocPrint(allocator, "remote.{s}.url", .{rname}) catch return;
+        defer allocator.free(url_key);
+        const url = getConfigValue(config_content, url_key, allocator) catch return;
+        defer allocator.free(url);
+
+        const src_git_dir = resolveSourceGitDir(allocator, url) catch return;
+        defer allocator.free(src_git_dir);
+
+        const head_path = std.fmt.allocPrint(allocator, "{s}/HEAD", .{src_git_dir}) catch return;
+        defer allocator.free(head_path);
+        const head_content = readFileContent(allocator, head_path) catch return;
+        defer allocator.free(head_content);
+        const trimmed = std.mem.trim(u8, head_content, " \t\r\n");
+        if (std.mem.startsWith(u8, trimmed, "ref: refs/heads/")) {
+            const branch_name = trimmed["ref: refs/heads/".len..];
+            const rh_path = std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}/HEAD", .{ git_path, rname }) catch return;
+            defer allocator.free(rh_path);
+            if (std.fs.path.dirname(rh_path)) |pd| std.fs.cwd().makePath(pd) catch {};
+            const sc = std.fmt.allocPrint(allocator, "ref: refs/remotes/{s}/{s}\n", .{ rname, branch_name }) catch return;
+            defer allocator.free(sc);
+            std.fs.cwd().writeFile(.{ .sub_path = rh_path, .data = sc }) catch {};
+        }
+        return;
+    }
+
+    if (branch_arg) |branch| {
+        // Set refs/remotes/<remote>/HEAD to point to refs/remotes/<remote>/<branch>
+        const rh_path = std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}/HEAD", .{ git_path, rname }) catch return;
+        defer allocator.free(rh_path);
+        if (std.fs.path.dirname(rh_path)) |pd| std.fs.cwd().makePath(pd) catch {};
+        const sc = std.fmt.allocPrint(allocator, "ref: refs/remotes/{s}/{s}\n", .{ rname, branch }) catch return;
+        defer allocator.free(sc);
+        std.fs.cwd().writeFile(.{ .sub_path = rh_path, .data = sc }) catch {};
+    }
+}
+
+/// Resolve a URL to an absolute path, preserving trailing /. or /..
+pub fn resolveUrlPreservingDot(allocator: std.mem.Allocator, source_url: []const u8) ![]u8 {
+    const raw = if (std.mem.startsWith(u8, source_url, "file://"))
+        source_url["file://".len..]
+    else
+        source_url;
+
+    const bn = std.fs.path.basename(raw);
+    if (std.mem.eql(u8, bn, ".") or std.mem.eql(u8, bn, "..")) {
+        const parent = std.fs.path.dirname(raw);
+        if (parent) |p| {
+            const rp = try std.fs.cwd().realpathAlloc(allocator, p);
+            defer allocator.free(rp);
+            return try std.fmt.allocPrint(allocator, "{s}/{s}", .{ rp, bn });
+        } else {
+            // Just "." or ".."
+            if (std.mem.eql(u8, bn, ".")) {
+                const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
+                defer allocator.free(cwd);
+                return try std.fmt.allocPrint(allocator, "{s}/.", .{cwd});
+            }
+        }
+    }
+    return try std.fs.cwd().realpathAlloc(allocator, raw);
 }
 
 pub fn touchTraceFiles() void {

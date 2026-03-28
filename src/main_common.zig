@@ -9163,7 +9163,7 @@ fn performLocalClone(
             const f = try std.fs.cwd().createFile(config_path, .{});
             defer f.close();
             // Resolve the source URL to an absolute path for the remote
-            const abs_source = std.fs.cwd().realpathAlloc(allocator, if (std.mem.startsWith(u8, source_url, "file://")) source_url["file://".len..] else source_url) catch try allocator.dupe(u8, source_url);
+            const abs_source = fetch_cmd.resolveUrlPreservingDot(allocator, source_url) catch try allocator.dupe(u8, source_url);
             defer allocator.free(abs_source);
             const cfg = if (is_mirror)
                 try std.fmt.allocPrint(allocator, "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n[remote \"{s}\"]\n\turl = {s}\n\tfetch = +refs/*:refs/*\n\tmirror = true\n", .{ remote_name, abs_source })
@@ -9392,7 +9392,7 @@ fn performLocalClone(
         {
             const f = try std.fs.cwd().createFile(config_path, .{});
             defer f.close();
-            const abs_source = std.fs.cwd().realpathAlloc(allocator, if (std.mem.startsWith(u8, source_url, "file://")) source_url["file://".len..] else source_url) catch try allocator.dupe(u8, source_url);
+            const abs_source = fetch_cmd.resolveUrlPreservingDot(allocator, source_url) catch try allocator.dupe(u8, source_url);
             defer allocator.free(abs_source);
             const cfg = try std.fmt.allocPrint(allocator, "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n[remote \"{s}\"]\n\turl = {s}\n\tfetch = +refs/heads/*:refs/remotes/{s}/*\n[branch \"{s}\"]\n\tremote = {s}\n\tmerge = refs/heads/{s}\n", .{ remote_name, abs_source, remote_name, checkout_branch, remote_name, checkout_branch });
             defer allocator.free(cfg);
@@ -19858,6 +19858,7 @@ fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     } else if (std.mem.eql(u8, subcommand.?, "add")) {
         // git remote add [-f] [-t <branch>] [-m <master>] <name> <url>
         var fetch_after_add = false;
+        var master_branch: ?[]const u8 = null;
         var add_positionals = std.array_list.Managed([]const u8).init(allocator);
         defer add_positionals.deinit();
         {
@@ -19866,7 +19867,10 @@ fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 const parg = positionals.items[pi];
                 if (std.mem.eql(u8, parg, "-f") or std.mem.eql(u8, parg, "--fetch")) {
                     fetch_after_add = true;
-                } else if (std.mem.eql(u8, parg, "-t") or std.mem.eql(u8, parg, "-m") or std.mem.eql(u8, parg, "--master")) {
+                } else if (std.mem.eql(u8, parg, "-m") or std.mem.eql(u8, parg, "--master")) {
+                    pi += 1;
+                    if (pi < positionals.items.len) master_branch = positionals.items[pi];
+                } else if (std.mem.eql(u8, parg, "-t")) {
                     pi += 1; // skip the value argument
                 } else {
                     try add_positionals.append(parg);
@@ -19915,6 +19919,16 @@ fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
         f.seekFromEnd(0) catch {};
         f.writeAll(section) catch {};
         
+        // Create refs/remotes/<name>/HEAD if -m was given
+        if (master_branch) |mb| {
+            const rh_path = try std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}/HEAD", .{ git_path, name });
+            defer allocator.free(rh_path);
+            if (std.fs.path.dirname(rh_path)) |pd| std.fs.cwd().makePath(pd) catch {};
+            const sc = try std.fmt.allocPrint(allocator, "ref: refs/remotes/{s}/{s}\n", .{ name, mb });
+            defer allocator.free(sc);
+            std.fs.cwd().writeFile(.{ .sub_path = rh_path, .data = sc }) catch {};
+        }
+
         // If -f flag, fetch from the new remote
         if (fetch_after_add) {
             var is_local = false;
@@ -20266,9 +20280,10 @@ fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                 performLocalFetch(allocator, git_path, local_path, rname, false, &.{}, platform_impl, true) catch continue;
             }
         }
+    } else if (std.mem.eql(u8, subcommand.?, "set-head")) {
+        fetch_cmd.cmdRemoteSetHead(allocator, git_path, positionals.items);
     } else if (std.mem.eql(u8, subcommand.?, "set-branches") or
-        std.mem.eql(u8, subcommand.?, "prune") or
-        std.mem.eql(u8, subcommand.?, "set-head"))
+        std.mem.eql(u8, subcommand.?, "prune"))
     {
         // Stub - silently accept
     } else {
