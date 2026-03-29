@@ -655,14 +655,32 @@ pub fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
             // Regular files - check stat
             if (std.fs.cwd().statFile(full_path)) |stat_result| {
                 const file_size: u32 = @intCast(@min(stat_result.size, std.math.maxInt(u32)));
-                if (entry.size != file_size) {
+                if (entry.size != file_size and entry.size != 0) {
                     modified = true;
                 } else {
                     // helpers.Compare mtime
                     const mtime_s: u32 = @intCast(@max(0, @divTrunc(stat_result.mtime, std.time.ns_per_s)));
                     const mtime_ns: u32 = @intCast(@max(0, @rem(stat_result.mtime, std.time.ns_per_s)));
-                    if (entry.mtime_sec != mtime_s or entry.mtime_nsec != mtime_ns) {
-                        modified = true;
+                    if (entry.mtime_sec != mtime_s or entry.mtime_nsec != mtime_ns or entry.size == 0) {
+                        // Stat mismatch or smeared entry (size=0) - compare content hash
+                        const content = platform_impl.fs.readFile(allocator, full_path) catch {
+                            modified = true;
+                            continue;
+                        };
+                        defer allocator.free(content);
+                        const blob_header = std.fmt.allocPrint(allocator, "blob {d}\x00", .{content.len}) catch {
+                            modified = true;
+                            continue;
+                        };
+                        defer allocator.free(blob_header);
+                        var hasher = std.crypto.hash.Sha1.init(.{});
+                        hasher.update(blob_header);
+                        hasher.update(content);
+                        var file_hash: [20]u8 = undefined;
+                        hasher.final(&file_hash);
+                        if (!std.mem.eql(u8, &file_hash, &entry.sha1)) {
+                            modified = true;
+                        }
                     }
                 }
             } else |_| {
@@ -1033,6 +1051,7 @@ pub fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_inde
     var suppress_output = false;
     var name_status = false;
     var name_only = false;
+    var di_ignore_submodules = false;
     var tree_ish: ?[]const u8 = null;
     var pathspecs = std.ArrayList([]const u8).init(allocator);
     defer pathspecs.deinit();
@@ -1060,6 +1079,8 @@ pub fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_inde
             name_status = true;
         } else if (std.mem.eql(u8, arg, "--name-only")) {
             name_only = true;
+        } else if (std.mem.eql(u8, arg, "--ignore-submodules") or std.mem.startsWith(u8, arg, "--ignore-submodules=")) {
+            di_ignore_submodules = true;
         } else if (std.mem.eql(u8, arg, "--")) {
             seen_dashdash = true;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
@@ -1098,6 +1119,8 @@ pub fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_inde
     var has_diffs = false;
 
     for (idx.entries.items) |entry| {
+        // Skip submodule entries when --ignore-submodules is set
+        if (di_ignore_submodules and entry.mode == 0o160000) continue;
         if (pathspecs.items.len > 0) {
             var matches = false;
             for (pathspecs.items) |ps| {
@@ -1146,6 +1169,8 @@ pub fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_inde
 
     var tree_it = tree_entries.iterator();
     while (tree_it.next()) |kv| {
+        // Skip submodule entries when --ignore-submodules is set
+        if (di_ignore_submodules and kv.value_ptr.mode == 0o160000) continue;
         var found = false;
         for (idx.entries.items) |entry| {
             if (std.mem.eql(u8, entry.path, kv.key_ptr.*)) {

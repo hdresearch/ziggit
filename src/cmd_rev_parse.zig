@@ -509,6 +509,20 @@ pub fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
     };
     defer allocator.free(git_path);
 
+    // Apply --default if no rev-like positional args were given
+    if (default_rev) |def| {
+        var has_rev_arg = false;
+        for (positional_args.items) |arg| {
+            if (!std.mem.startsWith(u8, arg, "--")) {
+                has_rev_arg = true;
+                break;
+            }
+        }
+        if (!has_rev_arg) {
+            try positional_args.append(def);
+        }
+    }
+
     for (positional_args.items) |arg| {
         // helpers.Skip flags already processed
         if (std.mem.startsWith(u8, arg, "--")) {

@@ -410,6 +410,37 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                     } else |_| {}
                 }
             }
+            // Also check self-exe directory and /usr/lib/git-core for git-<command>
+            const fallback_dirs = [_][]const u8{
+                std.fs.path.dirname(std.fs.selfExePathAlloc(allocator) catch "") orelse "",
+                "/usr/lib/git-core",
+            };
+            for (fallback_dirs) |fb_dir| {
+                if (fb_dir.len == 0) continue;
+                const exec_path_check = std.posix.getenv("GIT_EXEC_PATH") orelse "";
+                if (exec_path_check.len > 0 and std.mem.eql(u8, fb_dir, exec_path_check)) continue;
+                const fb_cmd = std.fmt.allocPrint(allocator, "{s}/git-{s}", .{fb_dir, command}) catch continue;
+                defer allocator.free(fb_cmd);
+                if (std.fs.cwd().access(fb_cmd, .{})) |_| {
+                    var argv = std.ArrayList([]const u8).init(allocator);
+                    defer argv.deinit();
+                    argv.append(fb_cmd) catch continue;
+                    var ri2: usize = command_index + 1;
+                    while (ri2 < all_original_args.items.len) : (ri2 += 1) {
+                        argv.append(all_original_args.items[ri2]) catch continue;
+                    }
+                    var child = std.process.Child.init(argv.items, allocator);
+                    child.stdin_behavior = .Inherit;
+                    child.stdout_behavior = .Inherit;
+                    child.stderr_behavior = .Inherit;
+                    _ = child.spawn() catch continue;
+                    const result3 = child.wait() catch { std.process.exit(128); };
+                    switch (result3) {
+                        .Exited => |code| std.process.exit(code),
+                        else => std.process.exit(128),
+                    }
+                } else |_| {}
+            }
             // Also check PATH for git-<command>
             const path_env = std.posix.getenv("PATH") orelse "";
             if (path_env.len > 0) {
