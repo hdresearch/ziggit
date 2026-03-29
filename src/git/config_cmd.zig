@@ -3832,7 +3832,8 @@ fn startsWithIgnoreCase(haystack: []const u8, needle: []const u8) bool {
 }
 
 fn parseColorName(word: []const u8) ?i16 {
-    if (std.ascii.eqlIgnoreCase(word, "normal") or std.ascii.eqlIgnoreCase(word, "default")) return -1;
+    if (std.ascii.eqlIgnoreCase(word, "normal")) return -1;
+    if (std.ascii.eqlIgnoreCase(word, "default")) return -2;
     if (std.ascii.eqlIgnoreCase(word, "black")) return 0;
     if (std.ascii.eqlIgnoreCase(word, "red")) return 1;
     if (std.ascii.eqlIgnoreCase(word, "green")) return 2;
@@ -3861,7 +3862,7 @@ fn colorToAnsiAlloc(allocator: Allocator, color_str: []const u8) ![]u8 {
     defer attrs.deinit();
     var has_reset = false;
 
-    var word_iter = std.mem.tokenizeAny(u8, trimmed, " \t");
+    var word_iter = std.mem.tokenizeAny(u8, trimmed, " \t\n\r");
     while (word_iter.next()) |word| {
         if (word.len == 7 and word[0] == '#') {
             const r = std.fmt.parseInt(u8, word[1..3], 16) catch return error.InvalidColor;
@@ -3888,7 +3889,13 @@ fn colorToAnsiAlloc(allocator: Allocator, color_str: []const u8) ![]u8 {
         if (std.ascii.eqlIgnoreCase(word, "reverse")) { try attrs.append(7); continue; }
         if (std.ascii.eqlIgnoreCase(word, "strike")) { try attrs.append(9); continue; }
         if (std.ascii.eqlIgnoreCase(word, "nobold") or std.ascii.eqlIgnoreCase(word, "no-bold")) { try attrs.append(22); continue; }
-        if (std.ascii.eqlIgnoreCase(word, "nodim") or std.ascii.eqlIgnoreCase(word, "no-dim")) { try attrs.append(22); continue; }
+        if (std.ascii.eqlIgnoreCase(word, "nodim") or std.ascii.eqlIgnoreCase(word, "no-dim")) {
+            // nodim shares code 22 with nobold; deduplicate
+            var found_dup = false;
+            for (attrs.items) |a| { if (a == 22) { found_dup = true; break; } }
+            if (!found_dup) try attrs.append(22);
+            continue;
+        }
         if (std.ascii.eqlIgnoreCase(word, "noitalic") or std.ascii.eqlIgnoreCase(word, "no-italic")) { try attrs.append(23); continue; }
         if (std.ascii.eqlIgnoreCase(word, "noul") or std.ascii.eqlIgnoreCase(word, "no-ul")) { try attrs.append(24); continue; }
         if (std.ascii.eqlIgnoreCase(word, "noblink") or std.ascii.eqlIgnoreCase(word, "no-blink")) { try attrs.append(25); continue; }
@@ -3912,7 +3919,12 @@ fn colorToAnsiAlloc(allocator: Allocator, color_str: []const u8) ![]u8 {
         // Numeric color
         if (std.fmt.parseInt(i16, word, 10)) |n| {
             if (n < -1 or n > 255) return error.InvalidColor;
-            if (!fg_set) { fg_color = n; fg_set = true; } else { bg_color = n; bg_set = true; }
+            // -1 is synonym for "normal" (no output)
+            if (n == -1) {
+                if (!fg_set) { fg_color = -1; fg_set = true; } else { bg_color = -1; bg_set = true; }
+            } else {
+                if (!fg_set) { fg_color = n; fg_set = true; } else { bg_color = n; bg_set = true; }
+            }
             continue;
         } else |_| {}
         return error.InvalidColor;
@@ -3927,6 +3939,9 @@ fn colorToAnsiAlloc(allocator: Allocator, color_str: []const u8) ![]u8 {
         first = false;
     }
 
+    // Sort attributes: git outputs them in fixed order
+    // positive attrs (1,2,3,4,5,7,9) first, then negative (22,23,24,25,27,29)
+    std.mem.sort(u8, attrs.items, {}, std.sort.asc(u8));
     for (attrs.items) |attr_code| {
         if (!first) try codes.append(';');
         var buf2: [8]u8 = undefined;
@@ -3944,10 +3959,13 @@ fn colorToAnsiAlloc(allocator: Allocator, color_str: []const u8) ![]u8 {
                 try codes.appendSlice(s);
                 first = false;
             }
-        } else if (fg_color == -1) {
+        } else if (fg_color == -2) {
+            // "default" → explicit ANSI default foreground
             if (!first) try codes.append(';');
             try codes.appendSlice("39");
             first = false;
+        } else if (fg_color == -1) {
+            // "normal" or -1 → no foreground output
         } else if (fg_color >= 0 and fg_color <= 7) {
             if (!first) try codes.append(';');
             var buf2: [8]u8 = undefined;
@@ -3978,10 +3996,13 @@ fn colorToAnsiAlloc(allocator: Allocator, color_str: []const u8) ![]u8 {
                 try codes.appendSlice(s);
                 first = false;
             }
-        } else if (bg_color == -1) {
+        } else if (bg_color == -2) {
+            // "default" → explicit ANSI default background
             if (!first) try codes.append(';');
             try codes.appendSlice("49");
             first = false;
+        } else if (bg_color == -1) {
+            // "normal" or -1 → no background output
         } else if (bg_color >= 0 and bg_color <= 7) {
             if (!first) try codes.append(';');
             var buf2: [8]u8 = undefined;
