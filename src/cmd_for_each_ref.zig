@@ -700,7 +700,14 @@ pub fn validateFormatAtom(field: []const u8, allocator: std.mem.Allocator) helpe
         if (std.mem.eql(u8, atom, da)) return helpers.validateDateOptions(options);
     }
     if (std.mem.eql(u8, atom, "objectname") or std.mem.eql(u8, atom, "*objectname")) return helpers.validateObjectnameOptions(options);
-    if (std.mem.eql(u8, atom, "refname")) return helpers.validateRefnameOptions(options);
+    if (std.mem.eql(u8, atom, "refname")) {
+        const rv = helpers.validateRefnameOptions(options);
+        if (!rv.valid) {
+            const msg = std.fmt.allocPrint(allocator, "fatal: unrecognized %(refname) argument: {s}\n", .{options}) catch return .{ .valid = false };
+            return .{ .valid = false, .err_msg = msg };
+        }
+        return rv;
+    }
     if (std.mem.eql(u8, atom, "trailers")) return validateTrailerOptions(options, allocator);
     if (std.mem.eql(u8, atom, "contents")) {
         // Validate contents sub-options
