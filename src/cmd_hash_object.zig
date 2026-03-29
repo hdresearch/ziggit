@@ -105,7 +105,7 @@ pub fn cmdHashObject(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         }
     } else if (stdin_mode) {
         // helpers.Read data from stdin first
-        var data = helpers.readStdin(allocator, 100 * 1024 * 1024) catch {
+        const data = helpers.readStdin(allocator, 100 * 1024 * 1024) catch {
             std.process.exit(128);
             unreachable;
         };
@@ -196,8 +196,11 @@ fn applyCrlfConversion(allocator: std.mem.Allocator, data: []const u8, path: []c
     var should_convert = (crlf_attr == .set);
     if (!should_convert and crlf_attr == .unspecified) {
         // Check core.autocrlf
-        const config = config_mod.GitConfig.open(allocator, git_dir) catch return null;
+        var config = config_mod.GitConfig.init(allocator);
         defer config.deinit();
+        const config_path = std.fs.path.join(allocator, &.{ git_dir, "config" }) catch return null;
+        defer allocator.free(config_path);
+        config.parseFromFile(config_path) catch return null;
         if (config.get("core", null, "autocrlf")) |val| {
             if (std.mem.eql(u8, val, "true")) {
                 should_convert = true;

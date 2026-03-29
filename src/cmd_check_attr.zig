@@ -213,7 +213,7 @@ pub const AttrValue = struct {
 pub const AttrRule = struct {
     pattern: []const u8,
     attrs: std.ArrayList(AttrValue),
-    fn deinit(self: *AttrRule, alloc: std.mem.Allocator) void {
+    pub fn deinit(self: *AttrRule, alloc: std.mem.Allocator) void {
         alloc.free(self.pattern);
         for (self.attrs.items) |*attr| attr.deinit(alloc);
         self.attrs.deinit();
