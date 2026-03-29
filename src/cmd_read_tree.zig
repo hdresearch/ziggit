@@ -110,6 +110,22 @@ pub fn readTreeIntoIndex(idx: *index_mod.Index, git_dir: []const u8, tree_hash: 
         if (null_pos + 21 > data.len) break;
         const entry_sha1 = data[null_pos + 1 .. null_pos + 21];
 
+        // Check for null SHA1
+        const is_null_sha1 = blk: {
+            for (entry_sha1) |byte| {
+                if (byte != 0) break :blk false;
+            }
+            break :blk true;
+        };
+        if (is_null_sha1) {
+            if (std.posix.getenv("GIT_ALLOW_NULL_SHA1") == null) {
+                const err_msg = std.fmt.allocPrint(allocator, "error: invalid object {s} {s} for '{s}'\n", .{ mode_str, "0000000000000000000000000000000000000000", name }) catch "error: invalid object\n";
+                platform_impl.writeStderr(err_msg) catch {};
+                platform_impl.writeStderr("fatal: read-tree failed\n") catch {};
+                std.process.exit(128);
+            }
+        }
+
         var hash_hex: [40]u8 = undefined;
         for (entry_sha1, 0..) |byte, j| {
             const hex = std.fmt.bytesToHex([1]u8{byte}, .lower);
