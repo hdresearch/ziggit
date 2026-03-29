@@ -245,7 +245,7 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             const rev_part = object_ref.?[0..colon_pos];
             const path_part = object_ref.?[colon_pos + 1 ..];
             if (rev_part.len == 0) {
-                // :path - read from helpers.HEAD tree
+                // :path - read from HEAD tree
                 const head_hash = refs.getCurrentCommit(git_path, platform_impl, allocator) catch { try platform_impl.writeStderr("fatal: no commits\n"); std.process.exit(128); unreachable; };
                 if (head_hash) |hh| {
                     defer allocator.free(hh);
@@ -253,7 +253,11 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                     defer allocator.free(blob_hash);
                     const blob_obj = objects.GitObject.load(blob_hash, git_path, platform_impl, allocator) catch { try platform_impl.writeStderr("fatal: bad object\n"); std.process.exit(128); unreachable; };
                     defer blob_obj.deinit(allocator);
-                    try platform_impl.writeStdout(blob_obj.data);
+                    if (textconv) {
+                        try runTextconv(git_path, path_part, blob_obj.data, platform_impl, allocator);
+                    } else {
+                        try platform_impl.writeStdout(blob_obj.data);
+                    }
                     return;
                 }
             }
@@ -263,7 +267,11 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             defer allocator.free(blob_hash);
             const blob_obj = objects.GitObject.load(blob_hash, git_path, platform_impl, allocator) catch { try platform_impl.writeStderr("fatal: bad object\n"); std.process.exit(128); unreachable; };
             defer blob_obj.deinit(allocator);
-            try platform_impl.writeStdout(blob_obj.data);
+            if (textconv) {
+                try runTextconv(git_path, path_part, blob_obj.data, platform_impl, allocator);
+            } else {
+                try platform_impl.writeStdout(blob_obj.data);
+            }
             return;
         } else if (textconv) {
             const rev_valid = helpers.resolveRevision(git_path, object_ref.?, platform_impl, allocator) catch null;
@@ -273,7 +281,7 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                 defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
             } else {
-                const msg = try std.fmt.allocPrint(allocator, "fatal: helpers.Not a valid object name {s}\n", .{object_ref.?});
+                const msg = try std.fmt.allocPrint(allocator, "fatal: Not a valid object name {s}\n", .{object_ref.?});
                 defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
             }
@@ -286,7 +294,7 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     if (helpers.isValidHashPrefix(object_ref.?)) {
         // helpers.Try to resolve as a partial hash
         object_hash = helpers.resolveCommitHash(git_path, object_ref.?, platform_impl, allocator) catch {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: helpers.Not a valid object name {s}\n", .{object_ref.?});
+            const msg = try std.fmt.allocPrint(allocator, "fatal: Not a valid object name {s}\n", .{object_ref.?});
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);
             std.process.exit(128);
@@ -294,7 +302,7 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     } else {
         // helpers.Try to resolve as a committish
         object_hash = helpers.resolveCommittish(git_path, object_ref.?, platform_impl, allocator) catch {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: helpers.Not a valid object name {s}\n", .{object_ref.?});
+            const msg = try std.fmt.allocPrint(allocator, "fatal: Not a valid object name {s}\n", .{object_ref.?});
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);
             std.process.exit(128);
@@ -305,7 +313,7 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     // helpers.Load the git object
     const git_object = objects.GitObject.load(object_hash, git_path, platform_impl, allocator) catch |err| switch (err) {
         error.ObjectNotFound => {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: helpers.Not a valid object name {s}\n", .{object_ref.?});
+            const msg = try std.fmt.allocPrint(allocator, "fatal: Not a valid object name {s}\n", .{object_ref.?});
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);
             std.process.exit(128);
@@ -464,4 +472,122 @@ pub fn formatCatFileOutput(allocator: std.mem.Allocator, fmt: []const u8, obj_ha
     }
 
     return result.toOwnedSlice();
+}
+
+fn runTextconv(git_path: []const u8, file_path: []const u8, blob_data: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+    // Find the diff driver from gitattributes
+    const driver_name = findDiffDriver(git_path, file_path, platform_impl, allocator) orelse {
+        // No textconv filter, output raw data
+        try platform_impl.writeStdout(blob_data);
+        return;
+    };
+    defer allocator.free(driver_name);
+
+    // Look up diff.<driver>.textconv in config
+    const textconv_key = std.fmt.allocPrint(allocator, "diff.{s}.textconv", .{driver_name}) catch return;
+    defer allocator.free(textconv_key);
+
+    const cmd_maybe = helpers.getConfigValueByKey(git_path, textconv_key, allocator);
+    const cmd = cmd_maybe orelse {
+        try platform_impl.writeStdout(blob_data);
+        return;
+    };
+    defer allocator.free(cmd);
+
+    // Write blob to temp file
+    const tmp_path = std.fmt.allocPrint(allocator, "/tmp/.git-textconv-{d}", .{std.time.milliTimestamp()}) catch return;
+    defer allocator.free(tmp_path);
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+    const tmp_file = std.fs.cwd().createFile(tmp_path, .{}) catch return;
+    tmp_file.writeAll(blob_data) catch { tmp_file.close(); return; };
+    tmp_file.close();
+
+    // Run textconv command
+    const full_cmd = std.fmt.allocPrint(allocator, "{s} {s}", .{ cmd, tmp_path }) catch return;
+    defer allocator.free(full_cmd);
+    const argv = [_][]const u8{ "/bin/sh", "-c", full_cmd };
+    var child = std.process.Child.init(&argv, allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+    child.spawn() catch {
+        try platform_impl.writeStdout(blob_data);
+        return;
+    };
+    const output = child.stdout.?.reader().readAllAlloc(allocator, 1024 * 1024) catch {
+        _ = child.wait() catch {};
+        try platform_impl.writeStdout(blob_data);
+        return;
+    };
+    defer allocator.free(output);
+    const term = child.wait() catch {
+        try platform_impl.writeStdout(blob_data);
+        return;
+    };
+    if (term.Exited != 0) {
+        // textconv command failed (e.g., for symlinks), output raw data
+        try platform_impl.writeStdout(blob_data);
+        return;
+    }
+    try platform_impl.writeStdout(output);
+}
+
+fn findDiffDriver(git_path: []const u8, file_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ?[]u8 {
+    // Get repo root from git_path
+    const repo_root = if (std.mem.endsWith(u8, git_path, "/.git"))
+        git_path[0 .. git_path.len - 5]
+    else
+        git_path;
+
+    // Read .gitattributes
+    const attr_path = std.fmt.allocPrint(allocator, "{s}/.gitattributes", .{repo_root}) catch return null;
+    defer allocator.free(attr_path);
+    const content = platform_impl.fs.readFile(allocator, attr_path) catch return null;
+    defer allocator.free(content);
+
+    // Parse gitattributes: look for patterns matching file_path with diff=<driver>
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    var result: ?[]u8 = null;
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0 or trimmed[0] == '#') continue;
+        // Format: pattern attr1 attr2 ...
+        var parts = std.mem.tokenizeAny(u8, trimmed, " \t");
+        const pattern = parts.next() orelse continue;
+        while (parts.next()) |attr| {
+            if (std.mem.startsWith(u8, attr, "diff=")) {
+                const basename = std.fs.path.basename(file_path);
+                if (matchGlob(pattern, basename) or matchGlob(pattern, file_path)) {
+                    if (result) |prev| allocator.free(prev);
+                    result = allocator.dupe(u8, attr[5..]) catch null;
+                }
+            }
+        }
+    }
+    return result;
+}
+
+fn matchGlob(pattern: []const u8, name: []const u8) bool {
+    var pi: usize = 0;
+    var ni: usize = 0;
+    while (pi < pattern.len and ni < name.len) {
+        if (pattern[pi] == '*') {
+            pi += 1;
+            if (pi >= pattern.len) return true;
+            while (ni < name.len) {
+                if (matchGlob(pattern[pi..], name[ni..])) return true;
+                ni += 1;
+            }
+            return matchGlob(pattern[pi..], name[ni..]);
+        } else if (pattern[pi] == '?') {
+            pi += 1;
+            ni += 1;
+        } else if (pattern[pi] == name[ni]) {
+            pi += 1;
+            ni += 1;
+        } else {
+            return false;
+        }
+    }
+    while (pi < pattern.len and pattern[pi] == '*') pi += 1;
+    return pi >= pattern.len and ni >= name.len;
 }
