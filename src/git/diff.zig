@@ -140,9 +140,17 @@ fn writeHunkHeaderWithContext(writer: anytype, old_start: usize, old_count: usiz
                 if (i < lines.len) {
                     const line = lines[i];
                     if (line.len > 0 and isFuncnameByte(line[0])) {
-                        // Truncate to 40 chars like git
-                        const max_len = @min(line.len, 40);
-                        try writer.print(" {s}", .{line[0..max_len]});
+                        // Truncate to 80 bytes like git (on UTF-8 boundary)
+                        var byte_pos: usize = 0;
+                        while (byte_pos < line.len and byte_pos < 80) {
+                            const b = line[byte_pos];
+                            const char_len: usize = if (b < 0x80) 1 else if (b < 0xE0) 2 else if (b < 0xF0) 3 else 4;
+                            const next_pos = byte_pos + char_len;
+                            if (next_pos > 80) break;
+                            if (next_pos > line.len) break;
+                            byte_pos = next_pos;
+                        }
+                        try writer.print(" {s}", .{line[0..byte_pos]});
                         break;
                     }
                 }
