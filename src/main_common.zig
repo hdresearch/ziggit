@@ -39172,7 +39172,7 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                                     if (std.mem.eql(u8, si, child)) { dp = true; break; }
                                 }
                             }
-                            if (!dp) try qt.append(child);
+                            if (!dp) try qt.append(allocator, child);
                         }
                     }
                 }
