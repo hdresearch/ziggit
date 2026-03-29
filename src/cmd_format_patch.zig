@@ -34,9 +34,12 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *platform_mod.ArgItera
     var numbered = false;
     var subject_prefix: []const u8 = "PATCH";
     var start_number: usize = 1;
+    var signoff = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--stdout")) {
             stdout_mode = true;
+        } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--signoff")) {
+            signoff = true;
         } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--numbered")) {
             numbered = true;
         } else if (std.mem.eql(u8, arg, "--cover-letter")) {
@@ -169,7 +172,43 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *platform_mod.ArgItera
                 defer allocator.free(subj);
                 try platform_impl.writeStdout(subj);
             }
+
+            // Add MIME headers if signoff name or commit message has non-ASCII
+            var needs_mime = false;
+            if (signoff) {
+                // Get committer name for signoff
+                const committer_name_env = std.process.getEnvVarOwned(allocator, "GIT_COMMITTER_NAME") catch null;
+                defer if (committer_name_env) |n| allocator.free(n);
+                const signer_name = committer_name_env orelse author_name;
+                for (signer_name) |c| {
+                    if (c > 127) {
+                        needs_mime = true;
+                        break;
+                    }
+                }
+            }
+            if (needs_mime) {
+                try platform_impl.writeStdout("MIME-Version: 1.0\n");
+                try platform_impl.writeStdout("Content-Type: text/plain; charset=UTF-8\n");
+                try platform_impl.writeStdout("Content-Transfer-Encoding: 8bit\n");
+            }
             
+            // Write commit message body
+            try platform_impl.writeStdout("\n");
+            const full_msg = std.mem.trimRight(u8, commit_msg, "\n ");
+            try platform_impl.writeStdout(full_msg);
+            try platform_impl.writeStdout("\n");
+            if (signoff) {
+                const committer_name_env2 = std.process.getEnvVarOwned(allocator, "GIT_COMMITTER_NAME") catch null;
+                defer if (committer_name_env2) |n| allocator.free(n);
+                const committer_email_env2 = std.process.getEnvVarOwned(allocator, "GIT_COMMITTER_EMAIL") catch null;
+                defer if (committer_email_env2) |n| allocator.free(n);
+                const sob_name = committer_name_env2 orelse author_name;
+                const sob_email = committer_email_env2 orelse author_email;
+                const sob = try std.fmt.allocPrint(allocator, "\nSigned-off-by: {s} <{s}>\n", .{ sob_name, sob_email });
+                defer allocator.free(sob);
+                try platform_impl.writeStdout(sob);
+            }
             try platform_impl.writeStdout("\n---\n\n");
             
             // helpers.Get parent for diff
