@@ -110,28 +110,55 @@ pub fn cmdUpdateRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
             var new_packed = std.ArrayList(u8).init(allocator);
             defer new_packed.deinit();
             var lines_iter = std.mem.splitScalar(u8, packed_data, '\n');
+            var ref_was_removed = false;
+            var skip_peel = false;
+            // First, collect the header lines
+            var header_end = std.ArrayList(u8).init(allocator);
+            defer header_end.deinit();
             while (lines_iter.next()) |line| {
                 if (line.len == 0) continue;
                 if (line[0] == '#') {
+                    try header_end.appendSlice(line);
+                    try header_end.append('\n');
+                    continue;
+                }
+                if (line[0] == '^') {
+                    if (skip_peel) {
+                        skip_peel = false;
+                        continue;
+                    }
                     try new_packed.appendSlice(line);
                     try new_packed.append('\n');
                     continue;
                 }
-                if (line[0] == '^') {
-                    // Peeled ref - skip if previous ref was deleted
-                    continue;
-                }
+                skip_peel = false;
                 // helpers.Check if this line references our ref
                 if (line.len > 41) {
                     const line_ref = std.mem.trimRight(u8, line[41..], " \t\r");
                     if (std.mem.eql(u8, line_ref, ref_name)) {
+                        ref_was_removed = true;
+                        skip_peel = true;
                         continue; // skip this ref
                     }
                 }
                 try new_packed.appendSlice(line);
                 try new_packed.append('\n');
             }
-            platform_impl.fs.writeFile(packed_refs_path, new_packed.items) catch {};
+            if (ref_was_removed) {
+                // Rewrite with fresh header
+                var final_packed = std.ArrayList(u8).init(allocator);
+                defer final_packed.deinit();
+                try final_packed.appendSlice("# pack-refs with: peeled fully-peeled sorted \n");
+                try final_packed.appendSlice(new_packed.items);
+                platform_impl.fs.writeFile(packed_refs_path, final_packed.items) catch {};
+            } else {
+                // No change needed, but write back with original headers
+                var final_packed = std.ArrayList(u8).init(allocator);
+                defer final_packed.deinit();
+                try final_packed.appendSlice(header_end.items);
+                try final_packed.appendSlice(new_packed.items);
+                platform_impl.fs.writeFile(packed_refs_path, final_packed.items) catch {};
+            }
         } else |_| {}
         
         // helpers.Try to clean up empty parent dirs

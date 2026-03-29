@@ -94,12 +94,19 @@ pub fn nativeCmdMv(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
             std.process.exit(128);
         }
         
-        // helpers.Check target doesn't exist (unless -f or case-change rename)
+        // helpers.Check target doesn't exist (unless -f or case-change/normalization rename)
         if (!force) {
             if ((std.fs.cwd().statFile(target) catch null) != null) {
-                // Allow case-change rename: same name different case
+                // Allow rename if source and target refer to the same file
+                // (case-change or Unicode normalization on the filesystem)
                 const is_case_change = std.ascii.eqlIgnoreCase(src, target) and !std.mem.eql(u8, src, target);
-                if (!is_case_change) {
+                const src_stat = std.fs.cwd().statFile(src) catch null;
+                const tgt_stat = std.fs.cwd().statFile(target) catch null;
+                const is_same_inode = if (src_stat != null and tgt_stat != null)
+                    (src_stat.?.inode == tgt_stat.?.inode)
+                else
+                    false;
+                if (!is_case_change and !is_same_inode) {
                     if (skip_errors) continue;
                     const msg = try std.fmt.allocPrint(allocator, "fatal: destination exists, source={s}, destination={s}\n", .{ src, target });
                     defer allocator.free(msg);
