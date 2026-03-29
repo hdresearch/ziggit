@@ -39223,8 +39223,10 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             switch (signed_commits_mode) {
                 .abort_mode => {
                     try platform_impl.writeStdout(output.items);
-                    try platform_impl.writeStderr("Error: encountered signed commit\n");
-                    std.process.exit(1);
+                    const emsg = try std.fmt.allocPrint(allocator, "fatal: encountered signed commit {s}; use --signed-commits=<mode> to handle it\n", .{commit_hash});
+                    defer allocator.free(emsg);
+                    try platform_impl.writeStderr(emsg);
+                    std.process.exit(128);
                 },
                 .warn, .warn_strip => {
                     const wmsg = try std.fmt.allocPrint(allocator, "Warning: signed commit {s}\n", .{commit_hash});
