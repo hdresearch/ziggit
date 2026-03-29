@@ -21,7 +21,7 @@ const build_options = @import("build_options");
 const version_mod = @import("version.zig");
 const wildmatch_mod = @import("wildmatch.zig");
 
-const FANOUT_THRESHOLD: usize = 256;
+const FANOUT_THRESHOLD: usize = 8;
 
 const NoteEntry = struct { name: []const u8, hash: [20]u8 };
 const SubEntry = struct { rest: []const u8, hash: [20]u8 };
