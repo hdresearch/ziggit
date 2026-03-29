@@ -189,7 +189,7 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *pm.ArgIterator, platform_imp
             opts.output_mode = .patch_with_raw;
         } else if (std.mem.eql(u8, arg, "--summary")) {
             opts.show_summary = true;
-            if (opts.output_mode == .patch) opts.output_mode = .summary;
+            if (opts.output_mode == .patch or opts.output_mode == .no_patch) opts.output_mode = .summary;
         } else if (std.mem.eql(u8, arg, "--dirstat") or std.mem.eql(u8, arg, "--cumulative") or
             std.mem.eql(u8, arg, "--dirstat-by-file") or std.mem.startsWith(u8, arg, "--dirstat="))
         {
@@ -228,6 +228,7 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *pm.ArgIterator, platform_imp
             opts.reverse = true;
         } else if (std.mem.eql(u8, arg, "--compact-summary")) {
             opts.compact_summary = true;
+            if (opts.output_mode == .no_patch) opts.output_mode = .patch;
         } else if (std.mem.startsWith(u8, arg, "--line-prefix=")) {
             opts.line_prefix = arg["--line-prefix=".len..];
         } else if (std.mem.eql(u8, arg, "--cc")) {
@@ -2822,7 +2823,9 @@ fn outputChanges(changes_slice: []const FileChange, opts: *const DiffOpts, pi: *
             try pi.writeStdout("\n");
             try outputPatch(changes, opts, pi, allocator);
         },
-        .no_patch => {},
+        .no_patch => {
+            if (opts.show_summary) try outputSummary(effective_changes, pi, allocator);
+        },
     }
 
     if (opts.exit_code and effective_changes.len > 0) {
