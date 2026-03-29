@@ -186,6 +186,19 @@ pub fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
             }
         } else if (std.mem.startsWith(u8, arg, "--default=")) {
             default_rev = arg["--default=".len..];
+        } else if (std.mem.eql(u8, arg, "--git-path")) {
+            // --git-path <path> - resolve path relative to GIT_DIR
+            arg_i += 1;
+            if (arg_i >= all_args.items.len) {
+                try platform_impl.writeStderr("fatal: --git-path requires an argument\n");
+                std.process.exit(1);
+            }
+            const path_arg = all_args.items[arg_i];
+            const resolved = try resolveGitPath(allocator, path_arg, platform_impl);
+            defer allocator.free(resolved);
+            const out = try std.fmt.allocPrint(allocator, "{s}\n", .{resolved});
+            defer allocator.free(out);
+            try platform_impl.writeStdout(out);
         } else {
             try positional_args.append(arg);
         }
@@ -411,10 +424,6 @@ pub fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
             continue;
-        } else if (std.mem.eql(u8, arg, "--git-path")) {
-            // --git-path <path> - resolve path relative to helpers.GIT_DIR
-            // helpers.The next positional should be the path component
-            continue; // helpers.The path will be the next arg, handled below
         } else if (std.mem.eql(u8, arg, "--show-object-format") or std.mem.startsWith(u8, arg, "--show-object-format=")) {
             try platform_impl.writeStdout("sha1\n");
             continue;
@@ -696,4 +705,118 @@ pub fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
             }
         }
     }
+}
+
+/// Resolve a path for --git-path, handling env var overrides and common dir.
+fn resolveGitPath(allocator: std.mem.Allocator, path: []const u8, _: *const platform_mod.Platform) ![]u8 {
+    // Use GIT_DIR env or default to .git (relative)
+    const git_dir = if (std.posix.getenv("GIT_DIR")) |gd| gd else ".git";
+
+    // Normalize path - collapse multiple slashes for matching purposes
+    const norm_path = try normalizePath(allocator, path);
+    defer allocator.free(norm_path);
+
+    // Check env var overrides first
+    // GIT_INDEX_FILE overrides "index"
+    if (std.posix.getenv("GIT_INDEX_FILE")) |idx_file| {
+        if (std.mem.eql(u8, norm_path, "index")) {
+            return try allocator.dupe(u8, idx_file);
+        }
+    }
+
+    // GIT_GRAFT_FILE overrides "info/grafts"
+    if (std.posix.getenv("GIT_GRAFT_FILE")) |graft_file| {
+        if (std.mem.eql(u8, norm_path, "info/grafts")) {
+            return try allocator.dupe(u8, graft_file);
+        }
+    }
+
+    // GIT_OBJECT_DIRECTORY overrides "objects" and "objects/*"
+    if (std.posix.getenv("GIT_OBJECT_DIRECTORY")) |obj_dir| {
+        if (std.mem.eql(u8, norm_path, "objects")) {
+            return try allocator.dupe(u8, obj_dir);
+        }
+        if (std.mem.startsWith(u8, norm_path, "objects/")) {
+            return try std.fmt.allocPrint(allocator, "{s}/{s}", .{ obj_dir, norm_path["objects/".len..] });
+        }
+    }
+
+    // GIT_COMMON_DIR handling
+    if (std.posix.getenv("GIT_COMMON_DIR")) |common_dir| {
+        // These paths stay in .git (repo-specific, NOT shared):
+        if (isRepoSpecificPath(path)) {
+            return try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, path });
+        }
+        // Everything else goes to common dir
+        return try std.fmt.allocPrint(allocator, "{s}/{s}", .{ common_dir, path });
+    }
+
+    // Default: relative to git_dir
+    return try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, path });
+}
+
+/// Check if a path is repo-specific (stays in .git, not shared to common dir)
+fn isRepoSpecificPath(path: []const u8) bool {
+    // Normalize for matching
+    const norm = std.mem.trim(u8, path, "/");
+
+    // Exact matches
+    const exact_private = [_][]const u8{
+        "HEAD", "index", "index.lock",
+        "MERGE_HEAD", "MERGE_MSG", "MERGE_RR", "MERGE_MODE",
+        "FETCH_HEAD", "ORIG_HEAD", "CHERRY_PICK_HEAD",
+        "REVERT_HEAD", "BISECT_LOG", "AUTO_MERGE",
+        "BISECT_EXPECTED_REV", "BISECT_ANCESTORS_OK",
+        "BISECT_NAMES", "BISECT_RUN", "BISECT_START",
+        "BISECT_TERMS",
+    };
+    for (exact_private) |p| {
+        if (std.mem.eql(u8, norm, p)) return true;
+    }
+
+    // Prefix matches (paths that start with these are repo-specific)
+    // logs/HEAD and logs/HEAD.lock are private, but logs/refs is shared
+    if (std.mem.eql(u8, norm, "logs/HEAD") or std.mem.startsWith(u8, norm, "logs/HEAD.")) return true;
+
+    // refs/bisect/* is private
+    if (std.mem.startsWith(u8, norm, "refs/bisect/") or std.mem.eql(u8, norm, "refs/bisect")) return true;
+    // logs/refs/bisect/* is private
+    if (std.mem.startsWith(u8, norm, "logs/refs/bisect/") or std.mem.eql(u8, norm, "logs/refs/bisect")) return true;
+
+    // info/sparse-checkout is private
+    if (isInfoSparseCheckout(path)) return true;
+
+    // worktrees/ is private
+    if (std.mem.startsWith(u8, norm, "worktrees/") or std.mem.eql(u8, norm, "worktrees")) return true;
+
+    return false;
+}
+
+/// Check if path is info/sparse-checkout (with possible multiple slashes)
+fn isInfoSparseCheckout(path: []const u8) bool {
+    // Match "info/sparse-checkout" or "info//sparse-checkout" etc.
+    if (std.mem.startsWith(u8, path, "info/")) {
+        const rest = path["info/".len..];
+        // Skip extra slashes
+        var i: usize = 0;
+        while (i < rest.len and rest[i] == '/') i += 1;
+        if (std.mem.eql(u8, rest[i..], "sparse-checkout")) return true;
+    }
+    return false;
+}
+
+/// Normalize a path by collapsing multiple slashes
+fn normalizePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var result = std.ArrayList(u8).init(allocator);
+    var prev_slash = false;
+    for (path) |c| {
+        if (c == '/') {
+            if (!prev_slash) try result.append(c);
+            prev_slash = true;
+        } else {
+            try result.append(c);
+            prev_slash = false;
+        }
+    }
+    return result.toOwnedSlice();
 }
