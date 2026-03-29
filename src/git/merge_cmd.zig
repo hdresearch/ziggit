@@ -533,6 +533,39 @@ pub fn cmdMerge(allocator: Allocator, args: *pm.ArgIterator, platform_impl: *con
 
 }
 
+/// Check if a specific -c key=value was passed on the original command line.
+/// This works around config value translation in main_common.zig.
+fn hasOriginalConfigArg(key: []const u8, value: []const u8) bool {
+    if (@import("builtin").target.os.tag == .freestanding) return false;
+    // Read /proc/self/cmdline to get original args
+    const cmdline = std.fs.cwd().readFileAlloc(std.heap.page_allocator, "/proc/self/cmdline", 65536) catch return false;
+    defer std.heap.page_allocator.free(cmdline);
+    // cmdline is null-separated
+    var i: usize = 0;
+    while (i < cmdline.len) {
+        const start = i;
+        while (i < cmdline.len and cmdline[i] != 0) i += 1;
+        const arg = cmdline[start..i];
+        if (i < cmdline.len) i += 1; // skip null
+        if (std.mem.eql(u8, arg, "-c")) {
+            // Next arg is key=value
+            const next_start = i;
+            while (i < cmdline.len and cmdline[i] != 0) i += 1;
+            const next_arg = cmdline[next_start..i];
+            if (i < cmdline.len) i += 1;
+            // Check if it matches key=value (case-insensitive key)
+            if (std.mem.indexOfScalar(u8, next_arg, '=')) |eq_pos| {
+                if (std.ascii.eqlIgnoreCase(next_arg[0..eq_pos], key) and
+                    std.ascii.eqlIgnoreCase(next_arg[eq_pos + 1 ..], value))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 fn applyConfigDefaults(git_path: []const u8, opts: *MergeOpts, allocator: Allocator, platform_impl: *const pm.Platform) void {
     var cfg = config_mod.loadGitConfig(git_path, allocator) catch null;
     defer if (cfg) |*c| c.deinit();
@@ -550,10 +583,16 @@ fn applyConfigDefaults(git_path: []const u8, opts: *MergeOpts, allocator: Alloca
 
     // merge.stat / merge.diffstat config
     if (opts.stat == null) {
-        if (mc.getConfigOverride("merge.stat")) |val| {
+        // Check if merge.stat=compact was passed via -c (may have been translated to "true")
+        if (hasOriginalConfigArg("merge.stat", "compact")) {
+            opts.stat = true;
+            opts.compact_summary = true;
+        } else if (mc.getConfigOverride("merge.stat")) |val| {
             if (std.ascii.eqlIgnoreCase(val, "compact")) {
                 opts.stat = true;
                 opts.compact_summary = true;
+            } else if (std.ascii.eqlIgnoreCase(val, "diffstat")) {
+                opts.stat = true;
             } else {
                 opts.stat = isTruthy(val);
             }
@@ -1443,7 +1482,33 @@ fn doThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_hash: 
     }
 }
 
-fn doOctopusMerge(git_path: []const u8, current_hash: []const u8, current_branch: []const u8, opts: *MergeOpts, target_hashes: []const []const u8, allocator: Allocator, platform_impl: *const pm.Platform) void {
+fn doOctopusMerge(git_path: []const u8, current_hash: []const u8, current_branch: []const u8, opts: *MergeOpts, target_hashes_orig: []const []const u8, allocator: Allocator, platform_impl: *const pm.Platform) void {
+    // Reduce heads: remove targets that are ancestors of other targets
+    var reduced = std.array_list.Managed(usize).init(allocator);
+    defer reduced.deinit();
+    for (0..target_hashes_orig.len) |i| {
+        var dominated = false;
+        for (0..target_hashes_orig.len) |j| {
+            if (i == j) continue;
+            if (isAncestor(git_path, target_hashes_orig[i], target_hashes_orig[j], allocator, platform_impl) catch false) {
+                dominated = true;
+                break;
+            }
+        }
+        if (!dominated) reduced.append(i) catch {};
+    }
+    // Build reduced list
+    var reduced_hashes = std.array_list.Managed([]const u8).init(allocator);
+    defer reduced_hashes.deinit();
+    var reduced_names = std.array_list.Managed([]const u8).init(allocator);
+    defer reduced_names.deinit();
+    for (reduced.items) |idx| {
+        reduced_hashes.append(target_hashes_orig[idx]) catch {};
+        if (idx < opts.targets.items.len)
+            reduced_names.append(opts.targets.items[idx]) catch {};
+    }
+    const target_hashes = reduced_hashes.items;
+
     // Octopus: merge each target sequentially, creating intermediate commits
     var head = allocator.dupe(u8, current_hash) catch return;
     // We'll free head at end or when replaced
@@ -1453,7 +1518,7 @@ fn doOctopusMerge(git_path: []const u8, current_hash: []const u8, current_branch
         if (isAncestor(git_path, target_hash, head, allocator, platform_impl) catch false) continue;
 
         // Determine pretty target name
-        const pretty_name = if (target_idx < opts.targets.items.len) opts.targets.items[target_idx] else target_hash[0..@min(7, target_hash.len)];
+        const pretty_name = if (target_idx < reduced_names.items.len) reduced_names.items[target_idx] else target_hash[0..@min(7, target_hash.len)];
 
         if (isAncestor(git_path, head, target_hash, allocator, platform_impl) catch false) {
             // Fast-forward - print ff message instead of "Trying"
@@ -1475,38 +1540,91 @@ fn doOctopusMerge(git_path: []const u8, current_hash: []const u8, current_branch
 
             const conflicts = doTreeMerge(git_path, base, head, target_hash, allocator, platform_impl);
             if (conflicts) {
-                writeStderr(platform_impl, "Should not be doing an octopus.\n");
-                writeStderr(platform_impl, "fatal: merge program failed\n");
+                // Check if head was fast-forwarded to one of the targets
+                // (making this effectively a 2-way merge, not a true octopus)
+                var is_ff_plus_merge = false;
+                for (target_hashes) |th| {
+                    if (std.mem.eql(u8, head, th)) {
+                        is_ff_plus_merge = true;
+                        break;
+                    }
+                }
+
+                if (!is_ff_plus_merge) {
+                    // True octopus conflict: restore and abort with exit code 2
+                    writeStderr(platform_impl, "Should not be doing an octopus.\n");
+                    writeStderr(platform_impl, "fatal: merge program failed\n");
+                    writeStderr(platform_impl, "Automatic merge failed; fix conflicts and then commit the result.\n");
+                    // Fully restore: reset index and working tree to original state
+                    resetIndexToCommit(git_path, current_hash, allocator, platform_impl);
+                    checkoutTree(git_path, current_hash, allocator, platform_impl);
+                    cleanMergeState(git_path, allocator);
+                    std.process.exit(2);
+                }
+
+                // FF + one actual merge that conflicted: treat as regular conflict
+                // Write MERGE_HEAD with target hashes (excluding any we ff'd to)
+                {
+                    var mh_buf = std.array_list.Managed(u8).init(allocator);
+                    defer mh_buf.deinit();
+                    for (target_hashes) |th| {
+                        if (!std.mem.eql(u8, th, head)) {
+                            mh_buf.appendSlice(th) catch {};
+                            mh_buf.append('\n') catch {};
+                        }
+                    }
+                    const mh_path = std.fmt.allocPrint(allocator, "{s}/MERGE_HEAD", .{git_path}) catch "";
+                    defer if (mh_path.len > 0) allocator.free(mh_path);
+                    if (mh_path.len > 0) platform_impl.fs.writeFile(mh_path, mh_buf.items) catch {};
+                }
+                // Write MERGE_MSG
+                {
+                    const mm = opts.message orelse (buildOctopusMessage(reduced_names.items, current_branch, git_path, allocator, platform_impl) catch "Merge");
+                    const mm_path = std.fmt.allocPrint(allocator, "{s}/MERGE_MSG", .{git_path}) catch "";
+                    defer if (mm_path.len > 0) allocator.free(mm_path);
+                    if (mm_path.len > 0) platform_impl.fs.writeFile(mm_path, mm) catch {};
+                    if (opts.message == null and !std.mem.eql(u8, mm, "Merge")) allocator.free(@constCast(mm));
+                }
+                // Write MERGE_MODE
+                {
+                    const mode_path = std.fmt.allocPrint(allocator, "{s}/MERGE_MODE", .{git_path}) catch "";
+                    defer if (mode_path.len > 0) allocator.free(mode_path);
+                    if (mode_path.len > 0) platform_impl.fs.writeFile(mode_path, "") catch {};
+                }
+                // Update ref to the ff'd head so commit picks up right first parent
+                refs.updateRef(git_path, current_branch, head, platform_impl, allocator) catch {};
                 writeStderr(platform_impl, "Automatic merge failed; fix conflicts and then commit the result.\n");
-                // Restore original state
-                checkoutTree(git_path, current_hash, allocator, platform_impl);
-                cleanMergeState(git_path, allocator);
-                std.process.exit(2);
+                allocator.free(head);
+                std.process.exit(1);
             }
 
-            // Create intermediate commit from working tree state
-            updateIndexFromWorkTree(git_path, allocator, platform_impl);
-            var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch continue;
-            defer idx.deinit();
-            const tree_hash = writeTreeFromIndex(allocator, &idx, git_path, platform_impl) catch continue;
-            defer allocator.free(tree_hash);
+            // For intermediate merges (more targets coming), create intermediate commit
+            // For the last target, we'll create the final commit below
+            if (target_idx + 1 < target_hashes.len) {
+                updateIndexFromWorkTree(git_path, allocator, platform_impl);
+                var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch continue;
+                defer idx.deinit();
+                const tree_hash = writeTreeFromIndex(allocator, &idx, git_path, platform_impl) catch continue;
+                defer allocator.free(tree_hash);
 
-            const author_line = getAuthorString(allocator) catch continue;
-            defer allocator.free(author_line);
-            const committer_line = getCommitterString(allocator) catch continue;
-            defer allocator.free(committer_line);
+                const author_line = getAuthorString(allocator) catch continue;
+                defer allocator.free(author_line);
+                const committer_line = getCommitterString(allocator) catch continue;
+                defer allocator.free(committer_line);
 
-            const parents = [_][]const u8{ head, target_hash };
-            const commit_obj = objects.createCommitObject(tree_hash, &parents, author_line, committer_line, "intermediate octopus merge", allocator) catch continue;
-            defer commit_obj.deinit(allocator);
-            const new_hash = commit_obj.store(git_path, platform_impl, allocator) catch continue;
+                const int_parents = [_][]const u8{ head, target_hash };
+                const commit_obj = objects.createCommitObject(tree_hash, &int_parents, author_line, committer_line, "intermediate octopus merge", allocator) catch continue;
+                defer commit_obj.deinit(allocator);
+                const new_hash = commit_obj.store(git_path, platform_impl, allocator) catch continue;
 
-            allocator.free(head);
-            head = new_hash;
+                allocator.free(head);
+                head = new_hash;
+            }
+            // For the last target, head stays pointing at the ff'd target or previous intermediate
         }
     }
 
-    const merge_msg = opts.message orelse (buildOctopusMessage(opts.targets.items, current_branch, git_path, allocator, platform_impl) catch "Merge");
+    const merge_msg = opts.message orelse (buildOctopusMessage(reduced_names.items, current_branch, git_path, allocator, platform_impl) catch "Merge");
     const should_free = opts.message == null and !std.mem.eql(u8, merge_msg, "Merge");
     defer if (should_free) allocator.free(@constCast(merge_msg));
 
@@ -1577,8 +1695,45 @@ fn doOctopusMerge(git_path: []const u8, current_hash: []const u8, current_branch
     // Rebuild index from all merged trees before creating merge commit
     rebuildIndexFromMergedTrees(git_path, current_hash, target_hashes, allocator, platform_impl);
 
-    // Create final octopus merge commit with all parents
-    createOctopusMergeCommit(git_path, current_hash, target_hashes, current_branch, merge_msg, allocator, platform_impl);
+    // Build the correct parent list for the final merge commit.
+    // In git's octopus merge, the first parent is the result of fast-forwarding HEAD
+    // through any targets that are descendants. Remaining targets become additional parents.
+    // We track which target was ff'd to (it becomes first parent).
+    {
+        var parents = std.array_list.Managed([]const u8).init(allocator);
+        defer parents.deinit();
+
+        // Find which target head was fast-forwarded to (if any)
+        var ff_target: ?[]const u8 = null;
+        for (target_hashes) |th| {
+            if (std.mem.eql(u8, head, th)) {
+                ff_target = th;
+                break;
+            }
+        }
+        // Check if head matches a target hash (ff'd to it)
+        if (ff_target) |ft| {
+            // First parent = the ff'd target
+            parents.append(ft) catch {};
+            // Rest = other targets
+            for (target_hashes) |th| {
+                if (!std.mem.eql(u8, th, ft)) {
+                    parents.append(th) catch {};
+                }
+            }
+        } else {
+            // head is an intermediate commit; use original approach
+            // First parent = current_hash (original HEAD), then all targets
+            parents.append(current_hash) catch {};
+            for (target_hashes) |th| parents.append(th) catch {};
+        }
+
+        if (parents.items.len <= 1) {
+            refs.updateRef(git_path, current_branch, head, platform_impl, allocator) catch {};
+        } else {
+            createOctopusMergeCommitFromParents(git_path, parents.items, current_branch, merge_msg, allocator, platform_impl);
+        }
+    }
     allocator.free(head);
 
     writeStdout(platform_impl, "Merge made by the 'octopus' strategy.\n");
@@ -1652,6 +1807,17 @@ const TreeFileMap = std.StringHashMap(TreeFileEntry);
 const TreeFileEntry = struct {
     hash: []const u8,
     mode: []const u8,
+};
+
+/// Track per-file conflict info for writing proper index stage entries.
+const ConflictEntry = struct {
+    path: []const u8,
+    base_hash: ?[]const u8, // stage 1
+    base_mode: ?[]const u8,
+    ours_hash: ?[]const u8, // stage 2
+    ours_mode: ?[]const u8,
+    theirs_hash: ?[]const u8, // stage 3
+    theirs_mode: ?[]const u8,
 };
 
 fn parseTreeToMap(git_path: []const u8, tree_hash: []const u8, prefix: []const u8, map: *TreeFileMap, allocator: Allocator, platform_impl: *const pm.Platform) void {
@@ -1775,6 +1941,10 @@ fn doTreeMergeImpl(git_path: []const u8, base_hash: []const u8, ours_hash: []con
     const repo_root = std.fs.path.dirname(git_path) orelse ".";
     var conflicts = false;
 
+    // Track conflict entries for writing proper index stages
+    var conflict_entries = std.array_list.Managed(ConflictEntry).init(allocator);
+    defer conflict_entries.deinit();
+
     var path_it = all_paths.iterator();
     while (path_it.next()) |entry| {
         const path = entry.key_ptr.*;
@@ -1803,6 +1973,12 @@ fn doTreeMergeImpl(git_path: []const u8, base_hash: []const u8, ours_hash: []con
                 } else {
                     conflicts = true;
                     if (conflict_files) |cf| cf.append(allocator.dupe(u8, path) catch path) catch {};
+                    conflict_entries.append(.{
+                        .path = path,
+                        .base_hash = base_h, .base_mode = if (base_e) |e| e.mode else null,
+                        .ours_hash = ours_h, .ours_mode = if (ours_e) |e| e.mode else null,
+                        .theirs_hash = theirs_h, .theirs_mode = if (theirs_e) |e| e.mode else null,
+                    }) catch {};
                     writeConflictFile(git_path, path, base_h.?, ours_h.?, theirs_h.?, repo_root, allocator, platform_impl);
                 }
             }
@@ -1819,6 +1995,12 @@ fn doTreeMergeImpl(git_path: []const u8, base_hash: []const u8, ours_hash: []con
             } else {
                 conflicts = true;
                 if (conflict_files) |cf| cf.append(allocator.dupe(u8, path) catch path) catch {};
+                conflict_entries.append(.{
+                    .path = path,
+                    .base_hash = null, .base_mode = null,
+                    .ours_hash = ours_h, .ours_mode = if (ours_e) |e| e.mode else null,
+                    .theirs_hash = theirs_h, .theirs_mode = if (theirs_e) |e| e.mode else null,
+                }) catch {};
                 const msg = std.fmt.allocPrint(allocator, "CONFLICT (add/add): Merge conflict in {s}\n", .{path}) catch "";
                 defer if (msg.len > 0) allocator.free(msg);
                 writeStderr(platform_impl, msg);
@@ -1835,6 +2017,12 @@ fn doTreeMergeImpl(git_path: []const u8, base_hash: []const u8, ours_hash: []con
                 // Modified in ours, deleted in theirs - conflict
                 conflicts = true;
                 if (conflict_files) |cf| cf.append(allocator.dupe(u8, path) catch path) catch {};
+                conflict_entries.append(.{
+                    .path = path,
+                    .base_hash = base_h, .base_mode = if (base_e) |e| e.mode else null,
+                    .ours_hash = ours_h, .ours_mode = if (ours_e) |e| e.mode else null,
+                    .theirs_hash = null, .theirs_mode = null,
+                }) catch {};
                 const msg = std.fmt.allocPrint(allocator, "CONFLICT (modify/delete): {s} deleted in theirs and modified in ours.\n", .{path}) catch "";
                 defer if (msg.len > 0) allocator.free(msg);
                 writeStderr(platform_impl, msg);
@@ -1848,6 +2036,12 @@ fn doTreeMergeImpl(git_path: []const u8, base_hash: []const u8, ours_hash: []con
                 // Modified in theirs, deleted in ours - conflict
                 conflicts = true;
                 if (conflict_files) |cf| cf.append(allocator.dupe(u8, path) catch path) catch {};
+                conflict_entries.append(.{
+                    .path = path,
+                    .base_hash = base_h, .base_mode = if (base_e) |e| e.mode else null,
+                    .ours_hash = null, .ours_mode = null,
+                    .theirs_hash = theirs_h, .theirs_mode = if (theirs_e) |e| e.mode else null,
+                }) catch {};
                 const msg = std.fmt.allocPrint(allocator, "CONFLICT (modify/delete): {s} deleted in ours and modified in theirs.\n", .{path}) catch "";
                 defer if (msg.len > 0) allocator.free(msg);
                 writeStderr(platform_impl, msg);
@@ -1856,8 +2050,8 @@ fn doTreeMergeImpl(git_path: []const u8, base_hash: []const u8, ours_hash: []con
         }
     }
 
-    // Update index
-    updateIndexFromWorkTree(git_path, allocator, platform_impl);
+    // Update index with proper staged entries for conflicts
+    updateIndexWithConflicts(git_path, conflict_entries.items, allocator, platform_impl);
 
     return conflicts;
 }
@@ -2692,6 +2886,108 @@ fn updateIndexFromWorkTree(git_path: []const u8, allocator: Allocator, platform_
     idx.save(git_path, platform_impl) catch {};
 }
 
+/// Update the index after a merge, writing proper staged entries for conflicts.
+/// For conflicted files, stages 1 (base), 2 (ours), 3 (theirs) are written.
+/// For non-conflicted files, normal stage 0 entries are written.
+fn updateIndexWithConflicts(git_path: []const u8, conflict_entries: []const ConflictEntry, allocator: Allocator, platform_impl: *const pm.Platform) void {
+    // First, do the normal index update
+    updateIndexFromWorkTree(git_path, allocator, platform_impl);
+
+    if (conflict_entries.len == 0) return;
+
+    // Now load the index and add conflict stage entries
+    var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch return;
+    defer idx.deinit();
+
+    for (conflict_entries) |ce| {
+        // Remove the stage-0 entry for this conflicted path
+        idx.remove(ce.path) catch {};
+
+        // Add stage 1 (base) if it exists
+        if (ce.base_hash) |bh| {
+            addStagedEntry(&idx, ce.path, bh, ce.base_mode orelse "100644", 1, allocator);
+        }
+        // Add stage 2 (ours) if it exists
+        if (ce.ours_hash) |oh| {
+            addStagedEntry(&idx, ce.path, oh, ce.ours_mode orelse "100644", 2, allocator);
+        }
+        // Add stage 3 (theirs) if it exists
+        if (ce.theirs_hash) |th| {
+            addStagedEntry(&idx, ce.path, th, ce.theirs_mode orelse "100644", 3, allocator);
+        }
+    }
+
+    idx.save(git_path, platform_impl) catch {};
+}
+
+/// Add a staged index entry with a specific stage number and known hash/mode.
+fn addStagedEntry(idx: *index_mod.Index, path: []const u8, hash_hex: []const u8, mode_str: []const u8, stage: u2, allocator: Allocator) void {
+    var sha1: [20]u8 = undefined;
+    _ = std.fmt.hexToBytes(&sha1, hash_hex) catch return;
+
+    const mode: u32 = std.fmt.parseInt(u32, mode_str, 8) catch 0o100644;
+
+    const path_dup = allocator.dupe(u8, path) catch return;
+
+    // Build flags: stage in bits [12:13], path length in bits [0:11]
+    const path_len_field: u16 = if (path.len >= 0xFFF) 0xFFF else @intCast(path.len);
+    const stage_bits: u16 = @as(u16, stage) << 12;
+    const flags: u16 = stage_bits | path_len_field;
+
+    const entry = index_mod.IndexEntry{
+        .ctime_sec = 0,
+        .ctime_nsec = 0,
+        .mtime_sec = 0,
+        .mtime_nsec = 0,
+        .dev = 0,
+        .ino = 0,
+        .mode = mode,
+        .uid = 0,
+        .gid = 0,
+        .size = 0,
+        .sha1 = sha1,
+        .flags = flags,
+        .extended_flags = null,
+        .path = path_dup,
+    };
+
+    // Insert in sorted order (by path, then stage)
+    var insert_pos: usize = idx.entries.items.len;
+    for (idx.entries.items, 0..) |existing, i| {
+        const existing_stage = (existing.flags >> 12) & 0x3;
+        const cmp = std.mem.order(u8, path, existing.path);
+        if (cmp == .lt) {
+            insert_pos = i;
+            break;
+        } else if (cmp == .eq) {
+            if (stage < existing_stage) {
+                insert_pos = i;
+                break;
+            } else if (stage == existing_stage) {
+                // Replace
+                idx.entries.items[i].deinit(allocator);
+                idx.entries.items[i] = entry;
+                return;
+            }
+            // stage > existing_stage: continue
+            if (i + 1 < idx.entries.items.len) {
+                const next_cmp = std.mem.order(u8, path, idx.entries.items[i + 1].path);
+                if (next_cmp != .eq) {
+                    insert_pos = i + 1;
+                    break;
+                }
+            } else {
+                insert_pos = i + 1;
+                break;
+            }
+        }
+    }
+
+    idx.entries.insert(insert_pos, entry) catch {
+        allocator.free(path_dup);
+    };
+}
+
 fn resetIndexToCommit(git_path: []const u8, commit_hash: []const u8, allocator: Allocator, platform_impl: *const pm.Platform) void {
     const tree_hash = getCommitTree(git_path, commit_hash, allocator, platform_impl) catch return;
     defer allocator.free(tree_hash);
@@ -2773,6 +3069,30 @@ fn createOctopusMergeCommit(git_path: []const u8, current_hash: []const u8, targ
     for (target_hashes) |th| parents.append(th) catch {};
 
     const commit_obj = objects.createCommitObject(tree_hash, parents.items, author_line, committer_line, message, allocator) catch return;
+    defer commit_obj.deinit(allocator);
+
+    const new_hash = commit_obj.store(git_path, platform_impl, allocator) catch return;
+    defer allocator.free(new_hash);
+
+    refs.updateRef(git_path, current_branch, new_hash, platform_impl, allocator) catch {};
+}
+
+/// Create an octopus merge commit with a pre-built parents list.
+fn createOctopusMergeCommitFromParents(git_path: []const u8, parents_list: []const []const u8, current_branch: []const u8, message: []const u8, allocator: Allocator, platform_impl: *const pm.Platform) void {
+    updateIndexFromWorkTree(git_path, allocator, platform_impl);
+
+    var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch return;
+    defer idx.deinit();
+
+    const tree_hash = writeTreeFromIndex(allocator, &idx, git_path, platform_impl) catch return;
+    defer allocator.free(tree_hash);
+
+    const author_line = getAuthorString(allocator) catch return;
+    defer allocator.free(author_line);
+    const committer_line = getCommitterString(allocator) catch return;
+    defer allocator.free(committer_line);
+
+    const commit_obj = objects.createCommitObject(tree_hash, parents_list, author_line, committer_line, message, allocator) catch return;
     defer commit_obj.deinit(allocator);
 
     const new_hash = commit_obj.store(git_path, platform_impl, allocator) catch return;
