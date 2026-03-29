@@ -744,8 +744,23 @@ pub fn scanDirectoryForUntrackedFiles(
                 // Check for nested git repo - list as directory entry
                 const dotgit_full = try std.fmt.allocPrint(allocator, "{s}/{s}/.git", .{ repo_root, entry_relative_path });
                 defer allocator.free(dotgit_full);
-                if (platform_impl.fs.exists(dotgit_full) catch false) {
-                    // Nested repo - skip entirely (don't list as untracked)
+                const is_nested_repo = blk: {
+                    // Check if .git exists
+                    if (!(platform_impl.fs.exists(dotgit_full) catch false)) break :blk false;
+                    // Check if .git is a directory (real git repo)
+                    const stat = std.fs.cwd().statFile(dotgit_full) catch break :blk false;
+                    if (stat.kind == .directory) break :blk true;
+                    // .git is a file - check if it's a valid gitdir link
+                    const dotgit_content = std.fs.cwd().readFileAlloc(allocator, dotgit_full, 4096) catch break :blk false;
+                    defer allocator.free(dotgit_content);
+                    const trimmed = std.mem.trim(u8, dotgit_content, &[_]u8{ ' ', '\t', '\n', '\r' });
+                    if (std.mem.startsWith(u8, trimmed, "gitdir: ")) break :blk true;
+                    break :blk false;
+                };
+                if (is_nested_repo) {
+                    // Nested repo - list as directory, don't recurse
+                    const dir_path = try std.fmt.allocPrint(allocator, "{s}/", .{entry_relative_path});
+                    try untracked_files.append(dir_path);
                     continue;
                 }
 
