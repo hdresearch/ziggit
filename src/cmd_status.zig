@@ -294,7 +294,23 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         defer allocator.free(full_path);
         
         // helpers.Check if file exists in working directory
-        const file_exists = platform_impl.fs.exists(full_path) catch false;
+        // Also check that no parent directory component is a symlink
+        // (e.g. if 'copy' was a dir but is now a symlink, 'copy/file' is deleted)
+        const file_exists = file_exists_blk: {
+            if (!((platform_impl.fs.exists(full_path)) catch false)) break :file_exists_blk false;
+            // Check each parent component for symlinks
+            var path_to_check: []const u8 = entry.path;
+            while (std.fs.path.dirname(path_to_check)) |parent| {
+                if (parent.len == 0) break;
+                const parent_full = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, parent }) catch break;
+                defer allocator.free(parent_full);
+                const parent_z = std.posix.toPosixPath(parent_full) catch break;
+                const lstat_result = std.posix.fstatat(std.posix.AT.FDCWD, &parent_z, std.posix.AT.SYMLINK_NOFOLLOW) catch break;
+                if ((lstat_result.mode & std.posix.S.IFMT) == std.posix.S.IFLNK) break :file_exists_blk false;
+                path_to_check = parent;
+            }
+            break :file_exists_blk true;
+        };
         
         if (!file_exists) {
             // File is in index but not in working directory - it's deleted
