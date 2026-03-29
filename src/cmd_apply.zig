@@ -236,6 +236,22 @@ pub fn nativeCmdApply(allocator: std.mem.Allocator, args: *platform_mod.ArgItera
                 try platform_impl.writeStderr(msg);
                 std.process.exit(1);
             };
+            if (index_flag) {
+                // Update the index for the affected file
+                const git_path = helpers.global_git_dir_override orelse ".git";
+                const affected_path = patch.new_path orelse patch.old_path orelse "unknown";
+                var idx = index_mod.Index.init(allocator);
+                defer idx.deinit();
+                const idx_path = std.fmt.allocPrint(allocator, "{s}/index", .{git_path}) catch null;
+                defer if (idx_path) |p| allocator.free(p);
+                if (idx_path) |p| idx.read(p) catch {};
+                if (patch.is_delete) {
+                    idx.remove(affected_path) catch {};
+                } else {
+                    idx.add(affected_path, affected_path, platform_impl, git_path) catch {};
+                }
+                idx.save(git_path, platform_impl) catch {};
+            }
             if (verbose) {
                 const path = patch.new_path orelse patch.old_path orelse "unknown";
                 const msg = try std.fmt.allocPrint(allocator, "Applying: {s}\n", .{path});
