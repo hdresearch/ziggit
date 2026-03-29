@@ -33,6 +33,7 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var max_count: ?u32 = null;
     var committish: ?[]const u8 = null;
     var walk_reflog = false;
+    var pretty_alias: ?[]const u8 = null; // unresolved pretty.<name> alias
     
     // helpers.Parse arguments
     while (args.next()) |arg| {
@@ -53,11 +54,10 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         } else if (std.mem.eql(u8, arg, "--pretty=medium") or std.mem.eql(u8, arg, "--pretty=full") or std.mem.eql(u8, arg, "--pretty=fuller") or std.mem.eql(u8, arg, "--pretty=email") or std.mem.eql(u8, arg, "--pretty=raw") or std.mem.eql(u8, arg, "--pretty=reference") or std.mem.eql(u8, arg, "--pretty=mboxrd")) {
             // Named formats - use default for now
         } else if (std.mem.startsWith(u8, arg, "--pretty=")) {
-            // Custom format string without "format:" prefix - treat as tformat
+            // Could be a pretty.<name> alias from config — resolve after git_path is known
             const fmt_val = arg["--pretty=".len..];
             if (fmt_val.len > 0) {
-                format_string = fmt_val;
-                format_is_separator = false;
+                pretty_alias = fmt_val;
             }
         } else if (std.mem.eql(u8, arg, "--first-parent")) {
             // first-parent flag - already the default behavior (we only follow first parent)
@@ -88,6 +88,35 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         std.process.exit(128);
     };
     defer allocator.free(git_path);
+
+    // Resolve pretty.<alias> from config if needed
+    if (pretty_alias) |alias_name| {
+        const config_key = std.fmt.allocPrint(allocator, "pretty.{s}", .{alias_name}) catch null;
+        const resolved = if (config_key) |key| helpers.getConfigValueByKey(git_path, key, allocator) else null;
+        if (config_key) |key| allocator.free(key);
+        if (resolved) |value| {
+            // Resolved alias — parse the value
+            if (std.mem.startsWith(u8, value, "format:")) {
+                format_string = value["format:".len..];
+                format_is_separator = true;
+            } else if (std.mem.startsWith(u8, value, "tformat:")) {
+                format_string = value["tformat:".len..];
+                format_is_separator = false;
+            } else if (std.mem.eql(u8, value, "oneline") or std.mem.eql(u8, value, "short")) {
+                oneline = true;
+            } else if (std.mem.eql(u8, value, "medium") or std.mem.eql(u8, value, "full") or std.mem.eql(u8, value, "fuller") or std.mem.eql(u8, value, "email") or std.mem.eql(u8, value, "raw") or std.mem.eql(u8, value, "reference") or std.mem.eql(u8, value, "mboxrd")) {
+                // Named builtin format from alias
+            } else {
+                // Treat as tformat string
+                format_string = value;
+                format_is_separator = false;
+            }
+        } else {
+            // Not a known alias — treat as format string directly (git compat)
+            format_string = alias_name;
+            format_is_separator = false;
+        }
+    }
 
     // helpers.Resolve starting commit
     var start_commit: []u8 = undefined;
