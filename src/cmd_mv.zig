@@ -106,7 +106,16 @@ pub fn nativeCmdMv(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                     (src_stat.?.inode == tgt_stat.?.inode)
                 else
                     false;
-                if (!is_case_change and !is_same_inode) {
+                // Also check if the target is not tracked in the index
+                // (untracked files at destination shouldn't block git mv)
+                var target_in_index = false;
+                for (index.entries.items) |entry| {
+                    if (std.mem.eql(u8, entry.path, target)) {
+                        target_in_index = true;
+                        break;
+                    }
+                }
+                if (!is_case_change and !is_same_inode and target_in_index) {
                     if (skip_errors) continue;
                     const msg = try std.fmt.allocPrint(allocator, "fatal: destination exists, source={s}, destination={s}\n", .{ src, target });
                     defer allocator.free(msg);
