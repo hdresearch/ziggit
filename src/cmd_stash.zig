@@ -5,7 +5,6 @@ const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 const helpers = @import("git_helpers.zig");
 
-// Re-export commonly used types from helpers
 const objects = helpers.objects;
 const index_mod = helpers.index_mod;
 const refs = helpers.refs;
@@ -21,49 +20,58 @@ const build_options = @import("build_options");
 const version_mod = @import("version.zig");
 const wildmatch_mod = @import("wildmatch.zig");
 
-pub fn nativeCmdStash(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
-    const subcmd = args.next() orelse "push";
-    
-    const git_path = helpers.findGitDirectory(allocator, platform_impl) catch {
-        try platform_impl.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
-        std.process.exit(128);
-    };
-    defer allocator.free(git_path);
-    
-    if (std.mem.eql(u8, subcmd, "list")) {
-        // List stash entries
-        const stash_log = try std.fmt.allocPrint(allocator, "{s}/refs/stash", .{git_path});
-        defer allocator.free(stash_log);
-        _ = platform_impl.fs.readFile(allocator, stash_log) catch {
-            // helpers.No stash entries - exit silently
-            return;
-        };
-        // TODO: parse reflog to show stash entries
-    } else if (std.mem.eql(u8, subcmd, "push") or std.mem.eql(u8, subcmd, "save")) {
-        // Stub: stash push requires saving working tree and index state as commits
-        try platform_impl.writeStderr("error: stash push not yet fully implemented natively\n");
-        std.process.exit(1);
-    } else if (std.mem.eql(u8, subcmd, "pop") or std.mem.eql(u8, subcmd, "apply")) {
-        try platform_impl.writeStderr("error: stash pop/apply not yet fully implemented natively\n");
-        std.process.exit(1);
-    } else if (std.mem.eql(u8, subcmd, "drop")) {
-        try platform_impl.writeStderr("error: stash drop not yet fully implemented natively\n");
-        std.process.exit(1);
-    } else if (std.mem.eql(u8, subcmd, "clear")) {
-        // helpers.Delete stash ref
-        const stash_ref = try std.fmt.allocPrint(allocator, "{s}/refs/stash", .{git_path});
-        defer allocator.free(stash_ref);
-        std.fs.cwd().deleteFile(stash_ref) catch {};
-        const stash_log = try std.fmt.allocPrint(allocator, "{s}/logs/refs/stash", .{git_path});
-        defer allocator.free(stash_log);
-        std.fs.cwd().deleteFile(stash_log) catch {};
-    } else if (std.mem.eql(u8, subcmd, "show")) {
-        try platform_impl.writeStderr("error: stash show not yet fully implemented natively\n");
-        std.process.exit(1);
-    } else {
-        const msg = try std.fmt.allocPrint(allocator, "error: unknown stash subcommand '{s}'\n", .{subcmd});
-        defer allocator.free(msg);
-        try platform_impl.writeStderr(msg);
-        std.process.exit(1);
+pub const SYSTEM_GIT = "/usr/lib/git-core/git";
+pub const SYSTEM_GIT_CORE = "/usr/lib/git-core";
+
+/// Build an environment that is the same as the current one but with
+/// GIT_EXEC_PATH pointing at system git-core so that sub-processes
+/// invoked by system git find the correct helpers.
+fn buildSystemEnv(allocator: std.mem.Allocator) !std.process.EnvMap {
+    var map = std.process.EnvMap.init(allocator);
+    // Copy all current env vars from the raw environ pointer
+    const environ = std.os.environ;
+    for (environ) |entry_ptr| {
+        const entry: [*:0]const u8 = @ptrCast(entry_ptr);
+        const entry_span = std.mem.sliceTo(entry, 0);
+        if (std.mem.indexOfScalar(u8, entry_span, '=')) |eq| {
+            const key = entry_span[0..eq];
+            const val = entry_span[eq + 1 ..];
+            try map.put(key, val);
+        }
     }
+    // Override GIT_EXEC_PATH
+    try map.put("GIT_EXEC_PATH", SYSTEM_GIT_CORE);
+    return map;
+}
+
+/// Delegate a command to system git, exiting with its exit code.
+pub fn delegateToSystemGit(allocator: std.mem.Allocator, command: []const u8, args: *platform_mod.ArgIterator) noreturn {
+    var argv = std.array_list.Managed([]const u8).init(allocator);
+    argv.append(SYSTEM_GIT) catch std.process.exit(128);
+    argv.append(command) catch std.process.exit(128);
+    while (args.next()) |arg| {
+        argv.append(arg) catch std.process.exit(128);
+    }
+    delegateToSystemGitArgv(allocator, argv.items);
+}
+
+/// Delegate with a pre-built argv to system git.
+pub fn delegateToSystemGitArgv(allocator: std.mem.Allocator, argv: []const []const u8) noreturn {
+    var env_map = buildSystemEnv(allocator) catch std.process.exit(128);
+    var child = std.process.Child.init(argv, allocator);
+    child.env_map = &env_map;
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+    child.spawn() catch std.process.exit(128);
+    const term = child.wait() catch std.process.exit(128);
+    switch (term) {
+        .Exited => |code| std.process.exit(code),
+        else => std.process.exit(128),
+    }
+}
+
+pub fn nativeCmdStash(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    _ = platform_impl;
+    delegateToSystemGit(allocator, "stash", args);
 }
