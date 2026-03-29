@@ -385,7 +385,7 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             const tz_abs: u32 = @intCast(if (tz_offset < 0) -tz_offset else tz_offset);
             const tz_hours = tz_abs / 3600;
             const tz_minutes = (tz_abs % 3600) / 60;
-            break :blk try std.fmt.allocPrint(allocator, "helpers.Unknown <unknown@unknown> {d} {c}{d:0>2}{d:0>2}", .{ timestamp, tz_sign, tz_hours, tz_minutes });
+            break :blk try std.fmt.allocPrint(allocator, "Unknown <unknown@unknown> {d} {c}{d:0>2}{d:0>2}", .{ timestamp, tz_sign, tz_hours, tz_minutes });
         };
     } else if (author_override) |auth_str| blk_auth: {
         // --author="Name <email>" format - add timestamp
@@ -407,7 +407,7 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         const tz_abs: u32 = @intCast(if (tz_offset < 0) -tz_offset else tz_offset);
         const tz_hours = tz_abs / 3600;
         const tz_minutes = (tz_abs % 3600) / 60;
-        break :blk try std.fmt.allocPrint(allocator, "helpers.Unknown <unknown@unknown> {d} {c}{d:0>2}{d:0>2}", .{ timestamp, tz_sign, tz_hours, tz_minutes });
+        break :blk try std.fmt.allocPrint(allocator, "Unknown <unknown@unknown> {d} {c}{d:0>2}{d:0>2}", .{ timestamp, tz_sign, tz_hours, tz_minutes });
     };
     defer allocator.free(author_info);
     const committer_info = helpers.getCommitterString(allocator) catch blk: {
@@ -417,15 +417,15 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         const tz_abs: u32 = @intCast(if (tz_offset < 0) -tz_offset else tz_offset);
         const tz_hours = tz_abs / 3600;
         const tz_minutes = (tz_abs % 3600) / 60;
-        break :blk try std.fmt.allocPrint(allocator, "helpers.Unknown <unknown@unknown> {d} {c}{d:0>2}{d:0>2}", .{ timestamp, tz_sign, tz_hours, tz_minutes });
+        break :blk try std.fmt.allocPrint(allocator, "Unknown <unknown@unknown> {d} {c}{d:0>2}{d:0>2}", .{ timestamp, tz_sign, tz_hours, tz_minutes });
     };
     defer allocator.free(committer_info);
 
     // helpers.Add sign-off line if requested
     if (signoff) {
-        // helpers.Extract name and email from committer info (format: "helpers.Name <email> timestamp tz")
+        // helpers.Extract name and email from committer info (format: "Name <email> timestamp tz")
         const committer_name_email = blk: {
-            // helpers.Find the last '>' to get "helpers.Name <email>"
+            // helpers.Find the last '>' to get "Name <email>"
             if (std.mem.lastIndexOf(u8, committer_info, ">")) |gt_pos| {
                 break :blk committer_info[0..gt_pos + 1];
             }

@@ -146,21 +146,21 @@ pub fn cmdNotes(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         defer allocator.free(tree_hash);
 
         // helpers.Create commit object for notes
-        const author_str = helpers.getAuthorString(allocator) catch try allocator.dupe(u8, "helpers.Unknown <unknown@unknown>");
+        const author_str = helpers.getAuthorString(allocator) catch try allocator.dupe(u8, "Unknown <unknown@unknown>");
         defer allocator.free(author_str);
-        const committer_str = helpers.getCommitterString(allocator) catch try allocator.dupe(u8, "helpers.Unknown <unknown@unknown>");
+        const committer_str = helpers.getCommitterString(allocator) catch try allocator.dupe(u8, "Unknown <unknown@unknown>");
         defer allocator.free(committer_str);
 
         if (existing_commit) |ec| {
             const parents = [_][]const u8{ec};
-            const notes_commit = try objects.createCommitObject(tree_hash, &parents, author_str, committer_str, "helpers.Notes added by 'git notes add'", allocator);
+            const notes_commit = try objects.createCommitObject(tree_hash, &parents, author_str, committer_str, "Notes added by 'git notes add'", allocator);
             defer notes_commit.deinit(allocator);
             const notes_hash = try notes_commit.store(git_path, platform_impl, allocator);
             defer allocator.free(notes_hash);
             try refs.updateRef(git_path, "refs/notes/commits", notes_hash, platform_impl, allocator);
         } else {
             const empty_parents: []const []const u8 = &.{};
-            const notes_commit = try objects.createCommitObject(tree_hash, empty_parents, author_str, committer_str, "helpers.Notes added by 'git notes add'", allocator);
+            const notes_commit = try objects.createCommitObject(tree_hash, empty_parents, author_str, committer_str, "Notes added by 'git notes add'", allocator);
             defer notes_commit.deinit(allocator);
             const notes_hash = try notes_commit.store(git_path, platform_impl, allocator);
             defer allocator.free(notes_hash);
