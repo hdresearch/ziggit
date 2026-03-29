@@ -10027,6 +10027,42 @@ pub fn isAllHex(s: []const u8) bool {
 }
 
 
+/// Recursively collect all blob paths and hashes from a tree.
+pub fn collectTreeBlobs(allocator: std.mem.Allocator, tree_hash: []const u8, prefix: []const u8, git_path: []const u8, platform_impl: anytype, map: *std.StringHashMap([]const u8)) !void {
+    const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch return;
+    defer tree_obj.deinit(allocator);
+    if (tree_obj.type != .tree) return;
+    const entries = tree_mod.parseTree(tree_obj.data, allocator) catch return;
+    defer {
+        for (entries.items) |e| e.deinit(allocator);
+        entries.deinit();
+    }
+    for (entries.items) |entry| {
+        const full_path = if (prefix.len > 0)
+            std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, entry.name }) catch continue
+        else
+            allocator.dupe(u8, entry.name) catch continue;
+        if (isTreeMode(entry.mode)) {
+            defer allocator.free(full_path);
+            collectTreeBlobs(allocator, entry.hash, full_path, git_path, platform_impl, map) catch {};
+        } else {
+            const h = allocator.dupe(u8, entry.hash) catch { allocator.free(full_path); continue; };
+            map.put(full_path, h) catch { allocator.free(full_path); allocator.free(h); };
+        }
+    }
+}
+
+/// Compute the SHA1 hash of a blob with given content, returning hex string.
+pub fn hashBlobContent(content: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    const header = try std.fmt.allocPrint(allocator, "blob {d}\x00", .{content.len});
+    defer allocator.free(header);
+    var hasher = std.crypto.hash.Sha1.init(.{});
+    hasher.update(header);
+    hasher.update(content);
+    const digest = hasher.finalResult();
+    return try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&digest)});
+}
+
 /// Returns the shortest unique abbreviation of a hash (minimum min_len chars).
 /// Caller does NOT own the returned slice (it's a slice of the input hash).
 pub fn uniqueAbbrev(allocator: std.mem.Allocator, git_dir: []const u8, hash: []const u8, min_len: usize) []const u8 {
