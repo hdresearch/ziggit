@@ -6202,6 +6202,100 @@ pub fn resolveReflogEntry(git_path: []const u8, ref_name: []const u8, n: u32, al
 }
 
 
+pub fn parseRelativeTime(spec: []const u8) !i64 {
+    // Parse time specs like "1.year.ago", "2.weeks.ago", "yesterday", etc.
+    const now = std.time.timestamp();
+    const lower = spec; // assume already lowercase
+
+    if (std.mem.eql(u8, lower, "now")) return now;
+
+    // Strip ".ago" or " ago" suffix
+    const base = if (std.mem.endsWith(u8, lower, ".ago"))
+        lower[0 .. lower.len - 4]
+    else if (std.mem.endsWith(u8, lower, " ago"))
+        lower[0 .. lower.len - 4]
+    else
+        lower;
+
+    // Parse "N.unit" or "N unit"
+    var parts = std.mem.tokenizeAny(u8, base, ". ");
+    const num_str = parts.next() orelse return error.InvalidTime;
+    const num = std.fmt.parseInt(i64, num_str, 10) catch return error.InvalidTime;
+    const unit = parts.next() orelse return error.InvalidTime;
+
+    const seconds: i64 = if (std.mem.startsWith(u8, unit, "second"))
+        num
+    else if (std.mem.startsWith(u8, unit, "minute"))
+        num * 60
+    else if (std.mem.startsWith(u8, unit, "hour"))
+        num * 3600
+    else if (std.mem.startsWith(u8, unit, "day"))
+        num * 86400
+    else if (std.mem.startsWith(u8, unit, "week"))
+        num * 86400 * 7
+    else if (std.mem.startsWith(u8, unit, "month"))
+        num * 86400 * 30
+    else if (std.mem.startsWith(u8, unit, "year"))
+        num * 86400 * 365
+    else
+        return error.InvalidTime;
+
+    return now - seconds;
+}
+
+pub fn resolveReflogByTime(git_path: []const u8, ref_name: []const u8, target_time: i64, allocator: std.mem.Allocator, platform_impl: anytype) ![]u8 {
+    // Find the reflog entry closest to (but not after) the target time
+    const path1 = try std.fmt.allocPrint(allocator, "{s}/logs/{s}", .{ git_path, ref_name });
+    defer allocator.free(path1);
+    var content: []u8 = undefined;
+    var content_valid = false;
+    if (platform_impl.fs.readFile(allocator, path1)) |c| {
+        content = c;
+        content_valid = true;
+    } else |_| {}
+    if (!content_valid) {
+        const path2 = try std.fmt.allocPrint(allocator, "{s}/logs/refs/heads/{s}", .{ git_path, ref_name });
+        defer allocator.free(path2);
+        if (platform_impl.fs.readFile(allocator, path2)) |c| {
+            content = c;
+            content_valid = true;
+        } else |_| {}
+    }
+    if (!content_valid) return error.NotFound;
+    defer allocator.free(content);
+
+    // Parse reflog entries and find the one with timestamp <= target_time
+    // Each line: <old_hash> <new_hash> <author> <timestamp> <tz> <message>
+    var best_hash: ?[]const u8 = null;
+    var best_time: i64 = 0;
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        if (line.len < 82) continue;
+        // Find timestamp: after "> " in the author/committer part
+        if (std.mem.indexOf(u8, line, "> ")) |gt_pos| {
+            const rest = line[gt_pos + 2 ..];
+            const ts_end = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
+            const ts = std.fmt.parseInt(i64, rest[0..ts_end], 10) catch continue;
+            if (ts <= target_time and ts >= best_time) {
+                best_time = ts;
+                best_hash = line[41..81];
+            }
+        }
+    }
+
+    if (best_hash) |h| {
+        return try allocator.dupe(u8, h);
+    }
+    // If no entry before target time, return the oldest entry's new hash
+    var first_lines = std.mem.splitScalar(u8, content, '\n');
+    while (first_lines.next()) |line| {
+        if (line.len >= 81 and isValidHash(line[41..81])) {
+            return try allocator.dupe(u8, line[41..81]);
+        }
+    }
+    return error.NotFound;
+}
+
 pub fn resolvePreviousBranch(git_path: []const u8, n: u32, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
     const head_reflog_path = try std.fmt.allocPrint(allocator, "{s}/logs/HEAD", .{git_path});
     defer allocator.free(head_reflog_path);
@@ -6420,7 +6514,25 @@ pub fn resolveRevision(git_path: []const u8, rev: []const u8, platform_impl: *co
                 }
                 return try allocator.dupe(u8, hash);
             } else |_| {
-                // Could be @{upstream}, @{push}, etc. - skip for now
+                // Could be @{upstream}, @{push}, or a time spec like @{1.year.ago}
+                if (std.mem.eql(u8, inner, "upstream") or std.mem.eql(u8, inner, "u") or
+                    std.mem.eql(u8, inner, "push"))
+                {
+                    // Not yet implemented
+                } else {
+                    // Try as a time specification
+                    const target_time = parseRelativeTime(inner) catch null;
+                    if (target_time) |ts| {
+                        const hash = resolveReflogByTime(git_path, full_ref, ts, allocator, platform_impl) catch return error.BadRevision;
+                        defer allocator.free(hash);
+                        if (suffix.len > 0) {
+                            const combined = try std.fmt.allocPrint(allocator, "{s}{s}", .{ hash, suffix });
+                            defer allocator.free(combined);
+                            return resolveRevision(git_path, combined, platform_impl, allocator);
+                        }
+                        return try allocator.dupe(u8, hash);
+                    }
+                }
             }
         }
     }
