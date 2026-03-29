@@ -50,6 +50,8 @@ pub fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgItera
     var unmerged_mode = false;
     var verbose = false;
     var info_only = false;
+    var index_version_old: ?u32 = null;
+    var index_version_new: ?u32 = null;
 
     var replace_mode = false;
     var again_mode = false;
@@ -222,31 +224,18 @@ pub fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgItera
                 modified = true;
             }
         } else if (std.mem.eql(u8, arg, "--show-index-version")) {
-            // helpers.Show the current index version - version 3 if any entries have extended flags
-            var has_extended = false;
-            for (idx.entries.items) |*entry| {
-                if (entry.flags & 0x4000 != 0) {
-                    has_extended = true;
-                    break;
-                }
-            }
-            if (has_extended) {
-                try platform_impl.writeStdout("3\n");
-            } else {
-                try platform_impl.writeStdout("2\n");
-            }
+            // Show the current index version from the index file
+            const ver_msg = try std.fmt.allocPrint(allocator, "{d}\n", .{idx.version});
+            defer allocator.free(ver_msg);
+            try platform_impl.writeStdout(ver_msg);
             return;
         } else if (std.mem.eql(u8, arg, "--index-version")) {
             if (args.next()) |ver_str| {
                 const new_ver = std.fmt.parseInt(u32, ver_str, 10) catch 2;
-                const old_ver = idx.version;
+                index_version_old = idx.version;
+                index_version_new = new_ver;
                 idx.version = new_ver;
                 modified = true;
-                if (verbose) {
-                    const vmsg = try std.fmt.allocPrint(allocator, "index-version: was {d}, set to {d}\n", .{ old_ver, new_ver });
-                    defer allocator.free(vmsg);
-                    try platform_impl.writeStdout(vmsg);
-                }
             }
         } else if (std.mem.eql(u8, arg, "--")) {
             // rest are paths
@@ -650,6 +639,13 @@ pub fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgItera
             }
             i_ag += 1;
         }
+    }
+
+    // Output index-version change message after all args processed (verbose may come after --index-version)
+    if (verbose and index_version_old != null and index_version_new != null) {
+        const vmsg = try std.fmt.allocPrint(allocator, "index-version: was {d}, set to {d}\n", .{ index_version_old.?, index_version_new.? });
+        defer allocator.free(vmsg);
+        try platform_impl.writeStdout(vmsg);
     }
 
     if (modified) {
