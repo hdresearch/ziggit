@@ -34,6 +34,9 @@ pub fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, com
     var exclude_patterns = std.ArrayList([]const u8).init(allocator);
     defer exclude_patterns.deinit();
     var omit_empty = false;
+    var ignore_case = false;
+    var use_stdin = false;
+    var positional_count: usize = 0;
 
     var i = command_index + 1;
     while (i < args.len) : (i += 1) {
@@ -102,7 +105,7 @@ pub fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, com
             i += 1;
             if (i < args.len) try exclude_patterns.append(args[i]);
         } else if (std.mem.eql(u8, arg, "--ignore-case")) {
-            // Accept silently for now
+            ignore_case = true;
         } else if (std.mem.eql(u8, arg, "--omit-empty")) {
             omit_empty = true;
         } else if (std.mem.eql(u8, arg, "--no-sort")) {
@@ -111,6 +114,7 @@ pub fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, com
         } else if (std.mem.eql(u8, arg, "--color") or std.mem.startsWith(u8, arg, "--color=")) {
             // Accept silently
         } else if (std.mem.eql(u8, arg, "--stdin")) {
+            use_stdin = true;
             // helpers.Read patterns from stdin
             const stdin_data = read_stdin_blk: {
                 var buf2 = std.ArrayList(u8).init(allocator);
@@ -130,7 +134,14 @@ pub fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, com
             }
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             try patterns.append(arg);
+            positional_count += 1;
         }
+    }
+
+    // Validate --stdin + extra args
+    if (use_stdin and positional_count > 0) {
+        try platform_impl.writeStderr("fatal: unknown arguments supplied with --stdin\n");
+        std.process.exit(129);
     }
 
     const git_dir = helpers.findGitDir() catch {
@@ -263,7 +274,11 @@ pub fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, com
         if (patterns.items.len > 0) {
             var matches = false;
             for (patterns.items) |pattern| {
-                if (helpers.refPatternMatch(entry.name, pattern)) {
+                const match = if (ignore_case)
+                    refPatternMatchIgnoreCase(entry.name, pattern)
+                else
+                    helpers.refPatternMatch(entry.name, pattern);
+                if (match) {
                     matches = true;
                     break;
                 }
@@ -275,7 +290,11 @@ pub fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, com
         if (exclude_patterns.items.len > 0) {
             var excluded = false;
             for (exclude_patterns.items) |excl_pattern| {
-                if (helpers.refPatternMatch(entry.name, excl_pattern)) {
+                const excl_match = if (ignore_case)
+                    refPatternMatchIgnoreCase(entry.name, excl_pattern)
+                else
+                    helpers.refPatternMatch(entry.name, excl_pattern);
+                if (excl_match) {
                     excluded = true;
                     break;
                 }
@@ -291,12 +310,14 @@ pub fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, com
 
             const formatted = try formatRefOutput(allocator, format, entry.name, entry.hash, obj_type, obj.data, quoting_style, entry.symref_target);
             defer allocator.free(formatted);
+            if (omit_empty and formatted.len == 0) continue;
             const output = std.fmt.allocPrint(allocator, "{s}\n", .{formatted}) catch continue;
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
         } else |_| {
             const formatted = try formatRefOutput(allocator, format, entry.name, entry.hash, obj_type, "", quoting_style, entry.symref_target);
             defer allocator.free(formatted);
+            if (omit_empty and formatted.len == 0) continue;
             const output = std.fmt.allocPrint(allocator, "{s}\n", .{formatted}) catch continue;
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
@@ -743,6 +764,16 @@ fn validateTrailerOptions(options: []const u8, allocator: std.mem.Allocator) hel
     return .{ .valid = true };
 }
 
+
+fn refPatternMatchIgnoreCase(name: []const u8, pattern: []const u8) bool {
+    // Case-insensitive prefix match (for ref patterns)
+    // Convert both to lowercase for comparison
+    const name_lower = std.ascii.allocLowerString(std.heap.page_allocator, name) catch return false;
+    defer std.heap.page_allocator.free(name_lower);
+    const pattern_lower = std.ascii.allocLowerString(std.heap.page_allocator, pattern) catch return false;
+    defer std.heap.page_allocator.free(pattern_lower);
+    return helpers.refPatternMatch(name_lower, pattern_lower);
+}
 
 pub fn isValidFormatAtom(field: []const u8) bool {
     const result = validateFormatAtom(field, std.heap.page_allocator);
