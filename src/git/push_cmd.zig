@@ -993,7 +993,8 @@ fn pushSingleRefspec(
 
                     if (!is_bare_remote) {
                         if (std.ascii.eqlIgnoreCase(deny_policy, "refuse") or std.ascii.eqlIgnoreCase(deny_policy, "true")) {
-                            const emsg = try std.fmt.allocPrint(allocator, "remote: error: refusing to update checked out branch: {s}\nremote: error: By default, updating the current branch in a non-bare repository\nremote: is denied, because it will make the index and work tree inconsistent\n", .{full_dst});
+                            const branch_short = if (std.mem.startsWith(u8, full_dst, "refs/heads/")) full_dst["refs/heads/".len..] else full_dst;
+                            const emsg = try std.fmt.allocPrint(allocator, " ! [remote rejected] {s} -> {s} (branch is currently checked out)\nremote: error: refusing to update checked out branch: {s}\nremote: error: By default, updating the current branch in a non-bare repository\nremote: is denied, because it will make the index and work tree inconsistent\nerror: failed to push some refs\n", .{ branch_short, branch_short, full_dst });
                             defer allocator.free(emsg);
                             try platform_impl.writeStderr(emsg);
                             return error.DenyCurrentBranch;
