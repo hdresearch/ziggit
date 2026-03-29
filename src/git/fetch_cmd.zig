@@ -349,6 +349,22 @@ fn resolveSourceGitDir(allocator: std.mem.Allocator, source_path: []const u8) ![
     if (has_objects and has_refs) return abs_path;
 
     allocator.free(abs_path);
+
+    // Try adding .git suffix (e.g., foo -> foo.git)
+    const with_git_suffix = try std.fmt.allocPrint(allocator, "{s}.git", .{path});
+    defer allocator.free(with_git_suffix);
+    const abs_with_git = std.fs.cwd().realpathAlloc(allocator, with_git_suffix) catch return error.RepositoryNotFound;
+    errdefer allocator.free(abs_with_git);
+
+    const obj2 = try std.fmt.allocPrint(allocator, "{s}/objects", .{abs_with_git});
+    defer allocator.free(obj2);
+    const ref2 = try std.fmt.allocPrint(allocator, "{s}/refs", .{abs_with_git});
+    defer allocator.free(ref2);
+    const has_obj2 = if (std.fs.cwd().access(obj2, .{})) |_| true else |_| false;
+    const has_ref2 = if (std.fs.cwd().access(ref2, .{})) |_| true else |_| false;
+    if (has_obj2 and has_ref2) return abs_with_git;
+
+    allocator.free(abs_with_git);
     return error.RepositoryNotFound;
 }
 
