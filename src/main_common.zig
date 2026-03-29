@@ -39081,7 +39081,7 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                     if (commit_set.contains(phs)) {
                         dg += 1;
                         if (cm_ts.getPtr(phs)) |cl| {
-                            try cl.append(ch);
+                            try cl.append(allocator, ch);
                         }
                     }
                 }
