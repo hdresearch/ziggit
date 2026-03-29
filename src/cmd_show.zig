@@ -120,6 +120,10 @@ pub fn cmdShow(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                     try showCommitNameOnly(git_object, git_path, platform_impl, allocator);
                 } else if (pretty_format) |format| {
                     try showCommitPrettyFormat(git_object, commit_hash, format, platform_impl, allocator);
+                    // Also show diff for git show with pretty format
+                    if (!suppress_diff) {
+                        try showCommitDiffOnly(git_object, git_path, platform_impl, allocator);
+                    }
                 } else if (suppress_diff) {
                     // helpers.Show header only, no diff
                     try showCommitHeaderOnly(git_object, commit_hash, platform_impl, allocator);
@@ -396,14 +400,44 @@ pub fn showCommitWithOpts(git_object: objects.GitObject, commit_hash: []const u8
             }
         }
     } else {
-        // Root commit - show diff against empty tree if showroot
-        if (opts.show_root) {
-            const dt_opts = cmd_diff_tree.DiffTreeOpts{ .recursive = true, .show_patch = true, .show_root = true };
-            try cmd_diff_tree.diffTreeWithEmptyOpts(allocator, this_tree, &dt_opts, git_path, platform_impl);
+        // Root commit - always show diff against empty tree for git show
+        if (opts.show_patch or (!opts.show_stat and !opts.show_summary and !opts.show_raw) or opts.show_root) {
+            const empty_tree = helpers.EMPTY_TREE_HASH;
+            _ = try cmd_diff_tree.diffTwoTreesPatch(allocator, empty_tree, this_tree, "", git_path, false, opts.pathspecs, platform_impl);
         }
     }
 }
 
+
+fn showCommitDiffOnly(git_object: objects.GitObject, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+    // Extract tree hash and parent hashes from commit
+    var tree_hash: ?[]const u8 = null;
+    var parent_hashes = std.ArrayList([]const u8).init(allocator);
+    defer parent_hashes.deinit();
+    var line_iter = std.mem.splitScalar(u8, git_object.data, '\n');
+    while (line_iter.next()) |line| {
+        if (line.len == 0) break;
+        if (std.mem.startsWith(u8, line, "tree ")) tree_hash = line["tree ".len..];
+        if (std.mem.startsWith(u8, line, "parent ")) parent_hashes.append(line["parent ".len..]) catch {};
+    }
+    const this_tree = tree_hash orelse return;
+    if (parent_hashes.items.len == 1) {
+        const parent_obj = objects.GitObject.load(parent_hashes.items[0], git_path, platform_impl, allocator) catch return;
+        defer parent_obj.deinit(allocator);
+        var parent_tree: ?[]const u8 = null;
+        var piter = std.mem.splitScalar(u8, parent_obj.data, '\n');
+        while (piter.next()) |pline| {
+            if (pline.len == 0) break;
+            if (std.mem.startsWith(u8, pline, "tree ")) { parent_tree = pline["tree ".len..]; break; }
+        }
+        if (parent_tree) |pt| {
+            _ = cmd_diff_tree.diffTwoTreesPatch(allocator, pt, this_tree, "", git_path, false, &[_][]const u8{}, platform_impl) catch {};
+        }
+    } else if (parent_hashes.items.len == 0) {
+        // Root commit - diff against empty tree
+        _ = cmd_diff_tree.diffTwoTreesPatch(allocator, helpers.EMPTY_TREE_HASH, this_tree, "", git_path, false, &[_][]const u8{}, platform_impl) catch {};
+    }
+}
 
 pub fn showBlobObject(git_object: objects.GitObject, platform_impl: *const platform_mod.Platform) !void {
     // helpers.For blob helpers.objects, just output the raw content
