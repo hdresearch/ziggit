@@ -48,6 +48,9 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     defer delete_names.deinit();
     var list_patterns = std.ArrayList([]const u8).init(allocator);
     defer list_patterns.deinit();
+    var sort_key: ?[]const u8 = "refname";
+    var ignore_case = false;
+    var create_reflog = false;
     var target_ref: ?[]const u8 = null;
 
     // helpers.Parse arguments
@@ -121,9 +124,15 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 // Consume next arg as value (e.g. --contains helpers.HEAD)
                 _ = args.next();
             }
-        } else if (std.mem.startsWith(u8, arg, "--sort=") or std.mem.startsWith(u8, arg, "--format=") or
-            std.mem.eql(u8, arg, "--create-reflog") or std.mem.eql(u8, arg, "--no-sort") or
-            std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--ignore-case") or
+        } else if (std.mem.startsWith(u8, arg, "--sort=")) {
+            sort_key = arg["--sort=".len..];
+        } else if (std.mem.eql(u8, arg, "--no-sort")) {
+            sort_key = null;
+        } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--ignore-case")) {
+            ignore_case = true;
+        } else if (std.mem.eql(u8, arg, "--create-reflog")) {
+            create_reflog = true;
+        } else if (std.mem.startsWith(u8, arg, "--format=") or
             std.mem.eql(u8, arg, "--column") or std.mem.eql(u8, arg, "--no-column") or
             std.mem.eql(u8, arg, "--color") or std.mem.startsWith(u8, arg, "--color=") or
             std.mem.eql(u8, arg, "--omit-empty"))
@@ -317,12 +326,33 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             }
         } else |_| {}
         
-        // helpers.Sort tags alphabetically
-        std.sort.pdq([]u8, tag_list.items, {}, struct {
-            fn lessThan(_: void, a: []u8, b: []u8) bool {
-                return std.mem.lessThan(u8, a, b);
-            }
-        }.lessThan);
+        // Sort tags
+        const reverse = if (sort_key) |sk| std.mem.startsWith(u8, sk, "-") else false;
+        if (ignore_case) {
+            std.sort.pdq([]u8, tag_list.items, reverse, struct {
+                fn lessThan(rev: bool, a: []u8, b: []u8) bool {
+                    const cmp = cmpIgnoreCase(a, b);
+                    return if (rev) cmp == .gt else cmp == .lt;
+                }
+                fn cmpIgnoreCase(a: []const u8, b: []const u8) std.math.Order {
+                    const min_len = @min(a.len, b.len);
+                    for (0..min_len) |i| {
+                        const ca = std.ascii.toLower(a[i]);
+                        const cb = std.ascii.toLower(b[i]);
+                        if (ca < cb) return .lt;
+                        if (ca > cb) return .gt;
+                    }
+                    return std.math.order(a.len, b.len);
+                }
+            }.lessThan);
+        } else {
+            std.sort.pdq([]u8, tag_list.items, reverse, struct {
+                fn lessThan(rev: bool, a: []u8, b: []u8) bool {
+                    const cmp_result = std.mem.order(u8, a, b);
+                    return if (rev) cmp_result == .gt else cmp_result == .lt;
+                }
+            }.lessThan);
+        }
         
         for (tag_list.items) |tag| {
             const output = try std.fmt.allocPrint(allocator, "{s}\n", .{tag});
