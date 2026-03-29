@@ -339,12 +339,15 @@ pub fn isPseudoRef(ref_name: []const u8) bool {
     }
     // Also treat any ALL_CAPS_WITH_UNDERSCORES name as a pseudoref
     // But NOT "HEAD" which is a special symbolic ref
+    // Must contain at least one underscore and be at least 2 chars
     if (std.mem.eql(u8, ref_name, "HEAD")) return false;
-    if (ref_name.len > 0 and ref_name[0] >= 'A' and ref_name[0] <= 'Z') {
+    if (ref_name.len >= 2 and ref_name[0] >= 'A' and ref_name[0] <= 'Z') {
+        var has_underscore = false;
         for (ref_name) |c| {
-            if (c != '_' and (c < 'A' or c > 'Z')) return false;
+            if (c == '_') { has_underscore = true; continue; }
+            if (c < 'A' or c > 'Z') return false;
         }
-        return true;
+        return has_underscore;
     }
     return false;
 }

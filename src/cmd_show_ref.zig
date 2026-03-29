@@ -25,9 +25,11 @@ const wildmatch_mod = @import("wildmatch.zig");
 pub fn nativeCmdShowRef(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
     var verify = false;
     var exists_mode = false;
+    var exclude_existing = false;
     var quiet = false;
     var heads = false;
     var tags = false;
+    var show_head = false;
     var hash_only = false;
     var hash_len: usize = 40;
     var dereference = false;
@@ -57,8 +59,10 @@ pub fn nativeCmdShowRef(allocator: std.mem.Allocator, args: [][]const u8, comman
         } else if (std.mem.startsWith(u8, arg, "--hash=")) {
             hash_only = true;
             hash_len = std.fmt.parseInt(usize, arg["--hash=".len..], 10) catch 40;
+        } else if (std.mem.eql(u8, arg, "--exclude-existing") or std.mem.startsWith(u8, arg, "--exclude-existing=")) {
+            exclude_existing = true;
         } else if (std.mem.eql(u8, arg, "--head")) {
-            // Include helpers.HEAD in output
+            show_head = true;
         } else if (std.mem.eql(u8, arg, "--")) {
             i += 1;
             while (i < args.len) : (i += 1) {
@@ -68,6 +72,14 @@ pub fn nativeCmdShowRef(allocator: std.mem.Allocator, args: [][]const u8, comman
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             try patterns.append(arg);
         }
+    }
+
+    // Check mutual exclusivity of sub-modes
+    const sub_mode_count = @as(u8, if (verify) 1 else 0) + @as(u8, if (exists_mode) 1 else 0) + @as(u8, if (exclude_existing) 1 else 0);
+    if (sub_mode_count > 1) {
+        try platform_impl.writeStderr("fatal: only one of '--exclude-existing', '--verify' or '--exists' can be given\n");
+        std.process.exit(129);
+        unreachable;
     }
 
     const git_dir = helpers.findGitDir() catch {
@@ -91,8 +103,8 @@ pub fn nativeCmdShowRef(allocator: std.mem.Allocator, args: [][]const u8, comman
             // helpers.Check if it's a directory (directories are not refs)
             const stat = std.fs.cwd().statFile(ref_path) catch return; // can't stat, assume it exists
             if (stat.kind == .directory) {
-                try platform_impl.writeStderr("error: reference does not exist\n");
-                std.process.exit(2);
+                try platform_impl.writeStderr("error: failed to look up reference: Is a directory\n");
+                std.process.exit(1);
                 unreachable;
             }
             return; // exists (even if symref is dangling)
@@ -121,20 +133,26 @@ pub fn nativeCmdShowRef(allocator: std.mem.Allocator, args: [][]const u8, comman
     }
     
     if (verify) {
-        // helpers.Verify mode: check specific helpers.refs (read direct ref value, no tag dereferencing)
+        // Verify mode: check specific refs exist and point to valid objects
         var found_any = false;
         for (patterns.items) |pattern| {
             const resolved = helpers.readRefDirect(git_dir, pattern, allocator, platform_impl) catch null;
-            if (resolved == null) {
-                if (!quiet) {
-                    const msg = std.fmt.allocPrint(allocator, "fatal: '{s}' - not a valid ref\n", .{pattern}) catch continue;
-                    defer allocator.free(msg);
-                    try platform_impl.writeStderr(msg);
-                }
-                continue;
-            }
             if (resolved) |hash| {
                 defer allocator.free(hash);
+                // Verify the object actually exists
+                const obj_exists = blk: {
+                    const obj = objects.GitObject.load(hash, git_dir, platform_impl, allocator) catch break :blk false;
+                    obj.deinit(allocator);
+                    break :blk true;
+                };
+                if (!obj_exists) {
+                    if (!quiet) {
+                        const msg = std.fmt.allocPrint(allocator, "fatal: '{s}' - not a valid ref\n", .{pattern}) catch continue;
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                    }
+                    continue;
+                }
                 found_any = true;
                 if (!quiet) {
                     const end = @min(hash_len, hash.len);
@@ -146,6 +164,22 @@ pub fn nativeCmdShowRef(allocator: std.mem.Allocator, args: [][]const u8, comman
                         const output = std.fmt.allocPrint(allocator, "{s} {s}\n", .{ hash[0..end], pattern }) catch continue;
                         defer allocator.free(output);
                         try platform_impl.writeStdout(output);
+                    }
+                    // Dereference tag objects when -d is set
+                    if (dereference) {
+                        const obj = objects.GitObject.load(hash, git_dir, platform_impl, allocator) catch continue;
+                        defer obj.deinit(allocator);
+                        if (obj.type == .tag) {
+                            if (std.mem.indexOf(u8, obj.data, "object ")) |obj_start| {
+                                const hash_start = obj_start + 7;
+                                if (hash_start + 40 <= obj.data.len) {
+                                    const target_hash = obj.data[hash_start..hash_start + 40];
+                                    const deref_output = std.fmt.allocPrint(allocator, "{s} {s}^{{}}\n", .{ target_hash, pattern }) catch continue;
+                                    defer allocator.free(deref_output);
+                                    try platform_impl.writeStdout(deref_output);
+                                }
+                            }
+                        }
                     }
                 }
             } else {
@@ -205,15 +239,47 @@ pub fn nativeCmdShowRef(allocator: std.mem.Allocator, args: [][]const u8, comman
         }
     }.lessThan);
 
-    // Filter and output
+    // Output HEAD if --head is set
     var found = false;
+    if (show_head) {
+        const head_hash = helpers.readRefDirect(git_dir, "HEAD", allocator, platform_impl) catch null;
+        if (head_hash) |hh| {
+            defer allocator.free(hh);
+            {
+                found = true;
+                if (!quiet) {
+                    const end = @min(hash_len, hh.len);
+                    if (hash_only) {
+                        const output = std.fmt.allocPrint(allocator, "{s}\n", .{hh[0..end]}) catch unreachable;
+                        defer allocator.free(output);
+                        try platform_impl.writeStdout(output);
+                    } else {
+                        const output = std.fmt.allocPrint(allocator, "{s} HEAD\n", .{hh[0..end]}) catch unreachable;
+                        defer allocator.free(output);
+                        try platform_impl.writeStdout(output);
+                    }
+                }
+            }
+        }
+    }
+
+    // Filter and output
     for (ref_list.items) |entry| {
         // helpers.Skip broken helpers.refs
         if (entry.broken) continue;
 
-        // helpers.Apply filters
-        if (heads and !std.mem.startsWith(u8, entry.name, "refs/heads/")) continue;
-        if (tags and !std.mem.startsWith(u8, entry.name, "refs/tags/")) continue;
+        // Apply filters: --heads and --tags use OR logic
+        if (heads or tags) {
+            const is_head = std.mem.startsWith(u8, entry.name, "refs/heads/");
+            const is_tag = std.mem.startsWith(u8, entry.name, "refs/tags/");
+            if (heads and tags) {
+                if (!is_head and !is_tag) continue;
+            } else if (heads) {
+                if (!is_head) continue;
+            } else if (tags) {
+                if (!is_tag) continue;
+            }
+        }
 
         // helpers.Apply patterns (match as suffix after /)
         if (patterns.items.len > 0) {
