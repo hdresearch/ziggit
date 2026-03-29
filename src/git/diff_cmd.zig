@@ -4797,6 +4797,7 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
     var inline_mode = false;
     var suffix: []const u8 = ".patch";
     var numbered_files = false;
+    var signoff = false;
 
     // Check for config format.subjectprefix
     if (git_helpers_mod.getConfigOverride("format.subjectprefix")) |val| {
@@ -4841,6 +4842,8 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
             suffix = arg["--suffix=".len..];
         } else if (std.mem.eql(u8, arg, "--numbered-files")) {
             numbered_files = true;
+        } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--signoff")) {
+            signoff = true;
         } else if (std.mem.startsWith(u8, arg, "--subject-prefix=")) {
             subject_prefix = arg["--subject-prefix=".len..];
         } else if (std.mem.startsWith(u8, arg, "--start-number=")) {
@@ -5122,6 +5125,23 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
                 try pi.writeStdout(subj);
             }
 
+            // Add MIME headers if signoff contains non-ASCII characters (only for plain format)
+            if (signoff and !attach and !inline_mode) {
+                const sob_name = std.posix.getenv("GIT_COMMITTER_NAME") orelse parsePersonName(author_line);
+                var has_non_ascii = false;
+                for (sob_name) |c| {
+                    if (c > 127) {
+                        has_non_ascii = true;
+                        break;
+                    }
+                }
+                if (has_non_ascii) {
+                    try pi.writeStdout("MIME-Version: 1.0\n");
+                    try pi.writeStdout("Content-Type: text/plain; charset=UTF-8\n");
+                    try pi.writeStdout("Content-Transfer-Encoding: 8bit\n");
+                }
+            }
+
             // Collect changes for stat and patch
             const parent_hash = extractField(obj.data, "parent ");
             var changes = std.ArrayList(FileChange).init(allocator);
@@ -5219,6 +5239,15 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
                         try pi.writeStdout(rest);
                         try pi.writeStdout("\n");
                     }
+                }
+
+                // Add Signed-off-by if --signoff
+                if (signoff) {
+                    const sob_name_p = std.posix.getenv("GIT_COMMITTER_NAME") orelse parsePersonName(author_line);
+                    const sob_email_p = std.posix.getenv("GIT_COMMITTER_EMAIL") orelse parsePersonEmail(author_line);
+                    const sob_line = try std.fmt.allocPrint(allocator, "\nSigned-off-by: {s} <{s}>\n", .{ sob_name_p, sob_email_p });
+                    defer allocator.free(sob_line);
+                    try pi.writeStdout(sob_line);
                 }
 
                 // Stat + patch
