@@ -962,7 +962,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
                         error.FileNotFound => {
                             if (default_value != null and action == .get) {
                                 const dv = default_value.?;
-                                const fmt_dv = cfgFormatType(dv, config_type, allocator, platform_impl) catch {
+                                const fmt_dv = cfgFormatTypeSafe(dv, config_type, allocator) catch {
                                     try platform_impl.writeStderr("error: failed to format default config value\n");
                                     std.process.exit(1);
                                 };
@@ -2447,6 +2447,22 @@ fn cfgValidateColor(color: []const u8) bool {
     return true;
 }
 
+/// Like cfgFormatType but returns an error instead of calling process.exit
+fn cfgFormatTypeSafe(value: []const u8, config_type: ConfigType, allocator: Allocator) ![]u8 {
+    switch (config_type) {
+        .none => return try allocator.dupe(u8, value),
+        .expiry_date => {
+            const trimmed = std.mem.trim(u8, value, " \t");
+            if (std.mem.eql(u8, trimmed, "never") or std.mem.eql(u8, trimmed, "false")) return try allocator.dupe(u8, "0");
+            if (std.mem.eql(u8, trimmed, "now")) return try std.fmt.allocPrint(allocator, "{d}", .{std.time.timestamp()});
+            if (std.fmt.parseInt(i64, trimmed, 10)) |n| return try std.fmt.allocPrint(allocator, "{d}", .{n}) else |_| {}
+            if (cfgParseDate(trimmed, allocator)) |ts| return ts;
+            return error.InvalidValue;
+        },
+        else => return cfgFormatTypeSilent(value, config_type, allocator),
+    }
+}
+
 fn cfgFormatType(value: []const u8, config_type: ConfigType, allocator: Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
     switch (config_type) {
         .bool_type => {
@@ -2808,6 +2824,28 @@ fn cfgConvertRelativeDate(s: []const u8, allocator: Allocator) ?[]u8 {
 }
 
 fn cfgParseDateWith(date_str: []const u8, allocator: Allocator) ?[]u8 {
+    // Reject obviously invalid date strings that the system `date` command
+    // might incorrectly accept (e.g., single letters like "x")
+    const stripped = std.mem.trim(u8, date_str, " \t");
+    if (stripped.len == 0) return null;
+    // Must contain at least a digit or be a known keyword
+    var has_digit = false;
+    for (stripped) |c| {
+        if (std.ascii.isDigit(c)) { has_digit = true; break; }
+    }
+    if (!has_digit) {
+        // Check for known date keywords
+        const keywords = [_][]const u8{ "now", "never", "today", "yesterday", "tomorrow" };
+        var lower_buf: [64]u8 = undefined;
+        if (stripped.len <= lower_buf.len) {
+            for (stripped, 0..) |c, idx| lower_buf[idx] = std.ascii.toLower(c);
+            const lower = lower_buf[0..stripped.len];
+            for (keywords) |kw| {
+                if (std.mem.eql(u8, lower, kw)) { has_digit = true; break; }
+            }
+        }
+        if (!has_digit) return null;
+    }
     const result = std.process.Child.run(.{
         .allocator = allocator,
         .argv = &[_][]const u8{ "date", "-d", date_str, "+%s" },
