@@ -1,3 +1,4 @@
+const git_helpers_mod = @import("../git_helpers.zig");
 const std = @import("std");
 const platform_mod = @import("../platform/platform.zig");
 const refs = @import("refs.zig");
@@ -195,9 +196,8 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     // Touch trace files
     fetch_cmd.touchTraceFiles();
 
-    const main_common = @import("../main_common.zig");
 
-    const git_path = main_common.findGitDirectory(allocator, platform_impl) catch {
+    const git_path = git_helpers_mod.findGitDirectory(allocator, platform_impl) catch {
         try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
         std.process.exit(128);
     };

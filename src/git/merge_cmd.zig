@@ -1,3 +1,4 @@
+const git_helpers_mod = @import("../git_helpers.zig");
 const std = @import("std");
 const pm = @import("../platform/platform.zig");
 const refs = @import("refs.zig");
@@ -87,7 +88,7 @@ pub fn cmdMerge(allocator: Allocator, args: *pm.ArgIterator, platform_impl: *con
         return;
     }
 
-    const git_path = mc.findGitDirectory(allocator, platform_impl) catch {
+    const git_path = git_helpers_mod.findGitDirectory(allocator, platform_impl) catch {
         writeStderr(platform_impl, "fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
         std.process.exit(128);
     };
@@ -572,7 +573,7 @@ fn applyConfigDefaults(git_path: []const u8, opts: *MergeOpts, allocator: Alloca
 
     // merge.ff config (only if not explicitly set on command line)
     if (!opts.explicit_ff) {
-        if (mc.getConfigOverride("merge.ff")) |val| {
+        if (git_helpers_mod.getConfigOverride("merge.ff")) |val| {
             applyFfConfig(val, opts);
         } else if (cfg) |c| {
             if (c.get("merge", null, "ff")) |val| {
@@ -587,7 +588,7 @@ fn applyConfigDefaults(git_path: []const u8, opts: *MergeOpts, allocator: Alloca
         if (hasOriginalConfigArg("merge.stat", "compact")) {
             opts.stat = true;
             opts.compact_summary = true;
-        } else if (mc.getConfigOverride("merge.stat")) |val| {
+        } else if (git_helpers_mod.getConfigOverride("merge.stat")) |val| {
             if (std.ascii.eqlIgnoreCase(val, "compact")) {
                 opts.stat = true;
                 opts.compact_summary = true;
@@ -596,7 +597,7 @@ fn applyConfigDefaults(git_path: []const u8, opts: *MergeOpts, allocator: Alloca
             } else {
                 opts.stat = isTruthy(val);
             }
-        } else if (mc.getConfigOverride("merge.diffstat")) |val| {
+        } else if (git_helpers_mod.getConfigOverride("merge.diffstat")) |val| {
             opts.stat = isTruthy(val);
         } else if (cfg) |c| {
             if (c.get("merge", null, "stat")) |val| {
@@ -614,7 +615,7 @@ fn applyConfigDefaults(git_path: []const u8, opts: *MergeOpts, allocator: Alloca
 
     // merge.log config
     if (opts.log == null) {
-        if (mc.getConfigOverride("merge.log")) |val| {
+        if (git_helpers_mod.getConfigOverride("merge.log")) |val| {
             opts.log = isTruthy(val);
             if (opts.log.?) {
                 opts.log_count = std.fmt.parseInt(u32, val, 10) catch null;
@@ -631,7 +632,7 @@ fn applyConfigDefaults(git_path: []const u8, opts: *MergeOpts, allocator: Alloca
 
     // commit.cleanup config
     if (opts.cleanup == null) {
-        if (mc.getConfigOverride("commit.cleanup")) |val| {
+        if (git_helpers_mod.getConfigOverride("commit.cleanup")) |val| {
             opts.cleanup = val;
         } else if (cfg) |c| {
             if (c.get("commit", null, "cleanup")) |val| {
@@ -642,9 +643,9 @@ fn applyConfigDefaults(git_path: []const u8, opts: *MergeOpts, allocator: Alloca
 
     // merge.autoStash config
     if (opts.autostash == null) {
-        if (mc.getConfigOverride("merge.autostash")) |val| {
+        if (git_helpers_mod.getConfigOverride("merge.autostash")) |val| {
             opts.autostash = isTruthy(val);
-        } else if (mc.getConfigOverride("merge.autoStash")) |val| {
+        } else if (git_helpers_mod.getConfigOverride("merge.autoStash")) |val| {
             opts.autostash = isTruthy(val);
         } else if (cfg) |c| {
             if (c.get("merge", null, "autostash")) |val| {
@@ -657,7 +658,7 @@ fn applyConfigDefaults(git_path: []const u8, opts: *MergeOpts, allocator: Alloca
 
     // pull.octopus config for default octopus strategy
     if (opts.strategy == null and opts.targets.items.len > 1) {
-        if (mc.getConfigOverride("pull.octopus")) |val| {
+        if (git_helpers_mod.getConfigOverride("pull.octopus")) |val| {
             opts.octopus_strategies = allocator.dupe(u8, val) catch null;
             // Also set strategy to first valid one
             var strat_iter = std.mem.tokenizeAny(u8, val, " \t");
@@ -681,7 +682,7 @@ fn applyConfigDefaults(git_path: []const u8, opts: *MergeOpts, allocator: Alloca
 
     // pull.twohead / config for default two-head strategy
     if (opts.strategy == null and opts.targets.items.len <= 1) {
-        if (mc.getConfigOverride("pull.twohead")) |val| {
+        if (git_helpers_mod.getConfigOverride("pull.twohead")) |val| {
             // pull.twohead can be a space-separated list of strategies; use first one
             var strat_iter = std.mem.tokenizeAny(u8, val, " \t");
             if (strat_iter.next()) |first_strat| {
@@ -710,7 +711,7 @@ fn applyConfigDefaults(git_path: []const u8, opts: *MergeOpts, allocator: Alloca
     defer allocator.free(merge_opts_key);
 
     var merge_options_val: ?[]const u8 = null;
-    if (mc.getConfigOverride(merge_opts_key)) |val| {
+    if (git_helpers_mod.getConfigOverride(merge_opts_key)) |val| {
         merge_options_val = val;
     } else if (cfg) |c| {
         if (c.get("branch", short_branch, "mergeoptions")) |val| {
@@ -842,7 +843,7 @@ fn readStdinAll(allocator: Allocator) ![]u8 {
 
 fn resolveToCommitHash(git_path: []const u8, target: []const u8, allocator: Allocator, platform_impl: *const pm.Platform) ![]u8 {
     // Try as revision
-    if (mc.resolveRevision(git_path, target, platform_impl, allocator)) |hash| {
+    if (git_helpers_mod.resolveRevision(git_path, target, platform_impl, allocator)) |hash| {
         // Peel tag to commit if needed
         return peelToCommit(git_path, hash, allocator, platform_impl);
     } else |_| {}

@@ -357,11 +357,11 @@ pub fn splitCmdline(input: []const u8, allocator: std.mem.Allocator) ![][]const 
 /// and check hasconfig:remote.*.url violations.
 /// Called from main before command dispatch.
 pub fn validatePreCommandConfig(platform_impl: anytype) void {
-    const main_mod = @import("../main_common.zig");
+const git_helpers_mod = @import("../git_helpers.zig");
     const allocator = std.heap.page_allocator;
 
     // Check core.bare boolean validity
-    if (main_mod.global_config_overrides) |overrides| {
+    if (git_helpers_mod.global_config_overrides) |overrides| {
         for (overrides.items) |entry| {
             if (std.ascii.eqlIgnoreCase(entry.key, "core.bare")) {
                 const val = entry.value;
@@ -378,7 +378,7 @@ pub fn validatePreCommandConfig(platform_impl: anytype) void {
     // Check hasconfig:remote.*.url violations
     // If the repo config uses includeIf hasconfig:remote.*.url and the included file
     // defines remote URLs, that's forbidden.
-    const git_path = main_mod.findGitDirectory(allocator, platform_impl) catch return;
+    const git_path = git_helpers_mod.findGitDirectory(allocator, platform_impl) catch return;
     defer allocator.free(git_path);
 
     const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch return;
@@ -476,8 +476,8 @@ fn isValidBool(val: []const u8) bool {
 /// Set GIT_CONFIG_PARAMETERS environment variable from global_config_overrides.
 /// This ensures child processes (e.g., shell aliases) inherit -c overrides.
 pub fn setConfigParametersEnv(allocator: std.mem.Allocator) void {
-    const main_mod = @import("../main_common.zig");
-    const overrides = main_mod.global_config_overrides orelse return;
+const git_helpers_mod = @import("../git_helpers.zig");
+    const overrides = git_helpers_mod.global_config_overrides orelse return;
     if (overrides.items.len == 0) return;
 
     // Build GIT_CONFIG_PARAMETERS format: 'key=value' 'key=value' ...
@@ -509,20 +509,20 @@ pub fn setConfigParametersEnv(allocator: std.mem.Allocator) void {
     // Null-terminate for C setenv
     buf.append(0) catch return;
     const c_str: [*:0]const u8 = @ptrCast(buf.items[0 .. buf.items.len - 1 :0]);
-    _ = main_mod.cSetenv("GIT_CONFIG_PARAMETERS", c_str, 1);
+    _ = git_helpers_mod.cSetenv("GIT_CONFIG_PARAMETERS", c_str, 1);
 }
 
 /// Resolve alias from config, respecting GIT_CONFIG_NOSYSTEM and GIT_CONFIG_SYSTEM.
 /// Returns the alias value or null if not found.
 pub fn resolveAliasFromConfig(allocator: std.mem.Allocator, name: []const u8, platform_impl: anytype) ?[]u8 {
-    const main_mod = @import("../main_common.zig");
+const git_helpers_mod = @import("../git_helpers.zig");
     const alias_key = std.fmt.allocPrint(allocator, "alias.{s}", .{name}) catch return null;
     defer allocator.free(alias_key);
     const alias_subsection_key = std.fmt.allocPrint(allocator, "alias.{s}.command", .{name}) catch return null;
     defer allocator.free(alias_subsection_key);
 
     // Check -c overrides first
-    if (main_mod.global_config_overrides) |overrides| {
+    if (git_helpers_mod.global_config_overrides) |overrides| {
         for (overrides.items) |entry| {
             if (std.ascii.eqlIgnoreCase(entry.key, alias_key)) {
                 return allocator.dupe(u8, entry.value) catch null;
@@ -534,14 +534,14 @@ pub fn resolveAliasFromConfig(allocator: std.mem.Allocator, name: []const u8, pl
     }
 
     // Try local config (.git/config)
-    if (main_mod.findGitDirectory(allocator, platform_impl)) |git_path| {
+    if (git_helpers_mod.findGitDirectory(allocator, platform_impl)) |git_path| {
         defer allocator.free(git_path);
         const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch return null;
         defer allocator.free(config_path);
         if (platform_impl.fs.readFile(allocator, config_path)) |content| {
             defer allocator.free(content);
-            if (main_mod.parseConfigValue(content, alias_key, allocator) catch null) |val| return val;
-            if (main_mod.parseConfigValue(content, alias_subsection_key, allocator) catch null) |val| return val;
+            if (git_helpers_mod.parseConfigValue(content, alias_key, allocator) catch null) |val| return val;
+            if (git_helpers_mod.parseConfigValue(content, alias_subsection_key, allocator) catch null) |val| return val;
         } else |_| {}
     } else |_| {}
 
@@ -552,8 +552,8 @@ pub fn resolveAliasFromConfig(allocator: std.mem.Allocator, name: []const u8, pl
         defer allocator.free(global_config);
         if (platform_impl.fs.readFile(allocator, global_config)) |content| {
             defer allocator.free(content);
-            if (main_mod.parseConfigValue(content, alias_key, allocator) catch null) |val| return val;
-            if (main_mod.parseConfigValue(content, alias_subsection_key, allocator) catch null) |val| return val;
+            if (git_helpers_mod.parseConfigValue(content, alias_key, allocator) catch null) |val| return val;
+            if (git_helpers_mod.parseConfigValue(content, alias_subsection_key, allocator) catch null) |val| return val;
         } else |_| {}
 
         // Try XDG config
@@ -561,8 +561,8 @@ pub fn resolveAliasFromConfig(allocator: std.mem.Allocator, name: []const u8, pl
         defer allocator.free(xdg_config);
         if (platform_impl.fs.readFile(allocator, xdg_config)) |content| {
             defer allocator.free(content);
-            if (main_mod.parseConfigValue(content, alias_key, allocator) catch null) |val| return val;
-            if (main_mod.parseConfigValue(content, alias_subsection_key, allocator) catch null) |val| return val;
+            if (git_helpers_mod.parseConfigValue(content, alias_key, allocator) catch null) |val| return val;
+            if (git_helpers_mod.parseConfigValue(content, alias_subsection_key, allocator) catch null) |val| return val;
         } else |_| {}
     } else |_| {}
 
@@ -587,8 +587,8 @@ pub fn resolveAliasFromConfig(allocator: std.mem.Allocator, name: []const u8, pl
 
         if (platform_impl.fs.readFile(allocator, sys_config_path)) |content| {
             defer allocator.free(content);
-            if (main_mod.parseConfigValue(content, alias_key, allocator) catch null) |val| return val;
-            if (main_mod.parseConfigValue(content, alias_subsection_key, allocator) catch null) |val| return val;
+            if (git_helpers_mod.parseConfigValue(content, alias_key, allocator) catch null) |val| return val;
+            if (git_helpers_mod.parseConfigValue(content, alias_subsection_key, allocator) catch null) |val| return val;
         } else |_| {}
     }
 

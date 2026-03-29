@@ -1,3 +1,4 @@
+const git_helpers_mod = @import("../git_helpers.zig");
 const std = @import("std");
 const objects = @import("objects.zig");
 const refs = @import("refs.zig");
@@ -588,7 +589,7 @@ fn bundleCreate(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         unreachable;
     }
 
-    const git_dir = main_common.findGitDirectory(allocator, platform_impl) catch {
+    const git_dir = git_helpers_mod.findGitDirectory(allocator, platform_impl) catch {
         try platform_impl.writeStderr("fatal: not a git repository\n");
         std.process.exit(128);
         unreachable;
@@ -636,7 +637,7 @@ fn bundleCreate(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             const from_str = rev_arg[0..dot_pos];
             const to_str = rev_arg[dot_pos + 2 ..];
             if (from_str.len > 0) {
-                const from_hash = main_common.resolveRevision(git_dir, from_str, platform_impl, allocator) catch {
+                const from_hash = git_helpers_mod.resolveRevision(git_dir, from_str, platform_impl, allocator) catch {
                     const msg = try std.fmt.allocPrint(allocator, "fatal: bad revision '{s}'\n", .{from_str});
                     defer allocator.free(msg);
                     try platform_impl.writeStderr(msg);
@@ -646,7 +647,7 @@ fn bundleCreate(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                 try negative_hashes.append(from_hash);
             }
             if (to_str.len > 0) {
-                const to_hash = main_common.resolveRevision(git_dir, to_str, platform_impl, allocator) catch {
+                const to_hash = git_helpers_mod.resolveRevision(git_dir, to_str, platform_impl, allocator) catch {
                     const msg = try std.fmt.allocPrint(allocator, "fatal: bad revision '{s}'\n", .{to_str});
                     defer allocator.free(msg);
                     try platform_impl.writeStderr(msg);
@@ -664,7 +665,7 @@ fn bundleCreate(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         } else if (std.mem.startsWith(u8, rev_arg, "^")) {
             // Negative ref
             const neg_name = rev_arg[1..];
-            const neg_hash = main_common.resolveRevision(git_dir, neg_name, platform_impl, allocator) catch {
+            const neg_hash = git_helpers_mod.resolveRevision(git_dir, neg_name, platform_impl, allocator) catch {
                 const msg = try std.fmt.allocPrint(allocator, "fatal: bad revision '{s}'\n", .{neg_name});
                 defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
@@ -686,7 +687,7 @@ fn bundleCreate(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             // The test just checks object count, and with full history this should still work
         } else {
             // Positive ref
-            const hash = main_common.resolveRevision(git_dir, rev_arg, platform_impl, allocator) catch {
+            const hash = git_helpers_mod.resolveRevision(git_dir, rev_arg, platform_impl, allocator) catch {
                 const msg = try std.fmt.allocPrint(allocator, "fatal: bad revision '{s}'\n", .{rev_arg});
                 defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
