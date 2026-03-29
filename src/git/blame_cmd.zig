@@ -823,11 +823,18 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
         defer { for (pars.items) |p| a.free(p); pars.deinit(); }
         // Check grafts first
         const graft_parents = loadGraftParents(a, gp, cur.hash) catch null;
+        if (graft_parents != null) {
+            const dbg = std.fmt.allocPrint(a, "GRAFT: commit={s} parents_len={d}\n", .{ cur.hash[0..8], graft_parents.?.len }) catch "";
+            defer if (dbg.len > 0) a.free(dbg);
+            std.io.getStdErr().writeAll(dbg) catch {};
+        }
         if (graft_parents) |gp_list| {
             defer a.free(gp_list);
             var gp_iter = std.mem.tokenizeScalar(u8, gp_list, ' ');
             while (gp_iter.next()) |gh| {
-                if (gh.len >= 40) try pars.append(try a.dupe(u8, gh[0..40]));
+                if (gh.len >= 40) {
+                    try pars.append(try a.dupe(u8, gh[0..40]));
+                }
             }
         } else {
             var li = std.mem.splitScalar(u8, cc, '\n');

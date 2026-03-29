@@ -741,10 +741,14 @@ pub fn scanDirectoryForUntrackedFiles(
                 }
             },
             .directory => {
-                // Check for nested git repo
+                // Check for nested git repo - list as directory entry
                 const dotgit_full = try std.fmt.allocPrint(allocator, "{s}/{s}/.git", .{ repo_root, entry_relative_path });
                 defer allocator.free(dotgit_full);
-                if (platform_impl.fs.exists(dotgit_full) catch false) continue;
+                if (platform_impl.fs.exists(dotgit_full) catch false) {
+                    const dir_entry = try std.fmt.allocPrint(allocator, "{s}/", .{entry_relative_path});
+                    try untracked_files.append(dir_entry);
+                    continue;
+                }
 
                 // Recursively scan subdirectory
                 scanDirectoryForUntrackedFiles(
