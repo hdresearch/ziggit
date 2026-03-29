@@ -39048,8 +39048,85 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         allocator.free(commit_hash);
     }
 
-    // Reverse to get oldest first (topological order)
-    std.mem.reverse([]const u8, all_commits.items);
+    // Topological sort: parents before children
+    {
+        var cm_ts = std.StringHashMap(std.ArrayList([]const u8)).init(allocator);
+        defer {
+            var vit_ts = cm_ts.valueIterator();
+            while (vit_ts.next()) |v| v.deinit();
+            cm_ts.deinit();
+        }
+        var id_ts = std.StringHashMap(usize).init(allocator);
+        defer id_ts.deinit();
+
+        for (all_commits.items) |ch| {
+            if (!cm_ts.contains(ch)) {
+                try cm_ts.put(ch, std.ArrayList([]const u8).init(allocator));
+                try id_ts.put(ch, 0);
+            }
+        }
+
+        for (all_commits.items) |ch| {
+            const co_ts = objects.GitObject.load(ch, git_path, platform_impl, allocator) catch continue;
+            defer co_ts.deinit(allocator);
+            if (co_ts.type != .commit) continue;
+            var pl = std.mem.splitScalar(u8, co_ts.data, '\n');
+            var dg: usize = 0;
+            while (pl.next()) |pln| {
+                if (pln.len == 0) break;
+                if (std.mem.startsWith(u8, pln, "parent ")) {
+                    const phs = pln["parent ".len..];
+                    if (commit_set.contains(phs)) {
+                        dg += 1;
+                        if (cm_ts.getPtr(phs)) |cl| {
+                            try cl.append(ch);
+                        }
+                    }
+                }
+            }
+            if (id_ts.getPtr(ch)) |ptr| ptr.* = dg;
+        }
+
+        var qt = std.ArrayList([]const u8).init(allocator);
+        defer qt.deinit();
+        for (all_commits.items) |ch| {
+            if ((id_ts.get(ch) orelse 0) == 0) {
+                try qt.append(ch);
+            }
+        }
+
+        var st = std.ArrayList([]const u8).init(allocator);
+        defer st.deinit();
+        while (qt.items.len > 0) {
+            const cs = qt.orderedRemove(0);
+            try st.append(cs);
+            if (cm_ts.get(cs)) |cl| {
+                for (cl.items) |child| {
+                    if (id_ts.getPtr(child)) |ptr| {
+                        if (ptr.* > 0) ptr.* -= 1;
+                        if (ptr.* == 0) {
+                            var dp = false;
+                            for (qt.items) |qi| {
+                                if (std.mem.eql(u8, qi, child)) { dp = true; break; }
+                            }
+                            if (!dp) {
+                                for (st.items) |si| {
+                                    if (std.mem.eql(u8, si, child)) { dp = true; break; }
+                                }
+                            }
+                            if (!dp) try qt.append(child);
+                        }
+                    }
+                }
+            }
+        }
+
+        for (all_commits.items) |oc| allocator.free(oc);
+        all_commits.clearRetainingCapacity();
+        for (st.items) |s| {
+            try all_commits.append(try allocator.dupe(u8, s));
+        }
+    }
 
     // Assign marks
     var mark_counter: usize = 0;
