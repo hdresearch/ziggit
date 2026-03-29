@@ -6748,7 +6748,8 @@ pub fn parseTimestampFromLine(line: []const u8) !i64 {
 }
 
 
-pub fn outputRevListResults(final_results: [][]u8, reverse: bool, do_count: bool, format_str: ?[]const u8, no_commit_header: bool, show_objects: bool, no_object_names: bool, in_commit_order: bool, git_path: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+pub fn outputRevListResults(final_results: [][]u8, reverse: bool, do_count: bool, format_str: ?[]const u8, no_commit_header: bool, show_objects: bool, no_object_names: bool, in_commit_order: bool, git_path: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform, show_parents_opt: bool, show_children_opt: bool) !void {
+    _ = show_children_opt; // TODO: implement children
     if (do_count) {
         const count_output = try std.fmt.allocPrint(allocator, "{d}\n", .{final_results.len});
         defer allocator.free(count_output);
@@ -6792,9 +6793,30 @@ pub fn outputRevListResults(final_results: [][]u8, reverse: bool, do_count: bool
                 try platform_impl.writeStdout("\n");
                 if (commit_obj) |co| co.deinit(allocator);
             } else {
-                const out = try std.fmt.allocPrint(allocator, "{s}\n", .{h});
-                defer allocator.free(out);
-                try platform_impl.writeStdout(out);
+                if (show_parents_opt) {
+                    // Load commit to get parents
+                    var line_buf = std.ArrayList(u8).init(allocator);
+                    defer line_buf.deinit();
+                    try line_buf.appendSlice(h);
+                    if (objects.GitObject.load(h, git_path, platform_impl, allocator)) |cobj| {
+                        defer cobj.deinit(allocator);
+                        if (cobj.type == .commit) {
+                            var dlines = std.mem.splitScalar(u8, cobj.data, '\n');
+                            while (dlines.next()) |dline| {
+                                if (std.mem.startsWith(u8, dline, "parent ")) {
+                                    try line_buf.append(' ');
+                                    try line_buf.appendSlice(dline["parent ".len..]);
+                                } else if (dline.len == 0) break;
+                            }
+                        }
+                    } else |_| {}
+                    try line_buf.append('\n');
+                    try platform_impl.writeStdout(line_buf.items);
+                } else {
+                    const out = try std.fmt.allocPrint(allocator, "{s}\n", .{h});
+                    defer allocator.free(out);
+                    try platform_impl.writeStdout(out);
+                }
             }
             try emitted_objects.put(h, {});
 

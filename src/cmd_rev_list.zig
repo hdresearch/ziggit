@@ -45,6 +45,8 @@ pub fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     var all_refs = false;
     var graph = false;
     var no_walk = false;
+    var show_parents = false;
+    var show_children = false;
     var format_str: ?[]const u8 = null;
     var no_commit_header = false;
     var include_refs = std.ArrayList([]const u8).init(allocator);
@@ -106,6 +108,10 @@ pub fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         } else if (std.mem.eql(u8, arg, "--no-walk") or std.mem.startsWith(u8, arg, "--no-walk=")) {
             no_walk = true;
             max_count = 1;
+        } else if (std.mem.eql(u8, arg, "--parents")) {
+            show_parents = true;
+        } else if (std.mem.eql(u8, arg, "--children")) {
+            show_children = true;
         } else if (std.mem.eql(u8, arg, "--graph")) {
             graph = true;
         } else if (std.mem.startsWith(u8, arg, "--max-count=")) {
@@ -460,7 +466,7 @@ pub fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         } else skipped_results;
 
         // helpers.Output using the shared output logic
-        try helpers.outputRevListResults(final_results_topo, reverse, do_count, format_str, no_commit_header, show_objects, no_object_names, in_commit_order, git_path, allocator, platform_impl);
+        try helpers.outputRevListResults(final_results_topo, reverse, do_count, format_str, no_commit_header, show_objects, no_object_names, in_commit_order, git_path, allocator, platform_impl, show_parents, show_children);
         return;
     }
 
@@ -495,7 +501,7 @@ pub fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         break :blk if (limit < skipped_results.len) skipped_results[0..limit] else skipped_results;
     } else skipped_results;
 
-    try helpers.outputRevListResults(final_results, reverse, do_count, format_str, no_commit_header, show_objects, no_object_names, in_commit_order, git_path, allocator, platform_impl);
+    try helpers.outputRevListResults(final_results, reverse, do_count, format_str, no_commit_header, show_objects, no_object_names, in_commit_order, git_path, allocator, platform_impl, show_parents, show_children);
 }
 
 
