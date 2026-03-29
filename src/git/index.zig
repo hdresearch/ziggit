@@ -542,15 +542,21 @@ pub const Index = struct {
         
         const writer = buffer.writer();
 
-        // Determine version: use explicitly set version, or auto-detect
+        // Determine version: auto-detect based on entries
         var version: u32 = self.version;
-        if (version < 3) {
-            for (self.entries.items) |entry| {
-                if (entry.extended_flags != null) {
-                    version = 3;
+        var needs_v3 = false;
+        for (self.entries.items) |entry| {
+            if (entry.extended_flags) |ef| {
+                if (ef != 0) {
+                    needs_v3 = true;
                     break;
                 }
             }
+        }
+        if (needs_v3 and version < 3) {
+            version = 3;
+        } else if (!needs_v3 and version == 3) {
+            version = 2;
         }
 
         // Write header
