@@ -368,7 +368,7 @@ pub fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8
     const git_path = helpers.findGitDirectory(allocator, platform_impl) catch return false;
     defer allocator.free(git_path);
     
-    const empty_tree_sentinel = "4b825dc642cb6eb9a060e54bf899d69f82cf7202";
+    const empty_tree_sentinel = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
     const is_empty_tree1 = std.mem.eql(u8, tree1_hash, empty_tree_sentinel);
     const is_empty_tree2 = std.mem.eql(u8, tree2_hash, empty_tree_sentinel);
     
@@ -495,12 +495,12 @@ pub fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8
                 }
                 // Recurse into the old tree (deleted entries) and new tree (added entries)
                 if (recursive and e1_is_tree) {
-                    const empty_tree_tc = "4b825dc642cb6eb9a060e54bf899d69f82cf7202";
+                    const empty_tree_tc = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
                     const sub = try diffTwoTreesFiltered(allocator, e1.?.hash, empty_tree_tc, full_name, opts, pathspecs, platform_impl);
                     if (sub) had_diff = true;
                 }
                 if (recursive and e2_is_tree) {
-                    const empty_tree_tc2 = "4b825dc642cb6eb9a060e54bf899d69f82cf7202";
+                    const empty_tree_tc2 = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
                     const sub = try diffTwoTreesFiltered(allocator, empty_tree_tc2, e2.?.hash, full_name, opts, pathspecs, platform_impl);
                     if (sub) had_diff = true;
                 }
@@ -588,7 +588,7 @@ pub fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8
                     }
                 }
                 // Recurse into the deleted tree
-                const empty_tree = "4b825dc642cb6eb9a060e54bf899d69f82cf7202";
+                const empty_tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
                 const sub = try diffTwoTreesFiltered(allocator, e1.?.hash, empty_tree, full_name, opts, pathspecs, platform_impl);
                 if (sub) had_diff = true;
                 continue;
@@ -664,7 +664,7 @@ pub fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8
                     }
                 }
                 // Recurse into the added tree
-                const empty_tree = "4b825dc642cb6eb9a060e54bf899d69f82cf7202";
+                const empty_tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
                 const sub = try diffTwoTreesFiltered(allocator, empty_tree, e2.?.hash, full_name, opts, pathspecs, platform_impl);
                 if (sub) had_diff = true;
                 continue;

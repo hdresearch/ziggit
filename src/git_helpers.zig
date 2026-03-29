@@ -6246,6 +6246,11 @@ pub fn resolvePreviousBranch(git_path: []const u8, n: u32, allocator: std.mem.Al
 
 
 pub fn resolveRevision(git_path: []const u8, rev: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) ![]u8 {
+    // Special case: well-known empty tree hash
+    if (std.mem.eql(u8, rev, EMPTY_TREE_HASH)) {
+        return allocator.dupe(u8, EMPTY_TREE_HASH);
+    }
+
     // Handle :/pattern syntax - search for commit by message
     if (std.mem.startsWith(u8, rev, ":/")) {
         const pattern = rev[2..];
@@ -10092,9 +10097,16 @@ pub fn getGitIdent(allocator: std.mem.Allocator, prefix: []const u8) ![]u8 {
 }
 
 
+pub const EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
 pub fn resolveToTree(allocator: std.mem.Allocator, ref_str: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) ![]u8 {
     const hash = try resolveRevision(git_path, ref_str, platform_impl, allocator);
     defer allocator.free(hash);
+    
+    // Special case: the well-known empty tree hash
+    if (std.mem.eql(u8, hash, EMPTY_TREE_HASH)) {
+        return allocator.dupe(u8, hash);
+    }
     
     const obj = objects.GitObject.load(hash, git_path, platform_impl, allocator) catch return error.BadObject;
     defer obj.deinit(allocator);
