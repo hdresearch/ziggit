@@ -443,10 +443,20 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
 
         // helpers.Try to resolve revision expressions (like A^0, HEAD~3, etc.)
         // helpers.If the target contains special chars, resolve to a hash first
-        const resolved_target = if (std.mem.indexOfAny(u8, target, "~^@") != null)
+        var resolved_target = if (std.mem.indexOfAny(u8, target, "~^@") != null)
             helpers.resolveRevision(git_path, target, platform_impl, allocator) catch null
         else
             null;
+        // Try resolving as remote tracking branch (e.g., origin/main -> refs/remotes/origin/main)
+        if (resolved_target == null) {
+            const remote_ref = std.fmt.allocPrint(allocator, "refs/remotes/{s}", .{target}) catch null;
+            defer if (remote_ref) |r| allocator.free(r);
+            if (remote_ref) |rr| {
+                if (refs.resolveRef(git_path, rr, platform_impl, allocator) catch null) |hash| {
+                    resolved_target = hash;
+                }
+            }
+        }
         defer if (resolved_target) |rt| allocator.free(rt);
         const actual_target = resolved_target orelse target;
 
@@ -602,7 +612,7 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                     }
                 } else |_| {}
             }
-            const from_name = if (old_branch_name) |obn| obn else "HEAD";
+            const from_name = if (old_branch_name) |obn| obn else if (old_head_hash) |ohh| ohh else "HEAD";
             const reflog_msg = try std.fmt.allocPrint(allocator, "checkout: moving from {s} to {s}", .{ from_name, target });
             defer allocator.free(reflog_msg);
             const oh = if (old_head_hash) |ohh| ohh else "0000000000000000000000000000000000000000";

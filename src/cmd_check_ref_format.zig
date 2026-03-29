@@ -41,7 +41,62 @@ pub fn cmdCheckRefFormat(allocator: std.mem.Allocator, args: *platform_mod.ArgIt
     if (branch_mode) {
         const name = refname orelse { std.process.exit(128); unreachable; };
         if (name.len > 2 and name[0] == '@' and name[1] == '{' and name[name.len - 1] == '}') {
-            try platform_impl.writeStderr("fatal: no previous branch\n"); std.process.exit(128); unreachable;
+            // Handle @{-N} - find Nth previous branch from reflog
+            const inner = name[2 .. name.len - 1];
+            if (inner.len > 1 and inner[0] == '-') {
+                const n = std.fmt.parseInt(usize, inner[1..], 10) catch {
+                    try platform_impl.writeStderr("fatal: no previous branch\n");
+                    std.process.exit(128);
+                };
+                const git_path = helpers.findGitDirectory(allocator, platform_impl) catch {
+                    try platform_impl.writeStderr("fatal: no previous branch\n");
+                    std.process.exit(128);
+                };
+                defer allocator.free(git_path);
+                const reflog_path = std.fmt.allocPrint(allocator, "{s}/logs/HEAD", .{git_path}) catch {
+                    try platform_impl.writeStderr("fatal: no previous branch\n");
+                    std.process.exit(128);
+                };
+                defer allocator.free(reflog_path);
+                const reflog_content = platform_impl.fs.readFile(allocator, reflog_path) catch {
+                    try platform_impl.writeStderr("fatal: no previous branch\n");
+                    std.process.exit(128);
+                };
+                defer allocator.free(reflog_content);
+                // Parse reflog entries in reverse order
+                var lines = std.ArrayList([]const u8).init(allocator);
+                defer lines.deinit();
+                var line_iter = std.mem.splitScalar(u8, reflog_content, '\n');
+                while (line_iter.next()) |line| {
+                    if (line.len > 0) lines.append(line) catch {};
+                }
+                var count: usize = 0;
+                var i = lines.items.len;
+                while (i > 0) {
+                    i -= 1;
+                    const line = lines.items[i];
+                    // Look for "checkout: moving from X to Y"
+                    if (std.mem.indexOf(u8, line, "checkout: moving from ")) |pos| {
+                        const rest = line[pos + "checkout: moving from ".len ..];
+                        if (std.mem.indexOf(u8, rest, " to ")) |to_pos| {
+                            const from_branch = rest[0..to_pos];
+                            count += 1;
+                            if (count == n) {
+                                // If it's a branch name, output it; if it's a hash, output the hash
+                                const output = std.fmt.allocPrint(allocator, "{s}\n", .{from_branch}) catch {
+                                    try platform_impl.writeStderr("fatal: no previous branch\n");
+                                    std.process.exit(128);
+                                };
+                                defer allocator.free(output);
+                                try platform_impl.writeStdout(output);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            try platform_impl.writeStderr("fatal: no previous branch\n");
+            std.process.exit(128);
         }
         if (name.len > 0 and name[0] == '-') {
             const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' is not a valid branch name\n", .{name});
