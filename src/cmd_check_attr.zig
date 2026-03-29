@@ -201,7 +201,7 @@ pub fn nativeCmdCheckAttr(allocator: std.mem.Allocator, args: *platform_mod.ArgI
     }
 }
 
-const AttrValue = struct {
+pub const AttrValue = struct {
     name: []const u8,
     value: []const u8,
     fn deinit(self: *AttrValue, alloc: std.mem.Allocator) void {
@@ -210,7 +210,7 @@ const AttrValue = struct {
     }
 };
 
-const AttrRule = struct {
+pub const AttrRule = struct {
     pattern: []const u8,
     attrs: std.ArrayList(AttrValue),
     fn deinit(self: *AttrRule, alloc: std.mem.Allocator) void {
