@@ -39156,6 +39156,10 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     var output = std.array_list.Managed(u8).init(allocator);
     defer output.deinit();
 
+    // Track which refs have been seen (for reset lines)
+    var refs_seen = std.StringHashMap(void).init(allocator);
+    defer refs_seen.deinit();
+
     // Determine which ref each commit belongs to
     // Build a map: commit_hash -> ref_name for branch refs
     var commit_to_ref = std.StringHashMap([]const u8).init(allocator);
