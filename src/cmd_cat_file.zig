@@ -41,6 +41,10 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     var filters = false;
     var path_opt: ?[]const u8 = null;
     var object_ref: ?[]const u8 = null;
+    var extra_args: u32 = 0;
+    var buffer_mode = false;
+    var nul_terminated = false;
+    var batch_command = false;
     // helpers.Track cmdmode order for conflict reporting
     var cmdmode_first: ?[]const u8 = null;
     var cmdmode_second: ?[]const u8 = null;
@@ -71,8 +75,21 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             batch_format = arg["--batch-check=".len..];
         } else if (std.mem.eql(u8, arg, "--batch-all-objects")) {
             batch_all = true;
+        } else if (std.mem.eql(u8, arg, "--batch-command")) {
+            batch_command = true;
+            batch_mode = true;
+        } else if (std.mem.startsWith(u8, arg, "--batch-command=")) {
+            batch_command = true;
+            batch_mode = true;
+            batch_format = arg["--batch-command=".len..];
+        } else if (std.mem.eql(u8, arg, "--buffer")) {
+            buffer_mode = true;
+        } else if (std.mem.eql(u8, arg, "--no-buffer")) {
+            buffer_mode = false;
         } else if (std.mem.eql(u8, arg, "--follow-symlinks")) {
             follow_symlinks = true;
+        } else if (std.mem.eql(u8, arg, "-z") or std.mem.eql(u8, arg, "-Z")) {
+            nul_terminated = true;
         } else if (std.mem.eql(u8, arg, "--textconv")) {
             textconv = true;
             if (cmdmode_first == null) { cmdmode_first = "--textconv"; } else if (cmdmode_second == null) { cmdmode_second = "--textconv"; }
@@ -84,6 +101,9 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         } else if (std.mem.eql(u8, arg, "--path")) {
             path_opt = args.next();
         } else if (!std.mem.startsWith(u8, arg, "-")) {
+            if (object_ref != null) {
+                extra_args += 1;
+            }
             object_ref = arg;
         }
     }
@@ -102,7 +122,7 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         const first = cmdmode_first orelse "-e";
         const second = cmdmode_second orelse "-e";
         var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "error: {s} cannot be used together with {s}\n", .{ second, first }) catch "error: options cannot be used together\n";
+        const msg = std.fmt.bufPrint(&buf, "error: {s} is incompatible with {s}\n", .{ second, first }) catch "error: options are incompatible\n";
         try platform_impl.writeStderr(msg);
         std.process.exit(129);
     }
@@ -111,7 +131,7 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     if (batch_all and (show_exists or show_type or show_size or show_pretty)) {
         const mode_name = if (show_exists) "-e" else if (show_type) "-t" else if (show_size) "-s" else "-p";
         var buf2: [256]u8 = undefined;
-        const msg2 = std.fmt.bufPrint(&buf2, "error: --batch-all-helpers.objects cannot be used together with {s}\n", .{mode_name}) catch "error: options cannot be used together\n";
+        const msg2 = std.fmt.bufPrint(&buf2, "error: --batch-all-objects is incompatible with {s}\n", .{mode_name}) catch "error: options are incompatible\n";
         try platform_impl.writeStderr(msg2);
         std.process.exit(129);
     }
@@ -133,6 +153,53 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         const msg4 = std.fmt.bufPrint(&buf4, "error: {s} is incompatible with --follow-symlinks\n", .{mode_name}) catch "fatal: options are incompatible\n";
         try platform_impl.writeStderr(msg4);
         std.process.exit(129);
+    }
+
+    // Too many positional arguments for cmdmode options
+    if (extra_args > 0 and cmdmode_count > 0) {
+        const mode_name = if (show_exists) "-e" else if (show_type) "-t" else if (show_size) "-s" else if (show_pretty) "-p" else if (textconv) "--textconv" else "--filters";
+        var ebuf: [256]u8 = undefined;
+        const emsg = std.fmt.bufPrint(&ebuf, "error: too many arguments for {s} mode\n", .{mode_name}) catch "error: too many arguments\n";
+        try platform_impl.writeStderr(emsg);
+        std.process.exit(129);
+    }
+
+    // --buffer is incompatible with cmdmode options
+    if (buffer_mode and cmdmode_count > 0) {
+        const mode_name = if (show_exists) "-e" else if (show_type) "-t" else if (show_size) "-s" else if (show_pretty) "-p" else if (textconv) "--textconv" else "--filters";
+        var bbuf: [256]u8 = undefined;
+        const bmsg = std.fmt.bufPrint(&bbuf, "error: {s} is incompatible with --buffer\n", .{mode_name}) catch "error: options are incompatible\n";
+        try platform_impl.writeStderr(bmsg);
+        std.process.exit(129);
+    }
+
+    // --follow-symlinks is incompatible with --textconv/--filters
+    if (follow_symlinks and (textconv or filters)) {
+        const cw_name = if (textconv) "--textconv" else "--filters";
+        var fsbuf: [256]u8 = undefined;
+        const fsmsg = std.fmt.bufPrint(&fsbuf, "error: {s} is incompatible with --follow-symlinks\n", .{cw_name}) catch "error: options are incompatible\n";
+        try platform_impl.writeStderr(fsmsg);
+        std.process.exit(129);
+    }
+
+    // --buffer/--follow-symlinks/--batch-all-objects/-z/-Z require batch mode
+    if (!batch_mode and !batch_check) {
+        if (buffer_mode) {
+            try platform_impl.writeStderr("fatal: --buffer requires a batch mode\n");
+            std.process.exit(129);
+        }
+        if (follow_symlinks and !show_exists and !show_type and !show_size and !show_pretty and !textconv and !filters) {
+            try platform_impl.writeStderr("fatal: --follow-symlinks requires a batch mode\n");
+            std.process.exit(129);
+        }
+        if (batch_all) {
+            try platform_impl.writeStderr("fatal: --batch-all-objects requires a batch mode\n");
+            std.process.exit(129);
+        }
+        if (nul_terminated) {
+            try platform_impl.writeStderr("fatal: -z requires a batch mode\n");
+            std.process.exit(129);
+        }
     }
 
     // --path is incompatible with --batch/--batch-check
