@@ -368,14 +368,18 @@ pub fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8
     const git_path = helpers.findGitDirectory(allocator, platform_impl) catch return false;
     defer allocator.free(git_path);
     
-    const tree1_obj = objects.GitObject.load(tree1_hash, git_path, platform_impl, allocator) catch return false;
-    defer tree1_obj.deinit(allocator);
-    const tree2_obj = objects.GitObject.load(tree2_hash, git_path, platform_impl, allocator) catch return false;
-    defer tree2_obj.deinit(allocator);
+    const empty_tree_sentinel = "4b825dc642cb6eb9a060e54bf899d69f82cf7202";
+    const is_empty_tree1 = std.mem.eql(u8, tree1_hash, empty_tree_sentinel);
+    const is_empty_tree2 = std.mem.eql(u8, tree2_hash, empty_tree_sentinel);
     
-    var entries1 = tree_mod.parseTree(tree1_obj.data, allocator) catch return false;
+    const tree1_obj = if (!is_empty_tree1) (objects.GitObject.load(tree1_hash, git_path, platform_impl, allocator) catch return false) else null;
+    defer if (tree1_obj) |obj| obj.deinit(allocator);
+    const tree2_obj = if (!is_empty_tree2) (objects.GitObject.load(tree2_hash, git_path, platform_impl, allocator) catch return false) else null;
+    defer if (tree2_obj) |obj| obj.deinit(allocator);
+    
+    var entries1 = if (tree1_obj) |obj| (tree_mod.parseTree(obj.data, allocator) catch return false) else std.ArrayList(tree_mod.TreeEntry).init(allocator);
     defer entries1.deinit();
-    var entries2 = tree_mod.parseTree(tree2_obj.data, allocator) catch return false;
+    var entries2 = if (tree2_obj) |obj| (tree_mod.parseTree(obj.data, allocator) catch return false) else std.ArrayList(tree_mod.TreeEntry).init(allocator);
     defer entries2.deinit();
     
     const zero_hash = "0000000000000000000000000000000000000000";
@@ -388,19 +392,36 @@ pub fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8
     for (entries1.items) |e| map1.put(e.name, e) catch {};
     for (entries2.items) |e| map2.put(e.name, e) catch {};
     
-    // helpers.Collect and sort all names
+    // helpers.Collect and sort all names using git tree sort order
     var all_names = std.StringHashMap(void).init(allocator);
     defer all_names.deinit();
     for (entries1.items) |e| all_names.put(e.name, {}) catch {};
     for (entries2.items) |e| all_names.put(e.name, {}) catch {};
     
+    const SortCtx = struct {
+        m1: *std.StringHashMap(tree_mod.TreeEntry),
+        m2: *std.StringHashMap(tree_mod.TreeEntry),
+    };
     var name_list = std.ArrayList([]const u8).init(allocator);
     defer name_list.deinit();
     var niter = all_names.keyIterator();
     while (niter.next()) |key| try name_list.append(key.*);
-    std.mem.sort([]const u8, name_list.items, {}, struct {
-        fn cmp(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.order(u8, a, b) == .lt;
+    const ctx = SortCtx{ .m1 = &map1, .m2 = &map2 };
+    std.mem.sort([]const u8, name_list.items, ctx, struct {
+        fn cmp(c: SortCtx, a: []const u8, b: []const u8) bool {
+            // Git sorts tree entries as if they have a trailing '/'
+            const a_is_tree = if (c.m2.get(a)) |e| helpers.isTreeMode(e.mode) else if (c.m1.get(a)) |e| helpers.isTreeMode(e.mode) else false;
+            const b_is_tree = if (c.m2.get(b)) |e| helpers.isTreeMode(e.mode) else if (c.m1.get(b)) |e| helpers.isTreeMode(e.mode) else false;
+            // Compare using virtual trailing '/' for trees
+            const min_len = @min(a.len, b.len);
+            var i: usize = 0;
+            while (i < min_len) : (i += 1) {
+                if (a[i] != b[i]) return a[i] < b[i];
+            }
+            // Same prefix - compare suffixes
+            const a_next: u8 = if (i < a.len) a[i] else if (a_is_tree) '/' else 0;
+            const b_next: u8 = if (i < b.len) b[i] else if (b_is_tree) '/' else 0;
+            return a_next < b_next;
         }
     }.cmp);
     
@@ -417,7 +438,96 @@ pub fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8
         
         if (e1 != null and e2 != null) {
             if (std.mem.eql(u8, e1.?.hash, e2.?.hash) and std.mem.eql(u8, e1.?.mode, e2.?.mode)) continue;
-            if (recursive and helpers.isTreeMode(e1.?.mode) and helpers.isTreeMode(e2.?.mode)) {
+            
+            // Type change: tree <-> blob - treat as D + A
+            const e1_is_tree = helpers.isTreeMode(e1.?.mode);
+            const e2_is_tree = helpers.isTreeMode(e2.?.mode);
+            if (e1_is_tree != e2_is_tree) {
+                // This is a type change - emit blob side first (sorts before tree)
+                // then tree side, then recurse into the tree
+                had_diff = true;
+                if (!quiet) {
+                    if (name_status) {
+                        // Blob entry comes first in git tree sort order
+                        if (e1_is_tree) {
+                            // e1=tree(D), e2=blob(A) -> emit A first, then D
+                            const out_a = try std.fmt.allocPrint(allocator, "A\t{s}\n", .{full_name});
+                            defer allocator.free(out_a);
+                            try platform_impl.writeStdout(out_a);
+                            const out_d = try std.fmt.allocPrint(allocator, "D\t{s}\n", .{full_name});
+                            defer allocator.free(out_d);
+                            try platform_impl.writeStdout(out_d);
+                        } else {
+                            // e1=blob(D), e2=tree(A) -> emit D first, then A
+                            const out_d = try std.fmt.allocPrint(allocator, "D\t{s}\n", .{full_name});
+                            defer allocator.free(out_d);
+                            try platform_impl.writeStdout(out_d);
+                            const out_a = try std.fmt.allocPrint(allocator, "A\t{s}\n", .{full_name});
+                            defer allocator.free(out_a);
+                            try platform_impl.writeStdout(out_a);
+                        }
+                    } else if (name_only) {
+                        const out = try std.fmt.allocPrint(allocator, "{s}\n", .{full_name});
+                        defer allocator.free(out);
+                        try platform_impl.writeStdout(out);
+                    } else if (!opts.show_patch) {
+                        var mb1: [6]u8 = undefined;
+                        var mb2: [6]u8 = undefined;
+                        const suf = opts.hashSuffix();
+                        if (e1_is_tree) {
+                            // e1=tree(D), e2=blob(A) -> emit A first, then D
+                            const out_a = try std.fmt.allocPrint(allocator, ":000000 {s} {s}{s} {s}{s} A\t{s}\n", .{ helpers.padMode6(&mb2, e2.?.mode), opts.abbrevHash(zero_hash), suf, opts.abbrevHash(e2.?.hash), suf, full_name });
+                            defer allocator.free(out_a);
+                            try platform_impl.writeStdout(out_a);
+                            const out_d = try std.fmt.allocPrint(allocator, ":{s} 000000 {s}{s} {s}{s} D\t{s}\n", .{ helpers.padMode6(&mb1, e1.?.mode), opts.abbrevHash(e1.?.hash), suf, opts.abbrevHash(zero_hash), suf, full_name });
+                            defer allocator.free(out_d);
+                            try platform_impl.writeStdout(out_d);
+                        } else {
+                            // e1=blob(D), e2=tree(A) -> emit D first, then A
+                            const out_d = try std.fmt.allocPrint(allocator, ":{s} 000000 {s}{s} {s}{s} D\t{s}\n", .{ helpers.padMode6(&mb1, e1.?.mode), opts.abbrevHash(e1.?.hash), suf, opts.abbrevHash(zero_hash), suf, full_name });
+                            defer allocator.free(out_d);
+                            try platform_impl.writeStdout(out_d);
+                            const out_a = try std.fmt.allocPrint(allocator, ":000000 {s} {s}{s} {s}{s} A\t{s}\n", .{ helpers.padMode6(&mb2, e2.?.mode), opts.abbrevHash(zero_hash), suf, opts.abbrevHash(e2.?.hash), suf, full_name });
+                            defer allocator.free(out_a);
+                            try platform_impl.writeStdout(out_a);
+                        }
+                    }
+                }
+                // Recurse into the old tree (deleted entries) and new tree (added entries)
+                if (recursive and e1_is_tree) {
+                    const empty_tree_tc = "4b825dc642cb6eb9a060e54bf899d69f82cf7202";
+                    const sub = try diffTwoTreesFiltered(allocator, e1.?.hash, empty_tree_tc, full_name, opts, pathspecs, platform_impl);
+                    if (sub) had_diff = true;
+                }
+                if (recursive and e2_is_tree) {
+                    const empty_tree_tc2 = "4b825dc642cb6eb9a060e54bf899d69f82cf7202";
+                    const sub = try diffTwoTreesFiltered(allocator, empty_tree_tc2, e2.?.hash, full_name, opts, pathspecs, platform_impl);
+                    if (sub) had_diff = true;
+                }
+                continue;
+            }
+            
+            if (recursive and e1_is_tree and e2_is_tree) {
+                // Both are trees - if show_tree, emit tree entry first
+                if (opts.show_tree and !quiet) {
+                    if (name_status) {
+                        const out = try std.fmt.allocPrint(allocator, "M\t{s}\n", .{full_name});
+                        defer allocator.free(out);
+                        try platform_impl.writeStdout(out);
+                    } else if (name_only) {
+                        const out = try std.fmt.allocPrint(allocator, "{s}\n", .{full_name});
+                        defer allocator.free(out);
+                        try platform_impl.writeStdout(out);
+                    } else if (!opts.show_patch) {
+                        var mb1: [6]u8 = undefined;
+                        var mb2: [6]u8 = undefined;
+                        const suf = opts.hashSuffix();
+                        const out = try std.fmt.allocPrint(allocator, ":{s} {s} {s}{s} {s}{s} M\t{s}\n", .{ helpers.padMode6(&mb1, e1.?.mode), helpers.padMode6(&mb2, e2.?.mode), opts.abbrevHash(e1.?.hash), suf, opts.abbrevHash(e2.?.hash), suf, full_name });
+                        defer allocator.free(out);
+                        try platform_impl.writeStdout(out);
+                    }
+                    had_diff = true;
+                }
                 const sub = try diffTwoTreesFiltered(allocator, e1.?.hash, e2.?.hash, full_name, opts, pathspecs, platform_impl);
                 if (sub) had_diff = true;
                 continue;
@@ -454,6 +564,35 @@ pub fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8
                 }
             }
         } else if (e1 != null and e2 == null) {
+            const e1_is_tree = helpers.isTreeMode(e1.?.mode);
+            // For trees with -t, emit the tree entry then recurse
+            if (recursive and e1_is_tree) {
+                if (opts.show_tree) {
+                    had_diff = true;
+                    if (!quiet) {
+                        if (name_status) {
+                            const out = try std.fmt.allocPrint(allocator, "D\t{s}\n", .{full_name});
+                            defer allocator.free(out);
+                            try platform_impl.writeStdout(out);
+                        } else if (name_only) {
+                            const out = try std.fmt.allocPrint(allocator, "{s}\n", .{full_name});
+                            defer allocator.free(out);
+                            try platform_impl.writeStdout(out);
+                        } else if (!opts.show_patch) {
+                            var mb1: [6]u8 = undefined;
+                            const suf = opts.hashSuffix();
+                            const out = try std.fmt.allocPrint(allocator, ":{s} 000000 {s}{s} {s}{s} D\t{s}\n", .{ helpers.padMode6(&mb1, e1.?.mode), opts.abbrevHash(e1.?.hash), suf, opts.abbrevHash(zero_hash), suf, full_name });
+                            defer allocator.free(out);
+                            try platform_impl.writeStdout(out);
+                        }
+                    }
+                }
+                // Recurse into the deleted tree
+                const empty_tree = "4b825dc642cb6eb9a060e54bf899d69f82cf7202";
+                const sub = try diffTwoTreesFiltered(allocator, e1.?.hash, empty_tree, full_name, opts, pathspecs, platform_impl);
+                if (sub) had_diff = true;
+                continue;
+            }
             if (!helpers.matchesPathspecs(full_name, pathspecs)) continue;
             had_diff = true;
             if (!quiet) {
@@ -501,6 +640,35 @@ pub fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8
                 }
             }
         } else if (e2 != null) {
+            const e2_is_tree = helpers.isTreeMode(e2.?.mode);
+            // For trees with -t, emit the tree entry then recurse
+            if (recursive and e2_is_tree) {
+                if (opts.show_tree) {
+                    had_diff = true;
+                    if (!quiet) {
+                        if (name_status) {
+                            const out = try std.fmt.allocPrint(allocator, "A\t{s}\n", .{full_name});
+                            defer allocator.free(out);
+                            try platform_impl.writeStdout(out);
+                        } else if (name_only) {
+                            const out = try std.fmt.allocPrint(allocator, "{s}\n", .{full_name});
+                            defer allocator.free(out);
+                            try platform_impl.writeStdout(out);
+                        } else if (!opts.show_patch) {
+                            var mb2: [6]u8 = undefined;
+                            const suf = opts.hashSuffix();
+                            const out = try std.fmt.allocPrint(allocator, ":000000 {s} {s}{s} {s}{s} A\t{s}\n", .{ helpers.padMode6(&mb2, e2.?.mode), opts.abbrevHash(zero_hash), suf, opts.abbrevHash(e2.?.hash), suf, full_name });
+                            defer allocator.free(out);
+                            try platform_impl.writeStdout(out);
+                        }
+                    }
+                }
+                // Recurse into the added tree
+                const empty_tree = "4b825dc642cb6eb9a060e54bf899d69f82cf7202";
+                const sub = try diffTwoTreesFiltered(allocator, empty_tree, e2.?.hash, full_name, opts, pathspecs, platform_impl);
+                if (sub) had_diff = true;
+                continue;
+            }
             if (!helpers.matchesPathspecs(full_name, pathspecs)) continue;
             had_diff = true;
             if (!quiet) {

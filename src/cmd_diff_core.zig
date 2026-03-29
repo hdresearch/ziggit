@@ -820,6 +820,7 @@ pub fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index
     var compact_summary = false;
     var reverse_diff = false;
     var stdin_mode = false;
+    var show_tree = false;
     var line_prefix: []const u8 = "";
     var dt_exit_code = false;
     var tree_refs = std.ArrayList([]const u8).init(allocator);
@@ -837,6 +838,7 @@ pub fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index
             recursive = true;
         } else if (std.mem.eql(u8, arg, "-t")) {
             recursive = true;
+            show_tree = true;
         } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--patch") or std.mem.eql(u8, arg, "-u")) {
             show_patch = true;
             show_raw = false;
@@ -957,6 +959,7 @@ pub fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index
         .reverse_diff = reverse_diff,
         .stdin_mode = stdin_mode,
         .line_prefix = line_prefix,
+        .show_tree = show_tree,
     };
     
     var had_diff = false;

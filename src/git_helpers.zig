@@ -13615,6 +13615,7 @@ pub const DiffTreeOpts = struct {
     reverse_diff: bool = false,
     stdin_mode: bool = false,
     line_prefix: []const u8 = "",
+    show_tree: bool = false,
     
     pub fn abbrevHash(self: @This(), hash: []const u8) []const u8 {
         if (self.full_index) return hash;

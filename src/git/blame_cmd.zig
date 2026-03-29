@@ -515,7 +515,6 @@ fn resolveFuncname(pattern: []const u8, file_lines: []const []const u8, search_f
     var end: usize = file_lines.len;
     var j: usize = found_line.? + 1;
     while (j < file_lines.len) : (j += 1) {
-        // Check if this line starts a new function (heuristic: line starts with non-space, non-# and contains '(')
         if (isNewFuncStart(file_lines[j])) {
             end = j; // exclusive
             break;
@@ -544,17 +543,37 @@ fn isFuncDefMatch(line: []const u8, pattern: []const u8) bool {
     return false;
 }
 
-/// Check if a line starts a new function (heuristic)
+/// Check if a line starts a new function definition (heuristic)
 fn isNewFuncStart(line: []const u8) bool {
     if (line.len == 0) return false;
     const trimmed = std.mem.trim(u8, line, " \t");
     if (trimmed.len == 0) return false;
-    // Skip preprocessor lines, comments, and lines starting with whitespace
+    // Must start at column 0 (no indentation) for top-level function defs
     if (line[0] == ' ' or line[0] == '\t' or line[0] == '#' or line[0] == '/' or line[0] == '*') return false;
-    if (line[0] == '}') return false;
-    if (line[0] == '{') return false;
-    // A function definition typically has a '(' or starts a block
-    if (std.mem.indexOf(u8, trimmed, "(") != null) return true;
+    if (line[0] == '}' or line[0] == '{') return false;
+    // Look for identifier( pattern
+    // Find the FIRST '(' - for function defs, '(' comes early (function name + params)
+    if (std.mem.indexOf(u8, trimmed, "(")) |paren_pos| {
+        if (paren_pos == 0) return false;
+        // Check that there's no comma before the first '(' - commas before '(' suggest
+        // this is a variable declaration, not a function def
+        const before_paren = trimmed[0..paren_pos];
+        if (std.mem.indexOf(u8, before_paren, ",") != null) return false;
+        // Check that char before '(' is alphanumeric
+        const before = trimmed[paren_pos - 1];
+        if (!std.ascii.isAlphanumeric(before) and before != '_') return false;
+        // Find the identifier before '('
+        var k: usize = paren_pos;
+        while (k > 0 and (std.ascii.isAlphanumeric(trimmed[k - 1]) or trimmed[k - 1] == '_')) : (k -= 1) {}
+        const ident = trimmed[k..paren_pos];
+        if (ident.len == 0) return false;
+        // Exclude common non-function keywords
+        if (std.mem.eql(u8, ident, "if") or std.mem.eql(u8, ident, "while") or
+            std.mem.eql(u8, ident, "for") or std.mem.eql(u8, ident, "switch") or
+            std.mem.eql(u8, ident, "return") or std.mem.eql(u8, ident, "sizeof") or
+            std.mem.eql(u8, ident, "typeof")) return false;
+        return true;
+    }
     return false;
 }
 
