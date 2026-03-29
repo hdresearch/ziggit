@@ -1,0 +1,1013 @@
+     t0000-basic.sh                                          85/91 (6 failed)
+     t0001-init.sh                                           42/61 (19 failed)
+     t0002-gitfile.sh                                        10/14 (4 failed)
+     t0003-attributes.sh                                     17/45 (28 failed)
+PASS t0004-unwritable.sh                                     9/9
+     t0005-signals.sh                                        2/5 (3 failed)
+PASS t0006-date.sh                                           94/94
+PASS t0007-git-var.sh                                        27/27
+SKIP t0008-ignores.sh                                        no result
+PASS t0009-prio-queue.sh                                     4/4
+     t0010-racy-git.sh                                       6/10 (4 failed)
+PASS t0011-hashmap.sh                                        14/14
+     t0012-help.sh                                           96/154 (58 failed)
+PASS t0013-sha1dc.sh                                         1/1
+     t0014-alias.sh                                          3/4 (1 failed)
+PASS t0015-hash.sh                                           2/2
+PASS t0016-oidmap.sh                                         6/6
+PASS t0017-env-helper.sh                                     5/5
+PASS t0018-advice.sh                                         3/3
+PASS t0019-json-writer.sh                                    16/16
+     t0020-crlf.sh                                           13/36 (23 failed)
+     t0021-conversion.sh                                     15/42 (27 failed)
+     t0022-crlf-rename.sh                                    1/2 (1 failed)
+     t0023-crlf-am.sh                                        1/2 (1 failed)
+     t0024-crlf-archive.sh                                   2/3 (1 failed)
+     t0025-crlf-renormalize.sh                               1/3 (2 failed)
+     t0026-eol-config.sh                                     2/6 (4 failed)
+     t0027-auto-crlf.sh                                      2042/2600 (558 failed)
+     t0028-working-tree-encoding.sh                          2/22 (20 failed)
+SKIP t0029-core-unsetenvvars.sh                              no result
+PASS t0030-stripspace.sh                                     27/27
+PASS t0032-reftable-unittest.sh                              1/1
+     t0033-safe-directory.sh                                 6/12 (6 failed)
+SKIP t0034-root-safe-directory.sh                            no result
+     t0035-safe-bare-repository.sh                           1/8 (7 failed)
+PASS t0040-parse-options.sh                                  88/88
+     t0041-usage.sh                                          3/16 (13 failed)
+     t0050-filesystem.sh                                     10/11 (1 failed)
+SKIP t0051-windows-named-pipe.sh                             no result
+PASS t0052-simple-ipc.sh                                     9/9
+     t0055-beyond-symlinks.sh                                1/3 (2 failed)
+     t0056-git-C.sh                                          7/11 (4 failed)
+     t0060-path-utils.sh                                     181/218 (37 failed)
+PASS t0061-run-command.sh                                    23/23
+PASS t0062-revision-walking.sh                               2/2
+PASS t0063-string-list.sh                                    14/14
+PASS t0064-oid-array.sh                                      8/8
+PASS t0065-strcmp-offset.sh                                  4/4
+PASS t0066-dir-iterator.sh                                   10/10
+PASS t0067-parse_pathspec_file.sh                            8/8
+     t0068-for-each-repo.sh                                  2/4 (2 failed)
+PASS t0069-oidtree.sh                                        2/2
+PASS t0070-fundamental.sh                                    8/8
+PASS t0071-sort.sh                                           1/1
+PASS t0081-find-pack.sh                                      4/4
+     t0090-cache-tree.sh                                     1/22 (21 failed)
+     t0091-bugreport.sh                                      7/13 (6 failed)
+PASS t0092-diagnose.sh                                       4/4
+PASS t0095-bloom.sh                                          10/10
+     t0100-previous.sh                                       3/6 (3 failed)
+     t0101-at-syntax.sh                                      5/8 (3 failed)
+PASS t0110-urlmatch-normalization.sh                         11/11
+     t0200-gettext-basic.sh                                  13/16 (3 failed)
+     t0201-gettext-fallbacks.sh                              4/8 (4 failed)
+PASS t0202-gettext-perl.sh                                   1/1
+PASS t0203-gettext-setlocale-sanity.sh                       2/2
+PASS t0204-gettext-reencode-sanity.sh                        8/8
+     t0210-trace2-normal.sh                                  0/12 (12 failed)
+     t0211-trace2-perf.sh                                    4/9 (5 failed)
+     t0212-trace2-event.sh                                   1/7 (6 failed)
+     t0300-credentials.sh                                    1/46 (45 failed)
+     t0301-credential-cache.sh                               0/44 (44 failed)
+     t0302-credential-store.sh                               3/65 (62 failed)
+SKIP t0303-credential-external.sh                            no result
+     t0410-partial-clone.sh                                  9/32 (23 failed)
+     t0450-txt-doc-vs-help.sh                                552/612 (60 failed)
+PASS t0500-progress-display.sh                               16/16
+     t1000-read-tree-m-3way.sh                               44/83 (39 failed)
+     t1001-read-tree-m-2way.sh                               6/29 (23 failed)
+     t1002-read-tree-m-u-2way.sh                             2/22 (20 failed)
+     t1003-read-tree-prefix.sh                               1/3 (2 failed)
+     t1004-read-tree-m-u-wf.sh                               7/17 (10 failed)
+     t1005-read-tree-reset.sh                                2/7 (5 failed)
+     t1006-cat-file.sh                                       95/253 (158 failed)
+     t1007-hash-object.sh                                    36/40 (4 failed)
+PASS t1008-read-tree-overlay.sh                              2/2
+PASS t1009-read-tree-new-index.sh                            3/3
+     t1010-mktree.sh                                         6/8 (2 failed)
+     t1011-read-tree-sparse-checkout.sh                      4/23 (19 failed)
+     t1012-read-tree-df.sh                                   1/5 (4 failed)
+ERR  t1013-read-tree-submodule.sh                            parse error
+     t1014-read-tree-confusing.sh                            4/28 (24 failed)
+     t1015-read-index-unmerged.sh                            5/6 (1 failed)
+     t1020-subdirectory.sh                                   7/15 (8 failed)
+ERR  t1021-rerere-in-workdir.sh                              parse error
+     t1022-read-tree-partial-clone.sh                        0/1 (1 failed)
+     t1050-large.sh                                          11/29 (18 failed)
+     t1051-large-conversion.sh                               8/12 (4 failed)
+ERR  t1060-object-corruption.sh                              parse error
+     t1090-sparse-checkout-scope.sh                          3/7 (4 failed)
+ERR  t1091-sparse-checkout-builtin.sh                        parse error
+ERR  t1092-sparse-checkout-compatibility.sh                  parse error
+PASS t1100-commit-tree-options.sh                            5/5
+     t1300-config.sh                                         216/219 (3 failed)
+ERR  t1301-shared-repo.sh                                    parse error
+     t1302-repo-version.sh                                   12/18 (6 failed)
+     t1303-wacky-config.sh                                   7/11 (4 failed)
+PASS t1304-default-acl.sh                                    4/4
+PASS t1305-config-include.sh                                 33/33
+     t1306-xdg-files.sh                                      11/21 (10 failed)
+PASS t1307-config-blob.sh                                    13/13
+     t1308-config-set.sh                                     37/39 (2 failed)
+PASS t1309-early-config.sh                                   10/10
+     t1310-config-default.sh                                 4/5 (1 failed)
+     t1350-config-hooks-path.sh                              1/3 (2 failed)
+SKIP t1400-update-ref.sh                                     no result
+     t1401-symbolic-ref.sh                                   18/25 (7 failed)
+     t1402-check-ref-format.sh                               97/99 (2 failed)
+     t1403-show-ref.sh                                       15/20 (5 failed)
+     t1404-update-ref-errors.sh                              8/53 (45 failed)
+PASS t1405-main-ref-store.sh                                 18/18
+     t1406-submodule-ref-store.sh                            14/15 (1 failed)
+     t1407-worktree-ref-store.sh                             0/5 (5 failed)
+PASS t1408-packed-refs.sh                                    2/2
+     t1409-avoid-packing-refs.sh                             10/11 (1 failed)
+ERR  t1410-reflog.sh                                         parse error
+     t1411-reflog-show.sh                                    6/17 (11 failed)
+     t1412-reflog-loop.sh                                    2/3 (1 failed)
+PASS t1413-reflog-detach.sh                                  7/7
+     t1414-reflog-walk.sh                                    5/12 (7 failed)
+     t1415-worktree-refs.sh                                  0/11 (11 failed)
+     t1416-ref-transaction-hooks.sh                          1/7 (6 failed)
+     t1417-reflog-updateref.sh                               7/21 (14 failed)
+PASS t1418-reflog-exists.sh                                  6/6
+     t1419-exclude-refs.sh                                   1/10 (9 failed)
+     t1420-lost-found.sh                                     1/2 (1 failed)
+ERR  t1430-bad-ref-name.sh                                   parse error
+     t1450-fsck.sh                                           7/94 (87 failed)
+     t1451-fsck-buffer.sh                                    10/72 (62 failed)
+     t1500-rev-parse.sh                                      53/76 (23 failed)
+     t1501-work-tree.sh                                      10/39 (29 failed)
+     t1502-rev-parse-parseopt.sh                             11/36 (25 failed)
+     t1503-rev-parse-verify.sh                               10/13 (3 failed)
+     t1504-ceiling-dirs.sh                                   41/44 (3 failed)
+PASS t1505-rev-parse-last.sh                                 7/7
+     t1506-rev-parse-diagnosis.sh                            6/30 (24 failed)
+     t1507-rev-parse-upstream.sh                             5/29 (24 failed)
+     t1508-at-combinations.sh                                20/35 (15 failed)
+SKIP t1509-root-work-tree.sh                                 no result
+     t1510-repo-setup.sh                                     11/109 (98 failed)
+     t1511-rev-parse-caret.sh                                11/17 (6 failed)
+ERR  t1512-rev-parse-disambiguation.sh                       parse error
+     t1513-rev-parse-prefix.sh                               1/11 (10 failed)
+     t1514-rev-parse-push.sh                                 3/9 (6 failed)
+PASS t1515-rev-parse-outside-repo.sh                         4/4
+     t1600-index.sh                                          2/7 (5 failed)
+     t1601-index-bogus.sh                                    3/4 (1 failed)
+     t1700-split-index.sh                                    5/29 (24 failed)
+     t1701-racy-split-index.sh                               1/31 (30 failed)
+     t1800-hook.sh                                           4/17 (13 failed)
+PASS t2000-conflict-when-checking-files-out.sh               14/14
+PASS t2002-checkout-cache-u.sh                               3/3
+     t2003-checkout-cache-mkdir.sh                           7/10 (3 failed)
+     t2004-checkout-cache-temp.sh                            6/23 (17 failed)
+PASS t2005-checkout-index-symlinks.sh                        3/3
+     t2006-checkout-index-basic.sh                           6/8 (2 failed)
+PASS t2007-checkout-symlink.sh                               4/4
+     t2008-checkout-subdir.sh                                5/9 (4 failed)
+PASS t2009-checkout-statinfo.sh                              3/3
+     t2010-checkout-ambiguous.sh                             6/10 (4 failed)
+     t2011-checkout-invalid-head.sh                          8/10 (2 failed)
+     t2012-checkout-last.sh                                  13/22 (9 failed)
+ERR  t2013-checkout-submodule.sh                             parse error
+PASS t2014-checkout-switch.sh                                4/4
+     t2015-checkout-unborn.sh                                4/6 (2 failed)
+     t2016-checkout-patch.sh                                 2/16 (14 failed)
+     t2017-checkout-orphan.sh                                5/13 (8 failed)
+     t2018-checkout-branch.sh                                12/25 (13 failed)
+     t2019-checkout-ambiguous-ref.sh                         5/9 (4 failed)
+     t2020-checkout-detach.sh                                11/24 (13 failed)
+     t2021-checkout-overwrite.sh                             7/9 (2 failed)
+     t2022-checkout-paths.sh                                 3/5 (2 failed)
+     t2023-checkout-m.sh                                     2/5 (3 failed)
+     t2024-checkout-dwim.sh                                  1/23 (22 failed)
+     t2025-checkout-no-overlay.sh                            1/6 (5 failed)
+     t2026-checkout-pathspec-file.sh                         2/11 (9 failed)
+     t2027-checkout-track.sh                                 2/4 (2 failed)
+     t2030-unresolve-info.sh                                 1/14 (13 failed)
+     t2050-git-dir-relative.sh                               1/4 (3 failed)
+     t2060-switch.sh                                         5/16 (11 failed)
+     t2070-restore.sh                                        4/15 (11 failed)
+     t2071-restore-patch.sh                                  2/14 (12 failed)
+     t2072-restore-pathspec-file.sh                          2/12 (10 failed)
+     t2080-parallel-checkout-basics.sh                       1/11 (10 failed)
+PASS t2081-parallel-checkout-collisions.sh                   6/6
+     t2082-parallel-checkout-attributes.sh                   0/5 (5 failed)
+PASS t2100-update-cache-badpath.sh                           5/5
+SKIP t2101-update-index-reupdate.sh                          no result
+PASS t2102-update-index-symlinks.sh                          3/3
+     t2103-update-index-ignore-missing.sh                    2/5 (3 failed)
+PASS t2104-update-index-skip-worktree.sh                     7/7
+PASS t2105-update-index-gitfile.sh                           4/4
+     t2106-update-index-assume-unchanged.sh                  1/2 (1 failed)
+     t2107-update-index-basic.sh                             8/10 (2 failed)
+     t2108-update-index-refresh-racy.sh                      5/6 (1 failed)
+     t2200-add-update.sh                                     9/18 (9 failed)
+     t2201-add-update-typechange.sh                          2/6 (4 failed)
+PASS t2202-add-addremove.sh                                  3/3
+     t2203-add-intent.sh                                     7/19 (12 failed)
+     t2204-add-ignored.sh                                    4/47 (43 failed)
+     t2205-add-worktree-config.sh                            3/13 (10 failed)
+PASS t2300-cd-to-toplevel.sh                                 5/5
+     t2400-worktree-add.sh                                   10/227 (217 failed)
+     t2401-worktree-prune.sh                                 2/12 (10 failed)
+     t2402-worktree-list.sh                                  5/25 (20 failed)
+     t2403-worktree-move.sh                                  6/31 (25 failed)
+     t2404-worktree-config.sh                                3/12 (9 failed)
+ERR  t2405-worktree-submodule.sh                             parse error
+     t2406-worktree-repair.sh                                1/20 (19 failed)
+     t2407-worktree-heads.sh                                 1/12 (11 failed)
+ERR  t2500-untracked-overwriting.sh                          parse error
+     t2501-cwd-empty.sh                                      1/24 (23 failed)
+     t3000-ls-files-others.sh                                15/16 (1 failed)
+     t3001-ls-files-others-exclude.sh                        12/27 (15 failed)
+PASS t3002-ls-files-dashpath.sh                              6/6
+PASS t3003-ls-files-exclude.sh                               7/7
+PASS t3004-ls-files-basic.sh                                 5/5
+     t3005-ls-files-relative.sh                              1/4 (3 failed)
+PASS t3006-ls-files-long.sh                                  3/3
+     t3007-ls-files-recurse-submodules.sh                    1/24 (23 failed)
+PASS t3008-ls-files-lazy-init-name-hash.sh                   1/1
+     t3009-ls-files-others-nonsubmodule.sh                   1/2 (1 failed)
+     t3010-ls-files-killed-modified.sh                       3/6 (3 failed)
+ERR  t3011-common-prefixes-and-directory-traversal.sh        parse error
+     t3012-ls-files-dedup.sh                                 1/3 (2 failed)
+     t3013-ls-files-format.sh                                18/20 (2 failed)
+PASS t3020-ls-files-error-unmatch.sh                         3/3
+     t3040-subprojects-basic.sh                              6/11 (5 failed)
+PASS t3050-subprojects-fetch.sh                              4/4
+     t3060-ls-files-with-tree.sh                             4/8 (4 failed)
+PASS t3070-wildmatch.sh                                      1891/1891
+PASS t3100-ls-tree-restrict.sh                               14/14
+PASS t3101-ls-tree-dirname.sh                                19/19
+PASS t3102-ls-tree-wildcards.sh                              4/4
+PASS t3103-ls-tree-misc.sh                                   10/10
+     t3104-ls-tree-format.sh                                 18/19 (1 failed)
+     t3105-ls-tree-output.sh                                 5/60 (55 failed)
+     t3200-branch.sh                                         59/164 (105 failed)
+     t3201-branch-contains.sh                                3/24 (21 failed)
+     t3202-show-branch.sh                                    6/25 (19 failed)
+     t3203-branch-output.sh                                  8/40 (32 failed)
+     t3204-branch-name-interpretation.sh                     5/16 (11 failed)
+     t3205-branch-color.sh                                   2/4 (2 failed)
+     t3206-range-diff.sh                                     1/44 (43 failed)
+     t3207-branch-submodule.sh                               0/20 (20 failed)
+     t3210-pack-refs.sh                                      23/35 (12 failed)
+     t3211-peel-ref.sh                                       7/8 (1 failed)
+     t3300-funny-names.sh                                    9/21 (12 failed)
+     t3301-notes.sh                                          27/148 (121 failed)
+     t3302-notes-index-expensive.sh                          11/12 (1 failed)
+     t3303-notes-subtrees.sh                                 12/23 (11 failed)
+     t3304-notes-mixed.sh                                    3/6 (3 failed)
+     t3305-notes-fanout.sh                                   5/7 (2 failed)
+     t3306-notes-prune.sh                                    4/12 (8 failed)
+     t3307-notes-man.sh                                      1/3 (2 failed)
+     t3308-notes-merge.sh                                    3/19 (16 failed)
+     t3309-notes-merge-auto-resolve.sh                       2/31 (29 failed)
+     t3310-notes-merge-manual-resolve.sh                     4/22 (18 failed)
+     t3311-notes-merge-fanout.sh                             1/24 (23 failed)
+     t3320-notes-merge-worktrees.sh                          3/9 (6 failed)
+     t3321-notes-stripspace.sh                               1/27 (26 failed)
+     t3400-rebase.sh                                         30/38 (8 failed)
+ERR  t3401-rebase-and-am-rename.sh                           parse error
+     t3402-rebase-merge.sh                                   6/13 (7 failed)
+     t3403-rebase-skip.sh                                    3/20 (17 failed)
+     t3404-rebase-interactive.sh                             56/129 (73 failed)
+     t3405-rebase-malformed.sh                               3/5 (2 failed)
+     t3406-rebase-message.sh                                 29/32 (3 failed)
+     t3407-rebase-abort.sh                                   5/15 (10 failed)
+PASS t3408-rebase-multi-line.sh                              2/2
+PASS t3409-rebase-environ.sh                                 3/3
+     t3412-rebase-root.sh                                    12/25 (13 failed)
+     t3413-rebase-hook.sh                                    7/15 (8 failed)
+     t3415-rebase-autosquash.sh                              2/25 (23 failed)
+     t3416-rebase-onto-threedots.sh                          13/18 (5 failed)
+     t3417-rebase-whitespace-fix.sh                          1/4 (3 failed)
+     t3418-rebase-continue.sh                                12/29 (17 failed)
+     t3419-rebase-patch-id.sh                                4/8 (4 failed)
+     t3420-rebase-autostash.sh                               7/42 (35 failed)
+ERR  t3421-rebase-topology-linear.sh                         parse error
+     t3422-rebase-incompatible-options.sh                    36/58 (22 failed)
+     t3423-rebase-reword.sh                                  2/3 (1 failed)
+ERR  t3424-rebase-empty.sh                                   parse error
+     t3425-rebase-topology-merges.sh                         0/13 (13 failed)
+ERR  t3426-rebase-submodule.sh                               parse error
+     t3427-rebase-subtree.sh                                 0/3 (3 failed)
+     t3428-rebase-signoff.sh                                 1/6 (5 failed)
+     t3429-rebase-edit-todo.sh                               4/7 (3 failed)
+     t3430-rebase-merges.sh                                  1/33 (32 failed)
+     t3431-rebase-fork-point.sh                              0/26 (26 failed)
+ERR  t3432-rebase-fast-forward.sh                            parse error
+     t3433-rebase-across-mode-change.sh                      2/4 (2 failed)
+     t3434-rebase-i18n.sh                                    1/6 (5 failed)
+     t3435-rebase-gpg-sign.sh                                2/19 (17 failed)
+     t3436-rebase-more-options.sh                            2/19 (17 failed)
+     t3437-rebase-fixup-options.sh                           0/12 (12 failed)
+     t3438-rebase-broken-files.sh                            1/8 (7 failed)
+     t3500-cherry.sh                                         0/4 (4 failed)
+     t3501-revert-cherry-pick.sh                             3/19 (16 failed)
+     t3502-cherry-pick-merge.sh                              4/12 (8 failed)
+     t3503-cherry-pick-root.sh                               3/6 (3 failed)
+     t3504-cherry-pick-rerere.sh                             4/9 (5 failed)
+     t3505-cherry-pick-empty.sh                              6/12 (6 failed)
+     t3506-cherry-pick-ff.sh                                 3/11 (8 failed)
+     t3507-cherry-pick-conflict.sh                           9/44 (35 failed)
+     t3508-cherry-pick-many-commits.sh                       2/14 (12 failed)
+     t3509-cherry-pick-merge-df.sh                           5/9 (4 failed)
+ERR  t3510-cherry-pick-sequence.sh                           parse error
+     t3511-cherry-pick-x.sh                                  0/22 (22 failed)
+ERR  t3512-cherry-pick-submodule.sh                          parse error
+ERR  t3513-revert-submodule.sh                               parse error
+     t3514-cherry-pick-revert-gpg.sh                         0/36 (36 failed)
+ERR  t3600-rm.sh                                             parse error
+     t3601-rm-pathspec-file.sh                               1/5 (4 failed)
+     t3602-rm-sparse-checkout.sh                             1/13 (12 failed)
+     t3700-add.sh                                            28/55 (27 failed)
+     t3701-add-interactive.sh                                22/78 (56 failed)
+     t3702-add-edit.sh                                       1/3 (2 failed)
+     t3703-add-magic-pathspec.sh                             2/6 (4 failed)
+     t3704-add-pathspec-file.sh                              1/11 (10 failed)
+     t3705-add-sparse-checkout.sh                            2/20 (18 failed)
+     t3800-mktag.sh                                          39/151 (112 failed)
+     t3900-i18n-commit.sh                                    8/38 (30 failed)
+     t3901-i18n-patch.sh                                     1/20 (19 failed)
+     t3902-quoted.sh                                         6/13 (7 failed)
+ERR  t3903-stash.sh                                          parse error
+     t3904-stash-patch.sh                                    2/8 (6 failed)
+     t3905-stash-include-untracked.sh                        4/34 (30 failed)
+ERR  t3906-stash-submodule.sh                                parse error
+     t3907-stash-show-config.sh                              1/10 (9 failed)
+     t3908-stash-in-worktree.sh                              0/2 (2 failed)
+     t3909-stash-pathspec-file.sh                            1/5 (4 failed)
+SKIP t3910-mac-os-precompose.sh                              no result
+     t3920-crlf-messages.sh                                  4/18 (14 failed)
+     t4000-diff-format.sh                                    39/41 (2 failed)
+     t4001-diff-rename.sh                                    13/22 (9 failed)
+     t4002-diff-basic.sh                                     47/63 (16 failed)
+     t4003-diff-rename-1.sh                                  4/7 (3 failed)
+     t4004-diff-rename-symlink.sh                            3/4 (1 failed)
+     t4005-diff-rename-2.sh                                  1/4 (3 failed)
+     t4006-diff-mode.sh                                      3/7 (4 failed)
+     t4007-rename-3.sh                                       5/8 (3 failed)
+     t4008-diff-break-rewrite.sh                             6/14 (8 failed)
+     t4009-diff-rename-4.sh                                  4/7 (3 failed)
+     t4010-diff-pathspec.sh                                  15/17 (2 failed)
+     t4011-diff-symlink.sh                                   2/8 (6 failed)
+     t4012-diff-binary.sh                                    4/13 (9 failed)
+     t4013-diff-various.sh                                   168/219 (51 failed)
+SKIP t4014-format-patch.sh                                   no result
+     t4015-diff-whitespace.sh                                46/130 (84 failed)
+     t4016-diff-quote.sh                                     2/5 (3 failed)
+     t4017-diff-retval.sh                                    18/25 (7 failed)
+     t4018-diff-funcname.sh                                  30/256 (226 failed)
+     t4019-diff-wserror.sh                                   5/21 (16 failed)
+     t4020-diff-external.sh                                  11/25 (14 failed)
+     t4021-format-patch-numbered.sh                          9/14 (5 failed)
+     t4022-diff-rewrite.sh                                   6/11 (5 failed)
+     t4023-diff-rename-typechange.sh                         0/4 (4 failed)
+PASS t4024-diff-optimize-common.sh                           2/2
+     t4025-hunk-header.sh                                    1/2 (1 failed)
+     t4026-color.sh                                          26/32 (6 failed)
+     t4027-diff-submodule.sh                                 2/20 (18 failed)
+     t4028-format-patch-mime-headers.sh                      1/3 (2 failed)
+     t4029-diff-trailing-space.sh                            0/1 (1 failed)
+     t4030-diff-textconv.sh                                  2/19 (17 failed)
+     t4031-diff-rewrite-binary.sh                            3/8 (5 failed)
+     t4032-diff-inter-hunk-context.sh                        19/37 (18 failed)
+     t4033-diff-patience.sh                                  3/11 (8 failed)
+     t4034-diff-words.sh                                     7/64 (57 failed)
+     t4035-diff-quiet.sh                                     12/22 (10 failed)
+     t4036-format-patch-signer-mime.sh                       4/5 (1 failed)
+     t4037-diff-r-t-dirs.sh                                  1/2 (1 failed)
+ERR  t4038-diff-combined.sh                                  parse error
+PASS t4039-diff-assume-unchanged.sh                          4/4
+     t4040-whitespace-status.sh                              7/11 (4 failed)
+     t4041-diff-submodule-option.sh                          10/45 (35 failed)
+     t4042-diff-textconv-caching.sh                          1/7 (6 failed)
+     t4043-diff-rename-binary.sh                             2/3 (1 failed)
+     t4044-diff-index-unique-abbrev.sh                       1/2 (1 failed)
+ERR  t4045-diff-relative.sh                                  parse error
+     t4046-diff-unmerged.sh                                  0/6 (6 failed)
+     t4047-diff-dirstat.sh                                   2/41 (39 failed)
+     t4048-diff-combined-binary.sh                           3/14 (11 failed)
+     t4049-diff-stat-count.sh                                1/4 (3 failed)
+     t4050-diff-histogram.sh                                 3/10 (7 failed)
+     t4051-diff-function-context.sh                          22/42 (20 failed)
+     t4052-stat-output.sh                                    3/88 (85 failed)
+SKIP t4053-diff-no-index.sh                                  no result
+     t4054-diff-bogus-tree.sh                                7/14 (7 failed)
+     t4055-diff-context.sh                                   4/9 (5 failed)
+SKIP t4056-diff-order.sh                                     no result
+     t4057-diff-combined-paths.sh                            1/4 (3 failed)
+ERR  t4058-diff-duplicates.sh                                parse error
+     t4059-diff-submodule-not-initialized.sh                 1/8 (7 failed)
+     t4060-diff-submodule-option-diff-format.sh              10/50 (40 failed)
+     t4061-diff-indent.sh                                    7/33 (26 failed)
+     t4062-diff-pickaxe.sh                                   1/3 (2 failed)
+     t4063-diff-blobs.sh                                     5/18 (13 failed)
+     t4064-diff-oidfind.sh                                   2/10 (8 failed)
+     t4065-diff-anchored.sh                                  0/7 (7 failed)
+     t4066-diff-emit-delay.sh                                1/2 (1 failed)
+     t4067-diff-partial-clone.sh                             1/7 (6 failed)
+     t4068-diff-symmetric-merge-base.sh                      5/36 (31 failed)
+     t4069-remerge-diff.sh                                   1/14 (13 failed)
+PASS t4100-apply-stat.sh                                     18/18
+PASS t4101-apply-nonl.sh                                     12/12
+     t4102-apply-rename.sh                                   3/5 (2 failed)
+     t4103-apply-binary.sh                                   11/23 (12 failed)
+     t4104-apply-boundary.sh                                 10/24 (14 failed)
+     t4105-apply-fuzz.sh                                     4/9 (5 failed)
+PASS t4106-apply-stdin.sh                                    3/3
+     t4107-apply-ignore-whitespace.sh                        7/11 (4 failed)
+     t4108-apply-threeway.sh                                 7/15 (8 failed)
+PASS t4109-apply-multifrag.sh                                3/3
+PASS t4110-apply-scan.sh                                     1/1
+     t4111-apply-subdir.sh                                   2/10 (8 failed)
+     t4112-apply-renames.sh                                  1/2 (1 failed)
+PASS t4113-apply-ending.sh                                   3/3
+     t4114-apply-typechange.sh                               2/12 (10 failed)
+     t4115-apply-symlink.sh                                  2/8 (6 failed)
+     t4116-apply-reverse.sh                                  2/7 (5 failed)
+     t4117-apply-reject.sh                                   3/8 (5 failed)
+PASS t4118-apply-empty-context.sh                            3/3
+     t4119-apply-config.sh                                   1/11 (10 failed)
+     t4120-apply-popt.sh                                     2/8 (6 failed)
+     t4121-apply-diffs.sh                                    1/2 (1 failed)
+     t4122-apply-symlink-inside.sh                           1/7 (6 failed)
+PASS t4123-apply-shrink.sh                                   2/2
+     t4124-apply-ws-rule.sh                                  14/78 (64 failed)
+     t4125-apply-ws-fuzz.sh                                  2/4 (2 failed)
+     t4126-apply-empty.sh                                    6/7 (1 failed)
+     t4127-apply-same-fn.sh                                  2/7 (5 failed)
+     t4128-apply-root.sh                                     1/7 (6 failed)
+     t4129-apply-samemode.sh                                 4/10 (6 failed)
+PASS t4130-apply-criss-cross-rename.sh                       7/7
+     t4131-apply-fake-ancestor.sh                            1/3 (2 failed)
+     t4132-apply-removal.sh                                  1/14 (13 failed)
+     t4133-apply-filenames.sh                                1/4 (3 failed)
+     t4134-apply-submodule.sh                                1/2 (1 failed)
+ERR  t4135-apply-weird-filenames.sh                          parse error
+PASS t4136-apply-check.sh                                    6/6
+ERR  t4137-apply-submodule.sh                                parse error
+     t4138-apply-ws-expansion.sh                             0/5 (5 failed)
+     t4139-apply-escape.sh                                   3/12 (9 failed)
+     t4140-apply-ita.sh                                      2/5 (3 failed)
+PASS t4141-apply-too-large.sh                                1/1
+     t4150-am.sh                                             8/87 (79 failed)
+     t4151-am-abort.sh                                       1/20 (19 failed)
+     t4152-am-subjects.sh                                    4/13 (9 failed)
+     t4153-am-resume-override-opts.sh                        3/5 (2 failed)
+     t4200-rerere.sh                                         5/34 (29 failed)
+     t4201-shortlog.sh                                       3/30 (27 failed)
+     t4202-log.sh                                            49/146 (97 failed)
+     t4203-mailmap.sh                                        15/69 (54 failed)
+     t4204-patch-id.sh                                       1/24 (23 failed)
+ERR  t4205-log-pretty-formats.sh                             parse error
+     t4206-log-follow-harder-copies.sh                       3/5 (2 failed)
+     t4207-log-decoration-colors.sh                          0/4 (4 failed)
+     t4208-log-magic-pathspec.sh                             13/21 (8 failed)
+     t4209-log-pickaxe.sh                                    19/47 (28 failed)
+     t4210-log-i18n.sh                                       19/21 (2 failed)
+     t4211-line-log.sh                                       6/51 (45 failed)
+     t4212-log-corrupt.sh                                    6/13 (7 failed)
+     t4213-log-tabexpand.sh                                  1/9 (8 failed)
+     t4214-log-graph-octopus.sh                              0/17 (17 failed)
+     t4215-log-skewed-merges.sh                              0/10 (10 failed)
+     t4216-log-bloom.sh                                      4/144 (140 failed)
+     t4217-log-limit.sh                                      1/3 (2 failed)
+     t4252-am-options.sh                                     1/8 (7 failed)
+     t4253-am-keep-cr-dos.sh                                 1/7 (6 failed)
+     t4254-am-corrupt.sh                                     1/4 (3 failed)
+ERR  t4255-am-submodule.sh                                   parse error
+     t4256-am-format-flowed.sh                               1/2 (1 failed)
+     t4257-am-interactive.sh                                 1/4 (3 failed)
+     t4258-am-quoted-cr.sh                                   1/4 (3 failed)
+     t4300-merge-tree.sh                                     1/22 (21 failed)
+     t4301-merge-tree-write-tree.sh                          1/26 (25 failed)
+     t5000-tar-tree.sh                                       20/87 (67 failed)
+     t5001-archive-attr.sh                                   24/44 (20 failed)
+     t5002-archive-attr-pattern.sh                           15/19 (4 failed)
+     t5003-archive-zip.sh                                    66/77 (11 failed)
+     t5004-archive-corner-cases.sh                           8/14 (6 failed)
+     t5100-mailinfo.sh                                       0/23 (23 failed)
+     t5150-request-pull.sh                                   1/10 (9 failed)
+PASS t5200-update-server-info.sh                             6/6
+     t5300-pack-object.sh                                    34/48 (14 failed)
+     t5301-sliding-window.sh                                 0/6 (6 failed)
+     t5302-pack-index.sh                                     24/35 (11 failed)
+     t5303-pack-corruption-resilience.sh                     13/36 (23 failed)
+     t5304-prune.sh                                          9/31 (22 failed)
+PASS t5305-include-tag.sh                                    15/15
+     t5306-pack-nobase.sh                                    3/4 (1 failed)
+     t5307-pack-missing-commit.sh                            1/5 (4 failed)
+PASS t5308-pack-detect-duplicates.sh                         6/6
+     t5309-pack-delta-cycles.sh                              0/6 (6 failed)
+     t5310-pack-bitmaps.sh                                   76/227 (151 failed)
+PASS t5311-pack-bitmaps-shallow.sh                           6/6
+     t5312-prune-corruption.sh                               9/14 (5 failed)
+     t5313-pack-bounds-checks.sh                             2/9 (7 failed)
+PASS t5314-pack-cycle-detection.sh                           2/2
+     t5315-pack-objects-compression.sh                       5/9 (4 failed)
+     t5316-pack-delta-depth.sh                               2/5 (3 failed)
+     t5317-pack-objects-filter-objects.sh                    16/33 (17 failed)
+     t5318-commit-graph.sh                                   9/108 (99 failed)
+     t5319-multi-pack-index.sh                               16/89 (73 failed)
+     t5320-delta-islands.sh                                  5/15 (10 failed)
+PASS t5321-pack-large-objects.sh                             2/2
+     t5322-pack-objects-sparse.sh                            3/11 (8 failed)
+     t5323-pack-redundant.sh                                 3/17 (14 failed)
+     t5324-split-commit-graph.sh                             3/41 (38 failed)
+     t5325-reverse-index.sh                                  2/16 (14 failed)
+     t5326-multi-pack-bitmaps.sh                             112/353 (241 failed)
+     t5327-multi-pack-bitmaps-rev.sh                         102/314 (212 failed)
+     t5328-commit-graph-64bit-time.sh                        0/6 (6 failed)
+     t5329-pack-objects-cruft.sh                             4/33 (29 failed)
+     t5330-no-lazy-fetch-with-commit-graph.sh                2/4 (2 failed)
+     t5331-pack-objects-stdin.sh                             1/10 (9 failed)
+     t5351-unpack-large-objects.sh                           4/7 (3 failed)
+     t5400-send-pack.sh                                      8/16 (8 failed)
+     t5401-update-hooks.sh                                   4/13 (9 failed)
+     t5402-post-merge-hook.sh                                3/7 (4 failed)
+     t5403-post-checkout-hook.sh                             1/14 (13 failed)
+     t5404-tracking-branches.sh                              5/7 (2 failed)
+PASS t5405-send-pack-rewind.sh                               3/3
+     t5406-remote-rejects.sh                                 2/3 (1 failed)
+     t5407-post-rewrite-hook.sh                              2/17 (15 failed)
+     t5408-send-pack-stdin.sh                                3/9 (6 failed)
+     t5409-colorize-remote-messages.sh                       1/11 (10 failed)
+     t5410-receive-pack-alternates.sh                        1/3 (2 failed)
+     t5411-proc-receive-hook.sh                              97/178 (81 failed)
+     t5500-fetch-pack.sh                                     36/374 (338 failed)
+PASS t5501-fetch-push-alternates.sh                          3/3
+     t5502-quickfetch.sh                                     0/7 (7 failed)
+     t5503-tagfollow.sh                                      6/11 (5 failed)
+     t5504-fetch-receive-strict.sh                           6/28 (22 failed)
+ERR  t5505-remote.sh                                         parse error
+     t5506-remote-groups.sh                                  2/9 (7 failed)
+PASS t5507-remote-environment.sh                             5/5
+     t5509-fetch-push-namespaces.sh                          4/14 (10 failed)
+     t5510-fetch.sh                                          163/185 (22 failed)
+     t5511-refspec.sh                                        24/47 (23 failed)
+     t5512-ls-remote.sh                                      20/36 (16 failed)
+PASS t5513-fetch-track.sh                                    2/2
+     t5514-fetch-multiple.sh                                 6/14 (8 failed)
+     t5515-fetch-merge-logic.sh                              1/65 (64 failed)
+     t5516-fetch-push.sh                                     75/119 (44 failed)
+     t5517-push-mirror.sh                                    7/13 (6 failed)
+PASS t5518-fetch-exit-status.sh                              3/3
+     t5519-push-alternates.sh                                7/8 (1 failed)
+     t5520-pull.sh                                           21/72 (51 failed)
+     t5521-pull-options.sh                                   10/22 (12 failed)
+     t5522-pull-symlink.sh                                   1/4 (3 failed)
+     t5523-push-upstream.sh                                  10/17 (7 failed)
+     t5524-pull-msg.sh                                       1/3 (2 failed)
+     t5525-fetch-tagopt.sh                                   1/5 (4 failed)
+     t5526-fetch-submodules.sh                               1/54 (53 failed)
+PASS t5527-fetch-odd-refs.sh                                 5/5
+ERR  t5528-push-default.sh                                   parse error
+     t5529-push-errors.sh                                    5/6 (1 failed)
+     t5530-upload-pack-error.sh                              4/12 (8 failed)
+     t5531-deep-submodule-push.sh                            6/29 (23 failed)
+     t5532-fetch-proxy.sh                                    4/5 (1 failed)
+     t5533-push-cas.sh                                       2/23 (21 failed)
+     t5534-push-signed.sh                                    4/13 (9 failed)
+     t5535-fetch-push-symref.sh                              1/3 (2 failed)
+     t5536-fetch-conflicts.sh                                4/7 (3 failed)
+     t5537-fetch-shallow.sh                                  2/15 (13 failed)
+     t5538-push-shallow.sh                                   1/6 (5 failed)
+SKIP t5539-fetch-http-shallow.sh                             no result
+SKIP t5540-http-push-webdav.sh                               no result
+SKIP t5541-http-push-smart.sh                                no result
+SKIP t5542-push-http-shallow.sh                              no result
+     t5543-atomic-push.sh                                    5/11 (6 failed)
+     t5544-pack-objects-hook.sh                              2/7 (5 failed)
+     t5545-push-options.sh                                   0/10 (10 failed)
+     t5546-receive-limits.sh                                 14/17 (3 failed)
+     t5547-push-quarantine.sh                                4/6 (2 failed)
+     t5548-push-porcelain.sh                                 3/7 (4 failed)
+SKIP t5549-fetch-push-http.sh                                no result
+SKIP t5550-http-fetch-dumb.sh                                no result
+SKIP t5551-http-fetch-smart.sh                               no result
+     t5552-skipping-fetch-negotiator.sh                      0/6 (6 failed)
+     t5553-set-upstream.sh                                   8/21 (13 failed)
+     t5554-noop-fetch-negotiator.sh                          0/1 (1 failed)
+     t5555-http-smart-common.sh                              1/10 (9 failed)
+SKIP t5557-http-get.sh                                       no result
+     t5558-clone-bundle-uri.sh                               2/11 (9 failed)
+SKIP t5559-http-fetch-smart-http2.sh                         no result
+     t5560-http-backend-noserver.sh                          2/14 (12 failed)
+SKIP t5561-http-backend.sh                                   no result
+     t5562-http-backend-content-length.sh                    4/16 (12 failed)
+SKIP t5563-simple-http-auth.sh                               no result
+SKIP t5564-http-proxy.sh                                     no result
+SKIP t5570-git-daemon.sh                                     no result
+     t5571-pre-push-hook.sh                                  4/11 (7 failed)
+ERR  t5572-pull-submodule.sh                                 parse error
+     t5573-pull-verify-signatures.sh                         3/16 (13 failed)
+     t5574-fetch-output.sh                                   1/12 (11 failed)
+SKIP t5580-unc-paths.sh                                      no result
+SKIP t5581-http-curl-verbose.sh                              no result
+     t5582-fetch-negative-refspec.sh                         3/15 (12 failed)
+     t5583-push-branches.sh                                  3/8 (5 failed)
+     t5600-clone-fail-cleanup.sh                             8/14 (6 failed)
+     t5601-clone.sh                                          23/105 (82 failed)
+     t5602-clone-remote-exec.sh                              1/3 (2 failed)
+     t5603-clone-dirname.sh                                  1/47 (46 failed)
+     t5604-clone-reference.sh                                17/34 (17 failed)
+     t5605-clone-local.sh                                    12/22 (10 failed)
+ERR  t5606-clone-options.sh                                  parse error
+     t5607-clone-bundle.sh                                   4/14 (10 failed)
+SKIP t5608-clone-2gb.sh                                      no result
+PASS t5609-clone-branch.sh                                   7/7
+ERR  t5610-clone-detached.sh                                 parse error
+     t5611-clone-config.sh                                   3/13 (10 failed)
+     t5612-clone-refspec.sh                                  3/13 (10 failed)
+     t5613-info-alternate.sh                                 10/13 (3 failed)
+     t5614-clone-submodules-shallow.sh                       0/9 (9 failed)
+     t5615-alternate-env.sh                                  2/9 (7 failed)
+     t5616-partial-clone.sh                                  12/43 (31 failed)
+     t5617-clone-submodules-remote.sh                        1/9 (8 failed)
+     t5618-alternate-refs.sh                                 3/6 (3 failed)
+SKIP t5619-clone-local-ambiguous-transport.sh                no result
+SKIP t5700-protocol-v1.sh                                    no result
+     t5701-git-serve.sh                                      20/22 (2 failed)
+SKIP t5702-protocol-v2.sh                                    no result
+     t5703-upload-pack-ref-in-want.sh                        8/20 (12 failed)
+     t5704-protocol-violations.sh                            0/3 (3 failed)
+     t5705-session-id-in-capabilities.sh                     5/17 (12 failed)
+     t5730-protocol-v2-bundle-uri-file.sh                    2/8 (6 failed)
+SKIP t5731-protocol-v2-bundle-uri-git.sh                     no result
+SKIP t5732-protocol-v2-bundle-uri-http.sh                    no result
+PASS t5750-bundle-uri-parse.sh                               11/11
+ERR  t5801-remote-helpers.sh                                 parse error
+     t5802-connect-helper.sh                                 2/8 (6 failed)
+     t5810-proto-disable-local.sh                            28/54 (26 failed)
+SKIP t5811-proto-disable-git.sh                              no result
+SKIP t5812-proto-disable-http.sh                             no result
+     t5813-proto-disable-ssh.sh                              32/81 (49 failed)
+     t5814-proto-disable-ext.sh                              11/27 (16 failed)
+     t5815-submodule-protos.sh                               3/8 (5 failed)
+     t5900-repo-selection.sh                                 7/8 (1 failed)
+     t6000-rev-list-misc.sh                                  8/18 (10 failed)
+     t6001-rev-list-graft.sh                                 2/14 (12 failed)
+     t6002-rev-list-bisect.sh                                7/52 (45 failed)
+     t6003-rev-list-topo-order.sh                            21/36 (15 failed)
+     t6004-rev-list-path-optim.sh                            2/7 (5 failed)
+PASS t6005-rev-list-count.sh                                 6/6
+     t6006-rev-list-format.sh                                27/80 (53 failed)
+     t6007-rev-list-cherry-pick-file.sh                      2/23 (21 failed)
+     t6008-rev-list-submodule.sh                             1/2 (1 failed)
+     t6009-rev-list-parent.sh                                2/14 (12 failed)
+     t6010-merge-base.sh                                     7/12 (5 failed)
+     t6011-rev-list-with-bad-commit.sh                       3/6 (3 failed)
+     t6012-rev-list-simplify.sh                              2/42 (40 failed)
+PASS t6013-rev-list-reverse-parents.sh                       3/3
+PASS t6014-rev-list-all.sh                                   4/4
+     t6016-rev-list-graph-simplify-history.sh                0/12 (12 failed)
+     t6017-rev-list-stdin.sh                                 9/37 (28 failed)
+ERR  t6018-rev-list-glob.sh                                  parse error
+     t6019-rev-list-ancestry-path.sh                         2/18 (16 failed)
+     t6020-bundle-misc.sh                                    3/26 (23 failed)
+     t6021-rev-list-exclude-hidden.sh                        1/62 (61 failed)
+     t6022-rev-list-missing.sh                               2/10 (8 failed)
+     t6030-bisect-porcelain.sh                               12/95 (83 failed)
+     t6040-tracking-info.sh                                  3/23 (20 failed)
+ERR  t6041-bisect-submodule.sh                               parse error
+     t6050-replace.sh                                        8/37 (29 failed)
+     t6060-merge-index.sh                                    4/7 (3 failed)
+PASS t6100-rev-list-in-order.sh                              3/3
+     t6101-rev-parse-parents.sh                              28/38 (10 failed)
+     t6102-rev-list-unexpected-objects.sh                    8/22 (14 failed)
+PASS t6110-rev-list-sparse.sh                                2/2
+     t6111-rev-list-treesame.sh                              0/65 (65 failed)
+     t6112-rev-list-filters-objects.sh                       12/54 (42 failed)
+     t6113-rev-list-bitmap-filters.sh                        3/14 (11 failed)
+     t6114-keep-packs.sh                                     1/3 (2 failed)
+     t6115-rev-list-du.sh                                    6/17 (11 failed)
+     t6120-describe.sh                                       23/92 (69 failed)
+     t6130-pathspec-noglob.sh                                3/21 (18 failed)
+     t6131-pathspec-icase.sh                                 1/9 (8 failed)
+     t6132-pathspec-exclude.sh                               2/31 (29 failed)
+     t6133-pathspec-rev-dwim.sh                              2/6 (4 failed)
+     t6134-pathspec-in-submodule.sh                          0/3 (3 failed)
+     t6135-pathspec-with-attrs.sh                            4/28 (24 failed)
+     t6136-pathspec-in-bare.sh                               1/3 (2 failed)
+     t6200-fmt-merge-msg.sh                                  6/37 (31 failed)
+     t6300-for-each-ref.sh                                   316/418 (102 failed)
+     t6301-for-each-ref-errors.sh                            3/6 (3 failed)
+     t6302-for-each-ref-filter.sh                            4/43 (39 failed)
+     t6400-merge-df.sh                                       2/7 (5 failed)
+     t6401-merge-criss-cross.sh                              1/4 (3 failed)
+     t6402-merge-rename.sh                                   8/46 (38 failed)
+ERR  t6403-merge-file.sh                                     parse error
+     t6404-recursive-merge.sh                                1/6 (5 failed)
+PASS t6405-merge-symlinks.sh                                 7/7
+     t6406-merge-attr.sh                                     2/11 (9 failed)
+     t6407-merge-binary.sh                                   1/3 (2 failed)
+PASS t6408-merge-up-to-date.sh                               7/7
+     t6409-merge-subtree.sh                                  5/12 (7 failed)
+     t6411-merge-filemode.sh                                 10/19 (9 failed)
+     t6412-merge-large-rename.sh                             6/10 (4 failed)
+     t6413-merge-crlf.sh                                     2/3 (1 failed)
+     t6414-merge-rename-nocruft.sh                           2/3 (1 failed)
+ERR  t6415-merge-dir-to-symlink.sh                           parse error
+ERR  t6416-recursive-corner-cases.sh                         parse error
+     t6417-merge-ours-theirs.sh                              1/7 (6 failed)
+     t6418-merge-text-auto.sh                                1/11 (10 failed)
+SKIP t6419-merge-ignorecase.sh                               no result
+     t6421-merge-partial-clone.sh                            0/3 (3 failed)
+ERR  t6422-merge-rename-corner-cases.sh                      parse error
+ERR  t6423-merge-rename-directories.sh                       parse error
+     t6424-merge-unrelated-index-changes.sh                  2/19 (17 failed)
+     t6425-merge-rename-delete.sh                            0/1 (1 failed)
+     t6426-merge-skip-unneeded-updates.sh                    0/13 (13 failed)
+     t6427-diff3-conflict-markers.sh                         0/9 (9 failed)
+     t6428-merge-conflicts-sparse.sh                         0/2 (2 failed)
+     t6429-merge-sequence-rename-caching.sh                  2/10 (8 failed)
+     t6430-merge-recursive.sh                                11/37 (26 failed)
+     t6431-merge-criscross.sh                                0/2 (2 failed)
+     t6432-merge-recursive-space-options.sh                  2/11 (9 failed)
+     t6433-merge-toplevel.sh                                 7/15 (8 failed)
+     t6434-merge-recursive-rename-options.sh                 5/27 (22 failed)
+     t6435-merge-sparse.sh                                   4/6 (2 failed)
+     t6436-merge-overwrite.sh                                3/18 (15 failed)
+ERR  t6437-submodule-merge.sh                                parse error
+ERR  t6438-submodule-directory-file-conflicts.sh             parse error
+     t6439-merge-co-error-msgs.sh                            1/6 (5 failed)
+     t6500-gc.sh                                             13/29 (16 failed)
+PASS t6501-freshen-objects.sh                                42/42
+     t6600-test-reach.sh                                     0/37 (37 failed)
+     t6700-tree-depth.sh                                     4/10 (6 failed)
+     t7001-mv.sh                                             18/52 (34 failed)
+     t7002-mv-sparse-checkout.sh                             1/22 (21 failed)
+     t7003-filter-branch.sh                                  6/48 (42 failed)
+     t7004-tag.sh                                            110/218 (108 failed)
+     t7005-editor.sh                                         1/14 (13 failed)
+     t7006-pager.sh                                          106/109 (3 failed)
+     t7007-show.sh                                           3/17 (14 failed)
+     t7008-filter-branch-null-sha1.sh                        5/6 (1 failed)
+     t7010-setup.sh                                          4/16 (12 failed)
+     t7011-skip-worktree-reading.sh                          8/15 (7 failed)
+     t7012-skip-worktree-writing.sh                          3/11 (8 failed)
+     t7030-verify-tag.sh                                     2/15 (13 failed)
+     t7031-verify-tag-signed-ssh.sh                          4/14 (10 failed)
+     t7060-wtstatus.sh                                       5/17 (12 failed)
+     t7061-wtstatus-ignore.sh                                3/25 (22 failed)
+PASS t7062-wtstatus-ignorecase.sh                            1/1
+     t7063-status-untracked-cache.sh                         9/58 (49 failed)
+     t7064-wtstatus-pv2.sh                                   0/28 (28 failed)
+PASS t7101-reset-empty-subdirs.sh                            10/10
+     t7102-reset.sh                                          20/37 (17 failed)
+     t7103-reset-bare.sh                                     11/13 (2 failed)
+PASS t7104-reset-hard.sh                                     3/3
+     t7105-reset-patch.sh                                    2/11 (9 failed)
+     t7106-reset-unborn-branch.sh                            6/7 (1 failed)
+     t7107-reset-pathspec-file.sh                            2/11 (9 failed)
+     t7110-reset-merge.sh                                    7/21 (14 failed)
+     t7111-reset-table.sh                                    30/42 (12 failed)
+ERR  t7112-reset-submodule.sh                                parse error
+     t7113-post-index-change-hook.sh                         1/4 (3 failed)
+     t7201-co.sh                                             12/40 (28 failed)
+ERR  t7300-clean.sh                                          parse error
+     t7301-clean-interactive.sh                              4/23 (19 failed)
+     t7400-submodule-basic.sh                                20/120 (100 failed)
+     t7401-submodule-summary.sh                              2/23 (21 failed)
+     t7402-submodule-rebase.sh                               2/6 (4 failed)
+     t7403-submodule-sync.sh                                 1/18 (17 failed)
+     t7406-submodule-update.sh                               4/67 (63 failed)
+     t7407-submodule-foreach.sh                              1/23 (22 failed)
+     t7408-submodule-reference.sh                            4/16 (12 failed)
+     t7409-submodule-detached-work-tree.sh                   1/3 (2 failed)
+     t7411-submodule-config.sh                               4/20 (16 failed)
+     t7412-submodule-absorbgitdirs.sh                        1/12 (11 failed)
+     t7413-submodule-is-active.sh                            1/9 (8 failed)
+     t7414-submodule-mistakes.sh                             1/5 (4 failed)
+     t7416-submodule-dash-url.sh                             2/18 (16 failed)
+     t7417-submodule-path-url.sh                             2/5 (3 failed)
+     t7418-submodule-sparse-gitmodules.sh                    3/9 (6 failed)
+     t7419-submodule-set-branch.sh                           2/9 (7 failed)
+     t7420-submodule-set-url.sh                              1/3 (2 failed)
+     t7421-submodule-summary-add.sh                          1/5 (4 failed)
+     t7422-submodule-output.sh                               0/17 (17 failed)
+     t7450-bad-git-dotfiles.sh                               8/45 (37 failed)
+     t7500-commit-template-squash-signoff.sh                 16/54 (38 failed)
+     t7501-commit-basic-functionality.sh                     37/69 (32 failed)
+SKIP t7502-commit-porcelain.sh                               no result
+     t7503-pre-commit-and-pre-merge-commit-hooks.sh          14/22 (8 failed)
+ERR  t7504-commit-msg-hook.sh                                parse error
+     t7505-prepare-commit-msg-hook.sh                        7/23 (16 failed)
+     t7506-status-submodule.sh                               6/40 (34 failed)
+     t7507-commit-verbose.sh                                 5/44 (39 failed)
+     t7508-status.sh                                         44/121 (77 failed)
+     t7509-commit-authorship.sh                              4/12 (8 failed)
+     t7510-signed-commit.sh                                  1/27 (26 failed)
+PASS t7511-status-index.sh                                   24/24
+     t7512-status-help.sh                                    7/45 (38 failed)
+     t7513-interpret-trailers.sh                             5/94 (89 failed)
+     t7514-commit-patch.sh                                   1/3 (2 failed)
+     t7515-status-symlinks.sh                                2/3 (1 failed)
+     t7516-commit-races.sh                                   0/2 (2 failed)
+     t7517-per-repo-email.sh                                 8/16 (8 failed)
+     t7518-ident-corner-cases.sh                             1/5 (4 failed)
+     t7519-status-fsmonitor.sh                               13/33 (20 failed)
+     t7520-ignored-hook-warning.sh                           4/5 (1 failed)
+     t7521-ignored-mode.sh                                   1/12 (11 failed)
+     t7524-commit-summary.sh                                 1/2 (1 failed)
+     t7525-status-rename.sh                                  7/15 (8 failed)
+     t7526-commit-pathspec-file.sh                           1/11 (10 failed)
+     t7527-builtin-fsmonitor.sh                              20/52 (32 failed)
+ERR  t7528-signed-commit-ssh.sh                              parse error
+     t7600-merge.sh                                          38/78 (40 failed)
+     t7601-merge-pull-config.sh                              11/65 (54 failed)
+PASS t7602-merge-octopus-many.sh                             5/5
+     t7603-merge-reduce-heads.sh                             11/13 (2 failed)
+PASS t7604-merge-custom-message.sh                           8/8
+PASS t7605-merge-resolve.sh                                  4/4
+     t7606-merge-custom.sh                                   2/4 (2 failed)
+PASS t7607-merge-state.sh                                    1/1
+PASS t7608-merge-messages.sh                                 5/5
+     t7609-mergetool--lib.sh                                 0/1 (1 failed)
+     t7610-mergetool.sh                                      0/30 (30 failed)
+     t7611-merge-abort.sh                                    10/19 (9 failed)
+     t7612-merge-verify-signatures.sh                        4/16 (12 failed)
+PASS t7614-merge-signoff.sh                                  4/4
+     t7700-repack.sh                                         13/45 (32 failed)
+     t7701-repack-unpack-unreachable.sh                      3/8 (5 failed)
+PASS t7702-repack-cyclic-alternate.sh                        2/2
+     t7703-repack-geometric.sh                               4/15 (11 failed)
+     t7704-repack-cruft.sh                                   1/11 (10 failed)
+     t7800-difftool.sh                                       10/85 (75 failed)
+     t7810-grep.sh                                           213/261 (48 failed)
+     t7811-grep-open.sh                                      3/10 (7 failed)
+PASS t7812-grep-icase-non-ascii.sh                           18/18
+PASS t7813-grep-icase-iso.sh                                 2/2
+ERR  t7814-grep-recurse-submodules.sh                        parse error
+ERR  t7815-grep-binary.sh                                    parse error
+     t7816-grep-binary-pattern.sh                            97/145 (48 failed)
+     t7817-grep-sparse-checkout.sh                           0/8 (8 failed)
+     t7900-maintenance.sh                                    3/41 (38 failed)
+     t8001-annotate.sh                                       115/117 (2 failed)
+     t8002-blame.sh                                          129/131 (2 failed)
+     t8003-blame-corner-cases.sh                             17/30 (13 failed)
+PASS t8004-blame-with-conflicts.sh                           3/3
+     t8005-blame-i18n.sh                                     1/5 (4 failed)
+     t8006-blame-textconv.sh                                 8/16 (8 failed)
+     t8007-cat-file-textconv.sh                              12/15 (3 failed)
+PASS t8008-blame-formats.sh                                  5/5
+     t8009-blame-vs-topicbranches.sh                         1/2 (1 failed)
+     t8010-cat-file-filters.sh                               4/9 (5 failed)
+     t8011-blame-split-file.sh                               4/10 (6 failed)
+     t8012-blame-colors.sh                                   114/119 (5 failed)
+     t8013-blame-ignore-revs.sh                              5/15 (10 failed)
+     t8014-blame-ignore-fuzzy.sh                             1/16 (15 failed)
+     t9001-send-email.sh                                     44/199 (155 failed)
+PASS t9002-column.sh                                         15/15
+SKIP t9003-help-autocorrect.sh                               no result
+PASS t9004-example.sh                                        1/1
+SKIP t9100-git-svn-basic.sh                                  no result
+SKIP t9101-git-svn-props.sh                                  no result
+SKIP t9102-git-svn-deep-rmdir.sh                             no result
+SKIP t9103-git-svn-tracked-directory-removed.sh              no result
+SKIP t9104-git-svn-follow-parent.sh                          no result
+SKIP t9105-git-svn-commit-diff.sh                            no result
+SKIP t9106-git-svn-commit-diff-clobber.sh                    no result
+SKIP t9107-git-svn-migrate.sh                                no result
+SKIP t9108-git-svn-glob.sh                                   no result
+SKIP t9109-git-svn-multi-glob.sh                             no result
+SKIP t9110-git-svn-use-svm-props.sh                          no result
+SKIP t9111-git-svn-use-svnsync-props.sh                      no result
+SKIP t9112-git-svn-md5less-file.sh                           no result
+SKIP t9113-git-svn-dcommit-new-file.sh                       no result
+SKIP t9114-git-svn-dcommit-merge.sh                          no result
+SKIP t9115-git-svn-dcommit-funky-renames.sh                  no result
+SKIP t9116-git-svn-log.sh                                    no result
+SKIP t9117-git-svn-init-clone.sh                             no result
+SKIP t9118-git-svn-funky-branch-names.sh                     no result
+SKIP t9119-git-svn-info.sh                                   no result
+SKIP t9120-git-svn-clone-with-percent-escapes.sh             no result
+SKIP t9121-git-svn-fetch-renamed-dir.sh                      no result
+SKIP t9122-git-svn-author.sh                                 no result
+SKIP t9123-git-svn-rebuild-with-rewriteroot.sh               no result
+SKIP t9124-git-svn-dcommit-auto-props.sh                     no result
+SKIP t9125-git-svn-multi-glob-branch-names.sh                no result
+SKIP t9126-git-svn-follow-deleted-readded-directory.sh       no result
+SKIP t9127-git-svn-partial-rebuild.sh                        no result
+SKIP t9128-git-svn-cmd-branch.sh                             no result
+SKIP t9129-git-svn-i18n-commitencoding.sh                    no result
+SKIP t9130-git-svn-authors-file.sh                           no result
+SKIP t9131-git-svn-empty-symlink.sh                          no result
+SKIP t9132-git-svn-broken-symlink.sh                         no result
+SKIP t9133-git-svn-nested-git-repo.sh                        no result
+SKIP t9134-git-svn-ignore-paths.sh                           no result
+SKIP t9135-git-svn-moved-branch-empty-file.sh                no result
+SKIP t9136-git-svn-recreated-branch-empty-file.sh            no result
+SKIP t9137-git-svn-dcommit-clobber-series.sh                 no result
+SKIP t9138-git-svn-authors-prog.sh                           no result
+SKIP t9139-git-svn-non-utf8-commitencoding.sh                no result
+SKIP t9140-git-svn-reset.sh                                  no result
+SKIP t9141-git-svn-multiple-branches.sh                      no result
+SKIP t9142-git-svn-shallow-clone.sh                          no result
+SKIP t9143-git-svn-gc.sh                                     no result
+SKIP t9144-git-svn-old-rev_map.sh                            no result
+SKIP t9145-git-svn-master-branch.sh                          no result
+SKIP t9146-git-svn-empty-dirs.sh                             no result
+SKIP t9147-git-svn-include-paths.sh                          no result
+SKIP t9148-git-svn-propset.sh                                no result
+SKIP t9150-svk-mergetickets.sh                               no result
+SKIP t9151-svn-mergeinfo.sh                                  no result
+SKIP t9152-svn-empty-dirs-after-gc.sh                        no result
+SKIP t9153-git-svn-rewrite-uuid.sh                           no result
+SKIP t9154-git-svn-fancy-glob.sh                             no result
+SKIP t9155-git-svn-fetch-deleted-tag.sh                      no result
+SKIP t9156-git-svn-fetch-deleted-tag-2.sh                    no result
+SKIP t9157-git-svn-fetch-merge.sh                            no result
+SKIP t9158-git-svn-mergeinfo.sh                              no result
+SKIP t9159-git-svn-no-parent-mergeinfo.sh                    no result
+SKIP t9160-git-svn-preserve-empty-dirs.sh                    no result
+SKIP t9161-git-svn-mergeinfo-push.sh                         no result
+SKIP t9162-git-svn-dcommit-interactive.sh                    no result
+SKIP t9163-git-svn-reset-clears-caches.sh                    no result
+SKIP t9164-git-svn-dcommit-concurrent.sh                     no result
+SKIP t9165-git-svn-fetch-merge-branch-of-branch.sh           no result
+SKIP t9166-git-svn-fetch-merge-branch-of-branch2.sh          no result
+SKIP t9167-git-svn-cmd-branch-subproject.sh                  no result
+SKIP t9168-git-svn-partially-globbed-names.sh                no result
+SKIP t9169-git-svn-dcommit-crlf.sh                           no result
+SKIP t9200-git-cvsexportcommit.sh                            no result
+     t9210-scalar.sh                                         6/18 (12 failed)
+     t9211-scalar-clone.sh                                   2/13 (11 failed)
+SKIP t9300-fast-import.sh                                    no result
+     t9301-fast-import-notes.sh                              8/17 (9 failed)
+     t9302-fast-import-unpack-limit.sh                       1/3 (2 failed)
+     t9303-fast-import-compression.sh                        4/16 (12 failed)
+     t9304-fast-import-marks.sh                              3/8 (5 failed)
+ERR  t9350-fast-export.sh                                    parse error
+     t9351-fast-export-anonymize.sh                          8/17 (9 failed)
+SKIP t9400-git-cvsserver-server.sh                           no result
+SKIP t9401-git-cvsserver-crlf.sh                             no result
+SKIP t9402-git-cvsserver-refs.sh                             no result
+SKIP t9500-gitweb-standalone-no-errors.sh                    no result
+SKIP t9501-gitweb-standalone-http-status.sh                  no result
+SKIP t9502-gitweb-standalone-parse-output.sh                 no result
+SKIP t9600-cvsimport.sh                                      no result
+SKIP t9601-cvsimport-vendor-branch.sh                        no result
+SKIP t9602-cvsimport-branches-tags.sh                        no result
+SKIP t9603-cvsimport-patchsets.sh                            no result
+SKIP t9604-cvsimport-timestamps.sh                           no result
+SKIP t9700-perl-git.sh                                       no result
+SKIP t9800-git-p4-basic.sh                                   no result
+SKIP t9801-git-p4-branch.sh                                  no result
+SKIP t9802-git-p4-filetype.sh                                no result
+SKIP t9803-git-p4-shell-metachars.sh                         no result
+SKIP t9804-git-p4-label.sh                                   no result
+SKIP t9805-git-p4-skip-submit-edit.sh                        no result
+SKIP t9806-git-p4-options.sh                                 no result
+SKIP t9807-git-p4-submit.sh                                  no result
+SKIP t9808-git-p4-chdir.sh                                   no result
+SKIP t9809-git-p4-client-view.sh                             no result
+SKIP t9810-git-p4-rcs.sh                                     no result
+SKIP t9811-git-p4-label-import.sh                            no result
+SKIP t9812-git-p4-wildcards.sh                               no result
+SKIP t9813-git-p4-preserve-users.sh                          no result
+SKIP t9814-git-p4-rename.sh                                  no result
+SKIP t9815-git-p4-submit-fail.sh                             no result
+SKIP t9816-git-p4-locked.sh                                  no result
+SKIP t9817-git-p4-exclude.sh                                 no result
+SKIP t9818-git-p4-block.sh                                   no result
+SKIP t9819-git-p4-case-folding.sh                            no result
+SKIP t9820-git-p4-editor-handling.sh                         no result
+SKIP t9821-git-p4-path-variations.sh                         no result
+SKIP t9822-git-p4-path-encoding.sh                           no result
+SKIP t9823-git-p4-mock-lfs.sh                                no result
+SKIP t9824-git-p4-git-lfs.sh                                 no result
+SKIP t9825-git-p4-handle-utf16-without-bom.sh                no result
+SKIP t9826-git-p4-keep-empty-commits.sh                      no result
+SKIP t9827-git-p4-change-filetype.sh                         no result
+SKIP t9828-git-p4-map-user.sh                                no result
+SKIP t9829-git-p4-jobs.sh                                    no result
+SKIP t9830-git-p4-symlink-dir.sh                             no result
+SKIP t9831-git-p4-triggers.sh                                no result
+SKIP t9832-unshelve.sh                                       no result
+SKIP t9833-errors.sh                                         no result
+SKIP t9834-git-p4-file-dir-bug.sh                            no result
+SKIP t9835-git-p4-metadata-encoding-python2.sh               no result
+SKIP t9836-git-p4-metadata-encoding-python3.sh               no result
+     t9850-shell.sh                                          4/5 (1 failed)
+PASS t9901-git-web--browse.sh                                5/5
+ERR  t9902-completion.sh                                     parse error
+     t9903-bash-prompt.sh                                    1/67 (66 failed)
+
+=============================================
+FULL GIT TEST SUITE RESULTS
+Date: Sun Mar 29 15:52:05 UTC 2026
+Ziggit: git version 2.53.GIT
+=============================================
+Total scripts:     999
+Fully passing:     126
+Timeouts/bail:     0
+No result/errors:  212
+---------------------------------------------
+Individual tests:  12423 / 24786 passed (12363 failed)
+Pass rate:         50%
+=============================================
