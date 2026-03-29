@@ -52,6 +52,7 @@ const DiffOpts = struct {
     ignore_blank_lines: bool = false,
     combined_use_c: bool = false, // true for -c (diff --combined), false for --cc (diff --cc)
     break_rewrites: bool = false,
+    suppress_blank_empty: bool = false,
 
     fn getAbbrevLen(self: *const DiffOpts) u32 {
         if (self.abbrev) |a| {
@@ -152,6 +153,39 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *pm.ArgIterator, platform_imp
         if (git_helpers_mod.getConfigOverride("diff.renames")) |val| {
             if (std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "0")) {
                 opts.no_renames = true;
+            }
+        }
+        if (git_helpers_mod.getConfigOverride("diff.suppressBlankEmpty")) |val| {
+            if (std.mem.eql(u8, val, "true")) opts.suppress_blank_empty = true;
+        }
+
+        // Also read from config file
+        if (git_path_for_config) |gp| {
+            const config_path = std.fs.path.join(allocator, &.{ gp, "config" }) catch null;
+            if (config_path) |cp| {
+                defer allocator.free(cp);
+                const cfg_content = std.fs.cwd().readFileAlloc(allocator, cp, 1024 * 1024) catch null;
+                if (cfg_content) |cc| {
+                    defer allocator.free(cc);
+                    // Simple parsing for diff.suppressBlankEmpty
+                    var in_diff = false;
+                    var cfg_lines = std.mem.splitScalar(u8, cc, '\n');
+                    while (cfg_lines.next()) |line| {
+                        const trimmed = std.mem.trim(u8, line, " \t\r");
+                        if (trimmed.len > 0 and trimmed[0] == '[') {
+                            in_diff = std.ascii.startsWithIgnoreCase(trimmed, "[diff");
+                        }
+                        if (in_diff) {
+                            if (std.ascii.startsWithIgnoreCase(trimmed, "suppressblankempty") or std.ascii.startsWithIgnoreCase(trimmed, "suppressBlankEmpty")) {
+                                if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
+                                    const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t");
+                                    if (std.mem.eql(u8, val, "true")) opts.suppress_blank_empty = true
+                                    else if (std.mem.eql(u8, val, "false")) opts.suppress_blank_empty = false;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1282,7 +1316,7 @@ fn outputPatch(changes: []const FileChange, opts: *const DiffOpts, pi: *const pm
 
             // Generate and output hunks
             if (c.old_content.len > 0 or c.new_content.len > 0) {
-                try outputDiffHunks(c.old_content, c.new_content, opts.context_lines, lp, pi, allocator);
+                try outputDiffHunks(c.old_content, c.new_content, opts.context_lines, lp, opts.suppress_blank_empty, pi, allocator);
             }
         }
     }
@@ -1580,7 +1614,7 @@ fn outputDiffHeader(c: FileChange, sp: []const u8, dp: []const u8, lp: []const u
     }
 }
 
-fn outputDiffHunks(old_content: []const u8, new_content: []const u8, context_lines: u32, lp: []const u8, pi: *const pm.Platform, allocator: std.mem.Allocator) !void {
+fn outputDiffHunks(old_content: []const u8, new_content: []const u8, context_lines: u32, lp: []const u8, suppress_blank_empty: bool, pi: *const pm.Platform, allocator: std.mem.Allocator) !void {
     // Use the existing diff module to generate the unified diff
     const diff_output = diff_mod.generateUnifiedDiffWithHashesAndContext(
         old_content, new_content, "placeholder", "0", "0", context_lines, allocator,
@@ -1609,8 +1643,13 @@ fn outputDiffHunks(old_content: []const u8, new_content: []const u8, context_lin
 
     for (lines_list.items) |line| {
         if (lp.len > 0) try pi.writeStdout(lp);
-        try pi.writeStdout(line);
-        try pi.writeStdout("\n");
+        // If suppress_blank_empty and this is a context line that is just a space (blank line), output empty
+        if (suppress_blank_empty and line.len == 1 and line[0] == ' ') {
+            try pi.writeStdout("\n");
+        } else {
+            try pi.writeStdout(line);
+            try pi.writeStdout("\n");
+        }
 
         // After this line, check if we need "\ No newline at end of file"
         if (line.len > 1) {
@@ -2181,7 +2220,7 @@ fn diffTwoFiles(allocator: std.mem.Allocator, path_a: []const u8, path_b: []cons
     defer allocator.free(header);
     try pi.writeStdout(header);
 
-    try outputDiffHunks(content_a, content_b, opts.context_lines, "", pi, allocator);
+    try outputDiffHunks(content_a, content_b, opts.context_lines, "", opts.suppress_blank_empty, pi, allocator);
 }
 
 fn diffNewFile(allocator: std.mem.Allocator, path: []const u8, opts: *const DiffOpts, pi: *const pm.Platform) !void {
