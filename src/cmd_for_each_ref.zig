@@ -536,6 +536,8 @@ pub fn getRefField(field: []const u8, refname: []const u8, objectname: []const u
     }
 
     if (std.mem.startsWith(u8, field, "contents")) {
+        // contents atoms only apply to commits and tags
+        if (!std.mem.eql(u8, objecttype, "commit") and !std.mem.eql(u8, objecttype, "tag")) return "";
         const message = helpers.extractObjectMessage(data);
         if (std.mem.eql(u8, field, "contents")) return message
         else if (std.mem.eql(u8, field, "contents:subject")) {
