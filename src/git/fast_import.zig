@@ -476,8 +476,60 @@ fn State(comptime PlatformType: type) type {
                     }
                     tree_entries.clearRetainingCapacity();
                 } else if (std.mem.startsWith(u8, line, "N ")) {
-                    // Note command - skip
                     pos = line_end + 1;
+                    // N <dataref> <committish>
+                    // Adds a note blob to the commit; path in tree is the resolved committish hash
+                    const rest_n = line[2..];
+                    const space_n = std.mem.indexOfScalar(u8, rest_n, ' ') orelse continue;
+                    const note_dataref = rest_n[0..space_n];
+                    const note_committish = rest_n[space_n + 1 ..];
+
+                    // Resolve note blob hash
+                    var note_blob_hash: [40]u8 = undefined;
+                    if (std.mem.eql(u8, note_dataref, "inline")) {
+                        const inline_data_n = self.readData(data, pos) catch continue;
+                        pos = inline_data_n.end_pos;
+                        defer self.allocator.free(inline_data_n.content);
+                        const blob_obj_n = objects.GitObject.init(.blob, inline_data_n.content);
+                        const h_n = blob_obj_n.store(self.git_dir, self.platform, self.allocator) catch continue;
+                        defer self.allocator.free(h_n);
+                        @memcpy(&note_blob_hash, h_n.ptr);
+                    } else {
+                        const resolved_n = self.resolveDataref(note_dataref) orelse continue;
+                        note_blob_hash = resolved_n;
+                    }
+
+                    // Resolve committish to get the path (commit hash as filename)
+                    const note_path_str = blk_n: {
+                        if (self.resolveDataref(note_committish)) |resolved_c| {
+                            break :blk_n self.allocator.dupe(u8, &resolved_c) catch continue;
+                        }
+                        break :blk_n self.allocator.dupe(u8, note_committish) catch continue;
+                    };
+
+                    // Remove old entry if exists
+                    if (tree_entries.fetchSwapRemove(note_path_str)) |old_n| {
+                        self.allocator.free(old_n.key);
+                        self.allocator.free(old_n.value.hash);
+                        self.allocator.free(old_n.value.mode);
+                    }
+
+                    const owned_mode_n = self.allocator.dupe(u8, "100644") catch {
+                        self.allocator.free(note_path_str);
+                        continue;
+                    };
+                    const owned_hash_n = self.allocator.dupe(u8, &note_blob_hash) catch {
+                        self.allocator.free(note_path_str);
+                        self.allocator.free(owned_mode_n);
+                        continue;
+                    };
+
+                    tree_entries.put(note_path_str, .{ .mode = owned_mode_n, .hash = owned_hash_n }) catch {
+                        self.allocator.free(note_path_str);
+                        self.allocator.free(owned_mode_n);
+                        self.allocator.free(owned_hash_n);
+                        continue;
+                    };
                 } else if (std.mem.startsWith(u8, line, "C ")) {
                     pos = line_end + 1;
                     // Copy: C <source> <dest>
