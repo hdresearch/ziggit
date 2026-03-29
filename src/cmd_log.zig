@@ -381,6 +381,20 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 }
             }
             try platform_impl.writeStdout("\n");
+
+            // Display notes if any
+            if (displayNote(git_path, cur_hash, allocator, platform_impl)) |note_content| {
+                defer allocator.free(note_content);
+                try platform_impl.writeStdout("Notes:\n");
+                const trimmed_note = std.mem.trimRight(u8, note_content, "\n");
+                var note_iter = std.mem.splitScalar(u8, trimmed_note, '\n');
+                while (note_iter.next()) |nline| {
+                    const indented_note = try std.fmt.allocPrint(allocator, "    {s}\n", .{nline});
+                    defer allocator.free(indented_note);
+                    try platform_impl.writeStdout(indented_note);
+                }
+                try platform_impl.writeStdout("\n");
+            } else |_| {}
         }
 
         count += 1;
@@ -394,4 +408,63 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             }
         }
     }
+}
+
+fn getNotesRef(git_path: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) []const u8 {
+    // Check GIT_NOTES_REF env var
+    if (std.process.getEnvVarOwned(allocator, "GIT_NOTES_REF")) |env_val| {
+        return env_val;
+    } else |_| {}
+
+    // Check core.notesRef config
+    const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch return allocator.dupe(u8, "refs/notes/commits") catch "refs/notes/commits";
+    defer allocator.free(config_path);
+    if (platform_impl.fs.readFile(allocator, config_path)) |config_content| {
+        defer allocator.free(config_content);
+        var line_iter = std.mem.splitScalar(u8, config_content, '\n');
+        var in_core = false;
+        while (line_iter.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t");
+            if (trimmed.len > 0 and trimmed[0] == '[') {
+                in_core = std.ascii.eqlIgnoreCase(std.mem.trim(u8, trimmed[1 .. trimmed.len - @as(usize, if (trimmed[trimmed.len - 1] == ']') 1 else 0)], " \t"), "core");
+            } else if (in_core) {
+                if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
+                    const key = std.mem.trim(u8, trimmed[0..eq], " \t");
+                    if (std.ascii.eqlIgnoreCase(key, "notesRef")) {
+                        const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t");
+                        return allocator.dupe(u8, val) catch "refs/notes/commits";
+                    }
+                }
+            }
+        }
+    } else |_| {}
+
+    return allocator.dupe(u8, "refs/notes/commits") catch "refs/notes/commits";
+}
+
+fn displayNote(git_path: []const u8, commit_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) ![]u8 {
+    const notes_ref = getNotesRef(git_path, allocator, platform_impl);
+    defer allocator.free(notes_ref);
+
+    // Resolve notes ref to a commit hash
+    const notes_commit = refs.resolveRef(git_path, notes_ref, platform_impl, allocator) catch return error.NotFound;
+    defer allocator.free(notes_commit);
+
+    // Try flat path first (full hash as filename)
+    if (helpers.getTreeEntryHashFromCommit(git_path, notes_commit, commit_hash, allocator)) |blob_hash| {
+        defer allocator.free(blob_hash);
+        return helpers.readGitObjectContent(git_path, blob_hash, allocator) catch return error.NotFound;
+    } else |_| {}
+
+    // Try fan-out: first2/rest38
+    if (commit_hash.len >= 3) {
+        const fanout_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ commit_hash[0..2], commit_hash[2..] }) catch return error.NotFound;
+        defer allocator.free(fanout_path);
+        if (helpers.getTreeEntryHashFromCommit(git_path, notes_commit, fanout_path, allocator)) |blob_hash| {
+            defer allocator.free(blob_hash);
+            return helpers.readGitObjectContent(git_path, blob_hash, allocator) catch return error.NotFound;
+        } else |_| {}
+    }
+
+    return error.NotFound;
 }
