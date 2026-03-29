@@ -389,7 +389,7 @@ pub const TreeEntry = struct {
     }
 };
 
-pub fn createCommitObject(tree_hash: []const u8, parent_hashes: []const []const u8, author: []const u8, committer: []const u8, message: []const u8, allocator: std.mem.Allocator) !GitObject {
+pub fn createCommitObjectWithEncoding(tree_hash: []const u8, parent_hashes: []const []const u8, author: []const u8, committer: []const u8, message: []const u8, encoding: ?[]const u8, allocator: std.mem.Allocator) !GitObject {
     var content = std.ArrayList(u8).init(allocator);
     defer content.deinit();
 
@@ -401,6 +401,9 @@ pub fn createCommitObject(tree_hash: []const u8, parent_hashes: []const []const 
     
     try content.writer().print("author {s}\n", .{author});
     try content.writer().print("committer {s}\n", .{committer});
+    if (encoding) |enc| {
+        try content.writer().print("encoding {s}\n", .{enc});
+    }
     try content.writer().print("\n{s}", .{message});
     if (message.len == 0 or message[message.len - 1] != '\n') {
         try content.writer().writeByte('\n');
@@ -408,6 +411,10 @@ pub fn createCommitObject(tree_hash: []const u8, parent_hashes: []const []const 
 
     const data = try content.toOwnedSlice();
     return GitObject.init(.commit, data);
+}
+
+pub fn createCommitObject(tree_hash: []const u8, parent_hashes: []const []const u8, author: []const u8, committer: []const u8, message: []const u8, allocator: std.mem.Allocator) !GitObject {
+    return createCommitObjectWithEncoding(tree_hash, parent_hashes, author, committer, message, null, allocator);
 }
 
 /// Try to load object from pack files when loose object is not found

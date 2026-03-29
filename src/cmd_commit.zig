@@ -471,12 +471,24 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         }
     }
 
-    const commit_object = try objects.createCommitObject(
+    // Check i18n.commitencoding config
+    const commit_encoding: ?[]const u8 = blk_enc: {
+        if (helpers.getConfigOverride("i18n.commitencoding")) |enc| {
+            // Only add encoding header for non-UTF-8 encodings
+            if (!std.ascii.eqlIgnoreCase(enc, "UTF-8") and !std.ascii.eqlIgnoreCase(enc, "utf8")) {
+                break :blk_enc enc;
+            }
+        }
+        break :blk_enc null;
+    };
+
+    const commit_object = try objects.createCommitObjectWithEncoding(
         tree_hash,
         parent_hashes.items,
         author_info,
         committer_info,
         message.?,
+        commit_encoding,
         allocator,
     );
     defer commit_object.deinit(allocator);
