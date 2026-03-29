@@ -284,6 +284,37 @@ pub fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         cached = true;
     }
 
+    // Compute CWD prefix relative to repo root for relative path output
+    const cwd_prefix: ?[]const u8 = blk_cwd: {
+        const cwd = platform_impl.fs.getCwd(allocator) catch break :blk_cwd null;
+        defer allocator.free(cwd);
+        if (cwd.len > repo_root.len and std.mem.startsWith(u8, cwd, repo_root) and cwd[repo_root.len] == '/') {
+            break :blk_cwd allocator.dupe(u8, cwd[repo_root.len + 1 ..]) catch null;
+        }
+        break :blk_cwd null;
+    };
+    defer if (cwd_prefix) |p| allocator.free(p);
+
+    // Handle --eol output mode
+    if (eol_flag) {
+        const terminator_eol: []const u8 = if (z_terminator) "\x00" else "\n";
+        for (index.entries.items) |entry| {
+            const eol_i = getEolInfoIndex(allocator, entry, git_path, platform_impl);
+            const eol_w = getEolInfoWorktree(allocator, entry, repo_root, platform_impl);
+            // Format: i/<eolinfo:index>    w/<eolinfo:worktree>    attr/<eolattr>                 \t<path>
+            const i_field = try std.fmt.allocPrint(allocator, "i/{s}", .{eol_i});
+            defer allocator.free(i_field);
+            const w_field = try std.fmt.allocPrint(allocator, "w/{s}", .{eol_w});
+            defer allocator.free(w_field);
+            const attr_field = try std.fmt.allocPrint(allocator, "attr/", .{});
+            defer allocator.free(attr_field);
+            const output = try std.fmt.allocPrint(allocator, "{s: <8}{s: <8}{s: <22}\t{s}{s}", .{ i_field, w_field, attr_field, entry.path, terminator_eol });
+            defer allocator.free(output);
+            try platform_impl.writeStdout(output);
+        }
+        return;
+    }
+
     // helpers.Handle --format output mode
     if (format_str) |fmt| {
         const terminator: []const u8 = if (z_terminator) "\x00" else "\n";
@@ -337,7 +368,7 @@ pub fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                 if (file_exists2) continue; // file exists, not deleted
             }
 
-            const formatted = try formatLsFilesEntry(allocator, fmt, entry, git_path, platform_impl);
+            const formatted = try formatLsFilesEntry(allocator, fmt, entry, git_path, platform_impl, cwd_prefix);
             defer allocator.free(formatted);
             const output = try std.fmt.allocPrint(allocator, "{s}{s}", .{ formatted, terminator });
             defer allocator.free(output);
@@ -527,7 +558,72 @@ pub fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
 }
 
 
-pub fn formatLsFilesEntry(allocator: std.mem.Allocator, fmt: []const u8, entry: anytype, git_path: []const u8, platform_impl: anytype) ![]u8 {
+/// Make a repo-relative path relative to a CWD prefix within the repo.
+/// E.g., path="o1.txt", cwd_prefix="sub" -> "../o1.txt"
+fn makeRelativePath(allocator: std.mem.Allocator, path: []const u8, cwd_prefix: []const u8) ![]u8 {
+    if (cwd_prefix.len == 0) return allocator.dupe(u8, path);
+    // Check if path starts with the cwd prefix
+    if (std.mem.startsWith(u8, path, cwd_prefix) and path.len > cwd_prefix.len and path[cwd_prefix.len] == '/') {
+        return allocator.dupe(u8, path[cwd_prefix.len + 1 ..]);
+    }
+    // Count how many directory levels in the prefix
+    var depth: usize = 1;
+    for (cwd_prefix) |c| {
+        if (c == '/') depth += 1;
+    }
+    var result = std.ArrayList(u8).init(allocator);
+    for (0..depth) |_| {
+        try result.appendSlice("../");
+    }
+    try result.appendSlice(path);
+    return result.toOwnedSlice();
+}
+
+/// Detect line ending type in content. Returns "lf", "crlf", "mixed", or "" (no line endings).
+fn detectEolInfo(content: []const u8) []const u8 {
+    var has_lf = false;
+    var has_crlf = false;
+    var i: usize = 0;
+    while (i < content.len) : (i += 1) {
+        if (content[i] == '\n') {
+            if (i > 0 and content[i - 1] == '\r') {
+                has_crlf = true;
+            } else {
+                has_lf = true;
+            }
+        }
+    }
+    if (has_lf and has_crlf) return "mixed";
+    if (has_lf) return "lf";
+    if (has_crlf) return "crlf";
+    return "";
+}
+
+/// Get eolinfo for an index entry by reading the object content.
+fn getEolInfoIndex(allocator: std.mem.Allocator, entry: anytype, git_path: []const u8, platform_impl: anytype) []const u8 {
+    // Symlinks and submodules have no eol info
+    if (entry.mode & 0o170000 == 0o120000) return "";
+    if (entry.mode & 0o170000 == 0o160000) return "";
+    const hash_hex = std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch return "";
+    defer allocator.free(hash_hex);
+    const content = helpers.readBlobContent(allocator, git_path, hash_hex, platform_impl) catch return "";
+    defer allocator.free(content);
+    return detectEolInfo(content);
+}
+
+/// Get eolinfo for a worktree file.
+fn getEolInfoWorktree(allocator: std.mem.Allocator, entry: anytype, repo_root: []const u8, platform_impl: anytype) []const u8 {
+    // Symlinks and submodules have no eol info
+    if (entry.mode & 0o170000 == 0o120000) return "";
+    if (entry.mode & 0o170000 == 0o160000) return "";
+    const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path }) catch return "";
+    defer allocator.free(full_path);
+    const content = platform_impl.fs.readFile(allocator, full_path) catch return "";
+    defer allocator.free(content);
+    return detectEolInfo(content);
+}
+
+pub fn formatLsFilesEntry(allocator: std.mem.Allocator, fmt: []const u8, entry: anytype, git_path: []const u8, platform_impl: anytype, cwd_prefix: ?[]const u8) ![]u8 {
     var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
 
@@ -605,11 +701,21 @@ pub fn formatLsFilesEntry(allocator: std.mem.Allocator, fmt: []const u8, entry: 
                     defer allocator.free(stage_str);
                     try result.appendSlice(stage_str);
                 } else if (std.mem.eql(u8, field, "path")) {
-                    try result.appendSlice(entry.path);
+                    if (cwd_prefix) |pfx| {
+                        // Make path relative to CWD
+                        const rel = try makeRelativePath(allocator, entry.path, pfx);
+                        defer allocator.free(rel);
+                        try result.appendSlice(rel);
+                    } else {
+                        try result.appendSlice(entry.path);
+                    }
                 } else if (std.mem.eql(u8, field, "eolinfo:index")) {
-                    try result.appendSlice("");
+                    const repo_root_local = std.fs.path.dirname(git_path) orelse ".";
+                    _ = repo_root_local;
+                    try result.appendSlice(getEolInfoIndex(allocator, entry, git_path, platform_impl));
                 } else if (std.mem.eql(u8, field, "eolinfo:worktree")) {
-                    try result.appendSlice("");
+                    const repo_root_local = std.fs.path.dirname(git_path) orelse ".";
+                    try result.appendSlice(getEolInfoWorktree(allocator, entry, repo_root_local, platform_impl));
                 } else if (std.mem.eql(u8, field, "eolattr")) {
                     try result.appendSlice("");
                 }
