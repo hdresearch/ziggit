@@ -6613,6 +6613,55 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                     detach = true;
                 } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
                     force = true;
+                } else if (std.mem.eql(u8, arg, "-b") or std.mem.eql(u8, arg, "-B")) {
+                    // -f -b <branch> [<start_point>]: create and switch to new branch
+                    const is_reset = std.mem.eql(u8, arg, "-B");
+                    const branch_name_fb = args.next() orelse {
+                        try platform_impl.writeStderr("fatal: option '-b' requires a value\n");
+                        std.process.exit(128);
+                    };
+                    const start_point_fb = args.next();
+                    var resolved_start_fb: ?[]u8 = null;
+                    defer if (resolved_start_fb) |r| allocator.free(r);
+                    if (start_point_fb) |sp| {
+                        resolved_start_fb = resolveRevision(git_path, sp, platform_impl, allocator) catch null;
+                    }
+                    // Delete existing branch if -B
+                    if (is_reset) {
+                        const ref_path_fb = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, branch_name_fb });
+                        defer allocator.free(ref_path_fb);
+                        std.fs.cwd().deleteFile(ref_path_fb) catch {};
+                    }
+                    refs.createBranch(git_path, branch_name_fb, if (resolved_start_fb) |r| r else start_point_fb, platform_impl, allocator) catch |err| switch (err) {
+                        error.NoCommitsYet, error.RefNotFound, error.FileNotFound => {
+                            const hp = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+                            defer allocator.free(hp);
+                            const rc = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{branch_name_fb});
+                            defer allocator.free(rc);
+                            platform_impl.fs.writeFile(hp, rc) catch {};
+                            const sm = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name_fb});
+                            defer allocator.free(sm);
+                            try platform_impl.writeStderr(sm);
+                            return;
+                        },
+                        error.InvalidStartPoint => {
+                            try platform_impl.writeStderr("fatal: not a valid object name\n");
+                            std.process.exit(128);
+                        },
+                        else => return err,
+                    };
+                    refs.updateHEAD(git_path, branch_name_fb, platform_impl, allocator) catch {};
+                    if (start_point_fb != null) {
+                        const commit_hash_fb = refs.resolveRef(git_path, try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name_fb}), platform_impl, allocator) catch null;
+                        if (commit_hash_fb) |ch| {
+                            defer allocator.free(ch);
+                            checkoutCommitTree(git_path, ch, allocator, platform_impl) catch {};
+                        }
+                    }
+                    const sm = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name_fb});
+                    defer allocator.free(sm);
+                    try platform_impl.writeStderr(sm);
+                    return;
                 } else {
                     target = arg;
                     found_target = true;
@@ -6623,6 +6672,14 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                 if (detach) {
                     // --detach with no target means detach at HEAD
                     target = "HEAD";
+                } else if (force) {
+                    // -f with no other args: force checkout of current branch (reset working tree)
+                    const head_hash = refs.resolveRef(git_path, "HEAD", platform_impl, allocator) catch {
+                        return;
+                    };
+                    defer allocator.free(head_hash);
+                    checkoutCommitTree(git_path, head_hash, allocator, platform_impl) catch {};
+                    return;
                 } else {
                     try platform_impl.writeStderr("error: pathspec '' did not match any file(s) known to git\n");
                     std.process.exit(128);
