@@ -451,6 +451,23 @@ pub fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgItera
         // Refresh stat info for all entries by re-statting files
         const repo_root = std.fs.path.dirname(git_dir) orelse ".";
         var refresh_failed = false;
+        // Check core.trustctime config
+        const trust_ctime = blk: {
+            if (helpers.getConfigValueByKey(git_dir, "core.trustctime", allocator)) |val| {
+                defer allocator.free(val);
+                if (std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "0")) {
+                    break :blk false;
+                }
+            }
+            break :blk true;
+        };
+        // Get the index file mtime for racy detection
+        const index_mtime_sec: u32 = blk: {
+            const index_path = std.fmt.allocPrint(allocator, "{s}/index", .{git_dir}) catch break :blk 0;
+            defer allocator.free(index_path);
+            const index_stat = std.fs.cwd().statFile(index_path) catch break :blk 0;
+            break :blk @intCast(@max(0, @divTrunc(index_stat.mtime, std.time.ns_per_s)));
+        };
         for (idx.entries.items) |*entry| {
             // helpers.Skip higher-stage (unmerged) entries
             const stage = (entry.flags >> 12) & 0x3;
@@ -503,11 +520,23 @@ pub fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgItera
                 // helpers.Use fstatat with SYMLINK_NOFOLLOW for proper symlink stat
                 const full_path_z = std.posix.toPosixPath(full_path) catch continue;
                 const lstat = std.posix.fstatat(std.posix.AT.FDCWD, &full_path_z, std.posix.AT.SYMLINK_NOFOLLOW) catch continue;
-                entry.ctime_sec = @intCast(@max(0, lstat.ctime().sec));
-                entry.ctime_nsec = @intCast(@max(0, lstat.ctime().nsec));
-                entry.mtime_sec = @intCast(@max(0, lstat.mtime().sec));
-                entry.mtime_nsec = @intCast(@max(0, lstat.mtime().nsec));
-                entry.ino = @intCast(lstat.ino);
+                const new_ctime_sec: u32 = @intCast(@max(0, lstat.ctime().sec));
+                const new_ctime_nsec: u32 = @intCast(@max(0, lstat.ctime().nsec));
+                const new_mtime_sec_s: u32 = @intCast(@max(0, lstat.mtime().sec));
+                const new_mtime_nsec_s: u32 = @intCast(@max(0, lstat.mtime().nsec));
+                const new_ino: u32 = @intCast(lstat.ino);
+                const ctime_changed = trust_ctime and (entry.ctime_sec != new_ctime_sec or entry.ctime_nsec != new_ctime_nsec);
+                if (ctime_changed or
+                    entry.mtime_sec != new_mtime_sec_s or entry.mtime_nsec != new_mtime_nsec_s or
+                    entry.ino != new_ino)
+                {
+                    modified = true;
+                }
+                entry.ctime_sec = new_ctime_sec;
+                entry.ctime_nsec = new_ctime_nsec;
+                entry.mtime_sec = new_mtime_sec_s;
+                entry.mtime_nsec = new_mtime_nsec_s;
+                entry.ino = new_ino;
             } else |_| {
                 // Regular file - check if content changed
                 if (std.fs.cwd().statFile(full_path)) |stat| {
@@ -536,17 +565,47 @@ pub fn cmdUpdateIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgItera
                         }
                     }
 
-                    entry.ctime_sec = @intCast(@max(0, @divTrunc(stat.ctime, std.time.ns_per_s)));
-                    entry.ctime_nsec = @intCast(@max(0, @rem(stat.ctime, std.time.ns_per_s)));
+                    const new_ctime_sec2: u32 = @intCast(@max(0, @divTrunc(stat.ctime, std.time.ns_per_s)));
+                    const new_ctime_nsec2: u32 = @intCast(@max(0, @rem(stat.ctime, std.time.ns_per_s)));
+                    const new_ino2: u32 = @intCast(stat.inode);
+                    const ctime_changed2 = trust_ctime and (entry.ctime_sec != new_ctime_sec2 or entry.ctime_nsec != new_ctime_nsec2);
+                    if (ctime_changed2 or
+                        entry.mtime_sec != new_mtime_sec or entry.mtime_nsec != new_mtime_nsec or
+                        entry.size != file_size or entry.ino != new_ino2)
+                    {
+                        modified = true;
+                    }
+                    entry.ctime_sec = new_ctime_sec2;
+                    entry.ctime_nsec = new_ctime_nsec2;
                     entry.mtime_sec = new_mtime_sec;
                     entry.mtime_nsec = new_mtime_nsec;
                     entry.size = file_size;
-                    entry.ino = @intCast(stat.inode);
+                    entry.ino = new_ino2;
+
+                    // Check for racy entry: entry mtime >= index mtime
+                    // Racy entries need to be smeared (size set to 0) to force re-check
+                    if (index_mtime_sec > 0 and new_mtime_sec >= index_mtime_sec) {
+                        // Verify content is clean, then smear
+                        const content2 = platform_impl.fs.readFile(allocator, full_path) catch continue;
+                        defer allocator.free(content2);
+                        const blob_obj2 = objects.createBlobObject(content2, allocator) catch continue;
+                        defer blob_obj2.deinit(allocator);
+                        const hash_str2 = blob_obj2.hash(allocator) catch continue;
+                        defer allocator.free(hash_str2);
+                        var hash2: [20]u8 = undefined;
+                        _ = std.fmt.hexToBytes(&hash2, hash_str2) catch continue;
+                        if (std.mem.eql(u8, &hash2, &entry.sha1)) {
+                            // Content matches, smear the entry to avoid future raciness
+                            entry.size = 0;
+                            modified = true;
+                        }
+                    }
                 } else |_| {}
             }
         }
-        modified = true;
+        // modified is only set if stat info actually changed
         if (refresh_failed) {
+            modified = true;
             idx.save(git_dir, platform_impl) catch {};
             std.process.exit(1);
         }
