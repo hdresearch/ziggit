@@ -32,6 +32,7 @@ pub fn cmdHashObject(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     var literally = false;
     var path_opt: ?[]const u8 = null;
     var stdin_count: u32 = 0;
+    var no_filters = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-w")) {
@@ -43,6 +44,8 @@ pub fn cmdHashObject(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             stdin_paths = true;
         } else if (std.mem.eql(u8, arg, "--literally")) {
             literally = true;
+        } else if (std.mem.eql(u8, arg, "--no-filters")) {
+            no_filters = true;
         } else if (std.mem.eql(u8, arg, "--path")) {
             path_opt = args.next();
         } else if (std.mem.startsWith(u8, arg, "--path=")) {
@@ -101,7 +104,7 @@ pub fn cmdHashObject(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         while (lines.next()) |line| {
             const trimmed = std.mem.trimRight(u8, line, "\r");
             if (trimmed.len == 0) continue;
-            try hashOneFile(allocator, trimmed, obj_type, write_object, literally, git_dir, platform_impl, git_dir_for_crlf, path_opt);
+            try hashOneFile(allocator, trimmed, obj_type, write_object, literally, git_dir, platform_impl, if (no_filters) null else git_dir_for_crlf, path_opt);
         }
     } else if (stdin_mode) {
         // helpers.Read data from stdin first
@@ -124,11 +127,11 @@ pub fn cmdHashObject(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         }
         // Then process any file arguments
         for (files.items) |file_path| {
-            try hashOneFile(allocator, file_path, obj_type, write_object, literally, git_dir, platform_impl, git_dir_for_crlf, path_opt);
+            try hashOneFile(allocator, file_path, obj_type, write_object, literally, git_dir, platform_impl, if (no_filters) null else git_dir_for_crlf, path_opt);
         }
     } else if (files.items.len > 0) {
         for (files.items) |file_path| {
-            try hashOneFile(allocator, file_path, obj_type, write_object, literally, git_dir, platform_impl, git_dir_for_crlf, path_opt);
+            try hashOneFile(allocator, file_path, obj_type, write_object, literally, git_dir, platform_impl, if (no_filters) null else git_dir_for_crlf, path_opt);
         }
     } else {
         try platform_impl.writeStderr("usage: git hash-object [-t <type>] [-w] [--stdin | --stdin-paths | <file>...]\n");
