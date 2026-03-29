@@ -149,7 +149,11 @@ pub const Index = struct {
     }
 
     pub fn load(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !Index {
-        const index_path = try std.fmt.allocPrint(allocator, "{s}/index", .{git_dir});
+        // Check GIT_INDEX_FILE environment variable first
+        const index_path = if (@import("builtin").target.os.tag != .freestanding and std.posix.getenv("GIT_INDEX_FILE") != null)
+            try allocator.dupe(u8, std.posix.getenv("GIT_INDEX_FILE").?)
+        else
+            try std.fmt.allocPrint(allocator, "{s}/index", .{git_dir});
         defer allocator.free(index_path);
 
         var index = Index.init(allocator);
@@ -534,7 +538,11 @@ pub const Index = struct {
     }
 
     pub fn save(self: Index, git_dir: []const u8, platform_impl: anytype) !void {
-        const index_path = try std.fmt.allocPrint(self.allocator, "{s}/index", .{git_dir});
+        // Check GIT_INDEX_FILE environment variable first
+        const index_path = if (@import("builtin").target.os.tag != .freestanding and std.posix.getenv("GIT_INDEX_FILE") != null)
+            try self.allocator.dupe(u8, std.posix.getenv("GIT_INDEX_FILE").?)
+        else
+            try std.fmt.allocPrint(self.allocator, "{s}/index", .{git_dir});
         defer self.allocator.free(index_path);
 
         var buffer = std.ArrayList(u8).init(self.allocator);
@@ -552,6 +560,16 @@ pub const Index = struct {
                     break;
                 }
             }
+        } else if (version == 3) {
+            // Downgrade to version 2 if no entries need extended flags
+            var needs_v3 = false;
+            for (self.entries.items) |entry| {
+                if (entry.extended_flags != null) {
+                    needs_v3 = true;
+                    break;
+                }
+            }
+            if (!needs_v3) version = 2;
         }
         if (needs_v3 and version < 3) {
             version = 3;
