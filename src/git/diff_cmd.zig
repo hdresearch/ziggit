@@ -3970,6 +3970,24 @@ fn writeDiffForCommit(hash: []const u8, data: []const u8, parent_hash: ?[]const 
         }
     } else if (!lo.root and !lo.show_mode) {
         return; // No parent and --root not specified = no diff for initial commit
+    } else if (lo.show_mode and !lo.root) {
+        // Check log.showroot config
+        const cfg_gp = git_helpers_mod.findGitDirectory(allocator, pi) catch null;
+        defer if (cfg_gp) |gp| allocator.free(gp);
+        if (cfg_gp) |gp| {
+            const cfg_p = std.fmt.allocPrint(allocator, "{s}/config", .{gp}) catch null;
+            defer if (cfg_p) |cp| allocator.free(cp);
+            if (cfg_p) |cp| {
+                if (std.fs.cwd().readFileAlloc(allocator, cp, 1024 * 1024)) |cfg_content| {
+                    defer allocator.free(cfg_content);
+                    if (getConfigValue(cfg_content, "log", "showroot")) |val| {
+                        if (std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "0")) {
+                            return; // log.showroot=false, skip root diff in show mode
+                        }
+                    }
+                } else |_| {}
+            }
+        }
     }
 
     var changes = std.ArrayList(FileChange).init(allocator);

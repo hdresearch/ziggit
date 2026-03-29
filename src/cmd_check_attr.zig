@@ -204,7 +204,7 @@ pub fn nativeCmdCheckAttr(allocator: std.mem.Allocator, args: *platform_mod.ArgI
 pub const AttrValue = struct {
     name: []const u8,
     value: []const u8,
-    fn deinit(self: *AttrValue, alloc: std.mem.Allocator) void {
+    pub fn deinit(self: *AttrValue, alloc: std.mem.Allocator) void {
         alloc.free(self.name);
         alloc.free(self.value);
     }
