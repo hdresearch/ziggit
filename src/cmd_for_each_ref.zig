@@ -289,13 +289,13 @@ pub fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, com
             obj_type = obj.type.toString();
             defer obj.deinit(allocator);
 
-            const formatted = try formatRefOutput(allocator, format, entry.name, entry.hash, obj_type, obj.data, quoting_style);
+            const formatted = try formatRefOutput(allocator, format, entry.name, entry.hash, obj_type, obj.data, quoting_style, entry.symref_target);
             defer allocator.free(formatted);
             const output = std.fmt.allocPrint(allocator, "{s}\n", .{formatted}) catch continue;
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
         } else |_| {
-            const formatted = try formatRefOutput(allocator, format, entry.name, entry.hash, obj_type, "", quoting_style);
+            const formatted = try formatRefOutput(allocator, format, entry.name, entry.hash, obj_type, "", quoting_style, entry.symref_target);
             defer allocator.free(formatted);
             const output = std.fmt.allocPrint(allocator, "{s}\n", .{formatted}) catch continue;
             defer allocator.free(output);
@@ -306,7 +306,7 @@ pub fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, com
 }
 
 
-pub fn getRefField(field: []const u8, refname: []const u8, objectname: []const u8, objecttype: []const u8, data: []const u8, allocator: std.mem.Allocator) []const u8 {
+pub fn getRefField(field: []const u8, refname: []const u8, objectname: []const u8, objecttype: []const u8, data: []const u8, allocator: std.mem.Allocator, symref_target: ?[]const u8) []const u8 {
     // refname and refname: (trailing colon = same as bare refname)
     if (std.mem.eql(u8, field, "refname") or std.mem.eql(u8, field, "refname:")) return refname;
     if (std.mem.eql(u8, field, "refname:short")) {
@@ -537,12 +537,33 @@ pub fn getRefField(field: []const u8, refname: []const u8, objectname: []const u
         }
     }
 
+    // Handle symref atom
+    if (std.mem.eql(u8, field, "symref")) {
+        return symref_target orelse "";
+    }
+    if (std.mem.eql(u8, field, "symref:short")) {
+        const target = symref_target orelse return "";
+        if (std.mem.startsWith(u8, target, "refs/heads/")) return target["refs/heads/".len..];
+        if (std.mem.startsWith(u8, target, "refs/tags/")) return target["refs/tags/".len..];
+        if (std.mem.startsWith(u8, target, "refs/remotes/")) return target["refs/remotes/".len..];
+        return target;
+    }
+    if (std.mem.startsWith(u8, field, "symref:lstrip=") or std.mem.startsWith(u8, field, "symref:strip=")) {
+        const target = symref_target orelse return "";
+        const eq_pos = std.mem.indexOfScalar(u8, field, '=') orelse return target;
+        return helpers.applyLstrip(target, field[eq_pos + 1 ..]);
+    }
+    if (std.mem.startsWith(u8, field, "symref:rstrip=")) {
+        const target = symref_target orelse return "";
+        return helpers.applyRstrip(target, field["symref:rstrip=".len..]);
+    }
+
     return "";
 }
 
 
 
-pub fn formatRefOutput(allocator: std.mem.Allocator, format: []const u8, refname: []const u8, objectname: []const u8, objecttype: []const u8, data: []const u8, quoting: anytype) ![]u8 {
+pub fn formatRefOutput(allocator: std.mem.Allocator, format: []const u8, refname: []const u8, objectname: []const u8, objecttype: []const u8, data: []const u8, quoting: anytype, symref_target: ?[]const u8) ![]u8 {
     var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
 
@@ -551,7 +572,7 @@ pub fn formatRefOutput(allocator: std.mem.Allocator, format: []const u8, refname
         if (format[idx] == '%' and idx + 1 < format.len and format[idx + 1] == '(') {
             if (std.mem.indexOfScalar(u8, format[idx..], ')')) |close| {
                 const field = format[idx + 2 .. idx + close];
-                const value = getRefField(field, refname, objectname, objecttype, data, allocator);
+                const value = getRefField(field, refname, objectname, objecttype, data, allocator, symref_target);
                 // helpers.Apply quoting
                 switch (quoting) {
                     .shell => {
