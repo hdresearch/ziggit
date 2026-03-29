@@ -35,6 +35,7 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     var add_all = false;
     var quiet = false;
     var signoff = false;
+    var no_verify = false;
     var msg_source: enum { none, m_flag, f_flag, c_flag } = .none;
     var commit_files = std.ArrayList([]const u8).init(allocator);
     defer commit_files.deinit();
@@ -148,7 +149,7 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         {
             // Accept cleanup modes (ignore for now)
         } else if (std.mem.eql(u8, arg, "--no-verify") or std.mem.eql(u8, arg, "-n")) {
-            // helpers.Skip hooks
+            no_verify = true;
         } else if (std.mem.eql(u8, arg, "--signoff") or std.mem.eql(u8, arg, "-s")) {
             signoff = true;
         } else if (std.mem.eql(u8, arg, "--no-edit")) {
@@ -434,6 +435,39 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             } else {
                 message = try std.fmt.allocPrint(allocator, "{s}\n\n{s}\n", .{trimmed_msg, signoff_line});
             }
+        }
+    }
+
+    // Check for ignored hooks (non-executable hook files)
+    if (!no_verify) {
+        const hook_path = std.fmt.allocPrint(allocator, "{s}/hooks/pre-commit", .{git_path}) catch null;
+        defer if (hook_path) |p| allocator.free(p);
+        if (hook_path) |hp| {
+            if (std.fs.cwd().statFile(hp)) |stat| {
+                // File exists - check if executable
+                const mode = stat.mode;
+                const is_exec = (mode & 0o111) != 0;
+                if (!is_exec) {
+                    // Check advice.ignoredHook config
+                    var show_warning = true;
+                    const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch null;
+                    defer if (config_path) |cp| allocator.free(cp);
+                    if (config_path) |cp| {
+                        if (platform_impl.fs.readFile(allocator, cp)) |cfg| {
+                            defer allocator.free(cfg);
+                            if (std.mem.indexOf(u8, cfg, "ignoredHook = false") != null) {
+                                show_warning = false;
+                            }
+                        } else |_| {}
+                    }
+                    if (show_warning) {
+                        const hint1 = std.fmt.allocPrint(allocator, "hint: The '{s}' hook was ignored because it's not set as executable.\n", .{hp}) catch null;
+                        defer if (hint1) |h| allocator.free(h);
+                        if (hint1) |h| platform_impl.writeStderr(h) catch {};
+                        platform_impl.writeStderr("hint: You can disable this warning with `git config advice.ignoredHook false`.\n") catch {};
+                    }
+                }
+            } else |_| {}
         }
     }
 
