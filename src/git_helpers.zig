@@ -14515,18 +14515,9 @@ pub fn applyOnePatch(allocator: std.mem.Allocator, patch: *const Patch, reverse:
             }
         }
 
-        // Validate: if the hunk has no trailing context, it must go to end of file
-        if (hunk.lines.items.len > 0) {
-            const last_line_type = if (reverse) reverseLineType(hunk.lines.items[hunk.lines.items.len - 1].line_type) else hunk.lines.items[hunk.lines.items.len - 1].line_type;
-            if (last_line_type == .add or last_line_type == .remove) {
-                // No trailing context - hunk should cover to end of file
-                const old_count: usize = @intCast(if (reverse) hunk.new_count else hunk.old_count);
-                if (start_line + old_count < orig_lines.items.len) {
-                    // File has more lines than hunk accounts for and no trailing context
-                    return error.PatchFailed;
-                }
-            }
-        }
+        // Note: no trailing context doesn't necessarily mean hunk covers to end of file.
+        // Git generates hunks with limited context, so a hunk without trailing context
+        // can appear in the middle of a file.
 
         // Copy lines before this hunk
         while (orig_idx < start_line and orig_idx < orig_lines.items.len) {
