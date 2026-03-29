@@ -99,8 +99,9 @@ pub fn cmdNotes(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                     const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch null;
                     defer if (tree_obj) |to| to.deinit(allocator);
                     if (tree_obj) |to| {
-                        // helpers.Copy existing entries, skipping the target if force
+                        // Copy existing entries, checking for duplicates
                         var pos: usize = 0;
+                        var target_exists = false;
                         while (pos < to.data.len) {
                             // tree entry format: mode<space>name<null>hash(20 bytes)
                             const space_pos = std.mem.indexOfPos(u8, to.data, pos, " ") orelse break;
@@ -109,7 +110,16 @@ pub fn cmdNotes(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                             const entry_end = null_pos + 1 + 20;
                             if (entry_end > to.data.len) break;
 
-                            if (!force or !std.mem.eql(u8, entry_name, target_hash)) {
+                            if (std.mem.eql(u8, entry_name, target_hash)) {
+                                target_exists = true;
+                                if (!force) {
+                                    const err_msg = try std.fmt.allocPrint(allocator, "error: Cannot add notes. Found existing notes for object {s}. Use '-f' to overwrite existing notes\n", .{target_hash});
+                                    defer allocator.free(err_msg);
+                                    try platform_impl.writeStderr(err_msg);
+                                    std.process.exit(1);
+                                }
+                                // Skip this entry (will be replaced)
+                            } else {
                                 try tree_entries.appendSlice(to.data[pos..entry_end]);
                             }
                             pos = entry_end;
@@ -227,9 +237,137 @@ pub fn cmdNotes(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             std.process.exit(1);
         }
     } else if (std.mem.eql(u8, subcmd, "remove")) {
-        // no-op for now
+        var rm_target: ?[]const u8 = null;
+        while (args.next()) |arg| {
+            if (!std.mem.startsWith(u8, arg, "-")) rm_target = arg;
+        }
+        const rm_hash = if (rm_target) |t|
+            helpers.resolveRevision(git_path, t, platform_impl, allocator) catch {
+                try platform_impl.writeStderr("error: failed to resolve target\n");
+                std.process.exit(1);
+            }
+        else blk: {
+            const h = refs.getCurrentCommit(git_path, platform_impl, allocator) catch { std.process.exit(1); };
+            break :blk h orelse { std.process.exit(1); };
+        };
+        defer allocator.free(rm_hash);
+
+        const notes_ref_rm = "refs/notes/commits";
+        const nc_hash = refs.getRef(git_path, notes_ref_rm, platform_impl, allocator) catch {
+            try platform_impl.writeStderr("error: no note found\n");
+            std.process.exit(1);
+        };
+        defer allocator.free(nc_hash);
+        const nc_obj = objects.GitObject.load(nc_hash, git_path, platform_impl, allocator) catch {
+            try platform_impl.writeStderr("error: no note found\n");
+            std.process.exit(1);
+        };
+        defer nc_obj.deinit(allocator);
+        const nt_hash = helpers.extractHeaderField(nc_obj.data, "tree");
+        if (nt_hash.len == 0) { try platform_impl.writeStderr("error: no note found\n"); std.process.exit(1); }
+        const nt_obj = objects.GitObject.load(nt_hash, git_path, platform_impl, allocator) catch {
+            try platform_impl.writeStderr("error: no note found\n");
+            std.process.exit(1);
+        };
+        defer nt_obj.deinit(allocator);
+
+        // Build new tree without the target
+        var new_tree = std.ArrayList(u8).init(allocator);
+        defer new_tree.deinit();
+        var found_rm = false;
+        {
+            var pos: usize = 0;
+            while (pos < nt_obj.data.len) {
+                const sp = std.mem.indexOfPos(u8, nt_obj.data, pos, " ") orelse break;
+                const np = std.mem.indexOfPos(u8, nt_obj.data, sp, &[_]u8{0}) orelse break;
+                const ename = nt_obj.data[sp + 1 .. np];
+                const eend = np + 1 + 20;
+                if (eend > nt_obj.data.len) break;
+                if (std.mem.eql(u8, ename, rm_hash)) {
+                    found_rm = true;
+                } else {
+                    try new_tree.appendSlice(nt_obj.data[pos..eend]);
+                }
+                pos = eend;
+            }
+        }
+        if (!found_rm) {
+            try platform_impl.writeStderr("error: no note found for object\n");
+            std.process.exit(1);
+        }
+
+        const rm_tree_obj = objects.GitObject.init(.tree, new_tree.items);
+        const rm_tree_hash = try rm_tree_obj.store(git_path, platform_impl, allocator);
+        defer allocator.free(rm_tree_hash);
+        const rm_author = helpers.getAuthorString(allocator) catch try allocator.dupe(u8, "Unknown <unknown@unknown>");
+        defer allocator.free(rm_author);
+        const rm_committer = helpers.getCommitterString(allocator) catch try allocator.dupe(u8, "Unknown <unknown@unknown>");
+        defer allocator.free(rm_committer);
+        const rm_parents = [_][]const u8{nc_hash};
+        const rm_commit = try objects.createCommitObject(rm_tree_hash, &rm_parents, rm_author, rm_committer, "Notes removed by 'git notes remove'", allocator);
+        defer rm_commit.deinit(allocator);
+        const rm_commit_hash = try rm_commit.store(git_path, platform_impl, allocator);
+        defer allocator.free(rm_commit_hash);
+        try refs.updateRef(git_path, "refs/notes/commits", rm_commit_hash, platform_impl, allocator);
+        const rm_msg = try std.fmt.allocPrint(allocator, "Removing note for object {s}\n", .{rm_hash});
+        defer allocator.free(rm_msg);
+        try platform_impl.writeStdout(rm_msg);
     } else if (std.mem.eql(u8, subcmd, "list")) {
-        // no-op for now
+        var list_target: ?[]const u8 = null;
+        while (args.next()) |arg| {
+            if (!std.mem.startsWith(u8, arg, "-")) list_target = arg;
+        }
+
+        const notes_ref_list = "refs/notes/commits";
+        const nc_hash_l = refs.getRef(git_path, notes_ref_list, platform_impl, allocator) catch return;
+        defer allocator.free(nc_hash_l);
+        const nc_obj_l = objects.GitObject.load(nc_hash_l, git_path, platform_impl, allocator) catch return;
+        defer nc_obj_l.deinit(allocator);
+        const nt_hash_l = helpers.extractHeaderField(nc_obj_l.data, "tree");
+        if (nt_hash_l.len == 0) return;
+        const nt_obj_l = objects.GitObject.load(nt_hash_l, git_path, platform_impl, allocator) catch return;
+        defer nt_obj_l.deinit(allocator);
+
+        // If target specified, show just that note's blob hash
+        const filter_hash: ?[]const u8 = if (list_target) |t|
+            helpers.resolveRevision(git_path, t, platform_impl, allocator) catch null
+        else
+            null;
+        defer if (filter_hash) |fh| allocator.free(fh);
+
+        var pos_l: usize = 0;
+        while (pos_l < nt_obj_l.data.len) {
+            const sp_l = std.mem.indexOfPos(u8, nt_obj_l.data, pos_l, " ") orelse break;
+            const np_l = std.mem.indexOfPos(u8, nt_obj_l.data, sp_l, &[_]u8{0}) orelse break;
+            const ename_l = nt_obj_l.data[sp_l + 1 .. np_l];
+            const hs = np_l + 1;
+            if (hs + 20 > nt_obj_l.data.len) break;
+            const hash_bytes_l = nt_obj_l.data[hs .. hs + 20];
+            var hex_l: [40]u8 = undefined;
+            for (hash_bytes_l, 0..) |b, bi| {
+                const hc = "0123456789abcdef";
+                hex_l[bi * 2] = hc[b >> 4];
+                hex_l[bi * 2 + 1] = hc[b & 0xf];
+            }
+
+            if (filter_hash) |fh| {
+                if (std.mem.eql(u8, ename_l, fh)) {
+                    const out_l = try std.fmt.allocPrint(allocator, "{s}\n", .{hex_l});
+                    defer allocator.free(out_l);
+                    try platform_impl.writeStdout(out_l);
+                    return;
+                }
+            } else {
+                const out_l = try std.fmt.allocPrint(allocator, "{s} {s}\n", .{ hex_l, ename_l });
+                defer allocator.free(out_l);
+                try platform_impl.writeStdout(out_l);
+            }
+            pos_l = hs + 20;
+        }
+        if (filter_hash != null) {
+            try platform_impl.writeStderr("error: no note found for object\n");
+            std.process.exit(1);
+        }
     } else {
         const emsg = try std.fmt.allocPrint(allocator, "error: unknown notes subcommand: {s}\n", .{subcmd});
         defer allocator.free(emsg);
