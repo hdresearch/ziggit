@@ -661,8 +661,8 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
     // Infer action from positionals
     if (action == .none) {
         if (positionals.items.len == 0) {
-            try platform_impl.writeStderr("error: no action specified\n");
-            std.process.exit(2);
+            try platform_impl.writeStderr("usage: git config [<options>]\n");
+            std.process.exit(129);
         } else if (positionals.items.len == 1) {
             action = .get;
         } else {
