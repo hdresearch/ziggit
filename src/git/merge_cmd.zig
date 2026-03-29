@@ -2135,17 +2135,25 @@ fn writeConflictFile(git_path: []const u8, path: []const u8, base_hash: []const 
     const theirs_content = loadBlobContent(git_path, theirs_hash, allocator, platform_impl);
     defer if (theirs_content.len > 0) allocator.free(theirs_content);
 
+    // Detect if content uses CRLF line endings
+    const use_crlf = (std.mem.indexOf(u8, ours_content, "\r\n") != null) or
+        (std.mem.indexOf(u8, theirs_content, "\r\n") != null);
+    const nl: []const u8 = if (use_crlf) "\r\n" else "\n";
+
     var buf = std.ArrayList(u8).init(allocator);
     defer buf.deinit();
-    buf.appendSlice("<<<<<<< HEAD\n") catch return;
+    buf.appendSlice("<<<<<<< HEAD") catch return;
+    buf.appendSlice(nl) catch return;
     buf.appendSlice(ours_content) catch return;
     if (ours_content.len > 0 and ours_content[ours_content.len - 1] != '\n')
-        buf.append('\n') catch return;
-    buf.appendSlice("=======\n") catch return;
+        buf.appendSlice(nl) catch return;
+    buf.appendSlice("=======") catch return;
+    buf.appendSlice(nl) catch return;
     buf.appendSlice(theirs_content) catch return;
     if (theirs_content.len > 0 and theirs_content[theirs_content.len - 1] != '\n')
-        buf.append('\n') catch return;
-    buf.appendSlice(">>>>>>> incoming\n") catch return;
+        buf.appendSlice(nl) catch return;
+    buf.appendSlice(">>>>>>> incoming") catch return;
+    buf.appendSlice(nl) catch return;
 
     const full = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, path }) catch return;
     defer allocator.free(full);
