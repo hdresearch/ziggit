@@ -44,6 +44,7 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var fixed_strings = false;
     var grep_reflog = false;
     var invert_grep = false;
+    var output_encoding: ?[]const u8 = null;
 
     // helpers.Parse arguments
     while (args.next()) |arg| {
@@ -106,6 +107,8 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             grep_reflog = true;
         } else if (std.mem.eql(u8, arg, "--invert-grep")) {
             invert_grep = true;
+        } else if (std.mem.startsWith(u8, arg, "--encoding=")) {
+            output_encoding = arg["--encoding=".len..];
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             // helpers.This is likely a committish (commit hash, branch name, etc.)
             committish = arg;
@@ -374,8 +377,60 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             }
         }
 
+        // Re-encode message if --encoding is specified and differs from commit encoding
+        var reencoded_msg: ?[]u8 = null;
+        defer if (reencoded_msg) |rm| allocator.free(rm);
+        if (output_encoding) |out_enc| {
+            const commit_enc = blk: {
+                const enc_field = helpers.extractHeaderField(commit_data, "encoding");
+                if (enc_field.len > 0) break :blk enc_field;
+                break :blk "utf-8"; // default
+            };
+            // Check if we need to convert
+            const out_is_utf8 = std.ascii.eqlIgnoreCase(out_enc, "utf8") or std.ascii.eqlIgnoreCase(out_enc, "utf-8");
+            const src_is_latin1 = std.ascii.eqlIgnoreCase(commit_enc, "ISO-8859-1") or std.ascii.eqlIgnoreCase(commit_enc, "latin1") or std.ascii.eqlIgnoreCase(commit_enc, "latin-1");
+            const src_is_utf8 = std.ascii.eqlIgnoreCase(commit_enc, "utf8") or std.ascii.eqlIgnoreCase(commit_enc, "utf-8");
+            const out_is_latin1 = std.ascii.eqlIgnoreCase(out_enc, "ISO-8859-1") or std.ascii.eqlIgnoreCase(out_enc, "latin1") or std.ascii.eqlIgnoreCase(out_enc, "latin-1");
+            if (out_is_utf8 and src_is_latin1) {
+                // Convert ISO-8859-1 to UTF-8
+                var buf = std.ArrayList(u8).init(allocator);
+                for (message.items) |byte| {
+                    if (byte < 0x80) {
+                        buf.append(byte) catch break;
+                    } else {
+                        buf.append(0xC0 | (byte >> 6)) catch break;
+                        buf.append(0x80 | (byte & 0x3F)) catch break;
+                    }
+                }
+                reencoded_msg = buf.toOwnedSlice() catch null;
+            } else if (out_is_latin1 and src_is_utf8) {
+                // Convert UTF-8 to ISO-8859-1
+                var buf = std.ArrayList(u8).init(allocator);
+                var i: usize = 0;
+                const src = message.items;
+                while (i < src.len) {
+                    if (src[i] < 0x80) {
+                        buf.append(src[i]) catch break;
+                        i += 1;
+                    } else if (i + 1 < src.len and (src[i] & 0xE0) == 0xC0) {
+                        const cp = (@as(u16, src[i] & 0x1F) << 6) | @as(u16, src[i + 1] & 0x3F);
+                        if (cp <= 0xFF) {
+                            buf.append(@intCast(cp)) catch break;
+                        } else {
+                            buf.append('?') catch break;
+                        }
+                        i += 2;
+                    } else {
+                        buf.append('?') catch break;
+                        i += 1;
+                    }
+                }
+                reencoded_msg = buf.toOwnedSlice() catch null;
+            }
+        }
+
         // Apply commit filters (--author, --committer, --grep)
-        const msg_text = message.items;
+        const msg_text = if (reencoded_msg) |rm| rm else message.items;
         const committer_line = helpers.extractHeaderField(commit_data, "committer");
         const should_show = filterCommit: {
             const has_author_filter = author_filters.items.len > 0;
