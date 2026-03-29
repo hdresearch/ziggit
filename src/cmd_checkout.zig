@@ -118,11 +118,34 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
             std.process.exit(128);
         };
 
+        // Check for HEAD.lock
+        {
+            const lock_path = try std.fmt.allocPrint(allocator, "{s}/HEAD.lock", .{git_path});
+            defer allocator.free(lock_path);
+            if (std.fs.cwd().access(lock_path, .{})) |_| {
+                try platform_impl.writeStderr("fatal: Unable to create '/HEAD.lock': File exists.\n");
+                std.process.exit(128);
+            } else |_| {}
+        }
+
         // helpers.Get optional start point - resolve it to a hash
         const start_point_arg = args.next();
         var resolved_start: ?[]const u8 = null;
         if (start_point_arg) |sp| {
             resolved_start = helpers.resolveRevision(git_path, sp, platform_impl, allocator) catch null;
+            // Validate that start point is a commit, not a tree or blob
+            if (resolved_start) |hash| {
+                const obj = objects.GitObject.load(hash, git_path, platform_impl, allocator) catch null;
+                if (obj) |o| {
+                    defer o.deinit(allocator);
+                    if (o.type != .commit) {
+                        const msg = try std.fmt.allocPrint(allocator, "fatal: Cannot update paths and switch to branch '{s}' at the same time.\n", .{branch_name});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                        std.process.exit(128);
+                    }
+                }
+            }
         }
         defer if (resolved_start) |r| allocator.free(@constCast(r));
 
