@@ -948,7 +948,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
                 return try alloc.dupe(u8, "/etc/gitconfig");
             }
             if (gp) |g| return try std.fmt.allocPrint(alloc, "{s}/config", .{g});
-            try pi.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
+            try pi.writeStderr("fatal: not in a git directory\n");
             std.process.exit(128);
         }
     };
