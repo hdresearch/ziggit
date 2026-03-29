@@ -571,10 +571,69 @@ pub fn deleteBranch(git_dir: []const u8, branch_name: []const u8, platform_impl:
     const ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_dir, branch_name });
     defer allocator.free(ref_path);
 
-    try platform_impl.fs.deleteFile(ref_path);
+    platform_impl.fs.deleteFile(ref_path) catch |err| switch (err) {
+        error.FileNotFound => {}, // May only exist in packed-refs
+        else => return err,
+    };
+
+    // Also remove from packed-refs
+    const full_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name});
+    defer allocator.free(full_ref);
+    removeFromPackedRefs(git_dir, full_ref, platform_impl, allocator);
 
     // Clean up empty parent directories (e.g., refs/heads/dir/ after deleting refs/heads/dir/file)
     cleanupEmptyRefParents(git_dir, branch_name, allocator);
+}
+
+/// Remove a ref entry from the packed-refs file
+fn removeFromPackedRefs(git_dir: []const u8, ref_name: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) void {
+    const packed_refs_path = std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir}) catch return;
+    defer allocator.free(packed_refs_path);
+
+    const content = platform_impl.fs.readFile(allocator, packed_refs_path) catch return;
+    defer allocator.free(content);
+
+    var result = std.ArrayList(u8).init(allocator);
+    defer result.deinit();
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    var skip_next_peeled = false;
+    while (lines.next()) |line| {
+        if (skip_next_peeled) {
+            skip_next_peeled = false;
+            if (std.mem.startsWith(u8, line, "^")) continue;
+        }
+        if (line.len == 0) {
+            // Preserve trailing newline handling
+            continue;
+        }
+        if (line[0] == '#') {
+            result.appendSlice(line) catch return;
+            result.append('\n') catch return;
+            continue;
+        }
+        // Lines are "<hash> <refname>" or "^<hash>" (peeled)
+        if (line[0] == '^') {
+            result.appendSlice(line) catch return;
+            result.append('\n') catch return;
+            continue;
+        }
+        // Check if this line matches the ref to remove
+        if (std.mem.indexOf(u8, line, " ")) |space| {
+            const entry_ref = line[space + 1 ..];
+            if (std.mem.eql(u8, entry_ref, ref_name)) {
+                // Skip this line and any following peeled line
+                skip_next_peeled = true;
+                continue;
+            }
+        }
+        result.appendSlice(line) catch return;
+        result.append('\n') catch return;
+    }
+
+    platform_impl.fs.writeFile(packed_refs_path, result.items) catch return;
+    // Invalidate packed-refs cache
+    packed_refs_cache = null;
 }
 
 /// Remove empty parent directories after deleting a ref under refs/heads/
