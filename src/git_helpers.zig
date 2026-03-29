@@ -745,8 +745,7 @@ pub fn scanDirectoryForUntrackedFiles(
                 const dotgit_full = try std.fmt.allocPrint(allocator, "{s}/{s}/.git", .{ repo_root, entry_relative_path });
                 defer allocator.free(dotgit_full);
                 if (platform_impl.fs.exists(dotgit_full) catch false) {
-                    const dir_entry = try std.fmt.allocPrint(allocator, "{s}/", .{entry_relative_path});
-                    try untracked_files.append(dir_entry);
+                    // Nested repo - skip entirely (don't list as untracked)
                     continue;
                 }
 
