@@ -1530,11 +1530,17 @@ fn outputDiffHeader(c: FileChange, sp: []const u8, dp: []const u8, lp: []const u
     if (c.is_rename and c.similarity == 100) return;
 
     // index line
-    const abbrev_len = opts.getAbbrevLen();
     const full = opts.full_index;
-    const olen = if (full) @as(u32, 40) else abbrev_len;
-    const old_h = abbreviateHash(c.old_hash, olen);
-    const new_h = abbreviateHash(c.new_hash, olen);
+    const old_h = if (full) c.old_hash else blk: {
+        const git_dir = git_helpers_mod.findGitDirectory(allocator, pi) catch break :blk abbreviateHash(c.old_hash, opts.getAbbrevLen());
+        defer allocator.free(git_dir);
+        break :blk git_helpers_mod.uniqueAbbrev(allocator, git_dir, c.old_hash, opts.getAbbrevLen());
+    };
+    const new_h = if (full) c.new_hash else blk: {
+        const git_dir = git_helpers_mod.findGitDirectory(allocator, pi) catch break :blk abbreviateHash(c.new_hash, opts.getAbbrevLen());
+        defer allocator.free(git_dir);
+        break :blk git_helpers_mod.uniqueAbbrev(allocator, git_dir, c.new_hash, opts.getAbbrevLen());
+    };
 
     if (c.is_rename) {
         // For renames with changes, don't show index line but show --- +++

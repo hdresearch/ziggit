@@ -549,8 +549,8 @@ pub fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8
                     defer if (old_content.len > 0) allocator.free(old_content);
                     const new_content = helpers.loadBlobContent(allocator, e2.?.hash, git_path, platform_impl) catch "";
                     defer if (new_content.len > 0) allocator.free(new_content);
-                    const idx_h1 = if (opts.full_index) e1.?.hash else e1.?.hash[0..@min(7, e1.?.hash.len)];
-                    const idx_h2 = if (opts.full_index) e2.?.hash else e2.?.hash[0..@min(7, e2.?.hash.len)];
+                    const idx_h1 = if (opts.full_index) e1.?.hash else helpers.uniqueAbbrev(allocator, git_path, e1.?.hash, 7);
+                    const idx_h2 = if (opts.full_index) e2.?.hash else helpers.uniqueAbbrev(allocator, git_path, e2.?.hash, 7);
                     const diff_out = diff_mod.generateUnifiedDiffWithHashes(old_content, new_content, full_name, idx_h1, idx_h2, allocator) catch "";
                     defer if (diff_out.len > 0) allocator.free(diff_out);
                     if (diff_out.len > 0) try platform_impl.writeStdout(diff_out);
@@ -788,8 +788,8 @@ pub fn diffTwoTreesPatch(allocator: std.mem.Allocator, tree1_hash: []const u8, t
                 defer if (old_content.len > 0) allocator.free(old_content);
                 const new_content = helpers.loadBlobContent(allocator, e2.?.hash, git_path, platform_impl) catch "";
                 defer if (new_content.len > 0) allocator.free(new_content);
-                const short1 = e1.?.hash[0..@min(7, e1.?.hash.len)];
-                const short2 = e2.?.hash[0..@min(7, e2.?.hash.len)];
+                const short1 = helpers.uniqueAbbrev(allocator, git_path, e1.?.hash, 7);
+                const short2 = helpers.uniqueAbbrev(allocator, git_path, e2.?.hash, 7);
                 const diff_out = diff_mod.generateUnifiedDiffWithHashes(old_content, new_content, full_name, short1, short2, allocator) catch continue;
                 defer allocator.free(diff_out);
                 try platform_impl.writeStdout(diff_out);

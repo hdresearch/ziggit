@@ -10027,6 +10027,49 @@ pub fn isAllHex(s: []const u8) bool {
 }
 
 
+/// Returns the shortest unique abbreviation of a hash (minimum min_len chars).
+/// Caller does NOT own the returned slice (it's a slice of the input hash).
+pub fn uniqueAbbrev(allocator: std.mem.Allocator, git_dir: []const u8, hash: []const u8, min_len: usize) []const u8 {
+    if (hash.len < min_len) return hash;
+    const prefix2 = hash[0..2];
+    const subdir_path = std.fmt.allocPrint(allocator, "{s}/objects/{s}", .{ git_dir, prefix2 }) catch return hash[0..@min(min_len, hash.len)];
+    defer allocator.free(subdir_path);
+
+    var dir = std.fs.cwd().openDir(subdir_path, .{ .iterate = true }) catch return hash[0..@min(min_len, hash.len)];
+    
+    defer dir.close();
+
+    // Collect all object names in this prefix bucket
+    var names = std.ArrayList([38]u8).init(allocator);
+    defer names.deinit();
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.name.len == 38) {
+            var buf: [38]u8 = undefined;
+            @memcpy(&buf, entry.name[0..38]);
+            names.append(buf) catch {};
+        }
+    }
+
+    // Find minimum length where hash[0..len] is unique
+    const rest = hash[2..];
+    var len: usize = min_len;
+    while (len < hash.len) : (len += 1) {
+        const check_rest = rest[0..@min(len - 2, rest.len)];
+        var count: usize = 0;
+        for (names.items) |name| {
+            if (std.mem.startsWith(u8, &name, check_rest)) {
+                count += 1;
+                if (count > 1) break;
+            }
+        }
+        if (count <= 1) return hash[0..len];
+    }
+    return hash;
+}
+
+// Also check pack index for uniqueness - TODO for full implementation
+
 pub fn expandAbbrevHash(allocator: std.mem.Allocator, git_dir: []const u8, abbrev: []const u8) ![]u8 {
     if (abbrev.len < 4) return error.TooShort;
     const prefix = abbrev[0..2];
