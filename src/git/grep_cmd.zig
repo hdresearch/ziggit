@@ -1512,6 +1512,13 @@ fn grepContent(allocator: Allocator, opts: *GrepOptions, display_path: []const u
         try platform_impl.writeStdout("\n");
     }
 
+    // Hunk mark between files with context
+    if (!opts.show_break and prev_file_had_output and match_count > 0) {
+        if (opts.context_before > 0 or opts.context_after > 0) {
+            try platform_impl.writeStdout("--\n");
+        }
+    }
+
     // Heading mode
     if (opts.show_heading and match_count > 0) {
         const quoted = quotePathIfNeeded(display_path, allocator, opts.null_separator);
