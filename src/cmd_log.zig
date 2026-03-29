@@ -381,6 +381,7 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         var reencoded_msg: ?[]u8 = null;
         defer if (reencoded_msg) |rm| allocator.free(rm);
         if (output_encoding) |out_enc| {
+            platform_impl.writeStderr("DEBUG: output_encoding set\n") catch {};
             const commit_enc = blk: {
                 const enc_field = helpers.extractHeaderField(commit_data, "encoding");
                 if (enc_field.len > 0) break :blk enc_field;
