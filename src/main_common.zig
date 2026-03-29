@@ -39055,7 +39055,7 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         var cm_ts = std.StringHashMap(std.ArrayList([]const u8)).init(allocator);
         defer {
             var vit_ts = cm_ts.valueIterator();
-            while (vit_ts.next()) |v| v.deinit();
+            while (vit_ts.next()) |v| v.deinit(allocator);
             cm_ts.deinit();
         }
         var id_ts = std.StringHashMap(usize).init(allocator);
