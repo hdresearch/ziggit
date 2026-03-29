@@ -2895,6 +2895,13 @@ const LogOpts = struct {
     walk_reflog: bool = false,
     grep_pattern: ?[]const u8 = null,
     output_encoding: ?[]const u8 = null,
+    author_filters: std.ArrayList([]const u8) = std.ArrayList([]const u8).init(std.heap.page_allocator),
+    committer_filters: std.ArrayList([]const u8) = std.ArrayList([]const u8).init(std.heap.page_allocator),
+    grep_filters: std.ArrayList([]const u8) = std.ArrayList([]const u8).init(std.heap.page_allocator),
+    all_match: bool = false,
+    fixed_strings: bool = false,
+    grep_reflog: bool = false,
+    invert_grep: bool = false,
 
     const DiffMergesMode = enum { default, off, on, first_parent, combined, dense_combined, separate };
     const DecorateMode = enum { no, short, full };
@@ -2998,6 +3005,73 @@ fn extractField(data: []const u8, header: []const u8) []const u8 {
         }
     }
     return "";
+}
+
+fn stripPersonTimestamp(person: []const u8) []const u8 {
+    // "Name <email> timestamp tz" -> "Name <email>"
+    // Find the last '>' which ends the email
+    if (std.mem.lastIndexOfScalar(u8, person, '>')) |gt| {
+        return person[0 .. gt + 1];
+    }
+    return person;
+}
+
+fn logFilterMatch(text: []const u8, pattern: []const u8, fixed: bool) bool {
+    if (pattern.len == 0) return true;
+    if (text.len == 0) return false;
+    if (fixed) {
+        return std.mem.indexOf(u8, text, pattern) != null;
+    }
+    // Handle basic regex anchors
+    var pat = pattern;
+    var anchor_start = false;
+    var anchor_end = false;
+    if (pat.len > 0 and pat[0] == '^') {
+        anchor_start = true;
+        pat = pat[1..];
+    }
+    if (pat.len > 0 and pat[pat.len - 1] == '$') {
+        anchor_end = true;
+        pat = pat[0 .. pat.len - 1];
+    }
+    // Handle \. as literal dot
+    // For simplicity, unescape common regex escapes for literal matching
+    var unescaped_buf: [512]u8 = undefined;
+    var ulen: usize = 0;
+    var has_regex_chars = false;
+    var pi: usize = 0;
+    while (pi < pat.len and ulen < unescaped_buf.len) {
+        if (pat[pi] == '\\' and pi + 1 < pat.len) {
+            unescaped_buf[ulen] = pat[pi + 1];
+            ulen += 1;
+            pi += 2;
+        } else if (pat[pi] == '.' or pat[pi] == '*' or pat[pi] == '+' or pat[pi] == '?' or pat[pi] == '[' or pat[pi] == '(' or pat[pi] == '|') {
+            has_regex_chars = true;
+            unescaped_buf[ulen] = pat[pi];
+            ulen += 1;
+            pi += 1;
+        } else {
+            unescaped_buf[ulen] = pat[pi];
+            ulen += 1;
+            pi += 1;
+        }
+    }
+    const search_pat = unescaped_buf[0..ulen];
+
+    // Check each line for anchored matches
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (anchor_start and anchor_end) {
+            if (std.mem.eql(u8, line, search_pat)) return true;
+        } else if (anchor_start) {
+            if (std.mem.startsWith(u8, line, search_pat)) return true;
+        } else if (anchor_end) {
+            if (std.mem.endsWith(u8, line, search_pat)) return true;
+        } else {
+            if (std.mem.indexOf(u8, line, search_pat) != null) return true;
+        }
+    }
+    return false;
 }
 
 fn extractMessage(data: []const u8) []const u8 {
@@ -4198,6 +4272,19 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
             lo.pickaxe_all = true;
         } else if (std.mem.startsWith(u8, arg, "--grep=")) {
             lo.grep_pattern = arg["--grep=".len..];
+            try lo.grep_filters.append(arg["--grep=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "--author=")) {
+            try lo.author_filters.append(arg["--author=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "--committer=")) {
+            try lo.committer_filters.append(arg["--committer=".len..]);
+        } else if (std.mem.eql(u8, arg, "--all-match")) {
+            lo.all_match = true;
+        } else if (std.mem.eql(u8, arg, "-F") or std.mem.eql(u8, arg, "--fixed-strings")) {
+            lo.fixed_strings = true;
+        } else if (std.mem.eql(u8, arg, "--grep-reflog") or std.mem.startsWith(u8, arg, "--grep-reflog=")) {
+            lo.grep_reflog = true;
+        } else if (std.mem.eql(u8, arg, "--invert-grep")) {
+            lo.invert_grep = true;
         } else if (std.mem.startsWith(u8, arg, "-I") and arg.len > 2) {
             try lo.ignore_regex.append(arg[2..]);
         } else if (std.mem.startsWith(u8, arg, "--max-count=")) {
@@ -4380,6 +4467,12 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
             defer allocator.free(dir_path);
             addRefsFromDir(allocator, dir_path, &start_hashes, git_path) catch {};
         }
+    }
+
+    // Validate --grep-reflog can only be used with -g
+    if (lo.grep_reflog and !lo.walk_reflog) {
+        try pi.writeStderr("fatal: --grep-reflog can only be used under -g\n");
+        std.process.exit(1);
     }
 
     // Reflog walking mode (-g / --walk-reflogs)
@@ -4649,17 +4742,82 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
             }
         }
 
-        // --grep filtering: match pattern against commit message
-        if (lo.grep_pattern) |pattern| {
-            const msg = extractMessage(obj.data);
-            const commit_enc = getCommitEncoding(obj.data);
-            const out_enc = lo.output_encoding orelse "UTF-8";
-            const match_msg = reencodeForGrep(allocator, msg, commit_enc, out_enc) catch msg;
-            const should_free = match_msg.ptr != msg.ptr;
-            defer if (should_free) allocator.free(match_msg);
-            if (std.mem.indexOf(u8, match_msg, pattern) == null) {
-                addParentsToQueue(&queue, &visited, parents.items, lo.first_parent, git_path, pi, allocator) catch {};
-                continue;
+        // --grep / --author / --committer filtering
+        {
+            const has_author_f = lo.author_filters.items.len > 0;
+            const has_committer_f = lo.committer_filters.items.len > 0;
+            const has_grep_f = lo.grep_filters.items.len > 0;
+
+            if (has_author_f or has_committer_f or has_grep_f) {
+                const msg = extractMessage(obj.data);
+                const author_full = extractField(obj.data, "author ");
+                const committer_full = extractField(obj.data, "committer ");
+                // Strip timestamp from author/committer for matching (only match name <email>)
+                const author_val = stripPersonTimestamp(author_full);
+                const committer_val = stripPersonTimestamp(committer_full);
+
+                const should_show = if (lo.all_match) blk: {
+                    // all-match: author uses union, committer uses union, grep ALL must match
+                    if (has_author_f) {
+                        var any = false;
+                        for (lo.author_filters.items) |af| {
+                            if (logFilterMatch(author_val, af, lo.fixed_strings)) { any = true; break; }
+                        }
+                        if (!any) break :blk false;
+                    }
+                    if (has_committer_f) {
+                        var any = false;
+                        for (lo.committer_filters.items) |cf| {
+                            if (logFilterMatch(committer_val, cf, lo.fixed_strings)) { any = true; break; }
+                        }
+                        if (!any) break :blk false;
+                    }
+                    if (has_grep_f) {
+                        for (lo.grep_filters.items) |gf| {
+                            if (!logFilterMatch(msg, gf, lo.fixed_strings)) break :blk false;
+                        }
+                    }
+                    break :blk true;
+                } else blk: {
+                    // Default: union within each filter type, intersection between types
+                    var grep_ok = !has_grep_f;
+                    var author_ok = !has_author_f;
+                    var committer_ok = !has_committer_f;
+                    if (has_grep_f) {
+                        for (lo.grep_filters.items) |gf| {
+                            if (logFilterMatch(msg, gf, lo.fixed_strings)) { grep_ok = true; break; }
+                        }
+                    }
+                    if (has_author_f) {
+                        for (lo.author_filters.items) |af| {
+                            if (logFilterMatch(author_val, af, lo.fixed_strings)) { author_ok = true; break; }
+                        }
+                    }
+                    if (has_committer_f) {
+                        for (lo.committer_filters.items) |cf| {
+                            if (logFilterMatch(committer_val, cf, lo.fixed_strings)) { committer_ok = true; break; }
+                        }
+                    }
+                    break :blk grep_ok and author_ok and committer_ok;
+                };
+
+                const skip = if (lo.invert_grep) should_show else !should_show;
+                if (skip) {
+                    addParentsToQueue(&queue, &visited, parents.items, lo.first_parent, git_path, pi, allocator) catch {};
+                    continue;
+                }
+            } else if (lo.grep_pattern) |pattern| {
+                // Legacy single grep_pattern fallback
+                const msg = extractMessage(obj.data);
+                const commit_enc = getCommitEncoding(obj.data);
+                const out_enc = lo.output_encoding orelse "UTF-8";
+                const match_msg = reencodeForGrep(allocator, msg, commit_enc, out_enc) catch msg;
+                const should_free = match_msg.ptr != msg.ptr;
+                defer if (should_free) allocator.free(match_msg);
+                if (std.mem.indexOf(u8, match_msg, pattern) == null) {
+                    addParentsToQueue(&queue, &visited, parents.items, lo.first_parent, git_path, pi, allocator) catch {};
+                    continue;
+                }
             }
         }
 
