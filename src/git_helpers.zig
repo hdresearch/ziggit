@@ -10278,6 +10278,27 @@ pub fn collectFilesFromTree(allocator: std.mem.Allocator, tree_hash_str: []const
 }
 
 
+pub fn computeDiffStatSummary(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) ![]u8 {
+    var entries = std.ArrayList(diff_stats_mod.StatEntry).init(allocator);
+    defer {
+        for (entries.items) |*e| allocator.free(e.path);
+        entries.deinit();
+    }
+    try diff_stats_mod.collectAccurate(allocator, tree1_hash, tree2_hash, "", git_path, &.{}, platform_impl, &entries);
+    if (entries.items.len == 0) return try allocator.dupe(u8, "");
+    var ti: usize = 0;
+    var td: usize = 0;
+    for (entries.items) |e| { ti += e.insertions; td += e.deletions; }
+    var s = std.ArrayList(u8).init(allocator);
+    defer s.deinit();
+    const w = s.writer();
+    try w.print(" {d} file{s} changed", .{ entries.items.len, if (entries.items.len != 1) @as([]const u8, "s") else @as([]const u8, "") });
+    if (ti > 0) try w.print(", {d} insertion{s}(+)", .{ ti, if (ti != 1) @as([]const u8, "s") else @as([]const u8, "") });
+    if (td > 0) try w.print(", {d} deletion{s}(-)", .{ td, if (td != 1) @as([]const u8, "s") else @as([]const u8, "") });
+    try w.writeAll("\n");
+    return try s.toOwnedSlice();
+}
+
 pub fn outputStatForTwoTrees(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, git_path: []const u8, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform) !void {
     var entries = std.ArrayList(diff_stats_mod.StatEntry).init(allocator);
     defer {

@@ -386,6 +386,8 @@ pub fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         }
 
         const terminator_cached: []const u8 = if (z_terminator) "\x00" else "\n";
+        var last_dedup_path: ?[]u8 = null;
+        defer if (last_dedup_path) |lp| allocator.free(lp);
         for (index.entries.items) |entry| {
             if (effective_pathspecs.len > 0) {
                 var matches = false;
@@ -427,6 +429,14 @@ pub fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                 defer allocator.free(output);
                 try platform_impl.writeStdout(output);
             } else {
+                // Deduplicate: skip if same path as previous entry
+                if (deduplicate_flag) {
+                    if (last_dedup_path) |lp| {
+                        if (std.mem.eql(u8, lp, entry.path)) continue;
+                    }
+                    if (last_dedup_path) |lp| allocator.free(lp);
+                    last_dedup_path = try allocator.dupe(u8, entry.path);
+                }
                 const quoted = if (z_terminator) try allocator.dupe(u8, entry.path) else try helpers.cQuotePath(allocator, entry.path, true);
                 defer allocator.free(quoted);
                 const tag_prefix: []const u8 = if (tag_flag) blk_tag2: {
