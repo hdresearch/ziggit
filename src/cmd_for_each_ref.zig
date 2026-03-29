@@ -439,17 +439,22 @@ pub fn getRefField(field: []const u8, refname: []const u8, objectname: []const u
 
     if (std.mem.eql(u8, field, "subject")) {
         const message = helpers.extractObjectMessage(data);
-        const clean_msg = helpers.stripCR(allocator, message) catch message;
+        const without_sig = helpers.extractMessageWithoutSignature(message);
+        const clean_msg = helpers.stripCR(allocator, without_sig) catch without_sig;
         return helpers.joinLines(allocator, helpers.extractSubject(clean_msg)) catch helpers.extractSubject(clean_msg);
     }
     if (std.mem.eql(u8, field, "subject:sanitize")) {
         const message = helpers.extractObjectMessage(data);
-        const clean_msg = helpers.stripCR(allocator, message) catch message;
+        const without_sig = helpers.extractMessageWithoutSignature(message);
+        const clean_msg = helpers.stripCR(allocator, without_sig) catch without_sig;
         const joined = helpers.joinLines(allocator, helpers.extractSubject(clean_msg)) catch helpers.extractSubject(clean_msg);
         return helpers.sanitizeSubject(allocator, joined) catch joined;
     }
 
-    if (std.mem.eql(u8, field, "body")) return helpers.extractBody(helpers.extractObjectMessage(data));
+    if (std.mem.eql(u8, field, "body")) {
+        const message = helpers.extractObjectMessage(data);
+        return helpers.extractBody(message);
+    }
 
     if (std.mem.eql(u8, field, "HEAD")) {
         const git_dir = helpers.findGitDir() catch return " ";
@@ -513,11 +518,16 @@ pub fn getRefField(field: []const u8, refname: []const u8, objectname: []const u
         const message = helpers.extractObjectMessage(data);
         if (std.mem.eql(u8, field, "contents")) return message
         else if (std.mem.eql(u8, field, "contents:subject")) {
-            const clean_msg = helpers.stripCR(allocator, message) catch message;
+            const without_sig = helpers.extractMessageWithoutSignature(message);
+            const clean_msg = helpers.stripCR(allocator, without_sig) catch without_sig;
             return helpers.joinLines(allocator, helpers.extractSubject(clean_msg)) catch helpers.extractSubject(clean_msg);
-        } else if (std.mem.eql(u8, field, "contents:body")) return helpers.extractBody(message)
-        else if (std.mem.eql(u8, field, "contents:signature")) return ""
-        else if (std.mem.eql(u8, field, "contents:size")) {
+        } else if (std.mem.eql(u8, field, "contents:body")) {
+            // contents:body is the body WITHOUT the signature
+            const without_sig = helpers.extractMessageWithoutSignature(message);
+            return helpers.extractBody(without_sig);
+        } else if (std.mem.eql(u8, field, "contents:signature")) {
+            return helpers.extractSignature(message);
+        } else if (std.mem.eql(u8, field, "contents:size")) {
             return std.fmt.allocPrint(allocator, "{d}", .{message.len}) catch return "0";
         } else if (std.mem.eql(u8, field, "contents:trailers") or std.mem.startsWith(u8, field, "contents:trailers:")) {
             const raw_trailers = helpers.extractTrailers(message);
