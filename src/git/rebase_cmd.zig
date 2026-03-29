@@ -439,8 +439,8 @@ fn startRebase(git_path: []const u8, repo_root: []const u8, allocator: std.mem.A
     };
 
     const is_interactive = opts.interactive or opts.has_exec;
-    const force = opts.force_rebase or is_interactive;
-    if (is_noop and !force) {
+    const force = opts.force_rebase or opts.has_exec;
+    if (is_noop and !force and !is_interactive) {
         if (!opts.quiet) {
             const msg = try std.fmt.allocPrint(allocator, "Current branch {s} is up to date.\n", .{current_branch_name});
             defer allocator.free(msg);
@@ -452,7 +452,11 @@ fn startRebase(git_path: []const u8, repo_root: []const u8, allocator: std.mem.A
         if (!opts.quiet) {
             const msg = try std.fmt.allocPrint(allocator, "Current branch {s} is up to date, rebase forced.\n", .{current_branch_name});
             defer allocator.free(msg);
-            try platform_impl.writeStdout(msg);
+            if (opts.apply_mode) {
+                try platform_impl.writeStdout(msg);
+            } else {
+                try platform_impl.writeStderr(msg);
+            }
         }
     }
 
@@ -504,6 +508,25 @@ fn startRebase(git_path: []const u8, repo_root: []const u8, allocator: std.mem.A
         }
         todo.clearRetainingCapacity();
         try todo.appendSlice(new_todo.items);
+    }
+
+    // Add Rebase comment to todo for interactive mode
+    if (is_interactive) {
+        // Count commands
+        var cmd_count: usize = 0;
+        var count_lines = std.mem.splitScalar(u8, todo.items, '\n');
+        while (count_lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (trimmed.len > 0 and trimmed[0] != '#') cmd_count += 1;
+        }
+        const short_base = upstream_hash[0..@min(7, upstream_hash.len)];
+        const short_head = head_hash[0..@min(7, head_hash.len)];
+        const short_onto = onto_hash[0..@min(7, onto_hash.len)];
+        const comment = try std.fmt.allocPrint(allocator, "\n# Rebase {s}..{s} onto {s} ({d} command{s})\n", .{
+            short_base, short_head, short_onto, cmd_count, if (cmd_count != 1) "s" else "",
+        });
+        defer allocator.free(comment);
+        try todo.appendSlice(comment);
     }
 
     // Save rebase state
@@ -559,9 +582,8 @@ fn startRebase(git_path: []const u8, repo_root: []const u8, allocator: std.mem.A
         }
 
         // If was originally noop and editor didn't change the order/actions,
-        // treat as noop (don't rewrite commits)
-        if (is_noop and !has_non_pick_action and todo_pick_count == commits_to_replay.items.len) {
-            // Check if picks are in original order
+        // and we're not forcing rebase, treat as noop
+        if (is_noop and !opts.force_rebase and !has_non_pick_action and todo_pick_count == commits_to_replay.items.len) {
             var is_same_order = true;
             var todo_idx: usize = 0;
             var check_lines2 = std.mem.splitScalar(u8, new_todo, '\n');
@@ -571,7 +593,6 @@ fn startRebase(git_path: []const u8, repo_root: []const u8, allocator: std.mem.A
                 if (std.mem.eql(u8, trimmed2, "noop")) continue;
                 if (std.mem.startsWith(u8, trimmed2, "pick ") or std.mem.startsWith(u8, trimmed2, "p ")) {
                     if (todo_idx < commits_to_replay.items.len) {
-                        // Extract hash from line
                         const after_cmd = std.mem.trimLeft(u8, trimmed2[if (trimmed2[0] == 'p' and trimmed2.len > 1 and trimmed2[1] == 'i') @as(usize, 5) else @as(usize, 2)..], " ");
                         const space = std.mem.indexOfScalar(u8, after_cmd, ' ') orelse after_cmd.len;
                         const hash = after_cmd[0..space];
@@ -587,9 +608,9 @@ fn startRebase(git_path: []const u8, repo_root: []const u8, allocator: std.mem.A
             if (is_same_order) {
                 cleanupRebaseState(git_path, allocator);
                 if (!opts.quiet) {
-                    const msg = try std.fmt.allocPrint(allocator, "Current branch {s} is up to date.\n", .{current_branch_name});
-                    defer allocator.free(msg);
-                    try platform_impl.writeStdout(msg);
+                    try platform_impl.writeStderr("Successfully rebased and updated refs/heads/");
+                    try platform_impl.writeStderr(current_branch_name);
+                    try platform_impl.writeStderr(".\n");
                 }
                 return;
             }
@@ -635,8 +656,26 @@ fn startRebase(git_path: []const u8, repo_root: []const u8, allocator: std.mem.A
                 if (head_entries.get(path) == null and indexed_paths.get(path) == null) {
                     const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, path }) catch continue;
                     defer allocator.free(full_path);
-                    if (std.fs.cwd().statFile(full_path)) |_| {
-                        untracked_conflicts.append(path) catch {};
+                    if (platform_impl.fs.readFile(allocator, full_path)) |disk_content| {
+                        defer allocator.free(disk_content);
+                        // Compare with blob content - if same, no conflict
+                        const onto_entry = entry.value_ptr.*;
+                        var hex: [40]u8 = undefined;
+                        for (onto_entry.sha1, 0..) |b, bi| {
+                            const hx = "0123456789abcdef";
+                            hex[bi * 2] = hx[b >> 4];
+                            hex[bi * 2 + 1] = hx[b & 0xf];
+                        }
+                        const blob_obj = objects.GitObject.load(&hex, git_path, platform_impl, allocator) catch {
+                            untracked_conflicts.append(path) catch {};
+                            continue;
+                        };
+                        defer blob_obj.deinit(allocator);
+                        if (blob_obj.type == .blob and std.mem.eql(u8, blob_obj.data, disk_content)) {
+                            // Content matches - not a conflict
+                        } else {
+                            untracked_conflicts.append(path) catch {};
+                        }
                     } else |_| {}
                 }
             }
@@ -662,7 +701,7 @@ fn startRebase(git_path: []const u8, repo_root: []const u8, allocator: std.mem.A
     // Write reflog start entry
     const reflog_action = getReflogAction(allocator);
     defer allocator.free(reflog_action);
-    const upstream_name = opts.original_upstream_display orelse opts.upstream_arg orelse "upstream";
+    const upstream_name = if (opts.onto != null) (opts.onto orelse "upstream") else (opts.original_upstream_display orelse opts.upstream_arg orelse "upstream");
     const start_msg = try std.fmt.allocPrint(allocator, "{s} (start): checkout {s}", .{ reflog_action, upstream_name });
     defer allocator.free(start_msg);
     writeReflogEntry(git_path, "HEAD", head_hash, onto_hash, start_msg, allocator, platform_impl) catch {};
@@ -1215,6 +1254,13 @@ fn rebaseContinue(git_path: []const u8, repo_root: []const u8, allocator: std.me
     defer allocator.free(merge_msg_path);
     platform_impl.fs.deleteFile(merge_msg_path) catch {};
 
+    // Remove CHERRY_PICK_HEAD if present
+    {
+        const cp_path = try std.fmt.allocPrint(allocator, "{s}/CHERRY_PICK_HEAD", .{git_path});
+        defer allocator.free(cp_path);
+        platform_impl.fs.deleteFile(cp_path) catch {};
+    }
+
     // Check if we need to commit resolved conflicts
     const rebase_head_path = try std.fmt.allocPrint(allocator, "{s}/REBASE_HEAD", .{git_path});
     defer allocator.free(rebase_head_path);
@@ -1659,7 +1705,7 @@ fn finishRebase(git_path: []const u8, branch_name: []const u8, quiet: bool, appl
 fn doFastForward(git_path: []const u8, head_hash: []const u8, onto_hash: []const u8, current_branch_name: []const u8, opts: *RebaseOpts, allocator: std.mem.Allocator, platform_impl: *const Platform) !void {
     const ff_reflog_action = getReflogAction(allocator);
     defer allocator.free(ff_reflog_action);
-    const ff_upstream_name = opts.original_upstream_display orelse opts.upstream_arg orelse "upstream";
+    const ff_upstream_name = if (opts.onto != null) (opts.onto orelse "upstream") else (opts.original_upstream_display orelse opts.upstream_arg orelse "upstream");
 
     const ff_start_msg = try std.fmt.allocPrint(allocator, "{s} (start): checkout {s}", .{ ff_reflog_action, ff_upstream_name });
     defer allocator.free(ff_start_msg);
@@ -2414,8 +2460,28 @@ fn checkUntrackedConflicts(git_path: []const u8, onto_hash: []const u8, allocato
         const path = entry.key_ptr.*;
         if (!head_files.contains(path) and !indexed_files.contains(path)) {
             // This file is in onto but not in HEAD/index. Check if it exists on disk (truly untracked)
-            if (dir.statFile(path)) |_| {
-                conflicts.append(path) catch {};
+            const full_path2 = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, path }) catch continue;
+            defer allocator.free(full_path2);
+            if (platform_impl.fs.readFile(allocator, full_path2)) |disk_content| {
+                defer allocator.free(disk_content);
+                // Compare with onto blob content
+                const onto_sha = entry.value_ptr.*;
+                var hex2: [40]u8 = undefined;
+                for (onto_sha, 0..) |b, bi| {
+                    const hx = "0123456789abcdef";
+                    hex2[bi * 2] = hx[b >> 4];
+                    hex2[bi * 2 + 1] = hx[b & 0xf];
+                }
+                const blob_obj2 = objects.GitObject.load(&hex2, git_path, platform_impl, allocator) catch {
+                    conflicts.append(path) catch {};
+                    continue;
+                };
+                defer blob_obj2.deinit(allocator);
+                if (blob_obj2.type == .blob and std.mem.eql(u8, blob_obj2.data, disk_content)) {
+                    // Same content - not a real conflict
+                } else {
+                    conflicts.append(path) catch {};
+                }
             } else |_| {}
         }
     }
