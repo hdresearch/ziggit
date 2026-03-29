@@ -51,6 +51,7 @@ const DiffOpts = struct {
     ignore_regex: std.ArrayList([]const u8) = undefined,
     ignore_blank_lines: bool = false,
     combined_use_c: bool = false, // true for -c (diff --combined), false for --cc (diff --cc)
+    break_rewrites: bool = false,
 
     fn getAbbrevLen(self: *const DiffOpts) u32 {
         if (self.abbrev) |a| {
@@ -321,7 +322,7 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *pm.ArgIterator, platform_imp
         } else if (std.mem.startsWith(u8, arg, "--relative") or std.mem.startsWith(u8, arg, "--no-relative")) {
             // Accept
         } else if (std.mem.startsWith(u8, arg, "--break-rewrites") or std.mem.startsWith(u8, arg, "-B")) {
-            // Accept
+            opts.break_rewrites = true;
         } else if (std.mem.startsWith(u8, arg, "--") and arg.len > 2) {
             // Unknown long option - error
             const msg = try std.fmt.allocPrint(allocator, "usage: git diff [<options>] [<commit>] [--] [<path>...]\n", .{});
@@ -2764,6 +2765,32 @@ fn outputChanges(changes_slice: []const FileChange, opts: *const DiffOpts, pi: *
         break :blk rename_list.?.items;
     } else changes_slice;
 
+    // Apply break-rewrites: for modified files that are mostly rewritten,
+    // report as full delete + insert
+    var break_rewrite_list: ?std.ArrayList(FileChange) = null;
+    defer if (break_rewrite_list) |*brl| brl.deinit();
+    const changes2 = if (opts.break_rewrites) blk_br: {
+        break_rewrite_list = std.ArrayList(FileChange).init(allocator);
+        for (changes) |c| {
+            var fc = c;
+            if (!c.is_new and !c.is_deleted and !c.is_binary and !c.is_unmerged) {
+                const old_lines = diff_stats.countLines(c.old_content);
+                const new_lines = diff_stats.countLines(c.new_content);
+                pi.writeStderr(std.fmt.allocPrint(allocator, "DEBUG break-rewrite: old_lines={d} new_lines={d} ins={d} dels={d} old_content_len={d} new_content_len={d}\n", .{old_lines, new_lines, c.insertions, c.deletions, c.old_content.len, c.new_content.len}) catch "DBG ERR\n") catch {};
+                if (old_lines > 0) {
+                    const total = c.insertions + c.deletions;
+                    const max_possible = old_lines + new_lines;
+                    if (max_possible > 0 and total * 100 / max_possible > 60) {
+                        fc.insertions = new_lines;
+                        fc.deletions = old_lines;
+                    }
+                }
+            }
+            break_rewrite_list.?.append(fc) catch {};
+        }
+        break :blk_br break_rewrite_list.?.items;
+    } else changes;
+
     const has_ignore = opts.ignore_regex.items.len > 0 or opts.ignore_blank_lines;
 
     // For -I filtering with non-patch modes, we need to filter changes
@@ -2774,7 +2801,7 @@ fn outputChanges(changes_slice: []const FileChange, opts: *const DiffOpts, pi: *
         opts.output_mode == .name_status or opts.output_mode == .stat or opts.output_mode == .shortstat))
     blk: {
         filtered_changes = std.ArrayList(FileChange).init(allocator);
-        for (changes) |c| {
+        for (changes2) |c| {
             // Unmerged, deleted, new files always pass through -I filter
             if (c.is_unmerged or c.is_deleted or c.is_new) {
                 filtered_changes.?.append(c) catch {};
@@ -2789,7 +2816,7 @@ fn outputChanges(changes_slice: []const FileChange, opts: *const DiffOpts, pi: *
             }
         }
         break :blk filtered_changes.?.items;
-    } else changes;
+    } else changes2;
 
     if (opts.quiet) {
         if (effective_changes.len > 0) std.process.exit(1);
