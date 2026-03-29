@@ -7865,54 +7865,81 @@ pub fn validateTreeObject(data: []const u8, platform_impl: *const platform_mod.P
 
 
 pub fn hashData(allocator: std.mem.Allocator, data: []const u8, obj_type: []const u8, write_object: bool, literally: bool, git_dir: ?[]const u8, platform_impl: *const platform_mod.Platform) !void {
-    const parsed_type = objects.ObjectType.fromString(obj_type) orelse {
+    const parsed_type = objects.ObjectType.fromString(obj_type);
+    if (parsed_type == null and !literally) {
         const msg = try std.fmt.allocPrint(allocator, "fatal: invalid object type \"{s}\"\n", .{obj_type});
         defer allocator.free(msg);
         try platform_impl.writeStderr(msg);
         std.process.exit(128);
         unreachable;
-    };
+    }
     // Validate object format unless --literally is set
     if (!literally) {
-        switch (parsed_type) {
-            .tree => {
-                // Validate tree object format
-                validateTreeObject(data, platform_impl) catch {
-                    std.process.exit(128);
-                    unreachable;
-                };
-            },
-            .commit => {
-                // Minimal commit validation: must have "tree " line
-                if (!std.mem.startsWith(u8, data, "tree ")) {
-                    platform_impl.writeStderr("fatal: corrupt commit\n") catch {};
-                    std.process.exit(128);
-                    unreachable;
-                }
-            },
-            .tag => {
-                // Minimal tag validation: must have "object " line
-                if (!std.mem.startsWith(u8, data, "object ")) {
-                    platform_impl.writeStderr("fatal: corrupt tag\n") catch {};
-                    std.process.exit(128);
-                    unreachable;
-                }
-            },
-            else => {},
+        if (parsed_type) |pt| {
+            switch (pt) {
+                .tree => {
+                    // Validate tree object format
+                    validateTreeObject(data, platform_impl) catch {
+                        std.process.exit(128);
+                        unreachable;
+                    };
+                },
+                .commit => {
+                    // Minimal commit validation: must have "tree " line
+                    if (!std.mem.startsWith(u8, data, "tree ")) {
+                        platform_impl.writeStderr("fatal: corrupt commit\n") catch {};
+                        std.process.exit(128);
+                        unreachable;
+                    }
+                },
+                .tag => {
+                    // Minimal tag validation: must have "object " line
+                    if (!std.mem.startsWith(u8, data, "object ")) {
+                        platform_impl.writeStderr("fatal: corrupt tag\n") catch {};
+                        std.process.exit(128);
+                        unreachable;
+                    }
+                },
+                else => {},
+            }
         }
     }
 
-    const obj = objects.GitObject.init(parsed_type, data);
-    const hash = try obj.hash(allocator);
+    // For --literally with unknown type, compute hash directly with the raw type string
+    const hash = if (parsed_type) |pt| blk: {
+        const obj = objects.GitObject.init(pt, data);
+        break :blk try obj.hash(allocator);
+    } else blk: {
+        // Use raw type string for header
+        const header = try std.fmt.allocPrint(allocator, "{s} {}\x00", .{ obj_type, data.len });
+        defer allocator.free(header);
+        const content = try std.mem.concat(allocator, u8, &[_][]const u8{ header, data });
+        defer allocator.free(content);
+        var hasher = std.crypto.hash.Sha1.init(.{});
+        hasher.update(content);
+        var digest: [20]u8 = undefined;
+        hasher.final(&digest);
+        break :blk try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&digest)});
+    };
     defer allocator.free(hash);
 
     if (write_object) {
         if (git_dir) |gd| {
-            _ = obj.store(gd, platform_impl, allocator) catch {
-                try platform_impl.writeStderr("fatal: unable to write object\n");
-                std.process.exit(128);
-                unreachable;
-            };
+            if (parsed_type) |pt| {
+                const obj = objects.GitObject.init(pt, data);
+                _ = obj.store(gd, platform_impl, allocator) catch {
+                    try platform_impl.writeStderr("fatal: unable to write object\n");
+                    std.process.exit(128);
+                    unreachable;
+                };
+            } else {
+                // For --literally with unknown type, store with raw type string
+                storeLiteralObject(gd, hash, obj_type, data, platform_impl, allocator) catch {
+                    try platform_impl.writeStderr("fatal: unable to write object\n");
+                    std.process.exit(128);
+                    unreachable;
+                };
+            }
         }
     }
 
@@ -7921,6 +7948,28 @@ pub fn hashData(allocator: std.mem.Allocator, data: []const u8, obj_type: []cons
     try platform_impl.writeStdout(output);
 }
 
+
+fn storeLiteralObject(git_dir: []const u8, hash_str: []const u8, type_str: []const u8, data: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+    const obj_dir_path = try std.fmt.allocPrint(allocator, "{s}/objects/{s}", .{ git_dir, hash_str[0..2] });
+    defer allocator.free(obj_dir_path);
+    platform_impl.fs.makeDir(obj_dir_path) catch |err| switch (err) {
+        error.AlreadyExists => {},
+        else => return err,
+    };
+    const obj_file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ obj_dir_path, hash_str[2..] });
+    defer allocator.free(obj_file_path);
+    const header = try std.fmt.allocPrint(allocator, "{s} {}\x00", .{ type_str, data.len });
+    defer allocator.free(header);
+    const content = try std.mem.concat(allocator, u8, &[_][]const u8{ header, data });
+    defer allocator.free(content);
+    const zlib = @import("git/zlib_compat.zig");
+    const compressed = try zlib.compressSlice(allocator, content);
+    defer allocator.free(compressed);
+    platform_impl.fs.writeFile(obj_file_path, compressed) catch |err| switch (err) {
+        error.AlreadyExists => return,
+        else => return err,
+    };
+}
 
 pub fn parseDateToGitFormat(date_str: []const u8, allocator: std.mem.Allocator) ![]u8 {
     const trimmed = std.mem.trim(u8, date_str, " \t\n\r");
