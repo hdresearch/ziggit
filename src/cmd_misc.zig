@@ -338,9 +338,9 @@ pub fn nativeCmdRevert(allocator: std.mem.Allocator, args: [][]const u8, command
         defer if (sj3.len > 0) allocator.free(sj3);
         const rm2 = std.fmt.allocPrint(allocator, "Revert \"{s}\"\n\nThis reverts commit {s}.\n", .{ sj3, commit_hash }) catch continue;
         defer allocator.free(rm2);
-        const auth = helpers.getAuthorString(allocator) catch try allocator.dupe(u8, "helpers.Unknown <unknown> 0 +0000");
+        const auth = helpers.getAuthorString(allocator) catch try allocator.dupe(u8, "Unknown <unknown> 0 +0000");
         defer allocator.free(auth);
-        const comm = helpers.getCommitterString(allocator) catch try allocator.dupe(u8, "helpers.Unknown <unknown> 0 +0000");
+        const comm = helpers.getCommitterString(allocator) catch try allocator.dupe(u8, "Unknown <unknown> 0 +0000");
         defer allocator.free(comm);
         const parents = [_][]const u8{current_hash};
         const co = objects.createCommitObject(new_tree, &parents, auth, comm, rm2, allocator) catch continue;
@@ -490,7 +490,7 @@ pub fn nativeCmdBisect(allocator: std.mem.Allocator, args: *platform_mod.ArgIter
         try platform_impl.writeStdout("Previous helpers.HEAD position was...\n");
     } else if (std.mem.eql(u8, subcmd, "log")) {
         const log_data = platform_impl.fs.readFile(allocator, bisect_log_path) catch {
-            try platform_impl.writeStderr("helpers.We are not bisecting.\n");
+            try platform_impl.writeStderr("We are not bisecting.\n");
             std.process.exit(1);
         };
         defer allocator.free(log_data);

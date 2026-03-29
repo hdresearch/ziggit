@@ -159,7 +159,7 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *platform_mod.ArgItera
             defer allocator.free(from_header);
             try platform_impl.writeStdout(from_header);
             
-            const date_header = try std.fmt.allocPrint(allocator, "Date: {s}\n", .{ author_date orelse "helpers.Thu, 1 helpers.Jan 1970 00:00:00 +0000" });
+            const date_header = try std.fmt.allocPrint(allocator, "Date: {s}\n", .{ author_date orelse "Thu, 1 helpers.Jan 1970 00:00:00 +0000" });
             defer allocator.free(date_header);
             try platform_impl.writeStdout(date_header);
             

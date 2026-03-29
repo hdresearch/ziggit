@@ -451,7 +451,7 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                 platform_impl.fs.writeFile(head_path, head_content) catch {};
                 
                 if (!quiet) {
-                    const det_msg = try std.fmt.allocPrint(allocator, "helpers.HEAD is now at {s}...\n", .{hash[0..7]});
+                    const det_msg = try std.fmt.allocPrint(allocator, "HEAD is now at {s}...\n", .{hash[0..7]});
                     defer allocator.free(det_msg);
                     try platform_impl.writeStderr(det_msg);
                 }
@@ -655,7 +655,7 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
             } else |_| {
-                const msg = try std.fmt.allocPrint(allocator, "helpers.HEAD is now at {s}\n", .{target[0..@min(target.len, 7)]});
+                const msg = try std.fmt.allocPrint(allocator, "HEAD is now at {s}\n", .{target[0..@min(target.len, 7)]});
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
             }

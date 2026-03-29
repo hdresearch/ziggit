@@ -62,7 +62,7 @@ pub fn cmdWebBrowse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
         defer allocator.free(result.stderr);
         if (result.stdout.len > 0) try platform_impl.writeStdout(result.stdout);
     } else {
-        try platform_impl.writeStderr("helpers.No suitable browser detected.\n");
+        try platform_impl.writeStderr("No suitable browser detected.\n");
         std.process.exit(1);
     }
 }

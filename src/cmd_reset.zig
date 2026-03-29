@@ -307,12 +307,12 @@ pub fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         if (reset_mode == .hard or reset_mode == .merge_mode) {
             helpers.cleanupMergeState(git_path, allocator);
         }
-        // helpers.Output "helpers.HEAD is now at <short-hash> <subject>" for hard reset
+        // helpers.Output "HEAD is now at <short-hash> <subject>" for hard reset
         if (reset_mode == .hard or reset_mode == .merge_mode) {
             const short_hash = if (target_hash.len >= 7) target_hash[0..7] else target_hash;
             const subj = helpers.getCommitSubject(target_hash, git_path, platform_impl, allocator) catch "";
             defer if (subj.len > 0) allocator.free(subj);
-            const reset_msg = std.fmt.allocPrint(allocator, "helpers.HEAD is now at {s} {s}\n", .{ short_hash, subj }) catch "";
+            const reset_msg = std.fmt.allocPrint(allocator, "HEAD is now at {s} {s}\n", .{ short_hash, subj }) catch "";
             if (reset_msg.len > 0) {
                 defer allocator.free(reset_msg);
                 platform_impl.writeStdout(reset_msg) catch {};

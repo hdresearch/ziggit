@@ -41,7 +41,7 @@ pub fn nativeCmdVar(_: std.mem.Allocator, args: [][]const u8, command_index: usi
     const var_name = var_name_arg orelse { try platform_impl.writeStderr("usage: git var (-l | <variable>)\n"); std.process.exit(1); };
     const known = [_][]const u8{ "GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT", "GIT_EDITOR", "GIT_PAGER", "GIT_DEFAULT_BRANCH", "GIT_SEQUENCE_EDITOR", "GIT_SHELL_PATH", "GIT_ATTR_SYSTEM", "GIT_ATTR_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL" };
     var is_known = false; for (known) |k| { if (std.mem.eql(u8, var_name, k)) { is_known = true; break; } }
-    if (!is_known) { const msg = std.fmt.allocPrint(allocator, "helpers.Unknown variable: '{s}'\n", .{var_name}) catch return; defer allocator.free(msg); try platform_impl.writeStderr(msg); std.process.exit(1); }
+    if (!is_known) { const msg = std.fmt.allocPrint(allocator, "Unknown variable: '{s}'\n", .{var_name}) catch return; defer allocator.free(msg); try platform_impl.writeStderr(msg); std.process.exit(1); }
     if (std.mem.eql(u8, var_name, "GIT_CONFIG_GLOBAL")) { if (std.process.getEnvVarOwned(allocator, "GIT_CONFIG_GLOBAL")) |ev| { defer allocator.free(ev); const o = std.fmt.allocPrint(allocator, "{s}\n", .{ev}) catch return; defer allocator.free(o); try platform_impl.writeStdout(o); return; } else |_| {} const vals = getVarMulti(allocator, var_name) catch { try outputVar(allocator, var_name, platform_impl); return; }; defer { for (vals) |v| allocator.free(v); allocator.free(vals); } for (vals) |val| { const l = std.fmt.allocPrint(allocator, "{s}\n", .{val}) catch continue; defer allocator.free(l); platform_impl.writeStdout(l) catch {}; } return; }
     try outputVar(allocator, var_name, platform_impl);
 }

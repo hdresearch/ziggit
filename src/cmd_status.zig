@@ -177,22 +177,22 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
 
             // helpers.Compare commits: count ahead/behind
             if (std.mem.eql(u8, current_commit.?, upstream_hash)) {
-                const up_msg = try std.fmt.allocPrint(allocator, "helpers.Your branch is up to date with '{s}'.\n\n", .{upstream_display_name});
+                const up_msg = try std.fmt.allocPrint(allocator, "Your branch is up to date with '{s}'.\n\n", .{upstream_display_name});
                 defer allocator.free(up_msg);
                 try platform_impl.writeStdout(up_msg);
             } else {
                 const ahead_count = helpers.countUnreachable(git_path, current_commit.?, upstream_hash, allocator, platform_impl);
                 const behind_count = helpers.countUnreachable(git_path, upstream_hash, current_commit.?, allocator, platform_impl);
                 if (ahead_count > 0 and behind_count > 0) {
-                    const up_msg = try std.fmt.allocPrint(allocator, "helpers.Your branch and '{s}' have diverged,\nand have {d} and {d} different commits each, respectively.\n  (use \"git pull\" if you want to integrate the remote branch with yours)\n\n", .{upstream_display_name, ahead_count, behind_count});
+                    const up_msg = try std.fmt.allocPrint(allocator, "Your branch and '{s}' have diverged,\nand have {d} and {d} different commits each, respectively.\n  (use \"git pull\" if you want to integrate the remote branch with yours)\n\n", .{upstream_display_name, ahead_count, behind_count});
                     defer allocator.free(up_msg);
                     try platform_impl.writeStdout(up_msg);
                 } else if (ahead_count > 0) {
-                    const up_msg = try std.fmt.allocPrint(allocator, "helpers.Your branch is ahead of '{s}' by {d} commit{s}.\n  (use \"git push\" to publish your local commits)\n\n", .{upstream_display_name, ahead_count, if (ahead_count > 1) "s" else ""});
+                    const up_msg = try std.fmt.allocPrint(allocator, "Your branch is ahead of '{s}' by {d} commit{s}.\n  (use \"git push\" to publish your local commits)\n\n", .{upstream_display_name, ahead_count, if (ahead_count > 1) "s" else ""});
                     defer allocator.free(up_msg);
                     try platform_impl.writeStdout(up_msg);
                 } else if (behind_count > 0) {
-                    const up_msg = try std.fmt.allocPrint(allocator, "helpers.Your branch is behind '{s}' by {d} commit{s}, and can be fast-forwarded.\n  (use \"git pull\" to update your local branch)\n\n", .{upstream_display_name, behind_count, if (behind_count > 1) "s" else ""});
+                    const up_msg = try std.fmt.allocPrint(allocator, "Your branch is behind '{s}' by {d} commit{s}, and can be fast-forwarded.\n  (use \"git pull\" to update your local branch)\n\n", .{upstream_display_name, behind_count, if (behind_count > 1) "s" else ""});
                     defer allocator.free(up_msg);
                     try platform_impl.writeStdout(up_msg);
                 }

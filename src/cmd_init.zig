@@ -365,7 +365,7 @@ pub fn initRepositoryInDir(git_dir: []const u8, bare: bool, template_dir: ?[]con
     const abs_path = std.fs.cwd().realpathAlloc(allocator, git_dir) catch try allocator.dupe(u8, git_dir);
     defer allocator.free(abs_path);
     if (!quiet) {
-        const msg = try std.fmt.allocPrint(allocator, "Initialized empty helpers.Git repository in {s}/\n", .{abs_path});
+        const msg = try std.fmt.allocPrint(allocator, "Initialized empty Git repository in {s}/\n", .{abs_path});
         defer allocator.free(msg);
         try platform_impl.writeStdout(msg);
     }
