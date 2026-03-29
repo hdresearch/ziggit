@@ -443,6 +443,32 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                     }
                 }
             }
+            // Emit GIT_TRACE run_command line for the dashed external attempt
+            if (std.posix.getenv("GIT_TRACE")) |trace_val| {
+                if (trace_val.len > 0 and !std.mem.eql(u8, trace_val, "0")) {
+                    // Build trace line: trace: run_command: git-<cmd> arg1 arg2 ...
+                    var trace_buf = std.ArrayList(u8).init(allocator);
+                    defer trace_buf.deinit();
+                    trace_buf.appendSlice("trace: run_command: git-") catch {};
+                    trace_buf.appendSlice(command) catch {};
+                    var ti: usize = command_index + 1;
+                    while (ti < all_original_args.items.len) : (ti += 1) {
+                        trace_buf.append(' ') catch {};
+                        const arg = all_original_args.items[ti];
+                        // Quote if empty or contains spaces
+                        const needs_quote = arg.len == 0 or std.mem.indexOfScalar(u8, arg, ' ') != null;
+                        if (needs_quote) {
+                            trace_buf.append('\'') catch {};
+                            trace_buf.appendSlice(arg) catch {};
+                            trace_buf.append('\'') catch {};
+                        } else {
+                            trace_buf.appendSlice(arg) catch {};
+                        }
+                    }
+                    trace_buf.append('\n') catch {};
+                    platform_impl.writeStderr(trace_buf.items) catch {};
+                }
+            }
             // Command not found - check help.autocorrect config
             const error_msg = std.fmt.allocPrint(allocator, "git: '{s}' is not a git command. See 'git --help'.\n", .{command}) catch "git: invalid command. See 'git --help'.\n";
             defer if (error_msg.ptr != "ziggit: invalid command. See 'ziggit --help'.\n".ptr) allocator.free(error_msg);
