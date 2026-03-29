@@ -514,6 +514,33 @@ const git_helpers_mod = @import("../git_helpers.zig");
 
 /// Resolve alias from config, respecting GIT_CONFIG_NOSYSTEM and GIT_CONFIG_SYSTEM.
 /// Returns the alias value or null if not found.
+fn resolveAliasFromContent(content: []const u8, alias_key: []const u8, config_path: []const u8, allocator: std.mem.Allocator, platform_impl: anytype) ?[]u8 {
+    const git_helpers_mod2 = @import("../git_helpers.zig");
+    var entries = std.ArrayList(git_helpers_mod2.CfgEntry).init(allocator);
+    defer { for (entries.items) |*e| e.deinit(allocator); entries.deinit(); }
+    git_helpers_mod2.cfgParseEntries(content, &entries, allocator) catch return null;
+    var last_entry: ?*const git_helpers_mod2.CfgEntry = null;
+    for (entries.items) |*e| {
+        if (git_helpers_mod2.cfgKeyMatches(e.full_key, alias_key)) {
+            last_entry = e;
+        }
+    }
+    if (last_entry) |e| {
+        if (!e.has_equals) {
+            // Boolean key without value - this is an error for aliases
+            const msg1 = std.fmt.allocPrint(allocator, "fatal: missing value for 'alias.{s}'\n", .{alias_key["alias.".len..]}) catch return null;
+            defer allocator.free(msg1);
+            platform_impl.writeStderr(msg1) catch {};
+            const msg2 = std.fmt.allocPrint(allocator, "fatal: bad config line {d} in file {s}\n", .{ e.line_number, config_path }) catch return null;
+            defer allocator.free(msg2);
+            platform_impl.writeStderr(msg2) catch {};
+            std.process.exit(128);
+        }
+        return allocator.dupe(u8, e.value) catch null;
+    }
+    return null;
+}
+
 pub fn resolveAliasFromConfig(allocator: std.mem.Allocator, name: []const u8, platform_impl: anytype) ?[]u8 {
 const git_helpers_mod = @import("../git_helpers.zig");
     const alias_key = std.fmt.allocPrint(allocator, "alias.{s}", .{name}) catch return null;
@@ -540,8 +567,8 @@ const git_helpers_mod = @import("../git_helpers.zig");
         defer allocator.free(config_path);
         if (platform_impl.fs.readFile(allocator, config_path)) |content| {
             defer allocator.free(content);
-            if (git_helpers_mod.parseConfigValue(content, alias_key, allocator) catch null) |val| return val;
-            if (git_helpers_mod.parseConfigValue(content, alias_subsection_key, allocator) catch null) |val| return val;
+            if (resolveAliasFromContent(content, alias_key, config_path, allocator, platform_impl)) |val| return val;
+            if (resolveAliasFromContent(content, alias_subsection_key, config_path, allocator, platform_impl)) |val| return val;
         } else |_| {}
     } else |_| {}
 
