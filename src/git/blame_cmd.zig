@@ -766,6 +766,28 @@ fn gf(gp: []const u8, ch: []const u8, fp2: []const u8, a2: std.mem.Allocator) ![
     return try git_helpers_mod.readGitObjectContent(gp, bh, a2);
 }
 
+/// Load graft parents for a commit from .git/info/grafts
+/// Returns the rest of the line after the commit hash (the parent hashes) or null
+fn loadGraftParents(a: std.mem.Allocator, git_path: []const u8, commit_hash: []const u8) !?[]const u8 {
+    const grafts_path = try std.fmt.allocPrint(a, "{s}/info/grafts", .{git_path});
+    defer a.free(grafts_path);
+    const content = std.fs.cwd().readFileAlloc(a, grafts_path, 1024 * 1024) catch return null;
+    defer a.free(content);
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len >= 40 and std.mem.startsWith(u8, trimmed, commit_hash[0..@min(40, commit_hash.len)])) {
+            // Return the parent hashes (everything after the commit hash)
+            if (trimmed.len > 41) {
+                return try a.dupe(u8, trimmed[41..]);
+            }
+            // Empty parents = root commit (no parents)
+            return try a.dupe(u8, "");
+        }
+    }
+    return null;
+}
+
 fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, tl: []const []const u8, es: []B.BlameEntry, wl: ?[]const []const u8, first_parent_only: bool) !void {
     var ub = try a.alloc(bool, tl.len);
     defer a.free(ub);
@@ -799,7 +821,15 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
         defer B.freeInfo(info, a);
         var pars = std.ArrayList([]const u8).init(a);
         defer { for (pars.items) |p| a.free(p); pars.deinit(); }
-        {
+        // Check grafts first
+        const graft_parents = loadGraftParents(a, gp, cur.hash) catch null;
+        if (graft_parents) |gp_list| {
+            defer a.free(gp_list);
+            var gp_iter = std.mem.tokenizeScalar(u8, gp_list, ' ');
+            while (gp_iter.next()) |gh| {
+                if (gh.len >= 40) try pars.append(try a.dupe(u8, gh[0..40]));
+            }
+        } else {
             var li = std.mem.splitScalar(u8, cc, '\n');
             while (li.next()) |l| {
                 if (std.mem.startsWith(u8, l, "parent ")) try pars.append(try a.dupe(u8, l[7..]));
