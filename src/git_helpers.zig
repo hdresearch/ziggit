@@ -14395,6 +14395,12 @@ pub fn applyOnePatch(allocator: std.mem.Allocator, patch: *const Patch, reverse:
     // Handle new file creation
     if ((patch.is_new_file and !reverse) or (patch.is_delete and reverse)) {
         if (check_only) return;
+        // For submodule/gitlink entries (mode 160000), create a directory
+        const effective_mode = if (!reverse) patch.new_mode else patch.old_mode;
+        if (effective_mode != null and effective_mode.? == 0o160000) {
+            std.fs.cwd().makePath(target_path) catch {};
+            return;
+        }
         var content = std.ArrayList(u8).init(allocator);
         defer content.deinit();
         for (patch.hunks.items) |hunk| {
@@ -14419,7 +14425,17 @@ pub fn applyOnePatch(allocator: std.mem.Allocator, patch: *const Patch, reverse:
     // Handle file deletion
     if ((patch.is_delete and !reverse) or (patch.is_new_file and reverse)) {
         if (check_only) return;
-        std.fs.cwd().deleteFile(target_path) catch {};
+        // Try deleteFile first (regular files/symlinks), then deleteDir (submodules)
+        std.fs.cwd().deleteFile(target_path) catch {
+            std.fs.cwd().deleteDir(target_path) catch {};
+        };
+        // Remove empty parent directories
+        var dir_path = target_path;
+        while (std.fs.path.dirname(dir_path)) |parent| {
+            if (parent.len == 0) break;
+            std.fs.cwd().deleteDir(parent) catch break;
+            dir_path = parent;
+        }
         return;
     }
 
