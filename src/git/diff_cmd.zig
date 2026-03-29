@@ -2903,6 +2903,7 @@ const LogOpts = struct {
     grep_reflog: bool = false,
     invert_grep: bool = false,
     use_color: bool = false,
+    raw_format: bool = false,
 
     const DiffMergesMode = enum { default, off, on, first_parent, combined, dense_combined, separate };
     const DecorateMode = enum { no, short, full };
@@ -3526,6 +3527,34 @@ fn writeCommitHeader(hash: []const u8, data: []const u8, lo: *const LogOpts, is_
     const parents = try getAllParents(data, allocator);
     defer parents.deinit();
     const msg = extractMessage(data);
+
+    // Raw format: output commit object headers directly
+    if (lo.raw_format) {
+        const header_out = try std.fmt.allocPrint(allocator, "commit {s}\n", .{hash});
+        defer allocator.free(header_out);
+        try pi.writeStdout(header_out);
+        // Output the raw commit data (everything before the empty line + the empty line)
+        var raw_iter = std.mem.splitScalar(u8, data, '\n');
+        while (raw_iter.next()) |line| {
+            if (line.len == 0) {
+                try pi.writeStdout("\n");
+                break;
+            }
+            const lo2 = try std.fmt.allocPrint(allocator, "{s}\n", .{line});
+            defer allocator.free(lo2);
+            try pi.writeStdout(lo2);
+        }
+        // Output message with 4-space indent
+        const trimmed_msg = std.mem.trimRight(u8, msg, "\n");
+        var msg_iter = std.mem.splitScalar(u8, trimmed_msg, '\n');
+        while (msg_iter.next()) |mline| {
+            const mout = try std.fmt.allocPrint(allocator, "    {s}\n", .{mline});
+            defer allocator.free(mout);
+            try pi.writeStdout(mout);
+        }
+        try pi.writeStdout("\n");
+        return;
+    }
 
     // commit line
     var commit_line = std.ArrayList(u8).init(allocator);
@@ -4330,9 +4359,11 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
             const fmt_val = arg["--pretty=".len..];
             if (std.mem.eql(u8, fmt_val, "oneline") or std.mem.eql(u8, fmt_val, "short")) {
                 lo.oneline = true;
+            } else if (std.mem.eql(u8, fmt_val, "raw")) {
+                lo.raw_format = true;
             } else if (std.mem.eql(u8, fmt_val, "medium") or std.mem.eql(u8, fmt_val, "full") or
                 std.mem.eql(u8, fmt_val, "fuller") or std.mem.eql(u8, fmt_val, "email") or
-                std.mem.eql(u8, fmt_val, "raw") or std.mem.eql(u8, fmt_val, "reference") or
+                std.mem.eql(u8, fmt_val, "reference") or
                 std.mem.eql(u8, fmt_val, "mboxrd")) {
                 // Named formats - use default
             } else if (fmt_val.len > 0) {
