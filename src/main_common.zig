@@ -39061,7 +39061,7 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
 
         for (all_commits.items) |ch| {
             if (!cm_ts.contains(ch)) {
-                try cm_ts.put(ch, std.ArrayList([]const u8).init(allocator));
+                try cm_ts.put(ch, std.ArrayList([]const u8){});
                 try id_ts.put(ch, 0);
             }
         }
