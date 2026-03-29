@@ -7834,7 +7834,7 @@ pub fn validateTreeObject(data: []const u8, platform_impl: *const platform_mod.P
         // Check for duplicate filenames
         if (last_name) |ln| {
             if (std.mem.eql(u8, ln, name)) {
-                try platform_impl.writeStderr("error: duplicate filename in tree\n");
+                try platform_impl.writeStderr("error: duplicateEntries: contains duplicate file entries\n");
                 return error.InvalidTree;
             }
         }
