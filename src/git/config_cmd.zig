@@ -3238,7 +3238,8 @@ fn cfgSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add:
     }
 
     if (replace_all) {
-        if (rmatch_count == 0 and match_count == 0) {
+        if (rmatch_count == 0) {
+            // No regex matches: add a new entry
             if (section_found) {
                 try result.appendSlice(content[0..last_target_end]);
                 try result.appendSlice(new_line);
