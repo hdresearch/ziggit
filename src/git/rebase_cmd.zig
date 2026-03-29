@@ -1,3 +1,4 @@
+const git_helpers_mod = @import("../git_helpers.zig");
 // rebase_cmd.zig - Full git rebase implementation with interactive support
 const std = @import("std");
 const objects = @import("objects.zig");
@@ -13,7 +14,7 @@ const Platform = platform_mod.Platform;
 // ============================================================================
 
 pub fn nativeCmdRebase(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const Platform) !void {
-    const git_path = try main_common.findGitDirectory(allocator, platform_impl);
+    const git_path = try git_helpers_mod.findGitDirectory(allocator, platform_impl);
     defer allocator.free(git_path);
     const repo_root = std.fs.path.dirname(git_path) orelse ".";
 
@@ -282,11 +283,11 @@ fn parseRebaseArgs(allocator: std.mem.Allocator, args: [][]const u8, command_ind
 }
 
 fn checkConfigOptions(allocator: std.mem.Allocator, opts: *RebaseOpts, platform_impl: *const Platform) void {
-    const git_path = main_common.findGitDirectory(allocator, platform_impl) catch return;
+    const git_path = git_helpers_mod.findGitDirectory(allocator, platform_impl) catch return;
     defer allocator.free(git_path);
 
     if (!opts.has_rebase_merges) {
-        if (main_common.getConfigOverride("rebase.rebasemerges")) |val| {
+        if (git_helpers_mod.getConfigOverride("rebase.rebasemerges")) |val| {
             const trimmed = std.mem.trim(u8, val, " \t\r\n");
             if (!std.mem.eql(u8, trimmed, "false") and trimmed.len > 0) {
                 opts.has_rebase_merges = true;
@@ -294,7 +295,7 @@ fn checkConfigOptions(allocator: std.mem.Allocator, opts: *RebaseOpts, platform_
         }
     }
     if (!opts.has_update_refs) {
-        if (main_common.getConfigOverride("rebase.updaterefs")) |val| {
+        if (git_helpers_mod.getConfigOverride("rebase.updaterefs")) |val| {
             const trimmed = std.mem.trim(u8, val, " \t\r\n");
             if (std.mem.eql(u8, trimmed, "true")) {
                 opts.has_update_refs = true;
@@ -341,7 +342,7 @@ fn startRebase(git_path: []const u8, repo_root: []const u8, allocator: std.mem.A
 
     // If branch_arg is given, switch to it first
     if (opts.branch_arg) |branch| {
-        const branch_hash = main_common.resolveRevision(git_path, branch, platform_impl, allocator) catch {
+        const branch_hash = git_helpers_mod.resolveRevision(git_path, branch, platform_impl, allocator) catch {
             const msg = try std.fmt.allocPrint(allocator, "fatal: no such branch/commit '{s}'\n", .{branch});
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);
@@ -362,7 +363,7 @@ fn startRebase(git_path: []const u8, repo_root: []const u8, allocator: std.mem.A
     // Resolve upstream
     var upstream_hash: []u8 = undefined;
     if (opts.upstream_arg) |ua| {
-        upstream_hash = main_common.resolveRevision(git_path, ua, platform_impl, allocator) catch {
+        upstream_hash = git_helpers_mod.resolveRevision(git_path, ua, platform_impl, allocator) catch {
             const msg = try std.fmt.allocPrint(allocator, "fatal: invalid upstream '{s}'\n", .{ua});
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);
@@ -948,7 +949,7 @@ fn executePick(git_path: []const u8, hash: []const u8, original_line: []const u8
     _ = is_continue;
 
     // Resolve hash (could be abbreviated)
-    const full_hash = main_common.resolveRevision(git_path, hash, platform_impl, allocator) catch {
+    const full_hash = git_helpers_mod.resolveRevision(git_path, hash, platform_impl, allocator) catch {
         const msg = try std.fmt.allocPrint(allocator, "error: could not apply {s}\n", .{hash});
         defer allocator.free(msg);
         try platform_impl.writeStderr(msg);
@@ -1019,7 +1020,7 @@ fn executePick(git_path: []const u8, hash: []const u8, original_line: []const u8
 fn executeSquashFixup(git_path: []const u8, item: TodoItem, dir_name: []const u8, reflog_action: []const u8, quiet: bool, allocator: std.mem.Allocator, platform_impl: *const Platform) !void {
     _ = quiet;
     const is_squash = item.cmd == .squash;
-    const full_hash = main_common.resolveRevision(git_path, item.hash, platform_impl, allocator) catch return;
+    const full_hash = git_helpers_mod.resolveRevision(git_path, item.hash, platform_impl, allocator) catch return;
     defer allocator.free(full_hash);
 
     // Write REBASE_HEAD
@@ -2543,20 +2544,20 @@ fn resolveOnto(git_path: []const u8, onto: ?[]const u8, keep_base: bool, head_ha
     if (onto) |onto_ref| {
         if (std.mem.endsWith(u8, onto_ref, "...")) {
             const base_ref = onto_ref[0 .. onto_ref.len - 3];
-            const base_h = try main_common.resolveRevision(git_path, base_ref, platform_impl, allocator);
+            const base_h = try git_helpers_mod.resolveRevision(git_path, base_ref, platform_impl, allocator);
             defer allocator.free(base_h);
             return findMergeBase(git_path, base_h, head_hash, allocator, platform_impl) catch try allocator.dupe(u8, base_h);
         }
         if (std.mem.indexOf(u8, onto_ref, "...")) |dot_pos| {
             const left = onto_ref[0..dot_pos];
             const right = onto_ref[dot_pos + 3 ..];
-            const lh = try main_common.resolveRevision(git_path, left, platform_impl, allocator);
+            const lh = try git_helpers_mod.resolveRevision(git_path, left, platform_impl, allocator);
             defer allocator.free(lh);
-            const rh = try main_common.resolveRevision(git_path, right, platform_impl, allocator);
+            const rh = try git_helpers_mod.resolveRevision(git_path, right, platform_impl, allocator);
             defer allocator.free(rh);
             return findMergeBase(git_path, lh, rh, allocator, platform_impl) catch try allocator.dupe(u8, lh);
         }
-        return main_common.resolveRevision(git_path, onto_ref, platform_impl, allocator) catch {
+        return git_helpers_mod.resolveRevision(git_path, onto_ref, platform_impl, allocator) catch {
             const msg = try std.fmt.allocPrint(allocator, "fatal: invalid --onto '{s}'\n", .{onto_ref});
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);
@@ -3356,7 +3357,7 @@ fn getConfiguredUpstream(git_path: []const u8, branch_name: []const u8, allocato
             const local_branch = merge_ref["refs/heads/".len..];
             return refs.getRef(git_path, try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{local_branch}), platform_impl, allocator) catch return error.NoUpstream;
         }
-        return main_common.resolveRevision(git_path, merge_ref, platform_impl, allocator) catch return error.NoUpstream;
+        return git_helpers_mod.resolveRevision(git_path, merge_ref, platform_impl, allocator) catch return error.NoUpstream;
     }
 
     // Remote tracking branch

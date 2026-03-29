@@ -1,6 +1,7 @@
 const std = @import("std");
 const platform_mod = @import("../platform/platform.zig");
 const main_mod = @import("../main_common.zig");
+const git_helpers_mod = @import("../git_helpers.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -645,7 +646,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
 
     // --worktree requires repo
     if (use_worktree) {
-        const gpc: ?[]const u8 = main_mod.findGitDirectory(allocator, platform_impl) catch null;
+        const gpc: ?[]const u8 = git_helpers_mod.findGitDirectory(allocator, platform_impl) catch null;
         if (gpc) |gp2| allocator.free(gp2) else {
             try platform_impl.writeStderr("fatal: --worktree can only be used inside a git repository\n");
             std.process.exit(128);
@@ -705,7 +706,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
         }
     }
 
-    const git_path_opt: ?[]const u8 = main_mod.findGitDirectory(allocator, platform_impl) catch null;
+    const git_path_opt: ?[]const u8 = git_helpers_mod.findGitDirectory(allocator, platform_impl) catch null;
     defer if (git_path_opt) |gp| allocator.free(gp);
 
     // --local requires repo
@@ -2843,7 +2844,7 @@ fn cfgLookup(sources: []const ConfigSource, key: []const u8, allocator: Allocato
             }
         }
     }
-    if (main_mod.getConfigOverride(key)) |ov| {
+    if (git_helpers_mod.getConfigOverride(key)) |ov| {
         if (result) |prev| allocator.free(prev);
         return try allocator.dupe(u8, ov);
     }

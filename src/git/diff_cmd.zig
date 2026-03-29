@@ -1,3 +1,4 @@
+const git_helpers_mod = @import("../git_helpers.zig");
 const std = @import("std");
 const pm = @import("../platform/platform.zig");
 const refs = @import("refs.zig");
@@ -130,24 +131,24 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *pm.ArgIterator, platform_imp
     var seen_dashdash = false;
 
     // Read config for prefix options
-    const git_path_for_config = mc.findGitDirectory(allocator, platform_impl) catch null;
+    const git_path_for_config = git_helpers_mod.findGitDirectory(allocator, platform_impl) catch null;
     defer if (git_path_for_config) |gp| allocator.free(gp);
 
     if (git_path_for_config != null) {
         // Check config overrides first, then read config file
-        if (mc.getConfigOverride("diff.noprefix")) |val| {
+        if (git_helpers_mod.getConfigOverride("diff.noprefix")) |val| {
             if (std.mem.eql(u8, val, "true")) opts.no_prefix = true;
         }
-        if (mc.getConfigOverride("diff.mnemonicprefix")) |val| {
+        if (git_helpers_mod.getConfigOverride("diff.mnemonicprefix")) |val| {
             if (std.mem.eql(u8, val, "true")) opts.mnemonic_prefix = true;
         }
-        if (mc.getConfigOverride("diff.srcprefix")) |val| {
+        if (git_helpers_mod.getConfigOverride("diff.srcprefix")) |val| {
             opts.src_prefix = val;
         }
-        if (mc.getConfigOverride("diff.dstprefix")) |val| {
+        if (git_helpers_mod.getConfigOverride("diff.dstprefix")) |val| {
             opts.dst_prefix = val;
         }
-        if (mc.getConfigOverride("diff.renames")) |val| {
+        if (git_helpers_mod.getConfigOverride("diff.renames")) |val| {
             if (std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "0")) {
                 opts.no_renames = true;
             }
@@ -338,7 +339,7 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *pm.ArgIterator, platform_imp
         return;
     }
 
-    const git_path = mc.findGitDirectory(allocator, platform_impl) catch {
+    const git_path = git_helpers_mod.findGitDirectory(allocator, platform_impl) catch {
         try platform_impl.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
         std.process.exit(128);
     };
@@ -429,7 +430,7 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *pm.ArgIterator, platform_imp
 }
 
 fn resolveToTree(allocator: std.mem.Allocator, ref_str: []const u8, git_path: []const u8, platform_impl: *const pm.Platform) ![]u8 {
-    const hash = try mc.resolveRevision(git_path, ref_str, platform_impl, allocator);
+    const hash = try git_helpers_mod.resolveRevision(git_path, ref_str, platform_impl, allocator);
     defer allocator.free(hash);
 
     const obj = try objects.GitObject.load(hash, git_path, platform_impl, allocator);
@@ -4189,12 +4190,12 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
 
     // Read log.diffMerges config (check -c overrides first, then config file)
     {
-        var dm_config = mc.getConfigOverride("log.diffmerges");
+        var dm_config = git_helpers_mod.getConfigOverride("log.diffmerges");
         var dm_config_alloc: ?[]u8 = null;
         defer if (dm_config_alloc) |d| allocator.free(d);
         if (dm_config == null) {
             // Read from git config file
-            const cfg_git_path = mc.findGitDirectory(allocator, pi) catch null;
+            const cfg_git_path = git_helpers_mod.findGitDirectory(allocator, pi) catch null;
             defer if (cfg_git_path) |gp| allocator.free(gp);
             if (cfg_git_path) |gp| {
                 const cfg_path = std.fmt.allocPrint(allocator, "{s}/config", .{gp}) catch null;
@@ -4243,7 +4244,7 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
         }
     }
 
-    const git_path = mc.findGitDirectory(allocator, pi) catch {
+    const git_path = git_helpers_mod.findGitDirectory(allocator, pi) catch {
         try pi.writeStderr("fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n");
         std.process.exit(128);
     };
@@ -4258,7 +4259,7 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
 
     if (committish_list.items.len > 0) {
         for (committish_list.items) |c| {
-            const h = mc.resolveRevision(git_path, c, pi, allocator) catch {
+            const h = git_helpers_mod.resolveRevision(git_path, c, pi, allocator) catch {
                 const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\n", .{c});
                 defer allocator.free(msg);
                 try pi.writeStderr(msg);
@@ -4778,7 +4779,7 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
         return;
     }
 
-    const git_path = mc.findGitDirectory(allocator, pi) catch {
+    const git_path = git_helpers_mod.findGitDirectory(allocator, pi) catch {
         try pi.writeStderr("fatal: not a git repository\n");
         std.process.exit(128);
     };
@@ -4798,7 +4799,7 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
     var numbered_files = false;
 
     // Check for config format.subjectprefix
-    if (mc.getConfigOverride("format.subjectprefix")) |val| {
+    if (git_helpers_mod.getConfigOverride("format.subjectprefix")) |val| {
         subject_prefix = val;
     }
     // Also check git config file
@@ -4873,13 +4874,13 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
         base_rev = range;
     }
 
-    const base_hash = mc.resolveRevision(git_path, base_rev, pi, allocator) catch {
+    const base_hash = git_helpers_mod.resolveRevision(git_path, base_rev, pi, allocator) catch {
         try pi.writeStderr("fatal: bad revision range\n");
         std.process.exit(128);
     };
     defer allocator.free(base_hash);
 
-    const tip_hash = mc.resolveRevision(git_path, tip_rev, pi, allocator) catch {
+    const tip_hash = git_helpers_mod.resolveRevision(git_path, tip_rev, pi, allocator) catch {
         try pi.writeStderr("fatal: bad revision range\n");
         std.process.exit(128);
     };

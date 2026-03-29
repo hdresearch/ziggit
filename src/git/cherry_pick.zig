@@ -1,3 +1,4 @@
+const git_helpers_mod = @import("../git_helpers.zig");
 // cherry_pick.zig - Git cherry-pick implementation
 // Provides both cherry-pick utilities and the full cherry-pick command.
 
@@ -41,7 +42,7 @@ const FileEntry = struct {
 };
 
 pub fn nativeCmdCherryPick(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const Platform) !void {
-    const git_path = try main_common.findGitDirectory(allocator, platform_impl);
+    const git_path = try git_helpers_mod.findGitDirectory(allocator, platform_impl);
     defer allocator.free(git_path);
 
     var positionals = std.array_list.Managed([]const u8).init(allocator);
@@ -89,7 +90,7 @@ pub fn nativeCmdCherryPick(allocator: std.mem.Allocator, args: [][]const u8, com
     }
 
     for (positionals.items) |commit_ref| {
-        const commit_hash = main_common.resolveRevision(git_path, commit_ref, platform_impl, allocator) catch {
+        const commit_hash = git_helpers_mod.resolveRevision(git_path, commit_ref, platform_impl, allocator) catch {
             const msg = try std.fmt.allocPrint(allocator, "fatal: bad revision '{s}'\n", .{commit_ref});
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);

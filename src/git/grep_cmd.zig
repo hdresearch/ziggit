@@ -1,3 +1,4 @@
+const git_helpers_mod = @import("../git_helpers.zig");
 const std = @import("std");
 const objects = @import("objects.zig");
 const index_mod = @import("../git/index.zig");
@@ -795,10 +796,10 @@ pub fn cmdGrep(allocator: Allocator, args: *platform_mod.ArgIterator, platform_i
     }
 
     // Find git directory
-    const git_dir = main_common.findGitDirectory(allocator, platform_impl) catch {
+    const git_dir = git_helpers_mod.findGitDirectory(allocator, platform_impl) catch {
         // Not in a git repository
         // Check if fallbackToNoIndex is enabled
-        if (main_common.getConfigOverride("grep.fallbacktonoindex")) |val| {
+        if (git_helpers_mod.getConfigOverride("grep.fallbacktonoindex")) |val| {
             if (std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "yes")) {
                 try grepNoIndex(allocator, &opts, platform_impl);
                 return;
@@ -834,15 +835,15 @@ pub fn cmdGrep(allocator: Allocator, args: *platform_mod.ArgIterator, platform_i
 
 fn readGrepConfig(opts: *GrepOptions, allocator: Allocator, platform_impl: *const platform_mod.Platform) void {
     // Read from global config overrides (-c key=value on command line)
-    if (main_common.global_config_overrides) |overrides| {
+    if (git_helpers_mod.global_config_overrides) |overrides| {
         for (overrides.items) |ov| {
-            if (main_common.asciiCaseInsensitiveEqual(ov.key, "grep.linenumber")) {
+            if (git_helpers_mod.asciiCaseInsensitiveEqual(ov.key, "grep.linenumber")) {
                 if (std.mem.eql(u8, ov.value, "true") or std.mem.eql(u8, ov.value, "1")) {
                     opts.config_linenumber = true;
                 } else if (std.mem.eql(u8, ov.value, "false") or std.mem.eql(u8, ov.value, "0")) {
                     opts.config_linenumber = false;
                 }
-            } else if (main_common.asciiCaseInsensitiveEqual(ov.key, "grep.patterntype")) {
+            } else if (git_helpers_mod.asciiCaseInsensitiveEqual(ov.key, "grep.patterntype")) {
                 const val = ov.value;
                 if (std.ascii.eqlIgnoreCase(val, "basic")) {
                     opts.pattern_type_values.append(.basic) catch {};
@@ -856,7 +857,7 @@ fn readGrepConfig(opts: *GrepOptions, allocator: Allocator, platform_impl: *cons
                 } else if (std.ascii.eqlIgnoreCase(val, "default")) {
                     opts.pattern_type_values.append(null) catch {};
                 }
-            } else if (main_common.asciiCaseInsensitiveEqual(ov.key, "grep.extendedregexp")) {
+            } else if (git_helpers_mod.asciiCaseInsensitiveEqual(ov.key, "grep.extendedregexp")) {
                 if (std.mem.eql(u8, ov.value, "true") or std.mem.eql(u8, ov.value, "1")) {
                     opts.extended_regexp_values.append(true) catch {};
                 } else if (std.mem.eql(u8, ov.value, "false") or std.mem.eql(u8, ov.value, "0")) {
@@ -893,9 +894,9 @@ fn getPrefix(repo_root: []const u8, cwd: []const u8, allocator: Allocator) []con
 
 fn isRevision(arg: []const u8, allocator: Allocator, platform_impl: *const platform_mod.Platform) bool {
     // Try to resolve as a git revision
-    const git_dir = main_common.findGitDirectory(allocator, platform_impl) catch return false;
+    const git_dir = git_helpers_mod.findGitDirectory(allocator, platform_impl) catch return false;
     defer allocator.free(git_dir);
-    const hash = main_common.resolveRevision(git_dir, arg, platform_impl, allocator) catch return false;
+    const hash = git_helpers_mod.resolveRevision(git_dir, arg, platform_impl, allocator) catch return false;
     defer allocator.free(hash);
     return true;
 }
@@ -1096,7 +1097,7 @@ fn grepTreeIsh(allocator: Allocator, opts: *GrepOptions, git_dir: []const u8, re
     const tree_ish = opts.tree_ish.?;
 
     // Resolve the revision to a commit hash
-    const commit_hash = main_common.resolveRevision(git_dir, tree_ish, platform_impl, allocator) catch {
+    const commit_hash = git_helpers_mod.resolveRevision(git_dir, tree_ish, platform_impl, allocator) catch {
         const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\n", .{tree_ish});
         defer allocator.free(msg);
         try platform_impl.writeStderr(msg);

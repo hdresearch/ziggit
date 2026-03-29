@@ -1,3 +1,4 @@
+const git_helpers_mod = @import("../git_helpers.zig");
 const std = @import("std");
 const pm = @import("../platform/platform.zig");
 const refs = @import("refs.zig");
@@ -77,7 +78,7 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
     }
     if (fp == null) { try pi.writeStderr("usage: git blame [<options>] [<rev>] [--] <file>\n"); std.process.exit(128); }
 
-    const gp = mc.findGitDirectory(a, pi) catch {
+    const gp = git_helpers_mod.findGitDirectory(a, pi) catch {
         try pi.writeStderr("fatal: not a git repository (or any of the parent directories): .git\n");
         std.process.exit(128);
         unreachable;
@@ -111,13 +112,13 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
         // Handle ^REV syntax (boundary commit)
         if (r.len > 0 and r[0] == '^') rev_is_boundary = true;
         const actual_rev = if (r.len > 0 and r[0] == '^') r[1..] else r;
-        hh = mc.resolveRevision(gp, actual_rev, pi, a) catch (refs.resolveRef(gp, actual_rev, pi, a) catch null);
+        hh = git_helpers_mod.resolveRevision(gp, actual_rev, pi, a) catch (refs.resolveRef(gp, actual_rev, pi, a) catch null);
         // Dereference tag objects to commits (follow chain)
         if (hh) |h| {
             var cur_h = h;
             var depth: u32 = 0;
             while (depth < 10) : (depth += 1) {
-                const data = mc.readGitObjectContent(gp, cur_h, a) catch break;
+                const data = git_helpers_mod.readGitObjectContent(gp, cur_h, a) catch break;
                 defer a.free(data);
                 if (std.mem.startsWith(u8, data, "object ") and data.len > 47) {
                     if (std.mem.indexOf(u8, data, "\n")) |nl| {
@@ -741,9 +742,9 @@ fn matchCharClass(ch: u8, elem: []const u8) bool {
 }
 
 fn gf(gp: []const u8, ch: []const u8, fp2: []const u8, a2: std.mem.Allocator) ![]const u8 {
-    const bh = try mc.getTreeEntryHashFromCommit(gp, ch, fp2, a2);
+    const bh = try git_helpers_mod.getTreeEntryHashFromCommit(gp, ch, fp2, a2);
     defer a2.free(bh);
-    return try mc.readGitObjectContent(gp, bh, a2);
+    return try git_helpers_mod.readGitObjectContent(gp, bh, a2);
 }
 
 fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, tl: []const []const u8, es: []B.BlameEntry, wl: ?[]const []const u8, first_parent_only: bool) !void {
@@ -773,7 +774,7 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
         defer act.deinit();
         for (cur.idx) |idx| { if (ub[idx]) try act.append(idx); }
         if (act.items.len == 0) continue;
-        const cc = mc.readGitObjectContent(gp, cur.hash, a) catch continue;
+        const cc = git_helpers_mod.readGitObjectContent(gp, cur.hash, a) catch continue;
         defer a.free(cc);
         const info = B.parseInfo(cc, a) catch continue;
         defer B.freeInfo(info, a);
