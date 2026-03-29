@@ -8879,7 +8879,8 @@ pub fn validateRefnameOptions(options: []const u8) FormatAtomError {
     for (valid_opts) |vo| {
         if (std.mem.eql(u8, options, vo) or std.mem.startsWith(u8, options, vo)) return .{ .valid = true };
     }
-    return .{ .valid = false };
+    const msg = std.fmt.allocPrint(std.heap.page_allocator, "fatal: unrecognized %(refname) argument: {s}\n", .{options}) catch return .{ .valid = false };
+    return .{ .valid = false, .err_msg = msg };
 }
 
 
@@ -9581,7 +9582,7 @@ pub fn formatTrailers(allocator: std.mem.Allocator, raw_trailers: []const u8, op
         }
     }
 
-    if (result.items.len > 0) {
+    if (result.items.len > 0 and separator == null) {
         try result.append('\n');
     }
 

@@ -623,7 +623,14 @@ pub fn validateFormatAtom(field: []const u8, allocator: std.mem.Allocator) helpe
     };
     var matched_atom: ?[]const u8 = null;
     for (valid_atoms) |atom| {
-        if (std.mem.eql(u8, field, atom)) return .{ .valid = true };
+        if (std.mem.eql(u8, field, atom)) {
+            // rest atom is only valid in cat-file --batch context, not for-each-ref
+            if (std.mem.eql(u8, field, "rest")) {
+                const msg = std.fmt.allocPrint(allocator, "fatal: %(rest) atom used in --format option is not allowed in this context\n", .{}) catch return .{ .valid = false };
+                return .{ .valid = false, .err_msg = msg };
+            }
+            return .{ .valid = true };
+        }
         if (std.mem.startsWith(u8, field, atom) and field.len > atom.len and field[atom.len] == ':') {
             matched_atom = atom;
             break;
@@ -642,6 +649,66 @@ pub fn validateFormatAtom(field: []const u8, allocator: std.mem.Allocator) helpe
     }
     if (std.mem.eql(u8, atom, "objectname") or std.mem.eql(u8, atom, "*objectname")) return helpers.validateObjectnameOptions(options);
     if (std.mem.eql(u8, atom, "refname")) return helpers.validateRefnameOptions(options);
+    if (std.mem.eql(u8, atom, "trailers")) return validateTrailerOptions(options, allocator);
+    if (std.mem.eql(u8, atom, "contents")) {
+        // Validate contents sub-options
+        if (std.mem.startsWith(u8, options, "trailers:")) {
+            return validateTrailerOptions(options["trailers:".len..], allocator);
+        }
+        if (std.mem.eql(u8, options, "trailers") or
+            std.mem.eql(u8, options, "subject") or
+            std.mem.eql(u8, options, "body") or
+            std.mem.eql(u8, options, "signature") or
+            std.mem.eql(u8, options, "size"))
+        {
+            return .{ .valid = true };
+        }
+        // Unknown contents option
+        const msg = std.fmt.allocPrint(allocator, "fatal: unrecognized %(contents) argument: {s}\n", .{options}) catch return .{ .valid = false };
+        return .{ .valid = false, .err_msg = msg };
+    }
+    if (std.mem.eql(u8, atom, "subject")) {
+        if (std.mem.eql(u8, options, "sanitize")) return .{ .valid = true };
+        const msg = std.fmt.allocPrint(allocator, "fatal: unrecognized %(subject) argument: {s}\n", .{options}) catch return .{ .valid = false };
+        return .{ .valid = false, .err_msg = msg };
+    }
+    if (std.mem.eql(u8, atom, "HEAD")) {
+        const msg = std.fmt.allocPrint(allocator, "fatal: %(HEAD) does not take arguments\n", .{}) catch return .{ .valid = false };
+        return .{ .valid = false, .err_msg = msg };
+    }
+    if (std.mem.eql(u8, atom, "rest")) {
+        const msg = std.fmt.allocPrint(allocator, "fatal: %(rest) does not take arguments, use %(trailers) instead\n", .{}) catch return .{ .valid = false };
+        return .{ .valid = false, .err_msg = msg };
+    }
+    return .{ .valid = true };
+}
+
+fn validateTrailerOptions(options: []const u8, allocator: std.mem.Allocator) helpers.FormatAtomError {
+    const valid_trailer_opts = [_][]const u8{ "unfold", "only", "valueonly", "key", "separator", "key_value_separator" };
+    var opts_iter = std.mem.splitScalar(u8, options, ',');
+    while (opts_iter.next()) |opt| {
+        const trimmed = std.mem.trim(u8, opt, " \t");
+        if (trimmed.len == 0) continue;
+        // Extract the option name (before =)
+        const eq_pos = std.mem.indexOfScalar(u8, trimmed, '=');
+        const opt_name = if (eq_pos) |p| trimmed[0..p] else trimmed;
+        var found = false;
+        for (valid_trailer_opts) |valid_opt| {
+            if (std.mem.eql(u8, opt_name, valid_opt)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            const msg = std.fmt.allocPrint(allocator, "fatal: unknown %(trailers) argument: {s}\n", .{opt_name}) catch return .{ .valid = false };
+            return .{ .valid = false, .err_msg = msg };
+        }
+        // Check that 'key' has a value
+        if (std.mem.eql(u8, opt_name, "key") and eq_pos == null) {
+            const msg = std.fmt.allocPrint(allocator, "fatal: expected %(trailers:key=<value>)\n", .{}) catch return .{ .valid = false };
+            return .{ .valid = false, .err_msg = msg };
+        }
+    }
     return .{ .valid = true };
 }
 
