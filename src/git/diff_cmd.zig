@@ -531,7 +531,7 @@ fn freeChange(allocator: std.mem.Allocator, c: *FileChange) void {
     if (c.new_content.len > 0) allocator.free(c.new_content);
 }
 
-const EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf899d69f82cf0101";
+const EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 fn collectTreeChanges(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, prefix: []const u8, git_path: []const u8, pathspecs: []const []const u8, pi: *const pm.Platform, out: *std.ArrayList(FileChange)) !void {
     const is_empty1 = std.mem.eql(u8, tree1_hash, EMPTY_TREE_HASH);
@@ -619,7 +619,7 @@ fn collectTreeChanges(allocator: std.mem.Allocator, tree1_hash: []const u8, tree
         } else if (e1 != null and e2 == null) {
             // Deleted
             if (is_tree(e1.?.mode)) {
-                const empty_tree = "4b825dc642cb6eb9a060e54bf899d69f82cf0101";
+                const empty_tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
                 try collectTreeChanges(allocator, e1.?.hash, empty_tree, full_name, git_path, pathspecs, pi, out);
                 allocator.free(full_name);
                 continue;
@@ -646,7 +646,7 @@ fn collectTreeChanges(allocator: std.mem.Allocator, tree1_hash: []const u8, tree
         } else if (e2 != null) {
             // Added
             if (is_tree(e2.?.mode)) {
-                const empty_tree = "4b825dc642cb6eb9a060e54bf899d69f82cf0101";
+                const empty_tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
                 try collectTreeChanges(allocator, empty_tree, e2.?.hash, full_name, git_path, pathspecs, pi, out);
                 allocator.free(full_name);
                 continue;
@@ -3875,7 +3875,7 @@ fn commitMatchesPickaxe(data: []const u8, parent_hash: ?[]const u8, git_path: []
     if (tree_hash.len == 0) return false;
 
     // Get parent tree
-    var parent_tree: []const u8 = "4b825dc642cb6eb9a060e54bf899d69f82cf0101"; // empty tree
+    var parent_tree: []const u8 = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"; // empty tree
     var parent_tree_alloc: ?[]u8 = null;
     defer if (parent_tree_alloc) |a| allocator.free(a);
     if (parent_hash) |ph| {
@@ -3924,7 +3924,7 @@ fn writeDiffForCommit(hash: []const u8, data: []const u8, parent_hash: ?[]const 
     const tree_hash = extractField(data, "tree ");
     if (tree_hash.len == 0) return;
 
-    var p_tree: []const u8 = "4b825dc642cb6eb9a060e54bf899d69f82cf0101";
+    var p_tree: []const u8 = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
     var p_tree_alloc: ?[]u8 = null;
     defer if (p_tree_alloc) |a| allocator.free(a);
     _ = hash;
@@ -3936,7 +3936,7 @@ fn writeDiffForCommit(hash: []const u8, data: []const u8, parent_hash: ?[]const 
             p_tree_alloc = allocator.dupe(u8, pt) catch return;
             p_tree = p_tree_alloc.?;
         }
-    } else if (!lo.root) {
+    } else if (!lo.root and !lo.show_mode) {
         return; // No parent and --root not specified = no diff for initial commit
     }
 
@@ -4598,7 +4598,7 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
     }
 
     // Show mode: just show the specified commits (don't walk history for non-show)
-    if (show_mode and committish_list.items.len > 0) {
+    if (show_mode) {
         for (start_hashes.items, 0..) |hash, idx| {
             const obj = objects.GitObject.load(hash, git_path, pi, allocator) catch {
                 const msg = try std.fmt.allocPrint(allocator, "fatal: bad object {s}\n", .{hash});
@@ -4662,7 +4662,7 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
                 }
             } else {
                 const ph = if (parents.items.len > 0) parents.items[0] else null;
-                if ((ph != null or lo.root) and !lo.patch_with_stat) {
+                if ((ph != null or lo.root or lo.show_mode) and !lo.patch_with_stat) {
                     try pi.writeStdout("\n");
                 }
                 try writeDiffForCommit(hash, obj.data, ph, &lo, git_path, pi, allocator);

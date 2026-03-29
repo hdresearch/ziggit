@@ -727,14 +727,17 @@ const TreeEntryInfo = helpers.TreeEntryInfo; // = struct { mode: u32, hash: [20]
 
 
 pub fn diffTwoTreesPatch(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, prefix: []const u8, git_path: []const u8, quiet: bool, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform) !bool {
-    const tree1_obj = objects.GitObject.load(tree1_hash, git_path, platform_impl, allocator) catch return false;
-    defer tree1_obj.deinit(allocator);
-    const tree2_obj = objects.GitObject.load(tree2_hash, git_path, platform_impl, allocator) catch return false;
-    defer tree2_obj.deinit(allocator);
+    const empty_tree_hash = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+    const is_empty1 = std.mem.eql(u8, tree1_hash, empty_tree_hash);
+    const is_empty2 = std.mem.eql(u8, tree2_hash, empty_tree_hash);
+    const tree1_obj = if (!is_empty1) (objects.GitObject.load(tree1_hash, git_path, platform_impl, allocator) catch return false) else null;
+    defer if (tree1_obj) |obj| obj.deinit(allocator);
+    const tree2_obj = if (!is_empty2) (objects.GitObject.load(tree2_hash, git_path, platform_impl, allocator) catch return false) else null;
+    defer if (tree2_obj) |obj| obj.deinit(allocator);
     
-    var entries1 = tree_mod.parseTree(tree1_obj.data, allocator) catch return false;
+    var entries1 = if (tree1_obj) |obj| (tree_mod.parseTree(obj.data, allocator) catch return false) else std.ArrayList(tree_mod.TreeEntry).init(allocator);
     defer entries1.deinit();
-    var entries2 = tree_mod.parseTree(tree2_obj.data, allocator) catch return false;
+    var entries2 = if (tree2_obj) |obj| (tree_mod.parseTree(obj.data, allocator) catch return false) else std.ArrayList(tree_mod.TreeEntry).init(allocator);
     defer entries2.deinit();
     
     var map1 = std.StringHashMap(tree_mod.TreeEntry).init(allocator);
