@@ -2782,7 +2782,6 @@ fn outputChanges(changes_slice: []const FileChange, opts: *const DiffOpts, pi: *
             if (!c.is_new and !c.is_deleted and !c.is_binary and !c.is_unmerged) {
                 const old_lines = diff_stats.countLines(c.old_content);
                 const new_lines = diff_stats.countLines(c.new_content);
-                pi.writeStderr(std.fmt.allocPrint(allocator, "DEBUG break-rewrite: old_lines={d} new_lines={d} ins={d} dels={d} old_content_len={d} new_content_len={d}\n", .{old_lines, new_lines, c.insertions, c.deletions, c.old_content.len, c.new_content.len}) catch "DBG ERR\n") catch {};
                 if (old_lines > 0) {
                     const total = c.insertions + c.deletions;
                     const max_possible = old_lines + new_lines;
