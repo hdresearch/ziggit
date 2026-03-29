@@ -597,34 +597,59 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                 if (std.mem.startsWith(u8, line, "parent ") and commit_parent_h == null) commit_parent_h = line["parent ".len..];
             }
             
-            if (commit_tree_h) |_| {
-                // helpers.Count files that changed (simplified)
-                const file_count = index.entries.items.len;
-                if (is_root and file_count > 0) {
+            if (commit_tree_h) |tree_h| {
+                if (is_root) {
                     // Root commit: all files are new
-                    var total_lines: usize = 0;
-                    for (index.entries.items) |entry| {
-                        const repo_root_path = std.fs.path.dirname(git_path) orelse ".";
-                        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root_path, entry.path });
-                        defer allocator.free(full_path);
-                        if (platform_impl.fs.readFile(allocator, full_path)) |content| {
-                            defer allocator.free(content);
-                            var line_count: usize = 0;
-                            for (content) |c| {
-                                if (c == '\n') line_count += 1;
-                            }
-                            if (content.len > 0 and content[content.len - 1] != '\n') line_count += 1;
-                            total_lines += line_count;
-                        } else |_| {}
+                    const file_count = index.entries.items.len;
+                    if (file_count > 0) {
+                        var total_lines: usize = 0;
+                        for (index.entries.items) |entry| {
+                            const repo_root_path = std.fs.path.dirname(git_path) orelse ".";
+                            const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root_path, entry.path });
+                            defer allocator.free(full_path);
+                            if (platform_impl.fs.readFile(allocator, full_path)) |content| {
+                                defer allocator.free(content);
+                                var line_count: usize = 0;
+                                for (content) |c| {
+                                    if (c == '\n') line_count += 1;
+                                }
+                                if (content.len > 0 and content[content.len - 1] != '\n') line_count += 1;
+                                total_lines += line_count;
+                            } else |_| {}
+                        }
+                        const stat_msg = try std.fmt.allocPrint(allocator, " {d} file{s} changed, {d} insertion{s}(+)\n", .{
+                            file_count,
+                            if (file_count != 1) @as([]const u8, "s") else "",
+                            total_lines,
+                            if (total_lines != 1) @as([]const u8, "s") else "",
+                        });
+                        defer allocator.free(stat_msg);
+                        try platform_impl.writeStdout(stat_msg);
                     }
-                    const stat_msg = try std.fmt.allocPrint(allocator, " {d} file{s} changed, {d} insertion{s}(+)\n", .{
-                        file_count,
-                        if (file_count != 1) @as([]const u8, "s") else "",
-                        total_lines,
-                        if (total_lines != 1) @as([]const u8, "s") else "",
-                    });
-                    defer allocator.free(stat_msg);
-                    try platform_impl.writeStdout(stat_msg);
+                } else if (commit_parent_h) |parent_h| {
+                    // Non-root commit: diff current tree vs parent tree
+                    const parent_obj = objects.GitObject.load(parent_h, git_path, platform_impl, allocator) catch null;
+                    if (parent_obj) |po| {
+                        defer po.deinit(allocator);
+                        var parent_tree_h: ?[]const u8 = null;
+                        var plines = std.mem.splitSequence(u8, po.data, "\n");
+                        while (plines.next()) |pline| {
+                            if (pline.len == 0) break;
+                            if (std.mem.startsWith(u8, pline, "tree ")) {
+                                parent_tree_h = pline["tree ".len..];
+                                break;
+                            }
+                        }
+                        if (parent_tree_h) |pt_h| {
+                            const stat_line = helpers.computeDiffStatSummary(allocator, pt_h, tree_h, git_path, platform_impl) catch null;
+                            if (stat_line) |sl| {
+                                defer allocator.free(sl);
+                                if (sl.len > 0) {
+                                    try platform_impl.writeStdout(sl);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

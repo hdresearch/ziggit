@@ -823,11 +823,7 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
         defer { for (pars.items) |p| a.free(p); pars.deinit(); }
         // Check grafts first
         const graft_parents = loadGraftParents(a, gp, cur.hash) catch null;
-        if (graft_parents != null) {
-            const dbg = std.fmt.allocPrint(a, "GRAFT: commit={s} parents_len={d}\n", .{ cur.hash[0..8], graft_parents.?.len }) catch "";
-            defer if (dbg.len > 0) a.free(dbg);
-            std.io.getStdErr().writeAll(dbg) catch {};
-        }
+
         if (graft_parents) |gp_list| {
             defer a.free(gp_list);
             var gp_iter = std.mem.tokenizeScalar(u8, gp_list, ' ');
@@ -855,12 +851,33 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
         const t2t = try B.doLcs(a, tl, tls.items);
         defer a.free(t2t);
         if (pars.items.len == 0) {
+            var tree_used2 = try a.alloc(bool, tls.items.len);
+            defer a.free(tree_used2);
+            @memset(tree_used2, false);
+            // First pass: use LCS matches
             for (act.items) |idx| {
                 if (ub[idx] and t2t[idx] != std.math.maxInt(usize)) {
                     B.setEntry(&es[idx], cur.hash, info, a) catch {};
                     es[idx].is_boundary = true;
                     es[idx].orig_line = t2t[idx] + 1;
+                    tree_used2[t2t[idx]] = true;
                     ub[idx] = false;
+                }
+            }
+            // Second pass: content match for remaining lines
+            for (act.items) |idx| {
+                if (ub[idx]) {
+                    const line_content = tl[idx];
+                    for (tls.items, 0..) |tree_line, ti| {
+                        if (!tree_used2[ti] and std.mem.eql(u8, line_content, tree_line)) {
+                            B.setEntry(&es[idx], cur.hash, info, a) catch {};
+                            es[idx].is_boundary = true;
+                            es[idx].orig_line = ti + 1;
+                            tree_used2[ti] = true;
+                            ub[idx] = false;
+                            break;
+                        }
+                    }
                 }
             }
             continue;
@@ -875,16 +892,39 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
             var pl = B.splitLines(a, pf) catch continue;
             defer pl.deinit();
             const t2p = try B.doLcs(a, tls.items, pl.items);
+
             defer a.free(t2p);
             var pp = std.ArrayList(usize).init(a);
             defer pp.deinit();
+            // Track which parent lines are already used
+            var parent_used = try a.alloc(bool, pl.items.len);
+            defer a.free(parent_used);
+            @memset(parent_used, false);
+            // First pass: use LCS matches
             for (act.items) |idx| {
                 if (ub[idx] and t2t[idx] != std.math.maxInt(usize) and t2p[t2t[idx]] != std.math.maxInt(usize) and !fap[idx]) {
                     fap[idx] = true;
+                    parent_used[t2p[t2t[idx]]] = true;
                     try pp.append(idx);
                 }
             }
-            if (pp.items.len > 0) try q.append(.{ .hash = try a.dupe(u8, ph), .idx = try a.dupe(usize, pp.items) });
+            // Second pass: for unclaimed lines, try to find a content match in parent
+            for (act.items) |idx| {
+                if (ub[idx] and !fap[idx] and t2t[idx] != std.math.maxInt(usize)) {
+                    const line_content = tls.items[t2t[idx]];
+                    for (pl.items, 0..) |parent_line, pi| {
+                        if (!parent_used[pi] and std.mem.eql(u8, line_content, parent_line)) {
+                            fap[idx] = true;
+                            parent_used[pi] = true;
+                            try pp.append(idx);
+                            break;
+                        }
+                    }
+                }
+            }
+            if (pp.items.len > 0) {
+                try q.append(.{ .hash = try a.dupe(u8, ph), .idx = try a.dupe(usize, pp.items) });
+            }
         }
         for (act.items) |idx| {
             if (ub[idx] and !fap[idx] and t2t[idx] != std.math.maxInt(usize)) {
