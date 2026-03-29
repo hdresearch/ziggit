@@ -8885,8 +8885,9 @@ pub fn validateRefnameOptions(options: []const u8) FormatAtomError {
     for (valid_opts) |vo| {
         if (std.mem.eql(u8, options, vo) or std.mem.startsWith(u8, options, vo)) return .{ .valid = true };
     }
-    const msg = std.fmt.allocPrint(std.heap.page_allocator, "fatal: unrecognized %(refname) argument: {s}\n", .{options}) catch return .{ .valid = false };
-    return .{ .valid = false, .err_msg = msg };
+    // Note: this msg will be freed by the caller using the passed allocator, but we don't have access to it here.
+    // Return without error message - the caller will generate a generic one.
+    return .{ .valid = false };
 }
 
 
