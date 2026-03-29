@@ -2902,6 +2902,7 @@ const LogOpts = struct {
     fixed_strings: bool = false,
     grep_reflog: bool = false,
     invert_grep: bool = false,
+    use_color: bool = false,
 
     const DiffMergesMode = enum { default, off, on, first_parent, combined, dense_combined, separate };
     const DecorateMode = enum { no, short, full };
@@ -3529,6 +3530,7 @@ fn writeCommitHeader(hash: []const u8, data: []const u8, lo: *const LogOpts, is_
     // commit line
     var commit_line = std.ArrayList(u8).init(allocator);
     defer commit_line.deinit();
+    if (lo.use_color) try commit_line.appendSlice("\x1b[33m");
     try commit_line.appendSlice("commit ");
     try commit_line.appendSlice(hash);
 
@@ -3544,6 +3546,7 @@ fn writeCommitHeader(hash: []const u8, data: []const u8, lo: *const LogOpts, is_
             }
         }
     }
+    if (lo.use_color) try commit_line.appendSlice("\x1b[m");
     try commit_line.append('\n');
     try pi.writeStdout(commit_line.items);
 
@@ -4342,10 +4345,19 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
             lo.walk_reflog = true;
         } else if (std.mem.startsWith(u8, arg, "--encoding=")) {
             lo.output_encoding = arg["--encoding=".len..];
+        } else if (std.mem.eql(u8, arg, "--color") or std.mem.eql(u8, arg, "--color=always")) {
+            lo.use_color = true;
+        } else if (std.mem.eql(u8, arg, "--no-color") or std.mem.eql(u8, arg, "--color=never")) {
+            lo.use_color = false;
+        } else if (std.mem.startsWith(u8, arg, "--color=")) {
+            // --color=auto - check GIT_PAGER_IN_USE
+            const val = arg["--color=".len..];
+            if (std.mem.eql(u8, val, "auto")) {
+                if (std.posix.getenv("GIT_PAGER_IN_USE")) |_| lo.use_color = true;
+            }
         } else if (std.mem.eql(u8, arg, "--source") or std.mem.eql(u8, arg, "--quiet") or
             std.mem.eql(u8, arg, "--use-mailmap") or std.mem.eql(u8, arg, "--no-mailmap") or
-            std.mem.eql(u8, arg, "--no-diff-merges") or std.mem.eql(u8, arg, "--color") or
-            std.mem.startsWith(u8, arg, "--color=") or std.mem.eql(u8, arg, "--no-color") or
+            std.mem.eql(u8, arg, "--no-diff-merges") or
             std.mem.eql(u8, arg, "--expand-tabs") or std.mem.startsWith(u8, arg, "--expand-tabs=") or
             std.mem.eql(u8, arg, "--no-expand-tabs") or
             std.mem.eql(u8, arg, "--no-standard-notes") or std.mem.eql(u8, arg, "--standard-notes") or
@@ -4368,6 +4380,23 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
     // In whatchanged mode, -p should replace default raw
     if (whatchanged_mode and lo.explicit_patch and !lo.patch_with_raw) {
         lo.show_raw = false;
+    }
+
+    // Auto-detect color: if color.ui=auto and GIT_PAGER_IN_USE is set, enable color
+    if (!lo.use_color) {
+        const gp_for_color = git_helpers_mod.findGitDirectory(allocator, pi) catch null;
+        defer if (gp_for_color) |gpc| allocator.free(gpc);
+        if (gp_for_color) |gpc| {
+            const color_ui = git_helpers_mod.getConfigValueByKey(gpc, "color.ui", allocator);
+            if (color_ui) |val| {
+                defer allocator.free(val);
+                if (std.ascii.eqlIgnoreCase(val, "auto")) {
+                    if (std.posix.getenv("GIT_PAGER_IN_USE")) |_| lo.use_color = true;
+                } else if (std.ascii.eqlIgnoreCase(val, "always") or std.ascii.eqlIgnoreCase(val, "true")) {
+                    lo.use_color = true;
+                }
+            }
+        }
     }
 
     // Read log.diffMerges config (check -c overrides first, then config file)
