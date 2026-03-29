@@ -2010,9 +2010,10 @@ fn cmdInit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     const env_work_tree = std.process.getEnvVarOwned(allocator, "GIT_WORK_TREE") catch null;
     defer if (env_work_tree) |w| allocator.free(w);
     
-    // Check GIT_DIR environment variable
-    const env_git_dir = std.process.getEnvVarOwned(allocator, "GIT_DIR") catch null;
-    defer if (env_git_dir) |g| allocator.free(g);
+    // Check GIT_DIR environment variable — also respect --git-dir= global override
+    const env_git_dir_raw = std.process.getEnvVarOwned(allocator, "GIT_DIR") catch null;
+    defer if (env_git_dir_raw) |g| allocator.free(g);
+    const env_git_dir: ?[]const u8 = if (global_git_dir_override) |gd| gd else env_git_dir_raw;
     
     if (env_work_tree != null) {
         if (bare) {
@@ -2034,7 +2035,7 @@ fn cmdInit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platfo
     }
     
     // Check --separate-git-dir + implicit bare (GIT_DIR=.) incompatibility 
-    if (separate_git_dir != null and env_git_dir != null) {
+    if (separate_git_dir != null and env_git_dir != null and global_git_dir_override == null) {
         // When GIT_DIR is set, it's implicitly bare-like, incompatible with --separate-git-dir
         try platform_impl.writeStderr("fatal: --separate-git-dir incompatible with bare repository\n");
         std.process.exit(128);
