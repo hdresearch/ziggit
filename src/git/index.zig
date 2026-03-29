@@ -560,16 +560,6 @@ pub const Index = struct {
                     break;
                 }
             }
-        } else if (version == 3) {
-            // Downgrade to version 2 if no entries need extended flags
-            var needs_v3 = false;
-            for (self.entries.items) |entry| {
-                if (entry.extended_flags != null) {
-                    needs_v3 = true;
-                    break;
-                }
-            }
-            if (!needs_v3) version = 2;
         }
         if (needs_v3 and version < 3) {
             version = 3;
