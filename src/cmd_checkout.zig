@@ -194,6 +194,14 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
             const reflog_msg_b = try std.fmt.allocPrint(allocator, "checkout: moving from {s} to {s}", .{ from_name, branch_name });
             defer allocator.free(reflog_msg_b);
             helpers.writeReflogEntry(git_path, "HEAD", old_h, old_h, reflog_msg_b, allocator, platform_impl) catch {};
+
+            // Write reflog entry for the new branch ref
+            const branch_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name});
+            defer allocator.free(branch_ref);
+            const created_from = if (start_point_arg) |sp| sp else "HEAD";
+            const branch_reflog_msg = try std.fmt.allocPrint(allocator, "branch: Created from {s}", .{created_from});
+            defer allocator.free(branch_reflog_msg);
+            helpers.writeReflogEntry(git_path, branch_ref, "0000000000000000000000000000000000000000", old_h, branch_reflog_msg, allocator, platform_impl) catch {};
         }
 
         // Set up tracking if -t was specified
