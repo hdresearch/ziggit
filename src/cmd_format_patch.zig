@@ -35,6 +35,8 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *platform_mod.ArgItera
     var subject_prefix: []const u8 = "PATCH";
     var start_number: usize = 1;
     var signoff = false;
+    var dash_n_count: ?usize = null;
+    var positional_rev: ?[]const u8 = null;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--stdout")) {
             stdout_mode = true;
@@ -52,14 +54,26 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *platform_mod.ArgItera
         } else if (std.mem.startsWith(u8, arg, "--start-number=")) {
             start_number = std.fmt.parseInt(usize, arg["--start-number=".len..], 10) catch 1;
         } else if (std.mem.startsWith(u8, arg, "-") and arg.len > 1 and std.ascii.isDigit(arg[1])) {
-            // -N means last N commits from helpers.HEAD
-            const count = std.fmt.parseInt(usize, arg[1..], 10) catch 1;
-            const range = std.fmt.allocPrint(allocator, "HEAD~{d}..HEAD", .{count}) catch null;
-            if (range) |r| rev_range = r;
+            // -N means last N commits
+            dash_n_count = std.fmt.parseInt(usize, arg[1..], 10) catch 1;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
-            rev_range = arg;
+            if (std.mem.indexOf(u8, arg, "..") != null) {
+                rev_range = arg;
+            } else {
+                positional_rev = arg;
+            }
         }
         // Silently ignore other flags
+    }
+
+    // Build rev_range from -N and positional revision
+    if (rev_range == null) {
+        if (dash_n_count) |count| {
+            const tip = positional_rev orelse "HEAD";
+            rev_range = std.fmt.allocPrint(allocator, "{s}~{d}..{s}", .{ tip, count, tip }) catch null;
+        } else if (positional_rev) |rev| {
+            rev_range = rev;
+        }
     }
 
     if (rev_range == null) {
