@@ -27,6 +27,7 @@ const cmd_commit = @import("cmd_commit.zig");
 const cmd_commit_tree = @import("cmd_commit_tree.zig");
 const cmd_count_objects = @import("cmd_count_objects.zig");
 const cmd_daemon = @import("cmd_daemon.zig");
+const cmd_upload_pack = @import("cmd_upload_pack.zig");
 const cmd_describe = @import("cmd_describe.zig");
 const cmd_diff_core = @import("cmd_diff_core.zig");
 const cmd_diff_tree = @import("cmd_diff_tree.zig");
@@ -1080,11 +1081,67 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmd_last_modified.cmdLastModified(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "daemon")) {
         try cmd_daemon.cmdDaemon(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "upload-pack") or std.mem.eql(u8, command, "receive-pack") or std.mem.eql(u8, command, "send-pack")) {
-        const emsg = try std.fmt.allocPrint(allocator, "fatal: {s} not yet implemented in ziggit\n", .{command});
-        defer allocator.free(emsg);
-        try platform_impl.writeStderr(emsg);
-        std.process.exit(128);
+    } else if (std.mem.eql(u8, command, "upload-pack")) {
+        try cmd_upload_pack.cmdUploadPack(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "receive-pack") or std.mem.eql(u8, command, "send-pack") or std.mem.eql(u8, command, "upload-archive")) {
+        // Delegate to the dashed binary (git-upload-pack, git-receive-pack, etc.)
+        const dashed_name = try std.fmt.allocPrint(allocator, "git-{s}", .{command});
+        defer allocator.free(dashed_name);
+        // Find the dashed binary next to our executable or in PATH
+        const self_exe = std.fs.selfExePathAlloc(allocator) catch null;
+        var dashed_path: ?[]const u8 = null;
+        if (self_exe) |exe| {
+            defer allocator.free(exe);
+            if (std.mem.lastIndexOfScalar(u8, exe, '/')) |sep| {
+                const dir = exe[0 .. sep + 1];
+                dashed_path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ dir, dashed_name });
+            }
+        }
+        if (dashed_path == null) {
+            // Fallback: search PATH
+            const path_env = std.posix.getenv("PATH") orelse "";
+            var path_iter = std.mem.splitScalar(u8, path_env, ':');
+            while (path_iter.next()) |dir| {
+                if (dir.len == 0) continue;
+                const candidate = std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, dashed_name }) catch continue;
+                if (std.fs.cwd().access(candidate, .{})) |_| {
+                    dashed_path = candidate;
+                    break;
+                } else |_| {
+                    allocator.free(candidate);
+                }
+            }
+        }
+        if (dashed_path) |dp| {
+            defer allocator.free(dp);
+            var argv2 = std.ArrayList([]const u8).init(allocator);
+            defer argv2.deinit();
+            try argv2.append(dp);
+            var ri3: usize = command_index + 1;
+            while (ri3 < all_original_args.items.len) : (ri3 += 1) {
+                try argv2.append(all_original_args.items[ri3]);
+            }
+            var child2 = std.process.Child.init(argv2.items, allocator);
+            child2.stdin_behavior = .Inherit;
+            child2.stdout_behavior = .Inherit;
+            child2.stderr_behavior = .Inherit;
+            _ = child2.spawn() catch {
+                const emsg = try std.fmt.allocPrint(allocator, "fatal: {s} not yet implemented in ziggit\n", .{command});
+                defer allocator.free(emsg);
+                try platform_impl.writeStderr(emsg);
+                std.process.exit(128);
+            };
+            const result2 = child2.wait() catch { std.process.exit(128); };
+            switch (result2) {
+                .Exited => |code| std.process.exit(code),
+                else => std.process.exit(128),
+            }
+        } else {
+            const emsg = try std.fmt.allocPrint(allocator, "fatal: {s} not yet implemented in ziggit\n", .{command});
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
+            std.process.exit(128);
+        }
     } else if (std.mem.eql(u8, command, "check-ref-format")) {
         try cmd_check_ref_format.cmdCheckRefFormat(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "refs")) {
