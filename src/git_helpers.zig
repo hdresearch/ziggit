@@ -9382,6 +9382,41 @@ pub fn extractBody(message: []const u8) []const u8 {
 
 
 /// Extract the trailers block from a commit message.
+/// Extract the PGP/SSH signature from a tag or commit object's message.
+/// Returns the signature block including the BEGIN/END markers, or empty string.
+pub fn extractSignature(message: []const u8) []const u8 {
+    // Look for signature markers
+    const markers = [_][]const u8{
+        "-----BEGIN PGP SIGNATURE-----",
+        "-----BEGIN PGP MESSAGE-----",
+        "-----BEGIN SSH SIGNATURE-----",
+        "-----BEGIN SIGNED MESSAGE-----",
+    };
+    for (markers) |marker| {
+        if (std.mem.indexOf(u8, message, marker)) |start| {
+            return message[start..];
+        }
+    }
+    return "";
+}
+
+/// Extract the message body without the signature
+pub fn extractMessageWithoutSignature(message: []const u8) []const u8 {
+    const markers = [_][]const u8{
+        "-----BEGIN PGP SIGNATURE-----",
+        "-----BEGIN PGP MESSAGE-----",
+        "-----BEGIN SSH SIGNATURE-----",
+        "-----BEGIN SIGNED MESSAGE-----",
+    };
+    for (markers) |marker| {
+        if (std.mem.indexOf(u8, message, marker)) |start| {
+            return message[0..start];
+        }
+    }
+    return message;
+}
+
+/// Extract the trailers block from a commit message.
 pub fn extractTrailers(message: []const u8) []const u8 {
     const trimmed_msg = std.mem.trimRight(u8, message, "\n\r \t");
     if (trimmed_msg.len == 0) return "";
