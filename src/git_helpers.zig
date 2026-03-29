@@ -9376,6 +9376,253 @@ pub fn extractBody(message: []const u8) []const u8 {
 }
 
 
+/// Extract the trailers block from a commit message.
+pub fn extractTrailers(message: []const u8) []const u8 {
+    const trimmed_msg = std.mem.trimRight(u8, message, "\n\r \t");
+    if (trimmed_msg.len == 0) return "";
+
+    // Find the start of the last paragraph (after the last blank line)
+    var last_blank_end: usize = 0;
+    var i: usize = 0;
+    var prev_was_blank = false;
+    while (i < trimmed_msg.len) {
+        const nl = std.mem.indexOfScalar(u8, trimmed_msg[i..], '\n');
+        const line_end = if (nl) |n| i + n else trimmed_msg.len;
+        const line = std.mem.trimRight(u8, trimmed_msg[i..line_end], " \t\r");
+        if (line.len == 0) {
+            prev_was_blank = true;
+        } else if (prev_was_blank) {
+            last_blank_end = i;
+            prev_was_blank = false;
+        }
+        i = if (nl) |n| i + n + 1 else trimmed_msg.len;
+    }
+
+    const trailer_block = trimmed_msg[last_blank_end..];
+
+    // Verify at least one trailer line exists
+    var has_trailer = false;
+    var lines = std.mem.splitScalar(u8, trailer_block, '\n');
+    while (lines.next()) |line| {
+        const tline = std.mem.trimRight(u8, line, " \t\r");
+        if (tline.len == 0) continue;
+        if (isTrailerLine(tline)) {
+            has_trailer = true;
+            break;
+        }
+    }
+
+    if (!has_trailer) return "";
+    return trailer_block;
+}
+
+fn isTrailerLine(line: []const u8) bool {
+    if (std.mem.indexOf(u8, line, ": ")) |colon_pos| {
+        if (colon_pos == 0) return false;
+        const key = line[0..colon_pos];
+        for (key) |c| {
+            if (c == ' ' or c == '\t') return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+pub fn formatTrailers(allocator: std.mem.Allocator, raw_trailers: []const u8, options: []const u8) ![]u8 {
+    var unfold = false;
+    var only: ?bool = null;
+    var key_filters = std.ArrayList([]const u8).init(allocator);
+    defer key_filters.deinit();
+    var value_only = false;
+    var separator: ?[]const u8 = null;
+    var kv_separator: ?[]const u8 = null;
+
+    if (options.len > 0) {
+        var opts_iter = std.mem.splitScalar(u8, options, ',');
+        while (opts_iter.next()) |opt| {
+            const trimmed = std.mem.trim(u8, opt, " \t");
+            if (std.mem.eql(u8, trimmed, "unfold")) {
+                unfold = true;
+            } else if (std.mem.eql(u8, trimmed, "only")) {
+                only = true;
+            } else if (std.mem.startsWith(u8, trimmed, "only=")) {
+                const val = trimmed["only=".len..];
+                only = std.mem.eql(u8, val, "yes") or std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "1");
+            } else if (std.mem.startsWith(u8, trimmed, "key=")) {
+                try key_filters.append(trimmed["key=".len..]);
+            } else if (std.mem.eql(u8, trimmed, "valueonly")) {
+                value_only = true;
+            } else if (std.mem.startsWith(u8, trimmed, "separator=")) {
+                separator = trimmed["separator=".len..];
+            } else if (std.mem.startsWith(u8, trimmed, "key_value_separator=")) {
+                kv_separator = trimmed["key_value_separator=".len..];
+            }
+        }
+    }
+
+    var result = std.ArrayList(u8).init(allocator);
+    defer result.deinit();
+
+    const TrailerEntry = struct {
+        key: ?[]const u8,
+        value: []const u8,
+        full_line: []const u8,
+        is_trailer: bool,
+    };
+    var entries = std.ArrayList(TrailerEntry).init(allocator);
+    defer entries.deinit();
+
+    var lines = std.mem.splitScalar(u8, raw_trailers, '\n');
+    while (lines.next()) |line| {
+        const tline = std.mem.trimRight(u8, line, " \t\r");
+        if (tline.len == 0) continue;
+
+        if (tline[0] == ' ' or tline[0] == '\t') {
+            if (entries.items.len > 0) {
+                const prev = &entries.items[entries.items.len - 1];
+                const new_full = std.fmt.allocPrint(allocator, "{s}\n{s}", .{ prev.full_line, tline }) catch continue;
+                if (prev.value.len > 0) {
+                    const new_val = std.fmt.allocPrint(allocator, "{s}\n{s}", .{ prev.value, tline }) catch continue;
+                    prev.value = new_val;
+                }
+                prev.full_line = new_full;
+            }
+            continue;
+        }
+
+        if (isTrailerLine(tline)) {
+            const colon_pos = std.mem.indexOf(u8, tline, ": ").?;
+            try entries.append(.{
+                .key = tline[0..colon_pos],
+                .value = tline[colon_pos + 2 ..],
+                .full_line = tline,
+                .is_trailer = true,
+            });
+        } else {
+            try entries.append(.{
+                .key = null,
+                .value = tline,
+                .full_line = tline,
+                .is_trailer = false,
+            });
+        }
+    }
+
+    var first = true;
+    for (entries.items) |entry| {
+        if (only != null and only.?) {
+            if (!entry.is_trailer) continue;
+        }
+
+        if (key_filters.items.len > 0) {
+            if (!entry.is_trailer) {
+                if (only == null or only.?) continue;
+            } else {
+                const key = entry.key.?;
+                var matched = false;
+                for (key_filters.items) |kf| {
+                    const filter_key = if (std.mem.endsWith(u8, kf, ":")) kf[0 .. kf.len - 1] else kf;
+                    if (std.ascii.eqlIgnoreCase(key, filter_key)) {
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!matched) continue;
+            }
+        }
+
+        if (!first) {
+            if (separator) |sep| {
+                try result.appendSlice(unescapeSeparator(allocator, sep) catch sep);
+            } else {
+                try result.append('\n');
+            }
+        }
+        first = false;
+
+        if (value_only) {
+            if (unfold) {
+                const unfolded = unfoldLine(allocator, entry.value) catch entry.value;
+                try result.appendSlice(unfolded);
+            } else {
+                try result.appendSlice(entry.value);
+            }
+        } else {
+            if (unfold) {
+                if (kv_separator) |kvs| {
+                    if (entry.is_trailer) {
+                        try result.appendSlice(entry.key.?);
+                        try result.appendSlice(unescapeSeparator(allocator, kvs) catch kvs);
+                        const uval = unfoldLine(allocator, entry.value) catch entry.value;
+                        try result.appendSlice(uval);
+                    } else {
+                        const unfolded = unfoldLine(allocator, entry.full_line) catch entry.full_line;
+                        try result.appendSlice(unfolded);
+                    }
+                } else {
+                    const unfolded = unfoldLine(allocator, entry.full_line) catch entry.full_line;
+                    try result.appendSlice(unfolded);
+                }
+            } else if (kv_separator) |kvs| {
+                if (entry.is_trailer) {
+                    try result.appendSlice(entry.key.?);
+                    try result.appendSlice(unescapeSeparator(allocator, kvs) catch kvs);
+                    try result.appendSlice(entry.value);
+                } else {
+                    try result.appendSlice(entry.full_line);
+                }
+            } else {
+                try result.appendSlice(entry.full_line);
+            }
+        }
+    }
+
+    if (result.items.len > 0) {
+        try result.append('\n');
+    }
+
+    return result.toOwnedSlice();
+}
+
+fn unfoldLine(allocator: std.mem.Allocator, line: []const u8) ![]const u8 {
+    var res = std.ArrayList(u8).init(allocator);
+    var ii: usize = 0;
+    while (ii < line.len) {
+        if (line[ii] == '\n' and ii + 1 < line.len and (line[ii + 1] == ' ' or line[ii + 1] == '\t')) {
+            try res.append(' ');
+            ii += 1;
+            while (ii < line.len and (line[ii] == ' ' or line[ii] == '\t')) ii += 1;
+        } else {
+            try res.append(line[ii]);
+            ii += 1;
+        }
+    }
+    return res.toOwnedSlice();
+}
+
+fn unescapeSeparator(allocator: std.mem.Allocator, sep: []const u8) ![]const u8 {
+    var res = std.ArrayList(u8).init(allocator);
+    var ii: usize = 0;
+    while (ii < sep.len) {
+        if (sep[ii] == '%' and ii + 1 < sep.len) {
+            if (sep[ii + 1] == 'n') {
+                try res.append('\n');
+                ii += 2;
+                continue;
+            } else if (sep[ii + 1] == 'x' and ii + 3 < sep.len) {
+                if (std.fmt.parseInt(u8, sep[ii + 2 .. ii + 4], 16)) |byte| {
+                    try res.append(byte);
+                    ii += 4;
+                    continue;
+                } else |_| {}
+            }
+        }
+        try res.append(sep[ii]);
+        ii += 1;
+    }
+    return res.toOwnedSlice();
+}
+
 pub fn parseExpireTime(expire: []const u8) error{InvalidFormat}!i128 {
     // Parse expire time strings like "1.day", "2.weeks.ago", "now", "never"
     if (expire.len == 0 or std.mem.eql(u8, expire, "now")) return std.math.maxInt(i128); // prune everything

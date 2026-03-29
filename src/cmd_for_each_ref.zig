@@ -500,6 +500,15 @@ pub fn getRefField(field: []const u8, refname: []const u8, objectname: []const u
         return "";
     }
 
+    // Handle trailers atom
+    if (std.mem.eql(u8, field, "trailers") or std.mem.startsWith(u8, field, "trailers:")) {
+        const message = helpers.extractObjectMessage(data);
+        const raw_trailers = helpers.extractTrailers(message);
+        if (raw_trailers.len == 0) return "";
+        const options = if (std.mem.startsWith(u8, field, "trailers:")) field["trailers:".len..] else "";
+        return helpers.formatTrailers(allocator, raw_trailers, options) catch return "";
+    }
+
     if (std.mem.startsWith(u8, field, "contents")) {
         const message = helpers.extractObjectMessage(data);
         if (std.mem.eql(u8, field, "contents")) return message
@@ -510,6 +519,11 @@ pub fn getRefField(field: []const u8, refname: []const u8, objectname: []const u
         else if (std.mem.eql(u8, field, "contents:signature")) return ""
         else if (std.mem.eql(u8, field, "contents:size")) {
             return std.fmt.allocPrint(allocator, "{d}", .{message.len}) catch return "0";
+        } else if (std.mem.eql(u8, field, "contents:trailers") or std.mem.startsWith(u8, field, "contents:trailers:")) {
+            const raw_trailers = helpers.extractTrailers(message);
+            if (raw_trailers.len == 0) return "";
+            const options = if (std.mem.startsWith(u8, field, "contents:trailers:")) field["contents:trailers:".len..] else "";
+            return helpers.formatTrailers(allocator, raw_trailers, options) catch return "";
         }
     }
 
