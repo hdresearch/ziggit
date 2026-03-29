@@ -39367,6 +39367,16 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         const ch_dup = try allocator.dupe(u8, commit_hash);
         try commit_to_mark.put(ch_dup, commit_mark);
 
+        // Emit reset before first commit on each ref
+        if (!refs_seen.contains(actual_ref)) {
+            try refs_seen.put(actual_ref, {});
+            if (parents.items.len == 0) {
+                const reset_str = try std.fmt.allocPrint(allocator, "reset {s}\n", .{actual_ref});
+                defer allocator.free(reset_str);
+                try output.appendSlice(reset_str);
+            }
+        }
+
         // Output commit header
         const commit_line = try std.fmt.allocPrint(allocator, "commit {s}\n", .{actual_ref});
         defer allocator.free(commit_line);
