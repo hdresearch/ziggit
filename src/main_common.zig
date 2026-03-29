@@ -39089,16 +39089,16 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             if (id_ts.getPtr(ch)) |ptr| ptr.* = dg;
         }
 
-        var qt = std.ArrayList([]const u8).init(allocator);
-        defer qt.deinit();
+        var qt: std.ArrayList([]const u8) = .{};
+        defer qt.deinit(allocator);
         for (all_commits.items) |ch| {
             if ((id_ts.get(ch) orelse 0) == 0) {
-                try qt.append(ch);
+                try qt.append(allocator, ch);
             }
         }
 
-        var st = std.ArrayList([]const u8).init(allocator);
-        defer st.deinit();
+        var st: std.ArrayList([]const u8) = .{};
+        defer st.deinit(allocator);
         while (qt.items.len > 0) {
             const cs = qt.orderedRemove(0);
             try st.append(cs);
