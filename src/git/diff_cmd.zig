@@ -2893,11 +2893,100 @@ const LogOpts = struct {
     format_string: ?[]const u8 = null,
     format_is_separator: bool = false,
     walk_reflog: bool = false,
+    grep_pattern: ?[]const u8 = null,
+    output_encoding: ?[]const u8 = null,
 
     const DiffMergesMode = enum { default, off, on, first_parent, combined, dense_combined, separate };
     const DecorateMode = enum { no, short, full };
     const CombinedStyle = enum { none, c_style, cc_style };
 };
+
+/// Get encoding from commit object headers (default UTF-8)
+fn getCommitEncoding(data: []const u8) []const u8 {
+    var iter = std.mem.splitScalar(u8, data, '\n');
+    while (iter.next()) |line| {
+        if (line.len == 0) break;
+        if (std.mem.startsWith(u8, line, "encoding ")) {
+            return line["encoding ".len..];
+        }
+    }
+    return "UTF-8";
+}
+
+/// Check if two encoding names refer to the same encoding
+fn encodingsMatch(a: []const u8, b: []const u8) bool {
+    // Normalize common encoding names
+    const na = normalizeEncodingName(a);
+    const nb = normalizeEncodingName(b);
+    return std.mem.eql(u8, na, nb);
+}
+
+fn normalizeEncodingName(name: []const u8) []const u8 {
+    // Case-insensitive comparison of common encoding names
+    if (std.ascii.eqlIgnoreCase(name, "UTF-8") or std.ascii.eqlIgnoreCase(name, "utf8")) return "UTF-8";
+    if (std.ascii.eqlIgnoreCase(name, "ISO-8859-1") or std.ascii.eqlIgnoreCase(name, "latin1") or std.ascii.eqlIgnoreCase(name, "latin-1")) return "ISO-8859-1";
+    return name;
+}
+
+/// Re-encode message from commit_enc to out_enc for grep matching
+fn reencodeForGrep(allocator: std.mem.Allocator, msg: []const u8, commit_enc: []const u8, out_enc: []const u8) ![]const u8 {
+    if (encodingsMatch(commit_enc, out_enc)) return msg;
+    const norm_commit = normalizeEncodingName(commit_enc);
+    const norm_out = normalizeEncodingName(out_enc);
+    if (std.mem.eql(u8, norm_commit, "ISO-8859-1") and std.mem.eql(u8, norm_out, "UTF-8")) {
+        return latin1ToUtf8(allocator, msg);
+    }
+    if (std.mem.eql(u8, norm_commit, "UTF-8") and std.mem.eql(u8, norm_out, "ISO-8859-1")) {
+        return utf8ToLatin1(allocator, msg);
+    }
+    return msg; // Can't re-encode, return as-is
+}
+
+/// Convert Latin-1 bytes to UTF-8
+fn latin1ToUtf8(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
+    var result = std.ArrayList(u8).init(allocator);
+    defer result.deinit();
+    for (input) |byte| {
+        if (byte < 0x80) {
+            try result.append(byte);
+        } else {
+            try result.append(0xC0 | (byte >> 6));
+            try result.append(0x80 | (byte & 0x3F));
+        }
+    }
+    return result.toOwnedSlice();
+}
+
+/// Convert UTF-8 to Latin-1 (codepoints > 255 become '?')
+fn utf8ToLatin1(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
+    var result = std.ArrayList(u8).init(allocator);
+    defer result.deinit();
+    var i: usize = 0;
+    while (i < input.len) {
+        if (input[i] < 0x80) {
+            try result.append(input[i]);
+            i += 1;
+        } else if (input[i] & 0xE0 == 0xC0 and i + 1 < input.len) {
+            const cp = (@as(u16, input[i] & 0x1F) << 6) | @as(u16, input[i + 1] & 0x3F);
+            if (cp <= 0xFF) {
+                try result.append(@intCast(cp));
+            } else {
+                try result.append('?');
+            }
+            i += 2;
+        } else if (input[i] & 0xF0 == 0xE0) {
+            try result.append('?');
+            i += 3;
+        } else if (input[i] & 0xF8 == 0xF0) {
+            try result.append('?');
+            i += 4;
+        } else {
+            try result.append('?');
+            i += 1;
+        }
+    }
+    return result.toOwnedSlice();
+}
 
 fn extractField(data: []const u8, header: []const u8) []const u8 {
     const prefix = header;
@@ -4107,6 +4196,8 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
             lo.pickaxe_g = arg[2..];
         } else if (std.mem.eql(u8, arg, "--pickaxe-all")) {
             lo.pickaxe_all = true;
+        } else if (std.mem.startsWith(u8, arg, "--grep=")) {
+            lo.grep_pattern = arg["--grep=".len..];
         } else if (std.mem.startsWith(u8, arg, "-I") and arg.len > 2) {
             try lo.ignore_regex.append(arg[2..]);
         } else if (std.mem.startsWith(u8, arg, "--max-count=")) {
@@ -4162,11 +4253,12 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
             // default format
         } else if (std.mem.eql(u8, arg, "-g") or std.mem.eql(u8, arg, "--walk-reflogs")) {
             lo.walk_reflog = true;
+        } else if (std.mem.startsWith(u8, arg, "--encoding=")) {
+            lo.output_encoding = arg["--encoding=".len..];
         } else if (std.mem.eql(u8, arg, "--source") or std.mem.eql(u8, arg, "--quiet") or
             std.mem.eql(u8, arg, "--use-mailmap") or std.mem.eql(u8, arg, "--no-mailmap") or
             std.mem.eql(u8, arg, "--no-diff-merges") or std.mem.eql(u8, arg, "--color") or
             std.mem.startsWith(u8, arg, "--color=") or std.mem.eql(u8, arg, "--no-color") or
-            std.mem.eql(u8, arg, "--encoding=") or std.mem.startsWith(u8, arg, "--encoding=") or
             std.mem.eql(u8, arg, "--expand-tabs") or std.mem.startsWith(u8, arg, "--expand-tabs=") or
             std.mem.eql(u8, arg, "--no-expand-tabs") or
             std.mem.eql(u8, arg, "--no-standard-notes") or std.mem.eql(u8, arg, "--standard-notes") or
@@ -4552,6 +4644,20 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
         }
         if (lo.pickaxe_g) |search| {
             if (!commitMatchesPickaxe(obj.data, if (parents.items.len > 0) parents.items[0] else null, git_path, search, true, allocator, pi)) {
+                addParentsToQueue(&queue, &visited, parents.items, lo.first_parent, git_path, pi, allocator) catch {};
+                continue;
+            }
+        }
+
+        // --grep filtering: match pattern against commit message
+        if (lo.grep_pattern) |pattern| {
+            const msg = extractMessage(obj.data);
+            const commit_enc = getCommitEncoding(obj.data);
+            const out_enc = lo.output_encoding orelse "UTF-8";
+            const match_msg = reencodeForGrep(allocator, msg, commit_enc, out_enc) catch msg;
+            const should_free = match_msg.ptr != msg.ptr;
+            defer if (should_free) allocator.free(match_msg);
+            if (std.mem.indexOf(u8, match_msg, pattern) == null) {
                 addParentsToQueue(&queue, &visited, parents.items, lo.first_parent, git_path, pi, allocator) catch {};
                 continue;
             }
