@@ -39101,7 +39101,7 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         defer st.deinit(allocator);
         while (qt.items.len > 0) {
             const cs = qt.orderedRemove(0);
-            try st.append(cs);
+            try st.append(allocator, cs);
             if (cm_ts.get(cs)) |cl| {
                 for (cl.items) |child| {
                     if (id_ts.getPtr(child)) |ptr| {
