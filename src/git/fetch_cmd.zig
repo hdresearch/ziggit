@@ -2780,13 +2780,24 @@ fn pullExtractTree(commit_data: []const u8) []const u8 {
 
 fn pullBuildMergeMessage(allocator: std.mem.Allocator, merge_branch: ?[]const u8, remote: []const u8, fetch_head_desc: ?[]const u8) ![]u8 {
     if (fetch_head_desc) |desc| {
-        return std.fmt.allocPrint(allocator, "Merge {s}", .{desc});
+        // Strip " of <remote>" suffix when remote is "." (local repo) — matches git's fmt-merge-msg behavior
+        const cleaned_desc = if (std.mem.eql(u8, remote, ".")) blk: {
+            // Look for " of ." at the end of the description
+            if (std.mem.endsWith(u8, desc, " of .")) {
+                break :blk desc[0 .. desc.len - " of .".len];
+            }
+            break :blk desc;
+        } else desc;
+        return std.fmt.allocPrint(allocator, "Merge {s}", .{cleaned_desc});
     }
     if (merge_branch) |mb| {
         const branch = if (std.mem.startsWith(u8, mb, "refs/heads/"))
             mb["refs/heads/".len..]
         else
             mb;
+        if (std.mem.eql(u8, remote, ".")) {
+            return std.fmt.allocPrint(allocator, "Merge branch '{s}'", .{branch});
+        }
         return std.fmt.allocPrint(allocator, "Merge branch '{s}' of {s}", .{ branch, remote });
     }
     return std.fmt.allocPrint(allocator, "Merge remote changes", .{});
@@ -2795,24 +2806,28 @@ fn pullBuildMergeMessage(allocator: std.mem.Allocator, merge_branch: ?[]const u8
 fn pullGetAuthorString(allocator: std.mem.Allocator) ![]u8 {
     const name = std.posix.getenv("GIT_AUTHOR_NAME") orelse std.posix.getenv("GIT_COMMITTER_NAME") orelse "Unknown";
     const email = std.posix.getenv("GIT_AUTHOR_EMAIL") orelse std.posix.getenv("GIT_COMMITTER_EMAIL") orelse "unknown@unknown";
-    const date = std.posix.getenv("GIT_AUTHOR_DATE") orelse blk: {
+    const raw_date = std.posix.getenv("GIT_AUTHOR_DATE") orelse blk: {
         const ts = std.time.timestamp();
         const buf = try allocator.alloc(u8, 32);
         const len = std.fmt.bufPrint(buf, "{d} +0000", .{ts}) catch return error.FormatError;
         break :blk len;
     };
+    const date = git_helpers_mod.parseDateToGitFormat(raw_date, allocator) catch try allocator.dupe(u8, raw_date);
+    defer allocator.free(date);
     return std.fmt.allocPrint(allocator, "{s} <{s}> {s}", .{ name, email, date });
 }
 
 fn pullGetCommitterString(allocator: std.mem.Allocator) ![]u8 {
     const name = std.posix.getenv("GIT_COMMITTER_NAME") orelse std.posix.getenv("GIT_AUTHOR_NAME") orelse "Unknown";
     const email = std.posix.getenv("GIT_COMMITTER_EMAIL") orelse std.posix.getenv("GIT_AUTHOR_EMAIL") orelse "unknown@unknown";
-    const date = std.posix.getenv("GIT_COMMITTER_DATE") orelse blk: {
+    const raw_date = std.posix.getenv("GIT_COMMITTER_DATE") orelse blk: {
         const ts = std.time.timestamp();
         const buf = try allocator.alloc(u8, 32);
         const len = std.fmt.bufPrint(buf, "{d} +0000", .{ts}) catch return error.FormatError;
         break :blk len;
     };
+    const date = git_helpers_mod.parseDateToGitFormat(raw_date, allocator) catch try allocator.dupe(u8, raw_date);
+    defer allocator.free(date);
     return std.fmt.allocPrint(allocator, "{s} <{s}> {s}", .{ name, email, date });
 }
 
