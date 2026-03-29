@@ -23,7 +23,7 @@ const wildmatch_mod = @import("wildmatch.zig");
 
 pub fn cmdCommitTree(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     var tree_hash: ?[]const u8 = null;
-    var parents = std.array_list.Managed([]const u8).init(allocator);
+    var parents = std.ArrayList([]const u8).init(allocator);
     defer parents.deinit();
     var message: ?[]const u8 = null;
     var read_stdin = true;
@@ -78,7 +78,7 @@ pub fn cmdCommitTree(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
 
     // Deduplicate parent hashes (git silently removes duplicates)
     {
-        var unique = std.array_list.Managed([]const u8).init(allocator);
+        var unique = std.ArrayList([]const u8).init(allocator);
         for (parents.items) |p| {
             var dup = false;
             for (unique.items) |u| {

@@ -53,7 +53,7 @@ pub fn nativeCmdMktree(allocator: std.mem.Allocator, args: [][]const u8, command
     };
     defer allocator.free(stdin_data);
 
-    var entries = std.array_list.Managed(objects.TreeEntry).init(allocator);
+    var entries = std.ArrayList(objects.TreeEntry).init(allocator);
     defer entries.deinit();
 
     var lines = std.mem.splitScalar(u8, stdin_data, '\n');

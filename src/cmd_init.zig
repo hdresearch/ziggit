@@ -269,7 +269,7 @@ pub fn initRepositoryInDir(git_dir: []const u8, bare: bool, template_dir: ?[]con
     const use_reftable = if (effective_ref_fmt) |rf| std.ascii.eqlIgnoreCase(rf, "reftable") else false;
     const needs_extensions = use_sha256 or use_reftable;
     
-    var config_buf = std.array_list.Managed(u8).init(allocator);
+    var config_buf = std.ArrayList(u8).init(allocator);
     defer config_buf.deinit();
     try config_buf.appendSlice("[core]\n");
     if (needs_extensions) {

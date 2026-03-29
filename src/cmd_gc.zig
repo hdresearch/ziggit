@@ -137,7 +137,7 @@ pub fn cleanEmptyRefDirs2(allocator: std.mem.Allocator, git_dir: []const u8, pre
     defer dir.close();
 
     // helpers.Collect subdirectory names first
-    var subdirs = std.array_list.Managed([]const u8).init(allocator);
+    var subdirs = std.ArrayList([]const u8).init(allocator);
     defer {
         for (subdirs.items) |s| allocator.free(s);
         subdirs.deinit();

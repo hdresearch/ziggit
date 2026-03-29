@@ -28,9 +28,9 @@ pub fn nativeCmdNameRev(allocator: std.mem.Allocator, args: [][]const u8, comman
     var stdin_mode = false;
     var annotate_stdin = false;
     var refs_pattern: ?[]const u8 = null;
-    var exclude_patterns = std.array_list.Managed([]const u8).init(allocator);
+    var exclude_patterns = std.ArrayList([]const u8).init(allocator);
     defer exclude_patterns.deinit();
-    var targets = std.array_list.Managed([]const u8).init(allocator);
+    var targets = std.ArrayList([]const u8).init(allocator);
     defer targets.deinit();
 
     var i = command_index + 1;
@@ -66,7 +66,7 @@ pub fn nativeCmdNameRev(allocator: std.mem.Allocator, args: [][]const u8, comman
     };
 
     // helpers.Collect all helpers.refs for naming
-    var ref_list = std.array_list.Managed(helpers.RefEntry).init(allocator);
+    var ref_list = std.ArrayList(helpers.RefEntry).init(allocator);
     defer {
         for (ref_list.items) |entry| {
             allocator.free(entry.name);
@@ -175,7 +175,7 @@ pub fn nativeCmdNameRev(allocator: std.mem.Allocator, args: [][]const u8, comman
         var lines = std.mem.splitScalar(u8, stdin_content, '\n');
         while (lines.next()) |line| {
             if (line.len == 0) continue;
-            var output = std.array_list.Managed(u8).init(allocator);
+            var output = std.ArrayList(u8).init(allocator);
             defer output.deinit();
             var j: usize = 0;
             while (j < line.len) {

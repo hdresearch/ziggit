@@ -185,12 +185,12 @@ fn matchCharClass(pattern: []const u8, ch: u8) ?usize {
 }
 
 pub const GitIgnore = struct {
-    entries: std.array_list.Managed(GitignoreEntry),
+    entries: std.ArrayList(GitignoreEntry),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) GitIgnore {
         return GitIgnore{
-            .entries = std.array_list.Managed(GitignoreEntry).init(allocator),
+            .entries = std.ArrayList(GitignoreEntry).init(allocator),
             .allocator = allocator,
         };
     }

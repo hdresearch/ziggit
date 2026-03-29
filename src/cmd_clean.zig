@@ -29,7 +29,7 @@ pub fn nativeCmdClean(_: std.mem.Allocator, args: [][]const u8, command_index: u
     var exclude_only = false;
     var no_gitignore = false;
     var interactive = false;
-    var pathspecs = std.array_list.Managed([]const u8).init(std.heap.page_allocator);
+    var pathspecs = std.ArrayList([]const u8).init(std.heap.page_allocator);
     defer pathspecs.deinit();
     var seen_separator = false;
     
@@ -142,7 +142,7 @@ pub fn nativeCmdClean(_: std.mem.Allocator, args: [][]const u8, command_index: u
     var dir = std.fs.cwd().openDir(repo_root, .{ .iterate = true }) catch return;
     defer dir.close();
     
-    var to_remove = std.array_list.Managed([]u8).init(allocator);
+    var to_remove = std.ArrayList([]u8).init(allocator);
     defer {
         for (to_remove.items) |item| allocator.free(item);
         to_remove.deinit();

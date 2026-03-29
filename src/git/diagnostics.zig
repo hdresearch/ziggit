@@ -8,7 +8,7 @@ pub const GitDiagnostics = struct {
     git_dir: []const u8,
     platform_impl: anytype,
     allocator: std.mem.Allocator,
-    issues: std.array_list.Managed(DiagnosticIssue),
+    issues: std.ArrayList(DiagnosticIssue),
     
     const Self = @This();
     
@@ -81,7 +81,7 @@ pub const GitDiagnostics = struct {
             .git_dir = git_dir,
             .platform_impl = platform_impl,
             .allocator = allocator,
-            .issues = std.array_list.Managed(DiagnosticIssue).init(allocator),
+            .issues = std.ArrayList(DiagnosticIssue).init(allocator),
         };
     }
     
@@ -251,7 +251,7 @@ pub const GitDiagnostics = struct {
         // Check each index entry
         for (idx.entries.items) |entry| {
             // Verify the blob object exists
-            const hash_str = try std.fmt.allocPrint(self.allocator, "{x}", .{&entry.sha1});
+            const hash_str = try std.fmt.allocPrint(self.allocator, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
             defer self.allocator.free(hash_str);
             
             const blob_obj = objects.GitObject.load(hash_str, self.git_dir, self.platform_impl, self.allocator) catch {
@@ -526,7 +526,7 @@ test "diagnostics initialization" {
             }
             pub fn readDir(allocator: std.mem.Allocator, path: []const u8) ![][]u8 {
                 _ = path;
-                var entries = std.array_list.Managed([]u8).init(allocator);
+                var entries = std.ArrayList([]u8).init(allocator);
                 try entries.append(try allocator.dupe(u8, "test.pack"));
                 try entries.append(try allocator.dupe(u8, "test.idx"));
                 return entries.toOwnedSlice();

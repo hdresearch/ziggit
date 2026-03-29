@@ -26,7 +26,7 @@ pub fn cmdHashObject(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     var stdin_mode = false;
     var stdin_paths = false;
     var obj_type: []const u8 = "blob";
-    var files = std.array_list.Managed([]const u8).init(allocator);
+    var files = std.ArrayList([]const u8).init(allocator);
     defer files.deinit();
     var literally = false;
     var path_opt: ?[]const u8 = null;

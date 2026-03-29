@@ -46,7 +46,7 @@ pub fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, o
     
     var tree_hash: ?[]const u8 = null;
     var parent_hash: ?[]const u8 = null;
-    var all_parent_hashes = std.array_list.Managed([]const u8).init(allocator);
+    var all_parent_hashes = std.ArrayList([]const u8).init(allocator);
     defer all_parent_hashes.deinit();
     var line_iter = std.mem.splitScalar(u8, commit_obj.data, '\n');
     while (line_iter.next()) |line| {
@@ -394,7 +394,7 @@ pub fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8
     for (entries1.items) |e| all_names.put(e.name, {}) catch {};
     for (entries2.items) |e| all_names.put(e.name, {}) catch {};
     
-    var name_list = std.array_list.Managed([]const u8).init(allocator);
+    var name_list = std.ArrayList([]const u8).init(allocator);
     defer name_list.deinit();
     var niter = all_names.keyIterator();
     while (niter.next()) |key| try name_list.append(key.*);
@@ -581,7 +581,7 @@ pub fn diffTwoTreesPatch(allocator: std.mem.Allocator, tree1_hash: []const u8, t
     for (entries1.items) |e| all_names.put(e.name, {}) catch {};
     for (entries2.items) |e| all_names.put(e.name, {}) catch {};
     
-    var name_list = std.array_list.Managed([]const u8).init(allocator);
+    var name_list = std.ArrayList([]const u8).init(allocator);
     defer name_list.deinit();
     var niter = all_names.keyIterator();
     while (niter.next()) |key| try name_list.append(key.*);

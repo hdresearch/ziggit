@@ -86,7 +86,7 @@ pub fn cmdNotes(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         const existing_commit = refs.getRef(git_path, notes_ref, platform_impl, allocator) catch null;
         defer if (existing_commit) |ec| allocator.free(ec);
 
-        var tree_entries = std.array_list.Managed(u8).init(allocator);
+        var tree_entries = std.ArrayList(u8).init(allocator);
         defer tree_entries.deinit();
 
         if (existing_commit) |ec| {

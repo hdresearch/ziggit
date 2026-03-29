@@ -31,7 +31,7 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     }
 
     // helpers.Collect all args first to check for --no-index
-    var all_diff_args = std.array_list.Managed([]const u8).init(allocator);
+    var all_diff_args = std.ArrayList([]const u8).init(allocator);
     defer all_diff_args.deinit();
     while (args.next()) |arg| {
         try all_diff_args.append(arg);
@@ -64,9 +64,9 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     var exit_code = false;
     var diff_output_mode: enum { patch, stat, shortstat, numstat, name_only, name_status, raw, no_patch, summary, dirstat, patch_with_stat, patch_with_raw } = .patch;
     var check_mode = false;
-    var positional = std.array_list.Managed([]const u8).init(allocator);
+    var positional = std.ArrayList([]const u8).init(allocator);
     defer positional.deinit();
-    var pathspec_args = std.array_list.Managed([]const u8).init(allocator);
+    var pathspec_args = std.ArrayList([]const u8).init(allocator);
     defer pathspec_args.deinit();
     var seen_dashdash = false;
     // Re-parse args (need an iterator)
@@ -236,7 +236,7 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             defer allocator.free(tree2);
             if (diff_output_mode == .name_only or diff_output_mode == .name_status or diff_output_mode == .numstat or diff_output_mode == .stat or diff_output_mode == .shortstat or diff_output_mode == .raw or diff_output_mode == .no_patch or diff_output_mode == .summary or diff_output_mode == .dirstat) {
                 // helpers.Use tree comparison to get file-level changes, then output in requested format
-                var diff_entries = std.array_list.Managed(helpers.DiffStatEntry).init(allocator);
+                var diff_entries = std.ArrayList(helpers.DiffStatEntry).init(allocator);
                 defer {
                     for (diff_entries.items) |*de| {
                         allocator.free(de.path);
@@ -277,7 +277,7 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     const use_stat = diff_output_mode == .stat or diff_output_mode == .shortstat or diff_output_mode == .numstat or diff_output_mode == .name_only or diff_output_mode == .name_status or diff_output_mode == .raw or diff_output_mode == .no_patch or diff_output_mode == .summary or diff_output_mode == .dirstat;
     if (use_stat) {
         // helpers.Collect diff entries for stat/name output
-        var diff_entries = std.array_list.Managed(helpers.DiffStatEntry).init(allocator);
+        var diff_entries = std.ArrayList(helpers.DiffStatEntry).init(allocator);
         defer {
             for (diff_entries.items) |e| {
                 allocator.free(e.path);
@@ -335,7 +335,7 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                 if (cached) {
                     // Cached: check the index (staged) content
                     var idx_hash_buf: [40]u8 = undefined;
-                    _ = std.fmt.bufPrint(&idx_hash_buf, "{x}", .{&entry.sha1}) catch continue;
+                    _ = std.fmt.bufPrint(&idx_hash_buf, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch continue;
                     const idx_obj = objects.GitObject.load(&idx_hash_buf, git_path, platform_impl, allocator) catch continue;
                     defer idx_obj.deinit(allocator);
                     check_content = try allocator.dupe(u8, idx_obj.data);
@@ -346,7 +346,7 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                     check_content_owned = true;
                     // helpers.Compare with index to skip unchanged
                     var idx_hash_buf: [40]u8 = undefined;
-                    _ = std.fmt.bufPrint(&idx_hash_buf, "{x}", .{&entry.sha1}) catch continue;
+                    _ = std.fmt.bufPrint(&idx_hash_buf, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch continue;
                     if (objects.GitObject.load(&idx_hash_buf, git_path, platform_impl, allocator)) |idx_obj| {
                         defer idx_obj.deinit(allocator);
                         if (std.mem.eql(u8, check_content, idx_obj.data)) {
@@ -401,7 +401,7 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
 pub fn cmdDiffNoIndex(allocator: std.mem.Allocator, diff_args: []const []const u8, platform_impl: *const platform_mod.Platform) !void {
     var exit_code = false;
     var quiet = false;
-    var paths = std.array_list.Managed([]const u8).init(allocator);
+    var paths = std.ArrayList([]const u8).init(allocator);
     defer paths.deinit();
     var seen_dashdash = false;
 
@@ -463,7 +463,7 @@ pub fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
     var df_suppress = false;
     var df_show_raw = false;
     var df_patch_with_raw = false;
-    var df_pathspecs = std.array_list.Managed([]const u8).init(allocator);
+    var df_pathspecs = std.ArrayList([]const u8).init(allocator);
     defer df_pathspecs.deinit();
     var df_seen_dashdash = false;
     while (args.next()) |arg| {
@@ -532,9 +532,9 @@ pub fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
     const zero_oid = "0000000000000000000000000000000000000000";
     var has_diffs = false;
     // helpers.For --patch-with-raw: collect raw lines and patch output separately
-    var pwr_raw_buf = std.array_list.Managed(u8).init(allocator);
+    var pwr_raw_buf = std.ArrayList(u8).init(allocator);
     defer pwr_raw_buf.deinit();
-    var pwr_patch_buf = std.array_list.Managed(u8).init(allocator);
+    var pwr_patch_buf = std.ArrayList(u8).init(allocator);
     defer pwr_patch_buf.deinit();
 
     for (idx.entries.items) |entry| {
@@ -575,7 +575,7 @@ pub fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
             has_diffs = true;
             if (df_suppress) continue;
             var hash_buf: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&hash_buf, "{x}", .{&entry.sha1}) catch unreachable;
+            _ = std.fmt.bufPrint(&hash_buf, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch unreachable;
             if (name_only) {
                 const line = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path});
                 defer allocator.free(line);
@@ -593,7 +593,7 @@ pub fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
                 if (df_patch) {
                     const indexed_content = helpers.getIndexedFileContent(entry, allocator) catch "";
                     defer if (indexed_content.len > 0) allocator.free(indexed_content);
-                    var out = std.array_list.Managed(u8).init(allocator);
+                    var out = std.ArrayList(u8).init(allocator);
                     defer out.deinit();
                     try out.appendSlice("diff --git a/");
                     try out.appendSlice(entry.path);
@@ -611,7 +611,7 @@ pub fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
                     try out.appendSlice("\n+++ /dev/null\n");
                     if (indexed_content.len > 0) {
                         var liter = std.mem.splitScalar(u8, indexed_content, '\n');
-                        var lines_arr = std.array_list.Managed([]const u8).init(allocator);
+                        var lines_arr = std.ArrayList([]const u8).init(allocator);
                         defer lines_arr.deinit();
                         while (liter.next()) |ln| try lines_arr.append(ln);
                         if (lines_arr.items.len > 0 and indexed_content[indexed_content.len - 1] == '\n') _ = lines_arr.pop();
@@ -690,7 +690,7 @@ pub fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
             has_diffs = true;
             if (df_suppress) continue;
             var hash_buf: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&hash_buf, "{x}", .{&entry.sha1}) catch unreachable;
+            _ = std.fmt.bufPrint(&hash_buf, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch unreachable;
             if (name_only) {
                 const line = try std.fmt.allocPrint(allocator, "{s}\n", .{entry.path});
                 defer allocator.free(line);
@@ -716,7 +716,7 @@ pub fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
                         break :blk platform_impl.fs.readFile(allocator, full_path) catch try allocator.dupe(u8, "");
                     };
                     defer allocator.free(wt_content);
-                    var out = std.array_list.Managed(u8).init(allocator);
+                    var out = std.ArrayList(u8).init(allocator);
                     defer out.deinit();
                     try out.appendSlice("diff --git a/");
                     try out.appendSlice(entry.path);
@@ -822,9 +822,9 @@ pub fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index
     var stdin_mode = false;
     var line_prefix: []const u8 = "";
     var dt_exit_code = false;
-    var tree_refs = std.array_list.Managed([]const u8).init(allocator);
+    var tree_refs = std.ArrayList([]const u8).init(allocator);
     defer tree_refs.deinit();
-    var pathspecs = std.array_list.Managed([]const u8).init(allocator);
+    var pathspecs = std.ArrayList([]const u8).init(allocator);
     defer pathspecs.deinit();
     var seen_dashdash = false;
     
@@ -996,7 +996,7 @@ pub fn nativeCmdDiffTree(_: std.mem.Allocator, args: [][]const u8, command_index
         };
         defer allocator.free(tree2);
         if (dt_opts.show_stat or dt_opts.show_shortstat or (dt_opts.show_summary and !dt_opts.show_patch)) {
-            var stat_entries = std.array_list.Managed(helpers.DiffStatEntry).init(allocator);
+            var stat_entries = std.ArrayList(helpers.DiffStatEntry).init(allocator);
             defer { for (stat_entries.items) |*de| allocator.free(de.path); stat_entries.deinit(); }
             try helpers.collectTreeDiffEntries(allocator, tree1, tree2, "", git_path, pathspecs.items, platform_impl, &stat_entries);
             if (stat_entries.items.len > 0) had_diff = true;
@@ -1031,7 +1031,7 @@ pub fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_inde
     var name_status = false;
     var name_only = false;
     var tree_ish: ?[]const u8 = null;
-    var pathspecs = std.array_list.Managed([]const u8).init(allocator);
+    var pathspecs = std.ArrayList([]const u8).init(allocator);
     defer pathspecs.deinit();
     var seen_dashdash = false;
 
@@ -1110,9 +1110,9 @@ pub fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_inde
             if (!std.mem.eql(u8, &te.hash, &entry.sha1) or te.mode != entry.mode) {
                 has_diffs = true;
                 var old_hash_buf: [40]u8 = undefined;
-                _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&te.hash}) catch unreachable;
+                _ = std.fmt.bufPrint(&old_hash_buf, "{}", .{std.fmt.fmtSliceHexLower(&te.hash)}) catch unreachable;
                 var new_hash_buf: [40]u8 = undefined;
-                _ = std.fmt.bufPrint(&new_hash_buf, "{x}", .{&entry.sha1}) catch unreachable;
+                _ = std.fmt.bufPrint(&new_hash_buf, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch unreachable;
                 if (!suppress_output) {
                     const line = if (name_status)
                         try std.fmt.allocPrint(allocator, "M\t{s}\n", .{entry.path})
@@ -1128,7 +1128,7 @@ pub fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_inde
             has_diffs = true;
             if (!suppress_output) {
                 var new_hash_buf: [40]u8 = undefined;
-                _ = std.fmt.bufPrint(&new_hash_buf, "{x}", .{&entry.sha1}) catch unreachable;
+                _ = std.fmt.bufPrint(&new_hash_buf, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch unreachable;
                 const line = if (name_status)
                     try std.fmt.allocPrint(allocator, "A\t{s}\n", .{entry.path})
                 else if (name_only)
@@ -1164,7 +1164,7 @@ pub fn nativeCmdDiffIndex(_: std.mem.Allocator, args: [][]const u8, command_inde
             has_diffs = true;
             if (!suppress_output) {
                 var old_hash_buf: [40]u8 = undefined;
-                _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&kv.value_ptr.hash}) catch unreachable;
+                _ = std.fmt.bufPrint(&old_hash_buf, "{}", .{std.fmt.fmtSliceHexLower(&kv.value_ptr.hash)}) catch unreachable;
                 const line = if (name_status)
                     try std.fmt.allocPrint(allocator, "D\t{s}\n", .{kv.key_ptr.*})
                 else if (name_only)
@@ -1197,7 +1197,7 @@ pub fn diffNoIndexFiles(allocator: std.mem.Allocator, path_a: []const u8, path_b
     defer allocator.free(diff_output);
 
     // helpers.Build proper header
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
     try out.appendSlice("diff --git a/");
     try out.appendSlice(path_a);
