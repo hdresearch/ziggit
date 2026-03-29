@@ -157,8 +157,20 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             };
 
             if (metadata.kind == .directory) {
-                // helpers.Add directory recursively
-                try addDirectoryRecursively(allocator, repo_root_for_rel, relative_file_path, &index, git_path, platform_impl);
+                // Check if this is a submodule (has .git inside)
+                const sub_git_path = try std.fmt.allocPrint(allocator, "{s}/.git", .{full_file_path});
+                defer allocator.free(sub_git_path);
+                const is_submodule = blk_sub: {
+                    std.fs.cwd().access(sub_git_path, .{}) catch break :blk_sub false;
+                    break :blk_sub true;
+                };
+                if (is_submodule) {
+                    // Add as gitlink (mode 160000) - read HEAD from submodule
+                    try addSubmoduleEntry(allocator, relative_file_path, sub_git_path, &index, git_path, platform_impl);
+                } else {
+                    // helpers.Add directory recursively
+                    try addDirectoryRecursively(allocator, repo_root_for_rel, relative_file_path, &index, git_path, platform_impl);
+                }
             } else {
                 // helpers.Add single file
                 try addSingleFile(allocator, relative_file_path, full_file_path, &index, git_path, platform_impl, repo_root_for_rel);
@@ -230,6 +242,82 @@ pub fn addSingleFile(allocator: std.mem.Allocator, relative_path: []const u8, fu
     };
 }
 
+
+fn addSubmoduleEntry(allocator: std.mem.Allocator, relative_path: []const u8, sub_git_path: []const u8, index: *index_mod.Index, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
+    _ = platform_impl;
+    _ = git_path;
+    // Read the submodule's HEAD to get the commit hash
+    // sub_git_path is like "path/to/submodule/.git"
+    // The .git could be a file (pointing to gitdir) or a directory
+    // First, check if .git is a file (gitdir reference) or directory
+    
+    // Try reading .git/HEAD directly (if .git is a directory)
+    const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{sub_git_path});
+    defer allocator.free(head_path);
+    const head_content = std.fs.cwd().readFileAlloc(allocator, head_path, 4096) catch blk_head: {
+        // Maybe .git is a file containing "gitdir: ..."
+        const git_file_content = std.fs.cwd().readFileAlloc(allocator, sub_git_path, 4096) catch return error.FileNotFound;
+        defer allocator.free(git_file_content);
+        const trimmed = std.mem.trim(u8, git_file_content, " \t\r\n");
+        if (std.mem.startsWith(u8, trimmed, "gitdir: ")) {
+            const gitdir = trimmed["gitdir: ".len..];
+            const actual_head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{gitdir});
+            defer allocator.free(actual_head_path);
+            break :blk_head try std.fs.cwd().readFileAlloc(allocator, actual_head_path, 4096);
+        } else {
+            return error.FileNotFound;
+        }
+    };
+    defer allocator.free(head_content);
+    
+    const trimmed_head = std.mem.trim(u8, head_content, " \t\r\n");
+    
+    // Resolve if it's a symbolic ref
+    var ref_content_alloc: ?[]u8 = null;
+    defer if (ref_content_alloc) |r| allocator.free(r);
+    const commit_hash: []const u8 = if (std.mem.startsWith(u8, trimmed_head, "ref: ")) blk_ref: {
+        const ref_name = trimmed_head["ref: ".len..];
+        const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{sub_git_path, ref_name});
+        defer allocator.free(ref_path);
+        ref_content_alloc = std.fs.cwd().readFileAlloc(allocator, ref_path, 4096) catch return error.FileNotFound;
+        break :blk_ref std.mem.trim(u8, ref_content_alloc.?, " \t\r\n");
+    } else trimmed_head;
+    
+    if (commit_hash.len != 40) return error.InvalidHash;
+    
+    var hash_bytes: [20]u8 = undefined;
+    _ = std.fmt.hexToBytes(&hash_bytes, commit_hash) catch return error.InvalidHash;
+    
+    // Create index entry with mode 160000 (gitlink)
+    const path_dupe = try allocator.dupe(u8, relative_path);
+    const fake_stat = std.fs.File.Stat{
+        .inode = 0,
+        .size = 0,
+        .mode = 0o160000,
+        .kind = .file,
+        .atime = 0,
+        .mtime = 0,
+        .ctime = 0,
+    };
+    const entry = index_mod.IndexEntry.init(path_dupe, fake_stat, hash_bytes);
+    
+    // Check if entry already exists
+    for (index.entries.items, 0..) |*existing, i| {
+        if (std.mem.eql(u8, existing.path, relative_path)) {
+            existing.deinit(allocator);
+            index.entries.items[i] = entry;
+            return;
+        }
+    }
+    
+    try index.entries.append(entry);
+    std.sort.block(index_mod.IndexEntry, index.entries.items, {}, struct {
+        fn lessThan(context: void, lhs: index_mod.IndexEntry, rhs: index_mod.IndexEntry) bool {
+            _ = context;
+            return std.mem.lessThan(u8, lhs.path, rhs.path);
+        }
+    }.lessThan);
+}
 
 pub fn addDirectoryRecursively(allocator: std.mem.Allocator, repo_root: []const u8, relative_dir: []const u8, index: *index_mod.Index, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
     const full_dir_path = if (relative_dir.len == 0)
