@@ -317,7 +317,7 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                     } else |_| {}
                 }
                 defer if (resolved_branch) |b| allocator.free(b);
-                // helpers.Check for ambiguous refspec (both branch and tag exist)
+                // Check for ambiguous refspec (both branch and tag exist)
                 if (!std.mem.startsWith(u8, push_src, "refs/") and !std.mem.eql(u8, push_src, "HEAD")) {
                     const ambig_branch = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, push_src });
                     defer allocator.free(ambig_branch);
@@ -326,7 +326,7 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                     const ab = if (std.fs.cwd().access(ambig_branch, .{})) true else |_| false;
                     const at = if (std.fs.cwd().access(ambig_tag, .{})) true else |_| false;
                     if (ab and at) {
-                        const amsg = try std.fmt.allocPrint(allocator, "error: src refspec {s} matches more than one\nerror: failed to push some helpers.refs to '{s}'\n", .{ push_src, actual_url });
+                        const amsg = try std.fmt.allocPrint(allocator, "error: src refspec {s} matches more than one\nerror: failed to push some refs to '{s}'\n", .{ push_src, actual_url });
                         defer allocator.free(amsg);
                         try platform_impl.writeStderr(amsg);
                         std.process.exit(1);
