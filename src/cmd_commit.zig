@@ -36,6 +36,7 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     var quiet = false;
     var signoff = false;
     var no_verify = false;
+    var author_override: ?[]const u8 = null;
     var msg_source: enum { none, m_flag, f_flag, c_flag } = .none;
     var commit_files = std.ArrayList([]const u8).init(allocator);
     defer commit_files.deinit();
@@ -166,9 +167,11 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             defer allocator.free(dv_z);
             _ = helpers.cSetenv("GIT_AUTHOR_DATE", dv_z, 1);
         } else if (std.mem.eql(u8, arg, "--author")) {
-            _ = args.next(); // consume but ignore for now
+            if (args.next()) |val| {
+                author_override = val;
+            }
         } else if (std.mem.startsWith(u8, arg, "--author=")) {
-            // ignore for now
+            author_override = arg["--author=".len..];
         } else if (std.mem.eql(u8, arg, "--allow-empty-message")) {
             allow_empty = true; // Close enough
         } else if (std.mem.eql(u8, arg, "--")) {
@@ -384,6 +387,19 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             const tz_minutes = (tz_abs % 3600) / 60;
             break :blk try std.fmt.allocPrint(allocator, "helpers.Unknown <unknown@unknown> {d} {c}{d:0>2}{d:0>2}", .{ timestamp, tz_sign, tz_hours, tz_minutes });
         };
+    } else if (author_override) |auth_str| blk_auth: {
+        // --author="Name <email>" format - add timestamp
+        const timestamp = std.time.timestamp();
+        const auth_date_env = std.posix.getenv("GIT_AUTHOR_DATE");
+        if (auth_date_env) |date_str| {
+            break :blk_auth try std.fmt.allocPrint(allocator, "{s} {s}", .{ auth_str, date_str });
+        }
+        const tz_offset = helpers.getTimezoneOffset(timestamp);
+        const tz_sign: u8 = if (tz_offset < 0) '-' else '+';
+        const tz_abs: u32 = @intCast(if (tz_offset < 0) -tz_offset else tz_offset);
+        const tz_hours = tz_abs / 3600;
+        const tz_minutes = (tz_abs % 3600) / 60;
+        break :blk_auth try std.fmt.allocPrint(allocator, "{s} {d} {c}{d:0>2}{d:0>2}", .{ auth_str, timestamp, tz_sign, tz_hours, tz_minutes });
     } else helpers.getAuthorString(allocator) catch blk: {
         const timestamp = std.time.timestamp();
         const tz_offset = helpers.getTimezoneOffset(timestamp);
