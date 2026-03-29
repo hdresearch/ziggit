@@ -6674,11 +6674,10 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                     target = "HEAD";
                 } else if (force) {
                     // -f with no other args: force checkout of current branch (reset working tree)
-                    const head_hash = refs.resolveRef(git_path, "HEAD", platform_impl, allocator) catch {
-                        return;
-                    };
-                    defer allocator.free(head_hash);
-                    checkoutCommitTree(git_path, head_hash, allocator, platform_impl) catch {};
+                    if ((try refs.resolveRef(git_path, "HEAD", platform_impl, allocator))) |head_hash| {
+                        defer allocator.free(head_hash);
+                        checkoutCommitTree(git_path, head_hash, allocator, platform_impl) catch {};
+                    }
                     return;
                 } else {
                     try platform_impl.writeStderr("error: pathspec '' did not match any file(s) known to git\n");
