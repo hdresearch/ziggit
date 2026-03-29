@@ -26,7 +26,7 @@ const wildmatch_mod = @import("wildmatch.zig");
 pub fn nativeCmdLsRemote(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
     var show_tags = false; var show_heads = false; var symref_flag = false;
     var quiet = false; var ecf = false; var get_url = false;
-    var patterns = std.array_list.Managed([]const u8).init(allocator); defer patterns.deinit();
+    var patterns = std.ArrayList([]const u8).init(allocator); defer patterns.deinit();
     var remote_arg: ?[]const u8 = null; var saw_dd = false;
     var ii = command_index + 1;
     while (ii < args.len) : (ii += 1) { const arg = args[ii];
@@ -58,7 +58,7 @@ pub fn nativeCmdLsRemote(allocator: std.mem.Allocator, args: [][]const u8, comma
     { var du: []const u8 = rn; var duo: ?[]u8 = null; defer if (duo) |u| allocator.free(u);
       if (helpers.findGitDir() catch null) |gd| { if (helpers.getRemoteUrl(gd, rn, platform_impl, allocator)) |u| { duo = u; du = u; } else |_| {} }
       const fm = try std.fmt.allocPrint(allocator, "From {s}\n", .{du}); defer allocator.free(fm); try platform_impl.writeStderr(fm); }
-    var rl = std.array_list.Managed(helpers.RefEntry).init(allocator);
+    var rl = std.ArrayList(helpers.RefEntry).init(allocator);
     defer { for (rl.items) |e| { allocator.free(e.name); allocator.free(e.hash); } rl.deinit(); }
     var pm = std.StringHashMap([]const u8).init(allocator);
     defer { var pit = pm.iterator(); while (pit.next()) |e| { allocator.free(e.key_ptr.*); allocator.free(e.value_ptr.*); } pm.deinit(); }

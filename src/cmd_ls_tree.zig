@@ -37,7 +37,7 @@ pub fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command
     var has_format = false;
     var format_str: ?[]const u8 = null;
     var treeish: ?[]const u8 = null;
-    var pathspecs = std.array_list.Managed([]const u8).init(allocator);
+    var pathspecs = std.ArrayList([]const u8).init(allocator);
     defer pathspecs.deinit();
 
     var i = command_index + 1;
@@ -156,7 +156,7 @@ pub fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command
     defer if (prefix_allocated) allocator.free(@constCast(prefix_str));
 
     // Adjust pathspecs with prefix (prepend prefix to relative pathspecs)
-    var adjusted_pathspecs = std.array_list.Managed([]const u8).init(allocator);
+    var adjusted_pathspecs = std.ArrayList([]const u8).init(allocator);
     defer {
         for (adjusted_pathspecs.items) |ps| allocator.free(@constCast(ps));
         adjusted_pathspecs.deinit();
@@ -200,7 +200,7 @@ pub fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command
     }
 
     // helpers.Use empty pathspecs when path resolved to root (show everything)
-    var empty_pathspecs = std.array_list.Managed([]const u8).init(allocator);
+    var empty_pathspecs = std.ArrayList([]const u8).init(allocator);
     defer empty_pathspecs.deinit();
     const effective_pathspecs = if (no_path_restriction)
         &empty_pathspecs
@@ -220,7 +220,7 @@ pub fn nativeCmdLsTree(allocator: std.mem.Allocator, args: [][]const u8, command
     defer allocator.free(tree_hash);
 
     // helpers.Collect all output entries
-    var output_entries = std.array_list.Managed(OutputEntry) .init(allocator);
+    var output_entries = std.ArrayList(OutputEntry) .init(allocator);
     defer {
         for (output_entries.items) |*entry| entry.deinit(allocator);
         output_entries.deinit();
@@ -336,9 +336,9 @@ pub fn walkTree(
     recursive: bool,
     show_trees: bool,
     only_trees: bool,
-    pathspecs: *std.array_list.Managed([]const u8),
+    pathspecs: *std.ArrayList([]const u8),
     platform_impl: *const platform_mod.Platform,
-    output: *std.array_list.Managed(OutputEntry),
+    output: *std.ArrayList(OutputEntry),
 ) !void {
     // helpers.Load the tree object
     const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch {
@@ -467,9 +467,9 @@ pub fn walkTreeOneLevel(
     git_path: []const u8,
     tree_hash: []const u8,
     prefix: []const u8,
-    pathspecs: *std.array_list.Managed([]const u8),
+    pathspecs: *std.ArrayList([]const u8),
     platform_impl: *const platform_mod.Platform,
-    output: *std.array_list.Managed(OutputEntry),
+    output: *std.ArrayList(OutputEntry),
     show_trees_flag: bool,
 ) !void {
     _ = show_trees_flag;
@@ -524,7 +524,7 @@ pub fn formatLsTreeEntry(
     git_path: []const u8,
     platform_impl: *const platform_mod.Platform,
 ) ![]u8 {
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     var i: usize = 0;
     while (i < fmt.len) {
         if (fmt[i] == '%' and i + 1 < fmt.len) {

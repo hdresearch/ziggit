@@ -777,7 +777,7 @@ pub fn cmdRestore(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     var source: ?[]const u8 = null;
     var staged = false;
     var worktree = true;
-    var paths = std.array_list.Managed([]const u8).init(allocator);
+    var paths = std.ArrayList([]const u8).init(allocator);
     defer paths.deinit();
     var seen_separator = false;
     
@@ -850,7 +850,7 @@ pub fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIte
     var temp_mode = false;
     var stdin_mode = false;
     var stdin_z = false;
-    var paths = std.array_list.Managed([]const u8).init(allocator);
+    var paths = std.ArrayList([]const u8).init(allocator);
     defer paths.deinit();
 
     while (args.next()) |arg| {
@@ -994,7 +994,7 @@ pub fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIte
 
         // helpers.Load the blob content
         var hash_buf: [40]u8 = undefined;
-        _ = std.fmt.bufPrint(&hash_buf, "{x}", .{&entry.sha1}) catch continue;
+        _ = std.fmt.bufPrint(&hash_buf, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch continue;
 
         const obj = objects.GitObject.load(&hash_buf, git_dir, platform_impl, allocator) catch {
             const msg = std.fmt.allocPrint(allocator, "error: unable to read sha1 file of {s} ({s})\n", .{ entry_path, &hash_buf }) catch continue;

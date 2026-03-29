@@ -26,7 +26,7 @@ pub fn nativeCmdShowBranch(allocator: std.mem.Allocator, args: [][]const u8, com
     // helpers.Minimal show-branch: supports --merge-base and --independent modes
     var merge_base_mode = false;
     var independent_mode = false;
-    var branch_refs = std.array_list.Managed([]const u8).init(allocator);
+    var branch_refs = std.ArrayList([]const u8).init(allocator);
     defer branch_refs.deinit();
 
     var i = command_index + 1;
@@ -43,7 +43,7 @@ pub fn nativeCmdShowBranch(allocator: std.mem.Allocator, args: [][]const u8, com
 
     if (merge_base_mode or independent_mode) {
         // Delegate to merge-base with appropriate flags
-        var new_args = std.array_list.Managed([]const u8).init(allocator);
+        var new_args = std.ArrayList([]const u8).init(allocator);
         defer new_args.deinit();
         try new_args.append("git");
         try new_args.append("merge-base");
@@ -68,7 +68,7 @@ pub fn nativeCmdShowBranch(allocator: std.mem.Allocator, args: [][]const u8, com
         const refs_heads_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads", .{git_path});
         defer allocator.free(refs_heads_path);
 
-        var branches = std.array_list.Managed([]const u8).init(allocator);
+        var branches = std.ArrayList([]const u8).init(allocator);
         defer {
             for (branches.items) |b| allocator.free(b);
             branches.deinit();

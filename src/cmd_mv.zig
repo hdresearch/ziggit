@@ -26,7 +26,7 @@ pub fn nativeCmdMv(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
     var dry_run = false;
     var skip_errors = false;
     var verbose = false;
-    var sources = std.array_list.Managed([]const u8).init(allocator);
+    var sources = std.ArrayList([]const u8).init(allocator);
     defer sources.deinit();
     
     while (args.next()) |arg| {
@@ -120,7 +120,7 @@ pub fn nativeCmdMv(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
             };
             
             // helpers.Update index: remove old entry, add new entry
-            var new_entries = std.array_list.Managed(index_mod.IndexEntry).init(allocator);
+            var new_entries = std.ArrayList(index_mod.IndexEntry).init(allocator);
             defer new_entries.deinit();
             
             for (index.entries.items) |entry| {

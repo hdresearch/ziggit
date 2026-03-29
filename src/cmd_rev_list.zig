@@ -47,9 +47,9 @@ pub fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     var no_walk = false;
     var format_str: ?[]const u8 = null;
     var no_commit_header = false;
-    var include_refs = std.array_list.Managed([]const u8).init(allocator);
+    var include_refs = std.ArrayList([]const u8).init(allocator);
     defer include_refs.deinit();
-    var exclude_refs = std.array_list.Managed([]const u8).init(allocator);
+    var exclude_refs = std.ArrayList([]const u8).init(allocator);
     defer exclude_refs.deinit();
 
     // helpers.Parse arguments
@@ -75,7 +75,7 @@ pub fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         } else if (std.mem.eql(u8, arg, "--stdin")) {
             // helpers.Read helpers.refs from stdin
             const stdin_data = blk: {
-                var buf = std.array_list.Managed(u8).init(allocator);
+                var buf = std.ArrayList(u8).init(allocator);
                 var tmp: [4096]u8 = undefined;
                 while (true) {
                     const n = std.posix.read(0, &tmp) catch break;
@@ -253,7 +253,7 @@ pub fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     }
 
     // helpers.Resolve all include/exclude helpers.refs
-    var include_hashes = std.array_list.Managed([]u8).init(allocator);
+    var include_hashes = std.ArrayList([]u8).init(allocator);
     defer {
         for (include_hashes.items) |h| allocator.free(h);
         include_hashes.deinit();
@@ -298,7 +298,7 @@ pub fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         parents: [][]const u8,
     };
 
-    var all_commits = std.array_list.Managed(CommitInfo).init(allocator);
+    var all_commits = std.ArrayList(CommitInfo).init(allocator);
     defer {
         for (all_commits.items) |ci| {
             allocator.free(ci.hash);
@@ -309,7 +309,7 @@ pub fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     }
 
     // helpers.BFS to collect all commits
-    var queue = std.array_list.Managed([]u8).init(allocator);
+    var queue = std.ArrayList([]u8).init(allocator);
     defer {
         for (queue.items) |h| allocator.free(h);
         queue.deinit();
@@ -344,7 +344,7 @@ pub fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             continue;
         }
 
-        var parents_list = std.array_list.Managed([]const u8).init(allocator);
+        var parents_list = std.ArrayList([]const u8).init(allocator);
         var commit_ts: i64 = 0;
         var author_ts: i64 = 0;
         var clines = std.mem.splitSequence(u8, obj.data, "\n");
@@ -398,7 +398,7 @@ pub fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             try hash_to_idx.put(ci.hash, idx);
         }
 
-        var result = std.array_list.Managed([]u8).init(allocator);
+        var result = std.ArrayList([]u8).init(allocator);
         defer {
             for (result.items) |h| allocator.free(h);
             result.deinit();
@@ -406,7 +406,7 @@ pub fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
 
         // helpers.Start with commits that have in-degree 0 (no children)
         // helpers.Use a priority queue sorted by timestamp to break ties
-        var ready = std.array_list.Managed(usize).init(allocator);
+        var ready = std.ArrayList(usize).init(allocator);
         defer ready.deinit();
 
         for (all_commits.items, 0..) |ci, idx| {
@@ -471,7 +471,7 @@ pub fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         }
     }.cmp);
 
-    var result = std.array_list.Managed([]u8).init(allocator);
+    var result = std.ArrayList([]u8).init(allocator);
     defer {
         for (result.items) |h| allocator.free(h);
         result.deinit();

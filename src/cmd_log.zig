@@ -139,7 +139,7 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         if (reflog_content) |content| {
             defer allocator.free(content);
             // helpers.Parse reflog entries (newest first)
-            var reflog_entries = std.array_list.Managed(helpers.ReflogEntry).init(allocator);
+            var reflog_entries = std.ArrayList(helpers.ReflogEntry).init(allocator);
             defer {
                 for (reflog_entries.items) |*e| {
                     allocator.free(e.old_hash);
@@ -234,7 +234,7 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         hash: []const u8,
         timestamp: i64,
     };
-    var queue = std.array_list.Managed(CommitQueueEntry).init(allocator);
+    var queue = std.ArrayList(CommitQueueEntry).init(allocator);
     defer {
         for (queue.items) |entry| allocator.free(@constCast(entry.hash));
         queue.deinit();
@@ -289,11 +289,11 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         
         // helpers.Extract commit message and author
         var lines_it = std.mem.splitSequence(u8, commit_data, "\n");
-        var parent_hashes = std.array_list.Managed([]const u8).init(allocator);
+        var parent_hashes = std.ArrayList([]const u8).init(allocator);
         defer parent_hashes.deinit();
         var author_line: ?[]const u8 = null;
         var empty_line_found = false;
-        var message = std.array_list.Managed(u8).init(allocator);
+        var message = std.ArrayList(u8).init(allocator);
         defer message.deinit();
 
         while (lines_it.next()) |line| {
@@ -338,7 +338,7 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
 
             // helpers.Show helpers.Merge line for merge commits (commits with 2+ parents)
             if (parent_hashes.items.len > 1) {
-                var merge_line = std.array_list.Managed(u8).init(allocator);
+                var merge_line = std.ArrayList(u8).init(allocator);
                 defer merge_line.deinit();
                 try merge_line.appendSlice("Merge:");
                 for (parent_hashes.items) |ph| {

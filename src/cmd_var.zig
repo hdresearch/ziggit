@@ -67,7 +67,7 @@ pub fn getVarValueP(allocator: std.mem.Allocator, var_name: []const u8, pi: ?*co
 
 pub fn getVarMulti(allocator: std.mem.Allocator, var_name: []const u8) ![][]u8 {
     if (std.mem.eql(u8, var_name, "GIT_CONFIG_GLOBAL")) {
-        var results = std.array_list.Managed([]u8).init(allocator);
+        var results = std.ArrayList([]u8).init(allocator);
         const xdg = std.process.getEnvVarOwned(allocator, "XDG_CONFIG_HOME") catch null;
         if (xdg) |xh| { defer allocator.free(xh); if (xh.len > 0) { if (std.fmt.allocPrint(allocator, "{s}/git/config", .{xh})) |pp| try results.append(@constCast(pp)) else |_| {} } } else { const h = std.process.getEnvVarOwned(allocator, "HOME") catch null; if (h) |hh| { defer allocator.free(hh); if (std.fmt.allocPrint(allocator, "{s}/.config/git/config", .{hh})) |pp| try results.append(@constCast(pp)) else |_| {} } }
         const h2 = std.process.getEnvVarOwned(allocator, "HOME") catch null;

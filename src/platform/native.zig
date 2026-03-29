@@ -3,7 +3,7 @@ const interface = @import("interface.zig");
 
 fn getArgsImpl(allocator: std.mem.Allocator) !interface.ArgIterator {
     var args = std.process.args();
-    var arg_list = std.array_list.Managed([]const u8).init(allocator);
+    var arg_list = std.ArrayList([]const u8).init(allocator);
     defer arg_list.deinit();
     
     while (args.next()) |arg| {
@@ -75,7 +75,7 @@ fn readDirImpl(allocator: std.mem.Allocator, path: []const u8) ![][]u8 {
     };
     defer dir.close();
     
-    var entries = std.array_list.Managed([]u8).init(allocator);
+    var entries = std.ArrayList([]u8).init(allocator);
     defer entries.deinit();
     
     var iterator = dir.iterate();

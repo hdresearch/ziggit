@@ -49,7 +49,7 @@ pub const ConfigOverride = struct {
 };
 
 /// Global config overrides from -c key=value command line options
-pub var global_config_overrides: ?std.array_list.Managed(ConfigOverride) = null;
+pub var global_config_overrides: ?std.ArrayList(ConfigOverride) = null;
 
 /// Global --git-dir override
 pub var global_git_dir_override: ?[]const u8 = null;
@@ -62,7 +62,7 @@ pub var global_noglob_pathspecs: bool = false;
 
 pub fn initConfigOverrides(allocator: std.mem.Allocator) void {
     if (global_config_overrides == null) {
-        global_config_overrides = std.array_list.Managed(ConfigOverride).init(allocator);
+        global_config_overrides = std.ArrayList(ConfigOverride).init(allocator);
     }
 }
 
@@ -184,7 +184,7 @@ pub fn handleConfigEnv(allocator: std.mem.Allocator, setting: []const u8) void {
 
 
 pub fn readStdin(allocator: std.mem.Allocator, max_size: usize) ![]u8 {
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     errdefer result.deinit();
     const f = std.fs.File{ .handle = std.posix.STDIN_FILENO };
     var buf: [4096]u8 = undefined;
@@ -270,12 +270,12 @@ pub fn levenshteinDistance(allocator: std.mem.Allocator, s: []const u8, t: []con
 
 pub fn findSimilarCommands(allocator: std.mem.Allocator, typo: []const u8, platform_impl: *const platform_mod.Platform) ![]const []const u8 {
     const Candidate = struct { name: []const u8, dist: u32 };
-    var candidates: std.ArrayList(Candidate) = .{};
-    defer candidates.deinit(allocator);
+    var candidates = std.ArrayList(Candidate).init(allocator);
+    defer candidates.deinit();
     for (NATIVE_COMMANDS) |cmd| {
         const d = levenshteinDistance(allocator, typo, cmd);
         if (d <= 3 and d < typo.len) {
-            candidates.append(allocator, .{ .name = cmd, .dist = d }) catch continue;
+            candidates.append(.{ .name = cmd, .dist = d }) catch continue;
         }
     }
     if (findGitDirectory(allocator, platform_impl)) |git_path| {
@@ -300,7 +300,7 @@ pub fn findSimilarCommands(allocator: std.mem.Allocator, typo: []const u8, platf
                                 const d = levenshteinDistance(allocator, typo, aname);
                                 if (d <= 3 and d < typo.len) {
                                     const duped = allocator.dupe(u8, aname) catch continue;
-                                    candidates.append(allocator, .{ .name = duped, .dist = d }) catch continue;
+                                    candidates.append(.{ .name = duped, .dist = d }) catch continue;
                                 }
                             }
                         }
@@ -323,7 +323,7 @@ pub fn findSimilarCommands(allocator: std.mem.Allocator, typo: []const u8, platf
                     const d = levenshteinDistance(allocator, typo, cname);
                     if (d <= 3 and d < typo.len) {
                         const duped = allocator.dupe(u8, cname) catch continue;
-                        candidates.append(allocator, .{ .name = duped, .dist = d }) catch continue;
+                        candidates.append(.{ .name = duped, .dist = d }) catch continue;
                     }
                 }
             }
@@ -336,7 +336,7 @@ pub fn findSimilarCommands(allocator: std.mem.Allocator, typo: []const u8, platf
             return std.mem.lessThan(u8, a.name, b.name);
         }
     }.lt);
-    var result2: std.ArrayList([]const u8) = .{};
+    var result2: std.ArrayListUnmanaged([]const u8) = .{};
     var seen2 = std.StringHashMap(void).init(allocator);
     defer seen2.deinit();
     const best = candidates.items[0].dist;
@@ -351,7 +351,7 @@ pub fn findSimilarCommands(allocator: std.mem.Allocator, typo: []const u8, platf
 }
 
 
-pub fn gcpExtractQuoted(params: []const u8, start: usize, buf: *std.array_list.Managed(u8)) ?usize {
+pub fn gcpExtractQuoted(params: []const u8, start: usize, buf: *std.ArrayList(u8)) ?usize {
     // Extract content of a single-quoted string starting at params[start] == '\''
     // Handle '\'' shell escape (close-quote, backslash-single-quote, open-quote)
     var i = start;
@@ -383,9 +383,9 @@ pub fn gcpExtractQuoted(params: []const u8, start: usize, buf: *std.array_list.M
 
 pub fn parseGitConfigParameters(allocator: std.mem.Allocator, params: []const u8) void {
     var i: usize = 0;
-    var key_buf = std.array_list.Managed(u8).init(allocator);
+    var key_buf = std.ArrayList(u8).init(allocator);
     defer key_buf.deinit();
-    var val_buf = std.array_list.Managed(u8).init(allocator);
+    var val_buf = std.ArrayList(u8).init(allocator);
     defer val_buf.deinit();
 
     while (i < params.len) {
@@ -411,7 +411,7 @@ pub fn parseGitConfigParameters(allocator: std.mem.Allocator, params: []const u8
                     // 'key'=unquoted_value (unusual but handle it)
                     const vs = i;
                     while (i < params.len and params[i] != ' ' and params[i] != '\t') i += 1;
-                    var combined = std.array_list.Managed(u8).init(allocator);
+                    var combined = std.ArrayList(u8).init(allocator);
                     defer combined.deinit();
                     combined.appendSlice(key_buf.items) catch continue;
                     combined.append('=') catch continue;
@@ -568,7 +568,7 @@ pub fn translateCommitFlags(allocator: std.mem.Allocator, all_args: [][]const u8
     // Translate commit flags for git 2.43 compat
     // Handle --template ":(optional)path" by stripping the prefix if file doesn't exist,
     // or using the real path if it does.
-    var new_args = std.array_list.Managed([]const u8).init(allocator);
+    var new_args = std.ArrayList([]const u8).init(allocator);
     var i: usize = 0;
     while (i < all_args.len) : (i += 1) {
         if (i > command_index) {
@@ -657,7 +657,7 @@ pub fn translateStderrLine(allocator: std.mem.Allocator, line: []const u8) ![]co
 
 
 pub fn translateStderr(allocator: std.mem.Allocator, stderr_data: []const u8) ![]const u8 {
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     var iter = std.mem.splitScalar(u8, stderr_data, '\n');
     var first = true;
     while (iter.next()) |line| {
@@ -673,8 +673,8 @@ pub fn translateStderr(allocator: std.mem.Allocator, stderr_data: []const u8) ![
 
 
 
-pub fn findUntrackedFiles(allocator: std.mem.Allocator, repo_root: []const u8, index: *const index_mod.Index, gitignore: *const gitignore_mod.GitIgnore, platform_impl: *const platform_mod.Platform) !std.array_list.Managed([]u8) {
-    var untracked_files = std.array_list.Managed([]u8).init(allocator);
+pub fn findUntrackedFiles(allocator: std.mem.Allocator, repo_root: []const u8, index: *const index_mod.Index, gitignore: *const gitignore_mod.GitIgnore, platform_impl: *const platform_mod.Platform) !std.ArrayList([]u8) {
+    var untracked_files = std.ArrayList([]u8).init(allocator);
     
     // Create a set of tracked file paths for fast lookup
     var tracked_files = std.StringHashMap(void).init(allocator);
@@ -701,7 +701,7 @@ pub fn scanDirectoryForUntrackedFiles(
     allocator: std.mem.Allocator,
     repo_root: []const u8,
     relative_path: []const u8,
-    untracked_files: *std.array_list.Managed([]u8),
+    untracked_files: *std.ArrayList([]u8),
     tracked_files: *const std.StringHashMap(void),
     gitignore: *const gitignore_mod.GitIgnore,
     platform_impl: *const platform_mod.Platform,
@@ -873,7 +873,7 @@ pub fn findUntrackedDirEntries(
     allocator: std.mem.Allocator,
     repo_root: []const u8,
     relative_path: []const u8,
-    results: *std.array_list.Managed([]u8),
+    results: *std.ArrayList([]u8),
     index: *const index_mod.Index,
     gitignore: *const gitignore_mod.GitIgnore,
     no_empty_directory: bool,
@@ -1289,12 +1289,12 @@ pub fn outputFormattedCommit(format: []const u8, commit_hash: []const u8, alloca
     
     // Parse commit fields
     var tree_hash: []const u8 = "";
-    var parent_hashes = std.array_list.Managed([]const u8).init(allocator);
+    var parent_hashes = std.ArrayList([]const u8).init(allocator);
     defer parent_hashes.deinit();
     var author_full: []const u8 = "";
     var committer_full: []const u8 = "";
     var subject: []const u8 = "";
-    var body = std.array_list.Managed(u8).init(allocator);
+    var body = std.ArrayList(u8).init(allocator);
     defer body.deinit();
     // Raw message for %B
     var raw_message: []const u8 = "";
@@ -1327,7 +1327,7 @@ pub fn outputFormattedCommit(format: []const u8, commit_hash: []const u8, alloca
         }
     }
     
-    var output = std.array_list.Managed(u8).init(allocator);
+    var output = std.ArrayList(u8).init(allocator);
     defer output.deinit();
     
     var i: usize = 0;
@@ -1469,7 +1469,7 @@ pub fn outputFormattedCommitWithReflog(format: []const u8, commit_hash: []const 
     var author_full: []const u8 = "";
     var committer_full: []const u8 = "";
     var subject: []const u8 = "";
-    var body_buf = std.array_list.Managed(u8).init(allocator);
+    var body_buf = std.ArrayList(u8).init(allocator);
     defer body_buf.deinit();
     var raw_message: []const u8 = "";
 
@@ -1499,7 +1499,7 @@ pub fn outputFormattedCommitWithReflog(format: []const u8, commit_hash: []const 
         }
     }
 
-    var output = std.array_list.Managed(u8).init(allocator);
+    var output = std.ArrayList(u8).init(allocator);
     defer output.deinit();
 
     var i: usize = 0;
@@ -1692,7 +1692,7 @@ pub fn outputDiffEntries(diff_entries: []const DiffStatEntry, diff_output_mode: 
 }
 
 
-pub fn collectRefDiffEntries(ref_name: []const u8, index: *const index_mod.Index, cwd: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, entries: *std.array_list.Managed(DiffStatEntry), is_cached: bool) !bool {
+pub fn collectRefDiffEntries(ref_name: []const u8, index: *const index_mod.Index, cwd: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, entries: *std.ArrayList(DiffStatEntry), is_cached: bool) !bool {
     // Get the tree for the ref
     const tree_hash = resolveToTree(allocator, ref_name, git_path, platform_impl) catch return false;
     defer allocator.free(tree_hash);
@@ -1711,12 +1711,12 @@ pub fn collectRefDiffEntries(ref_name: []const u8, index: *const index_mod.Index
     if (is_cached) {
         // Compare ref tree to index
         for (index.entries.items) |entry| {
-            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
+            const index_hash = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
             defer allocator.free(index_hash);
 
             if (tree_entries_map.get(entry.path)) |te| {
                 var old_hash_buf: [40]u8 = undefined;
-                _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&te.hash}) catch unreachable;
+                _ = std.fmt.bufPrint(&old_hash_buf, "{}", .{std.fmt.fmtSliceHexLower(&te.hash)}) catch unreachable;
                 if (!std.mem.eql(u8, &old_hash_buf, index_hash) or te.mode != entry.mode) {
                     has_diff = true;
                     const old_content = readBlobContent(allocator, git_path, &old_hash_buf, platform_impl) catch "";
@@ -1769,7 +1769,7 @@ pub fn collectRefDiffEntries(ref_name: []const u8, index: *const index_mod.Index
             if (!found) {
                 has_diff = true;
                 var old_hash_buf: [40]u8 = undefined;
-                _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&kv.value_ptr.hash}) catch unreachable;
+                _ = std.fmt.bufPrint(&old_hash_buf, "{}", .{std.fmt.fmtSliceHexLower(&kv.value_ptr.hash)}) catch unreachable;
                 const old_content = readBlobContent(allocator, git_path, &old_hash_buf, platform_impl) catch "";
                 defer if (old_content.len > 0) allocator.free(old_content);
                 var lines: usize = 0;
@@ -1810,7 +1810,7 @@ pub fn collectRefDiffEntries(ref_name: []const u8, index: *const index_mod.Index
 
             if (tree_entries_map.get(entry.path)) |te| {
                 var old_hash_buf: [40]u8 = undefined;
-                _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&te.hash}) catch unreachable;
+                _ = std.fmt.bufPrint(&old_hash_buf, "{}", .{std.fmt.fmtSliceHexLower(&te.hash)}) catch unreachable;
                 const old_content = readBlobContent(allocator, git_path, &old_hash_buf, platform_impl) catch "";
                 defer if (old_content.len > 0) allocator.free(old_content);
 
@@ -1881,7 +1881,7 @@ pub fn collectRefDiffEntries(ref_name: []const u8, index: *const index_mod.Index
             if (!seen_paths.contains(kv.key_ptr.*)) {
                 has_diff = true;
                 var old_hash_buf: [40]u8 = undefined;
-                _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&kv.value_ptr.hash}) catch unreachable;
+                _ = std.fmt.bufPrint(&old_hash_buf, "{}", .{std.fmt.fmtSliceHexLower(&kv.value_ptr.hash)}) catch unreachable;
                 const old_content = readBlobContent(allocator, git_path, &old_hash_buf, platform_impl) catch "";
                 defer if (old_content.len > 0) allocator.free(old_content);
                 var lines: usize = 0;
@@ -1905,7 +1905,7 @@ pub fn collectRefDiffEntries(ref_name: []const u8, index: *const index_mod.Index
 }
 
 
-pub fn collectWorkingTreeDiffEntries(index: *const index_mod.Index, cwd: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, entries: *std.array_list.Managed(DiffStatEntry)) !bool {
+pub fn collectWorkingTreeDiffEntries(index: *const index_mod.Index, cwd: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, entries: *std.ArrayList(DiffStatEntry)) !bool {
     _ = git_path;
     var has_diff = false;
     for (index.entries.items) |entry| {
@@ -1924,7 +1924,7 @@ pub fn collectWorkingTreeDiffEntries(index: *const index_mod.Index, cwd: []const
             const current_hash = try blob.hash(allocator);
             defer allocator.free(current_hash);
 
-            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
+            const index_hash = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
             defer allocator.free(index_hash);
 
             if (!std.mem.eql(u8, current_hash, index_hash)) {
@@ -1952,7 +1952,7 @@ pub fn collectWorkingTreeDiffEntries(index: *const index_mod.Index, cwd: []const
             const indexed_content = getIndexedFileContent(entry, allocator) catch "";
             defer if (indexed_content.len > 0) allocator.free(indexed_content);
 
-            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
+            const index_hash = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
             defer allocator.free(index_hash);
 
             var lines: usize = 0;
@@ -1978,7 +1978,7 @@ pub fn collectWorkingTreeDiffEntries(index: *const index_mod.Index, cwd: []const
 }
 
 
-pub fn collectStagedDiffEntries(index: *const index_mod.Index, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, entries: *std.array_list.Managed(DiffStatEntry)) !bool {
+pub fn collectStagedDiffEntries(index: *const index_mod.Index, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, entries: *std.ArrayList(DiffStatEntry)) !bool {
     var has_diff = false;
 
     // Get HEAD tree
@@ -1995,7 +1995,7 @@ pub fn collectStagedDiffEntries(index: *const index_mod.Index, git_path: []const
                 while (it.next()) |_| lines += 1;
                 if (content[content.len - 1] == '\n') lines -= 1;
             }
-            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
+            const index_hash = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
             defer allocator.free(index_hash);
             try entries.append(.{
                 .path = try allocator.dupe(u8, entry.path),
@@ -2024,12 +2024,12 @@ pub fn collectStagedDiffEntries(index: *const index_mod.Index, git_path: []const
     try walkTreeForDiffIndex(allocator, git_path, tree_hash, "", &tree_entries_map, platform_impl);
 
     for (index.entries.items) |entry| {
-        const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
+        const index_hash = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
         defer allocator.free(index_hash);
 
         if (tree_entries_map.get(entry.path)) |te| {
             var old_hash_buf: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&te.hash}) catch unreachable;
+            _ = std.fmt.bufPrint(&old_hash_buf, "{}", .{std.fmt.fmtSliceHexLower(&te.hash)}) catch unreachable;
             if (!std.mem.eql(u8, &old_hash_buf, index_hash) or te.mode != entry.mode) {
                 has_diff = true;
                 const old_content = readBlobContent(allocator, git_path, &old_hash_buf, platform_impl) catch "";
@@ -2092,7 +2092,7 @@ pub fn collectStagedDiffEntries(index: *const index_mod.Index, git_path: []const
         if (!found) {
             has_diff = true;
             var old_hash_buf: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&old_hash_buf, "{x}", .{&kv.value_ptr.hash}) catch unreachable;
+            _ = std.fmt.bufPrint(&old_hash_buf, "{}", .{std.fmt.fmtSliceHexLower(&kv.value_ptr.hash)}) catch unreachable;
             const old_content = readBlobContent(allocator, git_path, &old_hash_buf, platform_impl) catch "";
             defer if (old_content.len > 0) allocator.free(old_content);
             var lines: usize = 0;
@@ -2120,9 +2120,9 @@ pub fn collectStagedDiffEntries(index: *const index_mod.Index, git_path: []const
 
 pub fn countInsertionsDeletions(old_content: []const u8, new_content: []const u8, insertions: *usize, deletions: *usize) void {
     // Count lines in old and new
-    var old_lines = std.array_list.Managed([]const u8).init(std.heap.page_allocator);
+    var old_lines = std.ArrayList([]const u8).init(std.heap.page_allocator);
     defer old_lines.deinit();
-    var new_lines = std.array_list.Managed([]const u8).init(std.heap.page_allocator);
+    var new_lines = std.ArrayList([]const u8).init(std.heap.page_allocator);
     defer new_lines.deinit();
 
     var old_it = std.mem.splitScalar(u8, old_content, '\n');
@@ -2322,7 +2322,7 @@ pub fn formatDiffNumStat(diff_entries: []const DiffStatEntry, platform_impl: *co
 
 
 pub fn formatDiffStatSummary(files_changed: usize, total_ins: usize, total_dels: usize, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
-    var parts = std.array_list.Managed(u8).init(allocator);
+    var parts = std.ArrayList(u8).init(allocator);
     defer parts.deinit();
 
     const w = parts.writer();
@@ -2408,7 +2408,7 @@ pub fn getTreeEntryHashByPath(git_path: []const u8, tree_hash: []const u8, file_
         if (std.mem.eql(u8, name, first_component)) {
             // Convert hash bytes to hex
             var hex_buf: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&hex_buf, "{x}", .{entry_hash_bytes[0..20]}) catch return error.InvalidHash;
+            _ = std.fmt.bufPrint(&hex_buf, "{}", .{std.fmt.fmtSliceHexLower(entry_hash_bytes[0..20])}) catch return error.InvalidHash;
             
             if (rest) |remaining_path| {
                 // Need to recurse into subtree
@@ -2440,7 +2440,7 @@ pub fn getIndexedFileContent(entry: index_mod.IndexEntry, allocator: std.mem.All
     // Convert hash bytes to hex string
     const hash_str = try allocator.alloc(u8, 40);
     defer allocator.free(hash_str);
-    _ = std.fmt.bufPrint(hash_str, "{x}", .{&entry.sha1}) catch |err| {
+    _ = std.fmt.bufPrint(hash_str, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch |err| {
         std.log.debug("Could not format hash: {}", .{err});
         return try allocator.dupe(u8, "");
     };
@@ -2812,7 +2812,7 @@ pub fn parseTreeIntoMap(tree_data: []const u8, file_map: *std.StringHashMap([]co
         // Extract 20-byte hash and convert to hex string
         const hash_bytes = tree_data[i..i + 20];
         const hash_hex = try allocator.alloc(u8, 40);
-        _ = std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes}) catch {
+        _ = std.fmt.bufPrint(hash_hex, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch {
             allocator.free(hash_hex);
             break;
         };
@@ -3014,7 +3014,7 @@ pub fn threeWayContentMerge(base: []const u8, ours: []const u8, theirs: []const 
     for (theirs_lcs) |bi| theirs_kept[bi] = true;
 
     // Find common anchors (base lines kept in both)
-    var common_base = std.array_list.Managed(usize).init(allocator);
+    var common_base = std.ArrayList(usize).init(allocator);
     defer common_base.deinit();
     for (0..base_lines.len) |bi| {
         if (ours_kept[bi] and theirs_kept[bi]) {
@@ -3023,9 +3023,9 @@ pub fn threeWayContentMerge(base: []const u8, ours: []const u8, theirs: []const 
     }
 
     // Map common base indices to ours/theirs line indices
-    var ours_idx_map = std.array_list.Managed(usize).init(allocator);
+    var ours_idx_map = std.ArrayList(usize).init(allocator);
     defer ours_idx_map.deinit();
-    var theirs_idx_map = std.array_list.Managed(usize).init(allocator);
+    var theirs_idx_map = std.ArrayList(usize).init(allocator);
     defer theirs_idx_map.deinit();
 
     {
@@ -3059,7 +3059,7 @@ pub fn threeWayContentMerge(base: []const u8, ours: []const u8, theirs: []const 
         return null; // Mapping failed
     }
 
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     errdefer result.deinit();
 
     const anchor_count = common_base.items.len;
@@ -3138,7 +3138,7 @@ pub fn mergeComputeLCS(a: []const []const u8, b: []const []const u8, allocator: 
 
     // For large inputs, use greedy approach
     if (m * n > 1000000) {
-        var res = std.array_list.Managed(usize).init(allocator);
+        var res = std.ArrayList(usize).init(allocator);
         defer res.deinit();
         var bj: usize = 0;
         for (0..m) |ai| {
@@ -3174,7 +3174,7 @@ pub fn mergeComputeLCS(a: []const []const u8, b: []const []const u8, allocator: 
         }
     }
 
-    var res = std.array_list.Managed(usize).init(allocator);
+    var res = std.ArrayList(usize).init(allocator);
     defer res.deinit();
     var ii: usize = m;
     var jj: usize = n;
@@ -3197,7 +3197,7 @@ pub fn mergeComputeLCS(a: []const []const u8, b: []const []const u8, allocator: 
 
 pub fn splitLines(text: []const u8, allocator: std.mem.Allocator) ![][]const u8 {
     if (text.len == 0) return try allocator.alloc([]const u8, 0);
-    var lines = std.array_list.Managed([]const u8).init(allocator);
+    var lines = std.ArrayList([]const u8).init(allocator);
     var iter = std.mem.splitScalar(u8, text, '\n');
     while (iter.next()) |line| {
         // Skip trailing empty line from final newline
@@ -3246,7 +3246,7 @@ pub fn createConflictFile(git_path: []const u8, filename: []const u8, base_hash:
     defer if (target_content.len > 0) allocator.free(target_content);
     
     // Create conflict content with markers
-    var conflict_content = std.array_list.Managed(u8).init(allocator);
+    var conflict_content = std.ArrayList(u8).init(allocator);
     defer conflict_content.deinit();
     
     const writer = conflict_content.writer();
@@ -3453,7 +3453,7 @@ pub fn mergeCommits(git_path: []const u8, current_hash: []const u8, target_hash:
 
 
 pub fn urlDecodePath(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     errdefer result.deinit();
     var i: usize = 0;
     while (i < input.len) {
@@ -3601,7 +3601,7 @@ pub fn cfgValidateAndReport(content: []const u8, source_path: []const u8, alloca
 }
 
 
-pub fn cfgParseEntries(content: []const u8, entries: *std.array_list.Managed(CfgEntry), allocator: std.mem.Allocator) !void {
+pub fn cfgParseEntries(content: []const u8, entries: *std.ArrayList(CfgEntry), allocator: std.mem.Allocator) !void {
     var line_iter = std.mem.splitSequence(u8, content, "\n");
     var current_section: ?[]u8 = null;
     var line_num: usize = 0;
@@ -3620,7 +3620,7 @@ pub fn cfgParseEntries(content: []const u8, entries: *std.array_list.Managed(Cfg
             if (after.len == 0 or after[0] == '#' or after[0] == ';') continue;
             if (std.mem.indexOf(u8, after, "=")) |eq| {
                 const k = std.mem.trim(u8, after[0..eq], " \t");
-                var vbuf = std.array_list.Managed(u8).init(allocator);
+                var vbuf = std.ArrayList(u8).init(allocator);
                 defer vbuf.deinit();
                 try cfgAppendValuePart(&vbuf, after[eq + 1 ..]);
                 try entries.append(.{
@@ -3644,7 +3644,7 @@ pub fn cfgParseEntries(content: []const u8, entries: *std.array_list.Managed(Cfg
         if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
             const k = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
             var raw_value = trimmed[eq_pos + 1 ..];
-            var vbuf = std.array_list.Managed(u8).init(allocator);
+            var vbuf = std.ArrayList(u8).init(allocator);
             defer vbuf.deinit();
             while (true) {
                 const tv = std.mem.trimRight(u8, raw_value, " \t");
@@ -3723,7 +3723,7 @@ pub fn cfgParseSectionToKey(header: []const u8, allocator: std.mem.Allocator) ![
         const section = std.mem.trim(u8, inner[0..q_start], " \t");
         var rest = inner[q_start + 1 ..];
         if (std.mem.lastIndexOfScalar(u8, rest, '"')) |q_end| rest = rest[0..q_end];
-        var sub = std.array_list.Managed(u8).init(allocator);
+        var sub = std.ArrayList(u8).init(allocator);
         defer sub.deinit();
         var si: usize = 0;
         while (si < rest.len) : (si += 1) {
@@ -3762,7 +3762,7 @@ pub fn cfgQuoteValue(value: []const u8, allocator: std.mem.Allocator) ![]u8 {
         if (c == '#' or c == ';' or c == '\n' or c == '\\' or c == '"') { needs_quoting = true; break; }
     }
     if (!needs_quoting) return try allocator.dupe(u8, value);
-    var buf = std.array_list.Managed(u8).init(allocator);
+    var buf = std.ArrayList(u8).init(allocator);
     defer buf.deinit();
     try buf.append('"');
     for (value) |c| {
@@ -3807,7 +3807,7 @@ pub fn cfgValueMatchesPattern(val: []const u8, pattern: []const u8, fixed_val: b
 }
 
 
-pub fn cfgAppendValuePart(buf: *std.array_list.Managed(u8), raw: []const u8) !void {
+pub fn cfgAppendValuePart(buf: *std.ArrayList(u8), raw: []const u8) !void {
     const trimmed = std.mem.trimLeft(u8, raw, " \t");
     var in_quotes = false;
     var last_quoted_end: usize = 0;
@@ -4130,12 +4130,12 @@ pub fn cfgMakeRelativePath(abs_path: []const u8, allocator: std.mem.Allocator) !
 
 
 pub fn cfgRemoveEmptySections(cont: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    var lines_list = std.array_list.Managed([]const u8).init(allocator);
+    var lines_list = std.ArrayList([]const u8).init(allocator);
     defer lines_list.deinit();
     var iter_sec = std.mem.splitSequence(u8, cont, "\n");
     while (iter_sec.next()) |line| try lines_list.append(line);
     const lines_arr = lines_list.items;
-    var res = std.array_list.Managed(u8).init(allocator);
+    var res = std.ArrayList(u8).init(allocator);
     defer res.deinit();
     var idx_s: usize = 0;
     while (idx_s < lines_arr.len) {
@@ -4178,7 +4178,7 @@ pub fn cfgRemoveEmptySections(cont: []const u8, allocator: std.mem.Allocator) ![
 }
 
 
-pub fn cfgAppendOrigin(out: *std.array_list.Managed(u8), source_path: []const u8) !void {
+pub fn cfgAppendOrigin(out: *std.ArrayList(u8), source_path: []const u8) !void {
     if (std.mem.eql(u8, source_path, "standard input")) {
         try out.appendSlice("standard input:");
     } else if (std.mem.eql(u8, source_path, "command line")) {
@@ -4223,7 +4223,7 @@ pub fn cfgValidateColor(color: []const u8) bool {
 
 pub fn cfgColorToAnsiAlloc(color: []const u8, allocator: std.mem.Allocator) ![]u8 {
     if (color.len == 0) return try allocator.dupe(u8, "");
-    var buf = std.array_list.Managed(u8).init(allocator);
+    var buf = std.ArrayList(u8).init(allocator);
     defer buf.deinit();
     try buf.appendSlice("\x1b[");
     var first = true;
@@ -4260,12 +4260,12 @@ pub fn cfgColorToAnsiAlloc(color: []const u8, allocator: std.mem.Allocator) ![]u
 
 pub fn cfgOutputList(content: []const u8, source_path: []const u8, scope: []const u8, null_term: bool, name_only: bool, show_origin: bool, show_scope: bool, config_type: ConfigType, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     try cfgValidateAndReport(content, source_path, allocator, platform_impl);
-    var entries = std.array_list.Managed(CfgEntry).init(allocator);
+    var entries = std.ArrayList(CfgEntry).init(allocator);
     defer { for (entries.items) |*e| e.deinit(allocator); entries.deinit(); }
     try cfgParseEntries(content, &entries, allocator);
     for (entries.items) |e| {
         const term: []const u8 = if (null_term) "\x00" else "\n";
-        var out = std.array_list.Managed(u8).init(allocator);
+        var out = std.ArrayList(u8).init(allocator);
         defer out.deinit();
         if (show_scope) { try out.appendSlice(scope); try out.append('\t'); }
         if (show_origin) {
@@ -4299,7 +4299,7 @@ pub fn cfgLookup(sources: []const ConfigSource, key: []const u8, allocator: std.
     for (sources) |source| {
         const content = cfgReadSource(source.path, allocator, platform_impl) orelse continue;
         defer allocator.free(content);
-        var entries = std.array_list.Managed(CfgEntry).init(allocator);
+        var entries = std.ArrayList(CfgEntry).init(allocator);
         defer { for (entries.items) |*e| e.deinit(allocator); entries.deinit(); }
         cfgParseEntries(content, &entries, allocator) catch continue;
         for (entries.items) |e| {
@@ -4400,7 +4400,7 @@ pub fn cfgSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_
         error.FileNotFound => {
             const cs = try cfgFormatComment(comment, allocator);
             defer allocator.free(cs);
-            var out = std.array_list.Managed(u8).init(allocator);
+            var out = std.ArrayList(u8).init(allocator);
             defer out.deinit();
             const qv = try cfgQuoteValue(value, allocator);
             defer allocator.free(qv);
@@ -4416,7 +4416,7 @@ pub fn cfgSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_
 
     // Track lines and their properties
     const LI = struct { start: usize, end: usize, cont_end: usize, is_key: bool, regex_ok: bool, inline_on_header: bool };
-    var infos = std.array_list.Managed(LI).init(allocator);
+    var infos = std.ArrayList(LI).init(allocator);
     defer infos.deinit();
 
     var cur_sec: ?[]u8 = null;
@@ -4447,7 +4447,7 @@ pub fn cfgSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_
                     cur_sec = try allocator.dupe(u8, std.mem.trim(u8, inner[0..q], " \t"));
                     var r = inner[q + 1 ..];
                     if (std.mem.lastIndexOfScalar(u8, r, '"')) |q2| r = r[0..q2];
-                    var sb = std.array_list.Managed(u8).init(allocator);
+                    var sb = std.ArrayList(u8).init(allocator);
                     defer sb.deinit();
                     var si: usize = 0;
                     while (si < r.len) : (si += 1) {
@@ -4474,7 +4474,7 @@ pub fn cfgSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_
                     if (std.mem.indexOf(u8, after_bracket, "=")) |aeq| {
                         const ak = std.mem.trim(u8, after_bracket[0..aeq], " \t");
                         if (std.ascii.eqlIgnoreCase(ak, pk.variable)) {
-                            var vbuf2 = std.array_list.Managed(u8).init(allocator);
+                            var vbuf2 = std.ArrayList(u8).init(allocator);
                             defer vbuf2.deinit();
                             cfgAppendValuePart(&vbuf2, after_bracket[aeq + 1 ..]) catch {};
                             var rok2 = true;
@@ -4531,7 +4531,7 @@ pub fn cfgSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_
                         }
                     }
                     // Parse value for regex matching
-                    var vbuf = std.array_list.Managed(u8).init(allocator);
+                    var vbuf = std.ArrayList(u8).init(allocator);
                     defer vbuf.deinit();
                     // Simple: just parse the first line value for now
                     cfgAppendValuePart(&vbuf, raw_v) catch {};
@@ -4585,7 +4585,7 @@ pub fn cfgSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_
     defer allocator.free(new_line);
 
     const writeReplacement = struct {
-        fn f(res: *std.array_list.Managed(u8), li: LI, nl: []const u8, cont: []const u8) !void {
+        fn f(res: *std.ArrayList(u8), li: LI, nl: []const u8, cont: []const u8) !void {
             if (li.inline_on_header) {
                 const line_data = cont[li.start..li.end];
                 const cb = std.mem.indexOf(u8, line_data, "]");
@@ -4597,7 +4597,7 @@ pub fn cfgSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_
         }
     };
 
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
 
     if (do_add) {
@@ -4707,7 +4707,7 @@ pub fn cfgUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, val
     var match_count: usize = 0;
     var rmatch_count: usize = 0;
     {
-        var ents = std.array_list.Managed(CfgEntry).init(allocator);
+        var ents = std.ArrayList(CfgEntry).init(allocator);
         defer { for (ents.items) |*e| e.deinit(allocator); ents.deinit(); }
         cfgParseEntries(content, &ents, allocator) catch {};
         for (ents.items) |e| {
@@ -4732,7 +4732,7 @@ pub fn cfgUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, val
     }
 
     // Build output
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
     var cur_sec: ?[]u8 = null;
     var cur_sub: ?[]u8 = null;
@@ -4757,7 +4757,7 @@ pub fn cfgUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, val
                     cur_sec = try allocator.dupe(u8, std.mem.trim(u8, inner[0..q], " \t"));
                     var r = inner[q + 1 ..];
                     if (std.mem.lastIndexOfScalar(u8, r, '"')) |q2| r = r[0..q2];
-                    var sb = std.array_list.Managed(u8).init(allocator);
+                    var sb = std.ArrayList(u8).init(allocator);
                     defer sb.deinit();
                     var si: usize = 0;
                     while (si < r.len) : (si += 1) {
@@ -4785,7 +4785,7 @@ pub fn cfgUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, val
                 if (std.ascii.eqlIgnoreCase(k, pk.variable)) {
                     var should_rm = true;
                     if (value_regex) |vr| {
-                        var vbuf = std.array_list.Managed(u8).init(allocator);
+                        var vbuf = std.ArrayList(u8).init(allocator);
                         defer vbuf.deinit();
                         cfgAppendValuePart(&vbuf, trimmed[eq + 1 ..]) catch {};
                         const neg = vr.len > 0 and vr[0] == '!';
@@ -4858,7 +4858,7 @@ pub fn cfgRenameSection(cfg_path: []const u8, old_name: []const u8, new_name: []
     const new_sec = if (new_dot) |d| new_name[0..d] else new_name;
     const new_sub = if (new_dot) |d| new_name[d + 1 ..] else null;
 
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
     var found = false;
     var first_line = true;
@@ -4957,7 +4957,7 @@ pub fn cfgRemoveSection(cfg_path: []const u8, section_name: []const u8, allocato
     const rm_sec = if (sec_dot) |d| section_name[0..d] else section_name;
     const rm_sub = if (sec_dot) |d| section_name[d + 1 ..] else null;
 
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
     var in_removed = false;
     var found = false;
@@ -5066,7 +5066,7 @@ const ColorAttrEntry = union(enum) {
 };
 
 
-pub fn parseColorWord(word: []const u8, fg_color: *i16, bg_color: *i16, attrs: *std.array_list.AlignedManaged(ColorAttrEntry, null), fg_set: *bool, bg_set: *bool) !void {
+pub fn parseColorWord(word: []const u8, fg_color: *i16, bg_color: *i16, attrs: *std.ArrayList(ColorAttrEntry), fg_set: *bool, bg_set: *bool) !void {
     // Check for "bright" prefix colors
     if (word.len > 6 and std.mem.startsWith(u8, word, "bright")) {
         const base = parseColorName(word[6..]);
@@ -5168,7 +5168,7 @@ pub fn colorToAnsiAlloc(allocator: std.mem.Allocator, color_str: []const u8) ![]
     var fg_set = false;
     var bg_set = false;
 
-    var attrs = std.array_list.Managed(ColorAttrEntry).init(allocator);
+    var attrs = std.ArrayList(ColorAttrEntry).init(allocator);
     defer attrs.deinit();
 
     // We need to also track RGB values
@@ -5198,7 +5198,7 @@ pub fn colorToAnsiAlloc(allocator: std.mem.Allocator, color_str: []const u8) ![]
     }
 
     // Build ANSI code
-    var codes = std.array_list.Managed(u8).init(allocator);
+    var codes = std.ArrayList(u8).init(allocator);
     defer codes.deinit();
 
     var first = true;
@@ -5301,7 +5301,7 @@ pub fn colorToAnsiAlloc(allocator: std.mem.Allocator, color_str: []const u8) ![]
     }
 
     // Build final string: \e[CODESm
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     try result.append(0x1b);
     try result.append('[');
     try result.appendSlice(codes.items);
@@ -5313,7 +5313,7 @@ pub fn colorToAnsiAlloc(allocator: std.mem.Allocator, color_str: []const u8) ![]
 // Compatibility wrappers for code that uses old function names
 
 pub fn parseConfigValue(config_content: []const u8, key: []const u8, allocator: std.mem.Allocator) !?[]u8 {
-    var entries = std.array_list.Managed(CfgEntry).init(allocator);
+    var entries = std.ArrayList(CfgEntry).init(allocator);
     defer { for (entries.items) |*e| e.deinit(allocator); entries.deinit(); }
     try cfgParseEntries(config_content, &entries, allocator);
     var last_val: ?[]u8 = null;
@@ -5397,7 +5397,7 @@ pub fn outputConfigList(content: []const u8, source_path: []const u8, scope: []c
 
 
 pub fn outputConfigGetRegexp(content: []const u8, pattern: []const u8, name_only: bool, null_term: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !bool {
-    var entries = std.array_list.Managed(CfgEntry).init(allocator);
+    var entries = std.ArrayList(CfgEntry).init(allocator);
     defer { for (entries.items) |*e| e.deinit(allocator); entries.deinit(); }
     cfgParseEntries(content, &entries, allocator) catch return false;
     var found = false;
@@ -5420,8 +5420,8 @@ pub fn outputConfigGetRegexp(content: []const u8, pattern: []const u8, name_only
 }
 
 
-pub fn parseConfigGetAll(content: []const u8, key: []const u8, results: *std.array_list.Managed([]const u8), allocator: std.mem.Allocator) !void {
-    var entries = std.array_list.Managed(CfgEntry).init(allocator);
+pub fn parseConfigGetAll(content: []const u8, key: []const u8, results: *std.ArrayList([]const u8), allocator: std.mem.Allocator) !void {
+    var entries = std.ArrayList(CfgEntry).init(allocator);
     defer { for (entries.items) |*e| e.deinit(allocator); entries.deinit(); }
     try cfgParseEntries(content, &entries, allocator);
     for (entries.items) |e| {
@@ -5466,7 +5466,7 @@ pub fn parseConfigSectionHeader(header: []const u8, allocator: std.mem.Allocator
         var subsection_raw = inner[quote_start + 2 ..];
         if (subsection_raw.len > 0 and subsection_raw[subsection_raw.len - 1] == '"')
             subsection_raw = subsection_raw[0 .. subsection_raw.len - 1];
-        var sub_buf = std.array_list.Managed(u8).init(allocator);
+        var sub_buf = std.ArrayList(u8).init(allocator);
         defer sub_buf.deinit();
         var si: usize = 0;
         while (si < subsection_raw.len) : (si += 1) {
@@ -5487,7 +5487,7 @@ pub fn parseConfigKey(key: []const u8, allocator: std.mem.Allocator) !ParsedConf
 
 
 
-pub fn appendConfigValuePart(buf: *std.array_list.Managed(u8), raw: []const u8) !void {
+pub fn appendConfigValuePart(buf: *std.ArrayList(u8), raw: []const u8) !void {
     try cfgAppendValuePart(buf, raw);
 }
 
@@ -5655,7 +5655,7 @@ pub fn lookupBlobInTree(tree_hash: []const u8, path: []const u8, git_path: []con
         if (std.mem.eql(u8, name, name_to_find)) {
             if (remaining) |rest| {
                 // This is a directory - recurse
-                const sub_tree_hash = try std.fmt.allocPrint(allocator, "{x}", .{hash_bytes});
+                const sub_tree_hash = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
                 defer allocator.free(sub_tree_hash);
                 return try lookupBlobInTree(sub_tree_hash, rest, git_path, platform_impl, allocator);
             } else {
@@ -5710,7 +5710,7 @@ pub fn buildRecursiveTree(allocator: std.mem.Allocator, entries: []const index_m
         mode: []const u8,
         hash_bytes: [20]u8,
     };
-    var items = std.array_list.Managed(TreeItem).init(allocator);
+    var items = std.ArrayList(TreeItem).init(allocator);
     defer {
         for (items.items) |item| {
             allocator.free(item.name);
@@ -5810,7 +5810,7 @@ pub fn buildRecursiveTree(allocator: std.mem.Allocator, entries: []const index_m
     }.lessThan);
 
     // Build tree content
-    var tree_content = std.array_list.Managed(u8).init(allocator);
+    var tree_content = std.ArrayList(u8).init(allocator);
     defer tree_content.deinit();
 
     for (items.items) |item| {
@@ -6068,14 +6068,14 @@ pub fn resolveCommitByMessage(git_path: []const u8, pattern: []const u8, platfor
         while (vi.next()) |entry| allocator.free(entry.key_ptr.*);
         visited.deinit();
     }
-    var queue = std.array_list.Managed([]u8).init(allocator);
+    var queue = std.ArrayList([]u8).init(allocator);
     defer {
         for (queue.items) |q| allocator.free(q);
         queue.deinit();
     }
 
     const addTip = struct {
-        fn f(hash: []const u8, v: *std.StringHashMap(void), q: *std.array_list.Managed([]u8), alloc: std.mem.Allocator) void {
+        fn f(hash: []const u8, v: *std.StringHashMap(void), q: *std.ArrayList([]u8), alloc: std.mem.Allocator) void {
             if (v.contains(hash)) return;
             const dup1 = alloc.dupe(u8, hash) catch return;
             const dup2 = alloc.dupe(u8, hash) catch { alloc.free(dup1); return; };
@@ -6214,7 +6214,7 @@ pub fn resolvePreviousBranch(git_path: []const u8, n: u32, allocator: std.mem.Al
     const reflog_content = platform_impl.fs.readFile(allocator, head_reflog_path) catch return error.NotFound;
     defer allocator.free(reflog_content);
 
-    var checkout_entries = std.array_list.Managed([]const u8).init(allocator);
+    var checkout_entries = std.ArrayList([]const u8).init(allocator);
     defer checkout_entries.deinit();
 
     var lines = std.mem.splitScalar(u8, reflog_content, '\n');
@@ -6671,7 +6671,7 @@ pub fn computeDistance(git_path: []const u8, ancestor: []const u8, descendant: [
     
     // BFS from descendant backward to ancestor
     const QE = struct { hash: []u8, depth: u32 };
-    var queue = std.array_list.Managed(QE).init(allocator);
+    var queue = std.ArrayList(QE).init(allocator);
     defer {
         for (queue.items) |item| allocator.free(item.hash);
         queue.deinit();
@@ -6715,7 +6715,7 @@ pub fn computeDistance(git_path: []const u8, ancestor: []const u8, descendant: [
 
 pub fn getObjectSize(allocator: std.mem.Allocator, git_path: []const u8, sha1: *const [20]u8, platform_impl: anytype) !u64 {
     // Try to read object from loose store and get size
-    const hex = try std.fmt.allocPrint(allocator, "{x}", .{sha1});
+    const hex = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(sha1)});
     defer allocator.free(hex);
     const obj_path = try std.fmt.allocPrint(allocator, "{s}/objects/{s}/{s}", .{ git_path, hex[0..2], hex[2..] });
     defer allocator.free(obj_path);
@@ -6760,7 +6760,7 @@ pub fn outputRevListResults(final_results: [][]u8, reverse: bool, do_count: bool
         defer emitted_objects.deinit();
 
         // Collect deferred objects (trees/blobs) for non-in-commit-order mode
-        var deferred_objects = std.array_list.Managed([]const u8).init(allocator);
+        var deferred_objects = std.ArrayList([]const u8).init(allocator);
         defer {
             for (deferred_objects.items) |s| allocator.free(@constCast(s));
             deferred_objects.deinit();
@@ -6830,7 +6830,7 @@ pub fn outputRevListResults(final_results: [][]u8, reverse: bool, do_count: bool
 /// Format a commit according to a format string (like --pretty=format:...)
 
 pub fn formatCommitLine(allocator: std.mem.Allocator, fmt: []const u8, hash: []const u8, data: []const u8) ![]const u8 {
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     errdefer result.deinit();
 
     // Parse commit data fields
@@ -7140,7 +7140,7 @@ pub fn formatTimestampStrftime(timestamp: i64, tz_str: []const u8, fmt: []const 
     const day_abbrs = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
     const mon_names = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
     const mon_abbrs = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     var fi: usize = 0;
     while (fi < fmt.len) {
         if (fmt[fi] == '%' and fi + 1 < fmt.len) {
@@ -7365,7 +7365,7 @@ pub fn formatTimestampISO(timestamp: i64, tz_str: []const u8, allocator: std.mem
 
 
 pub fn walkAncestors(git_path: []const u8, start_hash: []const u8, set: *std.StringHashMap(void), platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
-    var queue = std.array_list.Managed([]u8).init(allocator);
+    var queue = std.ArrayList([]u8).init(allocator);
     defer {
         for (queue.items) |h| allocator.free(h);
         queue.deinit();
@@ -7523,7 +7523,7 @@ pub fn getCommitSubject(hash: []const u8, git_path: []const u8, platform_impl: a
 
 
 pub fn writeEmptyIndex(allocator: std.mem.Allocator, index_path: []const u8) !void {
-    var output = std.array_list.Managed(u8).init(allocator);
+    var output = std.ArrayList(u8).init(allocator);
     defer output.deinit();
     try output.appendSlice("DIRC");
     try output.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, 2))); // version 2
@@ -7549,7 +7549,7 @@ pub fn removePathsFromIndex(allocator: std.mem.Allocator, index_path: []const u8
     const num_entries = std.mem.readInt(u32, idx_data[8..12], .big);
 
     // Parse entries, keeping those not in paths
-    var new_entries = std.array_list.Managed(u8).init(allocator);
+    var new_entries = std.ArrayList(u8).init(allocator);
     defer new_entries.deinit();
     var kept_count: u32 = 0;
 
@@ -7584,7 +7584,7 @@ pub fn removePathsFromIndex(allocator: std.mem.Allocator, index_path: []const u8
     }
 
     // Write new index
-    var output = std.array_list.Managed(u8).init(allocator);
+    var output = std.ArrayList(u8).init(allocator);
     defer output.deinit();
     try output.appendSlice("DIRC");
     try output.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, 2)));
@@ -7629,7 +7629,7 @@ pub fn removeTrackedFiles(allocator: std.mem.Allocator, index_path: []const u8, 
 }
 
 
-pub fn collectTreeEntries(git_path: []const u8, tree_hash: []const u8, prefix: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, entries: *std.array_list.Managed(index_mod.IndexEntry)) !void {
+pub fn collectTreeEntries(git_path: []const u8, tree_hash: []const u8, prefix: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, entries: *std.ArrayList(index_mod.IndexEntry)) !void {
     const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch return;
     defer tree_obj.deinit(allocator);
 
@@ -8288,7 +8288,7 @@ pub fn removeFromPackedRefs(git_dir: []const u8, ref_name: []const u8, allocator
     defer allocator.free(packed_refs_path);
     const packed_data = platform_impl.fs.readFile(allocator, packed_refs_path) catch return;
     defer allocator.free(packed_data);
-    var new_packed = std.array_list.Managed(u8).init(allocator);
+    var new_packed = std.ArrayList(u8).init(allocator);
     defer new_packed.deinit();
     var lines_iter = std.mem.splitScalar(u8, packed_data, '\n');
     var skip_peel = false;
@@ -8399,8 +8399,8 @@ pub fn resolveTreeish(git_path: []const u8, treeish: []const u8, platform_impl: 
 
 /// Parse tree object data and return entries as a list
 
-pub fn parseTreeEntries(tree_data: []const u8, allocator: std.mem.Allocator) !std.array_list.Managed(LsTreeEntry) {
-    var entries = std.array_list.Managed(LsTreeEntry).init(allocator);
+pub fn parseTreeEntries(tree_data: []const u8, allocator: std.mem.Allocator) !std.ArrayList(LsTreeEntry) {
+    var entries = std.ArrayList(LsTreeEntry).init(allocator);
     var pos: usize = 0;
 
     while (pos < tree_data.len) {
@@ -8417,7 +8417,7 @@ pub fn parseTreeEntries(tree_data: []const u8, allocator: std.mem.Allocator) !st
         pos += 20;
 
         var hash_hex: [40]u8 = undefined;
-        _ = std.fmt.bufPrint(&hash_hex, "{x}", .{hash_bytes}) catch break;
+        _ = std.fmt.bufPrint(&hash_hex, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch break;
 
         const is_tree = std.mem.eql(u8, mode, "40000");
         const is_commit = std.mem.eql(u8, mode, "160000");
@@ -8476,7 +8476,7 @@ pub fn cQuotePath(allocator: std.mem.Allocator, path: []const u8, quote_high_byt
     }
     if (!needs_quoting) return try allocator.dupe(u8, path);
 
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     try result.append('"');
     for (path) |c| {
         switch (c) {
@@ -8502,7 +8502,7 @@ pub fn cQuotePath(allocator: std.mem.Allocator, path: []const u8, quote_high_byt
 
 pub fn makeRelativePath(allocator: std.mem.Allocator, prefix: []const u8, full_path: []const u8) ![]const u8 {
     // Split prefix into components
-    var prefix_parts = std.array_list.Managed([]const u8).init(allocator);
+    var prefix_parts = std.ArrayList([]const u8).init(allocator);
     defer prefix_parts.deinit();
     var piter = std.mem.splitScalar(u8, prefix, '/');
     while (piter.next()) |part| {
@@ -8510,7 +8510,7 @@ pub fn makeRelativePath(allocator: std.mem.Allocator, prefix: []const u8, full_p
     }
 
     // Split full_path into components
-    var path_parts = std.array_list.Managed([]const u8).init(allocator);
+    var path_parts = std.ArrayList([]const u8).init(allocator);
     defer path_parts.deinit();
     var fiter = std.mem.splitScalar(u8, full_path, '/');
     while (fiter.next()) |part| {
@@ -8527,7 +8527,7 @@ pub fn makeRelativePath(allocator: std.mem.Allocator, prefix: []const u8, full_p
     // Number of "../" needed
     const ups = prefix_parts.items.len - common;
 
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
     for (0..ups) |_| {
         try result.appendSlice("../");
@@ -8542,7 +8542,7 @@ pub fn makeRelativePath(allocator: std.mem.Allocator, prefix: []const u8, full_p
 
 
 pub fn normalizePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    var components = std.array_list.Managed([]const u8).init(allocator);
+    var components = std.ArrayList([]const u8).init(allocator);
     defer components.deinit();
 
     // Handle trailing slash
@@ -8564,7 +8564,7 @@ pub fn normalizePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     if (components.items.len == 0) return try allocator.dupe(u8, "");
 
     // Join components
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     for (components.items, 0..) |comp, idx| {
         if (idx > 0) try result.append('/');
         try result.appendSlice(comp);
@@ -8668,7 +8668,7 @@ pub fn findGitDir() ![]const u8 {
 }
 
 
-pub fn collectLooseRefs(allocator: std.mem.Allocator, git_dir: []const u8, prefix: []const u8, ref_list: *std.array_list.Managed(RefEntry), platform_impl: anytype) !void {
+pub fn collectLooseRefs(allocator: std.mem.Allocator, git_dir: []const u8, prefix: []const u8, ref_list: *std.ArrayList(RefEntry), platform_impl: anytype) !void {
     const dir_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, prefix }) catch return;
     defer allocator.free(dir_path);
 
@@ -9174,7 +9174,7 @@ pub fn parseMailmapLineEmail(line: []const u8, orig_name: []const u8, orig_email
 
 
 pub fn sanitizeSubject(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     for (text) |c| {
         if (std.ascii.isAlphanumeric(c)) {
             try result.append(c);
@@ -9231,7 +9231,7 @@ pub fn globMatch(str: []const u8, pattern: []const u8) bool {
 
 pub fn joinLines(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
     if (std.mem.indexOfScalar(u8, text, '\n') == null) return text;
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     var iter = std.mem.splitScalar(u8, text, '\n');
     var first = true;
     while (iter.next()) |line| {
@@ -9262,7 +9262,7 @@ pub fn extractObjectMessage(data: []const u8) []const u8 {
 
 pub fn stripCR(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
     if (std.mem.indexOfScalar(u8, input, '\r') == null) return input;
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     for (input) |c| {
         if (c != '\r') try result.append(c);
     }
@@ -9497,7 +9497,7 @@ pub fn doNativePrune(allocator: std.mem.Allocator, git_dir: []const u8, platform
 }
 
 
-pub fn collectLooseRefsForPack(allocator: std.mem.Allocator, git_dir: []const u8, prefix: []const u8, ref_map: *std.StringHashMap([]const u8), loose_refs: *std.array_list.Managed([]const u8)) !void {
+pub fn collectLooseRefsForPack(allocator: std.mem.Allocator, git_dir: []const u8, prefix: []const u8, ref_map: *std.StringHashMap([]const u8), loose_refs: *std.ArrayList([]const u8)) !void {
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, prefix });
     defer allocator.free(dir_path);
 
@@ -9602,7 +9602,7 @@ pub fn applyDelta(allocator: std.mem.Allocator, base: []const u8, delta: []const
 
     if (base_size != base.len) return error.BaseSizeMismatch;
 
-    var result = try std.array_list.Managed(u8).initCapacity(allocator, @intCast(result_size));
+    var result = try std.ArrayList(u8).initCapacity(allocator, @intCast(result_size));
     errdefer result.deinit();
 
     while (pos < delta.len) {
@@ -9865,7 +9865,7 @@ pub fn isTreeMode(mode: []const u8) bool {
 
 pub fn outputStatForEmptyTree(allocator: std.mem.Allocator, tree_hash_str: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
     // Collect all files and their line counts
-    var files = std.array_list.Managed(FileStatEntry).init(allocator);
+    var files = std.ArrayList(FileStatEntry).init(allocator);
     defer {
         for (files.items) |f| allocator.free(f.name);
         files.deinit();
@@ -9910,7 +9910,7 @@ pub fn outputStatForEmptyTree(allocator: std.mem.Allocator, tree_hash_str: []con
 }
 
 
-pub fn collectFilesFromTree(allocator: std.mem.Allocator, tree_hash_str: []const u8, prefix: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, files: *std.array_list.Managed(FileStatEntry)) !void {
+pub fn collectFilesFromTree(allocator: std.mem.Allocator, tree_hash_str: []const u8, prefix: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, files: *std.ArrayList(FileStatEntry)) !void {
     const tree_obj = objects.GitObject.load(tree_hash_str, git_path, platform_impl, allocator) catch return;
     defer tree_obj.deinit(allocator);
     
@@ -9943,7 +9943,7 @@ pub fn collectFilesFromTree(allocator: std.mem.Allocator, tree_hash_str: []const
 
 
 pub fn outputStatForTwoTrees(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, git_path: []const u8, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform) !void {
-    var entries = std.array_list.Managed(diff_stats_mod.StatEntry).init(allocator);
+    var entries = std.ArrayList(diff_stats_mod.StatEntry).init(allocator);
     defer {
         for (entries.items) |*e| allocator.free(e.path);
         entries.deinit();
@@ -9955,7 +9955,7 @@ pub fn outputStatForTwoTrees(allocator: std.mem.Allocator, tree1_hash: []const u
 
 
 pub fn outputSummaryForTwoTrees(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, git_path: []const u8, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform) !void {
-    var diff_entries = std.array_list.Managed(DiffStatEntry).init(allocator);
+    var diff_entries = std.ArrayList(DiffStatEntry).init(allocator);
     defer {
         for (diff_entries.items) |*de| allocator.free(de.path);
         diff_entries.deinit();
@@ -9987,7 +9987,7 @@ pub fn outputSummaryForTwoTrees(allocator: std.mem.Allocator, tree1_hash: []cons
 
 pub fn outputSummaryForEmptyTree(allocator: std.mem.Allocator, tree_hash_str: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
     // Use collectTreeDiffEntries with empty tree to get proper mode info
-    var diff_entries = std.array_list.Managed(DiffStatEntry).init(allocator);
+    var diff_entries = std.ArrayList(DiffStatEntry).init(allocator);
     defer {
         for (diff_entries.items) |*de| allocator.free(de.path);
         diff_entries.deinit();
@@ -10053,10 +10053,10 @@ pub fn getTreeForCommit(allocator: std.mem.Allocator, commit_hash: []const u8, g
 }
 
 
-pub fn getParentsForCommit(allocator: std.mem.Allocator, commit_hash: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) !std.array_list.Managed([]u8) {
+pub fn getParentsForCommit(allocator: std.mem.Allocator, commit_hash: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) !std.ArrayList([]u8) {
     const obj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch return error.ObjectNotFound;
     defer obj.deinit(allocator);
-    var parents = std.array_list.Managed([]u8).init(allocator);
+    var parents = std.ArrayList([]u8).init(allocator);
     var iter = std.mem.splitScalar(u8, obj.data, '\n');
     while (iter.next()) |line| {
         if (line.len == 0) break;
@@ -10106,7 +10106,7 @@ pub fn outputCombinedRaw(allocator: std.mem.Allocator, parent_hashes: []const []
     try collectTreeFiles(allocator, merge_tree_hash, "", git_path, platform_impl, &merge_files);
     
     // Collect parent tree files
-    var parent_file_maps = std.array_list.Managed(std.StringHashMap(TreeFileInfo)).init(allocator);
+    var parent_file_maps = std.ArrayList(std.StringHashMap(TreeFileInfo)).init(allocator);
     defer {
         for (parent_file_maps.items) |*pf| {
             var pit = pf.iterator();
@@ -10131,7 +10131,7 @@ pub fn outputCombinedRaw(allocator: std.mem.Allocator, parent_hashes: []const []
     }
     
     // Collect and sort all file names
-    var all_names = std.array_list.Managed([]const u8).init(allocator);
+    var all_names = std.ArrayList([]const u8).init(allocator);
     defer all_names.deinit();
     {
         var name_it = merge_files.keyIterator();
@@ -10166,7 +10166,7 @@ pub fn outputCombinedRaw(allocator: std.mem.Allocator, parent_hashes: []const []
         const merge_mode = if (merge_info) |mi| mi.mode else "000000";
         
         // Check if file differs from each parent
-        var statuses = std.array_list.Managed(u8).init(allocator);
+        var statuses = std.ArrayList(u8).init(allocator);
         defer statuses.deinit();
         var differs_from_any = false;
         var differs_from_all = true;
@@ -10197,7 +10197,7 @@ pub fn outputCombinedRaw(allocator: std.mem.Allocator, parent_hashes: []const []
         if (!differs_from_all) continue;
         
         // Build the raw line
-        var line = std.array_list.Managed(u8).init(allocator);
+        var line = std.ArrayList(u8).init(allocator);
         defer line.deinit();
         
         // Colons (one per parent)
@@ -10289,7 +10289,7 @@ pub fn outputCombinedStat(allocator: std.mem.Allocator, parent_hashes: []const [
     }
     try collectTreeFiles(allocator, merge_tree_hash, "", git_path, platform_impl, &merge_files);
     
-    var parent_file_maps = std.array_list.Managed(std.StringHashMap(TreeFileInfo)).init(allocator);
+    var parent_file_maps = std.ArrayList(std.StringHashMap(TreeFileInfo)).init(allocator);
     defer {
         for (parent_file_maps.items) |*pf| {
             var it = pf.iterator();
@@ -10320,11 +10320,11 @@ pub fn outputCombinedStat(allocator: std.mem.Allocator, parent_hashes: []const [
     
     // Collect changed files
     const ChangedFile = struct { name: []const u8, insertions: usize, deletions: usize };
-    var changed = std.array_list.Managed(ChangedFile).init(allocator);
+    var changed = std.ArrayList(ChangedFile).init(allocator);
     defer changed.deinit();
     
     var name_it = merge_files.keyIterator();
-    var all_names2 = std.array_list.Managed([]const u8).init(allocator);
+    var all_names2 = std.ArrayList([]const u8).init(allocator);
     defer all_names2.deinit();
     while (name_it.next()) |key| try all_names2.append(key.*);
     std.mem.sort([]const u8, all_names2.items, {}, struct {
@@ -10389,7 +10389,7 @@ pub fn outputCombinedStat(allocator: std.mem.Allocator, parent_hashes: []const [
     const num_width = countDigitsUsize(max_changes);
 
     // Output stat lines - use DiffStatEntry and formatDiffStat for consistent formatting
-    var stat_entries = std.array_list.Managed(DiffStatEntry).init(allocator);
+    var stat_entries = std.ArrayList(DiffStatEntry).init(allocator);
     defer {
         for (stat_entries.items) |*se| allocator.free(se.path);
         stat_entries.deinit();
@@ -10439,7 +10439,7 @@ pub fn outputCombinedSummary(allocator: std.mem.Allocator, parent_hashes: []cons
     }
     try collectTreeFiles(allocator, merge_tree_hash, "", git_path, platform_impl, &merge_files2);
     
-    var parent_file_maps2 = std.array_list.Managed(std.StringHashMap(TreeFileInfo)).init(allocator);
+    var parent_file_maps2 = std.ArrayList(std.StringHashMap(TreeFileInfo)).init(allocator);
     defer {
         for (parent_file_maps2.items) |*pf| {
             var it = pf.iterator();
@@ -10463,7 +10463,7 @@ pub fn outputCombinedSummary(allocator: std.mem.Allocator, parent_hashes: []cons
         try parent_file_maps2.append(pf);
     }
     
-    var all_names3 = std.array_list.Managed([]const u8).init(allocator);
+    var all_names3 = std.ArrayList([]const u8).init(allocator);
     defer all_names3.deinit();
     var nit = merge_files2.keyIterator();
     while (nit.next()) |key| try all_names3.append(key.*);
@@ -10521,7 +10521,7 @@ pub fn outputCombinedDiff(allocator: std.mem.Allocator, parent_hashes: []const [
     try collectTreeFiles(allocator, merge_tree_hash, "", git_path, platform_impl, &merge_files);
     
     // Collect files from each parent tree
-    var parent_files = std.array_list.Managed(std.StringHashMap(TreeFileInfo)).init(allocator);
+    var parent_files = std.ArrayList(std.StringHashMap(TreeFileInfo)).init(allocator);
     defer {
         for (parent_files.items) |*pf| {
             var it = pf.iterator();
@@ -10546,7 +10546,7 @@ pub fn outputCombinedDiff(allocator: std.mem.Allocator, parent_hashes: []const [
     }
     
     // Collect all file names from merge tree
-    var all_names = std.array_list.Managed([]const u8).init(allocator);
+    var all_names = std.ArrayList([]const u8).init(allocator);
     defer all_names.deinit();
     var name_iter = merge_files.keyIterator();
     while (name_iter.next()) |key| try all_names.append(key.*);
@@ -10583,14 +10583,14 @@ pub fn outputCombinedDiff(allocator: std.mem.Allocator, parent_hashes: []const [
         defer if (merge_content.len > 0) allocator.free(merge_content);
         
         // Load parent contents
-        var parent_contents = std.array_list.Managed([]const u8).init(allocator);
+        var parent_contents = std.ArrayList([]const u8).init(allocator);
         defer {
             for (parent_contents.items) |pc| {
                 if (pc.len > 0) allocator.free(pc);
             }
             parent_contents.deinit();
         }
-        var parent_short_hashes = std.array_list.Managed([]const u8).init(allocator);
+        var parent_short_hashes = std.ArrayList([]const u8).init(allocator);
         defer parent_short_hashes.deinit();
         
         for (parent_files.items) |pf| {
@@ -10613,7 +10613,7 @@ pub fn outputCombinedDiff(allocator: std.mem.Allocator, parent_hashes: []const [
         try platform_impl.writeStdout(diff_hdr);
         
         // index line: index hash1,hash2..merge_hash
-        var idx_line = std.array_list.Managed(u8).init(allocator);
+        var idx_line = std.ArrayList(u8).init(allocator);
         defer idx_line.deinit();
         try idx_line.appendSlice("index ");
         for (parent_short_hashes.items, 0..) |psh, i| {
@@ -10641,7 +10641,7 @@ pub fn outputCombinedDiffHunks(allocator: std.mem.Allocator, parent_contents: []
     const num_parents = parent_contents.len;
     
     // Split all contents into lines
-    var merge_lines = std.array_list.Managed([]const u8).init(allocator);
+    var merge_lines = std.ArrayList([]const u8).init(allocator);
     defer merge_lines.deinit();
     {
         var iter = std.mem.splitScalar(u8, merge_content, '\n');
@@ -10652,13 +10652,13 @@ pub fn outputCombinedDiffHunks(allocator: std.mem.Allocator, parent_contents: []
         }
     }
     
-    var parent_lines_list = std.array_list.Managed(std.array_list.Managed([]const u8)).init(allocator);
+    var parent_lines_list = std.ArrayList(std.ArrayList([]const u8)).init(allocator);
     defer {
         for (parent_lines_list.items) |*pl| pl.deinit();
         parent_lines_list.deinit();
     }
     for (parent_contents) |pc| {
-        var pl = std.array_list.Managed([]const u8).init(allocator);
+        var pl = std.ArrayList([]const u8).init(allocator);
         var iter = std.mem.splitScalar(u8, pc, '\n');
         while (iter.next()) |line| try pl.append(line);
         if (pl.items.len > 0 and pl.items[pl.items.len - 1].len == 0) {
@@ -10672,7 +10672,7 @@ pub fn outputCombinedDiffHunks(allocator: std.mem.Allocator, parent_contents: []
     // Mark each merge line with which parents it came from
     
     // For each parent, compute which merge lines match
-    var parent_matches = std.array_list.Managed([]bool).init(allocator);
+    var parent_matches = std.ArrayList([]bool).init(allocator);
     defer {
         for (parent_matches.items) |pm| allocator.free(pm);
         parent_matches.deinit();
@@ -10695,7 +10695,7 @@ pub fn outputCombinedDiffHunks(allocator: std.mem.Allocator, parent_contents: []
     
     // Build hunk header
     // @@@ -start1,len1 -start2,len2 +start_merge,len_merge @@@
-    var hunk_header = std.array_list.Managed(u8).init(allocator);
+    var hunk_header = std.ArrayList(u8).init(allocator);
     defer hunk_header.deinit();
     // Use @@@ markers with num_parents @ signs
     for (0..num_parents + 1) |_| try hunk_header.append('@');
@@ -10740,7 +10740,7 @@ pub fn outputCombinedDiffHunks(allocator: std.mem.Allocator, parent_contents: []
 }
 
 
-pub fn collectTreeDiffEntries(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, prefix: []const u8, git_path: []const u8, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform, diff_entries_out: *std.array_list.Managed(DiffStatEntry)) !void {
+pub fn collectTreeDiffEntries(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, prefix: []const u8, git_path: []const u8, pathspecs: []const []const u8, platform_impl: *const platform_mod.Platform, diff_entries_out: *std.ArrayList(DiffStatEntry)) !void {
     const empty_tree_hash = "4b825dc642cb6eb9a060e54bf899d69f82cf0101";
     const is_empty1 = std.mem.eql(u8, tree1_hash, empty_tree_hash);
     const is_empty2 = std.mem.eql(u8, tree2_hash, empty_tree_hash);
@@ -10770,7 +10770,7 @@ pub fn collectTreeDiffEntries(allocator: std.mem.Allocator, tree1_hash: []const 
     for (parsed1.items) |e| all_names.put(e.name, {}) catch {};
     for (parsed2.items) |e| all_names.put(e.name, {}) catch {};
 
-    var name_list = std.array_list.Managed([]const u8).init(allocator);
+    var name_list = std.ArrayList([]const u8).init(allocator);
     defer name_list.deinit();
     var niter = all_names.keyIterator();
     while (niter.next()) |key| try name_list.append(key.*);
@@ -11043,7 +11043,7 @@ pub fn buildTreeMap(tree_hash: []const u8, prefix: []const u8, git_path: []const
         
         if (std.mem.eql(u8, mode_str, "40000") or std.mem.eql(u8, mode_str, "040000")) {
             // Directory - recurse
-            const sub_hash = try std.fmt.allocPrint(allocator, "{x}", .{hash_bytes[0..20]});
+            const sub_hash = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes[0..20])});
             defer allocator.free(sub_hash);
             buildTreeMap(sub_hash, full_path, git_path, platform_impl, allocator, map) catch {};
             allocator.free(full_path);
@@ -11065,7 +11065,7 @@ pub fn performLocalFetch(allocator: std.mem.Allocator, git_path: []const u8, sou
     const fkey = try std.fmt.allocPrint(allocator, "remote.{s}.fetch", .{remote_name}); defer allocator.free(fkey);
     const cfgp = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path}); defer allocator.free(cfgp);
     const cfgc = platform_impl.fs.readFile(allocator, cfgp) catch ""; defer if (cfgc.len > 0) allocator.free(cfgc);
-    var rspecs = std.array_list.Managed([]const u8).init(allocator);
+    var rspecs = std.ArrayList([]const u8).init(allocator);
     defer { for (rspecs.items) |rs| allocator.free(rs); rspecs.deinit(); }
     if (cmd_refspecs.len > 0) { for (cmd_refspecs) |rs| try rspecs.append(try allocator.dupe(u8, rs)); }
     else { var fr: ?[]const u8 = null; if (cfgc.len > 0) fr = (parseConfigValue(cfgc, fkey, allocator) catch null) orelse null;
@@ -11076,7 +11076,7 @@ pub fn performLocalFetch(allocator: std.mem.Allocator, git_path: []const u8, sou
     const sp2 = try std.fmt.allocPrint(allocator, "{s}/pack", .{so}); defer allocator.free(sp2);
     const dp2 = try std.fmt.allocPrint(allocator, "{s}/pack", .{do2}); defer allocator.free(dp2);
     std.fs.cwd().makePath(dp2) catch {}; t5CopyMissingPackFiles(sp2, dp2) catch {};
-    var srl = std.array_list.Managed(RefEntry).init(allocator);
+    var srl = std.ArrayList(RefEntry).init(allocator);
     defer { for (srl.items) |e| { allocator.free(e.name); allocator.free(e.hash); } srl.deinit(); }
     const srp = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{src_git_dir}); defer allocator.free(srp);
     if (std.fs.cwd().readFileAlloc(allocator, srp, 10*1024*1024)) |pc| { defer allocator.free(pc);
@@ -11156,7 +11156,7 @@ pub fn performLocalFetch(allocator: std.mem.Allocator, git_path: []const u8, sou
     }
     // FETCH_HEAD - write for explicitly fetched refs
     // Build FETCH_HEAD with proper for-merge status
-    var fh_buf = std.array_list.Managed(u8).init(allocator);
+    var fh_buf = std.ArrayList(u8).init(allocator);
     defer fh_buf.deinit();
     if (cmd_refspecs.len > 0) {
         // When explicit refspecs are given, FETCH_HEAD comes from matched refs
@@ -11362,7 +11362,7 @@ pub fn checkRebaseClean(git_path: []const u8, repo_root: []const u8, head_hash: 
     defer allocator.free(head_tree);
 
     // Collect tree entries
-    var tree_entries = std.array_list.Managed(index_mod.IndexEntry).init(allocator);
+    var tree_entries = std.ArrayList(index_mod.IndexEntry).init(allocator);
     defer {
         for (tree_entries.items) |*entry| allocator.free(entry.path);
         tree_entries.deinit();
@@ -11430,7 +11430,7 @@ pub fn checkRebaseClean(git_path: []const u8, repo_root: []const u8, head_hash: 
 }
 
 
-pub fn collectCommitsToReplay(git_path: []const u8, head_hash: []const u8, base_hash: []const u8, commits: *std.array_list.Managed([]u8), allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+pub fn collectCommitsToReplay(git_path: []const u8, head_hash: []const u8, base_hash: []const u8, commits: *std.ArrayList([]u8), allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     // Walk from HEAD backwards to base, collecting commits
     var current = try allocator.dupe(u8, head_hash);
     var depth: usize = 0;
@@ -11502,7 +11502,7 @@ pub fn getCommitAuthorLine(git_path: []const u8, commit_hash: []const u8, alloca
 }
 
 
-pub fn saveRebaseState(git_path: []const u8, commits: *std.array_list.Managed([]u8), onto_hash: []const u8, orig_head: []const u8, branch_name: []const u8, upstream_hash: []const u8, apply_mode: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+pub fn saveRebaseState(git_path: []const u8, commits: *std.ArrayList([]u8), onto_hash: []const u8, orig_head: []const u8, branch_name: []const u8, upstream_hash: []const u8, apply_mode: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     const dir_name = if (apply_mode) "rebase-apply" else "rebase-merge";
     const rebase_dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, dir_name });
     defer allocator.free(rebase_dir);
@@ -11541,7 +11541,7 @@ pub fn saveRebaseState(git_path: []const u8, commits: *std.array_list.Managed([]
     write(rebase_dir, "upstream", upstream_hash, allocator, platform_impl);
 
     // Write the todo list (list of commits)
-    var todo = std.array_list.Managed(u8).init(allocator);
+    var todo = std.ArrayList(u8).init(allocator);
     defer todo.deinit();
     for (commits.items) |c| {
         todo.appendSlice("pick ") catch {};
@@ -11633,7 +11633,7 @@ pub fn copyRebaseNotes(git_path: []const u8, old_commit: []const u8, new_commit:
         defer tree_obj.deinit(allocator);
 
         // Build new tree with the added entry
-        var new_tree_data = std.array_list.Managed(u8).init(allocator);
+        var new_tree_data = std.ArrayList(u8).init(allocator);
         defer new_tree_data.deinit();
 
         // Copy existing entries
@@ -11748,7 +11748,7 @@ pub fn lookupTreeEntry(git_path: []const u8, tree_hash: []const u8, name: []cons
 }
 
 
-pub fn replayCommits(git_path: []const u8, repo_root: []const u8, commits: *std.array_list.Managed([]u8), start_idx: usize, branch_name: []const u8, quiet: bool, apply_mode: bool, reflog_action: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+pub fn replayCommits(git_path: []const u8, repo_root: []const u8, commits: *std.ArrayList([]u8), start_idx: usize, branch_name: []const u8, quiet: bool, apply_mode: bool, reflog_action: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     _ = repo_root;
     var idx = start_idx;
     while (idx < commits.items.len) : (idx += 1) {
@@ -11994,7 +11994,7 @@ pub fn removeDirectoryRecursive(path: []const u8, allocator: std.mem.Allocator, 
     defer dir.close();
 
     // Collect entries first
-    var entries_list = std.array_list.Managed([]u8).init(allocator);
+    var entries_list = std.ArrayList([]u8).init(allocator);
     defer {
         for (entries_list.items) |e| allocator.free(e);
         entries_list.deinit();
@@ -12080,7 +12080,7 @@ pub fn rebaseContinue(git_path: []const u8, repo_root: []const u8, allocator: st
     const todo = readRebaseFile(git_path, "git-rebase-todo", allocator, platform_impl) orelse return;
     defer allocator.free(todo);
 
-    var commits = std.array_list.Managed([]u8).init(allocator);
+    var commits = std.ArrayList([]u8).init(allocator);
     defer {
         for (commits.items) |c| allocator.free(c);
         commits.deinit();
@@ -12179,7 +12179,7 @@ pub fn rebaseSkip(git_path: []const u8, repo_root: []const u8, allocator: std.me
     const todo = readRebaseFile(git_path, "git-rebase-todo", allocator, platform_impl) orelse return;
     defer allocator.free(todo);
 
-    var commits = std.array_list.Managed([]u8).init(allocator);
+    var commits = std.ArrayList([]u8).init(allocator);
     defer {
         for (commits.items) |c| allocator.free(c);
         commits.deinit();
@@ -12569,7 +12569,7 @@ pub fn generateDiffBetweenCommits(git_path: []const u8, parent_hash: []const u8,
 pub fn outputAllPatchStats(allocator: std.mem.Allocator, patches: []Patch, platform_impl: anytype) !void {
     // Collect stats for all patches
     const StatInfo = struct { path: []const u8, added: u32, removed: u32, is_binary: bool, is_rename: bool };
-    var stats = std.array_list.Managed(StatInfo).init(allocator);
+    var stats = std.ArrayList(StatInfo).init(allocator);
     defer stats.deinit();
 
     var total_ins: u32 = 0;
@@ -12693,7 +12693,7 @@ pub fn outputAllPatchStats(allocator: std.mem.Allocator, patches: []Patch, platf
 
     // Summary line
     const nfiles = stats.items.len;
-    var summary = std.array_list.Managed(u8).init(allocator);
+    var summary = std.ArrayList(u8).init(allocator);
     defer summary.deinit();
     const nfiles_str = try std.fmt.allocPrint(allocator, " {d} file{s} changed", .{ nfiles, if (nfiles != 1) "s" else "" });
     defer allocator.free(nfiles_str);
@@ -12739,7 +12739,7 @@ pub fn checkoutTreeRecursive(git_path: []const u8, tree_data: []const u8, repo_r
         const hash_bytes = tree_data[i..i + 20];
         const hash_hex = try allocator.alloc(u8, 40);
         defer allocator.free(hash_hex);
-        _ = std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes}) catch break;
+        _ = std.fmt.bufPrint(hash_hex, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch break;
         
         i += 20;
         
@@ -13031,7 +13031,7 @@ pub fn countUnreachable(git_path: []const u8, from: []const u8, not_in: []const 
         not_in_set.deinit();
     }
     
-    var queue = std.array_list.Managed([]u8).init(allocator);
+    var queue = std.ArrayList([]u8).init(allocator);
     defer {
         for (queue.items) |item| allocator.free(item);
         queue.deinit();
@@ -13067,7 +13067,7 @@ pub fn countUnreachable(git_path: []const u8, from: []const u8, not_in: []const 
         visited.deinit();
     }
     
-    var queue2 = std.array_list.Managed([]u8).init(allocator);
+    var queue2 = std.ArrayList([]u8).init(allocator);
     defer {
         for (queue2.items) |item| allocator.free(item);
         queue2.deinit();
@@ -13123,7 +13123,7 @@ pub fn walkTreeForDiffIndex(allocator: std.mem.Allocator, git_dir: []const u8, t
         if ((mode & 0o170000) == 0o040000) {
             defer allocator.free(full_path);
             var sub_hash_hex: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&sub_hash_hex, "{x}", .{&hash}) catch continue;
+            _ = std.fmt.bufPrint(&sub_hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&hash)}) catch continue;
             try walkTreeForDiffIndex(allocator, git_dir, &sub_hash_hex, full_path, entries, platform_impl);
         } else {
             try entries.put(full_path, .{ .mode = mode, .hash = hash });
@@ -13225,7 +13225,7 @@ pub fn populateIndexFromTree(git_path: []const u8, tree_data: []const u8, repo_r
             // This is a tree (subdirectory) - recurse into it
             const hash_hex = try allocator.alloc(u8, 40);
             defer allocator.free(hash_hex);
-            _ = try std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes});
+            _ = try std.fmt.bufPrint(hash_hex, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
             
             const subtree_loaded = objects.GitObject.load(hash_hex, git_path, platform_impl, allocator) catch continue;
             defer subtree_loaded.deinit(allocator);
@@ -13338,7 +13338,7 @@ pub fn getRemoteUrl(git_path: []const u8, remote_name: []const u8, platform_impl
 
 
 // Moved from zig
-pub fn revListCollectTree(allocator: std.mem.Allocator, git_path: []const u8, tree_hash: []const u8, prefix: []const u8, no_names: bool, emitted: *std.StringHashMap(void), deferred: *std.array_list.Managed([]const u8), platform_impl: *const platform_mod.Platform) !void {
+pub fn revListCollectTree(allocator: std.mem.Allocator, git_path: []const u8, tree_hash: []const u8, prefix: []const u8, no_names: bool, emitted: *std.StringHashMap(void), deferred: *std.ArrayList([]const u8), platform_impl: *const platform_mod.Platform) !void {
     if (emitted.contains(tree_hash)) return;
     try emitted.put(try allocator.dupe(u8, tree_hash), {});
 
@@ -13636,7 +13636,7 @@ pub const Patch = struct {
     is_rewrite: bool = false,
     similarity: ?u32 = null, // similarity index percentage
     dissimilarity: ?u32 = null, // dissimilarity index percentage
-    hunks: std.array_list.Managed(PatchHunk),
+    hunks: std.ArrayList(PatchHunk),
     added: u32,
     removed: u32,
 
@@ -13730,7 +13730,7 @@ pub fn collectAncestors(git_path: []const u8, commit_hash: []const u8, ancestors
 // Moved from cmd_write_tree.zig
 pub fn writeTreeRecursive(allocator: std.mem.Allocator, idx: *index_mod.Index, prefix: []const u8, git_dir: []const u8, platform_impl: *const platform_mod.Platform) ![]u8 {
     // helpers.Collect entries at this level
-    var entries = std.array_list.Managed(objects.TreeEntry).init(allocator);
+    var entries = std.ArrayList(objects.TreeEntry).init(allocator);
     defer {
         for (entries.items) |*e| e.deinit(allocator);
         entries.deinit();
@@ -13826,7 +13826,7 @@ pub const PatchHunk = struct {
     old_count: u32,
     new_start: u32,
     new_count: u32,
-    lines: std.array_list.Managed(PatchLine),
+    lines: std.ArrayList(PatchLine),
 
     pub fn deinit(self: *PatchHunk, alloc: std.mem.Allocator) void {
         for (self.lines.items) |*l| l.deinit(alloc);
@@ -13882,7 +13882,7 @@ pub fn applyOnePatch(allocator: std.mem.Allocator, patch: *const Patch, reverse:
     // Handle new file creation
     if ((patch.is_new_file and !reverse) or (patch.is_delete and reverse)) {
         if (check_only) return;
-        var content = std.array_list.Managed(u8).init(allocator);
+        var content = std.ArrayList(u8).init(allocator);
         defer content.deinit();
         for (patch.hunks.items) |hunk| {
             for (hunk.lines.items) |line| {
@@ -13915,7 +13915,7 @@ pub fn applyOnePatch(allocator: std.mem.Allocator, patch: *const Patch, reverse:
     const original = platform_impl.fs.readFile(allocator, read_path) catch {
         // File doesn't exist - if all hunks are additions from line 0/1, create it
         if (patch.hunks.items.len > 0) {
-            var content = std.array_list.Managed(u8).init(allocator);
+            var content = std.ArrayList(u8).init(allocator);
             defer content.deinit();
             for (patch.hunks.items) |hunk| {
                 for (hunk.lines.items) |line| {
@@ -13939,7 +13939,7 @@ pub fn applyOnePatch(allocator: std.mem.Allocator, patch: *const Patch, reverse:
     defer allocator.free(original);
 
     // Split into lines
-    var orig_lines = std.array_list.Managed([]const u8).init(allocator);
+    var orig_lines = std.ArrayList([]const u8).init(allocator);
     defer orig_lines.deinit();
     var line_iter = std.mem.splitScalar(u8, original, '\n');
     while (line_iter.next()) |line| try orig_lines.append(line);
@@ -13949,7 +13949,7 @@ pub fn applyOnePatch(allocator: std.mem.Allocator, patch: *const Patch, reverse:
     }
 
     // Apply hunks using context matching
-    var result_lines = std.array_list.Managed([]const u8).init(allocator);
+    var result_lines = std.ArrayList([]const u8).init(allocator);
     defer result_lines.deinit();
     var last_line_no_newline = false;
 
@@ -13957,7 +13957,7 @@ pub fn applyOnePatch(allocator: std.mem.Allocator, patch: *const Patch, reverse:
 
     for (patch.hunks.items) |hunk| {
         // Build the context/remove lines for matching
-        var match_lines = std.array_list.Managed([]const u8).init(allocator);
+        var match_lines = std.ArrayList([]const u8).init(allocator);
         defer match_lines.deinit();
         for (hunk.lines.items) |pline| {
             const lt = if (reverse) reverseLineType(pline.line_type) else pline.line_type;
@@ -14059,7 +14059,7 @@ pub fn applyOnePatch(allocator: std.mem.Allocator, patch: *const Patch, reverse:
     }
 
     // Write result
-    var output = std.array_list.Managed(u8).init(allocator);
+    var output = std.ArrayList(u8).init(allocator);
     defer output.deinit();
     for (result_lines.items, 0..) |line, idx| {
         try output.appendSlice(line);

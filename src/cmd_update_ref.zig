@@ -29,7 +29,7 @@ pub fn cmdUpdateRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
     var create_reflog = false;
     var stdin_mode = false;
     var msg: ?[]const u8 = null;
-    var positional = std.array_list.Managed([]const u8).init(allocator);
+    var positional = std.ArrayList([]const u8).init(allocator);
     defer positional.deinit();
 
     while (args.next()) |arg| {
@@ -107,7 +107,7 @@ pub fn cmdUpdateRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
         defer allocator.free(packed_refs_path);
         if (platform_impl.fs.readFile(allocator, packed_refs_path)) |packed_data| {
             defer allocator.free(packed_data);
-            var new_packed = std.array_list.Managed(u8).init(allocator);
+            var new_packed = std.ArrayList(u8).init(allocator);
             defer new_packed.deinit();
             var lines_iter = std.mem.splitScalar(u8, packed_data, '\n');
             while (lines_iter.next()) |line| {

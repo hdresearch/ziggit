@@ -31,7 +31,7 @@ pub fn nativeCmdShowRef(allocator: std.mem.Allocator, args: [][]const u8, comman
     var hash_only = false;
     var hash_len: usize = 40;
     var dereference = false;
-    var patterns = std.array_list.Managed([]const u8).init(allocator);
+    var patterns = std.ArrayList([]const u8).init(allocator);
     defer patterns.deinit();
 
     var i = command_index + 1;
@@ -163,7 +163,7 @@ pub fn nativeCmdShowRef(allocator: std.mem.Allocator, args: [][]const u8, comman
     }
 
     // List mode: enumerate all helpers.refs
-    var ref_list = std.array_list.Managed(helpers.RefEntry).init(allocator);
+    var ref_list = std.ArrayList(helpers.RefEntry).init(allocator);
     defer {
         for (ref_list.items) |entry| {
             allocator.free(entry.name);

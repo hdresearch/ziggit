@@ -27,7 +27,7 @@ pub fn cmdLastModified(allocator: std.mem.Allocator, args: *platform_mod.ArgIter
     var recursive = false;
     var show_trees = false;
     var rev: ?[]const u8 = null;
-    var lm_paths = std.array_list.Managed([]const u8).init(allocator);
+    var lm_paths = std.ArrayList([]const u8).init(allocator);
     defer lm_paths.deinit();
 
     while (args.next()) |arg| {
@@ -138,7 +138,7 @@ pub fn cmdLastModified(allocator: std.mem.Allocator, args: *platform_mod.ArgIter
     }
     if (tree_hash == null) { try platform_impl.writeStderr("fatal: bad commit\n"); std.process.exit(128); }
 
-    var entries = std.array_list.Managed(helpers.LastModTreeEntry).init(allocator);
+    var entries = std.ArrayList(helpers.LastModTreeEntry).init(allocator);
     defer { for (entries.items) |e| allocator.free(e.path); entries.deinit(); }
 
     if (recursive) {
@@ -164,7 +164,7 @@ pub fn cmdLastModified(allocator: std.mem.Allocator, args: *platform_mod.ArgIter
 }
 
 
-pub fn lmCollectRecursive(allocator: std.mem.Allocator, git_path: []const u8, tree_hash: []const u8, prefix: []const u8, entries: *std.array_list.Managed(helpers.LastModTreeEntry), show_trees: bool, platform_impl: *const platform_mod.Platform) !void {
+pub fn lmCollectRecursive(allocator: std.mem.Allocator, git_path: []const u8, tree_hash: []const u8, prefix: []const u8, entries: *std.ArrayList(helpers.LastModTreeEntry), show_trees: bool, platform_impl: *const platform_mod.Platform) !void {
     const tree_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch return;
     defer tree_obj.deinit(allocator);
     var pos: usize = 0;
@@ -193,7 +193,7 @@ pub fn lmCollectRecursive(allocator: std.mem.Allocator, git_path: []const u8, tr
 }
 
 
-pub fn lmCollectTopLevel(allocator: std.mem.Allocator, git_path: []const u8, tree_hash: []const u8, entries: *std.array_list.Managed(helpers.LastModTreeEntry), platform_impl: *const platform_mod.Platform) !void {
+pub fn lmCollectTopLevel(allocator: std.mem.Allocator, git_path: []const u8, tree_hash: []const u8, entries: *std.ArrayList(helpers.LastModTreeEntry), platform_impl: *const platform_mod.Platform) !void {
     const tree_obj = try objects.GitObject.load(tree_hash, git_path, platform_impl, allocator);
     defer tree_obj.deinit(allocator);
     var pos: usize = 0;

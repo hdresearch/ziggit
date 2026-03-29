@@ -48,7 +48,7 @@ const DiffOpts = struct {
     reverse: bool = false,
     compact_summary: bool = false,
     show_summary: bool = false,
-    ignore_regex: std.array_list.Managed([]const u8) = undefined,
+    ignore_regex: std.ArrayList([]const u8) = undefined,
     ignore_blank_lines: bool = false,
     combined_use_c: bool = false, // true for -c (diff --combined), false for --cc (diff --cc)
 
@@ -102,7 +102,7 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *pm.ArgIterator, platform_imp
     // Debug removed
 
     // Collect all args
-    var all_args = std.array_list.Managed([]const u8).init(allocator);
+    var all_args = std.ArrayList([]const u8).init(allocator);
     defer all_args.deinit();
     while (args.next()) |arg| {
         try all_args.append(arg);
@@ -119,14 +119,14 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *pm.ArgIterator, platform_imp
 
     // Parse options
     var opts = DiffOpts{
-        .ignore_regex = std.array_list.Managed([]const u8).init(allocator),
+        .ignore_regex = std.ArrayList([]const u8).init(allocator),
     };
     defer opts.ignore_regex.deinit();
     opts.no_index = has_no_index;
 
-    var positional = std.array_list.Managed([]const u8).init(allocator);
+    var positional = std.ArrayList([]const u8).init(allocator);
     defer positional.deinit();
-    var pathspec_args = std.array_list.Managed([]const u8).init(allocator);
+    var pathspec_args = std.ArrayList([]const u8).init(allocator);
     defer pathspec_args.deinit();
     var seen_dashdash = false;
 
@@ -349,7 +349,7 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *pm.ArgIterator, platform_imp
     var ref1: ?[]const u8 = null;
     var ref2: ?[]const u8 = null;
     var single_ref: ?[]const u8 = null;
-    var multi_refs = std.array_list.Managed([]const u8).init(allocator);
+    var multi_refs = std.ArrayList([]const u8).init(allocator);
     defer multi_refs.deinit();
 
     if (positional.items.len >= 1) {
@@ -470,7 +470,7 @@ fn doTreeToTreeDiff(allocator: std.mem.Allocator, ref1: []const u8, ref2: []cons
     };
     defer allocator.free(tree2);
 
-    var changes = std.array_list.Managed(FileChange).init(allocator);
+    var changes = std.ArrayList(FileChange).init(allocator);
     defer {
         for (changes.items) |*c| freeChange(allocator, c);
         changes.deinit();
@@ -532,7 +532,7 @@ fn freeChange(allocator: std.mem.Allocator, c: *FileChange) void {
 
 const EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf899d69f82cf0101";
 
-fn collectTreeChanges(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, prefix: []const u8, git_path: []const u8, pathspecs: []const []const u8, pi: *const pm.Platform, out: *std.array_list.Managed(FileChange)) !void {
+fn collectTreeChanges(allocator: std.mem.Allocator, tree1_hash: []const u8, tree2_hash: []const u8, prefix: []const u8, git_path: []const u8, pathspecs: []const []const u8, pi: *const pm.Platform, out: *std.ArrayList(FileChange)) !void {
     const is_empty1 = std.mem.eql(u8, tree1_hash, EMPTY_TREE_HASH);
     const is_empty2 = std.mem.eql(u8, tree2_hash, EMPTY_TREE_HASH);
 
@@ -541,9 +541,9 @@ fn collectTreeChanges(allocator: std.mem.Allocator, tree1_hash: []const u8, tree
     const t2o = if (!is_empty2) (objects.GitObject.load(tree2_hash, git_path, pi, allocator) catch return) else null;
     defer if (t2o) |o| o.deinit(allocator);
 
-    var p1 = if (t1o) |o| (tree_mod.parseTree(o.data, allocator) catch return) else std.array_list.Managed(tree_mod.TreeEntry).init(allocator);
+    var p1 = if (t1o) |o| (tree_mod.parseTree(o.data, allocator) catch return) else std.ArrayList(tree_mod.TreeEntry).init(allocator);
     defer p1.deinit();
-    var p2 = if (t2o) |o| (tree_mod.parseTree(o.data, allocator) catch return) else std.array_list.Managed(tree_mod.TreeEntry).init(allocator);
+    var p2 = if (t2o) |o| (tree_mod.parseTree(o.data, allocator) catch return) else std.ArrayList(tree_mod.TreeEntry).init(allocator);
     defer p2.deinit();
 
     var m1 = std.StringHashMap(tree_mod.TreeEntry).init(allocator);
@@ -560,7 +560,7 @@ fn collectTreeChanges(allocator: std.mem.Allocator, tree1_hash: []const u8, tree
     for (p1.items) |e| all_names.put(e.name, {}) catch {};
     for (p2.items) |e| all_names.put(e.name, {}) catch {};
 
-    var sorted_names = std.array_list.Managed([]const u8).init(allocator);
+    var sorted_names = std.ArrayList([]const u8).init(allocator);
     defer sorted_names.deinit();
     var ki = all_names.keyIterator();
     while (ki.next()) |k| try sorted_names.append(k.*);
@@ -980,7 +980,7 @@ fn renamePrettyPath(from: []const u8, to: []const u8, allocator: std.mem.Allocat
     if (pfx_length == 0 and sfx_length == 0) {
         return std.fmt.allocPrint(allocator, "{s} => {s}", .{ from, to });
     } else {
-        var buf = std.array_list.Managed(u8).init(allocator);
+        var buf = std.ArrayList(u8).init(allocator);
         defer buf.deinit();
         try buf.appendSlice(prefix);
         try buf.append('{');
@@ -1006,7 +1006,7 @@ fn outputStat(changes: []const FileChange, pi: *const pm.Platform, allocator: st
     if (changes.len == 0) return;
 
     // Compute display paths
-    var display_paths = std.array_list.Managed([]u8).init(allocator);
+    var display_paths = std.ArrayList([]u8).init(allocator);
     defer {
         for (display_paths.items) |p| allocator.free(p);
         display_paths.deinit();
@@ -1053,7 +1053,7 @@ fn outputStat(changes: []const FileChange, pi: *const pm.Platform, allocator: st
     }
 
     // Summary line
-    var summary = std.array_list.Managed(u8).init(allocator);
+    var summary = std.ArrayList(u8).init(allocator);
     defer summary.deinit();
     const w = summary.writer();
     try w.print(" {d} file{s} changed", .{ changes.len, if (changes.len != 1) @as([]const u8, "s") else "" });
@@ -1071,7 +1071,7 @@ fn outputShortStat(changes: []const FileChange, pi: *const pm.Platform, allocato
         total_ins += c.insertions;
         total_dels += c.deletions;
     }
-    var s = std.array_list.Managed(u8).init(allocator);
+    var s = std.ArrayList(u8).init(allocator);
     defer s.deinit();
     const w = s.writer();
     try w.print(" {d} file{s} changed", .{ changes.len, if (changes.len != 1) @as([]const u8, "s") else "" });
@@ -1203,7 +1203,7 @@ fn outputDirStat(changes: []const FileChange, pi: *const pm.Platform, allocator:
     if (total_changes == 0) return;
 
     // Sort directories
-    var dirs = std.array_list.Managed([]const u8).init(allocator);
+    var dirs = std.ArrayList([]const u8).init(allocator);
     defer dirs.deinit();
     var dir_it = dir_changes.keyIterator();
     while (dir_it.next()) |k| try dirs.append(k.*);
@@ -1327,7 +1327,7 @@ fn generateFilteredHunks(old_content: []const u8, new_content: []const u8, opts:
     defer allocator.free(diff_output);
 
     // Collect all diff lines (skip headers)
-    var diff_lines = std.array_list.Managed(DiffLine).init(allocator);
+    var diff_lines = std.ArrayList(DiffLine).init(allocator);
     defer diff_lines.deinit();
 
     var lines = std.mem.splitScalar(u8, diff_output, '\n');
@@ -1367,7 +1367,7 @@ fn generateFilteredHunks(old_content: []const u8, new_content: []const u8, opts:
     }
 
     // Find ranges of non-ignored changes
-    var change_indices = std.array_list.Managed(usize).init(allocator);
+    var change_indices = std.ArrayList(usize).init(allocator);
     defer change_indices.deinit();
     for (diff_lines.items, 0..) |dl, idx| {
         if (dl.kind != .ctx and !dl.ignored) {
@@ -1378,7 +1378,7 @@ fn generateFilteredHunks(old_content: []const u8, new_content: []const u8, opts:
     if (change_indices.items.len == 0) return try allocator.dupe(u8, "");
 
     // Group changes into hunks with context_lines context
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
 
     const ctx = opts.context_lines;
@@ -1436,7 +1436,7 @@ fn parseHunkStart(header: []const u8, marker: u8) ?usize {
     return null;
 }
 
-fn outputFilteredHunk(diff_lines: []const DiffLine, start: usize, end: usize, result: *std.array_list.Managed(u8)) !void {
+fn outputFilteredHunk(diff_lines: []const DiffLine, start: usize, end: usize, result: *std.ArrayList(u8)) !void {
     // Calculate old and new line ranges
     var old_start: usize = 0;
     var old_count: usize = 0;
@@ -1584,7 +1584,7 @@ fn outputDiffHunks(old_content: []const u8, new_content: []const u8, context_lin
     const new_no_nl = new_content.len > 0 and new_content[new_content.len - 1] != '\n';
 
     // Extract just the hunks (skip the header lines)
-    var lines_list = std.array_list.Managed([]const u8).init(allocator);
+    var lines_list = std.ArrayList([]const u8).init(allocator);
     defer lines_list.deinit();
     {
         var lines = std.mem.splitScalar(u8, diff_output, '\n');
@@ -1641,7 +1641,7 @@ fn doCombinedDiff(allocator: std.mem.Allocator, ref_list: []const []const u8, gi
     if (ref_list.len < 2) return;
 
     // Resolve all trees: first is result, rest are parents
-    var trees = std.array_list.Managed([]const u8).init(allocator);
+    var trees = std.ArrayList([]const u8).init(allocator);
     defer {
         for (trees.items) |t| allocator.free(t);
         trees.deinit();
@@ -1668,7 +1668,7 @@ fn doCombinedDiff(allocator: std.mem.Allocator, ref_list: []const []const u8, gi
     }
     try collectAllTreeFiles(allocator, result_tree, "", git_path, pi, &result_files);
 
-    var parent_file_maps = std.array_list.Managed(std.StringHashMap(TreeFileInfo)).init(allocator);
+    var parent_file_maps = std.ArrayList(std.StringHashMap(TreeFileInfo)).init(allocator);
     defer {
         for (parent_file_maps.items) |*pf| {
             var it = pf.iterator();
@@ -1700,7 +1700,7 @@ fn doCombinedDiff(allocator: std.mem.Allocator, ref_list: []const []const u8, gi
     }
 
     // Sort
-    var sorted = std.array_list.Managed([]const u8).init(allocator);
+    var sorted = std.ArrayList([]const u8).init(allocator);
     defer sorted.deinit();
     {
         var fk = all_files.keyIterator();
@@ -1748,12 +1748,12 @@ fn doCombinedDiff(allocator: std.mem.Allocator, ref_list: []const []const u8, gi
         if (!all_parents_differ) continue;
 
         // Load contents
-        var parent_contents = std.array_list.Managed([]const u8).init(allocator);
+        var parent_contents = std.ArrayList([]const u8).init(allocator);
         defer {
             for (parent_contents.items) |c| if (c.len > 0) allocator.free(c);
             parent_contents.deinit();
         }
-        var parent_hashes = std.array_list.Managed([]const u8).init(allocator);
+        var parent_hashes = std.ArrayList([]const u8).init(allocator);
         defer parent_hashes.deinit();
 
         for (parent_file_maps.items) |pf| {
@@ -1782,7 +1782,7 @@ fn doCombinedDiff(allocator: std.mem.Allocator, ref_list: []const []const u8, gi
 
         // Index line
         {
-            var idx = std.array_list.Managed(u8).init(allocator);
+            var idx = std.ArrayList(u8).init(allocator);
             defer idx.deinit();
             try idx.appendSlice(lp);
             try idx.appendSlice("index ");
@@ -1849,7 +1849,7 @@ fn outputCombinedHunksNew(allocator: std.mem.Allocator, parent_contents: []const
     const result_lines = splitLines(allocator, result_content) catch return;
     defer result_lines.deinit();
 
-    var parent_lines_list = std.array_list.Managed(std.array_list.Managed([]const u8)).init(allocator);
+    var parent_lines_list = std.ArrayList(std.ArrayList([]const u8)).init(allocator);
     defer {
         for (parent_lines_list.items) |*pl| pl.deinit();
         parent_lines_list.deinit();
@@ -1860,12 +1860,12 @@ fn outputCombinedHunksNew(allocator: std.mem.Allocator, parent_contents: []const
     }
 
     // For each parent, compute LCS with result
-    var parent_in_result = std.array_list.Managed([]bool).init(allocator);
+    var parent_in_result = std.ArrayList([]bool).init(allocator);
     defer {
         for (parent_in_result.items) |pr| allocator.free(pr);
         parent_in_result.deinit();
     }
-    var parent_in_parent = std.array_list.Managed([]bool).init(allocator);
+    var parent_in_parent = std.ArrayList([]bool).init(allocator);
     defer {
         for (parent_in_parent.items) |pp| allocator.free(pp);
         parent_in_parent.deinit();
@@ -1882,7 +1882,7 @@ fn outputCombinedHunksNew(allocator: std.mem.Allocator, parent_contents: []const
     }
 
     // Build combined output line by line
-    var output = std.array_list.Managed(u8).init(allocator);
+    var output = std.ArrayList(u8).init(allocator);
     defer output.deinit();
 
     var parent_pos = try allocator.alloc(usize, num_parents);
@@ -1936,7 +1936,7 @@ fn outputCombinedHunksNew(allocator: std.mem.Allocator, parent_contents: []const
     if (output.items.len == 0) return;
 
     // Output hunk header
-    var header = std.array_list.Managed(u8).init(allocator);
+    var header = std.ArrayList(u8).init(allocator);
     defer header.deinit();
     try header.appendSlice(lp);
     for (0..num_parents + 1) |_| try header.append('@');
@@ -1967,8 +1967,8 @@ fn outputCombinedHunksNew(allocator: std.mem.Allocator, parent_contents: []const
     }
 }
 
-fn splitLines(allocator: std.mem.Allocator, content: []const u8) !std.array_list.Managed([]const u8) {
-    var lines = std.array_list.Managed([]const u8).init(allocator);
+fn splitLines(allocator: std.mem.Allocator, content: []const u8) !std.ArrayList([]const u8) {
+    var lines = std.ArrayList([]const u8).init(allocator);
     if (content.len > 0) {
         var it = std.mem.splitScalar(u8, content, '\n');
         while (it.next()) |line| try lines.append(line);
@@ -2014,9 +2014,9 @@ fn computeLCS(parent_lines: []const []const u8, result_lines: []const []const u8
     }
 }
 
-fn doDiffNoIndex(allocator: std.mem.Allocator, opts: *const DiffOpts, positional: *const std.array_list.Managed([]const u8), pathspec_args: *const std.array_list.Managed([]const u8), pi: *const pm.Platform) !void {
+fn doDiffNoIndex(allocator: std.mem.Allocator, opts: *const DiffOpts, positional: *const std.ArrayList([]const u8), pathspec_args: *const std.ArrayList([]const u8), pi: *const pm.Platform) !void {
     // Collect file paths from both positional and pathspec_args
-    var paths = std.array_list.Managed([]const u8).init(allocator);
+    var paths = std.ArrayList([]const u8).init(allocator);
     defer paths.deinit();
     for (positional.items) |arg| {
         if (!std.mem.startsWith(u8, arg, "-")) {
@@ -2063,7 +2063,7 @@ fn diffDirectories(allocator: std.mem.Allocator, dir_a: []const u8, dir_b: []con
     var dir_b_iter = std.fs.cwd().openDir(dir_b, .{ .iterate = true }) catch return;
     defer dir_b_iter.close();
 
-    var files_b = std.array_list.Managed([]const u8).init(allocator);
+    var files_b = std.ArrayList([]const u8).init(allocator);
     defer {
         for (files_b.items) |f| allocator.free(f);
         files_b.deinit();
@@ -2220,7 +2220,7 @@ fn doRefToIndexDiff(allocator: std.mem.Allocator, ref_name: []const u8, index: *
     const tree_hash = resolveToTree(allocator, ref_name, git_path, pi) catch return;
     defer allocator.free(tree_hash);
 
-    var changes = std.array_list.Managed(FileChange).init(allocator);
+    var changes = std.ArrayList(FileChange).init(allocator);
     defer {
         for (changes.items) |*c| freeChange(allocator, c);
         changes.deinit();
@@ -2244,7 +2244,7 @@ fn doRefToIndexDiff(allocator: std.mem.Allocator, ref_name: []const u8, index: *
         if (pathspecs.len > 0 and !matchPathspec(entry.path, pathspecs)) continue;
 
         var idx_hash_buf: [40]u8 = undefined;
-        _ = std.fmt.bufPrint(&idx_hash_buf, "{x}", .{&entry.sha1}) catch continue;
+        _ = std.fmt.bufPrint(&idx_hash_buf, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch continue;
 
         if (tree_files.get(entry.path)) |tree_info| {
             if (std.mem.eql(u8, tree_info.hash, &idx_hash_buf)) continue;
@@ -2333,7 +2333,7 @@ fn doRefToWorkingDiff(allocator: std.mem.Allocator, ref_name: []const u8, index:
     const tree_hash = resolveToTree(allocator, ref_name, git_path, pi) catch return;
     defer allocator.free(tree_hash);
 
-    var changes = std.array_list.Managed(FileChange).init(allocator);
+    var changes = std.ArrayList(FileChange).init(allocator);
     defer {
         for (changes.items) |*c| freeChange(allocator, c);
         changes.deinit();
@@ -2357,7 +2357,7 @@ fn doRefToWorkingDiff(allocator: std.mem.Allocator, ref_name: []const u8, index:
     defer index_map.deinit();
     for (index.entries.items) |entry| {
         var idx_hash_buf: [40]u8 = undefined;
-        _ = std.fmt.bufPrint(&idx_hash_buf, "{x}", .{&entry.sha1}) catch continue;
+        _ = std.fmt.bufPrint(&idx_hash_buf, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch continue;
         index_map.put(entry.path, .{ .hash = idx_hash_buf }) catch {};
     }
 
@@ -2369,7 +2369,7 @@ fn doRefToWorkingDiff(allocator: std.mem.Allocator, ref_name: []const u8, index:
     while (tkit.next()) |k| all_paths.put(k.*, {}) catch {};
     for (index.entries.items) |entry| all_paths.put(entry.path, {}) catch {};
 
-    var sorted = std.array_list.Managed([]const u8).init(allocator);
+    var sorted = std.ArrayList([]const u8).init(allocator);
     defer sorted.deinit();
     var apit = all_paths.keyIterator();
     while (apit.next()) |k| try sorted.append(k.*);
@@ -2460,7 +2460,7 @@ fn doIndexToHeadDiff(allocator: std.mem.Allocator, index: *const index_mod.Index
 
     if (head_commit == null) {
         // Unborn branch - all index entries are new
-        var changes = std.array_list.Managed(FileChange).init(allocator);
+        var changes = std.ArrayList(FileChange).init(allocator);
         defer {
             for (changes.items) |*c| freeChange(allocator, c);
             changes.deinit();
@@ -2470,7 +2470,7 @@ fn doIndexToHeadDiff(allocator: std.mem.Allocator, index: *const index_mod.Index
             if (pathspecs.len > 0 and !matchPathspec(entry.path, pathspecs)) continue;
 
             var idx_hash_buf: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&idx_hash_buf, "{x}", .{&entry.sha1}) catch continue;
+            _ = std.fmt.bufPrint(&idx_hash_buf, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch continue;
 
             const new_c = loadBlob(allocator, &idx_hash_buf, git_path, pi) catch try allocator.dupe(u8, "");
             try changes.append(.{
@@ -2500,7 +2500,7 @@ fn doIndexToHeadDiff(allocator: std.mem.Allocator, index: *const index_mod.Index
 fn doWorkingTreeDiff(allocator: std.mem.Allocator, index: *const index_mod.Index, cwd: []const u8, git_path: []const u8, opts: *const DiffOpts, pathspecs: []const []const u8, pi: *const pm.Platform) !void {
     _ = cwd;
 
-    var changes = std.array_list.Managed(FileChange).init(allocator);
+    var changes = std.ArrayList(FileChange).init(allocator);
     defer {
         for (changes.items) |*c| freeChange(allocator, c);
         changes.deinit();
@@ -2553,7 +2553,7 @@ fn doWorkingTreeDiff(allocator: std.mem.Allocator, index: *const index_mod.Index
         }
 
         var idx_hash_buf: [40]u8 = undefined;
-        _ = std.fmt.bufPrint(&idx_hash_buf, "{x}", .{&entry.sha1}) catch continue;
+        _ = std.fmt.bufPrint(&idx_hash_buf, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch continue;
 
         // Read working tree file
         const wt_content = pi.fs.readFile(allocator, entry.path) catch {
@@ -2631,11 +2631,11 @@ fn doWorkingTreeDiff(allocator: std.mem.Allocator, index: *const index_mod.Index
     try outputChanges(changes.items, opts, pi, allocator);
 }
 
-fn detectRenames(changes: *std.array_list.Managed(FileChange), allocator: std.mem.Allocator) void {
+fn detectRenames(changes: *std.ArrayList(FileChange), allocator: std.mem.Allocator) void {
     // Find added and deleted files
-    var deleted_indices = std.array_list.Managed(usize).init(allocator);
+    var deleted_indices = std.ArrayList(usize).init(allocator);
     defer deleted_indices.deinit();
-    var added_indices = std.array_list.Managed(usize).init(allocator);
+    var added_indices = std.ArrayList(usize).init(allocator);
     defer added_indices.deinit();
 
     for (changes.items, 0..) |c, i| {
@@ -2646,7 +2646,7 @@ fn detectRenames(changes: *std.array_list.Managed(FileChange), allocator: std.me
     // For each added file, find best matching deleted file
     var matched_deleted = std.AutoHashMap(usize, void).init(allocator);
     defer matched_deleted.deinit();
-    var rename_pairs = std.array_list.Managed([2]usize).init(allocator);
+    var rename_pairs = std.ArrayList([2]usize).init(allocator);
     defer rename_pairs.deinit();
 
     for (added_indices.items) |ai| {
@@ -2752,12 +2752,12 @@ fn outputChanges(changes_slice: []const FileChange, opts: *const DiffOpts, pi: *
     if (opts.quiet and !(opts.exit_code)) return;
 
     // Apply rename detection if enabled (default on unless --no-renames, or forced with -M)
-    var rename_list: ?std.array_list.Managed(FileChange) = null;
+    var rename_list: ?std.ArrayList(FileChange) = null;
     defer if (rename_list) |*rl| rl.deinit();
 
     const do_renames = !opts.no_renames or opts.find_renames;
     const changes = if (do_renames) blk: {
-        rename_list = std.array_list.Managed(FileChange).init(allocator);
+        rename_list = std.ArrayList(FileChange).init(allocator);
         for (changes_slice) |c| rename_list.?.append(c) catch {};
         detectRenames(&rename_list.?, allocator);
         break :blk rename_list.?.items;
@@ -2766,13 +2766,13 @@ fn outputChanges(changes_slice: []const FileChange, opts: *const DiffOpts, pi: *
     const has_ignore = opts.ignore_regex.items.len > 0 or opts.ignore_blank_lines;
 
     // For -I filtering with non-patch modes, we need to filter changes
-    var filtered_changes: ?std.array_list.Managed(FileChange) = null;
+    var filtered_changes: ?std.ArrayList(FileChange) = null;
     defer if (filtered_changes) |*fc| fc.deinit();
 
     const effective_changes = if (has_ignore and (opts.output_mode == .raw or opts.output_mode == .name_only or
         opts.output_mode == .name_status or opts.output_mode == .stat or opts.output_mode == .shortstat))
     blk: {
-        filtered_changes = std.array_list.Managed(FileChange).init(allocator);
+        filtered_changes = std.ArrayList(FileChange).init(allocator);
         for (changes) |c| {
             // Unmerged, deleted, new files always pass through -I filter
             if (c.is_unmerged or c.is_deleted or c.is_new) {
@@ -2859,8 +2859,8 @@ const LogOpts = struct {
     pickaxe_all: bool = false,
     name_only: bool = false,
     name_status: bool = false,
-    ignore_regex: std.array_list.Managed([]const u8),
-    pathspecs: std.array_list.Managed([]const u8),
+    ignore_regex: std.ArrayList([]const u8),
+    pathspecs: std.ArrayList([]const u8),
     all_refs: bool = false,
     // format-patch specific
     format_patch: bool = false,
@@ -2915,8 +2915,8 @@ fn extractMessage(data: []const u8) []const u8 {
     return "";
 }
 
-fn getAllParents(data: []const u8, allocator: std.mem.Allocator) !std.array_list.Managed([]const u8) {
-    var parents = std.array_list.Managed([]const u8).init(allocator);
+fn getAllParents(data: []const u8, allocator: std.mem.Allocator) !std.ArrayList([]const u8) {
+    var parents = std.ArrayList([]const u8).init(allocator);
     var iter = std.mem.splitScalar(u8, data, '\n');
     while (iter.next()) |line| {
         if (line.len == 0) break;
@@ -3099,12 +3099,12 @@ fn writeFormattedCommitWithReflog(format: []const u8, hash: []const u8, data: []
 fn writeFormattedCommitInner(format: []const u8, hash: []const u8, data: []const u8, pi: *const pm.Platform, allocator: std.mem.Allocator, reflog_info: ?*const ReflogInfo) !void {
     // Parse commit fields
     var tree_hash: []const u8 = "";
-    var parent_hashes_list = std.array_list.Managed([]const u8).init(allocator);
+    var parent_hashes_list = std.ArrayList([]const u8).init(allocator);
     defer parent_hashes_list.deinit();
     var author_full: []const u8 = "";
     var committer_full: []const u8 = "";
     var subject: []const u8 = "";
-    var body_buf = std.array_list.Managed(u8).init(allocator);
+    var body_buf = std.ArrayList(u8).init(allocator);
     defer body_buf.deinit();
     var raw_message: []const u8 = "";
 
@@ -3136,7 +3136,7 @@ fn writeFormattedCommitInner(format: []const u8, hash: []const u8, data: []const
         }
     }
 
-    var output = std.array_list.Managed(u8).init(allocator);
+    var output = std.ArrayList(u8).init(allocator);
     defer output.deinit();
 
     var i: usize = 0;
@@ -3310,7 +3310,7 @@ fn writeCommitHeaderWithFrom(hash: []const u8, data: []const u8, from_hash: []co
 
     // Merge line
     if (parents.items.len > 1) {
-        var merge_line = std.array_list.Managed(u8).init(allocator);
+        var merge_line = std.ArrayList(u8).init(allocator);
         defer merge_line.deinit();
         try merge_line.appendSlice("Merge:");
         for (parents.items) |ph| {
@@ -3361,7 +3361,7 @@ fn writeCommitHeader(hash: []const u8, data: []const u8, lo: *const LogOpts, is_
     const msg = extractMessage(data);
 
     // commit line
-    var commit_line = std.array_list.Managed(u8).init(allocator);
+    var commit_line = std.ArrayList(u8).init(allocator);
     defer commit_line.deinit();
     try commit_line.appendSlice("commit ");
     try commit_line.appendSlice(hash);
@@ -3383,7 +3383,7 @@ fn writeCommitHeader(hash: []const u8, data: []const u8, lo: *const LogOpts, is_
 
     // Merge line
     if (parents.items.len > 1) {
-        var merge_line = std.array_list.Managed(u8).init(allocator);
+        var merge_line = std.ArrayList(u8).init(allocator);
         defer merge_line.deinit();
         try merge_line.appendSlice("Merge:");
         for (parents.items) |ph| {
@@ -3523,7 +3523,7 @@ fn parseGitDateToTimestamp(date_str: []const u8, allocator: std.mem.Allocator) ?
 }
 
 fn getDecorations(hash: []const u8, git_path: []const u8, lo: *const LogOpts, pi: *const pm.Platform, allocator: std.mem.Allocator) ![]u8 {
-    var decos = std.array_list.Managed([]const u8).init(allocator);
+    var decos = std.ArrayList([]const u8).init(allocator);
     defer {
         for (decos.items) |d| allocator.free(d);
         decos.deinit();
@@ -3693,7 +3693,7 @@ fn getDecorations(hash: []const u8, git_path: []const u8, lo: *const LogOpts, pi
     }
 
     // Join with ", "
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
     for (decos.items, 0..) |d, i| {
         if (i > 0) try result.appendSlice(", ");
@@ -3723,7 +3723,7 @@ fn commitMatchesPickaxe(data: []const u8, parent_hash: ?[]const u8, git_path: []
     }
 
     // Compare trees - look for files that changed and contain the search string
-    var changes = std.array_list.Managed(FileChange).init(allocator);
+    var changes = std.ArrayList(FileChange).init(allocator);
     defer {
         for (changes.items) |*c| freeChange(allocator, c);
         changes.deinit();
@@ -3774,7 +3774,7 @@ fn writeDiffForCommit(hash: []const u8, data: []const u8, parent_hash: ?[]const 
         return; // No parent and --root not specified = no diff for initial commit
     }
 
-    var changes = std.array_list.Managed(FileChange).init(allocator);
+    var changes = std.ArrayList(FileChange).init(allocator);
     defer {
         for (changes.items) |*c| freeChange(allocator, c);
         changes.deinit();
@@ -3786,7 +3786,7 @@ fn writeDiffForCommit(hash: []const u8, data: []const u8, parent_hash: ?[]const 
     // Pickaxe file filtering: only show files where the search string appears
     if (!lo.pickaxe_all) {
         if (lo.pickaxe_s) |search| {
-            var filtered = std.array_list.Managed(FileChange).init(allocator);
+            var filtered = std.ArrayList(FileChange).init(allocator);
             for (changes.items) |*c| {
                 if (fileChangeContainsString(c, search)) {
                     filtered.append(c.*) catch continue;
@@ -3799,7 +3799,7 @@ fn writeDiffForCommit(hash: []const u8, data: []const u8, parent_hash: ?[]const 
             changes.deinit();
             changes = filtered;
         } else if (lo.pickaxe_g) |search| {
-            var filtered = std.array_list.Managed(FileChange).init(allocator);
+            var filtered = std.ArrayList(FileChange).init(allocator);
             for (changes.items) |*c| {
                 if (fileChangeMatchesGrep(c, search)) {
                     filtered.append(c.*) catch continue;
@@ -3817,7 +3817,7 @@ fn writeDiffForCommit(hash: []const u8, data: []const u8, parent_hash: ?[]const 
     if (changes.items.len == 0) return;
 
     var diff_opts = DiffOpts{
-        .ignore_regex = std.array_list.Managed([]const u8).init(allocator),
+        .ignore_regex = std.ArrayList([]const u8).init(allocator),
         .context_lines = lo.context_lines,
         .full_index = lo.full_index,
         .line_prefix = lo.line_prefix,
@@ -3877,17 +3877,17 @@ pub fn cmdWhatchanged(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
     return cmdLogInner(allocator, args, pi, false, true);
 }
 
-fn addRefsFromDir(allocator: std.mem.Allocator, dir_path: []const u8, start_hashes: *std.array_list.Managed([]u8), git_path: []const u8) !void {
+fn addRefsFromDir(allocator: std.mem.Allocator, dir_path: []const u8, start_hashes: *std.ArrayList([]u8), git_path: []const u8) !void {
     var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
     defer dir.close();
 
     // Collect and sort entries for deterministic order
-    var names = std.array_list.Managed([]u8).init(allocator);
+    var names = std.ArrayList([]u8).init(allocator);
     defer {
         for (names.items) |n| allocator.free(n);
         names.deinit();
     }
-    var kinds = std.array_list.Managed(std.fs.Dir.Entry.Kind).init(allocator);
+    var kinds = std.ArrayList(std.fs.Dir.Entry.Kind).init(allocator);
     defer kinds.deinit();
     var iter = dir.iterate();
     while (try iter.next()) |entry| {
@@ -3967,8 +3967,8 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
     }
 
     var lo = LogOpts{
-        .ignore_regex = std.array_list.Managed([]const u8).init(allocator),
-        .pathspecs = std.array_list.Managed([]const u8).init(allocator),
+        .ignore_regex = std.ArrayList([]const u8).init(allocator),
+        .pathspecs = std.ArrayList([]const u8).init(allocator),
         .show_mode = show_mode,
         .whatchanged_mode = whatchanged_mode,
     };
@@ -3984,14 +3984,14 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
         lo.show_raw = true;
     }
 
-    var committish_list = std.array_list.Managed([]const u8).init(allocator);
+    var committish_list = std.ArrayList([]const u8).init(allocator);
     defer committish_list.deinit();
     var seen_dashdash = false;
     // Note: --i-still-use-this is stripped in main_common.zig arg pre-processing
     // so we can't check for it here.
 
     // Check for -S requiring argument
-    var args_list = std.array_list.Managed([]const u8).init(allocator);
+    var args_list = std.ArrayList([]const u8).init(allocator);
     defer args_list.deinit();
     while (args.next()) |arg| {
         try args_list.append(arg);
@@ -4251,7 +4251,7 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
     defer allocator.free(git_path);
 
     // Resolve starting commits
-    var start_hashes = std.array_list.Managed([]u8).init(allocator);
+    var start_hashes = std.ArrayList([]u8).init(allocator);
     defer {
         for (start_hashes.items) |h| allocator.free(h);
         start_hashes.deinit();
@@ -4311,7 +4311,7 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
                 who: []u8,
                 message: []u8,
             };
-            var reflog_entries = std.array_list.Managed(ReflogEntry).init(allocator);
+            var reflog_entries = std.ArrayList(ReflogEntry).init(allocator);
             defer {
                 for (reflog_entries.items) |*e| {
                     allocator.free(e.old_hash);
@@ -4484,7 +4484,7 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
     }
 
     // Priority queue walk
-    var queue = std.array_list.Managed(CommitEntry).init(allocator);
+    var queue = std.ArrayList(CommitEntry).init(allocator);
     defer {
         for (queue.items) |e| allocator.free(@constCast(e.hash));
         queue.deinit();
@@ -4696,7 +4696,7 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
     }
 }
 
-fn addParentsToQueue(queue: *std.array_list.Managed(CommitEntry), visited: *std.StringHashMap(void), parents: []const []const u8, first_parent: bool, git_path: []const u8, pi: *const pm.Platform, allocator: std.mem.Allocator) !void {
+fn addParentsToQueue(queue: *std.ArrayList(CommitEntry), visited: *std.StringHashMap(void), parents: []const []const u8, first_parent: bool, git_path: []const u8, pi: *const pm.Platform, allocator: std.mem.Allocator) !void {
     const limit = if (first_parent) @min(@as(usize, 1), parents.len) else parents.len;
     for (parents[0..limit]) |ph| {
         if (!visited.contains(ph)) {
@@ -4719,7 +4719,7 @@ fn writeCombinedDiffForCommit(data: []const u8, lo: *LogOpts, git_path: []const 
     if (parents.items.len < 2) return;
 
     // Build list of refs: result_tree, parent1_tree, parent2_tree, ...
-    var ref_list = std.array_list.Managed([]const u8).init(allocator);
+    var ref_list = std.ArrayList([]const u8).init(allocator);
     defer {
         for (ref_list.items) |r| allocator.free(r);
         ref_list.deinit();
@@ -4742,7 +4742,7 @@ fn writeCombinedDiffForCommit(data: []const u8, lo: *LogOpts, git_path: []const 
     // If --patch-with-stat or --stat or --summary, output stat before combined diff
     if (lo.patch_with_stat or lo.show_stat or lo.show_summary or lo.show_shortstat) {
         // Compute changes between first parent and result for stat
-        var changes = std.array_list.Managed(FileChange).init(allocator);
+        var changes = std.ArrayList(FileChange).init(allocator);
         defer {
             for (changes.items) |*c| freeChange(allocator, c);
             changes.deinit();
@@ -4762,7 +4762,7 @@ fn writeCombinedDiffForCommit(data: []const u8, lo: *LogOpts, git_path: []const 
     }
 
     var diff_opts = DiffOpts{
-        .ignore_regex = std.array_list.Managed([]const u8).init(allocator),
+        .ignore_regex = std.ArrayList([]const u8).init(allocator),
         .line_prefix = lo.line_prefix,
         .combined_use_c = lo.combined_style == .c_style,
     };
@@ -4817,7 +4817,7 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
         } else |_| {}
     }
 
-    var all_args = std.array_list.Managed([]const u8).init(allocator);
+    var all_args = std.ArrayList([]const u8).init(allocator);
     defer all_args.deinit();
     while (args.next()) |arg| try all_args.append(arg);
 
@@ -4887,7 +4887,7 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
     defer allocator.free(tip_hash);
 
     // Walk from tip to base collecting non-merge commits (BFS)
-    var commit_list = std.array_list.Managed([]const u8).init(allocator);
+    var commit_list = std.ArrayList([]const u8).init(allocator);
     defer {
         for (commit_list.items) |h| allocator.free(@constCast(h));
         commit_list.deinit();
@@ -4896,7 +4896,7 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
     {
         var visited = std.StringHashMap(void).init(allocator);
         defer visited.deinit();
-        var queue = std.array_list.Managed([]const u8).init(allocator);
+        var queue = std.ArrayList([]const u8).init(allocator);
         defer {
             for (queue.items) |h| allocator.free(@constCast(h));
             queue.deinit();
@@ -4918,7 +4918,7 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
             defer obj.deinit(allocator);
 
             // Extract ALL parent hashes
-            var parents = std.array_list.Managed([]const u8).init(allocator);
+            var parents = std.ArrayList([]const u8).init(allocator);
             defer parents.deinit();
             {
                 var data_remaining = obj.data;
@@ -5020,7 +5020,7 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
 
         // Shortlog: group commits by author
         {
-            var author_commits = std.StringHashMap(std.array_list.Managed([]const u8)).init(allocator);
+            var author_commits = std.StringHashMap(std.ArrayList([]const u8)).init(allocator);
             defer {
                 var vit = author_commits.valueIterator();
                 while (vit.next()) |list| list.deinit();
@@ -5033,7 +5033,7 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
                 const aname = parsePersonName(ca);
                 const cmsg = extractMessage(cobj.data);
                 const cfirst = if (std.mem.indexOf(u8, cmsg, "\n")) |nl| cmsg[0..nl] else std.mem.trimRight(u8, cmsg, "\n");
-                var list = author_commits.get(aname) orelse std.array_list.Managed([]const u8).init(allocator);
+                var list = author_commits.get(aname) orelse std.ArrayList([]const u8).init(allocator);
                 try list.append(cfirst);
                 try author_commits.put(aname, list);
             }
@@ -5063,7 +5063,7 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
             const tip_tree = if (tip_obj_cl) |o| extractField(o.data, "tree ") else "";
 
             if (base_tree.len >= 40 and tip_tree.len >= 40) {
-                var changes = std.array_list.Managed(FileChange).init(allocator);
+                var changes = std.ArrayList(FileChange).init(allocator);
                 defer {
                     for (changes.items) |*c| freeChange(allocator, c);
                     changes.deinit();
@@ -5124,7 +5124,7 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
 
             // Collect changes for stat and patch
             const parent_hash = extractField(obj.data, "parent ");
-            var changes = std.array_list.Managed(FileChange).init(allocator);
+            var changes = std.ArrayList(FileChange).init(allocator);
             defer {
                 for (changes.items) |*c| freeChange(allocator, c);
                 changes.deinit();
@@ -5198,7 +5198,7 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
                 // Output the diff in the attachment
                 if (changes.items.len > 0) {
                     var diff_opts = DiffOpts{
-                        .ignore_regex = std.array_list.Managed([]const u8).init(allocator),
+                        .ignore_regex = std.ArrayList([]const u8).init(allocator),
                     };
                     defer diff_opts.ignore_regex.deinit();
                     try outputPatch(changes.items, &diff_opts, pi, allocator);
@@ -5228,7 +5228,7 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
                     try outputSummary(changes.items, pi, allocator);
                     try pi.writeStdout("\n");
                     var diff_opts = DiffOpts{
-                        .ignore_regex = std.array_list.Managed([]const u8).init(allocator),
+                        .ignore_regex = std.ArrayList([]const u8).init(allocator),
                     };
                     defer diff_opts.ignore_regex.deinit();
                     try outputPatch(changes.items, &diff_opts, pi, allocator);
@@ -5256,7 +5256,7 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
 }
 
 fn sanitizeSubject(subject: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
     for (subject) |c| {
         if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_') {

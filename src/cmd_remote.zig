@@ -38,7 +38,7 @@ pub fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
 
     var verbose = false;
     var subcommand: ?[]const u8 = null;
-    var positionals = std.array_list.Managed([]const u8).init(allocator);
+    var positionals = std.ArrayList([]const u8).init(allocator);
     defer positionals.deinit();
 
     // helpers.Parse arguments
@@ -62,7 +62,7 @@ pub fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         // git remote add [-f] [-t <branch>] [-m <master>] <name> <url>
         var fetch_after_add = false;
         var master_branch: ?[]const u8 = null;
-        var add_positionals = std.array_list.Managed([]const u8).init(allocator);
+        var add_positionals = std.ArrayList([]const u8).init(allocator);
         defer add_positionals.deinit();
         {
             var pi: usize = 0;
@@ -176,7 +176,7 @@ pub fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         }
 
         // helpers.Remove the section
-        var result = std.array_list.Managed(u8).init(allocator);
+        var result = std.ArrayList(u8).init(allocator);
         defer result.deinit();
         var in_remove_section = false;
         var lines = std.mem.splitScalar(u8, existing, '\n');
@@ -223,7 +223,7 @@ pub fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         };
         defer allocator.free(existing);
 
-        var result = std.array_list.Managed(u8).init(allocator);
+        var result = std.ArrayList(u8).init(allocator);
         defer result.deinit();
         var in_target_section = false;
         var url_replaced = false;
@@ -285,7 +285,7 @@ pub fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         defer allocator.free(new_header);
 
         // helpers.Simple string replacement for the section header
-        var result = std.array_list.Managed(u8).init(allocator);
+        var result = std.ArrayList(u8).init(allocator);
         defer result.deinit();
         var rest: []const u8 = existing;
         while (std.mem.indexOf(u8, rest, old_header)) |idx| {
@@ -399,7 +399,7 @@ pub fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         const config_data = platform_impl.fs.readFile(allocator, config_path) catch try allocator.dupe(u8, "");
         defer allocator.free(config_data);
 
-        var remotes_to_fetch = std.array_list.Managed([]const u8).init(allocator);
+        var remotes_to_fetch = std.ArrayList([]const u8).init(allocator);
         defer {
             for (remotes_to_fetch.items) |r| allocator.free(r);
             remotes_to_fetch.deinit();
