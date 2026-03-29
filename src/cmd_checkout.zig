@@ -578,6 +578,77 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
             } else |_| {}
         }
 
+        // Check for dirty working tree files that would be overwritten
+        if (!force) {
+            const objects_mod = @import("git/objects.zig");
+            var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch index_mod.Index.init(allocator);
+            defer idx.deinit();
+
+            // Resolve target commit's tree
+            const target_commit_hash = repo.findCommit(actual_target) catch null;
+            const target_tree_hash: ?[]u8 = if (target_commit_hash) |ch| blk: {
+                const commit_obj = objects_mod.GitObject.load(&ch, git_path, platform_impl, allocator) catch break :blk null;
+                defer commit_obj.deinit(allocator);
+                break :blk helpers.parseCommitTreeHash(commit_obj.data, allocator) catch null;
+            } else null;
+            defer if (target_tree_hash) |th| allocator.free(th);
+
+            // Build a set of target tree paths -> hashes
+            var target_blobs = std.StringHashMap([]const u8).init(allocator);
+            defer {
+                var vit = target_blobs.valueIterator();
+                while (vit.next()) |v| allocator.free(v.*);
+                var kit = target_blobs.keyIterator();
+                while (kit.next()) |k| allocator.free(k.*);
+                target_blobs.deinit();
+            }
+            if (target_tree_hash) |th| {
+                helpers.collectTreeBlobs(allocator, th, "", git_path, platform_impl, &target_blobs) catch {};
+            }
+
+            const repo_root2 = if (std.mem.endsWith(u8, git_path, "/.git")) git_path[0 .. git_path.len - 5] else git_path;
+            var dirty_files = std.ArrayList([]const u8).init(allocator);
+            defer {
+                for (dirty_files.items) |df| allocator.free(df);
+                dirty_files.deinit();
+            }
+
+            for (idx.entries.items) |entry| {
+                // Check if this file differs in target tree
+                const target_hash = target_blobs.get(entry.path);
+                // If file is same in current index and target tree, no conflict possible
+                var entry_hash_hex: [40]u8 = undefined;
+                _ = std.fmt.bufPrint(&entry_hash_hex, "{s}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch continue;
+                if (target_hash) |th| {
+                    if (std.mem.eql(u8, &entry_hash_hex, th)) continue;
+                } else {
+                    // File doesn't exist in target - deletion; check if modified
+                }
+
+                // Check if working tree file differs from index
+                const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root2, entry.path }) catch continue;
+                defer allocator.free(full_path);
+                const wt_content = platform_impl.fs.readFile(allocator, full_path) catch continue;
+                defer allocator.free(wt_content);
+                const wt_hash = helpers.hashBlobContent(wt_content, allocator) catch continue;
+                defer allocator.free(wt_hash);
+                if (!std.mem.eql(u8, wt_hash, &entry_hash_hex)) {
+                    dirty_files.append(allocator.dupe(u8, entry.path) catch continue) catch {};
+                }
+            }
+
+            if (dirty_files.items.len > 0) {
+                try platform_impl.writeStderr("error: Your local changes to the following files would be overwritten by checkout:\n");
+                for (dirty_files.items) |df| {
+                    const msg = try std.fmt.allocPrint(allocator, "\t{s}\n", .{df});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                }
+                try platform_impl.writeStderr("Please commit your changes or stash them before you switch branches.\nAborting\n");
+                std.process.exit(1);
+            }
+        }
+
         repo.checkout(actual_target) catch |err| {
             switch (err) {
                 error.CommitNotFound => {
