@@ -39254,7 +39254,7 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             }
         }
 
-        // Collect file entries from tree
+        // Collect file entries from current tree
         var file_entries = std.array_list.Managed(FastExportEntry).init(allocator);
         defer {
             for (file_entries.items) |fe| allocator.free(fe.path);
@@ -39262,8 +39262,65 @@ fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         }
         try fastExportCollectTree(git_path, tree_hash, "", platform_impl, allocator, &file_entries);
 
-        // Output blobs
+        // Collect parent tree entries for diffing
+        var parent_entries = std.StringHashMap(FastExportEntry).init(allocator);
+        defer {
+            var peit = parent_entries.valueIterator();
+            while (peit.next()) |pe| allocator.free(pe.path);
+            parent_entries.deinit();
+        }
+        if (parents.items.len > 0) {
+            const parent_obj = objects.GitObject.load(parents.items[0], git_path, platform_impl, allocator) catch null;
+            if (parent_obj) |pobj| {
+                defer pobj.deinit(allocator);
+                if (pobj.type == .commit) {
+                    const ptree = extractHeaderField(pobj.data, "tree");
+                    if (ptree.len > 0) {
+                        var pfe_list = std.array_list.Managed(FastExportEntry).init(allocator);
+                        defer pfe_list.deinit();
+                        fastExportCollectTree(git_path, ptree, "", platform_impl, allocator, &pfe_list) catch {};
+                        for (pfe_list.items) |pfe| {
+                            try parent_entries.put(pfe.path, pfe);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Compute changed entries (new or modified vs parent)
+        var changed_entries = std.array_list.Managed(FastExportEntry).init(allocator);
+        defer changed_entries.deinit();
         for (file_entries.items) |fe| {
+            if (parent_entries.get(fe.path)) |pe| {
+                if (!std.mem.eql(u8, fe.blob_hash, pe.blob_hash) or !std.mem.eql(u8, fe.mode, pe.mode)) {
+                    try changed_entries.append(fe);
+                }
+            } else {
+                try changed_entries.append(fe);
+            }
+        }
+
+        // Compute deleted entries
+        var deleted_paths = std.array_list.Managed([]const u8).init(allocator);
+        defer deleted_paths.deinit();
+        {
+            var peit2 = parent_entries.iterator();
+            while (peit2.next()) |pe| {
+                var found = false;
+                for (file_entries.items) |fe| {
+                    if (std.mem.eql(u8, fe.path, pe.key_ptr.*)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    try deleted_paths.append(pe.key_ptr.*);
+                }
+            }
+        }
+
+        // Output blobs for changed entries
+        for (changed_entries.items) |fe| {
             if (!blob_to_mark.contains(fe.blob_hash)) {
                 mark_counter += 1;
                 try blob_to_mark.put(fe.blob_hash, mark_counter);
