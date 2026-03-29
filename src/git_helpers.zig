@@ -8774,18 +8774,20 @@ pub fn collectLooseRefs(allocator: std.mem.Allocator, git_dir: []const u8, prefi
                     continue;
                 };
                 if (resolved) |rh| {
+                    const target_dup = try allocator.dupe(u8, target_ref);
                     var found_p = false;
                     for (ref_list.items, 0..) |ex, idx| {
                         if (std.mem.eql(u8, ex.name, full_name)) {
                             allocator.free(ex.hash);
                             ref_list.items[idx].hash = rh;
                             ref_list.items[idx].broken = false;
+                            ref_list.items[idx].symref_target = target_dup;
                             found_p = true;
                             allocator.free(full_name);
                             break;
                         }
                     }
-                    if (!found_p) try ref_list.append(.{ .name = full_name, .hash = rh, .broken = false });
+                    if (!found_p) try ref_list.append(.{ .name = full_name, .hash = rh, .broken = false, .symref_target = target_dup });
                 } else {
                     try ref_list.append(.{ .name = full_name, .hash = try allocator.dupe(u8, "0000000000000000000000000000000000000000"), .broken = true });
                 }
@@ -14036,6 +14038,7 @@ pub const RefEntry = struct {
     name: []const u8,
     hash: []const u8,
     broken: bool = false,
+    symref_target: ?[]const u8 = null,
 };
 
 
