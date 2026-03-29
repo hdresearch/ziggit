@@ -909,16 +909,16 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
                 }
             }
             // Second pass: for unclaimed lines, try to find a content match in parent
+            // Only match at the same line position to avoid incorrect attribution
             for (act.items) |idx| {
                 if (ub[idx] and !fap[idx] and t2t[idx] != std.math.maxInt(usize)) {
-                    const line_content = tls.items[t2t[idx]];
-                    for (pl.items, 0..) |parent_line, pi| {
-                        if (!parent_used[pi] and std.mem.eql(u8, line_content, parent_line)) {
-                            fap[idx] = true;
-                            parent_used[pi] = true;
-                            try pp.append(idx);
-                            break;
-                        }
+                    const tree_pos = t2t[idx];
+                    const line_content = tls.items[tree_pos];
+                    // Try same position first
+                    if (tree_pos < pl.items.len and !parent_used[tree_pos] and std.mem.eql(u8, line_content, pl.items[tree_pos])) {
+                        fap[idx] = true;
+                        parent_used[tree_pos] = true;
+                        try pp.append(idx);
                     }
                 }
             }
