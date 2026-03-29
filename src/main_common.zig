@@ -195,7 +195,7 @@ const NATIVE_COMMANDS = [_][]const u8{
     "count-objects", "show-ref", "for-each-ref", "verify-pack", "update-server-info",
     "mktree", "name-rev", "fsck", "gc", "prune", "repack", "pack-objects",
     "index-pack", "reflog", "clean", "mktag",
-    "merge-base", "unpack-objects",
+    "merge-base", "unpack-objects", "bundle",
     "diff-tree", "diff-index", "var", "show-index", "prune-packed",
     "verify-commit", "verify-tag", "mv", "stash", "apply",
     "column", "check-ignore", "check-attr",
@@ -1092,6 +1092,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try nativeCmdLsTree(allocator, all_original_args.items, command_index, &platform_impl);
     } else if (std.mem.eql(u8, command, "config")) {
         try config_cmd_mod.run(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "bundle")) {
+        try network.cmdBundle(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "version")) {
         try cmdVersion(allocator, &args_iter, &platform_impl);
     // Commands that forward to real git for full compatibility
