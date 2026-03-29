@@ -4860,7 +4860,13 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
             const has_grep_f = lo.grep_filters.items.len > 0;
 
             if (has_author_f or has_committer_f or has_grep_f) {
-                const msg = extractMessage(obj.data);
+                const raw_msg = extractMessage(obj.data);
+                // Re-encode message for grep matching if --encoding is specified
+                const grep_commit_enc = getCommitEncoding(obj.data);
+                const grep_out_enc = lo.output_encoding orelse "UTF-8";
+                const msg = reencodeForGrep(allocator, raw_msg, grep_commit_enc, grep_out_enc) catch raw_msg;
+                const msg_needs_free = msg.ptr != raw_msg.ptr;
+                defer if (msg_needs_free) allocator.free(msg);
                 const author_full = extractField(obj.data, "author ");
                 const committer_full = extractField(obj.data, "committer ");
                 // Strip timestamp from author/committer for matching (only match name <email>)
@@ -5165,6 +5171,8 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
 
     // Parse arguments
     var rev_range: ?[]const u8 = null;
+    var dash_n_count: ?usize = null;
+    var positional_rev: ?[]const u8 = null;
     var stdout_mode = false;
     var numbered: ?bool = null;
     var no_numbered = false;
@@ -5229,11 +5237,23 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
         } else if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output-directory")) {
             if (i + 1 < all_args.items.len) i += 1;
         } else if (std.mem.startsWith(u8, arg, "-") and arg.len > 1 and std.ascii.isDigit(arg[1])) {
-            const count = std.fmt.parseInt(usize, arg[1..], 10) catch 1;
-            const range = try std.fmt.allocPrint(allocator, "HEAD~{d}..HEAD", .{count});
-            rev_range = range;
+            dash_n_count = std.fmt.parseInt(usize, arg[1..], 10) catch 1;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
-            rev_range = arg;
+            if (std.mem.indexOf(u8, arg, "..") != null) {
+                rev_range = arg;
+            } else {
+                positional_rev = arg;
+            }
+        }
+    }
+
+    // Build rev_range from -N and positional revision
+    if (rev_range == null) {
+        if (dash_n_count) |count| {
+            const tip = positional_rev orelse "HEAD";
+            rev_range = try std.fmt.allocPrint(allocator, "{s}~{d}..{s}", .{ tip, count, tip });
+        } else if (positional_rev) |rev| {
+            rev_range = rev;
         }
     }
 
@@ -5649,15 +5669,93 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
                 try pi.writeStdout(ver_line);
             }
         } else {
-            // Write to file
+            // Write to file - use --stdout mode to capture content, then write to disk
             const sane_subj = sanitizeSubject(first_line, allocator) catch {
                 try pi.writeStdout("0001-patch.patch\n");
                 continue;
             };
             defer allocator.free(sane_subj);
-            const filename = try std.fmt.allocPrint(allocator, "{d:0>4}-{s}.patch\n", .{ patch_num, sane_subj });
+            const filename = try std.fmt.allocPrint(allocator, "{d:0>4}-{s}{s}", .{ patch_num, sane_subj, suffix });
             defer allocator.free(filename);
-            try pi.writeStdout(filename);
+
+            // Collect tree changes
+            const parent_hash_f = extractField(obj.data, "parent ");
+            var changes_f = std.ArrayList(FileChange).init(allocator);
+            defer {
+                for (changes_f.items) |*c| freeChange(allocator, c);
+                changes_f.deinit();
+            }
+            if (parent_hash_f.len >= 40) {
+                const cur_tree_f = extractField(obj.data, "tree ");
+                const pobj_f = objects.GitObject.load(parent_hash_f, git_path, pi, allocator) catch null;
+                defer if (pobj_f) |po| po.deinit(allocator);
+                const par_tree_f = if (pobj_f) |po| extractField(po.data, "tree ") else "";
+                if (cur_tree_f.len >= 40 and par_tree_f.len >= 40) {
+                    collectTreeChanges(allocator, par_tree_f, cur_tree_f, "", git_path, &.{}, pi, &changes_f) catch {};
+                }
+            }
+
+            var file_buf = std.ArrayList(u8).init(allocator);
+            defer file_buf.deinit();
+            const w = file_buf.writer();
+
+            try w.print("From {s} Mon Sep 17 00:00:00 2001\n", .{commit_hash});
+            try w.print("From: {s} <{s}>\n", .{ parsePersonName(author_line), parsePersonEmail(author_line) });
+            const date_rfc_f = formatRfc2822Date(author_line, allocator);
+            defer if (date_rfc_f) |d| allocator.free(d);
+            try w.print("Date: {s}\n", .{date_rfc_f orelse "Thu, 1 Jan 1970 00:00:00 +0000"});
+            if (do_number) {
+                try w.print("Subject: [{s} {d}/{d}] {s}\n", .{ subject_prefix, patch_num, total, first_line });
+            } else {
+                try w.print("Subject: [{s}] {s}\n", .{ subject_prefix, first_line });
+            }
+            try w.print("\n{s}\n", .{std.mem.trimRight(u8, commit_msg, "\n ")});
+            if (signoff) {
+                const sob_n = std.posix.getenv("GIT_COMMITTER_NAME") orelse parsePersonName(author_line);
+                const sob_e = std.posix.getenv("GIT_COMMITTER_EMAIL") orelse parsePersonEmail(author_line);
+                try w.print("\nSigned-off-by: {s} <{s}>\n", .{ sob_n, sob_e });
+            }
+            try w.print("---\n", .{});
+            // Generate stat and diff content
+            if (changes_f.items.len > 0) {
+                // Stat
+                for (changes_f.items) |fc| {
+                    const ins = fc.insertions;
+                    const del = fc.deletions;
+                    const path = fc.path;
+                    if (fc.is_binary) {
+                        try w.print(" {s} | Bin\n", .{path});
+                    } else {
+                        try w.print(" {s} | {d}", .{ path, ins + del });
+                        if (ins > 0) { var j: usize = 0; while (j < ins) : (j += 1) try w.writeByte('+'); }
+                        if (del > 0) { var j: usize = 0; while (j < del) : (j += 1) try w.writeByte('-'); }
+                        try w.writeByte('\n');
+                    }
+                }
+                try w.print(" {d} file{s} changed\n\n", .{ changes_f.items.len, if (changes_f.items.len != 1) @as([]const u8, "s") else @as([]const u8, "") });
+                // Patch
+                for (changes_f.items) |fc| {
+                    if (fc.is_new) {
+                        try w.print("diff --git a/{s} b/{s}\nnew file mode {s}\n--- /dev/null\n+++ b/{s}\n", .{ fc.path, fc.path, fc.new_mode, fc.path });
+                    } else if (fc.is_deleted) {
+                        try w.print("diff --git a/{s} b/{s}\ndeleted file mode {s}\n--- a/{s}\n+++ /dev/null\n", .{ fc.path, fc.path, fc.old_mode, fc.path });
+                    } else {
+                        try w.print("diff --git a/{s} b/{s}\n--- a/{s}\n+++ b/{s}\n", .{ fc.path, fc.path, fc.path, fc.path });
+                    }
+                    // Generate unified diff from old/new content
+                    const diff_text = diff_mod.generateUnifiedDiffWithHashesAndContext(fc.old_content, fc.new_content, fc.path, "", "", 3, allocator) catch "";
+                    defer if (diff_text.len > 0) allocator.free(diff_text);
+                    if (diff_text.len > 0) try w.print("{s}", .{diff_text});
+                }
+            } else {
+                try w.print("\n", .{});
+            }
+            try w.print("-- \n{s}\n\n", .{version_str});
+
+            pi.fs.writeFile(filename, file_buf.items) catch {};
+            const out_msg = try std.fmt.allocPrint(allocator, "{s}\n", .{filename});
+            defer allocator.free(out_msg);
+            try pi.writeStdout(out_msg);
         }
     }
 }
