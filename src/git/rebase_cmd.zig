@@ -3031,8 +3031,12 @@ fn threeWayMerge(git_path: []const u8, base_tree: []const u8, ours_tree: []const
                 try addIndexEntry(&idx, path, theirs.?.sha1, theirs.?.mode, repo_root, allocator);
                 try writeFileFromBlob(git_path, repo_root, path, &theirs.?.sha1, allocator, platform_impl);
             } else {
-                // Deleted in ours, modified in theirs - add theirs
-                try addIndexEntry(&idx, path, theirs.?.sha1, theirs.?.mode, repo_root, allocator);
+                // Deleted in ours, modified in theirs - conflict
+                has_conflicts = true;
+                if (base) |b| {
+                    try addIndexEntryStaged(&idx, path, b.sha1, b.mode, repo_root, allocator, 1);
+                }
+                try addIndexEntryStaged(&idx, path, theirs.?.sha1, theirs.?.mode, repo_root, allocator, 3);
                 try writeFileFromBlob(git_path, repo_root, path, &theirs.?.sha1, allocator, platform_impl);
             }
         }

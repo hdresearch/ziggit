@@ -291,6 +291,36 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
         const reset_msg = try std.fmt.allocPrint(allocator, "Switched to and reset branch '{s}'\n", .{branch_name});
         defer allocator.free(reset_msg);
         try platform_impl.writeStderr(reset_msg);
+    } else if (std.mem.eql(u8, effective_first_arg, "--theirs") or std.mem.eql(u8, effective_first_arg, "--ours")) {
+        // checkout --theirs/--ours <paths>: resolve conflicts using stage 2 (ours) or 3 (theirs)
+        const want_stage: u16 = if (std.mem.eql(u8, effective_first_arg, "--ours")) 2 else 3;
+        var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch return;
+        defer idx.deinit();
+        const repo_root = std.fs.path.dirname(git_path) orelse ".";
+
+        while (args.next()) |path_arg| {
+            const path = if (std.mem.eql(u8, path_arg, "--")) continue else path_arg;
+            for (idx.entries.items) |entry| {
+                const entry_stage = @as(u16, (entry.flags >> 12) & 0x3);
+                if (entry_stage != want_stage) continue;
+                if (std.mem.eql(u8, entry.path, path) or helpers.simpleGlobMatch(path, entry.path)) {
+                    var hash_hex: [40]u8 = undefined;
+                    for (entry.sha1, 0..) |byte, bi| {
+                        hash_hex[bi * 2] = "0123456789abcdef"[byte >> 4];
+                        hash_hex[bi * 2 + 1] = "0123456789abcdef"[byte & 0xf];
+                    }
+                    const blob = objects.GitObject.load(&hash_hex, git_path, platform_impl, allocator) catch continue;
+                    defer blob.deinit(allocator);
+                    const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path }) catch continue;
+                    defer allocator.free(full_path);
+                    // Ensure parent directory exists
+                    if (std.fs.path.dirname(full_path)) |dir| {
+                        std.fs.cwd().makePath(dir) catch {};
+                    }
+                    platform_impl.fs.writeFile(full_path, blob.data) catch {};
+                }
+            }
+        }
     } else if (std.mem.eql(u8, effective_first_arg, "--")) {
         // checkout -- <paths>: restore files from index
         var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch return;

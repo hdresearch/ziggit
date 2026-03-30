@@ -50,9 +50,9 @@ const DiffOpts = struct {
     show_summary: bool = false,
     ignore_regex: std.ArrayList([]const u8) = undefined,
     ignore_blank_lines: bool = false,
+    suppress_blank_empty: bool = false,
     combined_use_c: bool = false, // true for -c (diff --combined), false for --cc (diff --cc)
     break_rewrites: bool = false,
-    suppress_blank_empty: bool = false,
 
     fn getAbbrevLen(self: *const DiffOpts) u32 {
         if (self.abbrev) |a| {
@@ -158,20 +158,18 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *pm.ArgIterator, platform_imp
         if (git_helpers_mod.getConfigOverride("diff.suppressBlankEmpty")) |val| {
             if (std.mem.eql(u8, val, "true")) opts.suppress_blank_empty = true;
         }
-
-        // Also read from config file using proper GitConfig parser
-        if (git_path_for_config) |gp| {
-            const config_mod = @import("config.zig");
-            var config = config_mod.GitConfig.init(allocator);
-            defer config.deinit();
-            const config_path = std.fs.path.join(allocator, &.{ gp, "config" }) catch null;
-            if (config_path) |cp| {
-                defer allocator.free(cp);
-                config.parseFromFile(cp) catch {};
-            }
-            if (config.get("diff", null, "suppressBlankEmpty") orelse config.get("diff", null, "suppressblankempty")) |val| {
-                if (std.mem.eql(u8, val, "true")) opts.suppress_blank_empty = true
-                else if (std.mem.eql(u8, val, "false")) opts.suppress_blank_empty = false;
+        // Also check config file for suppressBlankEmpty
+        if (!opts.suppress_blank_empty) {
+            const cfg_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_path_for_config.?}) catch null;
+            defer if (cfg_path) |p| allocator.free(p);
+            if (cfg_path) |p| {
+                const cfg_data = std.fs.cwd().readFileAlloc(allocator, p, 1024 * 1024) catch null;
+                defer if (cfg_data) |d| allocator.free(d);
+                if (cfg_data) |d| {
+                    if (getConfigValue(d, "diff", "suppressBlankEmpty")) |v| {
+                        if (std.ascii.eqlIgnoreCase(v, "true")) opts.suppress_blank_empty = true;
+                    }
+                }
             }
         }
     }
@@ -1302,7 +1300,7 @@ fn outputPatch(changes: []const FileChange, opts: *const DiffOpts, pi: *const pm
 
             // Generate and output hunks
             if (c.old_content.len > 0 or c.new_content.len > 0) {
-                try outputDiffHunks(c.old_content, c.new_content, opts.context_lines, lp, opts.suppress_blank_empty, pi, allocator);
+                try outputDiffHunks(c.old_content, c.new_content, opts.context_lines, lp, pi, allocator, opts.suppress_blank_empty);
             }
         }
     }
@@ -1600,7 +1598,7 @@ fn outputDiffHeader(c: FileChange, sp: []const u8, dp: []const u8, lp: []const u
     }
 }
 
-fn outputDiffHunks(old_content: []const u8, new_content: []const u8, context_lines: u32, lp: []const u8, suppress_blank_empty: bool, pi: *const pm.Platform, allocator: std.mem.Allocator) !void {
+fn outputDiffHunks(old_content: []const u8, new_content: []const u8, context_lines: u32, lp: []const u8, pi: *const pm.Platform, allocator: std.mem.Allocator, suppress_blank_empty: bool) !void {
     // Use the existing diff module to generate the unified diff
     const diff_output = diff_mod.generateUnifiedDiffWithHashesAndContext(
         old_content, new_content, "placeholder", "0", "0", context_lines, allocator,
@@ -1629,7 +1627,8 @@ fn outputDiffHunks(old_content: []const u8, new_content: []const u8, context_lin
 
     for (lines_list.items) |line| {
         if (lp.len > 0) try pi.writeStdout(lp);
-        // If suppress_blank_empty and this is a context line that is just a space (blank line), output empty
+        // When suppress_blank_empty is true, context lines that are just a space
+        // should be output as empty lines (no trailing space)
         if (suppress_blank_empty and line.len == 1 and line[0] == ' ') {
             try pi.writeStdout("\n");
         } else {
@@ -2206,7 +2205,7 @@ fn diffTwoFiles(allocator: std.mem.Allocator, path_a: []const u8, path_b: []cons
     defer allocator.free(header);
     try pi.writeStdout(header);
 
-    try outputDiffHunks(content_a, content_b, opts.context_lines, "", opts.suppress_blank_empty, pi, allocator);
+    try outputDiffHunks(content_a, content_b, opts.context_lines, "", pi, allocator, opts.suppress_blank_empty);
 }
 
 fn diffNewFile(allocator: std.mem.Allocator, path: []const u8, opts: *const DiffOpts, pi: *const pm.Platform) !void {
@@ -3716,7 +3715,7 @@ fn getNoteForCommit(hash: []const u8, git_path: []const u8, pi: *const pm.Platfo
     const tree_entries = tree_mod.parseTree(tree_obj.data, allocator) catch return null;
     defer tree_entries.deinit();
 
-    // Look for an entry matching the commit hash
+    // Look for an entry matching the commit hash (flat layout)
     for (tree_entries.items) |entry| {
         if (std.mem.eql(u8, entry.name, hash)) {
             // Load the blob
@@ -3725,6 +3724,30 @@ fn getNoteForCommit(hash: []const u8, git_path: []const u8, pi: *const pm.Platfo
             return try allocator.dupe(u8, blob_obj.data);
         }
     }
+
+    // Try fanned-out layout: look for a subtree named hash[0..2]
+    if (hash.len >= 3) {
+        const prefix = hash[0..2];
+        const rest = hash[2..];
+        for (tree_entries.items) |entry| {
+            if (std.mem.eql(u8, entry.name, prefix)) {
+                // Load the subtree
+                const sub_obj = objects.GitObject.load(entry.hash, git_path, pi, allocator) catch return null;
+                defer sub_obj.deinit(allocator);
+                const sub_entries = tree_mod.parseTree(sub_obj.data, allocator) catch return null;
+                defer sub_entries.deinit();
+                for (sub_entries.items) |sub_entry| {
+                    if (std.mem.eql(u8, sub_entry.name, rest)) {
+                        const blob_obj = objects.GitObject.load(sub_entry.hash, git_path, pi, allocator) catch return null;
+                        defer blob_obj.deinit(allocator);
+                        return try allocator.dupe(u8, blob_obj.data);
+                    }
+                }
+                return null;
+            }
+        }
+    }
+
     return null;
 }
 
