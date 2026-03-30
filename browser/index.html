@@ -135,8 +135,9 @@
         const ver = new TextDecoder().decode(new Uint8Array(mem.buffer, ptr, len));
         instance.exports.ziggit_free(ptr, 128);
         const numExports = Object.keys(instance.exports).filter(k => typeof instance.exports[k] === 'function').length;
-        document.getElementById('wasm-version').textContent = `${ver} (${numExports} exports, WASM active)`;
-        console.log('WASM loaded:', ver, '— exports:', Object.keys(instance.exports).filter(k => typeof instance.exports[k] === 'function'));
+        const wasmSize = (mem.buffer.byteLength / 1024).toFixed(0) + 'KB';
+        document.getElementById('wasm-version').textContent = `${ver} (${numExports} exports, ${wasmSize} memory, WASM active)`;
+        console.log('WASM loaded:', ver, '— exports:', numExports, 'memory:', wasmSize);
       } catch (e) {
         document.getElementById('wasm-version').textContent = 'wasm not loaded (JS fallback active)';
         console.warn('WASM load failed:', e);
