@@ -69,6 +69,26 @@ pub fn build(b: *std.Build) void {
         "ziggit_set_args",
         "getGlobalArgc",
         "getGlobalArgv",
+        // wasm_exports.zig git operations
+        "ziggit_alloc",
+        "ziggit_free",
+        "ziggit_init",
+        "ziggit_is_repo",
+        "ziggit_rev_parse_head",
+        "ziggit_current_branch",
+        "ziggit_hash_blob",
+        "ziggit_store_blob",
+        "ziggit_http_get",
+        "ziggit_http_post",
+        "ziggit_clone_bare",
+        "ziggit_ls_remote",
+        "ziggit_version",
+        "ziggit_index_pack",
+        "ziggit_read_object",
+        "ziggit_log",
+        "ziggit_ls_tree",
+        "ziggit_read_file",
+        "ziggit_commit_tree",
     };
 
     const wasm_step = b.step("wasm", "Build WASM module for browser");
