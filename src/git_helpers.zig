@@ -1097,6 +1097,8 @@ pub fn findGitDirectory(allocator: std.mem.Allocator, platform_impl: *const plat
     var dir_to_check = try allocator.dupe(u8, current_dir);
     var is_first = true;
     
+    std.debug.print("findGitDirectory: starting from {s}\n", .{current_dir});
+    
     while (true) {
         // Check GIT_CEILING_DIRECTORIES - don't search at or above ceiling dirs
         // (but always check the starting directory itself)
