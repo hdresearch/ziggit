@@ -248,7 +248,6 @@ pub fn addSingleFile(allocator: std.mem.Allocator, relative_path: []const u8, fu
 }
 
 /// Emit CRLF/LF conversion warnings to stderr, matching git's behavior.
-/// Git warns when the round-trip (add+checkout) will change the file's line endings.
 fn emitCrlfWarning(allocator: std.mem.Allocator, relative_path: []const u8, full_path: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
     const content = platform_impl.fs.readFile(allocator, full_path) catch return;
     defer allocator.free(content);
@@ -269,40 +268,74 @@ fn emitCrlfWarning(allocator: std.mem.Allocator, relative_path: []const u8, full
         attr_rules.deinit();
     }
 
-    // Get the attrs for this file
     const attrs = crlf_mod.getFileAttrs(relative_path, attr_rules.items);
-    const commit_action = crlf_mod.getCommitAction(attrs.text, attrs.eol, autocrlf_val, content);
 
-    // After normalization (CRLF->LF), what would checkout do?
-    // We need to simulate: after add normalizes the content, what does checkout produce?
-    // If checkout would convert LF->CRLF, then the file ends up with CRLF regardless.
-    // The warning is about what the user will see in the working directory after a round-trip.
+    // Git's warning logic:
+    // 1. With explicit text/text=auto attribute: warn about CRLF->LF when file has CRLF and checkout won't restore it
+    // 2. With autocrlf=true (no text attr): warn about LF->CRLF for files with bare LF
+    // 3. With autocrlf=input (no text attr): NO warning (silent normalization)
 
-    if (commit_action == .crlf_to_lf and hasCrlf(content)) {
-        // Content has CRLF, commit will normalize to LF.
-        // Check if checkout would convert back to CRLF.
-        // Simulate normalized content for checkout check.
-        const normalized = crlf_mod.convertCrlfToLf(allocator, content) catch return;
-        defer allocator.free(normalized);
-        const co_action = crlf_mod.getCheckoutAction(attrs.text, attrs.eol, autocrlf_val, eol_config_val, normalized);
-        if (co_action != .lf_to_crlf) {
-            // Checkout won't restore CRLF, so the file will change from CRLF to LF
-            const msg = try std.fmt.allocPrint(allocator, "warning: CRLF will be replaced by LF in {s}.\nThe file will have its original line endings in your working directory\n", .{relative_path});
-            defer allocator.free(msg);
-            platform_impl.writeStderr(msg) catch {};
-        }
-        return; // Don't also emit LF->CRLF warning
-    }
+    const is_text = crlf_mod.isTextContent(content);
 
-    // Check if checkout would add CRLF to a file that currently has bare LF
-    if (hasBareLf(content) and crlf_mod.isTextContent(content)) {
-        // What action would happen on checkout for this content after normalization?
-        const co_action = crlf_mod.getCheckoutAction(attrs.text, attrs.eol, autocrlf_val, eol_config_val, content);
-        if (co_action == .lf_to_crlf) {
-            const msg = try std.fmt.allocPrint(allocator, "warning: LF will be replaced by CRLF in {s}.\nThe file will have its original line endings in your working directory\n", .{relative_path});
-            defer allocator.free(msg);
-            platform_impl.writeStderr(msg) catch {};
-        }
+    switch (attrs.text) {
+        .text => {
+            // Explicit text attribute
+            if (hasCrlf(content)) {
+                // CRLF content will be normalized to LF on add.
+                // Check if checkout would restore CRLF.
+                const normalized = crlf_mod.convertCrlfToLf(allocator, content) catch return;
+                defer allocator.free(normalized);
+                const co_action = crlf_mod.getCheckoutAction(.text, attrs.eol, autocrlf_val, eol_config_val, normalized);
+                if (co_action != .lf_to_crlf) {
+                    const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', CRLF will be replaced by LF the next time Git touches it\n", .{relative_path});
+                    defer allocator.free(msg);
+                    platform_impl.writeStderr(msg) catch {};
+                    return;
+                }
+            }
+            if (hasBareLf(content)) {
+                const co_action = crlf_mod.getCheckoutAction(.text, attrs.eol, autocrlf_val, eol_config_val, content);
+                if (co_action == .lf_to_crlf) {
+                    const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', LF will be replaced by CRLF the next time Git touches it\n", .{relative_path});
+                    defer allocator.free(msg);
+                    platform_impl.writeStderr(msg) catch {};
+                }
+            }
+        },
+        .text_auto => {
+            if (!is_text) return;
+            // Same as text but only for detected-text files
+            if (hasCrlf(content)) {
+                const normalized = crlf_mod.convertCrlfToLf(allocator, content) catch return;
+                defer allocator.free(normalized);
+                const co_action = crlf_mod.getCheckoutAction(.text_auto, attrs.eol, autocrlf_val, eol_config_val, normalized);
+                if (co_action != .lf_to_crlf) {
+                    const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', CRLF will be replaced by LF the next time Git touches it\n", .{relative_path});
+                    defer allocator.free(msg);
+                    platform_impl.writeStderr(msg) catch {};
+                    return;
+                }
+            }
+            if (hasBareLf(content)) {
+                const co_action = crlf_mod.getCheckoutAction(.text_auto, attrs.eol, autocrlf_val, eol_config_val, content);
+                if (co_action == .lf_to_crlf) {
+                    const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', LF will be replaced by CRLF the next time Git touches it\n", .{relative_path});
+                    defer allocator.free(msg);
+                    platform_impl.writeStderr(msg) catch {};
+                }
+            }
+        },
+        .no_text => {},
+        .unspecified => {
+            // No text attribute - only autocrlf=true generates warnings
+            if (autocrlf_val) |ac| {
+                if (std.mem.eql(u8, ac, "true") and is_text and hasBareLf(content)) {
+                    const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', LF will be replaced by CRLF the next time Git touches it\n", .{relative_path});
+                    defer allocator.free(msg);
+                    platform_impl.writeStderr(msg) catch {};
+                }
+            }
+        },
     }
 }
 
