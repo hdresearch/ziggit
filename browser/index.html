@@ -398,48 +398,58 @@
       // First pass: parse all objects, store raw data
       const objects = []; // { type, data, offset, baseOfsOffset?, baseRef? }
 
+      let parseErrors = 0;
       for (let i = 0; i < numObjects; i++) {
-        if (i % 50 === 0) {
+        if (i % 100 === 0) {
           status(`Parsing object ${i}/${numObjects}...`);
           showProgress((i / numObjects) * 70);
           await new Promise(r => setTimeout(r, 0)); // yield to UI
         }
         const objStart = offset;
-        const hdr = readVarInt(packData, offset);
-        offset = hdr.offset;
+        try {
+          const hdr = readVarInt(packData, offset);
+          offset = hdr.offset;
 
-        if (hdr.type >= 1 && hdr.type <= 4) {
-          // Regular object
-          const inf = smartInflate(packData, offset);
-          offset += inf.bytesRead;
-          const typeName = TYPE_NAMES[hdr.type];
-          // Compute SHA1
-          const header = new TextEncoder().encode(`${typeName} ${inf.result.length}\0`);
-          const full = new Uint8Array(header.length + inf.result.length);
-          full.set(header);
-          full.set(inf.result, header.length);
-          const hash = await sha1hex(full);
-          objectDb[hash] = { type: typeName, data: inf.result };
-          objects.push({ type: hdr.type, typeName, hash, data: inf.result, packOffset: objStart });
-        } else if (hdr.type === 6) {
-          // OFS_DELTA
-          const ofs = readOfsOffset(packData, offset);
-          offset = ofs.offset;
-          const baseOffset = objStart - ofs.value;
-          const inf = smartInflate(packData, offset);
-          offset += inf.bytesRead;
-          objects.push({ type: 6, deltaData: inf.result, basePackOffset: baseOffset, packOffset: objStart });
-        } else if (hdr.type === 7) {
-          // REF_DELTA
-          const baseHash = bytesToHex(packData.slice(offset, offset + 20));
-          offset += 20;
-          const inf = smartInflate(packData, offset);
-          offset += inf.bytesRead;
-          objects.push({ type: 7, deltaData: inf.result, baseHash, packOffset: objStart });
-        } else {
-          throw new Error('Unknown pack object type: ' + hdr.type);
+          if (hdr.type >= 1 && hdr.type <= 4) {
+            // Regular object
+            const inf = smartInflate(packData, offset);
+            offset += inf.bytesRead;
+            const typeName = TYPE_NAMES[hdr.type];
+            // Compute SHA1
+            const header = new TextEncoder().encode(`${typeName} ${inf.result.length}\0`);
+            const full = new Uint8Array(header.length + inf.result.length);
+            full.set(header);
+            full.set(inf.result, header.length);
+            const hash = await sha1hex(full);
+            objectDb[hash] = { type: typeName, data: inf.result };
+            objects.push({ type: hdr.type, typeName, hash, data: inf.result, packOffset: objStart });
+          } else if (hdr.type === 6) {
+            // OFS_DELTA
+            const ofs = readOfsOffset(packData, offset);
+            offset = ofs.offset;
+            const baseOffset = objStart - ofs.value;
+            const inf = smartInflate(packData, offset);
+            offset += inf.bytesRead;
+            objects.push({ type: 6, deltaData: inf.result, basePackOffset: baseOffset, packOffset: objStart });
+          } else if (hdr.type === 7) {
+            // REF_DELTA
+            const baseHash = bytesToHex(packData.slice(offset, offset + 20));
+            offset += 20;
+            const inf = smartInflate(packData, offset);
+            offset += inf.bytesRead;
+            objects.push({ type: 7, deltaData: inf.result, baseHash, packOffset: objStart });
+          } else {
+            console.warn('Unknown pack object type:', hdr.type, 'at offset', objStart);
+            parseErrors++;
+            break; // Unknown type means we can't calculate the next offset
+          }
+        } catch (e) {
+          console.error('Error parsing object', i, 'at offset', objStart, ':', e.message);
+          parseErrors++;
+          break; // Can't recover from inflate errors since offset is lost
         }
       }
+      if (parseErrors > 0) console.warn('Pack parse errors:', parseErrors);
 
       // Build offset->index map for OFS_DELTA resolution
       const offsetToIdx = {};
