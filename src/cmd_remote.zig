@@ -157,7 +157,7 @@ pub fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         defer allocator.free(config_path);
 
         const existing = platform_impl.fs.readFile(allocator, config_path) catch {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: helpers.No such remote: '{s}'\n", .{name});
+            const msg = try std.fmt.allocPrint(allocator, "error: No such remote: '{s}'\n", .{name});
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);
             std.process.exit(2);
@@ -169,7 +169,7 @@ pub fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         defer allocator.free(remote_header);
 
         if (std.mem.indexOf(u8, existing, remote_header) == null) {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: helpers.No such remote: '{s}'\n", .{name});
+            const msg = try std.fmt.allocPrint(allocator, "error: No such remote: '{s}'\n", .{name});
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);
             std.process.exit(2);
@@ -247,7 +247,7 @@ pub fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             try result.append('\n');
         }
         if (!url_replaced) {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: helpers.No such remote '{s}'\n", .{name});
+            const msg = try std.fmt.allocPrint(allocator, "fatal: No such remote '{s}'\n", .{name});
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);
             std.process.exit(2);
@@ -274,7 +274,7 @@ pub fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         const old_header = try std.fmt.allocPrint(allocator, "[remote \"{s}\"]", .{old_name});
         defer allocator.free(old_header);
         if (std.mem.indexOf(u8, existing, old_header) == null) {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: helpers.No such remote: '{s}'\n", .{old_name});
+            const msg = try std.fmt.allocPrint(allocator, "fatal: No such remote: '{s}'\n", .{old_name});
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);
             std.process.exit(2);
@@ -311,7 +311,7 @@ pub fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
             defer allocator.free(config_path);
             const existing = platform_impl.fs.readFile(allocator, config_path) catch {
-                const msg = try std.fmt.allocPrint(allocator, "fatal: helpers.No such remote '{s}'\n", .{name});
+                const msg = try std.fmt.allocPrint(allocator, "fatal: No such remote '{s}'\n", .{name});
                 defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
                 std.process.exit(2);
@@ -399,7 +399,7 @@ pub fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                     }
                 }
             } else {
-                const msg = try std.fmt.allocPrint(allocator, "fatal: helpers.No such remote '{s}'\n", .{name});
+                const msg = try std.fmt.allocPrint(allocator, "fatal: No such remote '{s}'\n", .{name});
                 defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
                 std.process.exit(2);
@@ -415,7 +415,7 @@ pub fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
         defer allocator.free(config_path);
         const existing = platform_impl.fs.readFile(allocator, config_path) catch {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: helpers.No such remote '{s}'\n", .{name});
+            const msg = try std.fmt.allocPrint(allocator, "fatal: No such remote '{s}'\n", .{name});
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);
             std.process.exit(2);
@@ -442,7 +442,7 @@ pub fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             }
         }
         if (!found) {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: helpers.No such remote '{s}'\n", .{name});
+            const msg = try std.fmt.allocPrint(allocator, "fatal: No such remote '{s}'\n", .{name});
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);
             std.process.exit(2);
@@ -507,7 +507,7 @@ pub fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                     if (std.mem.indexOf(u8, config_data, remote_section) != null) {
                         try remotes_to_fetch.append(try allocator.dupe(u8, group_or_remote));
                     } else {
-                        const msg = try std.fmt.allocPrint(allocator, "error: helpers.No such remote or remote group: {s}\n", .{group_or_remote});
+                        const msg = try std.fmt.allocPrint(allocator, "error: No such remote or remote group: {s}\n", .{group_or_remote});
                         defer allocator.free(msg);
                         try platform_impl.writeStderr(msg);
                         std.process.exit(1);
@@ -545,10 +545,10 @@ pub fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     {
         // Stub - silently accept
     } else {
-        const msg = try std.fmt.allocPrint(allocator, "error: helpers.Unknown subcommand: {s}\n", .{subcommand.?});
+        const msg = try std.fmt.allocPrint(allocator, "error: unknown subcommand: {s}\n", .{subcommand.?});
         defer allocator.free(msg);
         try platform_impl.writeStderr(msg);
-        std.process.exit(1);
+        std.process.exit(129);
     }
 }
 
