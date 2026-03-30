@@ -343,6 +343,61 @@ pub fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                         try platform_impl.writeStdout(url_line);
                     }
                 }
+                // Show tracked branches (from refs/remotes/<name>/)
+                const remotes_dir_path = try std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}", .{ git_path, name });
+                defer allocator.free(remotes_dir_path);
+                var tracked_branches = std.array_list.Managed([]const u8).init(allocator);
+                defer {
+                    for (tracked_branches.items) |b| allocator.free(b);
+                    tracked_branches.deinit();
+                }
+                if (std.fs.cwd().openDir(remotes_dir_path, .{ .iterate = true })) |dir_val| {
+                    var dir = dir_val;
+                    defer dir.close();
+                    var iter = dir.iterate();
+                    while (iter.next() catch null) |entry| {
+                        if (entry.kind == .directory) continue;
+                        if (std.mem.eql(u8, entry.name, "HEAD")) continue;
+                        try tracked_branches.append(try allocator.dupe(u8, entry.name));
+                    }
+                } else |_| {}
+                // Also check packed-refs
+                const packed_refs_path2 = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_path});
+                defer allocator.free(packed_refs_path2);
+                if (std.fs.cwd().readFileAlloc(allocator, packed_refs_path2, 10 * 1024 * 1024)) |pr_data| {
+                    defer allocator.free(pr_data);
+                    const prefix = try std.fmt.allocPrint(allocator, "refs/remotes/{s}/", .{name});
+                    defer allocator.free(prefix);
+                    var pr_lines = std.mem.splitScalar(u8, pr_data, '\n');
+                    while (pr_lines.next()) |pr_line| {
+                        if (pr_line.len == 0 or pr_line[0] == '#' or pr_line[0] == '^') continue;
+                        if (std.mem.indexOf(u8, pr_line, prefix)) |idx| {
+                            const branch_name = pr_line[idx + prefix.len ..];
+                            var found_dup = false;
+                            for (tracked_branches.items) |b| {
+                                if (std.mem.eql(u8, b, branch_name)) { found_dup = true; break; }
+                            }
+                            if (!found_dup) try tracked_branches.append(try allocator.dupe(u8, branch_name));
+                        }
+                    }
+                } else |_| {}
+                if (tracked_branches.items.len > 0) {
+                    // Sort
+                    std.sort.pdq([]const u8, tracked_branches.items, {}, struct {
+                        fn lt(_: void, a: []const u8, b: []const u8) bool {
+                            return std.mem.order(u8, a, b) == .lt;
+                        }
+                    }.lt);
+                    const plural: []const u8 = if (tracked_branches.items.len == 1) "" else "es";
+                    const hdr = try std.fmt.allocPrint(allocator, "  Remote branch{s}:\n", .{plural});
+                    defer allocator.free(hdr);
+                    try platform_impl.writeStdout(hdr);
+                    for (tracked_branches.items) |branch| {
+                        const bl = try std.fmt.allocPrint(allocator, "    {s} tracked\n", .{branch});
+                        defer allocator.free(bl);
+                        try platform_impl.writeStdout(bl);
+                    }
+                }
             } else {
                 const msg = try std.fmt.allocPrint(allocator, "fatal: helpers.No such remote '{s}'\n", .{name});
                 defer allocator.free(msg);
