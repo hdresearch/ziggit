@@ -258,19 +258,40 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     }
 
     // helpers.If file paths were specified, stage those files before committing
+    // In git, `git commit <paths>` re-stages tracked files matching the pathspec
+    // from the working tree (like `git add -u <paths>`), NOT adding untracked files.
     if (commit_files.items.len > 0) {
         const cwd = try platform_impl.fs.getCwd(allocator);
         defer allocator.free(cwd);
+        const repo_root = std.fs.path.dirname(git_path) orelse ".";
         for (commit_files.items) |file_arg| {
             const full_path = if (std.fs.path.isAbsolute(file_arg))
                 try allocator.dupe(u8, file_arg)
             else
                 try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd, file_arg });
             defer allocator.free(full_path);
-            
+
             const metadata = std.fs.cwd().statFile(full_path) catch continue;
             if (metadata.kind == .directory) {
-                try cmd_add.addDirectoryRecursively(allocator, cwd, file_arg, &index, git_path, platform_impl);
+                // For directories: re-stage tracked files matching this path prefix
+                // (like `git add -u <dir>`), don't add untracked files
+                const rel_dir = helpers.makeRelativePath(allocator, repo_root, full_path) catch file_arg;
+                for (index.entries.items) |*entry| {
+                    // Check if entry path matches the directory pathspec
+                    const matches = if (std.mem.eql(u8, rel_dir, ".") or rel_dir.len == 0)
+                        true // "." matches everything
+                    else
+                        std.mem.startsWith(u8, entry.path, rel_dir) and
+                            (entry.path.len == rel_dir.len or entry.path[rel_dir.len] == '/');
+                    if (matches) {
+                        const entry_full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path });
+                        defer allocator.free(entry_full);
+                        // Re-stage if file exists in working tree
+                        if (std.fs.cwd().statFile(entry_full) catch null) |_| {
+                            index.add(entry.path, entry.path, platform_impl, git_path) catch continue;
+                        }
+                    }
+                }
             } else {
                 try cmd_add.addSingleFile(allocator, file_arg, full_path, &index, git_path, platform_impl, cwd);
             }
