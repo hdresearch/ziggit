@@ -40,6 +40,9 @@ pub const Repository = struct {
     _cached_idx_data: ?[]u8 = null,
     _cached_pack_path: ?[]u8 = null,
 
+    // DIR HANDLE CACHE: Keep git_dir fd open to use openat() instead of full path resolution
+    _cached_git_dir_fd: ?std.posix.fd_t = null,
+
     /// Open an existing repository at the specified path
     pub fn open(allocator: std.mem.Allocator, path: []const u8) !Repository {
         const abs_path = if (std.fs.path.isAbsolute(path))
@@ -67,6 +70,11 @@ pub const Repository = struct {
             .git_dir = git_dir,
             .allocator = allocator,
         };
+
+        // OPTIMIZATION: Cache git dir fd for openat()-based access
+        if (std.fs.openDirAbsolute(git_dir, .{})) |dir| {
+            repo._cached_git_dir_fd = dir.fd;
+        } else |_| {}
         
         // OPTIMIZATION: Pre-warm critical caches during repository opening
         // This eliminates cold cache penalties for the first API calls
@@ -102,6 +110,9 @@ pub const Repository = struct {
 
     /// Close repository and free resources
     pub fn close(self: *Repository) void {
+        if (self._cached_git_dir_fd) |fd| {
+            std.posix.close(fd);
+        }
         if (self._cached_latest_tag) |tag| {
             self.allocator.free(tag);
         }
@@ -118,6 +129,14 @@ pub const Repository = struct {
         self.allocator.free(self.git_dir);
     }
     
+    /// Get or open a cached directory handle for the git dir (for openat()-based access)
+    fn getGitDirFd(self: *Repository) !std.posix.fd_t {
+        if (self._cached_git_dir_fd) |fd| return fd;
+        const dir = try std.fs.openDirAbsolute(self.git_dir, .{});
+        self._cached_git_dir_fd = dir.fd;
+        return dir.fd;
+    }
+
     /// OPTIMIZATION: Pre-warm critical caches to eliminate cold cache penalties
     /// This should be called immediately after repository opening
     fn warmupCaches(self: *Repository) !void {
@@ -279,7 +298,32 @@ pub const Repository = struct {
 
     /// Get HEAD commit hash without caching - internal implementation
     fn revParseHeadUncached(self: *const Repository) ![40]u8 {
-        // Use stack-allocated buffer instead of heap allocation
+        // Fast path: use cached dir fd with openat()
+        if (self._cached_git_dir_fd) |dir_fd| {
+            const dir = std.fs.Dir{ .fd = dir_fd };
+            const head_file = dir.openFile("HEAD", .{}) catch |err| switch (err) {
+                error.FileNotFound => return [_]u8{'0'} ** 40,
+                else => return err,
+            };
+            defer head_file.close();
+
+            var head_content_buf: [64]u8 = undefined;
+            const bytes_read = try head_file.readAll(&head_content_buf);
+            const head_content = std.mem.trim(u8, head_content_buf[0..bytes_read], " \n\r\t");
+
+            if (std.mem.startsWith(u8, head_content, "ref: ")) {
+                const ref_name = head_content[5..];
+                return try self.resolveRefFast(ref_name);
+            } else if (head_content.len >= 40 and isValidHex(head_content[0..40])) {
+                var result: [40]u8 = undefined;
+                @memcpy(&result, head_content[0..40]);
+                return result;
+            } else {
+                return [_]u8{'0'} ** 40;
+            }
+        }
+
+        // Fallback: use full path
         var head_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const head_path = std.fmt.bufPrint(&head_path_buf, "{s}/HEAD", .{self.git_dir}) catch return error.PathTooLong;
 
@@ -2820,14 +2864,34 @@ pub const Repository = struct {
 
     /// Fast ref resolution using stack allocation - OPTIMIZED
     fn resolveRefFast(self: *const Repository, ref_name: []const u8) ![40]u8 {
-        // Use stack-allocated buffer instead of heap allocation
+        // Fast path: use cached dir fd with openat()
+        if (self._cached_git_dir_fd) |dir_fd| {
+            const dir = std.fs.Dir{ .fd = dir_fd };
+            if (dir.openFile(ref_name, .{})) |ref_file| {
+                defer ref_file.close();
+
+                var ref_content_buf: [48]u8 = undefined;
+                const bytes_read = try ref_file.readAll(&ref_content_buf);
+                const ref_content = std.mem.trim(u8, ref_content_buf[0..bytes_read], " \n\r\t");
+
+                if (ref_content.len >= 40 and isValidHex(ref_content[0..40])) {
+                    var result: [40]u8 = undefined;
+                    @memcpy(&result, ref_content[0..40]);
+                    return result;
+                }
+            } else |_| {}
+
+            return self.resolveRefFromPackedRefs(ref_name);
+        }
+
+        // Fallback: use full path
         var ref_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const ref_path = std.fmt.bufPrint(&ref_path_buf, "{s}/{s}", .{ self.git_dir, ref_name }) catch return error.PathTooLong;
 
         if (std.fs.openFileAbsolute(ref_path, .{})) |ref_file| {
             defer ref_file.close();
 
-            var ref_content_buf: [48]u8 = undefined; // SHA-1 is 40 chars + newline
+            var ref_content_buf: [48]u8 = undefined;
             const bytes_read = try ref_file.readAll(&ref_content_buf);
             const ref_content = std.mem.trim(u8, ref_content_buf[0..bytes_read], " \n\r\t");
 
@@ -2845,10 +2909,15 @@ pub const Repository = struct {
     /// Resolve a ref by scanning the packed-refs file.
     /// packed-refs format: "<hash> <refname>\n" per line, with comment lines starting with '#'.
     fn resolveRefFromPackedRefs(self: *const Repository, ref_name: []const u8) ![40]u8 {
-        var packed_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const packed_path = std.fmt.bufPrint(&packed_path_buf, "{s}/packed-refs", .{self.git_dir}) catch return error.RefNotFound;
-
-        const packed_file = std.fs.openFileAbsolute(packed_path, .{}) catch return error.RefNotFound;
+        const packed_file = blk: {
+            if (self._cached_git_dir_fd) |dir_fd| {
+                const dir = std.fs.Dir{ .fd = dir_fd };
+                break :blk dir.openFile("packed-refs", .{}) catch return error.RefNotFound;
+            }
+            var packed_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const packed_path = std.fmt.bufPrint(&packed_path_buf, "{s}/packed-refs", .{self.git_dir}) catch return error.RefNotFound;
+            break :blk std.fs.openFileAbsolute(packed_path, .{}) catch return error.RefNotFound;
+        };
         defer packed_file.close();
 
         // packed-refs files are typically small (< 64KB even for large repos)
