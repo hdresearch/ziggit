@@ -54,6 +54,8 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var add_all_flag = false;
     var update_flag = false;
     var force_flag = false;
+    var dry_run = false;
+    var intent_to_add = false;
     var collected_add_paths = std.array_list.Managed([]const u8).init(allocator);
     defer collected_add_paths.deinit();
     while (args.next()) |raw_arg| {
@@ -66,14 +68,65 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             update_flag = true;
         } else if (std.mem.eql(u8, raw_arg, "--force") or std.mem.eql(u8, raw_arg, "-f")) {
             force_flag = true;
+        } else if (std.mem.eql(u8, raw_arg, "--dry-run") or std.mem.eql(u8, raw_arg, "-n")) {
+            dry_run = true;
+        } else if (std.mem.eql(u8, raw_arg, "--intent-to-add") or std.mem.eql(u8, raw_arg, "-N")) {
+            intent_to_add = true;
         } else if (raw_arg.len > 0 and raw_arg[0] == '-') {
             // helpers.Skip other flags
         } else {
             try collected_add_paths.append(raw_arg);
         }
     }
+
     if ((add_all_flag or update_flag) and collected_add_paths.items.len == 0) {
         try collected_add_paths.append(".");
+    }
+
+    // Handle dry-run mode early: just report what would change without modifying anything
+    if (dry_run) {
+        if (update_flag or add_all_flag) {
+            const repo_root_dr = if (helpers.global_git_dir_override != null or std.posix.getenv("GIT_DIR") != null)
+                try platform_impl.fs.getCwd(allocator)
+            else
+                try allocator.dupe(u8, std.fs.path.dirname(git_path) orelse ".");
+            defer allocator.free(repo_root_dr);
+
+            for (index.entries.items) |orig_entry| {
+                const fp_dr = if (repo_root_dr.len > 0 and !std.mem.eql(u8, repo_root_dr, "."))
+                    std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root_dr, orig_entry.path }) catch continue
+                else
+                    allocator.dupe(u8, orig_entry.path) catch continue;
+                defer allocator.free(fp_dr);
+                const exists_dr = blk_dr: {
+                    std.fs.cwd().access(fp_dr, .{}) catch break :blk_dr false;
+                    break :blk_dr true;
+                };
+                if (exists_dr) {
+                    const content_dr = platform_impl.fs.readFile(allocator, fp_dr) catch continue;
+                    defer allocator.free(content_dr);
+                    const blob_dr = objects.createBlobObject(content_dr, allocator) catch continue;
+                    defer blob_dr.deinit(allocator);
+                    const hash_dr = blob_dr.hash(allocator) catch continue;
+                    defer allocator.free(hash_dr);
+                    var orig_hash_hex: [40]u8 = undefined;
+                    for (orig_entry.sha1, 0..) |byte, bi| {
+                        orig_hash_hex[bi * 2] = "0123456789abcdef"[byte >> 4];
+                        orig_hash_hex[bi * 2 + 1] = "0123456789abcdef"[byte & 0xf];
+                    }
+                    if (!std.mem.eql(u8, hash_dr, &orig_hash_hex)) {
+                        const msg_dr = try std.fmt.allocPrint(allocator, "add '{s}'\n", .{orig_entry.path});
+                        defer allocator.free(msg_dr);
+                        try platform_impl.writeStdout(msg_dr);
+                    }
+                } else {
+                    const msg_dr = try std.fmt.allocPrint(allocator, "remove '{s}'\n", .{orig_entry.path});
+                    defer allocator.free(msg_dr);
+                    try platform_impl.writeStdout(msg_dr);
+                }
+            }
+        }
+        return;
     }
 
     // helpers.Process all file arguments
