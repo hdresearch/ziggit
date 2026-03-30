@@ -1,4 +1,5 @@
 const zlib_compat = @import("git/zlib_compat.zig");
+const stream_utils = @import("git/stream_utils.zig");
 /// WASM exports for browser integration
 /// Provides a C-ABI compatible interface to ziggit's git operations.
 /// All strings are passed as (ptr, len) pairs. Errors return negative values.
@@ -1388,4 +1389,42 @@ export fn ziggit_pack_object_count() i32 {
     if (idx_data.len < 8 + 256 * 4) return -2;
     const total = std.mem.readInt(u32, idx_data[8 + 255 * 4 ..][0..4], .big);
     return @intCast(total);
+}
+
+/// Decompress zlib data and compute SHA-1 hash in one pass.
+/// type_ptr/type_len: git object type ("blob", "commit", etc.)
+/// input_ptr/input_len: compressed data
+/// sha1_out: pointer to write 20-byte SHA-1
+/// size_out: pointer to write decompressed size
+/// consumed_out: pointer to write bytes consumed from input
+/// Returns 0 on success, negative on error.
+export fn ziggit_decompress_and_hash(
+    type_ptr: [*]const u8, type_len: u32,
+    input_ptr: [*]const u8, input_len: u32,
+    object_size: u32,
+    sha1_out: [*]u8, size_out: *u32, consumed_out: *u32,
+) i32 {
+    const result = stream_utils.decompressAndHash(
+        input_ptr[0..input_len],
+        type_ptr[0..type_len],
+        object_size,
+    ) catch return -1;
+    @memcpy(sha1_out[0..20], &result.sha1);
+    size_out.* = @intCast(result.decompressed_size);
+    consumed_out.* = @intCast(result.bytes_consumed);
+    return 0;
+}
+
+/// Parse a pack object header at the given offset.
+/// Returns type in type_out, size in size_out, header length in hdr_len_out.
+/// Returns 0 on success, negative on error.
+export fn ziggit_parse_pack_header(
+    data_ptr: [*]const u8, data_len: u32, offset: u32,
+    type_out: *u32, size_out: *u32, hdr_len_out: *u32,
+) i32 {
+    const hdr = stream_utils.parsePackObjectHeader(data_ptr[0..data_len], offset) catch return -1;
+    type_out.* = hdr.type_num;
+    size_out.* = @intCast(hdr.size);
+    hdr_len_out.* = @intCast(hdr.header_len);
+    return 0;
 }
