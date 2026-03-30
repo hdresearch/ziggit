@@ -784,7 +784,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         if (cmd_has_help) {
             const usage_msg = try std.fmt.allocPrint(allocator, "usage: git {s} [<options>]\n", .{command});
             defer allocator.free(usage_msg);
-            try platform_impl.writeStdout(usage_msg);
+            try platform_impl.writeStderr(usage_msg);
             std.process.exit(129);
         }
     }

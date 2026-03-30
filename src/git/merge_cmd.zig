@@ -110,6 +110,10 @@ pub fn cmdMerge(allocator: Allocator, args: *pm.ArgIterator, platform_impl: *con
             saw_double_dash = true;
             continue;
         }
+        if (std.mem.eql(u8, arg, "-h")) {
+            writeStderr(platform_impl, "usage: git merge [<options>] [<commit>...]\n");
+            std.process.exit(129);
+        }
         if (std.mem.eql(u8, arg, "-s")) {
             opts.strategy = args.next() orelse {
                 writeStderr(platform_impl, "error: switch `s' requires a value\n");
