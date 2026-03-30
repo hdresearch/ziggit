@@ -111,6 +111,8 @@ pub fn build(b: *std.Build) void {
         "ziggit_verify_pack",
         "ziggit_parse_commit",
         "ziggit_parse_tag",
+        "ziggit_crc32",
+        "ziggit_zlib_compress",
     };
 
     const wasm_step = b.step("wasm", "Build WASM module for browser");

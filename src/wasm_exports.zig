@@ -1656,6 +1656,23 @@ export fn ziggit_detect_language(path_ptr: [*]const u8, path_len: u32, out_ptr: 
     return 0; // No match
 }
 
+/// Compute CRC32 of data. Useful for pack index verification.
+/// Returns CRC32 value.
+export fn ziggit_crc32(data_ptr: [*]const u8, data_len: u32) u32 {
+    return std.hash.crc.Crc32IsoHdlc.hash(data_ptr[0..data_len]);
+}
+
+/// Compress data using zlib. Returns 0 on success, negative on error.
+/// Note: Compression may fail on freestanding (known limitation).
+export fn ziggit_zlib_compress(input_ptr: [*]const u8, input_len: u32, out_ptr: *u32, out_len: *u32) i32 {
+    const allocator = getAllocator();
+    const input = input_ptr[0..input_len];
+    const compressed = zlib_compat.compressSlice(allocator, input) catch return -1;
+    out_ptr.* = @intFromPtr(compressed.ptr);
+    out_len.* = @intCast(compressed.len);
+    return 0;
+}
+
 fn matchDriverToExt(driver_name: []const u8, ext: []const u8) bool {
     const mappings = .{
         .{ "cpp", &[_][]const u8{ ".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".cxx", ".hxx" } },
