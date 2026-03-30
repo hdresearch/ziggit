@@ -506,6 +506,18 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             },
             else => return err,
         };
+    } else if (std.mem.eql(u8, first_arg.?, "--show-current")) {
+        const cur = refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
+            // Detached HEAD or no branch - output nothing
+            return;
+        };
+        defer allocator.free(cur);
+        // In detached HEAD, getCurrentBranch might return HEAD
+        if (!std.mem.eql(u8, cur, "HEAD")) {
+            const out = try std.fmt.allocPrint(allocator, "{s}\n", .{cur});
+            defer allocator.free(out);
+            try platform_impl.writeStdout(out);
+        }
     } else if (std.mem.eql(u8, first_arg.?, "--list") or std.mem.eql(u8, first_arg.?, "-l")) {
         // List branches (with optional pattern)
         const current_branch2 = refs.getCurrentBranch(git_path, platform_impl, allocator) catch "master";
