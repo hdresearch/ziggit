@@ -900,10 +900,7 @@ fn readPackedObjectFromData(pack_data: []const u8, offset: usize, allocator: std
     switch (pack_type) {
         .commit, .tree, .blob, .tag => {
             if (pos >= pack_data.len) return error.ObjectNotFound;
-            var decompressed = std.array_list.Managed(u8).init(allocator);
-            defer decompressed.deinit();
-            var stream = std.io.fixedBufferStream(pack_data[pos..]);
-            zlib_compat.decompress(stream.reader(), decompressed.writer()) catch return error.ObjectNotFound;
+            const decompressed = zlib_compat.decompressSlice(allocator, pack_data[pos..]) catch return error.ObjectNotFound;
             const obj_type: InMemoryObjType = switch (pack_type) {
                 .commit => .commit,
                 .tree => .tree,
@@ -911,7 +908,7 @@ fn readPackedObjectFromData(pack_data: []const u8, offset: usize, allocator: std
                 .tag => .tag,
                 else => unreachable,
             };
-            return InMemoryGitObject{ .obj_type = obj_type, .data = try allocator.dupe(u8, decompressed.items) };
+            return InMemoryGitObject{ .obj_type = obj_type, .data = decompressed };
         },
         .ofs_delta => {
             if (pos >= pack_data.len) return error.ObjectNotFound;
@@ -933,11 +930,9 @@ fn readPackedObjectFromData(pack_data: []const u8, offset: usize, allocator: std
             const base_offset = offset - base_offset_delta;
             const base_object = try readPackedObjectFromData(pack_data, base_offset, allocator);
             defer base_object.deinit(allocator);
-            var delta_data = std.array_list.Managed(u8).init(allocator);
-            defer delta_data.deinit();
-            var stream = std.io.fixedBufferStream(pack_data[pos..]);
-            zlib_compat.decompress(stream.reader(), delta_data.writer()) catch return error.ObjectNotFound;
-            const result_data = try applyDelta(base_object.data, delta_data.items, allocator);
+            const delta_data_slice = zlib_compat.decompressSlice(allocator, pack_data[pos..]) catch return error.ObjectNotFound;
+            defer allocator.free(delta_data_slice);
+            const result_data = try applyDelta(base_object.data, delta_data_slice, allocator);
             return InMemoryGitObject{ .obj_type = base_object.obj_type, .data = result_data };
         },
         .ref_delta => {
@@ -949,11 +944,9 @@ fn readPackedObjectFromData(pack_data: []const u8, offset: usize, allocator: std
             const base_offset = findOffsetInIdx(idx_data, base_sha1[0..20].*) orelse return error.ObjectNotFound;
             const base_object = try readPackedObjectFromData(pack_data, base_offset, allocator);
             defer base_object.deinit(allocator);
-            var delta_data = std.array_list.Managed(u8).init(allocator);
-            defer delta_data.deinit();
-            var stream = std.io.fixedBufferStream(pack_data[pos..]);
-            zlib_compat.decompress(stream.reader(), delta_data.writer()) catch return error.ObjectNotFound;
-            const result_data = try applyDelta(base_object.data, delta_data.items, allocator);
+            const delta_data_slice = zlib_compat.decompressSlice(allocator, pack_data[pos..]) catch return error.ObjectNotFound;
+            defer allocator.free(delta_data_slice);
+            const result_data = try applyDelta(base_object.data, delta_data_slice, allocator);
             return InMemoryGitObject{ .obj_type = base_object.obj_type, .data = result_data };
         },
     }
@@ -1158,25 +1151,19 @@ fn generateIdxFromPackData(allocator: std.mem.Allocator, pack_data: []const u8) 
             }
         }
 
-        // Decompress using decompressor to track consumed bytes accurately
+        // Decompress using decompressSliceWithConsumed for accurate byte tracking
         decompressed.clearRetainingCapacity();
         const compressed_start = pos;
-        var fbs = std.io.fixedBufferStream(pack_data[pos..content_end]);
-        var dcp = std.compress.zlib.decompressor(fbs.reader());
-        {
-            var ok = true;
-            while (ok) {
-                var dbuf: [16384]u8 = undefined;
-                const n = dcp.read(&dbuf) catch { ok = false; break; };
-                if (n == 0) break;
-                decompressed.appendSlice(dbuf[0..n]) catch { ok = false; break; };
-            }
-            if (!ok and decompressed.items.len == 0) {
-                obj_idx += 1;
-                continue;
-            }
-        }
-        pos = compressed_start + fbs.pos - dcp.unreadBytes();
+        const decomp_result = zlib_compat.decompressSliceWithConsumed(allocator, pack_data[pos..content_end]) catch {
+            obj_idx += 1;
+            continue;
+        };
+        defer allocator.free(decomp_result.data);
+        decompressed.appendSlice(decomp_result.data) catch {
+            obj_idx += 1;
+            continue;
+        };
+        pos = compressed_start + decomp_result.consumed;
 
         const crc = std.hash.crc.Crc32IsoHdlc.hash(pack_data[obj_start..pos]);
 

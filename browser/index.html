@@ -166,24 +166,29 @@
 
     function smartInflate(data, offset) {
       // Git pack uses zlib format (2-byte header + deflate + 4-byte adler32).
-      // Use pako raw inflate, manually handling the zlib wrapper.
-      const cmf = data[offset];
-      const flg = data[offset + 1];
-      const headerSize = 2 + ((flg & 0x20) ? 4 : 0); // FDICT adds 4 bytes
+      // Strategy: use pako non-raw mode first (it handles header+checksum natively).
+      // Fall back to raw mode if needed.
+      const inputSlice = data.subarray(offset);
 
-      const inf = new pako.Inflate({ raw: true });
-      inf.push(data.subarray(offset + headerSize));
+      // Try non-raw (zlib) mode first
+      const inf = new pako.Inflate();
+      inf.push(inputSlice);
 
-      if (inf.err && inf.err !== 0) {
-        if (!inf.result || inf.result.length === 0) {
-          throw new Error('inflate error at offset ' + offset + ': ' + (inf.msg || 'unknown'));
-        }
+      if (inf.result && inf.result.length > 0 && inf.strm) {
+        // total_in in non-raw mode includes zlib header + deflate + adler32
+        return { result: inf.result, bytesRead: inf.strm.total_in };
       }
 
-      // Total: zlib header + raw deflate bytes consumed + 4-byte adler32 checksum
-      const rawBytesConsumed = (inf.strm && inf.strm.total_in) ? inf.strm.total_in : 0;
-      const bytesRead = headerSize + rawBytesConsumed + 4;
-      return { result: inf.result || new Uint8Array(0), bytesRead };
+      // Fallback: raw inflate, manually handle zlib wrapper
+      const flg = data[offset + 1];
+      const headerSize = 2 + ((flg & 0x20) ? 4 : 0);
+      const inf2 = new pako.Inflate({ raw: true });
+      inf2.push(data.subarray(offset + headerSize));
+      if (!inf2.result || inf2.result.length === 0) {
+        throw new Error('inflate error at offset ' + offset);
+      }
+      const rawConsumed = inf2.strm ? inf2.strm.total_in : 0;
+      return { result: inf2.result, bytesRead: headerSize + rawConsumed + 4 };
     }
 
     const TYPE_NAMES = { 1: 'commit', 2: 'tree', 3: 'blob', 4: 'tag' };
@@ -415,7 +420,7 @@
         let refsText, baseUrl;
         for (const suffix of ['.git', '']) {
           const tryUrl = repoUrl + suffix;
-          const refsUrl = corsProxy + encodeURIComponent(tryUrl + '/info/refs?service=git-upload-pack');
+          const refsUrl = corsProxy + tryUrl + '/info/refs?service=git-upload-pack';
           try {
             const refsResp = await fetch(refsUrl);
             if (refsResp.ok) {
@@ -440,7 +445,7 @@
         // 2. Request pack
         const packBody = buildWantRequest(headHash);
         console.log('Pack request:', packBody);
-        const packResp = await fetch(corsProxy + encodeURIComponent(baseUrl + '/git-upload-pack'), {
+        const packResp = await fetch(corsProxy + baseUrl + '/git-upload-pack', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-git-upload-pack-request' },
           body: packBody
