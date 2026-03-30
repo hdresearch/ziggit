@@ -163,7 +163,9 @@
     async function sha1hex(data) {
       // Use WASM SHA-1 if available (synchronous, avoids async overhead)
       if (wasmInstance) {
-        return wasmSha1Hex(data);
+        const result = wasmSha1Hex(data);
+        if (result) return result;
+        // Fall through to Web Crypto if WASM alloc failed
       }
       const hash = await crypto.subtle.digest('SHA-1', data);
       return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
