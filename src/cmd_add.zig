@@ -77,6 +77,7 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     }
 
     // helpers.Process all file arguments
+    var has_directory_add = false;
     for (collected_add_paths.items) |file_path| {
         has_files = true;
         
@@ -117,6 +118,7 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         } else if (std.mem.eql(u8, file_path, ".")) {
             // helpers.Add all files in current directory (recursively)
             try addDirectoryRecursively(allocator, cwd, "", &index, git_path, platform_impl);
+            has_directory_add = true;
         } else {
             // helpers.Resolve file path 
             const full_file_path = if (std.fs.path.isAbsolute(file_path))
@@ -156,26 +158,34 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             }
 
             // helpers.Check if it's a directory or file
-            const metadata = std.fs.cwd().statFile(full_file_path) catch {
-                // helpers.If we can't stat it (e.g. broken symlink), try to add it
-                try addSingleFile(allocator, relative_file_path, full_file_path, &index, git_path, platform_impl, repo_root_for_rel);
-                continue;
-            };
+            // For "." or paths ending in "/.", use the directory path
+            const is_dot_path = std.mem.eql(u8, file_path, ".") or std.mem.endsWith(u8, file_path, "/.");
+            const metadata = if (is_dot_path)
+                std.fs.File.Stat{ .inode = 0, .size = 0, .mode = 0o40755, .kind = .directory, .atime = 0, .mtime = 0, .ctime = 0 }
+            else
+                std.fs.cwd().statFile(full_file_path) catch {
+                    // helpers.If we can't stat it (e.g. broken symlink), try to add it
+                    try addSingleFile(allocator, relative_file_path, full_file_path, &index, git_path, platform_impl, repo_root_for_rel);
+                    continue;
+                };
 
             if (metadata.kind == .directory) {
-                // Check if this is a submodule (has .git inside)
-                const sub_git_path = try std.fmt.allocPrint(allocator, "{s}/.git", .{full_file_path});
-                defer allocator.free(sub_git_path);
-                const is_submodule = blk_sub: {
+                // Check if this is a submodule (has .git inside), but not for "." (the repo itself)
+                const is_submodule = if (is_dot_path) false else blk_sub: {
+                    const sub_git_path = try std.fmt.allocPrint(allocator, "{s}/.git", .{full_file_path});
+                    defer allocator.free(sub_git_path);
                     std.fs.cwd().access(sub_git_path, .{}) catch break :blk_sub false;
                     break :blk_sub true;
                 };
                 if (is_submodule) {
                     // Add as gitlink (mode 160000) - read HEAD from submodule
-                    try addSubmoduleEntry(allocator, relative_file_path, sub_git_path, &index, git_path, platform_impl);
+                    const sub_gp = try std.fmt.allocPrint(allocator, "{s}/.git", .{full_file_path});
+                    defer allocator.free(sub_gp);
+                    try addSubmoduleEntry(allocator, relative_file_path, sub_gp, &index, git_path, platform_impl);
                 } else {
                     // helpers.Add directory recursively
                     try addDirectoryRecursively(allocator, repo_root_for_rel, relative_file_path, &index, git_path, platform_impl);
+                    has_directory_add = true;
                 }
             } else {
                 // helpers.Add single file
@@ -191,9 +201,13 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         return;
     }
 
-    // helpers.When --all or --update, remove index entries for deleted files
-    if (add_all_flag or update_flag) {
-        const repo_root = std.fs.path.dirname(git_path) orelse ".";
+    // Remove index entries for deleted files (git add . also removes deleted files)
+    if (add_all_flag or update_flag or has_directory_add) {
+        const repo_root = if (helpers.global_git_dir_override != null or std.posix.getenv("GIT_DIR") != null)
+            try platform_impl.fs.getCwd(allocator)
+        else
+            try allocator.dupe(u8, std.fs.path.dirname(git_path) orelse ".");
+        defer allocator.free(repo_root);
         var i: usize = 0;
         while (i < index.entries.items.len) {
             const entry = index.entries.items[i];
