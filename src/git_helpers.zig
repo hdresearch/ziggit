@@ -8808,11 +8808,17 @@ pub fn findGitDir() ![]const u8 {
     } else |_| {
         // Check if .git is a gitdir link file
         if (std.fs.cwd().readFileAlloc(std.heap.page_allocator, ".git", 4096)) |content| {
-            defer std.heap.page_allocator.free(content);
             const trimmed = std.mem.trim(u8, content, " \t\r\n");
             if (std.mem.startsWith(u8, trimmed, "gitdir: ")) {
-                return ".git";
+                const target = trimmed["gitdir: ".len..];
+                const result = std.heap.page_allocator.dupe(u8, target) catch {
+                    std.heap.page_allocator.free(content);
+                    return ".git";
+                };
+                std.heap.page_allocator.free(content);
+                return result;
             }
+            std.heap.page_allocator.free(content);
         } else |_| {}
     }
 
