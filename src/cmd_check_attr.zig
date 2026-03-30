@@ -175,6 +175,11 @@ pub fn nativeCmdCheckAttr(allocator: std.mem.Allocator, args: *platform_mod.ArgI
         try loadAttrFile(allocator, repo_root, "", platform_impl, &attr_rules);
     }
 
+    // Emit warning if negative patterns were seen
+    if (saw_negative_pattern) {
+        try platform_impl.writeStderr("Negative patterns are ignored in git attributes\n");
+    }
+
     for (file_paths.items) |path| {
         // helpers.Resolve path relative to repo root
         var check_path: []const u8 = path;
@@ -210,8 +215,11 @@ pub fn nativeCmdCheckAttr(allocator: std.mem.Allocator, args: *platform_mod.ArgI
 
         if (all_attrs) {
             // helpers.Show all defined attributes for the path
-            var shown = std.StringHashMap([]const u8).init(allocator);
-            defer shown.deinit();
+            // Use ordered lists to preserve attribute encounter order
+            var shown_names = std.array_list.Managed([]const u8).init(allocator);
+            defer shown_names.deinit();
+            var shown_values = std.array_list.Managed([]const u8).init(allocator);
+            defer shown_values.deinit();
 
             // Collect all matching attributes. Last match wins within a file,
             // and dir-specific rules override repo-level rules.
@@ -219,25 +227,48 @@ pub fn nativeCmdCheckAttr(allocator: std.mem.Allocator, args: *platform_mod.ArgI
             for (attr_rules.items) |rule| {
                 if (attrPatternMatches(rule.pattern, check_path, ignore_case)) {
                     for (rule.attrs.items) |attr| {
-                        shown.put(attr.name, attr.value) catch {};
+                        // Update existing or append
+                        var found = false;
+                        for (shown_names.items, 0..) |n, idx| {
+                            if (std.mem.eql(u8, n, attr.name)) {
+                                shown_values.items[idx] = attr.value;
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            shown_names.append(attr.name) catch {};
+                            shown_values.append(attr.value) catch {};
+                        }
                     }
                 }
             }
             for (dir_rules.items) |rule| {
                 if (attrPatternMatches(rule.pattern, check_path, ignore_case)) {
                     for (rule.attrs.items) |attr| {
-                        shown.put(attr.name, attr.value) catch {};
+                        var found = false;
+                        for (shown_names.items, 0..) |n, idx| {
+                            if (std.mem.eql(u8, n, attr.name)) {
+                                shown_values.items[idx] = attr.value;
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            shown_names.append(attr.name) catch {};
+                            shown_values.append(attr.value) catch {};
+                        }
                     }
                 }
             }
 
             const quoted_path = try helpers.cQuotePath(allocator, path, false);
             defer allocator.free(quoted_path);
-            var iter = shown.iterator();
-            while (iter.next()) |entry| {
+            for (shown_names.items, 0..) |name, idx| {
+                const value = shown_values.items[idx];
                 // In --all mode, don't show 'unspecified' attributes
-                if (std.mem.eql(u8, entry.value_ptr.*, "unspecified")) continue;
-                const msg = try std.fmt.allocPrint(allocator, "{s}: {s}: {s}\n", .{ quoted_path, entry.key_ptr.*, entry.value_ptr.* });
+                if (std.mem.eql(u8, value, "unspecified")) continue;
+                const msg = try std.fmt.allocPrint(allocator, "{s}: {s}: {s}\n", .{ quoted_path, name, value });
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
             }
@@ -310,6 +341,9 @@ pub fn loadAttrFile(allocator: std.mem.Allocator, repo_root: []const u8, subdir:
 }
 
 
+// Flag to track if negative patterns were seen during parsing
+pub var saw_negative_pattern: bool = false;
+
 // Global macro definitions (e.g. [attr]binary -diff -merge -text)
 var global_macros: ?std.StringHashMap([]const AttrValue) = null;
 
@@ -355,6 +389,14 @@ pub fn parseAttrContent(allocator: std.mem.Allocator, content: []const u8, prefi
             continue;
         }
 
+        // Handle negative patterns: lines starting with ! are ignored
+        // Handle escaped exclamation: \! is treated as literal !
+        if (trimmed[0] == '!') {
+            // Negative pattern - skip it (git ignores these with a warning)
+            saw_negative_pattern = true;
+            continue;
+        }
+
         // Parse: pattern attr1=val1 attr2 -attr3 !attr4
         // Handle quoted patterns before tokenizing
         var pattern: []const u8 = undefined;
@@ -394,7 +436,15 @@ pub fn parseAttrContent(allocator: std.mem.Allocator, content: []const u8, prefi
             while (end_idx < trimmed.len and trimmed[end_idx] != ' ' and trimmed[end_idx] != '\t') {
                 end_idx += 1;
             }
-            pattern = trimmed[0..end_idx];
+            var raw_pattern = trimmed[0..end_idx];
+            // Handle \! escape at start of pattern
+            if (raw_pattern.len > 1 and raw_pattern[0] == '\\' and raw_pattern[1] == '!') {
+                pattern = raw_pattern[1..];
+            } else if (raw_pattern.len > 1 and raw_pattern[0] == '\\' and raw_pattern[1] == '#') {
+                pattern = raw_pattern[1..];
+            } else {
+                pattern = raw_pattern;
+            }
             attr_start = end_idx;
         }
         var parts = std.mem.tokenizeAny(u8, trimmed[attr_start..], " \t");
