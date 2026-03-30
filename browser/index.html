@@ -47,6 +47,11 @@
     #search::placeholder { color: #484f58; }
     .timing { color: #7ee787; font-size: 0.8em; }
     #file-panel { max-height: 600px; }
+    .line-numbers { display: flex; font-size: 0.85em; }
+    .line-numbers .nums { color: #484f58; text-align: right; padding-right: 12px; border-right: 1px solid #30363d; margin-right: 12px; user-select: none; white-space: pre; }
+    .line-numbers .code { white-space: pre-wrap; word-break: break-all; flex: 1; overflow-x: auto; }
+    .submodule-link { color: #d2a8ff; cursor: default; }
+    .submodule-link::before { content: '📦 '; }
   </style>
 </head>
 <body>
@@ -451,7 +456,7 @@
         const hash = bytesToHex(data.slice(nullIdx + 1, nullIdx + 21));
         pos = nullIdx + 21;
 
-        const type = mode === '40000' ? 'tree' : 'blob';
+        const type = mode === '40000' ? 'tree' : (mode === '160000' ? 'commit' : 'blob');
         entries.push({ mode, name, hash, type });
       }
       return entries;
@@ -745,27 +750,35 @@
       const tbody = document.querySelector('#tree-table tbody');
       tbody.innerHTML = '';
 
-      // Sort: trees first, then by name
+      // Sort: trees first, then submodules, then blobs, then by name
+      const typeOrder = { tree: 0, commit: 1, blob: 2 };
       entries.sort((a, b) => {
-        if (a.type === 'tree' && b.type !== 'tree') return -1;
-        if (a.type !== 'tree' && b.type === 'tree') return 1;
+        const ta = typeOrder[a.type] ?? 2, tb = typeOrder[b.type] ?? 2;
+        if (ta !== tb) return ta - tb;
         return a.name.localeCompare(b.name);
       });
 
       entries.forEach(e => {
         const tr = document.createElement('tr');
-        const nameClass = e.type === 'tree' ? 'tree-link' : 'blob-link';
         const safeName = e.name.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-        const onclick = e.type === 'tree'
-          ? `showTree('${e.hash}', '${path}${safeName}/')`
-          : `showFile('${e.hash}', '${safeName}')`;
+        let nameClass, onclick;
+        if (e.type === 'tree') {
+          nameClass = 'tree-link';
+          onclick = `showTree('${e.hash}', '${path}${safeName}/')`;
+        } else if (e.type === 'commit') {
+          nameClass = 'submodule-link';
+          onclick = '';
+        } else {
+          nameClass = 'blob-link';
+          onclick = `showFile('${e.hash}', '${safeName}')`;
+        }
         // Show size for blobs
         const sizeStr = e.type === 'blob' && objectDb[e.hash]
-          ? formatSize(objectDb[e.hash].data.length) : '';
+          ? formatSize(objectDb[e.hash].data.length) : (e.type === 'commit' ? 'submodule' : '');
         tr.innerHTML =
           `<td class="info">${e.mode}</td>` +
           `<td class="info">${e.type}</td>` +
-          `<td><span class="${nameClass}" onclick="${onclick}">${escHtml(e.name)}</span></td>` +
+          `<td><span class="${nameClass}"${onclick ? ` onclick="${onclick}"` : ''}>${escHtml(e.name)}</span></td>` +
           `<td class="info">${sizeStr}</td>` +
           `<td><span class="hash" title="${e.hash}">${e.hash.slice(0, 8)}</span></td>`;
         tbody.appendChild(tr);
@@ -815,8 +828,14 @@
         }
       } else {
         const text = new TextDecoder('utf-8', { fatal: false }).decode(obj.data);
-        contentEl.textContent =
-          text.length > 200000 ? text.slice(0, 200000) + '\n... (truncated)' : text;
+        const displayText = text.length > 200000 ? text.slice(0, 200000) + '\n... (truncated)' : text;
+        const lines = displayText.split('\n');
+        if (lines.length > 1) {
+          const nums = lines.map((_, i) => i + 1).join('\n');
+          contentEl.innerHTML = `<div class="line-numbers"><div class="nums">${nums}</div><div class="code">${escHtml(displayText)}</div></div>`;
+        } else {
+          contentEl.textContent = displayText;
+        }
       }
       // Scroll file panel into view
       panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
