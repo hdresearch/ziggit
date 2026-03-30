@@ -433,13 +433,24 @@ pub fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                 std.process.exit(128);
             };
             defer allocator.free(git_path);
-            const repo_root = std.fs.path.dirname(git_path) orelse git_path;
+            const real_git = std.fs.cwd().realpathAlloc(allocator, git_path) catch try allocator.dupe(u8, git_path);
+            defer allocator.free(real_git);
             const cwd = try platform_impl.fs.getCwd(allocator);
             defer allocator.free(cwd);
-            if (std.mem.eql(u8, cwd, repo_root)) {
+            const real_cwd = std.fs.cwd().realpathAlloc(allocator, cwd) catch try allocator.dupe(u8, cwd);
+            defer allocator.free(real_cwd);
+            // If inside git dir, output empty
+            if (std.mem.eql(u8, real_cwd, real_git) or
+                (std.mem.startsWith(u8, real_cwd, real_git) and real_cwd.len > real_git.len and real_cwd[real_git.len] == '/'))
+            {
                 try platform_impl.writeStdout("\n");
-            } else if (std.mem.startsWith(u8, cwd, repo_root)) {
-                const prefix = cwd[repo_root.len + 1 ..];
+                continue;
+            }
+            const repo_root = std.fs.path.dirname(real_git) orelse real_git;
+            if (std.mem.eql(u8, real_cwd, repo_root)) {
+                try platform_impl.writeStdout("\n");
+            } else if (std.mem.startsWith(u8, real_cwd, repo_root) and real_cwd.len > repo_root.len and real_cwd[repo_root.len] == '/') {
+                const prefix = real_cwd[repo_root.len + 1 ..];
                 const output = try std.fmt.allocPrint(allocator, "{s}/\n", .{prefix});
                 defer allocator.free(output);
                 try platform_impl.writeStdout(output);
