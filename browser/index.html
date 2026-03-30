@@ -443,16 +443,18 @@
       while (pos < data.length) {
         // Find space after mode
         let spaceIdx = pos;
-        while (data[spaceIdx] !== 0x20) spaceIdx++;
-        const mode = new TextDecoder().decode(data.slice(pos, spaceIdx));
+        while (spaceIdx < data.length && data[spaceIdx] !== 0x20) spaceIdx++;
+        if (spaceIdx >= data.length) break;
+        const mode = new TextDecoder().decode(data.subarray(pos, spaceIdx));
 
         // Find null after name
         let nullIdx = spaceIdx + 1;
-        while (data[nullIdx] !== 0) nullIdx++;
-        const name = new TextDecoder().decode(data.slice(spaceIdx + 1, nullIdx));
+        while (nullIdx < data.length && data[nullIdx] !== 0) nullIdx++;
+        if (nullIdx >= data.length || nullIdx + 21 > data.length) break;
+        const name = new TextDecoder().decode(data.subarray(spaceIdx + 1, nullIdx));
 
         // 20-byte SHA1
-        const hash = bytesToHex(data.slice(nullIdx + 1, nullIdx + 21));
+        const hash = bytesToHex(data.subarray(nullIdx + 1, nullIdx + 21));
         pos = nullIdx + 21;
 
         const type = mode === '40000' ? 'tree' : (mode === '160000' ? 'commit' : 'blob');
