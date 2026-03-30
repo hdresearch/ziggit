@@ -241,17 +241,16 @@
       try {
         const inf = new pako.Inflate({ raw: true });
         inf.push(rawData, true);
-        if (inf.err === 0 && inf.result && inf.result.length > 0 && inf.strm) {
+        if (inf.err === 0 && inf.result instanceof Uint8Array && inf.strm) {
           return { result: inf.result, bytesRead: headerSize + inf.strm.total_in + 4 };
         }
       } catch (e) { /* fall through */ }
 
       // Second attempt: use pako.inflate with full zlib handling
-      // total_in here counts raw deflate bytes; add zlib header + adler32 trailer
       try {
         const inf = new pako.Inflate();
         inf.push(data.subarray(offset), true);
-        if (inf.err === 0 && inf.result && inf.result.length > 0 && inf.strm) {
+        if (inf.err === 0 && inf.result instanceof Uint8Array && inf.strm) {
           return { result: inf.result, bytesRead: headerSize + inf.strm.total_in + 4 };
         }
       } catch (e) { /* fall through */ }

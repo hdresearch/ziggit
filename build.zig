@@ -89,6 +89,12 @@ pub fn build(b: *std.Build) void {
         "ziggit_ls_tree",
         "ziggit_read_file",
         "ziggit_commit_tree",
+        // Low-level WASM utils for browser
+        "ziggit_zlib_decompress",
+        "ziggit_sha1",
+        "ziggit_apply_delta",
+        "ziggit_load_pack",
+        "ziggit_pack_object_count",
     };
 
     const wasm_step = b.step("wasm", "Build WASM module for browser");
