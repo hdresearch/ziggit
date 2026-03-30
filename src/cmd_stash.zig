@@ -669,18 +669,18 @@ fn stashPush(
         const repo_root = try getRepoRoot(allocator, git_path);
         defer allocator.free(repo_root);
 
-        // Reset index to HEAD
-        helpers.updateIndexFromTree(git_path, head_hash, allocator, platform_impl) catch {};
-
         // Checkout HEAD tree
         const head_tree = helpers.getCommitTree(git_path, head_hash, allocator, platform_impl) catch null;
         if (head_tree) |ht| {
             defer allocator.free(ht);
+            // First checkout files to working tree
             const tree_obj = objects.GitObject.load(ht, git_path, platform_impl, allocator) catch null;
             if (tree_obj) |to| {
                 defer to.deinit(allocator);
                 helpers.checkoutTreeRecursive(git_path, to.data, repo_root, "", allocator, platform_impl) catch {};
             }
+            // Then reset index to HEAD tree (so stat info matches freshly written files)
+            helpers.updateIndexFromTree(git_path, ht, allocator, platform_impl) catch {};
         }
 
         // Keep index if requested
