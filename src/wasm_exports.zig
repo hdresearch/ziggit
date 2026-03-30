@@ -2895,3 +2895,15 @@ export fn ziggit_memory_stats(out_ptr: *u32, out_len: *u32) i32 {
     out_len.* = @intCast(owned.len);
     return 0;
 }
+
+/// Unload the currently loaded pack and index data to free WASM memory.
+/// Returns 0 on success, 1 if no pack was loaded.
+export fn ziggit_unload_pack() i32 {
+    const allocator = getAllocator();
+    if (global_pack_data == null and global_idx_data == null) return 1;
+    if (global_pack_data) |d| allocator.free(d);
+    if (global_idx_data) |d| allocator.free(d);
+    global_pack_data = null;
+    global_idx_data = null;
+    return 0;
+}
