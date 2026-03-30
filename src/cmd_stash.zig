@@ -151,18 +151,38 @@ fn getCurrentBranch(allocator: std.mem.Allocator, git_path: []const u8, platform
     return try allocator.dupe(u8, "(no branch)");
 }
 
+fn getStashIdentityFallback(allocator: std.mem.Allocator) ![]u8 {
+    const ts = std.time.timestamp();
+    return try std.fmt.allocPrint(allocator, "git stash <git@stash> {d} +0000", .{ts});
+}
+
+fn hasRealIdentity() bool {
+    // Check if any identity source is configured
+    if (std.posix.getenv("GIT_COMMITTER_NAME") != null) return true;
+    if (std.posix.getenv("GIT_COMMITTER_EMAIL") != null) return true;
+    if (std.posix.getenv("GIT_AUTHOR_NAME") != null) return true;
+    if (std.posix.getenv("GIT_AUTHOR_EMAIL") != null) return true;
+    // Check git config
+    const git_dir = helpers.findGitDir() catch return false;
+    if (helpers.getConfigValueByKey(git_dir, "user.name", std.heap.page_allocator)) |v| {
+        std.heap.page_allocator.free(v);
+        return true;
+    }
+    if (helpers.getConfigValueByKey(git_dir, "user.email", std.heap.page_allocator)) |v| {
+        std.heap.page_allocator.free(v);
+        return true;
+    }
+    return false;
+}
+
 fn getIdentityString(allocator: std.mem.Allocator) ![]u8 {
-    return helpers.getCommitterString(allocator) catch {
-        const ts = std.time.timestamp();
-        return try std.fmt.allocPrint(allocator, "User <user@example.com> {d} +0000", .{ts});
-    };
+    if (!hasRealIdentity()) return getStashIdentityFallback(allocator);
+    return helpers.getCommitterString(allocator) catch getStashIdentityFallback(allocator);
 }
 
 fn getAuthorString(allocator: std.mem.Allocator) ![]u8 {
-    return helpers.getAuthorString(allocator) catch {
-        const ts = std.time.timestamp();
-        return try std.fmt.allocPrint(allocator, "User <user@example.com> {d} +0000", .{ts});
-    };
+    if (!hasRealIdentity()) return getStashIdentityFallback(allocator);
+    return helpers.getAuthorString(allocator) catch getStashIdentityFallback(allocator);
 }
 
 /// Get HEAD commit's subject line
