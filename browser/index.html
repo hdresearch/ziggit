@@ -181,7 +181,7 @@
       }
 
       // Total: zlib header + raw deflate bytes consumed + 4-byte adler32 checksum
-      const rawBytesConsumed = inf.strm ? inf.strm.total_in : 0;
+      const rawBytesConsumed = (inf.strm && inf.strm.total_in) ? inf.strm.total_in : 0;
       const bytesRead = headerSize + rawBytesConsumed + 4;
       return { result: inf.result || new Uint8Array(0), bytesRead };
     }
@@ -415,7 +415,7 @@
         let refsText, baseUrl;
         for (const suffix of ['.git', '']) {
           const tryUrl = repoUrl + suffix;
-          const refsUrl = corsProxy + tryUrl + '/info/refs?service=git-upload-pack';
+          const refsUrl = corsProxy + encodeURIComponent(tryUrl + '/info/refs?service=git-upload-pack');
           try {
             const refsResp = await fetch(refsUrl);
             if (refsResp.ok) {
@@ -440,7 +440,7 @@
         // 2. Request pack
         const packBody = buildWantRequest(headHash);
         console.log('Pack request:', packBody);
-        const packResp = await fetch(corsProxy + baseUrl + '/git-upload-pack', {
+        const packResp = await fetch(corsProxy + encodeURIComponent(baseUrl + '/git-upload-pack'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-git-upload-pack-request' },
           body: packBody
