@@ -121,7 +121,7 @@ const importObject = {
 
 async function init() {
   try {
-    const resp = await fetch('../zig-out/wasm/ziggit.wasm');
+    const resp = await fetch('ziggit.wasm');
     const bytes = await resp.arrayBuffer();
     const result = await WebAssembly.instantiate(bytes, importObject);
     wasmInstance = result.instance;
