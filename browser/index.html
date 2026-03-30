@@ -43,6 +43,10 @@
     .progress-bar { background: #21262d; border-radius: 4px; height: 6px; margin: 8px 0; overflow: hidden; display: none; }
     .progress-fill { background: #58a6ff; height: 100%; width: 0%; transition: width 0.2s; }
     .stats { color: #8b949e; font-size: 0.8em; margin-top: 4px; }
+    #search { background: #161b22; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 10px; border-radius: 4px; font-family: inherit; font-size: 0.85em; width: 200px; margin-bottom: 8px; display: none; }
+    #search::placeholder { color: #484f58; }
+    .timing { color: #7ee787; font-size: 0.8em; }
+    #file-panel { max-height: 600px; }
   </style>
 </head>
 <body>
@@ -73,6 +77,7 @@
 
     <div id="tree-panel" class="panel" style="display:none">
       <h2>Files</h2>
+      <input type="text" id="search" placeholder="Filter files..." oninput="filterTree()">
       <div id="tree-breadcrumb" class="breadcrumb"></div>
       <table id="tree-table"><thead><tr><th>Mode</th><th>Type</th><th>Name</th><th>Size</th><th>Hash</th></tr></thead><tbody></tbody></table>
     </div>
@@ -485,6 +490,7 @@
       document.getElementById('tree-panel').style.display = 'none';
       document.getElementById('file-panel').style.display = 'none';
 
+      const t0 = performance.now();
       try {
         // 1. Fetch refs - try with .git suffix first, then without
         status('Fetching refs...');
@@ -581,7 +587,8 @@
         if (parsed.tree) showTree(parsed.tree, '/');
 
         showProgress(-1);
-        status('Ready! Click folders to expand, files to view.');
+        const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+        status(`Ready! ${Object.keys(objectDb).length} objects cloned in ${elapsed}s. Click folders to browse.`);
       } catch (e) {
         showProgress(-1);
         status('Error: ' + e.message, true);
@@ -700,6 +707,9 @@
       const entries = parseTree(obj.data);
       const panel = document.getElementById('tree-panel');
       panel.style.display = 'block';
+      const searchBox = document.getElementById('search');
+      searchBox.style.display = 'block';
+      searchBox.value = '';
 
       // Breadcrumb with navigable path segments
       const bc = document.getElementById('tree-breadcrumb');
@@ -802,6 +812,17 @@
       const c = parseCommit(obj.data);
       if (c.tree) showTree(c.tree, '/');
       status('Viewing commit ' + hash.slice(0, 8));
+    }
+
+    function filterTree() {
+      const q = document.getElementById('search').value.toLowerCase();
+      const rows = document.querySelectorAll('#tree-table tbody tr');
+      rows.forEach(row => {
+        const name = row.querySelector('td:nth-child(3)');
+        if (name) {
+          row.style.display = name.textContent.toLowerCase().includes(q) ? '' : 'none';
+        }
+      });
     }
   </script>
 </body>
