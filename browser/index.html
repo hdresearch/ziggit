@@ -201,6 +201,32 @@
       return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
     }
 
+    function wasmExtractPack(responseData) {
+      if (!wasmInstance) return null;
+      const e = wasmInstance.exports;
+      const inputPtr = e.ziggit_alloc(responseData.length);
+      if (!inputPtr) return null;
+      const outPtrPtr = e.ziggit_alloc(4);
+      const outLenPtr = e.ziggit_alloc(4);
+      new Uint8Array(e.memory.buffer, inputPtr, responseData.length).set(responseData);
+      const rc = e.ziggit_extract_pack_data(inputPtr, responseData.length, outPtrPtr, outLenPtr);
+      e.ziggit_free(inputPtr, responseData.length);
+      if (rc !== 0) {
+        e.ziggit_free(outPtrPtr, 4);
+        e.ziggit_free(outLenPtr, 4);
+        return null;
+      }
+      const buf = e.memory.buffer;
+      const view = new DataView(buf);
+      const resultPtr = view.getUint32(outPtrPtr, true);
+      const resultLen = view.getUint32(outLenPtr, true);
+      const result = new Uint8Array(buf, resultPtr, resultLen).slice();
+      e.ziggit_free(outPtrPtr, 4);
+      e.ziggit_free(outLenPtr, 4);
+      e.ziggit_free(resultPtr, resultLen);
+      return result;
+    }
+
     // --- Pkt-line ref parsing ---
     function parsePktLineRefs(text) {
       // Parse git smart HTTP pkt-line ref discovery response
@@ -662,6 +688,81 @@
       }
     }
 
+    // --- Full WASM pack extraction ---
+    async function parsePackWasmFull(packData) {
+      if (!wasmInstance) return false;
+      const e = wasmInstance.exports;
+      if (!e.ziggit_load_pack || !e.ziggit_extract_all_objects) return false;
+
+      status('WASM: Loading pack...');
+      showProgress(20);
+
+      const packPtr = e.ziggit_alloc(packData.length);
+      if (!packPtr) return false;
+      new Uint8Array(e.memory.buffer, packPtr, packData.length).set(packData);
+      const rc = e.ziggit_load_pack(packPtr, packData.length);
+      e.ziggit_free(packPtr, packData.length);
+      if (rc !== 0) { console.warn('WASM load_pack failed:', rc); return false; }
+
+      status('WASM: Extracting objects...');
+      showProgress(50);
+
+      const outPtrPtr = e.ziggit_alloc(4);
+      const outLenPtr = e.ziggit_alloc(4);
+      if (!outPtrPtr || !outLenPtr) return false;
+
+      const rc2 = e.ziggit_extract_all_objects(outPtrPtr, outLenPtr);
+      if (rc2 !== 0) {
+        e.ziggit_free(outPtrPtr, 4);
+        e.ziggit_free(outLenPtr, 4);
+        console.warn('WASM extract_all_objects failed:', rc2);
+        return false;
+      }
+
+      const buf = e.memory.buffer;
+      const view = new DataView(buf);
+      const jsonPtr = view.getUint32(outPtrPtr, true);
+      const jsonLen = view.getUint32(outLenPtr, true);
+      const jsonStr = new TextDecoder().decode(new Uint8Array(buf, jsonPtr, jsonLen));
+      e.ziggit_free(outPtrPtr, 4);
+      e.ziggit_free(outLenPtr, 4);
+      e.ziggit_free(jsonPtr, jsonLen);
+
+      let objects;
+      try { objects = JSON.parse(jsonStr); } catch (err) {
+        console.warn('WASM: Failed to parse object JSON:', err);
+        return false;
+      }
+
+      status(`WASM: Reading ${objects.length} objects...`);
+      showProgress(70);
+
+      let count = 0;
+      for (const obj of objects) {
+        // Read object data from WASM memory
+        const data = new Uint8Array(e.memory.buffer, obj.ptr, obj.size).slice();
+        objectDb[obj.hash] = { type: obj.type, data };
+        // Free the WASM allocation
+        e.ziggit_free(obj.ptr, obj.size);
+        count++;
+        if (count % 100 === 0) {
+          status(`WASM: Read ${count}/${objects.length} objects...`);
+          showProgress(70 + (count / objects.length) * 30);
+          await new Promise(r => setTimeout(r, 0));
+        }
+      }
+
+      showProgress(100);
+      const typeCounts = {};
+      for (const h of Object.keys(objectDb)) {
+        typeCounts[objectDb[h].type] = (typeCounts[objectDb[h].type] || 0) + 1;
+      }
+      const typeStr = Object.entries(typeCounts).map(([t,c]) => `${c} ${t}s`).join(', ');
+      console.log(`WASM pack extraction: ${Object.keys(objectDb).length} objects (${typeStr})`);
+      status(`WASM extracted ${objects.length} objects: ${typeStr}`);
+      return true;
+    }
+
     // --- Tree parsing ---
     function parseTree(data) {
       const entries = [];
@@ -798,8 +899,16 @@
         status(`Downloaded ${dlSize}. Extracting pack...`);
 
         // 3. Extract pack data
-        // Try sideband extraction first (we requested side-band-64k)
-        let packData = extractFromSideband(packBytes);
+        // Try WASM sideband extraction first (most reliable)
+        let packData = null;
+        if (wasmInstance && wasmInstance.exports.ziggit_extract_pack_data) {
+          try {
+            packData = wasmExtractPack(packBytes);
+            if (packData) console.log('WASM sideband extraction succeeded:', packData.length, 'bytes');
+          } catch (e) { console.warn('WASM sideband extraction failed:', e); }
+        }
+        // Try JS sideband extraction
+        if (!packData) packData = extractFromSideband(packBytes);
         if (!packData) {
           // Fall back to finding raw PACK signature
           const packStart = findPackStart(packBytes);
@@ -815,13 +924,24 @@
         console.log('Pack data size:', packData.length);
 
         // 4. Parse pack
-        // Pre-load into WASM for pack stats and object reading
+        // Try full WASM-native extraction first (fastest path)
+        let wasmExtracted = false;
         if (wasmInstance && packData.length < 50 * 1024 * 1024) {
-          try { await parsePackWasm(packData); } catch (e) {
-            console.warn('WASM pack pre-load failed:', e);
+          try {
+            wasmExtracted = await parsePackWasmFull(packData);
+          } catch (e) {
+            console.warn('WASM full extraction failed, falling back to JS:', e);
           }
         }
-        await parsePack(packData);
+        if (!wasmExtracted) {
+          // Pre-load into WASM for pack stats
+          if (wasmInstance && packData.length < 50 * 1024 * 1024) {
+            try { await parsePackWasm(packData); } catch (e) {
+              console.warn('WASM pack pre-load failed:', e);
+            }
+          }
+          await parsePack(packData);
+        }
 
         // 5. Display results
         currentCommit = headHash;
