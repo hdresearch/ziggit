@@ -1536,3 +1536,90 @@ export fn ziggit_split_lines(text_ptr: [*]const u8, text_len: u32, out_ptr: *u32
     out_len.* = @intCast(owned.len);
     return 0;
 }
+
+// ========== Recursive tree walk ==========
+
+/// Recursively walk a tree and return all file paths as JSON.
+/// tree_hash_ptr: 40 hex chars of root tree hash
+/// out_ptr/out_len: pointers to write result JSON
+/// Format: [{"path":"src/main.zig","hash":"abc...","mode":"100644","size":123},...]
+/// Returns 0 on success, negative on error.
+export fn ziggit_tree_walk(tree_hash_ptr: [*]const u8, tree_hash_len: u32, out_ptr: *u32, out_len: *u32) i32 {
+    if (tree_hash_len < 40) return -1;
+    const allocator = getAllocator();
+    const pack_data = global_pack_data orelse return -2;
+    const idx_data = global_idx_data orelse return -3;
+
+    var json = std.array_list.Managed(u8).init(allocator);
+    defer json.deinit();
+    json.appendSlice("[") catch return -4;
+
+    var first = true;
+    walkTreeRecursive(pack_data, idx_data, tree_hash_ptr[0..40], "", allocator, &json, &first, 0) catch return -5;
+
+    json.appendSlice("]") catch return -4;
+    const owned = json.toOwnedSlice() catch return -6;
+    out_ptr.* = @intFromPtr(owned.ptr);
+    out_len.* = @intCast(owned.len);
+    return 0;
+}
+
+fn walkTreeRecursive(
+    pack_data: []const u8,
+    idx_data: []const u8,
+    tree_hash_hex: []const u8,
+    prefix: []const u8,
+    allocator: std.mem.Allocator,
+    json: *std.array_list.Managed(u8),
+    first: *bool,
+    depth: u32,
+) !void {
+    if (depth > 20) return; // prevent infinite recursion
+
+    var hash_bytes: [20]u8 = undefined;
+    for (0..20) |i| {
+        hash_bytes[i] = std.fmt.parseInt(u8, tree_hash_hex[i * 2 .. i * 2 + 2], 16) catch return;
+    }
+
+    const offset = findOffsetInIdx(idx_data, hash_bytes) orelse return;
+    const obj = readPackedObjectFromData(pack_data, offset, allocator) catch return;
+    defer obj.deinit(allocator);
+
+    if (obj.obj_type != .tree) return;
+    const data = obj.data;
+    var pos: usize = 0;
+
+    while (pos < data.len) {
+        const space = std.mem.indexOfScalarPos(u8, data, pos, ' ') orelse break;
+        const mode = data[pos..space];
+        const null_pos = std.mem.indexOfScalarPos(u8, data, space + 1, 0) orelse break;
+        const name = data[space + 1 .. null_pos];
+        if (null_pos + 21 > data.len) break;
+        const entry_hash = data[null_pos + 1 .. null_pos + 21];
+        pos = null_pos + 21;
+
+        const hex = std.fmt.bytesToHex(entry_hash[0..20].*, .lower);
+        const full_path = if (prefix.len > 0)
+            std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, name }) catch continue
+        else
+            allocator.dupe(u8, name) catch continue;
+        defer allocator.free(full_path);
+
+        const is_tree = std.mem.eql(u8, mode, "40000") or std.mem.eql(u8, mode, "040000");
+
+        if (is_tree) {
+            walkTreeRecursive(pack_data, idx_data, &hex, full_path, allocator, json, first, depth + 1) catch {};
+        } else {
+            // Emit entry
+            if (!first.*) json.appendSlice(",") catch return;
+            first.* = false;
+            json.appendSlice("{\"path\":\"") catch return;
+            appendJsonEscaped(json, full_path) catch return;
+            json.appendSlice("\",\"hash\":\"") catch return;
+            json.appendSlice(&hex) catch return;
+            json.appendSlice("\",\"mode\":\"") catch return;
+            json.appendSlice(mode) catch return;
+            json.appendSlice("\"}") catch return;
+        }
+    }
+}
