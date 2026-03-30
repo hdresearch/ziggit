@@ -937,24 +937,261 @@ fn stashShow(
     };
     defer allocator.free(parent_hash);
 
-    // Generate diff
-    if (show_stat or numstat) {
-        const diff_output = helpers.generateDiffBetweenCommits(git_path, parent_hash, stash_hash, allocator, platform_impl) catch return;
-        defer allocator.free(diff_output);
+    // Get trees from both commits
+    const parent_tree = helpers.getCommitTree(git_path, parent_hash, allocator, platform_impl) catch return;
+    defer allocator.free(parent_tree);
+    const stash_tree_hash = helpers.getCommitTree(git_path, stash_hash, allocator, platform_impl) catch return;
+    defer allocator.free(stash_tree_hash);
 
-        if (numstat) {
-            // Parse diff and output numstat format
-            try outputNumstat(allocator, diff_output, platform_impl);
-        } else {
-            // Parse diff and output stat format
-            try outputDiffstat(allocator, diff_output, platform_impl);
+    // Collect files from both trees
+    var parent_map = std.StringHashMap([]const u8).init(allocator);
+    defer freeStringMap(&parent_map, allocator);
+    var stash_map_show = std.StringHashMap([]const u8).init(allocator);
+    defer freeStringMap(&stash_map_show, allocator);
+
+    collectTreeFilesRecursive(allocator, git_path, parent_tree, "", &parent_map, platform_impl) catch {};
+    collectTreeFilesRecursive(allocator, git_path, stash_tree_hash, "", &stash_map_show, platform_impl) catch {};
+
+    // Collect changed files
+    var changed_files = std.ArrayList(ChangedFile).init(allocator);
+    defer {
+        for (changed_files.items) |cf| {
+            allocator.free(cf.path);
+            if (cf.old_hash) |h| allocator.free(h);
+            if (cf.new_hash) |h| allocator.free(h);
+        }
+        changed_files.deinit();
+    }
+
+    // Files in stash that differ from parent
+    var all_paths = std.StringHashMap(void).init(allocator);
+    defer {
+        var it2 = all_paths.iterator();
+        while (it2.next()) |e| allocator.free(e.key_ptr.*);
+        all_paths.deinit();
+    }
+    {
+        var it2 = parent_map.iterator();
+        while (it2.next()) |e| {
+            if (!all_paths.contains(e.key_ptr.*)) try all_paths.put(try allocator.dupe(u8, e.key_ptr.*), {});
+        }
+    }
+    {
+        var it2 = stash_map_show.iterator();
+        while (it2.next()) |e| {
+            if (!all_paths.contains(e.key_ptr.*)) try all_paths.put(try allocator.dupe(u8, e.key_ptr.*), {});
+        }
+    }
+
+    var pit = all_paths.iterator();
+    while (pit.next()) |pe| {
+        const path = pe.key_ptr.*;
+        const old_h = parent_map.get(path);
+        const new_h = stash_map_show.get(path);
+        if (old_h != null and new_h != null and std.mem.eql(u8, old_h.?, new_h.?)) continue;
+        try changed_files.append(.{
+            .path = try allocator.dupe(u8, path),
+            .old_hash = if (old_h) |h| try allocator.dupe(u8, h) else null,
+            .new_hash = if (new_h) |h| try allocator.dupe(u8, h) else null,
+        });
+    }
+
+    // Sort changed files by path
+    std.mem.sort(ChangedFile, changed_files.items, {}, struct {
+        fn lessThan(_: void, a: ChangedFile, b: ChangedFile) bool {
+            return std.mem.order(u8, a.path, b.path) == .lt;
+        }
+    }.lessThan);
+
+    if (show_stat or numstat) {
+        for (changed_files.items) |cf| {
+            const old_content = if (cf.old_hash) |h| (helpers.readBlobContent(allocator, git_path, h, platform_impl) catch null) else null;
+            defer if (old_content) |c| allocator.free(c);
+            const new_content = if (cf.new_hash) |h| (helpers.readBlobContent(allocator, git_path, h, platform_impl) catch null) else null;
+            defer if (new_content) |c| allocator.free(c);
+
+            var ins: usize = 0;
+            var del: usize = 0;
+            countDiffStats(old_content orelse "", new_content orelse "", &ins, &del);
+
+            if (numstat) {
+                const out = try std.fmt.allocPrint(allocator, "{d}\t{d}\t{s}\n", .{ ins, del, cf.path });
+                defer allocator.free(out);
+                try platform_impl.writeStdout(out);
+            } else {
+                // Collect for stat summary
+                _ = .{}; // handled below
+            }
+        }
+        if (show_stat and !numstat) {
+            try outputDiffstatFromFiles(allocator, git_path, changed_files.items, platform_impl);
         }
     }
 
     if (show_patch) {
-        const diff_output = helpers.generateDiffBetweenCommits(git_path, parent_hash, stash_hash, allocator, platform_impl) catch return;
-        defer allocator.free(diff_output);
-        try platform_impl.writeStdout(diff_output);
+        for (changed_files.items) |cf| {
+            try outputPatchForFile(allocator, git_path, cf, platform_impl);
+        }
+    }
+}
+
+const ChangedFile = struct {
+    path: []u8,
+    old_hash: ?[]u8,
+    new_hash: ?[]u8,
+};
+
+fn countDiffStats(old: []const u8, new: []const u8, ins: *usize, del: *usize) void {
+    // Simple line-based diff counting
+    var old_lines = std.ArrayList([]const u8).init(std.heap.page_allocator);
+    defer old_lines.deinit();
+    var new_lines = std.ArrayList([]const u8).init(std.heap.page_allocator);
+    defer new_lines.deinit();
+
+    var oit = std.mem.splitScalar(u8, old, '\n');
+    while (oit.next()) |line| old_lines.append(line) catch {};
+    var nit = std.mem.splitScalar(u8, new, '\n');
+    while (nit.next()) |line| new_lines.append(line) catch {};
+
+    // Remove trailing empty line from split
+    if (old_lines.items.len > 0 and old_lines.items[old_lines.items.len - 1].len == 0) _ = old_lines.pop();
+    if (new_lines.items.len > 0 and new_lines.items[new_lines.items.len - 1].len == 0) _ = new_lines.pop();
+
+    // Simple: count lines added and removed
+    // For a proper diff we'd need LCS, but for stats, approximate with simple comparison
+    const old_count = old_lines.items.len;
+    const new_count = new_lines.items.len;
+
+    // Count matching lines from start
+    var common: usize = 0;
+    const min_count = @min(old_count, new_count);
+    while (common < min_count and std.mem.eql(u8, old_lines.items[common], new_lines.items[common])) {
+        common += 1;
+    }
+    // Count matching lines from end
+    var end_common: usize = 0;
+    while (end_common < min_count - common and
+        std.mem.eql(u8, old_lines.items[old_count - 1 - end_common], new_lines.items[new_count - 1 - end_common]))
+    {
+        end_common += 1;
+    }
+
+    const old_changed = old_count - common - end_common;
+    const new_changed = new_count - common - end_common;
+    del.* = old_changed;
+    ins.* = new_changed;
+}
+
+fn outputDiffstatFromFiles(
+    allocator: std.mem.Allocator,
+    git_path: []const u8,
+    files: []const ChangedFile,
+    platform_impl: *const platform_mod.Platform,
+) !void {
+    if (files.len == 0) return;
+
+    var max_name_len: usize = 0;
+    var total_ins: usize = 0;
+    var total_del: usize = 0;
+    var file_stats = std.ArrayList(FileStat).init(allocator);
+    defer file_stats.deinit();
+
+    for (files) |cf| {
+        const old_content = if (cf.old_hash) |h| (helpers.readBlobContent(allocator, git_path, h, platform_impl) catch null) else null;
+        defer if (old_content) |c| allocator.free(c);
+        const new_content = if (cf.new_hash) |h| (helpers.readBlobContent(allocator, git_path, h, platform_impl) catch null) else null;
+        defer if (new_content) |c| allocator.free(c);
+
+        var ins: usize = 0;
+        var del: usize = 0;
+        countDiffStats(old_content orelse "", new_content orelse "", &ins, &del);
+
+        if (cf.path.len > max_name_len) max_name_len = cf.path.len;
+        total_ins += ins;
+        total_del += del;
+        try file_stats.append(.{ .name = cf.path, .ins = ins, .del = del });
+    }
+
+    for (file_stats.items) |f| {
+        const changes = f.ins + f.del;
+        const line = try std.fmt.allocPrint(allocator, " {s}", .{f.name});
+        defer allocator.free(line);
+        try platform_impl.writeStdout(line);
+
+        var pad_count = max_name_len - f.name.len + 1;
+        while (pad_count > 0) : (pad_count -= 1) try platform_impl.writeStdout(" ");
+
+        const bar = try std.fmt.allocPrint(allocator, "| {d} ", .{changes});
+        defer allocator.free(bar);
+        try platform_impl.writeStdout(bar);
+
+        var plus_count = f.ins;
+        var minus_count = f.del;
+        const max_bar: usize = 40;
+        if (plus_count + minus_count > max_bar) {
+            const total = plus_count + minus_count;
+            plus_count = (plus_count * max_bar + total - 1) / total;
+            minus_count = max_bar - plus_count;
+        }
+        var j: usize = 0;
+        while (j < plus_count) : (j += 1) try platform_impl.writeStdout("+");
+        j = 0;
+        while (j < minus_count) : (j += 1) try platform_impl.writeStdout("-");
+        try platform_impl.writeStdout("\n");
+    }
+
+    try helpers.formatDiffStatSummary(file_stats.items.len, total_ins, total_del, platform_impl, allocator);
+}
+
+fn outputPatchForFile(
+    allocator: std.mem.Allocator,
+    git_path: []const u8,
+    cf: ChangedFile,
+    platform_impl: *const platform_mod.Platform,
+) !void {
+    const old_content = if (cf.old_hash) |h| (helpers.readBlobContent(allocator, git_path, h, platform_impl) catch null) else null;
+    defer if (old_content) |c| allocator.free(c);
+    const new_content = if (cf.new_hash) |h| (helpers.readBlobContent(allocator, git_path, h, platform_impl) catch null) else null;
+    defer if (new_content) |c| allocator.free(c);
+
+    const old_short = if (cf.old_hash) |h| h[0..@min(h.len, 7)] else "0000000";
+    const new_short = if (cf.new_hash) |h| h[0..@min(h.len, 7)] else "0000000";
+
+    // Header
+    const header = try std.fmt.allocPrint(allocator, "diff --git a/{s} b/{s}\n", .{ cf.path, cf.path });
+    defer allocator.free(header);
+    try platform_impl.writeStdout(header);
+
+    if (cf.old_hash == null) {
+        try platform_impl.writeStdout("new file mode 100644\n");
+        const idx = try std.fmt.allocPrint(allocator, "index {s}..{s}\n", .{ old_short, new_short });
+        defer allocator.free(idx);
+        try platform_impl.writeStdout(idx);
+    } else if (cf.new_hash == null) {
+        try platform_impl.writeStdout("deleted file mode 100644\n");
+        const idx = try std.fmt.allocPrint(allocator, "index {s}..{s}\n", .{ old_short, new_short });
+        defer allocator.free(idx);
+        try platform_impl.writeStdout(idx);
+    } else {
+        const idx = try std.fmt.allocPrint(allocator, "index {s}..{s} 100644\n", .{ old_short, new_short });
+        defer allocator.free(idx);
+        try platform_impl.writeStdout(idx);
+    }
+
+    const a_name = try std.fmt.allocPrint(allocator, "--- {s}\n", .{if (cf.old_hash != null) try std.fmt.allocPrint(allocator, "a/{s}", .{cf.path}) else "/dev/null"});
+    defer allocator.free(a_name);
+    try platform_impl.writeStdout(a_name);
+
+    const b_name = try std.fmt.allocPrint(allocator, "+++ {s}\n", .{if (cf.new_hash != null) try std.fmt.allocPrint(allocator, "b/{s}", .{cf.path}) else "/dev/null"});
+    defer allocator.free(b_name);
+    try platform_impl.writeStdout(b_name);
+
+    // Generate unified diff hunks only (we already output the header)
+    const diff_result = diff_mod.generateUnifiedDiffWithHashes(old_content orelse "", new_content orelse "", cf.path, old_short, new_short, allocator) catch return;
+    defer allocator.free(diff_result);
+    // Skip the header lines we already output, find the first @@ line
+    if (std.mem.indexOf(u8, diff_result, "@@ ")) |hunk_start| {
+        try platform_impl.writeStdout(diff_result[hunk_start..]);
     }
 }
 
