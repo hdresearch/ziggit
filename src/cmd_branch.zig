@@ -902,6 +902,14 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         std.mem.eql(u8, first_arg.?, "-a") or std.mem.eql(u8, first_arg.?, "--all") or
         std.mem.eql(u8, first_arg.?, "-r") or std.mem.eql(u8, first_arg.?, "--remotes"))
     {
+        // --column and -v are incompatible
+        if (verbose and (std.mem.startsWith(u8, first_arg.?, "--column") or std.mem.eql(u8, first_arg.?, "--no-column"))) {
+            // Check if --column is actually being used
+            if (std.mem.startsWith(u8, first_arg.?, "--column")) {
+                try platform_impl.writeStderr("fatal: options '--column' and '--verbose' cannot be used together\n");
+                std.process.exit(128);
+            }
+        }
         const is_remote_only = std.mem.eql(u8, first_arg.?, "-r") or std.mem.eql(u8, first_arg.?, "--remotes");
         const is_all = std.mem.eql(u8, first_arg.?, "-a") or std.mem.eql(u8, first_arg.?, "--all");
         const current_branch4 = refs.getCurrentBranch(git_path, platform_impl, allocator) catch "master";
