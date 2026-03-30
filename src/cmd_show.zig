@@ -270,12 +270,15 @@ pub fn showCommitPrettyFormat(git_object: objects.GitObject, commit_hash: []cons
         }
     } else if (std.mem.startsWith(u8, format, "format:") or std.mem.startsWith(u8, format, "tformat:")) {
         // Custom format string - delegate to the format handler
+        const is_tformat = std.mem.startsWith(u8, format, "tformat:");
         const fmt_str = if (std.mem.startsWith(u8, format, "format:"))
             format["format:".len..]
         else
             format["tformat:".len..];
         try helpers.outputFormattedCommit(fmt_str, commit_hash, allocator, platform_impl);
-        try platform_impl.writeStdout("\n");
+        if (is_tformat) {
+            try platform_impl.writeStdout("\n");
+        }
     } else {
         // helpers.Fallback to default format
         try showCommitDefault(git_object, commit_hash, "", platform_impl, allocator);

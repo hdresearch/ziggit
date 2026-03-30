@@ -3510,7 +3510,13 @@ fn writeFormattedCommitInner(format: []const u8, hash: []const u8, data: []const
                 }
                 i += 2;
             } else if (c == 'b') {
-                try output.appendSlice(std.mem.trimRight(u8, body_buf.items, "\n"));
+                // Body: strip leading blank lines, keep trailing newline
+                var body_trimmed = std.mem.trimLeft(u8, body_buf.items, "\n");
+                body_trimmed = std.mem.trimRight(u8, body_trimmed, "\n");
+                if (body_trimmed.len > 0) {
+                    try output.appendSlice(body_trimmed);
+                    try output.append('\n');
+                }
                 i += 2;
             } else if (c == 'B') {
                 const trimmed_raw = std.mem.trimRight(u8, raw_message, "\n");
