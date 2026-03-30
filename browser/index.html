@@ -88,6 +88,11 @@
     </div>
   </div>
 
+  <div id="commit-panel" class="panel" style="display:none">
+    <h2>Commit: <span id="commit-hash" class="hash"></span></h2>
+    <div id="commit-details"></div>
+  </div>
+
   <div id="file-panel" class="panel" style="display:none">
     <h2>File: <span id="file-name"></span></h2>
     <pre class="file-content" id="file-content"></pre>
@@ -877,7 +882,67 @@
       if (!obj) { status('Commit not found', true); return; }
       const c = parseCommit(obj.data);
       if (c.tree) showTree(c.tree, '/');
+      showCommitDetails(hash, c);
       status('Viewing commit ' + hash.slice(0, 8));
+    }
+
+    function flattenTree(treeHash, prefix) {
+      const obj = objectDb[treeHash];
+      if (!obj || obj.type !== 'tree') return {};
+      const entries = parseTree(obj.data);
+      const files = {};
+      for (const e of entries) {
+        const path = prefix ? prefix + '/' + e.name : e.name;
+        if (e.type === 'tree') {
+          Object.assign(files, flattenTree(e.hash, path));
+        } else if (e.type === 'blob') {
+          files[path] = e.hash;
+        }
+      }
+      return files;
+    }
+
+    function showCommitDetails(hash, commit) {
+      const panel = document.getElementById('commit-panel');
+      panel.style.display = 'block';
+      document.getElementById('commit-hash').textContent = hash.slice(0, 12);
+
+      let html = `<div class="info" style="margin-bottom:8px">`;
+      html += `<strong>Author:</strong> ${escHtml(commit.author)}<br>`;
+      html += `<strong>Message:</strong> ${escHtml(commit.message.split('\n')[0])}`;
+      if (commit.parents.length) html += `<br><strong>Parent:</strong> <span class="hash" onclick="inspectCommit('${commit.parents[0]}')">${commit.parents[0].slice(0,8)}</span>`;
+      html += `</div>`;
+
+      // Compare trees to show changed files
+      if (commit.parents.length > 0 && objectDb[commit.parents[0]]) {
+        const parentCommit = parseCommit(objectDb[commit.parents[0]].data);
+        if (parentCommit.tree && commit.tree) {
+          const oldFiles = flattenTree(parentCommit.tree, '');
+          const newFiles = flattenTree(commit.tree, '');
+          const allPaths = new Set([...Object.keys(oldFiles), ...Object.keys(newFiles)]);
+          const changes = [];
+          for (const path of [...allPaths].sort()) {
+            const oh = oldFiles[path], nh = newFiles[path];
+            if (!oh) changes.push({ path, status: 'A', color: '#7ee787' });
+            else if (!nh) changes.push({ path, status: 'D', color: '#f85149' });
+            else if (oh !== nh) changes.push({ path, status: 'M', color: '#d29922' });
+          }
+          if (changes.length > 0) {
+            html += `<div style="margin-top:8px"><strong>${changes.length} file${changes.length>1?'s':''} changed:</strong></div>`;
+            html += `<div style="max-height:200px;overflow-y:auto;margin-top:4px;font-size:0.85em">`;
+            for (const c of changes) {
+              html += `<div><span style="color:${c.color};font-weight:bold;width:20px;display:inline-block">${c.status}</span> ${escHtml(c.path)}</div>`;
+            }
+            html += `</div>`;
+          } else {
+            html += `<div class="info">No file changes detected</div>`;
+          }
+        }
+      } else if (commit.parents.length === 0) {
+        html += `<div class="info">Initial commit</div>`;
+      }
+
+      document.getElementById('commit-details').innerHTML = html;
     }
 
     function filterTree() {
