@@ -40,13 +40,29 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     defer all_args.deinit();
     while (args.next()) |a| try all_args.append(a);
 
-    // Pre-scan for modifier flags that can appear in any position
+    // Pre-scan for modifier flags and validate mode conflicts
     var verbose = false;
+    var mode_count: u32 = 0;
+    var has_delete = false;
+    var has_move = false;
+    var has_copy = false;
+    var has_list = false;
+    for (all_args.items) |a| {
+        if (std.mem.eql(u8, a, "-v") or std.mem.eql(u8, a, "--verbose")) verbose = true;
+        if (std.mem.eql(u8, a, "-d") or std.mem.eql(u8, a, "-D")) { has_delete = true; mode_count += 1; }
+        if (std.mem.eql(u8, a, "-m") or std.mem.eql(u8, a, "-M")) { has_move = true; mode_count += 1; }
+        if (std.mem.eql(u8, a, "-c") or std.mem.eql(u8, a, "-C")) { has_copy = true; mode_count += 1; }
+        if (std.mem.eql(u8, a, "-l") or std.mem.eql(u8, a, "--list")) { has_list = true; mode_count += 1; }
+    }
+    if (mode_count > 1) {
+        try platform_impl.writeStderr("fatal: options are incompatible\n");
+        std.process.exit(1);
+    }
+
     {
         var i: usize = 0;
         while (i < all_args.items.len) {
             if (std.mem.eql(u8, all_args.items[i], "-v") or std.mem.eql(u8, all_args.items[i], "--verbose")) {
-                verbose = true;
                 _ = all_args.orderedRemove(i);
             } else {
                 i += 1;
