@@ -408,9 +408,17 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                         try out_buf.append('\n');
                         try platform_impl.writeStdout(out_buf.items);
                     } else {
-                        const output = try std.fmt.allocPrint(allocator, "{s}\n", .{tag});
-                        defer allocator.free(output);
-                        try platform_impl.writeStdout(output);
+                        // Still pad for annotated tags with empty message
+                        var out_buf2 = std.array_list.Managed(u8).init(allocator);
+                        defer out_buf2.deinit();
+                        try out_buf2.appendSlice(tag);
+                        // Check if this is an annotated tag (pad even if empty annotation)
+                        const is_annotated = isAnnotatedTag(allocator, git_path, tag, platform_impl);
+                        if (is_annotated) {
+                            while (out_buf2.items.len < 16) try out_buf2.append(' ');
+                        }
+                        try out_buf2.append('\n');
+                        try platform_impl.writeStdout(out_buf2.items);
                     }
                 } else {
                     const output = try std.fmt.allocPrint(allocator, "{s}\n", .{tag});
@@ -633,6 +641,18 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         
         try platform_impl.fs.writeFile(tag_ref_path, ref_content);
     }
+}
+
+fn isAnnotatedTag(allocator: std.mem.Allocator, git_path: []const u8, tag_name: []const u8, platform_impl: anytype) bool {
+    const ref_path = std.fmt.allocPrint(allocator, "{s}/refs/tags/{s}", .{ git_path, tag_name }) catch return false;
+    defer allocator.free(ref_path);
+    const ref_content = platform_impl.fs.readFile(allocator, ref_path) catch return false;
+    defer allocator.free(ref_content);
+    const hash = std.mem.trim(u8, ref_content, " \t\n\r");
+    if (hash.len < 40) return false;
+    const obj = objects.GitObject.load(hash[0..40], git_path, platform_impl, allocator) catch return false;
+    defer obj.deinit(allocator);
+    return obj.type == .tag;
 }
 
 /// Get annotation text for a tag (first n_lines of message)
