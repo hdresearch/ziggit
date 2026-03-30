@@ -465,7 +465,20 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         const branch_name = fake_args.next() orelse {
             try platform_impl.writeStderr("fatal: branch name required\n");
             std.process.exit(128);
+            unreachable;
         };
+        // Check if branch is currently checked out
+        const current_br = refs.getCurrentBranch(git_path, platform_impl, allocator) catch null;
+        defer if (current_br) |cb| allocator.free(cb);
+        if (current_br) |cb| {
+            const short_cb = if (std.mem.startsWith(u8, cb, "refs/heads/")) cb["refs/heads/".len..] else cb;
+            if (std.mem.eql(u8, short_cb, branch_name)) {
+                const emsg_f = try std.fmt.allocPrint(allocator, "fatal: cannot force update the branch '{s}' used by worktree at '{s}'\n", .{ branch_name, std.fs.path.dirname(git_path) orelse "." });
+                defer allocator.free(emsg_f);
+                try platform_impl.writeStderr(emsg_f);
+                std.process.exit(128);
+            }
+        }
         const start_point = fake_args.next();
         // helpers.Resolve start_point using helpers.resolveRevision for complex helpers.refs like HEAD~1
         const resolved_sp_force: ?[]const u8 = if (start_point) |sp|
