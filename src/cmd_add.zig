@@ -235,8 +235,12 @@ pub fn addSingleFile(allocator: std.mem.Allocator, relative_path: []const u8, fu
     // Emit CRLF conversion warnings before adding
     emitCrlfWarning(allocator, relative_path, full_path, git_path, platform_impl) catch {};
 
+    // Apply CRLF→LF normalization for text files
+    const filtered = applyCrlfNormalization(allocator, relative_path, full_path, git_path, platform_impl);
+    defer if (filtered) |f| allocator.free(f);
+
     // helpers.Add to index
-    index.add(relative_path, full_path, platform_impl, git_path) catch |err| switch (err) {
+    index.addFiltered(relative_path, full_path, platform_impl, git_path, filtered) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => {
             const msg = try std.fmt.allocPrint(allocator, "error: failed to add '{s}' to index\n", .{relative_path});
@@ -337,6 +341,30 @@ fn emitCrlfWarning(allocator: std.mem.Allocator, relative_path: []const u8, full
             }
         },
     }
+}
+
+/// Apply CRLF→LF normalization based on attributes and config.
+/// Returns normalized content if conversion needed, null otherwise.
+fn applyCrlfNormalization(allocator: std.mem.Allocator, relative_path: []const u8, full_path: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) ?[]u8 {
+    const content = platform_impl.fs.readFile(allocator, full_path) catch return null;
+    defer allocator.free(content);
+
+    if (content.len == 0) return null;
+
+    const autocrlf_val = helpers.getConfigValueByKey(git_path, "core.autocrlf", allocator);
+    defer if (autocrlf_val) |v| allocator.free(v);
+
+    const repo_root = std.fs.path.dirname(git_path) orelse ".";
+    var attr_rules = crlf_mod.loadAttrRules(allocator, repo_root, git_path, platform_impl) catch return null;
+    defer {
+        for (attr_rules.items) |*rule| rule.deinit(allocator);
+        attr_rules.deinit();
+    }
+
+    const converted = crlf_mod.applyCommitConversion(allocator, content, relative_path, attr_rules.items, autocrlf_val) catch return null;
+    // If the conversion returned a new allocation (different from original), return it
+    // applyCommitConversion always allocates a new buffer (dupe or converted)
+    return converted;
 }
 
 fn hasCrlf(content: []const u8) bool {

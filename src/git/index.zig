@@ -588,6 +588,12 @@ pub const Index = struct {
     }
 
     pub fn add(self: *Index, path: []const u8, file_path: []const u8, platform_impl: anytype, git_dir: []const u8) !void {
+        return self.addFiltered(path, file_path, platform_impl, git_dir, null);
+    }
+
+    /// Add a file to the index with an optional content filter (e.g., CRLF normalization).
+    /// If filtered_content is provided, it's used as the blob content instead of the raw file.
+    pub fn addFiltered(self: *Index, path: []const u8, file_path: []const u8, platform_impl: anytype, git_dir: []const u8, filtered_content: ?[]const u8) !void {
         // Determine the repo root directory for relative path operations
         const repo_root = std.fs.path.dirname(git_dir) orelse ".";
         var repo_dir = std.fs.cwd().openDir(repo_root, .{}) catch return error.FileNotFound;
@@ -599,11 +605,25 @@ pub const Index = struct {
 
         var content: []const u8 = undefined;
         var file_mode: u32 = 0o100644;
+        var should_free_content = true;
 
         if (symlink_target) |link_target| {
             // For symlinks, the blob content is the link target path
             content = try self.allocator.dupe(u8, link_target);
             file_mode = 0o120000;
+        } else if (filtered_content) |fc| {
+            // Use pre-filtered content (e.g., CRLF-normalized)
+            content = fc;
+            should_free_content = false;
+            // Check if file is executable
+            if (@import("builtin").target.os.tag != .windows) {
+                const stat = repo_dir.statFile(file_path) catch null;
+                if (stat) |s| {
+                    if (s.mode & 0o111 != 0) {
+                        file_mode = 0o100755;
+                    }
+                }
+            }
         } else {
             // Regular file — read content
             content = try platform_impl.fs.readFile(self.allocator, file_path);
@@ -617,7 +637,7 @@ pub const Index = struct {
                 }
             }
         }
-        defer self.allocator.free(content);
+        defer if (should_free_content) self.allocator.free(content);
 
         // Create blob object and store it
         const blob = try objects.createBlobObject(content, self.allocator);
