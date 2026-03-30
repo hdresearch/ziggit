@@ -831,6 +831,12 @@
           `<td><span class="hash" title="${e.hash}">${e.hash.slice(0, 8)}</span></td>`;
         tbody.appendChild(tr);
       });
+
+      // Auto-show README if present
+      const readme = entries.find(e => e.type === 'blob' && /^readme/i.test(e.name));
+      if (readme && objectDb[readme.hash]) {
+        showFile(readme.hash, readme.name);
+      }
     }
 
     function showTreeFromCommit() {
