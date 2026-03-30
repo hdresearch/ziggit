@@ -199,6 +199,18 @@ pub fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
             const out = try std.fmt.allocPrint(allocator, "{s}\n", .{resolved});
             defer allocator.free(out);
             try platform_impl.writeStdout(out);
+        } else if (std.mem.startsWith(u8, arg, "--since=") or std.mem.startsWith(u8, arg, "--after=")) {
+            const date_str = if (std.mem.startsWith(u8, arg, "--since=")) arg["--since=".len..] else arg["--after=".len..];
+            const ts = parseDateStr(date_str, allocator);
+            const out = try std.fmt.allocPrint(allocator, "--max-age={d}\n", .{ts});
+            defer allocator.free(out);
+            try platform_impl.writeStdout(out);
+        } else if (std.mem.startsWith(u8, arg, "--until=") or std.mem.startsWith(u8, arg, "--before=")) {
+            const date_str = if (std.mem.startsWith(u8, arg, "--until=")) arg["--until=".len..] else arg["--before=".len..];
+            const ts = parseDateStr(date_str, allocator);
+            const out = try std.fmt.allocPrint(allocator, "--min-age={d}\n", .{ts});
+            defer allocator.free(out);
+            try platform_impl.writeStdout(out);
         } else {
             try positional_args.append(arg);
         }
@@ -851,4 +863,16 @@ fn normalizePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
         }
     }
     return result.toOwnedSlice();
+}
+
+/// Parse a date string to a Unix timestamp
+fn parseDateStr(date_str: []const u8, allocator: std.mem.Allocator) i64 {
+    // Try parseDateToGitFormat which returns "timestamp tz" format
+    const parsed = helpers.parseDateToGitFormat(date_str, allocator) catch return 0;
+    defer allocator.free(parsed);
+    // Extract timestamp (before space)
+    if (std.mem.indexOfScalar(u8, parsed, ' ')) |sp| {
+        return std.fmt.parseInt(i64, parsed[0..sp], 10) catch 0;
+    }
+    return std.fmt.parseInt(i64, parsed, 10) catch 0;
 }
