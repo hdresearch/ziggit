@@ -2716,3 +2716,115 @@ export fn ziggit_walk_commits(start_hash_ptr: [*]const u8, start_hash_len: u32, 
     out_len.* = @intCast(owned.len);
     return 0;
 }
+
+// ========== Blame / LCS exports ==========
+
+/// Compute the Longest Common Subsequence table between two text inputs.
+/// Returns JSON array of matching line indices.
+/// old_ptr/old_len: old text
+/// new_ptr/new_len: new text
+/// out_ptr/out_len: pointers to write result JSON
+/// Format: [0,1,3,...] (indices of lines in old that match in new)
+/// Returns 0 on success, negative on error.
+export fn ziggit_lcs(old_ptr: [*]const u8, old_len: u32, new_ptr: [*]const u8, new_len: u32, out_ptr: *u32, out_len: *u32) i32 {
+    const allocator = getAllocator();
+    var old_lines = blame.splitLines(allocator, old_ptr[0..old_len]) catch return -1;
+    defer old_lines.deinit();
+    var new_lines = blame.splitLines(allocator, new_ptr[0..new_len]) catch return -2;
+    defer new_lines.deinit();
+
+    const lcs = blame.doLcs(allocator, old_lines.items, new_lines.items) catch return -3;
+    defer allocator.free(lcs);
+
+    var json = std.array_list.Managed(u8).init(allocator);
+    defer json.deinit();
+    json.appendSlice("[") catch return -4;
+    for (lcs, 0..) |idx, i| {
+        if (i > 0) json.appendSlice(",") catch return -4;
+        json.writer().print("{d}", .{idx}) catch return -4;
+    }
+    json.appendSlice("]") catch return -4;
+
+    const owned = json.toOwnedSlice() catch return -5;
+    out_ptr.* = @intFromPtr(owned.ptr);
+    out_len.* = @intCast(owned.len);
+    return 0;
+}
+
+/// Generate unified diff with custom context and function name detection.
+/// Returns the diff as UTF-8 text.
+export fn ziggit_diff_with_context(
+    old_ptr: [*]const u8, old_len: u32,
+    new_ptr: [*]const u8, new_len: u32,
+    path_ptr: [*]const u8, path_len: u32,
+    old_hash_ptr: [*]const u8, old_hash_len: u32,
+    new_hash_ptr: [*]const u8, new_hash_len: u32,
+    context_lines: u32,
+    out_ptr: *u32, out_len: *u32,
+) i32 {
+    const allocator = getAllocator();
+    const result = diff.generateUnifiedDiffWithHashesAndContext(
+        old_ptr[0..old_len],
+        new_ptr[0..new_len],
+        path_ptr[0..path_len],
+        old_hash_ptr[0..old_hash_len],
+        new_hash_ptr[0..new_hash_len],
+        context_lines,
+        allocator,
+    ) catch return -1;
+    out_ptr.* = @intFromPtr(result.ptr);
+    out_len.* = @intCast(result.len);
+    return 0;
+}
+
+/// Parse a tree object from raw data and return JSON entries.
+/// data_ptr/data_len: raw tree object data
+/// out_ptr/out_len: pointers to write result JSON
+/// Format: [{"mode":"100644","name":"file.txt","hash":"abc...","type":"blob"},...]
+/// Returns 0 on success, negative on error.
+export fn ziggit_parse_tree(data_ptr: [*]const u8, data_len: u32, out_ptr: *u32, out_len: *u32) i32 {
+    const allocator = getAllocator();
+    const data = data_ptr[0..data_len];
+
+    var json = std.array_list.Managed(u8).init(allocator);
+    defer json.deinit();
+    json.appendSlice("[") catch return -1;
+
+    var pos: usize = 0;
+    var first = true;
+    while (pos < data.len) {
+        const space = std.mem.indexOfScalarPos(u8, data, pos, ' ') orelse break;
+        const mode = data[pos..space];
+        const null_pos = std.mem.indexOfScalarPos(u8, data, space + 1, 0) orelse break;
+        const name = data[space + 1 .. null_pos];
+        if (null_pos + 21 > data.len) break;
+        const entry_hash = data[null_pos + 1 .. null_pos + 21];
+        pos = null_pos + 21;
+
+        const hex = std.fmt.bytesToHex(entry_hash[0..20].*, .lower);
+        const entry_type: []const u8 = if (std.mem.eql(u8, mode, "40000") or std.mem.eql(u8, mode, "040000"))
+            "tree"
+        else if (std.mem.eql(u8, mode, "160000"))
+            "commit"
+        else
+            "blob";
+
+        if (!first) json.appendSlice(",") catch return -1;
+        first = false;
+        json.appendSlice("{\"mode\":\"") catch return -1;
+        json.appendSlice(mode) catch return -1;
+        json.appendSlice("\",\"name\":\"") catch return -1;
+        appendJsonEscaped(&json, name) catch return -1;
+        json.appendSlice("\",\"hash\":\"") catch return -1;
+        json.appendSlice(&hex) catch return -1;
+        json.appendSlice("\",\"type\":\"") catch return -1;
+        json.appendSlice(entry_type) catch return -1;
+        json.appendSlice("\"}") catch return -1;
+    }
+
+    json.appendSlice("]") catch return -1;
+    const owned = json.toOwnedSlice() catch return -2;
+    out_ptr.* = @intFromPtr(owned.ptr);
+    out_len.* = @intCast(owned.len);
+    return 0;
+}
