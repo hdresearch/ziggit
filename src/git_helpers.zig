@@ -14651,6 +14651,23 @@ pub fn applyOnePatch(allocator: std.mem.Allocator, patch: *const Patch, reverse:
         }
     }
 
+    // Verify: for the last hunk, if it has no trailing context,
+    // check that the hunk extends to the end of the file.
+    // Only do this for non-copy patches (copy patches may read modified source files).
+    if (patch.hunks.items.len > 0 and !patch.is_copy) {
+        const last_hunk = patch.hunks.items[patch.hunks.items.len - 1];
+        var has_trailing_context = false;
+        if (last_hunk.lines.items.len > 0) {
+            const last_lt = if (reverse) reverseLineType(last_hunk.lines.items[last_hunk.lines.items.len - 1].line_type) else last_hunk.lines.items[last_hunk.lines.items.len - 1].line_type;
+            has_trailing_context = (last_lt == .context);
+        }
+        if (!has_trailing_context and orig_idx < orig_lines.items.len) {
+            // Last hunk has no trailing context but there are remaining lines
+            // in the original file - this means the patch doesn't match
+            return error.PatchFailed;
+        }
+    }
+
     // Copy remaining lines
     while (orig_idx < orig_lines.items.len) {
         try result_lines.append(orig_lines.items[orig_idx]);
