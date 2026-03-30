@@ -727,16 +727,3 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     }
 }
 
-fn isTrailerLine(line: []const u8) bool {
-    // A trailer line matches "Key: value" pattern
-    // Key must be at least one non-whitespace char, followed by ": "
-    if (std.mem.indexOf(u8, line, ": ")) |colon_pos| {
-        if (colon_pos == 0) return false;
-        // Key must not contain whitespace
-        for (line[0..colon_pos]) |c| {
-            if (c == ' ' or c == '\t') return false;
-        }
-        return true;
-    }
-    return false;
-}
