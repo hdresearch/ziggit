@@ -129,13 +129,24 @@
 
     // --- Pkt-line ref parsing ---
     function parsePktLineRefs(text) {
+      // Parse git smart HTTP pkt-line ref discovery response
       const refs = {};
-      const lines = text.split('\n');
-      for (const line of lines) {
-        const headMatch = line.match(/([0-9a-f]{40})\s+HEAD/);
-        if (headMatch) refs['HEAD'] = headMatch[1];
-        const refMatch = line.match(/([0-9a-f]{40})\s+(refs\/[^\s\0]+)/);
-        if (refMatch) refs[refMatch[2]] = refMatch[1];
+      let pos = 0;
+      while (pos + 4 <= text.length) {
+        const lenHex = text.substring(pos, pos + 4);
+        if (lenHex === '0000') { pos += 4; continue; } // flush
+        const pktLen = parseInt(lenHex, 16);
+        if (isNaN(pktLen) || pktLen < 4) break;
+        if (pos + pktLen > text.length) break;
+        const line = text.substring(pos + 4, pos + pktLen);
+        pos += pktLen;
+        // Skip service announcement
+        if (line.startsWith('#')) continue;
+        // Parse: "<40-hex> <refname>[\0capabilities]\n"
+        const match = line.match(/^([0-9a-f]{40}) ([^\s\0\n]+)/);
+        if (match) {
+          refs[match[2]] = match[1];
+        }
       }
       return refs;
     }
