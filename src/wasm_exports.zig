@@ -1,6 +1,7 @@
 const zlib_compat = @import("git/zlib_compat.zig");
 const stream_utils = @import("git/stream_utils.zig");
 const DeltaCache = @import("git/delta_cache.zig").DeltaCache;
+const gitignore = @import("git/gitignore.zig");
 /// WASM exports for browser integration
 /// Provides a C-ABI compatible interface to ziggit's git operations.
 /// All strings are passed as (ptr, len) pairs. Errors return negative values.
@@ -1428,4 +1429,39 @@ export fn ziggit_parse_pack_header(
     size_out.* = @intCast(hdr.size);
     hdr_len_out.* = @intCast(hdr.header_len);
     return 0;
+}
+
+// ========== Gitignore pattern matching ==========
+
+/// Global gitignore state for browser use
+var global_gitignore: ?gitignore.GitIgnore = null;
+
+/// Initialize gitignore with patterns from a .gitignore file content.
+/// content_ptr/content_len: text content of .gitignore file
+/// Returns 0 on success, negative on error.
+export fn ziggit_gitignore_init(content_ptr: [*]const u8, content_len: u32) i32 {
+    const allocator = getAllocator();
+    if (global_gitignore) |*gi| gi.deinit();
+    global_gitignore = gitignore.GitIgnore.init(allocator);
+    var gi = &global_gitignore.?;
+    gi.addPatterns(content_ptr[0..content_len]);
+    return 0;
+}
+
+/// Check if a path matches gitignore patterns.
+/// Returns 1 if ignored, 0 if not ignored, negative on error.
+export fn ziggit_gitignore_match(path_ptr: [*]const u8, path_len: u32, is_dir: u32) i32 {
+    var gi = global_gitignore orelse return -1;
+    const path = path_ptr[0..path_len];
+    const result = gi.isIgnoredPath(path, is_dir != 0);
+    _ = &gi;
+    return if (result) @as(i32, 1) else @as(i32, 0);
+}
+
+/// Free gitignore state.
+export fn ziggit_gitignore_free() void {
+    if (global_gitignore) |*gi| {
+        gi.deinit();
+        global_gitignore = null;
+    }
 }
