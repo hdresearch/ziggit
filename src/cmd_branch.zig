@@ -572,6 +572,21 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         defer if (arg2 == null) allocator.free(src_name);
         const dst_name = arg2 orelse arg1;
 
+        // Check if target branch is currently checked out
+        {
+            const cur_br_c = refs.getCurrentBranch(git_path, platform_impl, allocator) catch null;
+            defer if (cur_br_c) |cb| allocator.free(cb);
+            if (cur_br_c) |cb| {
+                const short_cb_c = if (std.mem.startsWith(u8, cb, "refs/heads/")) cb["refs/heads/".len..] else cb;
+                if (std.mem.eql(u8, short_cb_c, dst_name)) {
+                    const emsg_c = try std.fmt.allocPrint(allocator, "fatal: cannot copy to the branch '{s}' used by worktree at '{s}'\n", .{ dst_name, std.fs.path.dirname(git_path) orelse "." });
+                    defer allocator.free(emsg_c);
+                    try platform_impl.writeStderr(emsg_c);
+                    std.process.exit(128);
+                }
+            }
+        }
+
         const src_ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, src_name });
         defer allocator.free(src_ref_path);
         const src_hash = std.fs.cwd().readFileAlloc(allocator, src_ref_path, 4096) catch {
