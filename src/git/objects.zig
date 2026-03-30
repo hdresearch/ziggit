@@ -11,16 +11,21 @@ var zlib_init_attempted: bool = false;
 fn initCZlib() void {
     if (zlib_init_attempted) return;
     zlib_init_attempted = true;
-    var lib = std.DynLib.open("libz.so.1") catch {
-        var lib2 = std.DynLib.open("libz.so") catch return;
-        zlib_lib = lib2;
-        zlib_compress_fn = lib2.lookup(*const fn ([*]u8, *c_ulong, [*]const u8, c_ulong) callconv(.c) c_int, "compress");
-        zlib_compress_bound_fn = lib2.lookup(*const fn (c_ulong) callconv(.c) c_ulong, "compressBound");
-        return;
+
+    // Try platform-specific library names for zlib
+    const lib_names = switch (@import("builtin").target.os.tag) {
+        .macos => &[_][]const u8{ "libz.dylib", "/usr/lib/libz.dylib", "/opt/homebrew/lib/libz.dylib", "libz.1.dylib" },
+        .windows => &[_][]const u8{ "zlib1.dll", "zlib.dll" },
+        else => &[_][]const u8{ "libz.so.1", "libz.so" }, // Linux, FreeBSD, etc.
     };
-    zlib_lib = lib;
-    zlib_compress_fn = lib.lookup(*const fn ([*]u8, *c_ulong, [*]const u8, c_ulong) callconv(.c) c_int, "compress");
-    zlib_compress_bound_fn = lib.lookup(*const fn (c_ulong) callconv(.c) c_ulong, "compressBound");
+
+    for (lib_names) |name| {
+        var lib = std.DynLib.open(name) catch continue;
+        zlib_lib = lib;
+        zlib_compress_fn = lib.lookup(*const fn ([*]u8, *c_ulong, [*]const u8, c_ulong) callconv(.c) c_int, "compress");
+        zlib_compress_bound_fn = lib.lookup(*const fn (c_ulong) callconv(.c) c_ulong, "compressBound");
+        return;
+    }
 }
 
 /// Compress data using C zlib (more reliable than Zig flate)
