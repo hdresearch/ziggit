@@ -384,6 +384,11 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         allocator.free(inc_hash);
     }
 
+    // Pre-allocate output buffer for batched writes
+    var output_buf = std.array_list.Managed(u8).init(allocator);
+    defer output_buf.deinit();
+    try output_buf.ensureTotalCapacity(64 * 1024); // 64KB initial buffer
+
     var count: u32 = 0;
     while (queue.items.len > 0 and (max_count == null or count < max_count.?)) {
         // helpers.Find the entry with the highest timestamp (most recent commit)
@@ -393,7 +398,8 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 best_idx = i;
             }
         }
-        const current = queue.orderedRemove(best_idx);
+        // Use swapRemove instead of orderedRemove for O(1) removal
+        const current = queue.swapRemove(best_idx);
         const cur_hash = current.hash;
         defer allocator.free(@constCast(cur_hash));
 
@@ -417,30 +423,50 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             return;
         }
 
-        // helpers.Parse commit data
+        // helpers.Parse commit data - extract parents, author, committer timestamp, and message start in one pass
         const commit_data = commit_object.data;
         
-        // helpers.Extract commit message and author
-        var lines_it = std.mem.splitSequence(u8, commit_data, "\n");
-        var parent_hashes = std.array_list.Managed([]const u8).init(allocator);
-        defer parent_hashes.deinit();
+        var parent_hashes_buf: [16][]const u8 = undefined;
+        var parent_count: usize = 0;
         var author_line: ?[]const u8 = null;
-        var empty_line_found = false;
-        var message = std.array_list.Managed(u8).init(allocator);
-        defer message.deinit();
-
-        while (lines_it.next()) |line| {
-            if (empty_line_found) {
-                try message.appendSlice(line);
-                try message.append('\n');
-            } else if (line.len == 0) {
-                empty_line_found = true;
-            } else if (std.mem.startsWith(u8, line, "parent ")) {
-                try parent_hashes.append(line["parent ".len..]);
-            } else if (std.mem.startsWith(u8, line, "author ")) {
-                author_line = line["author ".len..];
+        var committer_ts: i64 = 0;
+        var message_start: usize = commit_data.len;
+        
+        {
+            var pos: usize = 0;
+            while (pos < commit_data.len) {
+                const nl = std.mem.indexOfScalarPos(u8, commit_data, pos, '\n') orelse commit_data.len;
+                const line = commit_data[pos..nl];
+                if (line.len == 0) {
+                    message_start = if (nl + 1 < commit_data.len) nl + 1 else commit_data.len;
+                    break;
+                }
+                if (line.len > 7 and line[0] == 'p' and std.mem.startsWith(u8, line, "parent ")) {
+                    if (parent_count < 16) {
+                        parent_hashes_buf[parent_count] = line[7..];
+                        parent_count += 1;
+                    }
+                } else if (line.len > 7 and line[0] == 'a' and std.mem.startsWith(u8, line, "author ")) {
+                    author_line = line[7..];
+                } else if (line.len > 10 and line[0] == 'c' and std.mem.startsWith(u8, line, "committer ")) {
+                    // Extract timestamp from committer line for parent ordering
+                    if (std.mem.indexOf(u8, line, "> ")) |gt| {
+                        const rest = line[gt + 2 ..];
+                        if (std.mem.indexOf(u8, rest, " ")) |sp| {
+                            committer_ts = std.fmt.parseInt(i64, rest[0..sp], 10) catch 0;
+                        } else {
+                            committer_ts = std.fmt.parseInt(i64, rest, 10) catch 0;
+                        }
+                    }
+                }
+                pos = nl + 1;
             }
         }
+        const parent_hashes = parent_hashes_buf[0..parent_count];
+        
+        // Build message only when needed (not for oneline without filters)
+        var message = std.array_list.Managed(u8).init(allocator);
+        defer message.deinit();
 
         // Re-encode message if --encoding is specified and differs from commit encoding
         var reencoded_msg: ?[]u8 = null;
