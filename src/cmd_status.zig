@@ -33,7 +33,7 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     var show_branch = false;
     var short_format = false;
     var show_untracked = true; // default: show untracked files
-    var status_args = std.ArrayList([]const u8).init(allocator);
+    var status_args = std.array_list.Managed([]const u8).init(allocator);
     defer status_args.deinit();
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--porcelain") or std.mem.eql(u8, arg, "--porcelain=v1")) {
@@ -278,9 +278,9 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     }
 
     // helpers.Detect staged files vs modified files vs deleted files vs clean files
-    var staged_files = std.ArrayList(index_mod.IndexEntry).init(allocator);
-    var modified_files = std.ArrayList(index_mod.IndexEntry).init(allocator);
-    var deleted_files = std.ArrayList(index_mod.IndexEntry).init(allocator);
+    var staged_files = std.array_list.Managed(index_mod.IndexEntry).init(allocator);
+    var modified_files = std.array_list.Managed(index_mod.IndexEntry).init(allocator);
+    var deleted_files = std.array_list.Managed(index_mod.IndexEntry).init(allocator);
     defer staged_files.deinit();
     defer modified_files.deinit();
     defer deleted_files.deinit();
@@ -341,7 +341,7 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                 defer allocator.free(current_hash);
                 
                 // helpers.Compare with index hash
-                const index_hash = std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch break :blk false;
+                const index_hash = std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1}) catch break :blk false;
                 defer allocator.free(index_hash);
                 
                 break :blk !std.mem.eql(u8, current_hash, index_hash);
@@ -390,7 +390,7 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     defer if (head_tree_hash) |h| allocator.free(h);
 
     // helpers.For porcelain output, collect all lines then sort and output together
-    var porcelain_lines = std.ArrayList([]u8).init(allocator);
+    var porcelain_lines = std.array_list.Managed([]u8).init(allocator);
     defer {
         for (porcelain_lines.items) |line| allocator.free(line);
         porcelain_lines.deinit();
@@ -487,9 +487,9 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
 
     // helpers.Find untracked files
     var untracked_files = if (show_untracked)
-        helpers.findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.ArrayList([]u8).init(allocator)
+        helpers.findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.array_list.Managed([]u8).init(allocator)
     else
-        std.ArrayList([]u8).init(allocator);
+        std.array_list.Managed([]u8).init(allocator);
     defer {
         for (untracked_files.items) |file| {
             allocator.free(file);

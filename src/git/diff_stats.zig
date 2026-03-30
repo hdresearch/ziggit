@@ -39,9 +39,9 @@ fn computeLCSLen(a: []const []const u8, b: []const []const u8) usize {
 }
 
 pub fn countInsDels(old_content: []const u8, new_content: []const u8) struct { ins: usize, dels: usize } {
-    var old_lines = std.ArrayList([]const u8).init(std.heap.page_allocator);
+    var old_lines = std.array_list.Managed([]const u8).init(std.heap.page_allocator);
     defer old_lines.deinit();
-    var new_lines = std.ArrayList([]const u8).init(std.heap.page_allocator);
+    var new_lines = std.array_list.Managed([]const u8).init(std.heap.page_allocator);
     defer new_lines.deinit();
     var oit = std.mem.splitScalar(u8, old_content, '\n');
     while (oit.next()) |line| old_lines.append(line) catch {};
@@ -76,7 +76,7 @@ fn matchPs(path: []const u8, pathspecs: []const []const u8) bool {
     return false;
 }
 
-pub fn collectAccurate(allocator: std.mem.Allocator, t1h: []const u8, t2h: []const u8, prefix: []const u8, git_path: []const u8, pathspecs: []const []const u8, pi: *const platform_mod.Platform, out: *std.ArrayList(StatEntry)) !void {
+pub fn collectAccurate(allocator: std.mem.Allocator, t1h: []const u8, t2h: []const u8, prefix: []const u8, git_path: []const u8, pathspecs: []const []const u8, pi: *const platform_mod.Platform, out: *std.array_list.Managed(StatEntry)) !void {
     const t1o = objects.GitObject.load(t1h, git_path, pi, allocator) catch return;
     defer t1o.deinit(allocator);
     const t2o = objects.GitObject.load(t2h, git_path, pi, allocator) catch return;
@@ -95,7 +95,7 @@ pub fn collectAccurate(allocator: std.mem.Allocator, t1h: []const u8, t2h: []con
     defer an.deinit();
     for (p1.items) |e| an.put(e.name, {}) catch {};
     for (p2.items) |e| an.put(e.name, {}) catch {};
-    var nl = std.ArrayList([]const u8).init(allocator);
+    var nl = std.array_list.Managed([]const u8).init(allocator);
     defer nl.deinit();
     var ki = an.keyIterator();
     while (ki.next()) |k| try nl.append(k.*);
@@ -154,7 +154,7 @@ pub fn formatStat(entries: []const StatEntry, pi: *const platform_mod.Platform, 
             const l = try std.fmt.allocPrint(allocator, " {s}{s} | {d} {s}{s}\n", .{ e.path, pb, t, plb, mb }); defer allocator.free(l); try pi.writeStdout(l);
         }
     }
-    var s = std.ArrayList(u8).init(allocator); defer s.deinit();
+    var s = std.array_list.Managed(u8).init(allocator); defer s.deinit();
     const w = s.writer();
     try w.print(" {d} file{s} changed", .{ entries.len, if (entries.len != 1) "s" else "" });
     if (ti > 0 or (ti == 0 and td == 0)) try w.print(", {d} insertion{s}(+)", .{ ti, if (ti != 1) "s" else "" });

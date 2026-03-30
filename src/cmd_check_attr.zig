@@ -22,9 +22,9 @@ const version_mod = @import("version.zig");
 const wildmatch_mod = @import("wildmatch.zig");
 
 pub fn nativeCmdCheckAttr(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
-    var attr_names = std.ArrayList([]const u8).init(allocator);
+    var attr_names = std.array_list.Managed([]const u8).init(allocator);
     defer attr_names.deinit();
-    var file_paths = std.ArrayList([]const u8).init(allocator);
+    var file_paths = std.array_list.Managed([]const u8).init(allocator);
     defer file_paths.deinit();
     var all_attrs = false;
     var use_stdin = false;
@@ -116,7 +116,7 @@ pub fn nativeCmdCheckAttr(allocator: std.mem.Allocator, args: *platform_mod.ArgI
     defer allocator.free(cwd);
 
     // helpers.Load gitattributes from various sources
-    var attr_rules = std.ArrayList(AttrRule).init(allocator);
+    var attr_rules = std.array_list.Managed(AttrRule).init(allocator);
     defer {
         for (attr_rules.items) |*rule| rule.deinit(allocator);
         attr_rules.deinit();
@@ -151,7 +151,7 @@ pub fn nativeCmdCheckAttr(allocator: std.mem.Allocator, args: *platform_mod.ArgI
         }
 
         // helpers.Load directory-specific .gitattributes from each directory in path
-        var dir_rules = std.ArrayList(AttrRule).init(allocator);
+        var dir_rules = std.array_list.Managed(AttrRule).init(allocator);
         defer {
             for (dir_rules.items) |*rule| rule.deinit(allocator);
             dir_rules.deinit();
@@ -249,7 +249,7 @@ pub const AttrValue = struct {
 
 pub const AttrRule = struct {
     pattern: []const u8,
-    attrs: std.ArrayList(AttrValue),
+    attrs: std.array_list.Managed(AttrValue),
     pub fn deinit(self: *AttrRule, alloc: std.mem.Allocator) void {
         alloc.free(self.pattern);
         for (self.attrs.items) |*attr| attr.deinit(alloc);
@@ -258,7 +258,7 @@ pub const AttrRule = struct {
 };
 
 
-pub fn loadAttrFile(allocator: std.mem.Allocator, repo_root: []const u8, subdir: []const u8, platform_impl: *const platform_mod.Platform, rules: *std.ArrayList(AttrRule)) !void {
+pub fn loadAttrFile(allocator: std.mem.Allocator, repo_root: []const u8, subdir: []const u8, platform_impl: *const platform_mod.Platform, rules: *std.array_list.Managed(AttrRule)) !void {
     const attr_path = if (subdir.len > 0)
         try std.fmt.allocPrint(allocator, "{s}/{s}/.gitattributes", .{ repo_root, subdir })
     else
@@ -286,7 +286,7 @@ fn ensureMacros(allocator: std.mem.Allocator) void {
     }
 }
 
-pub fn parseAttrContent(allocator: std.mem.Allocator, content: []const u8, prefix: []const u8, rules: *std.ArrayList(AttrRule)) !void {
+pub fn parseAttrContent(allocator: std.mem.Allocator, content: []const u8, prefix: []const u8, rules: *std.array_list.Managed(AttrRule)) !void {
     ensureMacros(allocator);
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |line| {
@@ -297,7 +297,7 @@ pub fn parseAttrContent(allocator: std.mem.Allocator, content: []const u8, prefi
             const macro_rest = trimmed["[attr]".len..];
             var mparts = std.mem.tokenizeAny(u8, macro_rest, " \t");
             const macro_name = mparts.next() orelse continue;
-            var macro_attrs = std.ArrayList(AttrValue).init(allocator);
+            var macro_attrs = std.array_list.Managed(AttrValue).init(allocator);
             while (mparts.next()) |aspec| {
                 if (aspec.len == 0) continue;
                 if (aspec[0] == '!') {
@@ -334,7 +334,7 @@ pub fn parseAttrContent(allocator: std.mem.Allocator, content: []const u8, prefi
             }
             if (end_idx >= trimmed.len) continue; // no closing quote
             const quoted_content = trimmed[1..end_idx];
-            var unquoted = std.ArrayList(u8).init(allocator);
+            var unquoted = std.array_list.Managed(u8).init(allocator);
             defer unquoted.deinit();
             var qi: usize = 0;
             while (qi < quoted_content.len) {
@@ -381,7 +381,7 @@ pub fn parseAttrContent(allocator: std.mem.Allocator, content: []const u8, prefi
             full_pattern = try allocator.dupe(u8, pattern);
         }
 
-        var attrs = std.ArrayList(AttrValue).init(allocator);
+        var attrs = std.array_list.Managed(AttrValue).init(allocator);
         while (parts.next()) |attr_spec| {
             if (attr_spec.len == 0) continue;
 

@@ -98,7 +98,7 @@ pub fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command
         defer allocator.free(content);
 
         // helpers.Parse and display reflog entries in reverse order
-        var entries = std.ArrayList([]const u8).init(allocator);
+        var entries = std.array_list.Managed([]const u8).init(allocator);
         defer entries.deinit();
         var lines = std.mem.splitScalar(u8, content, '\n');
         while (lines.next()) |line| {

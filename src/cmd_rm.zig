@@ -42,7 +42,7 @@ pub fn cmdRm(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     var quiet = false;
     var ignore_unmatch = false;
     var saw_dashdash = false;
-    var files = std.ArrayList([]const u8).init(allocator);
+    var files = std.array_list.Managed([]const u8).init(allocator);
     defer files.deinit();
 
     while (args.next()) |arg| {
@@ -100,9 +100,9 @@ pub fn cmdRm(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
     defer index.deinit();
 
     // helpers.Collect indices to remove (reverse order to preserve indices)
-    var to_remove = std.ArrayList(usize).init(allocator);
+    var to_remove = std.array_list.Managed(usize).init(allocator);
     defer to_remove.deinit();
-    var removed_paths = std.ArrayList([]const u8).init(allocator);
+    var removed_paths = std.array_list.Managed([]const u8).init(allocator);
     defer removed_paths.deinit();
 
     for (files.items) |file_path| {

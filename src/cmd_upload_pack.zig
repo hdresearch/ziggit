@@ -58,7 +58,7 @@ pub fn cmdUploadPack(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     }
 
     // Collect all refs
-    var ref_list = std.ArrayList(RefEntry).init(allocator);
+    var ref_list = std.array_list.Managed(RefEntry).init(allocator);
     defer {
         for (ref_list.items) |entry| {
             allocator.free(entry.name);
@@ -160,7 +160,7 @@ pub fn cmdUploadPack(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
 
     // Read client requests (wants/haves)
     // For now, just read until we get a flush packet and handle basic negotiation
-    const stdin = std.io.getStdIn();
+    const stdin = std.fs.File.stdin();
     var buf: [65536]u8 = undefined;
 
     while (true) {
@@ -227,7 +227,7 @@ const RefEntry = struct {
     hash: []const u8,
 };
 
-fn collectRefs(allocator: std.mem.Allocator, git_dir: []const u8, prefix: []const u8, ref_list: *std.ArrayList(RefEntry)) !void {
+fn collectRefs(allocator: std.mem.Allocator, git_dir: []const u8, prefix: []const u8, ref_list: *std.array_list.Managed(RefEntry)) !void {
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, prefix });
     defer allocator.free(dir_path);
 
@@ -261,7 +261,7 @@ fn collectRefs(allocator: std.mem.Allocator, git_dir: []const u8, prefix: []cons
     }
 }
 
-fn collectPackedRefs(allocator: std.mem.Allocator, git_dir: []const u8, ref_list: *std.ArrayList(RefEntry)) !void {
+fn collectPackedRefs(allocator: std.mem.Allocator, git_dir: []const u8, ref_list: *std.array_list.Managed(RefEntry)) !void {
     const packed_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_dir});
     defer allocator.free(packed_path);
     const content = std.fs.cwd().readFileAlloc(allocator, packed_path, 10 * 1024 * 1024) catch return;

@@ -34,7 +34,7 @@ pub fn nativeCmdApply(allocator: std.mem.Allocator, args: *platform_mod.ArgItera
     var allow_empty = false;
     var verbose = false;
     var p_value: u32 = 1;
-    var patch_files = std.ArrayList([]const u8).init(allocator);
+    var patch_files = std.array_list.Managed([]const u8).init(allocator);
     defer patch_files.deinit();
 
     while (args.next()) |arg| {
@@ -104,7 +104,7 @@ pub fn nativeCmdApply(allocator: std.mem.Allocator, args: *platform_mod.ArgItera
     _ = &recount;
 
     // helpers.Read patch content
-    var all_patch_data = std.ArrayList(u8).init(allocator);
+    var all_patch_data = std.array_list.Managed(u8).init(allocator);
     defer all_patch_data.deinit();
 
     if (patch_files.items.len == 0) {
@@ -263,10 +263,10 @@ pub fn nativeCmdApply(allocator: std.mem.Allocator, args: *platform_mod.ArgItera
 }
 
 // Restored from original main_common.zig
-pub fn parsePatchSet(allocator: std.mem.Allocator, data: []const u8, p_value: u32, corrupt_line: *usize) !std.ArrayList(helpers.Patch) {
-    var patches = std.ArrayList(helpers.Patch).init(allocator);
+pub fn parsePatchSet(allocator: std.mem.Allocator, data: []const u8, p_value: u32, corrupt_line: *usize) !std.array_list.Managed(helpers.Patch) {
+    var patches = std.array_list.Managed(helpers.Patch).init(allocator);
     var lines_iter = std.mem.splitScalar(u8, data, '\n');
-    var lines = std.ArrayList([]const u8).init(allocator);
+    var lines = std.array_list.Managed([]const u8).init(allocator);
     defer lines.deinit();
     while (lines_iter.next()) |line| try lines.append(line);
 
@@ -317,7 +317,7 @@ pub fn parseSinglePatch(allocator: std.mem.Allocator, lines: []const []const u8,
         .new_mode = null,
         .old_mode = null,
         .is_binary = false,
-        .hunks = std.ArrayList(PatchHunk).init(allocator),
+        .hunks = std.array_list.Managed(PatchHunk).init(allocator),
         .added = 0,
         .removed = 0,
     };
@@ -455,7 +455,7 @@ pub fn parseTraditionalPatch(allocator: std.mem.Allocator, lines: []const []cons
         .new_mode = null,
         .old_mode = null,
         .is_binary = false,
-        .hunks = std.ArrayList(PatchHunk).init(allocator),
+        .hunks = std.array_list.Managed(PatchHunk).init(allocator),
         .added = 0,
         .removed = 0,
     };
@@ -540,7 +540,7 @@ pub fn parseHunk(allocator: std.mem.Allocator, lines: []const []const u8, pos: *
         .old_count = old_count,
         .new_start = new_start,
         .new_count = new_count,
-        .lines = std.ArrayList(PatchLine).init(allocator),
+        .lines = std.array_list.Managed(PatchLine).init(allocator),
     };
 
     while (pos.* < lines.len) {

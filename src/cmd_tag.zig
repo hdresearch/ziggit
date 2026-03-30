@@ -44,9 +44,9 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var list_mode = false;
     var force = false;
     var verify_mode = false;
-    var delete_names = std.ArrayList([]const u8).init(allocator);
+    var delete_names = std.array_list.Managed([]const u8).init(allocator);
     defer delete_names.deinit();
-    var list_patterns = std.ArrayList([]const u8).init(allocator);
+    var list_patterns = std.array_list.Managed([]const u8).init(allocator);
     defer list_patterns.deinit();
     var sort_key: ?[]const u8 = "refname";
     var ignore_case = false;
@@ -272,7 +272,7 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         };
         defer tags_dir.close();
         
-        var tag_list = std.ArrayList([]u8).init(allocator);
+        var tag_list = std.array_list.Managed([]u8).init(allocator);
         defer {
             for (tag_list.items) |tag| {
                 allocator.free(tag);
@@ -488,7 +488,7 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         }
         
         // helpers.Clean up message: strip comments, leading/trailing blanks, trailing whitespace per line
-        var msg_lines_arr = std.ArrayList([]const u8).init(allocator);
+        var msg_lines_arr = std.array_list.Managed([]const u8).init(allocator);
         defer msg_lines_arr.deinit();
         {
             var msg_lines = std.mem.splitScalar(u8, message.?, '\n');
@@ -509,7 +509,7 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             lead_skip += 1;
         }
         // helpers.Build final message
-        var cleaned_msg = std.ArrayList(u8).init(allocator);
+        var cleaned_msg = std.array_list.Managed(u8).init(allocator);
         defer cleaned_msg.deinit();
         for (msg_lines_arr.items[lead_skip..]) |mline| {
             try cleaned_msg.appendSlice(mline);
@@ -560,7 +560,7 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         defer allocator.free(obj_path);
         
         // Compress and write
-        var full_obj = std.ArrayList(u8).init(allocator);
+        var full_obj = std.array_list.Managed(u8).init(allocator);
         defer full_obj.deinit();
         try full_obj.appendSlice(header);
         try full_obj.appendSlice(tag_content);

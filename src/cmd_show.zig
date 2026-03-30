@@ -37,7 +37,7 @@ pub fn cmdShow(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     };
     defer allocator.free(git_path);
 
-    var refs_to_show = std.ArrayList([]const u8).init(allocator);
+    var refs_to_show = std.array_list.Managed([]const u8).init(allocator);
     defer refs_to_show.deinit();
     var name_only = false;
     var pretty_format: ?[]const u8 = null;
@@ -177,7 +177,7 @@ pub fn showCommitHeaderOnly(git_object: objects.GitObject, commit_hash: []const 
     var lines_iter = std.mem.splitSequence(u8, git_object.data, "\n");
     var author_line: ?[]const u8 = null;
     var empty_line_found = false;
-    var message = std.ArrayList(u8).init(allocator);
+    var message = std.array_list.Managed(u8).init(allocator);
     defer message.deinit();
 
     while (lines_iter.next()) |line| {
@@ -293,10 +293,10 @@ pub fn showCommitWithOpts(git_object: objects.GitObject, commit_hash: []const u8
     var hdr_lines = std.mem.splitSequence(u8, git_object.data, "\n");
     var tree_hash: ?[]const u8 = null;
     var author_line: ?[]const u8 = null;
-    var parent_hashes_list = std.ArrayList([]const u8).init(allocator);
+    var parent_hashes_list = std.array_list.Managed([]const u8).init(allocator);
     defer parent_hashes_list.deinit();
     var empty_line_found = false;
-    var message = std.ArrayList(u8).init(allocator);
+    var message = std.array_list.Managed(u8).init(allocator);
     defer message.deinit();
 
     while (hdr_lines.next()) |line| {
@@ -318,7 +318,7 @@ pub fn showCommitWithOpts(git_object: objects.GitObject, commit_hash: []const u8
 
     // helpers.Show helpers.Merge line for merge commits
     if (is_merge) {
-        var merge_line = std.ArrayList(u8).init(allocator);
+        var merge_line = std.array_list.Managed(u8).init(allocator);
         defer merge_line.deinit();
         try merge_line.appendSlice("Merge:");
         for (parent_hashes_list.items) |ph| {
@@ -412,7 +412,7 @@ pub fn showCommitWithOpts(git_object: objects.GitObject, commit_hash: []const u8
 fn showCommitDiffOnly(git_object: objects.GitObject, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
     // Extract tree hash and parent hashes from commit
     var tree_hash: ?[]const u8 = null;
-    var parent_hashes = std.ArrayList([]const u8).init(allocator);
+    var parent_hashes = std.array_list.Managed([]const u8).init(allocator);
     defer parent_hashes.deinit();
     var line_iter = std.mem.splitScalar(u8, git_object.data, '\n');
     while (line_iter.next()) |line| {
@@ -453,7 +453,7 @@ pub fn showTagObject(git_object: objects.GitObject, git_path: []const u8, platfo
     var tag_name: ?[]const u8 = null;
     var tagger_line: ?[]const u8 = null;
     var empty_line_found = false;
-    var message = std.ArrayList(u8).init(allocator);
+    var message = std.array_list.Managed(u8).init(allocator);
     defer message.deinit();
 
     while (lines.next()) |line| {
@@ -532,7 +532,7 @@ pub fn showTreeObject(git_object: objects.GitObject, platform_impl: *const platf
         const hash_bytes = git_object.data[i..i + 20];
         const hash_hex = try allocator.alloc(u8, 40);
         defer allocator.free(hash_hex);
-        _ = std.fmt.bufPrint(hash_hex, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch break;
+        _ = std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes}) catch break;
         
         i += 20;
         
@@ -568,7 +568,7 @@ pub fn showTreeObjectFormatted(git_object: objects.GitObject, platform_impl: *co
         const hash_bytes = git_object.data[i..i + 20];
         const hash_hex = try allocator.alloc(u8, 40);
         defer allocator.free(hash_hex);
-        _ = std.fmt.bufPrint(hash_hex, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch break;
+        _ = std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes}) catch break;
         
         i += 20;
         
@@ -607,7 +607,7 @@ pub fn showTreeObjectSimple(git_object: objects.GitObject, ref_name: []const u8,
 
 pub fn showRefToWorkingTreeDiff(ref_name: []const u8, index: *const index_mod.Index, cwd: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, quiet: bool, is_cached: bool) !bool {
     // helpers.For now, collect entries and show patch-style output
-    var diff_entries = std.ArrayList(cmd_show.DiffStatEntry).init(allocator);
+    var diff_entries = std.array_list.Managed(cmd_show.DiffStatEntry).init(allocator);
     defer {
         for (diff_entries.items) |e| allocator.free(e.path);
         diff_entries.deinit();
@@ -631,7 +631,7 @@ pub fn showRefToWorkingTreeDiff(ref_name: []const u8, index: *const index_mod.In
         const old_content = if (de.is_new) try allocator.dupe(u8, "") else blk: {
             if (tree_entries_map.get(de.path)) |te| {
                 var hash_buf: [40]u8 = undefined;
-                _ = std.fmt.bufPrint(&hash_buf, "{}", .{std.fmt.fmtSliceHexLower(&te.hash)}) catch unreachable;
+                _ = std.fmt.bufPrint(&hash_buf, "{x}", .{&te.hash}) catch unreachable;
                 break :blk helpers.readBlobContent(allocator, git_path, &hash_buf, platform_impl) catch try allocator.dupe(u8, "");
             } else break :blk try allocator.dupe(u8, "");
         };
@@ -688,7 +688,7 @@ pub fn showStagedDiff(index: *const index_mod.Index, git_path: []const u8, platf
             const empty_hash = try empty_blob.hash(allocator);
             defer allocator.free(empty_hash);
             
-            const index_hash = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
             defer allocator.free(index_hash);
             
             const short_empty_hash = empty_hash[0..7];
@@ -702,7 +702,7 @@ pub fn showStagedDiff(index: *const index_mod.Index, git_path: []const u8, platf
         }
     } else {
         for (index.entries.items) |entry| {
-            const index_hash = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
             defer allocator.free(index_hash);
             
             // helpers.Check if this file exists in helpers.HEAD tree with same hash
@@ -759,7 +759,7 @@ pub fn showWorkingTreeDiff(index: *const index_mod.Index, cwd: []const u8, platf
             defer allocator.free(current_hash);
             
             // helpers.Compare with index hash
-            const index_hash = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
             defer allocator.free(index_hash);
             
             if (!std.mem.eql(u8, current_hash, index_hash)) {
@@ -793,7 +793,7 @@ pub fn showWorkingTreeDiff(index: *const index_mod.Index, cwd: []const u8, platf
             defer allocator.free(empty_hash);
             
             // helpers.Get index hash
-            const index_hash = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
+            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
             defer allocator.free(index_hash);
             
             const short_index_hash = index_hash[0..7];

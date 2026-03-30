@@ -29,9 +29,9 @@ pub fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, com
     var sort_reverse = false;
     var count_limit: ?usize = null;
     var quoting_style: enum { none, shell, perl, python, tcl } = .none;
-    var patterns = std.ArrayList([]const u8).init(allocator);
+    var patterns = std.array_list.Managed([]const u8).init(allocator);
     defer patterns.deinit();
-    var exclude_patterns = std.ArrayList([]const u8).init(allocator);
+    var exclude_patterns = std.array_list.Managed([]const u8).init(allocator);
     defer exclude_patterns.deinit();
     var omit_empty = false;
     var ignore_case = false;
@@ -117,7 +117,7 @@ pub fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, com
             use_stdin = true;
             // helpers.Read patterns from stdin
             const stdin_data = read_stdin_blk: {
-                var buf2 = std.ArrayList(u8).init(allocator);
+                var buf2 = std.array_list.Managed(u8).init(allocator);
                 var tmp2: [4096]u8 = undefined;
                 while (true) {
                     const n2 = std.posix.read(0, &tmp2) catch break;
@@ -183,7 +183,7 @@ pub fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, com
     }
 
     // helpers.Collect all helpers.refs
-    var ref_list = std.ArrayList(helpers.RefEntry).init(allocator);
+    var ref_list = std.array_list.Managed(helpers.RefEntry).init(allocator);
     defer {
         for (ref_list.items) |entry| {
             allocator.free(entry.name);
@@ -587,7 +587,7 @@ pub fn getRefField(field: []const u8, refname: []const u8, objectname: []const u
 
 
 pub fn formatRefOutput(allocator: std.mem.Allocator, format: []const u8, refname: []const u8, objectname: []const u8, objecttype: []const u8, data: []const u8, quoting: anytype, symref_target: ?[]const u8) ![]u8 {
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     defer result.deinit();
 
     var idx: usize = 0;

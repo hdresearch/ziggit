@@ -51,7 +51,7 @@ pub fn nativeCmdUpdateServerInfo(allocator: std.mem.Allocator, args: [][]const u
     const info_refs_path = std.fmt.allocPrint(allocator, "{s}/info/refs", .{git_dir}) catch unreachable;
     defer allocator.free(info_refs_path);
     {
-        var ref_list = std.ArrayList(helpers.RefEntry).init(allocator);
+        var ref_list = std.array_list.Managed(helpers.RefEntry).init(allocator);
         defer {
             for (ref_list.items) |entry| {
                 allocator.free(entry.name);
@@ -90,7 +90,7 @@ pub fn nativeCmdUpdateServerInfo(allocator: std.mem.Allocator, args: [][]const u
         }.lessThan);
 
         // helpers.Write info/helpers.refs (only if content changed, unless force)
-        var content = std.ArrayList(u8).init(allocator);
+        var content = std.array_list.Managed(u8).init(allocator);
         defer content.deinit();
         for (ref_list.items) |entry| {
             const line = std.fmt.allocPrint(allocator, "{s}\t{s}\n", .{ entry.hash, entry.name }) catch continue;
@@ -119,7 +119,7 @@ pub fn nativeCmdUpdateServerInfo(allocator: std.mem.Allocator, args: [][]const u
     const packs_file_path = std.fmt.allocPrint(allocator, "{s}/objects/info/packs", .{git_dir}) catch unreachable;
     defer allocator.free(packs_file_path);
     {
-        var content = std.ArrayList(u8).init(allocator);
+        var content = std.array_list.Managed(u8).init(allocator);
         defer content.deinit();
 
         const pack_dir = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir}) catch unreachable;
@@ -128,7 +128,7 @@ pub fn nativeCmdUpdateServerInfo(allocator: std.mem.Allocator, args: [][]const u
         if (std.fs.cwd().openDir(pack_dir, .{ .iterate = true })) |pd| {
             var pack_d = pd;
             defer pack_d.close();
-            var pack_names = std.ArrayList([]const u8).init(allocator);
+            var pack_names = std.array_list.Managed([]const u8).init(allocator);
             defer {
                 for (pack_names.items) |n| allocator.free(n);
                 pack_names.deinit();

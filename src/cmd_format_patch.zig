@@ -110,7 +110,7 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *platform_mod.ArgItera
     defer allocator.free(tip_hash);
 
     // helpers.Walk from tip back to base, collecting commits
-    var commit_list = std.ArrayList([]const u8).init(allocator);
+    var commit_list = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (commit_list.items) |h| allocator.free(h);
         commit_list.deinit();

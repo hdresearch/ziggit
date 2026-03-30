@@ -44,7 +44,7 @@ pub fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     // helpers.Parse arguments
     var reset_mode: enum { soft, mixed, hard, merge_mode } = .mixed; // default is mixed
     var target_ref: ?[]const u8 = null;
-    var reset_paths = std.ArrayList([]const u8).init(allocator);
+    var reset_paths = std.array_list.Managed([]const u8).init(allocator);
     defer reset_paths.deinit();
     var seen_separator = false;
     var quiet = false;
@@ -363,7 +363,7 @@ pub fn resetIndex(git_path: []const u8, commit_hash: []const u8, platform_impl: 
 
     // helpers.Use read-tree to reset the index
     // helpers.Build index entries from the tree
-    var entries = std.ArrayList(index_mod.IndexEntry).init(allocator);
+    var entries = std.array_list.Managed(index_mod.IndexEntry).init(allocator);
     defer {
         for (entries.items) |*entry| {
             allocator.free(entry.path);
@@ -420,8 +420,8 @@ fn interactiveResetPatch(allocator: std.mem.Allocator, platform_impl: *const pla
         }
     }
 
-    const stdin = std.io.getStdIn();
-    var entries_to_remove = std.ArrayList(usize).init(allocator);
+    const stdin = std.fs.File.stdin();
+    var entries_to_remove = std.array_list.Managed(usize).init(allocator);
     defer entries_to_remove.deinit();
 
     // Process each index entry

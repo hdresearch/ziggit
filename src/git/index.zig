@@ -129,13 +129,13 @@ pub const IndexEntry = struct {
 };
 
 pub const Index = struct {
-    entries: std.ArrayList(IndexEntry),
+    entries: std.array_list.Managed(IndexEntry),
     allocator: std.mem.Allocator,
     version: u32 = 2,
 
     pub fn init(allocator: std.mem.Allocator) Index {
         return Index{
-            .entries = std.ArrayList(IndexEntry).init(allocator),
+            .entries = std.array_list.Managed(IndexEntry).init(allocator),
             .allocator = allocator,
             .version = 2,
         };
@@ -279,7 +279,7 @@ pub const Index = struct {
         // For v2/v3 with long paths (0xFFF), read until NUL
         if (version < 4 and actual_path_len == 0xFFF) {
             // Path is longer than 0xFFF - read until NUL byte
-            var path_buf = std.ArrayList(u8).init(self.allocator);
+            var path_buf = std.array_list.Managed(u8).init(self.allocator);
             defer path_buf.deinit();
             
             while (true) {
@@ -373,7 +373,7 @@ pub const Index = struct {
         const max_total_extension_size = 100 * 1024 * 1024; // Increased to 100MB max for very large repos
         
         // Track seen extensions to detect duplicates and store useful ones
-        var seen_extensions = std.ArrayList([4]u8).init(self.allocator);
+        var seen_extensions = std.array_list.Managed([4]u8).init(self.allocator);
         defer seen_extensions.deinit();
         
         // Store tree cache for potential future use
@@ -545,7 +545,7 @@ pub const Index = struct {
             try std.fmt.allocPrint(self.allocator, "{s}/index", .{git_dir});
         defer self.allocator.free(index_path);
 
-        var buffer = std.ArrayList(u8).init(self.allocator);
+        var buffer = std.array_list.Managed(u8).init(self.allocator);
         defer buffer.deinit();
         
         const writer = buffer.writer();
@@ -916,7 +916,7 @@ fn isValidExtensionSignature(sig: []const u8) bool {
 
 /// Check for index corruption or unusual conditions with enhanced validation
 pub fn validateIndex(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![][]const u8 {
-    var issues = std.ArrayList([]const u8).init(allocator);
+    var issues = std.array_list.Managed([]const u8).init(allocator);
     
     // First check if index file exists
     const index_path = try std.fmt.allocPrint(allocator, "{s}/index", .{git_dir});
@@ -989,7 +989,7 @@ pub const IndexOperations = struct {
     
     /// Get conflicted files from index
     pub fn getConflictedFiles(self: IndexOperations, git_dir: []const u8, platform_impl: anytype) ![][]const u8 {
-        var conflicts = std.ArrayList([]const u8).init(self.allocator);
+        var conflicts = std.array_list.Managed([]const u8).init(self.allocator);
         
         // Load index and look for entries with stage > 0
         var index = Index.load(git_dir, platform_impl, self.allocator) catch return conflicts.toOwnedSlice();
@@ -1133,7 +1133,7 @@ pub fn optimizeIndex(self: *Index) void {
 
 /// Get index entries that match a path pattern (simple glob support)
 pub fn getEntriesMatching(self: Index, pattern: []const u8, allocator: std.mem.Allocator) ![]IndexEntry {
-    var matching = std.ArrayList(IndexEntry).init(allocator);
+    var matching = std.array_list.Managed(IndexEntry).init(allocator);
     
     for (self.entries.items) |entry| {
         if (pathMatches(entry.path, pattern)) {
@@ -1328,8 +1328,8 @@ pub const IndexExtension = struct {
 
 /// Enhanced index parsing with extension support
 pub fn parseIndexWithExtensions(data: []const u8, allocator: std.mem.Allocator) !struct {
-    entries: std.ArrayList(IndexEntry),
-    extensions: std.ArrayList(IndexExtension),
+    entries: std.array_list.Managed(IndexEntry),
+    extensions: std.array_list.Managed(IndexExtension),
     version: u32,
 } {
     if (data.len < 12) return error.InvalidIndex;
@@ -1342,7 +1342,7 @@ pub fn parseIndexWithExtensions(data: []const u8, allocator: std.mem.Allocator) 
     
     if (version < 2 or version > 4) return error.UnsupportedIndexVersion;
     
-    var entries = std.ArrayList(IndexEntry).init(allocator);
+    var entries = std.array_list.Managed(IndexEntry).init(allocator);
     errdefer {
         for (entries.items) |entry| {
             entry.deinit(allocator);
@@ -1350,7 +1350,7 @@ pub fn parseIndexWithExtensions(data: []const u8, allocator: std.mem.Allocator) 
         entries.deinit();
     }
     
-    var extensions = std.ArrayList(IndexExtension).init(allocator);
+    var extensions = std.array_list.Managed(IndexExtension).init(allocator);
     errdefer {
         for (extensions.items) |ext| {
             ext.deinit(allocator);
@@ -1428,7 +1428,7 @@ pub fn analyzeIndexExtensions(git_dir: []const u8, platform_impl: anytype, alloc
     defer allocator.free(index_path);
     
     const data = platform_impl.fs.readFile(allocator, index_path) catch return IndexExtensionAnalysis{
-        .extensions_found = std.ArrayList(ExtensionInfo).init(allocator),
+        .extensions_found = std.array_list.Managed(ExtensionInfo).init(allocator),
         .total_extension_size = 0,
         .has_tree_cache = false,
         .has_resolve_undo = false,
@@ -1439,7 +1439,7 @@ pub fn analyzeIndexExtensions(git_dir: []const u8, platform_impl: anytype, alloc
     defer allocator.free(data);
     
     var analysis = IndexExtensionAnalysis{
-        .extensions_found = std.ArrayList(ExtensionInfo).init(allocator),
+        .extensions_found = std.array_list.Managed(ExtensionInfo).init(allocator),
         .total_extension_size = 0,
         .has_tree_cache = false,
         .has_resolve_undo = false,
@@ -1532,7 +1532,7 @@ pub const ExtensionInfo = struct {
 
 /// Analysis of all extensions in an index file
 pub const IndexExtensionAnalysis = struct {
-    extensions_found: std.ArrayList(ExtensionInfo),
+    extensions_found: std.array_list.Managed(ExtensionInfo),
     total_extension_size: u64,
     has_tree_cache: bool,
     has_resolve_undo: bool,

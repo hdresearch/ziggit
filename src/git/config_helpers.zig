@@ -123,7 +123,7 @@ pub const ConfigHelpers = struct {
     
     /// Get all remotes configured in the repository
     pub fn getAllRemotes(self: ConfigHelpers, allocator: std.mem.Allocator) ![]RemoteInfo {
-        var remotes = std.ArrayList(RemoteInfo).init(allocator);
+        var remotes = std.array_list.Managed(RemoteInfo).init(allocator);
         var seen_remotes = std.StringHashMap(void).init(allocator);
         defer seen_remotes.deinit();
         
@@ -297,13 +297,13 @@ pub fn getUserInfo(git_dir: []const u8, allocator: std.mem.Allocator) !UserInfo 
 /// Returns error.UnclosedQuote if there's an unmatched quote.
 /// This mimics git's split_cmdline() function.
 pub fn splitCmdline(input: []const u8, allocator: std.mem.Allocator) ![][]const u8 {
-    var words = std.ArrayList([]const u8).init(allocator);
+    var words = std.array_list.Managed([]const u8).init(allocator);
     errdefer {
         for (words.items) |w| allocator.free(w);
         words.deinit();
     }
 
-    var buf = std.ArrayList(u8).init(allocator);
+    var buf = std.array_list.Managed(u8).init(allocator);
     defer buf.deinit();
 
     var i: usize = 0;
@@ -481,7 +481,7 @@ const git_helpers_mod = @import("../git_helpers.zig");
     if (overrides.items.len == 0) return;
 
     // Build GIT_CONFIG_PARAMETERS format: 'key=value' 'key=value' ...
-    var buf = std.ArrayList(u8).init(allocator);
+    var buf = std.array_list.Managed(u8).init(allocator);
     defer buf.deinit();
 
     for (overrides.items) |entry| {
@@ -516,7 +516,7 @@ const git_helpers_mod = @import("../git_helpers.zig");
 /// Returns the alias value or null if not found.
 fn resolveAliasFromContent(content: []const u8, alias_key: []const u8, config_path: []const u8, allocator: std.mem.Allocator, platform_impl: anytype) ?[]u8 {
     const git_helpers_mod2 = @import("../git_helpers.zig");
-    var entries = std.ArrayList(git_helpers_mod2.CfgEntry).init(allocator);
+    var entries = std.array_list.Managed(git_helpers_mod2.CfgEntry).init(allocator);
     defer { for (entries.items) |*e| e.deinit(allocator); entries.deinit(); }
     git_helpers_mod2.cfgParseEntries(content, &entries, allocator) catch return null;
     var last_entry: ?*const git_helpers_mod2.CfgEntry = null;

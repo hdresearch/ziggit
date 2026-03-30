@@ -286,7 +286,7 @@ pub fn findTagInHistory(git_path: []const u8, start_hash: []const u8, tag_map: *
         visited.deinit();
     }
     
-    var commit_stack = std.ArrayList([]u8).init(allocator);
+    var commit_stack = std.array_list.Managed([]u8).init(allocator);
     defer {
         for (commit_stack.items) |hash| {
             allocator.free(hash);
@@ -341,7 +341,7 @@ pub fn findTagInHistory(git_path: []const u8, start_hash: []const u8, tag_map: *
 
 pub fn findTagInHistoryWithDistance(git_path: []const u8, start_hash: []const u8, tag_map: *const std.StringHashMap([]u8), include_lightweight: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !?helpers.TagWithDistance {
     // helpers.BFS to find closest tagged ancestor
-    var queue = std.ArrayList(struct { hash: []u8, depth: u32 }).init(allocator);
+    var queue = std.array_list.Managed(struct { hash: []u8, depth: u32 }).init(allocator);
     defer {
         for (queue.items) |item| allocator.free(item.hash);
         queue.deinit();

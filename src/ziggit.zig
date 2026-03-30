@@ -533,7 +533,7 @@ pub const Repository = struct {
     
     /// Detailed status implementation for when ultra-fast path is not sufficient
     fn statusPorcelainDetailed(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
-        var output = std.ArrayList(u8).init(allocator);
+        var output = std.array_list.Managed(u8).init(allocator);
         defer output.deinit();
 
         // Use stack buffer for index path
@@ -921,7 +921,7 @@ pub const Repository = struct {
         const branches_dir = try std.fmt.allocPrint(allocator, "{s}/refs/heads", .{self.git_dir});
         defer allocator.free(branches_dir);
 
-        var branches = std.ArrayList([]const u8).init(allocator);
+        var branches = std.array_list.Managed([]const u8).init(allocator);
         errdefer {
             for (branches.items) |branch| {
                 allocator.free(branch);
@@ -974,7 +974,7 @@ pub const Repository = struct {
         std.crypto.hash.Sha1.hash(blob_content, &hash, .{});
 
         var hash_hex: [40]u8 = undefined;
-        _ = std.fmt.bufPrint(&hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&hash)}) catch unreachable;
+        _ = std.fmt.bufPrint(&hash_hex, "{x}", .{&hash}) catch unreachable;
 
         // Compress and save
         try self.saveObject(&hash_hex, blob_content);
@@ -1033,7 +1033,7 @@ pub const Repository = struct {
         std.crypto.hash.Sha1.hash(commit_object, &commit_hash, .{});
 
         var commit_hash_hex: [40]u8 = undefined;
-        _ = std.fmt.bufPrint(&commit_hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&commit_hash)}) catch unreachable;
+        _ = std.fmt.bufPrint(&commit_hash_hex, "{x}", .{&commit_hash}) catch unreachable;
 
         try self.saveObject(&commit_hash_hex, commit_object);
         try self.updateHead(&commit_hash_hex);
@@ -1053,7 +1053,7 @@ pub const Repository = struct {
         defer git_index.deinit();
 
         // Collect paths to remove and paths to update (with new hash + stat)
-        var to_remove = std.ArrayList([]const u8).init(self.allocator);
+        var to_remove = std.array_list.Managed([]const u8).init(self.allocator);
         defer {
             for (to_remove.items) |p| self.allocator.free(p);
             to_remove.deinit();
@@ -1068,7 +1068,7 @@ pub const Repository = struct {
             ctime_s: u32,
             ctime_ns: u32,
         };
-        var to_update = std.ArrayList(UpdateInfo).init(self.allocator);
+        var to_update = std.array_list.Managed(UpdateInfo).init(self.allocator);
         defer {
             for (to_update.items) |u| self.allocator.free(u.path);
             to_update.deinit();
@@ -1109,7 +1109,7 @@ pub const Repository = struct {
                 defer self.allocator.free(blob_content);
 
                 var hash_hex: [40]u8 = undefined;
-                _ = std.fmt.bufPrint(&hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&new_hash)}) catch unreachable;
+                _ = std.fmt.bufPrint(&hash_hex, "{x}", .{&new_hash}) catch unreachable;
                 try self.saveObject(&hash_hex, blob_content);
 
                 const file_stat = try file.stat();
@@ -1197,7 +1197,7 @@ pub const Repository = struct {
             std.crypto.hash.Sha1.hash(tag_object, &tag_hash, .{});
 
             var tag_hash_hex: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&tag_hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&tag_hash)}) catch unreachable;
+            _ = std.fmt.bufPrint(&tag_hash_hex, "{x}", .{&tag_hash}) catch unreachable;
 
             try self.saveObject(&tag_hash_hex, tag_object);
             try tag_file.writeAll(&tag_hash_hex);
@@ -1309,7 +1309,7 @@ pub const Repository = struct {
         const idx_writer = @import("git/idx_writer.zig");
 
         // Collect local refs for negotiation
-        var local_refs_list = std.ArrayList(smart_http.LocalRef).init(self.allocator);
+        var local_refs_list = std.array_list.Managed(smart_http.LocalRef).init(self.allocator);
         defer local_refs_list.deinit();
 
         // Read refs/remotes/origin/* to build have list (non-bare repos)
@@ -1446,7 +1446,7 @@ pub const Repository = struct {
         const idx_writer = @import("git/idx_writer.zig");
 
         // Collect local refs for negotiation (same logic as fetchHttps)
-        var local_refs_list = std.ArrayList(ssh_transport.LocalRef).init(self.allocator);
+        var local_refs_list = std.array_list.Managed(ssh_transport.LocalRef).init(self.allocator);
         defer local_refs_list.deinit();
 
         const remote_refs_dir = try std.fmt.allocPrint(self.allocator, "{s}/refs/remotes/origin", .{self.git_dir});
@@ -1780,7 +1780,7 @@ pub const Repository = struct {
         {
             const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{target});
             defer allocator.free(packed_refs_path);
-            var packed_refs = std.ArrayList(u8).init(allocator);
+            var packed_refs = std.array_list.Managed(u8).init(allocator);
             defer packed_refs.deinit();
             try packed_refs.appendSlice("# pack-refs with: peeled fully-peeled sorted \n");
 
@@ -1946,7 +1946,7 @@ pub const Repository = struct {
         var head_ref: ?[]const u8 = null;
         {
             const pp = std.fmt.bufPrint(&path_buf, "{s}/packed-refs", .{target}) catch return error.PathTooLong;
-            var packed_refs = std.ArrayList(u8).init(allocator);
+            var packed_refs = std.array_list.Managed(u8).init(allocator);
             defer packed_refs.deinit();
             try packed_refs.appendSlice("# pack-refs with: peeled fully-peeled sorted \n");
 
@@ -2564,7 +2564,7 @@ pub const Repository = struct {
 
         // Look up base object by hash (may be in a different pack or loose)
         var base_hash_hex: [40]u8 = undefined;
-        _ = std.fmt.bufPrint(&base_hash_hex, "{}", .{std.fmt.fmtSliceHexLower(base_hash_bytes)}) catch return error.InvalidPackObject;
+        _ = std.fmt.bufPrint(&base_hash_hex, "{x}", .{base_hash_bytes}) catch return error.InvalidPackObject;
 
         const base_obj = try self.readRawObject(&base_hash_hex);
         defer self.allocator.free(base_obj);
@@ -2606,7 +2606,7 @@ pub const Repository = struct {
         }
 
         // Apply delta instructions
-        var result_content = std.ArrayList(u8).init(self.allocator);
+        var result_content = std.array_list.Managed(u8).init(self.allocator);
         errdefer result_content.deinit();
 
         while (dpos < delta.len) {
@@ -2710,7 +2710,7 @@ pub const Repository = struct {
 
             // Convert SHA to hex
             var sha_hex: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&sha_hex, "{}", .{std.fmt.fmtSliceHexLower(sha_bytes)}) catch break;
+            _ = std.fmt.bufPrint(&sha_hex, "{x}", .{sha_bytes}) catch break;
 
             // Check if it's a blob or tree
             if (std.mem.eql(u8, mode, "100644") or std.mem.eql(u8, mode, "100755")) {
@@ -2827,7 +2827,7 @@ pub const Repository = struct {
             } else if (std.mem.eql(u8, mode, "40000")) {
                 // Recursively add subtree
                 var sha_hex: [40]u8 = undefined;
-                _ = std.fmt.bufPrint(&sha_hex, "{}", .{std.fmt.fmtSliceHexLower(sha_bytes)}) catch break;
+                _ = std.fmt.bufPrint(&sha_hex, "{x}", .{sha_bytes}) catch break;
 
                 const subprefix = if (prefix.len == 0) 
                     try self.allocator.dupe(u8, name)
@@ -2977,7 +2977,7 @@ pub const Repository = struct {
     }
 
     fn scanUntracked(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
-        var output = std.ArrayList(u8).init(allocator);
+        var output = std.array_list.Managed(u8).init(allocator);
         defer output.deinit();
 
         const index_path = try std.fmt.allocPrint(allocator, "{s}/index", .{self.git_dir});
@@ -3016,7 +3016,7 @@ pub const Repository = struct {
 
     /// Fast untracked file scanning using HashMap for O(1) lookups - OPTIMIZED
     fn scanUntrackedFast(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
-        var output = std.ArrayList(u8).init(allocator);
+        var output = std.array_list.Managed(u8).init(allocator);
         defer output.deinit();
 
         // Use stack buffer for index path
@@ -3056,7 +3056,7 @@ pub const Repository = struct {
     }
 
     fn scanAllFilesAsUntracked(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
-        var output = std.ArrayList(u8).init(allocator);
+        var output = std.array_list.Managed(u8).init(allocator);
         defer output.deinit();
 
         var dir = std.fs.cwd().openDir(self.path, .{ .iterate = true }) catch return try allocator.dupe(u8, "");
@@ -3077,7 +3077,7 @@ pub const Repository = struct {
 
     /// Fast scan all files as untracked - OPTIMIZED
     fn scanAllFilesAsUntrackedFast(self: *const Repository, allocator: std.mem.Allocator) ![]const u8 {
-        var output = std.ArrayList(u8).init(allocator);
+        var output = std.array_list.Managed(u8).init(allocator);
         defer output.deinit();
 
         var dir = std.fs.cwd().openDir(self.path, .{ .iterate = true }) catch return try allocator.dupe(u8, "");
@@ -3149,7 +3149,7 @@ pub const Repository = struct {
             mode: []const u8,
             hash: [20]u8,
         };
-        var items = std.ArrayList(TreeItem).init(self.allocator);
+        var items = std.array_list.Managed(TreeItem).init(self.allocator);
         defer {
             for (items.items) |item| {
                 self.allocator.free(item.name);
@@ -3233,7 +3233,7 @@ pub const Repository = struct {
         }.lessThan);
 
         // Build tree content
-        var tree_content = std.ArrayList(u8).init(self.allocator);
+        var tree_content = std.array_list.Managed(u8).init(self.allocator);
         defer tree_content.deinit();
 
         for (items.items) |item| {
@@ -3254,7 +3254,7 @@ pub const Repository = struct {
         std.crypto.hash.Sha1.hash(tree_object, &tree_hash, .{});
 
         var tree_hash_hex: [40]u8 = undefined;
-        _ = std.fmt.bufPrint(&tree_hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&tree_hash)}) catch unreachable;
+        _ = std.fmt.bufPrint(&tree_hash_hex, "{x}", .{&tree_hash}) catch unreachable;
 
         try self.saveObject(&tree_hash_hex, tree_object);
         return tree_hash_hex;
@@ -3268,7 +3268,7 @@ pub const Repository = struct {
             else => return err,
         };
 
-        var compressed = std.ArrayList(u8).init(self.allocator);
+        var compressed = std.array_list.Managed(u8).init(self.allocator);
         defer compressed.deinit();
 
         var stream = std.io.fixedBufferStream(object_content);

@@ -17,8 +17,8 @@ fn parseSimpleConfigValue(config_content: []const u8, key: []const u8, allocator
 }
 
 /// Parse all config values for a given key (for multi-valued keys like remote.X.fetch)
-fn parseAllConfigValues(config_content: []const u8, key: []const u8, allocator: std.mem.Allocator) !std.ArrayList([]u8) {
-    var list = std.ArrayList([]u8).init(allocator);
+fn parseAllConfigValues(config_content: []const u8, key: []const u8, allocator: std.mem.Allocator) !std.array_list.Managed([]u8) {
+    var list = std.array_list.Managed([]u8).init(allocator);
     errdefer {
         for (list.items) |v| allocator.free(v);
         list.deinit();
@@ -108,7 +108,7 @@ fn iterConfigValues(content: []const u8, key: []const u8) ConfigValueIterator {
 }
 
 /// A simpler approach: scan config content for all values of a key
-fn getAllConfigValues(config_content: []const u8, key: []const u8, allocator: std.mem.Allocator) !std.ArrayList([]u8) {
+fn getAllConfigValues(config_content: []const u8, key: []const u8, allocator: std.mem.Allocator) !std.array_list.Managed([]u8) {
     // Parse key: section.subsection.varname or section.varname
     const dot1 = std.mem.indexOfScalar(u8, key, '.') orelse return error.InvalidKey;
     const rest = key[dot1 + 1 ..];
@@ -117,7 +117,7 @@ fn getAllConfigValues(config_content: []const u8, key: []const u8, allocator: st
     const subsection: ?[]const u8 = if (dot2) |d| rest[0..d] else null;
     const var_name = if (dot2) |d| rest[d + 1 ..] else rest;
 
-    var result = std.ArrayList([]u8).init(allocator);
+    var result = std.array_list.Managed([]u8).init(allocator);
     errdefer {
         for (result.items) |v| allocator.free(v);
         result.deinit();
@@ -368,8 +368,8 @@ fn resolveSourceGitDir(allocator: std.mem.Allocator, source_path: []const u8) ![
     return error.RepositoryNotFound;
 }
 
-pub fn collectAllRefs(allocator: std.mem.Allocator, git_dir: []const u8) !std.ArrayList(RefEntry) {
-    var result = std.ArrayList(RefEntry).init(allocator);
+pub fn collectAllRefs(allocator: std.mem.Allocator, git_dir: []const u8) !std.array_list.Managed(RefEntry) {
+    var result = std.array_list.Managed(RefEntry).init(allocator);
     errdefer {
         for (result.items) |e| {
             allocator.free(e.name);
@@ -405,7 +405,7 @@ pub fn collectAllRefs(allocator: std.mem.Allocator, git_dir: []const u8) !std.Ar
     return result;
 }
 
-fn collectLooseRefsRecursive(allocator: std.mem.Allocator, git_dir: []const u8, prefix: []const u8, result: *std.ArrayList(RefEntry)) !void {
+fn collectLooseRefsRecursive(allocator: std.mem.Allocator, git_dir: []const u8, prefix: []const u8, result: *std.array_list.Managed(RefEntry)) !void {
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, prefix });
     defer allocator.free(dir_path);
 
@@ -573,7 +573,7 @@ fn refspecMap(allocator: std.mem.Allocator, suffix: []const u8, dst_pattern: []c
 pub fn isAncestor(git_dir: []const u8, ancestor_hash: []const u8, descendant_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) bool {
     if (std.mem.eql(u8, ancestor_hash, descendant_hash)) return true;
     // Simple BFS
-    var queue = std.ArrayList([]u8).init(allocator);
+    var queue = std.array_list.Managed([]u8).init(allocator);
     defer {
         for (queue.items) |h| allocator.free(h);
         queue.deinit();
@@ -636,7 +636,7 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     var verbose = false;
     var fetch_tags: enum { auto, yes, no } = .auto;
     var remote_name_arg: ?[]const u8 = null;
-    var cmd_refspecs = std.ArrayList([]const u8).init(allocator);
+    var cmd_refspecs = std.array_list.Managed([]const u8).init(allocator);
     defer cmd_refspecs.deinit();
     var fetch_all = false;
     var prune = false;
@@ -1031,7 +1031,7 @@ fn performLocalFetch(
     defer allocator.free(config_content);
 
     // Resolve fetch refspecs
-    var refspecs = std.ArrayList([]u8).init(allocator);
+    var refspecs = std.array_list.Managed([]u8).init(allocator);
     defer {
         for (refspecs.items) |rs| allocator.free(rs);
         refspecs.deinit();
@@ -1044,7 +1044,7 @@ fn performLocalFetch(
         // Get ALL remote.<name>.fetch values (multi-valued)
         const fetch_key = try std.fmt.allocPrint(allocator, "remote.{s}.fetch", .{remote_name});
         defer allocator.free(fetch_key);
-        var all_fetch = getAllConfigValues(config_content, fetch_key, allocator) catch std.ArrayList([]u8).init(allocator);
+        var all_fetch = getAllConfigValues(config_content, fetch_key, allocator) catch std.array_list.Managed([]u8).init(allocator);
         if (all_fetch.items.len > 0) {
             // Transfer ownership
             for (all_fetch.items) |v| try refspecs.append(v);
@@ -1201,7 +1201,7 @@ fn performLocalFetch(
     }
 
     // Read branch.X.merge for FETCH_HEAD for-merge determination
-    var merge_refs = std.ArrayList([]u8).init(allocator);
+    var merge_refs = std.array_list.Managed([]u8).init(allocator);
     defer {
         for (merge_refs.items) |m| allocator.free(m);
         merge_refs.deinit();
@@ -1210,7 +1210,7 @@ fn performLocalFetch(
         defer allocator.free(current_branch);
         const merge_key = try std.fmt.allocPrint(allocator, "branch.{s}.merge", .{current_branch});
         defer allocator.free(merge_key);
-        var merge_vals = getAllConfigValues(config_content, merge_key, allocator) catch std.ArrayList([]u8).init(allocator);
+        var merge_vals = getAllConfigValues(config_content, merge_key, allocator) catch std.array_list.Managed([]u8).init(allocator);
         // Transfer
         for (merge_vals.items) |v| merge_refs.append(v) catch allocator.free(v);
         merge_vals.items.len = 0;
@@ -1218,7 +1218,7 @@ fn performLocalFetch(
     } else |_| {}
 
     // Apply refspecs and build FETCH_HEAD entries
-    var fetch_head_entries = std.ArrayList(FetchHeadEntry).init(allocator);
+    var fetch_head_entries = std.array_list.Managed(FetchHeadEntry).init(allocator);
     defer {
         for (fetch_head_entries.items) |e| {
             allocator.free(e.hash);
@@ -1233,7 +1233,7 @@ fn performLocalFetch(
 
     // Pre-prune: when --prune is active, prune BEFORE writing refs to resolve D/F conflicts
     if (do_prune) {
-        var prune_refspecs_pre = std.ArrayList([]u8).init(allocator);
+        var prune_refspecs_pre = std.array_list.Managed([]u8).init(allocator);
         defer {
             for (prune_refspecs_pre.items) |rs2| allocator.free(rs2);
             prune_refspecs_pre.deinit();
@@ -1443,7 +1443,7 @@ fn performLocalFetch(
     // also apply configured remote fetch refspecs to update tracking refs.
     // Skip if --refmap="" was given (empty refmap disables tracking updates)
     if (cmd_refspecs.len > 0 and !(has_refmap and refmap_value == null) and !dry_run) {
-        var cfg_refspecs = std.ArrayList([]u8).init(allocator);
+        var cfg_refspecs = std.array_list.Managed([]u8).init(allocator);
         defer {
             for (cfg_refspecs.items) |v| allocator.free(v);
             cfg_refspecs.deinit();
@@ -1455,7 +1455,7 @@ fn performLocalFetch(
             const remote_name_str: []const u8 = remote_name;
             const cfg_fetch_key = try std.fmt.allocPrint(allocator, "remote.{s}.fetch", .{remote_name_str});
             defer allocator.free(cfg_fetch_key);
-            var tmp = getAllConfigValues(config_content, cfg_fetch_key, allocator) catch std.ArrayList([]u8).init(allocator);
+            var tmp = getAllConfigValues(config_content, cfg_fetch_key, allocator) catch std.array_list.Managed([]u8).init(allocator);
             for (tmp.items) |v| try cfg_refspecs.append(v);
             tmp.items.len = 0;
             tmp.deinit();
@@ -1522,7 +1522,7 @@ fn performLocalFetch(
     const fhp = try std.fmt.allocPrint(allocator, "{s}/FETCH_HEAD", .{git_path});
     defer allocator.free(fhp);
 
-    var fh_content = std.ArrayList(u8).init(allocator);
+    var fh_content = std.array_list.Managed(u8).init(allocator);
     defer fh_content.deinit();
 
     // If append mode, read existing content first
@@ -1889,7 +1889,7 @@ fn buildFetchHeadDesc(allocator: std.mem.Allocator, ref_name: []const u8, source
 fn pruneStaleRefs(allocator: std.mem.Allocator, git_path: []const u8, refspecs_raw: []const []u8, remote_refs: []const RefEntry) !void {
     // Parse all refspecs into src/dst pairs
     const ParsedRefspec = struct { src: []const u8, dst: []const u8 };
-    var parsed = std.ArrayList(ParsedRefspec).init(allocator);
+    var parsed = std.array_list.Managed(ParsedRefspec).init(allocator);
     defer parsed.deinit();
 
     for (refspecs_raw) |rs_raw| {
@@ -2002,7 +2002,7 @@ fn removeFromPackedRefs(allocator: std.mem.Allocator, git_path: []const u8, ref_
     const content = readFileContent(allocator, packed_path) catch return;
     defer allocator.free(content);
 
-    var new_content = std.ArrayList(u8).init(allocator);
+    var new_content = std.array_list.Managed(u8).init(allocator);
     defer new_content.deinit();
 
     var skip_peeled = false;
@@ -2048,7 +2048,7 @@ fn setUpstreamConfig(allocator: std.mem.Allocator, config_path: []const u8, bran
     const section = std.fmt.allocPrint(allocator, "[branch \"{s}\"]", .{branch}) catch return;
     defer allocator.free(section);
 
-    var new_content = std.ArrayList(u8).init(allocator);
+    var new_content = std.array_list.Managed(u8).init(allocator);
     defer new_content.deinit();
 
     var found_section = false;
@@ -2264,9 +2264,9 @@ pub fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     };
     defer allocator.free(git_path);
 
-    var pull_flags = std.ArrayList([]const u8).init(allocator);
+    var pull_flags = std.array_list.Managed([]const u8).init(allocator);
     defer pull_flags.deinit();
-    var pull_positionals = std.ArrayList([]const u8).init(allocator);
+    var pull_positionals = std.array_list.Managed([]const u8).init(allocator);
     defer pull_positionals.deinit();
     var no_rebase = false;
     var do_rebase = false;
@@ -2573,7 +2573,7 @@ pub fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
 
         // Check for conflicting files before checkout
         const repo_root = std.fs.path.dirname(git_path) orelse ".";
-        var conflict_files = std.ArrayList([]u8).init(allocator);
+        var conflict_files = std.array_list.Managed([]u8).init(allocator);
         defer {
             for (conflict_files.items) |f| allocator.free(f);
             conflict_files.deinit();
@@ -2845,7 +2845,7 @@ fn findMergeBase(git_path: []const u8, hash1: []const u8, hash2: []const u8, all
     var ancestors1 = std.StringHashMap(void).init(allocator);
     defer ancestors1.deinit();
 
-    var queue1 = std.ArrayList([]const u8).init(allocator);
+    var queue1 = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (queue1.items) |item| allocator.free(item);
         queue1.deinit();
@@ -2872,7 +2872,7 @@ fn findMergeBase(git_path: []const u8, hash1: []const u8, hash2: []const u8, all
     }
 
     // Walk hash2's history and find first common ancestor
-    var queue2 = std.ArrayList([]const u8).init(allocator);
+    var queue2 = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (queue2.items) |item| allocator.free(item);
         queue2.deinit();
@@ -2920,7 +2920,7 @@ fn findMergeBase(git_path: []const u8, hash1: []const u8, hash2: []const u8, all
 }
 
 /// Collect conflicting files when pulling into void
-fn collectPullIntoVoidConflicts(git_path: []const u8, commit_hash: []const u8, repo_root: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform, conflicts: *std.ArrayList([]u8)) !void {
+fn collectPullIntoVoidConflicts(git_path: []const u8, commit_hash: []const u8, repo_root: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform, conflicts: *std.array_list.Managed([]u8)) !void {
     const commit_obj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch return;
     defer commit_obj.deinit(allocator);
     if (commit_obj.type != .commit) return;
@@ -2940,7 +2940,7 @@ fn collectPullIntoVoidConflicts(git_path: []const u8, commit_hash: []const u8, r
     try collectTreeConflicts(git_path, tree_obj.data, repo_root, "", &idx, allocator, platform_impl, conflicts);
 }
 
-fn collectTreeConflicts(git_path: []const u8, tree_data: []const u8, repo_root: []const u8, prefix: []const u8, idx: *index_mod.Index, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform, conflicts: *std.ArrayList([]u8)) !void {
+fn collectTreeConflicts(git_path: []const u8, tree_data: []const u8, repo_root: []const u8, prefix: []const u8, idx: *index_mod.Index, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform, conflicts: *std.array_list.Managed([]u8)) !void {
     var i: usize = 0;
     while (i < tree_data.len) {
         const space_pos = std.mem.indexOfScalarPos(u8, tree_data, i, ' ') orelse break;
@@ -3038,7 +3038,7 @@ fn clearTrackedFiles(git_path: []const u8, repo_root: []const u8, allocator: std
     defer dir.close();
 
     // Collect parent dirs
-    var parent_dirs = std.ArrayList([]const u8).init(allocator);
+    var parent_dirs = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (parent_dirs.items) |p| allocator.free(p);
         parent_dirs.deinit();

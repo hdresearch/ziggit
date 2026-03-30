@@ -54,7 +54,7 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var add_all_flag = false;
     var update_flag = false;
     var force_flag = false;
-    var collected_add_paths = std.ArrayList([]const u8).init(allocator);
+    var collected_add_paths = std.array_list.Managed([]const u8).init(allocator);
     defer collected_add_paths.deinit();
     while (args.next()) |raw_arg| {
         if (std.mem.eql(u8, raw_arg, "--")) {
@@ -610,12 +610,12 @@ pub fn addDirectoryRecursively(allocator: std.mem.Allocator, repo_root: []const 
 pub fn stageTrackedChanges(allocator: std.mem.Allocator, index: *index_mod.Index, git_path: []const u8, repo_root: []const u8, platform_impl: *const platform_mod.Platform) !void {
     // helpers.Collect paths to remove (deleted files) and paths to re-add (modified files).
     // helpers.We collect first to avoid mutating the list while iterating.
-    var to_remove = std.ArrayList([]const u8).init(allocator);
+    var to_remove = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (to_remove.items) |p| allocator.free(p);
         to_remove.deinit();
     }
-    var to_readd = std.ArrayList([]const u8).init(allocator);
+    var to_readd = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (to_readd.items) |p| allocator.free(p);
         to_readd.deinit();

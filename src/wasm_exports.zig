@@ -230,7 +230,7 @@ export fn ziggit_store_blob(path_ptr: [*]const u8, path_len: u32, data_ptr: [*]c
     const full_content = std.fmt.allocPrint(allocator, "{s}{s}", .{ header, data }) catch return -2;
     defer allocator.free(full_content);
 
-    var compressed = std.ArrayList(u8).init(allocator);
+    var compressed = std.array_list.Managed(u8).init(allocator);
     defer compressed.deinit();
 
     var comp = zlib_compat.compressorWriter(compressed.writer(), .{}) catch return -3;
@@ -386,7 +386,7 @@ export fn ziggit_clone_bare(url_ptr: [*]const u8, url_len: u32, target_ptr: [*]c
     defer allocator.free(body);
 
     // Actually, simplify: just send the standard clone request
-    var request_buf = std.ArrayList(u8).init(allocator);
+    var request_buf = std.array_list.Managed(u8).init(allocator);
     defer request_buf.deinit();
 
     // want HEAD
@@ -571,7 +571,7 @@ export fn ziggit_log(path_ptr: [*]const u8, path_len: u32, max_count: u32, out_p
     const head_rc = ziggit_rev_parse_head(path_ptr, path_len, &head_buf);
     if (head_rc != 0) return -3;
 
-    var json = std.ArrayList(u8).init(allocator);
+    var json = std.array_list.Managed(u8).init(allocator);
     defer json.deinit();
     json.appendSlice("[") catch return -4;
 
@@ -603,7 +603,7 @@ export fn ziggit_log(path_ptr: [*]const u8, path_len: u32, max_count: u32, out_p
         var pos: usize = 0;
 
         // Find headers and message
-        var lines_buf = std.ArrayList(u8).init(allocator);
+        var lines_buf = std.array_list.Managed(u8).init(allocator);
         defer lines_buf.deinit();
 
         while (line_iter.next()) |line| {
@@ -689,7 +689,7 @@ export fn ziggit_ls_tree(tree_hash_ptr: [*]const u8, tree_hash_len: u32, out_ptr
     if (obj.obj_type != .tree) return -7;
 
     // Parse tree entries: each entry is "<mode> <name>\0<20-byte-hash>"
-    var json = std.ArrayList(u8).init(allocator);
+    var json = std.array_list.Managed(u8).init(allocator);
     defer json.deinit();
     json.appendSlice("[") catch return -8;
 
@@ -900,7 +900,7 @@ fn readPackedObjectFromData(pack_data: []const u8, offset: usize, allocator: std
     switch (pack_type) {
         .commit, .tree, .blob, .tag => {
             if (pos >= pack_data.len) return error.ObjectNotFound;
-            var decompressed = std.ArrayList(u8).init(allocator);
+            var decompressed = std.array_list.Managed(u8).init(allocator);
             defer decompressed.deinit();
             var stream = std.io.fixedBufferStream(pack_data[pos..]);
             zlib_compat.decompress(stream.reader(), decompressed.writer()) catch return error.ObjectNotFound;
@@ -933,7 +933,7 @@ fn readPackedObjectFromData(pack_data: []const u8, offset: usize, allocator: std
             const base_offset = offset - base_offset_delta;
             const base_object = try readPackedObjectFromData(pack_data, base_offset, allocator);
             defer base_object.deinit(allocator);
-            var delta_data = std.ArrayList(u8).init(allocator);
+            var delta_data = std.array_list.Managed(u8).init(allocator);
             defer delta_data.deinit();
             var stream = std.io.fixedBufferStream(pack_data[pos..]);
             zlib_compat.decompress(stream.reader(), delta_data.writer()) catch return error.ObjectNotFound;
@@ -949,7 +949,7 @@ fn readPackedObjectFromData(pack_data: []const u8, offset: usize, allocator: std
             const base_offset = findOffsetInIdx(idx_data, base_sha1[0..20].*) orelse return error.ObjectNotFound;
             const base_object = try readPackedObjectFromData(pack_data, base_offset, allocator);
             defer base_object.deinit(allocator);
-            var delta_data = std.ArrayList(u8).init(allocator);
+            var delta_data = std.array_list.Managed(u8).init(allocator);
             defer delta_data.deinit();
             var stream = std.io.fixedBufferStream(pack_data[pos..]);
             zlib_compat.decompress(stream.reader(), delta_data.writer()) catch return error.ObjectNotFound;
@@ -987,7 +987,7 @@ fn applyDelta(base_data: []const u8, delta: []const u8, allocator: std.mem.Alloc
         shift += 7;
     }
 
-    var result = try std.ArrayList(u8).initCapacity(allocator, result_size);
+    var result = try std.array_list.Managed(u8).initCapacity(allocator, result_size);
     errdefer result.deinit();
 
     while (pos < delta.len) {
@@ -1096,7 +1096,7 @@ fn generateIdxFromPackData(allocator: std.mem.Allocator, pack_data: []const u8) 
         crc: u32,
     };
 
-    var entries = std.ArrayList(IdxEntry).init(allocator);
+    var entries = std.array_list.Managed(IdxEntry).init(allocator);
     defer entries.deinit();
     try entries.ensureTotalCapacity(object_count);
 
@@ -1109,7 +1109,7 @@ fn generateIdxFromPackData(allocator: std.mem.Allocator, pack_data: []const u8) 
         cache.deinit();
     }
 
-    var decompressed = std.ArrayList(u8).init(allocator);
+    var decompressed = std.array_list.Managed(u8).init(allocator);
     defer decompressed.deinit();
 
     var pos: usize = 12;
@@ -1307,7 +1307,7 @@ fn generateIdxFromPackData(allocator: std.mem.Allocator, pack_data: []const u8) 
 }
 
 /// Escape a string for JSON output.
-fn appendJsonEscaped(list: *std.ArrayList(u8), s: []const u8) !void {
+fn appendJsonEscaped(list: *std.array_list.Managed(u8), s: []const u8) !void {
     for (s) |c| {
         switch (c) {
             '"' => try list.appendSlice("\\\""),

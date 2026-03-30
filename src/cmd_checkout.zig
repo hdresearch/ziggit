@@ -330,7 +330,7 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
         const repo_root = std.fs.path.dirname(git_path) orelse ".";
 
         // Load CRLF conversion settings
-        var attr_rules = crlf_mod.loadAttrRules(allocator, repo_root, git_path, platform_impl) catch std.ArrayList(check_attr.AttrRule).init(allocator);
+        var attr_rules = crlf_mod.loadAttrRules(allocator, repo_root, git_path, platform_impl) catch std.array_list.Managed(check_attr.AttrRule).init(allocator);
         defer {
             for (attr_rules.items) |*rule| rule.deinit(allocator);
             attr_rules.deinit();
@@ -653,7 +653,7 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
             }
 
             const repo_root2 = if (std.mem.endsWith(u8, git_path, "/.git")) git_path[0 .. git_path.len - 5] else git_path;
-            var dirty_files = std.ArrayList([]const u8).init(allocator);
+            var dirty_files = std.array_list.Managed([]const u8).init(allocator);
             defer {
                 for (dirty_files.items) |df| allocator.free(df);
                 dirty_files.deinit();
@@ -664,7 +664,7 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                 const target_hash = target_blobs.get(entry.path);
                 // If file is same in current index and target tree, no conflict possible
                 var entry_hash_hex: [40]u8 = undefined;
-                _ = std.fmt.bufPrint(&entry_hash_hex, "{s}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch continue;
+                _ = std.fmt.bufPrint(&entry_hash_hex, "{x}", .{&entry.sha1}) catch continue;
                 if (target_hash) |th| {
                     if (std.mem.eql(u8, &entry_hash_hex, th)) continue;
                 } else {
@@ -935,7 +935,7 @@ pub fn cmdRestore(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     var source: ?[]const u8 = null;
     var staged = false;
     var worktree = true;
-    var paths = std.ArrayList([]const u8).init(allocator);
+    var paths = std.array_list.Managed([]const u8).init(allocator);
     defer paths.deinit();
     var seen_separator = false;
     
@@ -980,7 +980,7 @@ pub fn cmdRestore(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     const repo_root_r = std.fs.path.dirname(git_path) orelse ".";
 
     // Load CRLF conversion settings
-    var attr_rules_r = crlf_mod.loadAttrRules(allocator, repo_root_r, git_path, platform_impl) catch std.ArrayList(check_attr.AttrRule).init(allocator);
+    var attr_rules_r = crlf_mod.loadAttrRules(allocator, repo_root_r, git_path, platform_impl) catch std.array_list.Managed(check_attr.AttrRule).init(allocator);
     defer {
         for (attr_rules_r.items) |*rule| rule.deinit(allocator);
         attr_rules_r.deinit();
@@ -1023,7 +1023,7 @@ pub fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIte
     var temp_mode = false;
     var stdin_mode = false;
     var stdin_z = false;
-    var paths = std.ArrayList([]const u8).init(allocator);
+    var paths = std.array_list.Managed([]const u8).init(allocator);
     defer paths.deinit();
 
     while (args.next()) |arg| {
@@ -1167,7 +1167,7 @@ pub fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIte
 
         // helpers.Load the blob content
         var hash_buf: [40]u8 = undefined;
-        _ = std.fmt.bufPrint(&hash_buf, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch continue;
+        _ = std.fmt.bufPrint(&hash_buf, "{x}", .{&entry.sha1}) catch continue;
 
         const obj = objects.GitObject.load(&hash_buf, git_dir, platform_impl, allocator) catch {
             const msg = std.fmt.allocPrint(allocator, "error: unable to read sha1 file of {s} ({s})\n", .{ entry_path, &hash_buf }) catch continue;

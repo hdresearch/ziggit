@@ -1,22 +1,69 @@
 const std = @import("std");
-const zlib = std.compress.zlib;
+const flate = std.compress.flate;
+const Decompress = flate.Decompress;
+const Compress = flate.Compress;
+const Container = flate.Container;
+const Io = std.Io;
 
 pub fn decompress(reader: anytype, writer: anytype) !void {
-    zlib.decompress(reader, writer) catch return error.InvalidInput;
+    // Read all input from the generic reader into a buffer
+    var input_buf = std.array_list.Managed(u8).init(std.heap.page_allocator);
+    defer input_buf.deinit();
+    while (true) {
+        var tmp: [16384]u8 = undefined;
+        const n = reader.read(&tmp) catch return error.InvalidInput;
+        if (n == 0) break;
+        input_buf.appendSlice(tmp[0..n]) catch return error.InvalidInput;
+    }
+
+    // Decompress using slice-based API and write result
+    const decompressed = decompressSlice(std.heap.page_allocator, input_buf.items) catch return error.InvalidInput;
+    defer std.heap.page_allocator.free(decompressed);
+    writer.writeAll(decompressed) catch return error.InvalidInput;
 }
 
 pub fn compress(reader: anytype, writer: anytype, options: anytype) !void {
     _ = options;
-    zlib.compress(reader, writer, .{}) catch return error.CompressionFailed;
+    // Read all input
+    var input_buf = std.array_list.Managed(u8).init(std.heap.page_allocator);
+    defer input_buf.deinit();
+    while (true) {
+        var tmp: [16384]u8 = undefined;
+        const n = reader.read(&tmp) catch return error.CompressionFailed;
+        if (n == 0) break;
+        input_buf.appendSlice(tmp[0..n]) catch return error.CompressionFailed;
+    }
+
+    // Use allocating writer for compressed output
+    var aw: Io.Writer.Allocating = .init(std.heap.page_allocator);
+    defer aw.deinit();
+
+    // Compress with zlib container
+    var comp_buf: [flate.max_window_len * 2 + 512 * 1024]u8 = undefined;
+    var comp: Compress = .init(&aw.writer, &comp_buf, .{ .container = .zlib });
+    _ = comp.writer.writeAll(input_buf.items) catch return error.CompressionFailed;
+    comp.end() catch return error.CompressionFailed;
+
+    // Write compressed output to the generic writer
+    writer.writeAll(aw.written()) catch return error.CompressionFailed;
 }
 
 pub fn Decompressor(comptime ReaderType: type) type {
+    _ = ReaderType;
     return struct {
         const Self = @This();
-        inner: zlib.Decompressor(ReaderType),
+        // Store the compressed data for decompression
+        compressed_data: []const u8,
+        decompressed: []u8,
+        pos: usize,
 
         pub fn read(self: *Self, out_buf: []u8) !usize {
-            return self.inner.reader().readAll(out_buf) catch return error.InvalidInput;
+            if (self.pos >= self.decompressed.len) return 0;
+            const remaining = self.decompressed.len - self.pos;
+            const to_copy = @min(out_buf.len, remaining);
+            @memcpy(out_buf[0..to_copy], self.decompressed[self.pos..][0..to_copy]);
+            self.pos += to_copy;
+            return to_copy;
         }
 
         pub fn deinit(self: *Self) void {
@@ -26,14 +73,42 @@ pub fn Decompressor(comptime ReaderType: type) type {
 }
 
 pub fn decompressor(reader: anytype) Decompressor(@TypeOf(reader)) {
-    return .{ .inner = zlib.decompressor(reader) };
+    // Read all data from the reader first
+    var input_buf = std.array_list.Managed(u8).init(std.heap.page_allocator);
+    while (true) {
+        var tmp: [16384]u8 = undefined;
+        const n = reader.read(&tmp) catch break;
+        if (n == 0) break;
+        input_buf.appendSlice(tmp[0..n]) catch break;
+    }
+
+    // Decompress
+    var in: Io.Reader = .fixed(input_buf.items);
+    var decomp_buf: [flate.max_window_len]u8 = undefined;
+    _ = &decomp_buf;
+    var dec: Decompress = .init(&in, .zlib, &.{});
+
+    var output = std.array_list.Managed(u8).init(std.heap.page_allocator);
+    while (true) {
+        var buf: [16384]u8 = undefined;
+        const n = dec.reader.read(&buf) catch break;
+        if (n == 0) break;
+        output.appendSlice(buf[0..n]) catch break;
+    }
+    input_buf.deinit();
+
+    return .{
+        .compressed_data = &.{},
+        .decompressed = output.items,
+        .pos = 0,
+    };
 }
 
 pub fn Compressor(comptime WriterType: type) type {
     return struct {
         const Self = @This();
         inner_writer: WriterType,
-        buffer: std.ArrayList(u8),
+        buffer: std.array_list.Managed(u8),
 
         pub fn write(self: *Self, data: []const u8) !usize {
             self.buffer.appendSlice(data) catch return error.CompressionFailed;
@@ -41,8 +116,15 @@ pub fn Compressor(comptime WriterType: type) type {
         }
 
         pub fn finish(self: *Self) !void {
-            var fbs = std.io.fixedBufferStream(self.buffer.items);
-            zlib.compress(fbs.reader(), self.inner_writer, .{}) catch return error.CompressionFailed;
+            var aw: Io.Writer.Allocating = .init(std.heap.page_allocator);
+            defer aw.deinit();
+
+            var comp_buf: [flate.max_window_len * 2 + 512 * 1024]u8 = undefined;
+            var comp: Compress = .init(&aw.writer, &comp_buf, .{ .container = .zlib });
+            _ = comp.writer.writeAll(self.buffer.items) catch return error.CompressionFailed;
+            comp.end() catch return error.CompressionFailed;
+
+            self.inner_writer.writeAll(aw.written()) catch return error.CompressionFailed;
         }
 
         pub fn writer(self: *Self) GenWriter {
@@ -59,56 +141,50 @@ pub fn Compressor(comptime WriterType: type) type {
 
 pub fn compressorWriter(writer: anytype, options: anytype) !Compressor(@TypeOf(writer)) {
     _ = options;
-    return .{ .inner_writer = writer, .buffer = std.ArrayList(u8).init(std.heap.page_allocator) };
+    return .{ .inner_writer = writer, .buffer = std.array_list.Managed(u8).init(std.heap.page_allocator) };
 }
 
 pub fn compressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
-    var fbs = std.io.fixedBufferStream(input);
-    zlib.compress(fbs.reader(), output.writer(), .{}) catch return error.CompressionFailed;
-    return output.toOwnedSlice();
+    var aw: Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+
+    var comp_buf: [flate.max_window_len * 2 + 512 * 1024]u8 = undefined;
+    var comp: Compress = .init(&aw.writer, &comp_buf, .{ .container = .zlib });
+    _ = comp.writer.writeAll(input) catch return error.CompressionFailed;
+    comp.end() catch return error.CompressionFailed;
+
+    return aw.toOwnedSlice();
 }
 
 pub fn decompressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
-    var fbs = std.io.fixedBufferStream(input);
-    zlib.decompress(fbs.reader(), output.writer()) catch return error.InvalidInput;
-    return output.toOwnedSlice();
+    var in: Io.Reader = .fixed(input);
+    var dec: Decompress = .init(&in, .zlib, &.{});
+
+    var aw: Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    _ = dec.reader.streamRemaining(&aw.writer) catch return error.InvalidInput;
+
+    return aw.toOwnedSlice();
 }
 
 /// Fast decompression when the output size is known (e.g., from pack object headers).
 pub fn decompressSliceKnownSize(allocator: std.mem.Allocator, input: []const u8, expected_size: usize) ![]u8 {
-    const dest = try allocator.alloc(u8, expected_size);
-    errdefer allocator.free(dest);
-    var fbs = std.io.fixedBufferStream(input);
-    var dcp = zlib.decompressor(fbs.reader());
-    const n = dcp.reader().readAll(dest) catch {
-        allocator.free(dest);
-        return decompressSlice(allocator, input);
-    };
-    if (n == expected_size) {
-        return dest;
-    }
-    // Size mismatch, fall back
-    allocator.free(dest);
+    _ = expected_size;
+    // Just use the general decompressSlice - the new API is efficient enough
     return decompressSlice(allocator, input);
 }
 
 pub fn decompressSliceWithConsumed(allocator: std.mem.Allocator, input: []const u8) !struct { data: []u8, consumed: usize } {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
-    var fbs = std.io.fixedBufferStream(input);
-    var dcp = zlib.decompressor(fbs.reader());
-    // Read all decompressed data
-    while (true) {
-        var buf: [16384]u8 = undefined;
-        const n = dcp.reader().read(&buf) catch return error.InvalidInput;
-        if (n == 0) break;
-        try output.appendSlice(buf[0..n]);
-    }
-    // Calculate consumed bytes: position in stream minus unread buffered bytes
-    const consumed = fbs.pos - dcp.unreadBytes();
-    return .{ .data = try output.toOwnedSlice(), .consumed = consumed };
+    var in: Io.Reader = .fixed(input);
+    var dec: Decompress = .init(&in, .zlib, &.{});
+
+    var aw: Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    _ = dec.reader.streamRemaining(&aw.writer) catch return error.InvalidInput;
+
+    // Calculate consumed: total input minus what's still buffered in the reader
+    const buffered_remaining = in.end - in.seek;
+    const consumed = input.len - buffered_remaining;
+
+    return .{ .data = try aw.toOwnedSlice(), .consumed = consumed };
 }

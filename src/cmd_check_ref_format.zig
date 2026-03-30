@@ -64,7 +64,7 @@ pub fn cmdCheckRefFormat(allocator: std.mem.Allocator, args: *platform_mod.ArgIt
                 };
                 defer allocator.free(reflog_content);
                 // Parse reflog entries in reverse order
-                var lines = std.ArrayList([]const u8).init(allocator);
+                var lines = std.array_list.Managed([]const u8).init(allocator);
                 defer lines.deinit();
                 var line_iter = std.mem.splitScalar(u8, reflog_content, '\n');
                 while (line_iter.next()) |line| {

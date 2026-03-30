@@ -30,7 +30,7 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     }
 
     // helpers.Collect all arguments first
-    var all_args = std.ArrayList([]const u8).init(allocator);
+    var all_args = std.array_list.Managed([]const u8).init(allocator);
     defer all_args.deinit();
     
     while (args.next()) |arg| {
@@ -199,7 +199,7 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                 defer allocator.free(config_content);
 
                 // helpers.Replace bare = true with bare = false
-                var new_config = std.ArrayList(u8).init(allocator);
+                var new_config = std.array_list.Managed(u8).init(allocator);
                 defer new_config.deinit();
                 var config_lines = std.mem.splitSequence(u8, config_content, "\n");
                 var first = true;
@@ -473,7 +473,7 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         defer allocator.free(config_content);
 
         // helpers.Replace bare = true with bare = false
-        var new_config = std.ArrayList(u8).init(allocator);
+        var new_config = std.array_list.Managed(u8).init(allocator);
         defer new_config.deinit();
         var config_lines = std.mem.splitSequence(u8, config_content, "\n");
         var first = true;
@@ -772,7 +772,7 @@ pub fn performLocalClone(
         // helpers.Also copy packed-helpers.refs but rewrite heads to remotes
         if (std.fs.cwd().readFileAlloc(allocator, src_packed_refs, 10 * 1024 * 1024)) |packed_content| {
             defer allocator.free(packed_content);
-            var new_packed = std.ArrayList(u8).init(allocator);
+            var new_packed = std.array_list.Managed(u8).init(allocator);
             defer new_packed.deinit();
             var lines = std.mem.splitScalar(u8, packed_content, '\n');
             while (lines.next()) |line| {

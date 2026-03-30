@@ -123,7 +123,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     }
 
     // Store all arguments for potential git fallback
-    var all_original_args = std.ArrayList([]const u8).init(allocator);
+    var all_original_args = std.array_list.Managed([]const u8).init(allocator);
     defer all_original_args.deinit();
 
     // If invoked as git-<command>, prepend the command name
@@ -314,7 +314,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 // Shell alias: execute via /bin/sh -c
                 const shell_cmd = alias_cmd[1..];
                 // Append remaining args to the shell command
-                var full_cmd = std.ArrayList(u8).init(allocator);
+                var full_cmd = std.array_list.Managed(u8).init(allocator);
                 defer full_cmd.deinit();
                 try full_cmd.appendSlice(shell_cmd);
                 var ri: usize = command_index + 1;
@@ -341,7 +341,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 return;
             }
             // Split alias into words
-            var alias_words = std.ArrayList([]const u8).init(allocator);
+            var alias_words = std.array_list.Managed([]const u8).init(allocator);
             defer alias_words.deinit();
             var word_iter = std.mem.tokenizeAny(u8, alias_cmd, " \t");
             while (word_iter.next()) |word| {
@@ -349,7 +349,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
             }
             if (alias_words.items.len > 0) {
                 // Rebuild all_original_args: global flags + alias words + remaining args
-                var new_args = std.ArrayList([]const u8).init(allocator);
+                var new_args = std.array_list.Managed([]const u8).init(allocator);
                 defer new_args.deinit();
                 // Copy global flags (before command_index)
                 for (all_original_args.items[0..command_index]) |ga| {
@@ -378,7 +378,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                             const ckey = cv[0..eq_pos];
                             const cval = cv[eq_pos + 1 ..];
                             if (helpers.global_config_overrides == null) {
-                                helpers.global_config_overrides = std.ArrayList(helpers.ConfigOverride).init(allocator);
+                                helpers.global_config_overrides = std.array_list.Managed(helpers.ConfigOverride).init(allocator);
                             }
                             helpers.global_config_overrides.?.append(.{ .key = try allocator.dupe(u8, ckey), .value = try allocator.dupe(u8, cval) }) catch {};
                         }
@@ -404,7 +404,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                     defer allocator.free(ec);
                     if (std.fs.cwd().access(ec, .{})) |_| {
                         // External command found - execute it
-                        var argv = std.ArrayList([]const u8).init(allocator);
+                        var argv = std.array_list.Managed([]const u8).init(allocator);
                         defer argv.deinit();
                         try argv.append(ec);
                         var ri: usize = command_index + 1;
@@ -436,7 +436,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 const fb_cmd = std.fmt.allocPrint(allocator, "{s}/git-{s}", .{fb_dir, command}) catch continue;
                 defer allocator.free(fb_cmd);
                 if (std.fs.cwd().access(fb_cmd, .{})) |_| {
-                    var argv = std.ArrayList([]const u8).init(allocator);
+                    var argv = std.array_list.Managed([]const u8).init(allocator);
                     defer argv.deinit();
                     argv.append(fb_cmd) catch continue;
                     var ri2: usize = command_index + 1;
@@ -468,7 +468,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                         defer allocator.free(full_cmd);
                         if (std.fs.cwd().access(full_cmd, .{})) |_| {
                             // Found external command in PATH
-                            var argv2 = std.ArrayList([]const u8).init(allocator);
+                            var argv2 = std.array_list.Managed([]const u8).init(allocator);
                             defer argv2.deinit();
                             argv2.append(full_cmd) catch continue;
                             var ri3: usize = command_index + 1;
@@ -493,7 +493,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
             if (std.posix.getenv("GIT_TRACE")) |trace_val| {
                 if (trace_val.len > 0 and !std.mem.eql(u8, trace_val, "0")) {
                     // Build trace line: trace: run_command: git-<cmd> arg1 arg2 ...
-                    var trace_buf = std.ArrayList(u8).init(allocator);
+                    var trace_buf = std.array_list.Managed(u8).init(allocator);
                     defer trace_buf.deinit();
                     trace_buf.appendSlice("trace: run_command: git-") catch {};
                     trace_buf.appendSlice(command) catch {};
@@ -739,7 +739,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     }
 
     // Create args iterator for the remaining arguments (after the command)
-    var remaining_args = std.ArrayList([]const u8).init(allocator);
+    var remaining_args = std.array_list.Managed([]const u8).init(allocator);
     defer remaining_args.deinit();
     
     var remaining_arg_index = command_index + 1;
@@ -1167,7 +1167,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         }
         if (dashed_path) |dp| {
             defer allocator.free(dp);
-            var argv2 = std.ArrayList([]const u8).init(allocator);
+            var argv2 = std.array_list.Managed([]const u8).init(allocator);
             defer argv2.deinit();
             try argv2.append(dp);
             var ri3: usize = command_index + 1;

@@ -126,7 +126,7 @@ pub fn parsePktLine(data: []const u8) !struct { pkt: PktLine, consumed: usize } 
 
 /// Parse all pkt-lines from data. Returns slice of PktLines (data slices point into input).
 pub fn parseAllPktLines(allocator: std.mem.Allocator, data: []const u8) ![]PktLine {
-    var lines = std.ArrayList(PktLine).init(allocator);
+    var lines = std.array_list.Managed(PktLine).init(allocator);
     errdefer lines.deinit();
 
     var offset: usize = 0;
@@ -163,7 +163,7 @@ pub fn buildUploadPackRequest(allocator: std.mem.Allocator, wants: []const Oid, 
 }
 
 pub fn buildUploadPackRequestWithDepth(allocator: std.mem.Allocator, wants: []const Oid, haves: []const Oid, depth: u32) ![]u8 {
-    var body = std.ArrayList(u8).init(allocator);
+    var body = std.array_list.Managed(u8).init(allocator);
     errdefer body.deinit();
 
     // Include "shallow" and "deepen-since" in capabilities when doing shallow clone
@@ -294,19 +294,21 @@ fn httpGetWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.ht
         n_headers += 1;
     }
 
-    var server_header_buffer: [16384]u8 = undefined;
-    var req = client.open(.GET, uri, .{
-        .server_header_buffer = &server_header_buffer,
+    var req = client.request(.GET, uri, .{
         .extra_headers = headers_buf[0..n_headers],
     }) catch return error.HttpError;
     defer req.deinit();
 
-    req.send() catch return error.HttpError;
-    req.wait() catch return error.HttpError;
+    req.sendBodiless() catch return error.HttpError;
 
-    if (req.response.status != .ok) return error.HttpError;
+    var redirect_buf: [4096]u8 = undefined;
+    var resp = req.receiveHead(&redirect_buf) catch return error.HttpError;
 
-    return req.reader().readAllAlloc(allocator, max_response_size) catch return error.HttpError;
+    if (resp.head.status != .ok) return error.HttpError;
+
+    var transfer_buf: [16384]u8 = undefined;
+    const rdr = resp.reader(&transfer_buf);
+    return rdr.allocRemaining(allocator, std.io.Limit.limited(max_response_size)) catch return error.HttpError;
 }
 
 fn httpPost(allocator: std.mem.Allocator, url: []const u8, body: []const u8, content_type: []const u8) ![]u8 {
@@ -351,14 +353,10 @@ fn httpPostWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.h
         n_headers += 1;
     }
 
-    var server_header_buffer: [16384]u8 = undefined;
-    var req = client.open(.POST, uri, .{
-        .server_header_buffer = &server_header_buffer,
+    var req = client.request(.POST, uri, .{
         .extra_headers = headers_buf[0..n_headers],
     }) catch return error.HttpError;
     defer req.deinit();
-
-    req.transfer_encoding = .{ .content_length = body.len };
 
     if (trace_timing) {
         if (post_timer) |*t| {
@@ -367,9 +365,12 @@ fn httpPostWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.h
         }
     }
 
-    req.send() catch return error.HttpError;
-    req.writer().writeAll(body) catch return error.HttpError;
-    req.finish() catch return error.HttpError;
+    // Send body using the new API
+    req.transfer_encoding = .{ .content_length = body.len };
+    var bw = req.sendBodyUnflushed(&.{}) catch return error.HttpError;
+    bw.writer.writeAll(body) catch return error.HttpError;
+    bw.end() catch return error.HttpError;
+    req.connection.?.flush() catch return error.HttpError;
 
     if (trace_timing) {
         if (post_timer) |*t| {
@@ -378,7 +379,8 @@ fn httpPostWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.h
         }
     }
 
-    req.wait() catch return error.HttpError;
+    var redirect_buf: [4096]u8 = undefined;
+    var resp = req.receiveHead(&redirect_buf) catch return error.HttpError;
 
     if (trace_timing) {
         if (post_timer) |*t| {
@@ -387,29 +389,24 @@ fn httpPostWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.h
         }
     }
 
-    if (req.response.status != .ok) return error.HttpError;
+    if (resp.head.status != .ok) return error.HttpError;
 
-    // Pre-allocate based on Content-Length if available (avoids repeated reallocs for large packs)
+    var transfer_buf: [16384]u8 = undefined;
+    const rdr = resp.reader(&transfer_buf);
+
+    // Pre-allocate based on Content-Length if available
     const result = blk: {
-        if (req.response.content_length) |cl| {
+        if (resp.head.content_length) |cl| {
             if (cl > 0 and cl <= max_response_size) {
-                const buf = allocator.alloc(u8, cl) catch break :blk req.reader().readAllAlloc(allocator, max_response_size) catch return error.HttpError;
-                var total_read: usize = 0;
-                while (total_read < cl) {
-                    const n = req.reader().read(buf[total_read..]) catch {
-                        allocator.free(buf);
-                        return error.HttpError;
-                    };
-                    if (n == 0) break;
-                    total_read += n;
-                }
-                if (total_read < cl) {
-                    break :blk allocator.realloc(buf, total_read) catch buf[0..total_read];
-                }
+                const buf = allocator.alloc(u8, cl) catch break :blk rdr.allocRemaining(allocator, std.io.Limit.limited(max_response_size)) catch return error.HttpError;
+                rdr.readSliceAll(buf) catch {
+                    allocator.free(buf);
+                    return error.HttpError;
+                };
                 break :blk buf;
             }
         }
-        break :blk req.reader().readAllAlloc(allocator, max_response_size) catch return error.HttpError;
+        break :blk rdr.allocRemaining(allocator, std.io.Limit.limited(max_response_size)) catch return error.HttpError;
     };
 
     if (trace_timing) {
@@ -447,7 +444,7 @@ fn discoverRefsWithClient(allocator: std.mem.Allocator, client: ?*std.http.Clien
 
 /// Parse the response body of GET /info/refs?service=git-upload-pack
 pub fn parseRefDiscoveryResponse(allocator: std.mem.Allocator, data: []const u8) !RefDiscovery {
-    var refs = std.ArrayList(Ref).init(allocator);
+    var refs = std.array_list.Managed(Ref).init(allocator);
     errdefer {
         for (refs.items) |ref| allocator.free(ref.name);
         refs.deinit();
@@ -589,7 +586,7 @@ fn fetchPackShallowWithClient(allocator: std.mem.Allocator, client: ?*std.http.C
 /// Parse the response from POST /git-upload-pack.
 /// Handles side-band-64k demuxing.
 pub fn parseFetchPackResponse(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
-    var pack_data = std.ArrayList(u8).init(allocator);
+    var pack_data = std.array_list.Managed(u8).init(allocator);
     try pack_data.ensureTotalCapacity(data.len * 9 / 10);
     errdefer pack_data.deinit();
 
@@ -659,11 +656,11 @@ pub fn parseFetchPackResponse(allocator: std.mem.Allocator, data: []const u8) ![
 /// Parse fetch response that may contain shallow lines.
 /// Returns pack data and any shallow boundary commit OIDs.
 pub fn parseShallowFetchPackResponse(allocator: std.mem.Allocator, data: []const u8) !ShallowFetchResult {
-    var pack_data = std.ArrayList(u8).init(allocator);
+    var pack_data = std.array_list.Managed(u8).init(allocator);
     // Pre-allocate: pack data is ~90% of total response after sideband overhead
     try pack_data.ensureTotalCapacity(data.len * 9 / 10);
     errdefer pack_data.deinit();
-    var shallow_commits = std.ArrayList(Oid).init(allocator);
+    var shallow_commits = std.array_list.Managed(Oid).init(allocator);
     errdefer shallow_commits.deinit();
 
     var offset: usize = 0;
@@ -770,7 +767,7 @@ pub fn clonePack(allocator: std.mem.Allocator, url: []const u8) !CloneResult {
     var want_set = std.StringHashMap(void).init(allocator);
     defer want_set.deinit();
 
-    var wants = std.ArrayList(Oid).init(allocator);
+    var wants = std.array_list.Managed(Oid).init(allocator);
     defer wants.deinit();
 
     for (discovery.refs) |ref| {
@@ -827,7 +824,7 @@ fn checkV2Support(data: []const u8) bool {
 
 /// Build a v2 ls-refs request body with ref-prefix filtering.
 fn buildV2LsRefsRequest(allocator: std.mem.Allocator, ref_prefixes: []const []const u8, symrefs: bool) ![]u8 {
-    var body = std.ArrayList(u8).init(allocator);
+    var body = std.array_list.Managed(u8).init(allocator);
     errdefer body.deinit();
 
     // Command header section
@@ -888,7 +885,7 @@ fn parseV2LsRefsResponse(allocator: std.mem.Allocator, data: []const u8) !RefDis
 }
 
 fn parseV2LsRefsResponseFull(allocator: std.mem.Allocator, data: []const u8) !V2LsRefsResult {
-    var refs = std.ArrayList(Ref).init(allocator);
+    var refs = std.array_list.Managed(Ref).init(allocator);
     errdefer {
         for (refs.items) |ref| allocator.free(ref.name);
         refs.deinit();
@@ -960,7 +957,7 @@ fn parseV2LsRefsResponseFull(allocator: std.mem.Allocator, data: []const u8) !V2
 
 /// Build a v2 fetch command request body for shallow clone.
 fn buildV2FetchRequest(allocator: std.mem.Allocator, wants: []const Oid, haves: []const Oid, depth: u32) ![]u8 {
-    var body = std.ArrayList(u8).init(allocator);
+    var body = std.array_list.Managed(u8).init(allocator);
     errdefer body.deinit();
 
     // Command header
@@ -1046,11 +1043,11 @@ fn buildV2FetchRequest(allocator: std.mem.Allocator, wants: []const Oid, haves: 
 /// Parse v2 fetch response. The v2 fetch response has sections delimited by
 /// delimiters (0001) and contains: shallow-info, packfile-uris, then packfile section.
 fn parseV2FetchResponse(allocator: std.mem.Allocator, data: []const u8) !ShallowFetchResult {
-    var pack_data = std.ArrayList(u8).init(allocator);
+    var pack_data = std.array_list.Managed(u8).init(allocator);
     // Pre-allocate: pack data is ~90% of total response after sideband/pkt-line overhead
     try pack_data.ensureTotalCapacity(data.len * 9 / 10);
     errdefer pack_data.deinit();
-    var shallow_commits = std.ArrayList(Oid).init(allocator);
+    var shallow_commits = std.array_list.Managed(Oid).init(allocator);
     errdefer shallow_commits.deinit();
 
     var offset: usize = 0;
@@ -1181,7 +1178,7 @@ fn clonePackShallowV2(allocator: std.mem.Allocator, client: *std.http.Client, ur
     }
 
     // For full clone, use dynamic want list
-    var wants_list = std.ArrayList(Oid).init(allocator);
+    var wants_list = std.array_list.Managed(Oid).init(allocator);
     defer wants_list.deinit();
     if (depth == 0) {
         var want_set = std.StringHashMap(void).init(allocator);
@@ -1290,7 +1287,7 @@ fn clonePackShallowHybrid(allocator: std.mem.Allocator, client: *std.http.Client
 
     var want_set = std.StringHashMap(void).init(allocator);
     defer want_set.deinit();
-    var wants = std.ArrayList(Oid).init(allocator);
+    var wants = std.array_list.Managed(Oid).init(allocator);
     defer wants.deinit();
 
     for (discovery.refs) |ref| {
@@ -1360,7 +1357,7 @@ fn clonePackShallowHybrid(allocator: std.mem.Allocator, client: *std.http.Client
 /// Build a v2 fetch request body using want-ref (by name) instead of want (by OID).
 /// This eliminates the need for a separate ls-refs round-trip.
 fn buildV2FetchRequestWithWantRef(allocator: std.mem.Allocator, want_refs: []const []const u8, depth: u32) ![]u8 {
-    var body = std.ArrayList(u8).init(allocator);
+    var body = std.array_list.Managed(u8).init(allocator);
     errdefer body.deinit();
 
     // Command header
@@ -1450,12 +1447,12 @@ const WantRefFetchResult = struct {
 /// Parse v2 fetch response that includes wanted-refs section.
 /// Returns pack data, shallow commits, AND resolved ref OIDs.
 fn parseV2FetchResponseWithRefs(allocator: std.mem.Allocator, data: []const u8) !WantRefFetchResult {
-    var pack_data = std.ArrayList(u8).init(allocator);
+    var pack_data = std.array_list.Managed(u8).init(allocator);
     try pack_data.ensureTotalCapacity(data.len * 9 / 10);
     errdefer pack_data.deinit();
-    var shallow_commits = std.ArrayList(Oid).init(allocator);
+    var shallow_commits = std.array_list.Managed(Oid).init(allocator);
     errdefer shallow_commits.deinit();
-    var refs = std.ArrayList(Ref).init(allocator);
+    var refs = std.array_list.Managed(Ref).init(allocator);
     errdefer {
         for (refs.items) |ref| allocator.free(ref.name);
         refs.deinit();
@@ -1594,7 +1591,7 @@ fn clonePackShallowV2SingleRT(allocator: std.mem.Allocator, client: *std.http.Cl
 
     // Build the refs list for the caller. wanted-refs gives us the branch ref;
     // we also need to synthesize HEAD pointing to the same hash.
-    var all_refs = std.ArrayList(Ref).init(allocator);
+    var all_refs = std.array_list.Managed(Ref).init(allocator);
     errdefer {
         for (all_refs.items) |ref| allocator.free(ref.name);
         all_refs.deinit();
@@ -1710,7 +1707,7 @@ fn clonePackShallowV1(allocator: std.mem.Allocator, client: *std.http.Client, ur
     var want_set = std.StringHashMap(void).init(allocator);
     defer want_set.deinit();
 
-    var wants = std.ArrayList(Oid).init(allocator);
+    var wants = std.array_list.Managed(Oid).init(allocator);
     defer wants.deinit();
 
     for (discovery.refs) |ref| {
@@ -1800,9 +1797,9 @@ pub fn fetchNewPack(allocator: std.mem.Allocator, url: []const u8, local_refs: [
     }
 
     // Determine wants and haves
-    var wants = std.ArrayList(Oid).init(allocator);
+    var wants = std.array_list.Managed(Oid).init(allocator);
     defer wants.deinit();
-    var haves = std.ArrayList(Oid).init(allocator);
+    var haves = std.array_list.Managed(Oid).init(allocator);
     defer haves.deinit();
 
     // Collect unique want and have hashes

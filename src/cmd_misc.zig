@@ -85,7 +85,7 @@ pub fn showUsage(platform_impl: *const platform_mod.Platform) !void {
 pub fn cmdForEachRepo(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     var config_key: ?[]const u8 = null;
     var keep_going = false;
-    var cmd_args = std.ArrayList([]const u8).init(allocator);
+    var cmd_args = std.array_list.Managed([]const u8).init(allocator);
     defer cmd_args.deinit();
     var after_dashdash = false;
     while (args.next()) |arg| {
@@ -101,7 +101,7 @@ pub fn cmdForEachRepo(allocator: std.mem.Allocator, args: *platform_mod.ArgItera
     const dot_pos = std.mem.indexOf(u8, key, ".") orelse { try platform_impl.writeStderr("error: invalid config key\n"); std.process.exit(129); };
     if (dot_pos == key.len - 1 or key[key.len - 1] == '.') { try platform_impl.writeStderr("error: invalid config key\n"); std.process.exit(129); }
     for (key[0..dot_pos]) |c| { if (!std.ascii.isAlphanumeric(c) and c != '-') { try platform_impl.writeStderr("error: invalid config key\n"); std.process.exit(129); } }
-    var repos = std.ArrayList([]const u8).init(allocator);
+    var repos = std.array_list.Managed([]const u8).init(allocator);
     defer { for (repos.items) |r| allocator.free(r); repos.deinit(); }
     const self_exe = std.fs.selfExePathAlloc(allocator) catch return;
     defer allocator.free(self_exe);
@@ -122,7 +122,7 @@ pub fn cmdForEachRepo(allocator: std.mem.Allocator, args: *platform_mod.ArgItera
     }
     var had_error = false;
     for (repos.items) |rp| {
-        var ra3 = std.ArrayList([]const u8).init(allocator);
+        var ra3 = std.array_list.Managed([]const u8).init(allocator);
         defer ra3.deinit();
         try ra3.append(self_exe); try ra3.append("-C"); try ra3.append(rp);
         for (cmd_args.items) |c4| try ra3.append(c4);
@@ -155,7 +155,7 @@ pub fn cmdBugreport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
     std.fs.cwd().makePath(output_dir) catch {};
     const filename = try std.fmt.allocPrint(allocator, "{s}/git-bugreport-{s}.txt", .{ output_dir, suffix });
     defer allocator.free(filename);
-    var report = std.ArrayList(u8).init(allocator);
+    var report = std.array_list.Managed(u8).init(allocator);
     defer report.deinit();
     const w = report.writer();
     try w.writeAll("Thank you for filling out a helpers.Git bug report!\nPlease answer the following questions to help us understand your issue.\n\nWhat did you do before the bug happened? (Steps to reproduce your issue)\n\nWhat did you expect to happen? (helpers.Expected behavior)\n\nWhat happened instead? (Actual behavior)\n\nWhat's different between what you expected and what actually happened?\n\nAnything else you want to add:\n\nPlease review the rest of the bug report below.\nYou can delete any lines you don't wish to share.\n\n");
@@ -180,7 +180,7 @@ pub fn nativeCmdRevert(allocator: std.mem.Allocator, args: [][]const u8, command
     const git_path = try helpers.findGitDirectory(allocator, platform_impl);
     defer allocator.free(git_path);
 
-    var positionals = std.ArrayList([]const u8).init(allocator);
+    var positionals = std.array_list.Managed([]const u8).init(allocator);
     defer positionals.deinit();
 
     var iter_idx: usize = command_index + 1;
@@ -252,7 +252,7 @@ pub fn nativeCmdRevert(allocator: std.mem.Allocator, args: [][]const u8, command
         defer if (sd3) |d| allocator.free(d);
         if (sd3) |d| {
             std.fs.cwd().makePath(d) catch {};
-            var tb2 = std.ArrayList(u8).init(allocator);
+            var tb2 = std.array_list.Managed(u8).init(allocator);
             defer tb2.deinit();
             for (positionals.items) |ref| {
                 const h2 = helpers.resolveRevision(git_path, ref, platform_impl, allocator) catch continue;
@@ -379,7 +379,7 @@ pub fn nativeCmdBisect(allocator: std.mem.Allocator, args: *platform_mod.ArgIter
         try platform_impl.fs.writeFile(bisect_log_path, "# git bisect start\n");
         
         // helpers.Parse optional arguments: [--term-new=X] [--term-old=X] [bad [good...]] [--]
-        var positional_refs = std.ArrayList([]const u8).init(allocator);
+        var positional_refs = std.array_list.Managed([]const u8).init(allocator);
         defer positional_refs.deinit();
         while (args.next()) |start_arg| {
             if (std.mem.startsWith(u8, start_arg, "--term-new=") or std.mem.startsWith(u8, start_arg, "--term-old=") or

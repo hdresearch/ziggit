@@ -46,7 +46,7 @@ pub fn diffTreeForCommit(allocator: std.mem.Allocator, commit_ref: []const u8, o
     
     var tree_hash: ?[]const u8 = null;
     var parent_hash: ?[]const u8 = null;
-    var all_parent_hashes = std.ArrayList([]const u8).init(allocator);
+    var all_parent_hashes = std.array_list.Managed([]const u8).init(allocator);
     defer all_parent_hashes.deinit();
     var line_iter = std.mem.splitScalar(u8, commit_obj.data, '\n');
     while (line_iter.next()) |line| {
@@ -377,9 +377,9 @@ pub fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8
     const tree2_obj = if (!is_empty_tree2) (objects.GitObject.load(tree2_hash, git_path, platform_impl, allocator) catch return false) else null;
     defer if (tree2_obj) |obj| obj.deinit(allocator);
     
-    var entries1 = if (tree1_obj) |obj| (tree_mod.parseTree(obj.data, allocator) catch return false) else std.ArrayList(tree_mod.TreeEntry).init(allocator);
+    var entries1 = if (tree1_obj) |obj| (tree_mod.parseTree(obj.data, allocator) catch return false) else std.array_list.Managed(tree_mod.TreeEntry).init(allocator);
     defer entries1.deinit();
-    var entries2 = if (tree2_obj) |obj| (tree_mod.parseTree(obj.data, allocator) catch return false) else std.ArrayList(tree_mod.TreeEntry).init(allocator);
+    var entries2 = if (tree2_obj) |obj| (tree_mod.parseTree(obj.data, allocator) catch return false) else std.array_list.Managed(tree_mod.TreeEntry).init(allocator);
     defer entries2.deinit();
     
     const zero_hash = "0000000000000000000000000000000000000000";
@@ -402,7 +402,7 @@ pub fn diffTwoTreesFiltered(allocator: std.mem.Allocator, tree1_hash: []const u8
         m1: *std.StringHashMap(tree_mod.TreeEntry),
         m2: *std.StringHashMap(tree_mod.TreeEntry),
     };
-    var name_list = std.ArrayList([]const u8).init(allocator);
+    var name_list = std.array_list.Managed([]const u8).init(allocator);
     defer name_list.deinit();
     var niter = all_names.keyIterator();
     while (niter.next()) |key| try name_list.append(key.*);
@@ -735,9 +735,9 @@ pub fn diffTwoTreesPatch(allocator: std.mem.Allocator, tree1_hash: []const u8, t
     const tree2_obj = if (!is_empty2) (objects.GitObject.load(tree2_hash, git_path, platform_impl, allocator) catch return false) else null;
     defer if (tree2_obj) |obj| obj.deinit(allocator);
     
-    var entries1 = if (tree1_obj) |obj| (tree_mod.parseTree(obj.data, allocator) catch return false) else std.ArrayList(tree_mod.TreeEntry).init(allocator);
+    var entries1 = if (tree1_obj) |obj| (tree_mod.parseTree(obj.data, allocator) catch return false) else std.array_list.Managed(tree_mod.TreeEntry).init(allocator);
     defer entries1.deinit();
-    var entries2 = if (tree2_obj) |obj| (tree_mod.parseTree(obj.data, allocator) catch return false) else std.ArrayList(tree_mod.TreeEntry).init(allocator);
+    var entries2 = if (tree2_obj) |obj| (tree_mod.parseTree(obj.data, allocator) catch return false) else std.array_list.Managed(tree_mod.TreeEntry).init(allocator);
     defer entries2.deinit();
     
     var map1 = std.StringHashMap(tree_mod.TreeEntry).init(allocator);
@@ -752,7 +752,7 @@ pub fn diffTwoTreesPatch(allocator: std.mem.Allocator, tree1_hash: []const u8, t
     for (entries1.items) |e| all_names.put(e.name, {}) catch {};
     for (entries2.items) |e| all_names.put(e.name, {}) catch {};
     
-    var name_list = std.ArrayList([]const u8).init(allocator);
+    var name_list = std.array_list.Managed([]const u8).init(allocator);
     defer name_list.deinit();
     var niter = all_names.keyIterator();
     while (niter.next()) |key| try name_list.append(key.*);

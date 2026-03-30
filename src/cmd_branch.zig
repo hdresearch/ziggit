@@ -82,7 +82,7 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         defer allocator.free(existing);
         
         // helpers.Remove existing [branch "name"] section if present
-        var new_config = std.ArrayList(u8).init(allocator);
+        var new_config = std.array_list.Managed(u8).init(allocator);
         defer new_config.deinit();
         var skip_section = false;
         const section_header = try std.fmt.allocPrint(allocator, "[branch \"{s}\"]", .{branch_name});
@@ -125,7 +125,7 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         defer allocator.free(config_path);
         const existing = platform_impl.fs.readFile(allocator, config_path) catch try allocator.dupe(u8, "");
         defer allocator.free(existing);
-        var new_config = std.ArrayList(u8).init(allocator);
+        var new_config = std.array_list.Managed(u8).init(allocator);
         defer new_config.deinit();
         var skip_section = false;
         const section_header = try std.fmt.allocPrint(allocator, "[branch \"{s}\"]", .{branch_name});
@@ -142,7 +142,7 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     } else if (std.mem.eql(u8, first_arg.?, "-d") or std.mem.eql(u8, first_arg.?, "-D")) {
         // helpers.Delete branch - may have -r flag and/or multiple branch names
         var is_remote = false;
-        var names_to_delete = std.ArrayList([]const u8).init(allocator);
+        var names_to_delete = std.array_list.Managed([]const u8).init(allocator);
         defer names_to_delete.deinit();
         while (args.next()) |darg| {
             if (std.mem.eql(u8, darg, "-r") or std.mem.eql(u8, darg, "--remotes")) {

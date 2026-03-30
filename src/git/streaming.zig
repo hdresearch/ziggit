@@ -115,8 +115,8 @@ pub const PackFileStream = struct {
             .commit, .tree, .blob, .tag => {
                 // Create a decompression stream
                 const compressed_data = self.pack_data[self.position..];
-                var stream = std.io.fixedBufferStream(compressed_data);
-                var decompressor = zlib_compat.decompressor(stream.reader());
+                // Decompress the data to a buffer
+                const decompressed = zlib_compat.decompressSlice(self.allocator, compressed_data) catch return error.InvalidPackFile;
                 
                 const obj_type: objects.ObjectType = switch (pack_type) {
                     .commit => .commit,
@@ -131,8 +131,9 @@ pub const PackFileStream = struct {
                 // we'd need to actually decompress to find the end
                 self.position += @min(size * 2, self.pack_data.len - self.position); // Rough estimate
                 
+                var fbs = std.io.fixedBufferStream(decompressed);
                 return ObjectStream.init(
-                    decompressor.reader().any(),
+                    fbs.reader().any(),
                     obj_type,
                     size,
                     self.allocator
@@ -213,7 +214,7 @@ pub const TreeWalker = struct {
             
             // Convert hash to hex string
             const hash_hex = try self.allocator.alloc(u8, 40);
-            _ = try std.fmt.bufPrint(hash_hex, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
+            _ = try std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes});
             
             // Determine object type from mode
             const obj_type: objects.ObjectType = if (std.mem.eql(u8, mode, "040000"))

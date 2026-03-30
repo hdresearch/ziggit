@@ -33,17 +33,17 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var format_is_separator = false; // true for "format:", false for "tformat:" / "--format="
     var max_count: ?u32 = null;
     var committish: ?[]const u8 = null;
-    var exclude_refs = std.ArrayList([]const u8).init(allocator);
+    var exclude_refs = std.array_list.Managed([]const u8).init(allocator);
     defer exclude_refs.deinit();
-    var include_refs = std.ArrayList([]const u8).init(allocator);
+    var include_refs = std.array_list.Managed([]const u8).init(allocator);
     defer include_refs.deinit();
     var walk_reflog = false;
     var pretty_alias: ?[]const u8 = null; // unresolved pretty.<name> alias
-    var author_filters = std.ArrayList([]const u8).init(allocator);
+    var author_filters = std.array_list.Managed([]const u8).init(allocator);
     defer author_filters.deinit();
-    var committer_filters = std.ArrayList([]const u8).init(allocator);
+    var committer_filters = std.array_list.Managed([]const u8).init(allocator);
     defer committer_filters.deinit();
-    var grep_filters = std.ArrayList([]const u8).init(allocator);
+    var grep_filters = std.array_list.Managed([]const u8).init(allocator);
     defer grep_filters.deinit();
     var all_match = false;
     var fixed_strings = false;
@@ -228,7 +228,7 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         if (reflog_content) |content| {
             defer allocator.free(content);
             // helpers.Parse reflog entries (newest first)
-            var reflog_entries = std.ArrayList(helpers.ReflogEntry).init(allocator);
+            var reflog_entries = std.array_list.Managed(helpers.ReflogEntry).init(allocator);
             defer {
                 for (reflog_entries.items) |*e| {
                     allocator.free(e.old_hash);
@@ -323,7 +323,7 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         hash: []const u8,
         timestamp: i64,
     };
-    var queue = std.ArrayList(CommitQueueEntry).init(allocator);
+    var queue = std.array_list.Managed(CommitQueueEntry).init(allocator);
     defer {
         for (queue.items) |entry| allocator.free(@constCast(entry.hash));
         queue.deinit();
@@ -349,7 +349,7 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         const exc_hash = helpers.resolveCommittish(git_path, exc_ref, platform_impl, allocator) catch continue;
         defer allocator.free(exc_hash);
         // Walk excluded ref's ancestors
-        var exc_queue = std.ArrayList([]const u8).init(allocator);
+        var exc_queue = std.array_list.Managed([]const u8).init(allocator);
         defer exc_queue.deinit();
         try exc_queue.append(try allocator.dupe(u8, exc_hash));
         while (exc_queue.items.len > 0) {
@@ -422,11 +422,11 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         
         // helpers.Extract commit message and author
         var lines_it = std.mem.splitSequence(u8, commit_data, "\n");
-        var parent_hashes = std.ArrayList([]const u8).init(allocator);
+        var parent_hashes = std.array_list.Managed([]const u8).init(allocator);
         defer parent_hashes.deinit();
         var author_line: ?[]const u8 = null;
         var empty_line_found = false;
-        var message = std.ArrayList(u8).init(allocator);
+        var message = std.array_list.Managed(u8).init(allocator);
         defer message.deinit();
 
         while (lines_it.next()) |line| {
@@ -458,7 +458,7 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             const out_is_latin1 = std.ascii.eqlIgnoreCase(out_enc, "ISO-8859-1") or std.ascii.eqlIgnoreCase(out_enc, "latin1") or std.ascii.eqlIgnoreCase(out_enc, "latin-1");
             if (out_is_utf8 and src_is_latin1) {
                 // Convert ISO-8859-1 to UTF-8
-                var buf = std.ArrayList(u8).init(allocator);
+                var buf = std.array_list.Managed(u8).init(allocator);
                 for (message.items) |byte| {
                     if (byte < 0x80) {
                         buf.append(byte) catch break;
@@ -470,7 +470,7 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 reencoded_msg = buf.toOwnedSlice() catch null;
             } else if (out_is_latin1 and src_is_utf8) {
                 // Convert UTF-8 to ISO-8859-1
-                var buf = std.ArrayList(u8).init(allocator);
+                var buf = std.array_list.Managed(u8).init(allocator);
                 var i: usize = 0;
                 const src = message.items;
                 while (i < src.len) {
@@ -623,7 +623,7 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
 
             // helpers.Show helpers.Merge line for merge commits (commits with 2+ parents)
             if (parent_hashes.items.len > 1) {
-                var merge_line = std.ArrayList(u8).init(allocator);
+                var merge_line = std.array_list.Managed(u8).init(allocator);
                 defer merge_line.deinit();
                 try merge_line.appendSlice("Merge:");
                 for (parent_hashes.items) |ph| {

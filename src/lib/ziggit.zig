@@ -542,7 +542,7 @@ fn listBranches(repo: *Repository, buffer: []u8) !usize {
     const refs_heads_path = try std.fmt.allocPrint(global_allocator, "{s}/refs/heads", .{git_dir});
     defer global_allocator.free(refs_heads_path);
     
-    var branch_list = std.ArrayList([]u8).init(global_allocator);
+    var branch_list = std.array_list.Managed([]u8).init(global_allocator);
     defer {
         for (branch_list.items) |branch| {
             global_allocator.free(branch);
@@ -1122,7 +1122,7 @@ fn getStatusPorcelainReal(repo: *Repository, buffer: []u8) !void {
 // Scan for untracked files, excluding those tracked in index
 fn scanForUntrackedFilesInIndex(repo_root: []const u8, tracked_files: *std.HashMap([]const u8, void, std.hash_map.StringContext, std.hash_map.default_max_load_percentage), buffer: []u8, output_pos: *usize) !void {
     // Load .gitignore patterns
-    var ignore_patterns = std.ArrayList([]u8).init(global_allocator);
+    var ignore_patterns = std.array_list.Managed([]u8).init(global_allocator);
     defer {
         for (ignore_patterns.items) |pattern| {
             global_allocator.free(pattern);
@@ -1242,7 +1242,7 @@ fn scanForUntrackedFilesSimple(repo_root: []const u8, buffer: []u8, output_pos: 
 }
 
 // Get tree entries from HEAD commit
-fn getHeadTreeEntries(git_dir: []const u8, head_commit: []const u8) !std.ArrayList(TreeFileEntry) {
+fn getHeadTreeEntries(git_dir: []const u8, head_commit: []const u8) !std.array_list.Managed(TreeFileEntry) {
     if (head_commit.len != 40) return error.InvalidCommitHash;
     
     // Load commit object
@@ -1267,7 +1267,7 @@ fn getHeadTreeEntries(git_dir: []const u8, head_commit: []const u8) !std.ArrayLi
     if (tree_obj.obj_type != .tree) return error.NotATree;
     
     // Parse tree entries
-    var entries = std.ArrayList(TreeFileEntry).init(global_allocator);
+    var entries = std.array_list.Managed(TreeFileEntry).init(global_allocator);
     var pos: usize = 0;
     
     while (pos < tree_obj.data.len) {
@@ -1287,7 +1287,7 @@ fn getHeadTreeEntries(git_dir: []const u8, head_commit: []const u8) !std.ArrayLi
         const hash_bytes = tree_obj.data[full_null_pos + 1..full_null_pos + 21];
         
         // Convert hash to hex string
-        const hash_hex = try std.fmt.allocPrint(global_allocator, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
+        const hash_hex = try std.fmt.allocPrint(global_allocator, "{x}", .{hash_bytes});
         defer global_allocator.free(hash_hex);
         
         // Only include files (not subdirectories for now)
@@ -1336,7 +1336,7 @@ fn loadGitObject(git_dir: []const u8, hash: []const u8) !GitObjectData {
     defer global_allocator.free(compressed_data);
     
     // Decompress with zlib
-    var decompressed = std.ArrayList(u8).init(global_allocator);
+    var decompressed = std.array_list.Managed(u8).init(global_allocator);
     defer decompressed.deinit();
     
     var compressed_stream = std.io.fixedBufferStream(compressed_data);
@@ -1495,7 +1495,7 @@ fn scanDirectoryForUntrackedWithIgnore(
     dir: std.fs.Dir,
     rel_path: []const u8,
     tracked_files: *std.HashMap([]const u8, void, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
-    ignore_patterns: *std.ArrayList([]u8),
+    ignore_patterns: *std.array_list.Managed([]u8),
     buffer: []u8,
     output_pos: *usize
 ) !void {
@@ -1713,7 +1713,7 @@ fn isFileStagedAgainstHead(repo_path: []const u8, file_path: []const u8, index_h
     }
     
     // Parse tree to find file
-    var tree_entries = std.ArrayList(objects_parser.TreeEntry).init(global_allocator);
+    var tree_entries = std.array_list.Managed(objects_parser.TreeEntry).init(global_allocator);
     defer tree_entries.deinit();
     
     objects_parser.parseTree(tree_object.content, &tree_entries) catch {
@@ -1784,7 +1784,7 @@ fn fileExistsInHead(repo_path: []const u8, file_path: []const u8, head_hash_str:
             }
             
             // Parse tree entries
-            var tree_entries = std.ArrayList(objects_parser.TreeEntry).init(global_allocator);
+            var tree_entries = std.array_list.Managed(objects_parser.TreeEntry).init(global_allocator);
             defer tree_entries.deinit();
             
             objects_parser.parseTree(tree_object.content, &tree_entries) catch {
@@ -2108,7 +2108,7 @@ fn getLatestTagReal(repo: *Repository, buffer: []u8) !void {
 
     
     // Collect all tags first
-    var tags_list = std.ArrayList([]u8).init(global_allocator);
+    var tags_list = std.array_list.Managed([]u8).init(global_allocator);
     defer {
         for (tags_list.items) |tag| {
             global_allocator.free(tag);

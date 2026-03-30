@@ -114,7 +114,7 @@ fn buildNotesTree(map: *NotesMap, git_path: []const u8, platform_impl: *const pl
     if (!use_fanout) {
         // Build flat tree
         // Collect and sort entries for deterministic output
-        var entries_list = std.ArrayList(NoteEntry).init(allocator);
+        var entries_list = std.array_list.Managed(NoteEntry).init(allocator);
         defer entries_list.deinit();
         var it = map.iterator();
         while (it.next()) |kv| {
@@ -126,7 +126,7 @@ fn buildNotesTree(map: *NotesMap, git_path: []const u8, platform_impl: *const pl
             }
         }.lessThan);
 
-        var tree_buf = std.ArrayList(u8).init(allocator);
+        var tree_buf = std.array_list.Managed(u8).init(allocator);
         defer tree_buf.deinit();
         for (entries_list.items) |entry| {
             try tree_buf.appendSlice("100644 ");
@@ -138,7 +138,7 @@ fn buildNotesTree(map: *NotesMap, git_path: []const u8, platform_impl: *const pl
         return try tree_obj.store(git_path, platform_impl, allocator);
     } else {
         // Build fanned-out tree: group by first 2 chars
-        var prefix_map = std.StringHashMap(std.ArrayList(SubEntry)).init(allocator);
+        var prefix_map = std.StringHashMap(std.array_list.Managed(SubEntry)).init(allocator);
         defer {
             var pit = prefix_map.iterator();
             while (pit.next()) |kv| {
@@ -155,14 +155,14 @@ fn buildNotesTree(map: *NotesMap, git_path: []const u8, platform_impl: *const pl
             const rest = name[2..];
             const gop = try prefix_map.getOrPut(prefix);
             if (!gop.found_existing) {
-                gop.value_ptr.* = std.ArrayList(SubEntry).init(allocator);
+                gop.value_ptr.* = std.array_list.Managed(SubEntry).init(allocator);
             }
             try gop.value_ptr.append(.{ .rest = rest, .hash = kv.value_ptr.* });
         }
 
         // Build subtrees for each prefix, then build top-level tree
         // Collect prefixes and sort
-        var prefixes = std.ArrayList([]const u8).init(allocator);
+        var prefixes = std.array_list.Managed([]const u8).init(allocator);
         defer prefixes.deinit();
         var pit2 = prefix_map.iterator();
         while (pit2.next()) |kv| {
@@ -174,7 +174,7 @@ fn buildNotesTree(map: *NotesMap, git_path: []const u8, platform_impl: *const pl
             }
         }.lessThan);
 
-        var top_tree = std.ArrayList(u8).init(allocator);
+        var top_tree = std.array_list.Managed(u8).init(allocator);
         defer top_tree.deinit();
 
         for (prefixes.items) |prefix| {
@@ -186,7 +186,7 @@ fn buildNotesTree(map: *NotesMap, git_path: []const u8, platform_impl: *const pl
                 }
             }.lessThan);
 
-            var sub_buf = std.ArrayList(u8).init(allocator);
+            var sub_buf = std.array_list.Managed(u8).init(allocator);
             defer sub_buf.deinit();
             for (entries.items) |entry| {
                 try sub_buf.appendSlice("100644 ");
@@ -506,7 +506,7 @@ pub fn cmdNotes(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         }
 
         // Collect and sort for deterministic output
-        var entries_list = std.ArrayList(NoteEntry).init(allocator);
+        var entries_list = std.array_list.Managed(NoteEntry).init(allocator);
         defer entries_list.deinit();
         var it = notes_map.iterator();
         while (it.next()) |kv| {

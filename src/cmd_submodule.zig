@@ -12,7 +12,7 @@ const submodule_usage = "usage: git submodule [--quiet] [--cached]\n   or: git s
 pub fn cmdSubmodule(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     var quiet = false;
     var subcmd: ?[]const u8 = null;
-    var sub_args = std.ArrayList([]const u8).init(allocator);
+    var sub_args = std.array_list.Managed([]const u8).init(allocator);
     defer sub_args.deinit();
 
     while (args.next()) |arg| {
@@ -104,8 +104,8 @@ const SubmoduleEntry = struct {
     url: ?[]u8,
 };
 
-fn readGitmodules(allocator: std.mem.Allocator, repo_root: []const u8) !std.ArrayList(SubmoduleEntry) {
-    var entries = std.ArrayList(SubmoduleEntry).init(allocator);
+fn readGitmodules(allocator: std.mem.Allocator, repo_root: []const u8) !std.array_list.Managed(SubmoduleEntry) {
+    var entries = std.array_list.Managed(SubmoduleEntry).init(allocator);
     const gm_path = try std.fmt.allocPrint(allocator, "{s}/.gitmodules", .{repo_root});
     defer allocator.free(gm_path);
     const content = std.fs.cwd().readFileAlloc(allocator, gm_path, 10 * 1024 * 1024) catch return entries;
@@ -162,7 +162,7 @@ fn readGitmodules(allocator: std.mem.Allocator, repo_root: []const u8) !std.Arra
     return entries;
 }
 
-fn freeSubmoduleEntries(entries: *std.ArrayList(SubmoduleEntry), allocator: std.mem.Allocator) void {
+fn freeSubmoduleEntries(entries: *std.array_list.Managed(SubmoduleEntry), allocator: std.mem.Allocator) void {
     for (entries.items) |e| {
         allocator.free(e.name);
         allocator.free(e.path);
@@ -199,7 +199,7 @@ fn submoduleStatus(
         for (idx.entries.items) |ie| {
             if (std.mem.eql(u8, ie.path, entry.path)) {
                 var hash_hex: [40]u8 = undefined;
-                _ = std.fmt.bufPrint(&hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&ie.sha1)}) catch continue;
+                _ = std.fmt.bufPrint(&hash_hex, "{x}", .{&ie.sha1}) catch continue;
 
                 // Check if the submodule is initialized (has .git dir/file)
                 const sm_git = try std.fmt.allocPrint(allocator, "{s}/{s}/.git", .{ repo_root, entry.path });
@@ -339,7 +339,7 @@ fn submoduleUpdate(
         for (idx.entries.items) |ie| {
             if (std.mem.eql(u8, ie.path, entry.path)) {
                 var hh: [40]u8 = undefined;
-                _ = std.fmt.bufPrint(&hh, "{}", .{std.fmt.fmtSliceHexLower(&ie.sha1)}) catch continue;
+                _ = std.fmt.bufPrint(&hh, "{x}", .{&ie.sha1}) catch continue;
                 expected_hash = hh;
                 break;
             }
@@ -510,7 +510,7 @@ fn submoduleForeach(
     defer freeSubmoduleEntries(&entries, allocator);
 
     // Combine sub_args into command
-    var cmd_parts = std.ArrayList(u8).init(allocator);
+    var cmd_parts = std.array_list.Managed(u8).init(allocator);
     defer cmd_parts.deinit();
     for (sub_args, 0..) |arg, idx| {
         if (std.mem.eql(u8, arg, "--recursive")) {
@@ -604,7 +604,7 @@ fn submoduleDeinit(
     defer allocator.free(repo_root);
 
     var deinit_all = false;
-    var paths = std.ArrayList([]const u8).init(allocator);
+    var paths = std.array_list.Managed([]const u8).init(allocator);
     defer paths.deinit();
 
     for (sub_args) |arg| {
