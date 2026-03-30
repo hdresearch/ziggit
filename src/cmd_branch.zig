@@ -545,7 +545,7 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             defer allocator.free(new_head);
             try std.fs.cwd().writeFile(.{ .sub_path = head_path, .data = new_head });
         }
-    } else if (std.mem.eql(u8, first_arg.?, "-c") or std.mem.eql(u8, first_arg.?, "-C")) {
+    } else if (std.mem.eql(u8, first_arg.?, "-c") or std.mem.eql(u8, first_arg.?, "-C") or std.mem.eql(u8, first_arg.?, "--copy")) {
         // helpers.Copy branch
         const arg1 = fake_args.next() orelse {
             try platform_impl.writeStderr("fatal: branch name required\n");
@@ -788,7 +788,8 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             defer if (ref_name_b.len > 0) allocator.free(@constCast(ref_name_b));
             helpers.writeReflogEntry(git_path, ref_name_b, "0000000000000000000000000000000000000000", nh, reflog_msg_b, allocator, platform_impl) catch {};
         }
-    } else if (std.mem.eql(u8, first_arg.?, "--copy")) {
+    } else if (std.mem.eql(u8, first_arg.?, "__never_match__")) {
+        // Dead code - --copy is handled above with -c/-C
         const copy_src = fake_args.next() orelse {
             try platform_impl.writeStderr("fatal: branch name required\n");
             std.process.exit(128);
@@ -807,7 +808,42 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         defer if (src_hash2) |h2| allocator.free(h2);
         const dst_ref_path3 = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, copy_dst });
         defer allocator.free(dst_ref_path3);
+        if (std.fs.path.dirname(dst_ref_path3)) |pd| std.fs.cwd().makePath(pd) catch {};
         try std.fs.cwd().writeFile(.{ .sub_path = dst_ref_path3, .data = src_hash2 orelse "" });
+        // Copy reflog
+        const src_reflog = try std.fmt.allocPrint(allocator, "{s}/logs/refs/heads/{s}", .{ git_path, copy_src });
+        defer allocator.free(src_reflog);
+        const dst_reflog = try std.fmt.allocPrint(allocator, "{s}/logs/refs/heads/{s}", .{ git_path, copy_dst });
+        defer allocator.free(dst_reflog);
+        if (std.fs.cwd().readFileAlloc(allocator, src_reflog, 10 * 1024 * 1024)) |rl_data| {
+            defer allocator.free(rl_data);
+            if (std.fs.path.dirname(dst_reflog)) |pd2| std.fs.cwd().makePath(pd2) catch {};
+            std.fs.cwd().writeFile(.{ .sub_path = dst_reflog, .data = rl_data }) catch {};
+        } else |_| {}
+        // Copy config section
+        const config_path_c = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+        defer allocator.free(config_path_c);
+        if (std.fs.cwd().readFileAlloc(allocator, config_path_c, 1024 * 1024)) |cfg_data| {
+            defer allocator.free(cfg_data);
+            const src_section = try std.fmt.allocPrint(allocator, "[branch \"{s}\"]", .{copy_src});
+            defer allocator.free(src_section);
+            if (std.mem.indexOf(u8, cfg_data, src_section)) |sec_start| {
+                // Find end of section
+                var sec_end = sec_start + src_section.len;
+                while (sec_end < cfg_data.len) {
+                    if (cfg_data[sec_end] == '[') break;
+                    sec_end += 1;
+                }
+                const section_content = cfg_data[sec_start + src_section.len .. sec_end];
+                const new_section = try std.fmt.allocPrint(allocator, "[branch \"{s}\"]{s}", .{ copy_dst, section_content });
+                defer allocator.free(new_section);
+                var new_cfg = std.array_list.Managed(u8).init(allocator);
+                defer new_cfg.deinit();
+                try new_cfg.appendSlice(cfg_data);
+                try new_cfg.appendSlice(new_section);
+                std.fs.cwd().writeFile(.{ .sub_path = config_path_c, .data = new_cfg.items }) catch {};
+            }
+        } else |_| {}
     } else if (std.mem.eql(u8, first_arg.?, "--no-sort") or std.mem.startsWith(u8, first_arg.?, "--sort=") or
         std.mem.eql(u8, first_arg.?, "--sort") or std.mem.startsWith(u8, first_arg.?, "--track=") or
         std.mem.eql(u8, first_arg.?, "--no-track") or std.mem.eql(u8, first_arg.?, "--no-column") or
