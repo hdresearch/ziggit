@@ -289,6 +289,59 @@ pub fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         std.process.exit(128);
     }
 
+    // Fast path for --count: simple DFS, no sorting needed
+    if (do_count and !topo_order and skip_count == 0 and format_str == null and !show_objects and !show_parents and !show_children and !graph) {
+        var count_visited = std.StringHashMap(void).init(allocator);
+        defer {
+            var vit = count_visited.iterator();
+            while (vit.next()) |entry| allocator.free(@constCast(entry.key_ptr.*));
+            count_visited.deinit();
+        }
+        var count_stack = std.array_list.Managed([]u8).init(allocator);
+        defer {
+            for (count_stack.items) |h| allocator.free(h);
+            count_stack.deinit();
+        }
+        for (include_hashes.items) |h| {
+            try count_stack.append(try allocator.dupe(u8, h));
+        }
+        var total_count: usize = 0;
+        while (count_stack.items.len > 0) {
+            const current = count_stack.pop();
+            if (count_visited.contains(current)) {
+                allocator.free(current);
+                continue;
+            }
+            if (exclude_hashes.contains(current)) {
+                allocator.free(current);
+                continue;
+            }
+            try count_visited.put(current, {});
+            const obj = objects.GitObject.load(current, git_path, platform_impl, allocator) catch continue;
+            defer obj.deinit(allocator);
+            if (obj.type != .commit) continue;
+            total_count += 1;
+            // Parse only parent lines from header
+            var lines_iter = std.mem.splitScalar(u8, obj.data, '\n');
+            while (lines_iter.next()) |line| {
+                if (line.len == 0) break;
+                if (std.mem.startsWith(u8, line, "parent ") and line.len >= 47) {
+                    try count_stack.append(try allocator.dupe(u8, line[7..47]));
+                }
+            }
+        }
+        if (max_count) |mc| {
+            if (mc >= 0) {
+                const limit = @as(usize, @intCast(mc));
+                total_count = @min(total_count, limit);
+            }
+        }
+        var buf: [20]u8 = undefined;
+        const count_str = std.fmt.bufPrint(&buf, "{d}\n", .{total_count}) catch unreachable;
+        try platform_impl.writeStdout(count_str);
+        return;
+    }
+
     // helpers.Collect all reachable commits with timestamps for sorting
     var visited = std.StringHashMap(void).init(allocator);
     defer {
@@ -326,7 +379,7 @@ pub fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     }
 
     while (queue.items.len > 0) {
-        const current = queue.orderedRemove(0);
+        const current = queue.pop();
 
         if (visited.contains(current)) {
             allocator.free(current);

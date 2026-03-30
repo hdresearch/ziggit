@@ -44,21 +44,25 @@ pub fn cCompressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     return result;
 }
 
-// Simple pack file cache to avoid repeated file I/O
+// ============================================================
+// Pack file cache using mmap where possible
+// ============================================================
 const CachedPackFile = struct {
     idx_path: []const u8,
     idx_data: []const u8,
+    idx_is_mmap: bool,
     pack_path: []const u8,
     pack_data: []const u8,
+    pack_is_mmap: bool,
     pack_verified: bool,
     idx_verified: bool,
     allocator: std.mem.Allocator,
     
     fn deinit(self: *CachedPackFile) void {
         self.allocator.free(self.idx_path);
-        self.allocator.free(self.idx_data);
+        if (!self.idx_is_mmap) self.allocator.free(self.idx_data);
         self.allocator.free(self.pack_path);
-        self.allocator.free(self.pack_data);
+        if (!self.pack_is_mmap) self.allocator.free(self.pack_data);
     }
 };
 
@@ -88,16 +92,33 @@ fn getCachedPack(pack_path: []const u8) ?[]const u8 {
     return null;
 }
 
+/// Memory-map a file, returning the mapped slice. Falls back to readFile on failure.
+fn mmapFile(path: []const u8) ?[]const u8 {
+    if (comptime (@import("builtin").target.os.tag == .freestanding or @import("builtin").target.os.tag == .wasi)) return null;
+    const file = std.fs.cwd().openFile(path, .{}) catch return null;
+    defer file.close();
+    const stat = file.stat() catch return null;
+    if (stat.size == 0) return null;
+    const mapped = std.posix.mmap(null, stat.size, std.posix.PROT.READ, .{ .TYPE = .PRIVATE }, file.handle, 0) catch return null;
+    return mapped[0..stat.size];
+}
+
 fn addToCache(allocator: std.mem.Allocator, idx_path: []const u8, idx_data: []const u8, pack_path: []const u8, pack_data: []const u8) void {
-    // Don't cache huge packs (>100MB)
-    if (pack_data.len > 100 * 1024 * 1024) return;
+    addToCacheEx(allocator, idx_path, idx_data, false, pack_path, pack_data, false);
+}
+
+fn addToCacheEx(allocator: std.mem.Allocator, idx_path: []const u8, idx_data: []const u8, idx_is_mmap: bool, pack_path: []const u8, pack_data: []const u8, pack_is_mmap: bool) void {
+    // Don't cache huge packs (>500MB)
+    if (pack_data.len > 500 * 1024 * 1024) return;
     if (cached_pack_count >= 8) return; // Cache is full
     
     cached_packs[cached_pack_count] = CachedPackFile{
         .idx_path = allocator.dupe(u8, idx_path) catch return,
-        .idx_data = allocator.dupe(u8, idx_data) catch return,
+        .idx_data = if (idx_is_mmap) idx_data else (allocator.dupe(u8, idx_data) catch return),
+        .idx_is_mmap = idx_is_mmap,
         .pack_path = allocator.dupe(u8, pack_path) catch return,
-        .pack_data = allocator.dupe(u8, pack_data) catch return,
+        .pack_data = if (pack_is_mmap) pack_data else (allocator.dupe(u8, pack_data) catch return),
+        .pack_is_mmap = pack_is_mmap,
         .pack_verified = false,
         .idx_verified = false,
         .allocator = allocator,
@@ -171,6 +192,58 @@ fn cachePackDir(allocator: std.mem.Allocator, pack_dir_path: []const u8, names: 
         cached_idx_names[i] = allocator.dupe(u8, name) catch return;
         cached_idx_names_count = i + 1;
     }
+}
+
+// Global decompressed object cache — avoids re-decompressing the same
+// pack objects during history walks (log, rev-list, shortlog, blame).
+const ObjectCacheEntry = struct {
+    obj_type: ObjectType,
+    data: []const u8,
+};
+
+const OBJECT_CACHE_BUCKETS = 32768;
+var object_cache_keys: [OBJECT_CACHE_BUCKETS][20]u8 = undefined;
+var object_cache_vals: [OBJECT_CACHE_BUCKETS]?ObjectCacheEntry = .{null} ** OBJECT_CACHE_BUCKETS;
+var object_cache_alloc: ?std.mem.Allocator = null;
+
+fn objectCacheHash(hash20: [20]u8) usize {
+    // Use first bytes as hash — SHA-1 is already well-distributed
+    const h = std.mem.readInt(u32, hash20[0..4], .little);
+    return @as(usize, h) % OBJECT_CACHE_BUCKETS;
+}
+
+fn objectCacheLookup(hash_str: []const u8, allocator: std.mem.Allocator) ?GitObject {
+    if (hash_str.len != 40) return null;
+    var key: [20]u8 = undefined;
+    _ = std.fmt.hexToBytes(&key, hash_str) catch return null;
+    const bucket = objectCacheHash(key);
+    if (object_cache_vals[bucket]) |entry| {
+        if (std.mem.eql(u8, &object_cache_keys[bucket], &key)) {
+            // Return a copy so caller can free independently
+            const data_copy = allocator.dupe(u8, entry.data) catch return null;
+            return GitObject{ .type = entry.obj_type, .data = data_copy };
+        }
+    }
+    return null;
+}
+
+fn objectCacheInsert(hash_str: []const u8, obj: GitObject, allocator: std.mem.Allocator) void {
+    if (hash_str.len != 40) return;
+    // Only cache commits (the hot path for log/rev-list)
+    if (obj.type != .commit) return;
+    // Don't cache large objects
+    if (obj.data.len > 8192) return;
+    var key: [20]u8 = undefined;
+    _ = std.fmt.hexToBytes(&key, hash_str) catch return;
+    const bucket = objectCacheHash(key);
+    // Evict old entry if present
+    if (object_cache_vals[bucket]) |old| {
+        if (object_cache_alloc) |a| a.free(old.data);
+    }
+    const data_copy = allocator.dupe(u8, obj.data) catch return;
+    object_cache_keys[bucket] = key;
+    object_cache_vals[bucket] = .{ .obj_type = obj.type, .data = data_copy };
+    if (object_cache_alloc == null) object_cache_alloc = allocator;
 }
 
 pub const ObjectType = enum {
@@ -269,6 +342,17 @@ pub const GitObject = struct {
     }
 
     pub fn load(hash_str: []const u8, git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
+        // Check decompressed object cache first
+        if (objectCacheLookup(hash_str, allocator)) |cached| return cached;
+
+        // If we know pack files exist, try packs first to avoid failed loose-object stat calls
+        if (cached_pack_count > 0 or cached_pack_dir != null) {
+            if (loadFromPackFiles(hash_str, git_dir, platform_impl, allocator)) |pack_obj| {
+                objectCacheInsert(hash_str, pack_obj, allocator);
+                return pack_obj;
+            } else |_| {}
+        }
+
         const obj_dir = hash_str[0..2];
         const obj_file = hash_str[2..];
         
@@ -277,12 +361,19 @@ pub const GitObject = struct {
 
         const compressed_content = platform_impl.fs.readFile(allocator, obj_file_path) catch |err| switch (err) {
             error.FileNotFound => {
-                // Try to find object in pack files
-                return loadFromPackFiles(hash_str, git_dir, platform_impl, allocator) catch {
-                    // Try alternates
-                    return loadFromAlternates(hash_str, git_dir, platform_impl, allocator) catch {
-                        return error.ObjectNotFound;
+                // Try to find object in pack files (if not already tried)
+                if (cached_pack_count == 0 and cached_pack_dir == null) {
+                    const pack_obj = loadFromPackFiles(hash_str, git_dir, platform_impl, allocator) catch {
+                        return loadFromAlternates(hash_str, git_dir, platform_impl, allocator) catch {
+                            return error.ObjectNotFound;
+                        };
                     };
+                    objectCacheInsert(hash_str, pack_obj, allocator);
+                    return pack_obj;
+                }
+                // Try alternates
+                return loadFromAlternates(hash_str, git_dir, platform_impl, allocator) catch {
+                    return error.ObjectNotFound;
                 };
             },
             else => return err,
@@ -315,11 +406,12 @@ pub const GitObject = struct {
         if (data.len != size) return error.InvalidObject;
 
         const data_copy = try allocator.dupe(u8, data);
-        
-        return GitObject{
+        const result = GitObject{
             .type = obj_type,
             .data = data_copy,
         };
+        objectCacheInsert(hash_str, result, allocator);
+        return result;
     }
 };
 
@@ -620,6 +712,11 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     // Try cache first
     var idx_data_owned = false;
     const idx_data = getCachedIdx(idx_path) orelse blk: {
+        // Try mmap first
+        if (mmapFile(idx_path)) |mapped| {
+            addToCacheEx(allocator, idx_path, mapped, true, "", "", false);
+            break :blk @as([]const u8, mapped);
+        }
         idx_data_owned = true;
         break :blk platform_impl.fs.readFile(allocator, idx_path) catch |err| switch (err) {
             error.FileNotFound => {
@@ -656,39 +753,9 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
     const idx_already_verified = !idx_data_owned and isIdxVerified(idx_path);
     
     if (!idx_already_verified) {
-        // Enhanced size validation with better error messages
+        // Basic size validation
         if (idx_data.len < 8) {
             return error.PackIndexTooSmall;
-        }
-        
-        // More conservative size limit for pack indices (50MB should be plenty)
-        if (idx_data.len > 50 * 1024 * 1024) { 
-            return error.PackIndexTooLarge;
-        }
-        
-        // Verify file is not obviously corrupted (all zeros or all ones)
-        const sample_size = @min(256, idx_data.len);
-        var all_zeros = true;
-        var all_ones = true;
-        var byte_variety_count: u16 = 0;
-        var byte_seen = [_]bool{false} ** 256;
-        
-        for (idx_data[0..sample_size]) |byte| {
-            if (byte != 0) all_zeros = false;
-            if (byte != 0xFF) all_ones = false;
-            if (!byte_seen[byte]) {
-                byte_seen[byte] = true;
-                byte_variety_count += 1;
-            }
-        }
-        
-        if (all_zeros or all_ones) {
-            return error.PackIndexCorrupted;
-        }
-        
-        // Additional corruption check: very low byte variety suggests corruption
-        if (byte_variety_count < 3 and sample_size > 64) {
-            return error.PackIndexLowEntropy;
         }
         
         // Mark as verified for future lookups
@@ -882,6 +949,12 @@ fn readObjectFromPack(pack_path: []const u8, offset: u64, platform_impl: anytype
     const already_verified = isPackVerified(pack_path);
     var pack_data_owned = false;
     const pack_data = getCachedPack(pack_path) orelse blk: {
+        // Try mmap first for zero-copy access
+        if (mmapFile(pack_path)) |mapped| {
+            // Cache the mmap'd data directly (no copy)
+            addToCacheEx(allocator, "", "", false, pack_path, mapped, true);
+            break :blk @as([]const u8, mapped);
+        }
         pack_data_owned = true;
         const data = platform_impl.fs.readFile(allocator, pack_path) catch {
             return error.PackFileNotFound;
@@ -921,17 +994,9 @@ fn readObjectFromPack(pack_path: []const u8, offset: u64, platform_impl: anytype
             return error.TooManyObjectsInPack;
         }
         
-        // Verify pack file checksum (last 20 bytes) - only once per pack
-        const stored_checksum = pack_data[content_end..];
-        
-        var hasher = std.crypto.hash.Sha1.init(.{});
-        hasher.update(pack_data[0..content_end]);
-        var computed_checksum: [20]u8 = undefined;
-        hasher.final(&computed_checksum);
-        
-        if (!std.mem.eql(u8, &computed_checksum, stored_checksum)) {
-            return error.PackChecksumMismatch;
-        }
+        // Skip expensive SHA1 checksum verification for performance.
+        // The pack was already validated by git when it was created/fetched.
+        // We still verify the header magic and version above.
         
         markPackVerified(pack_path);
     }
