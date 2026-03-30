@@ -344,14 +344,37 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         // helpers.If only one argument: rename current branch to arg1
         // helpers.If two arguments: rename arg1 to arg2
         const old_name = if (arg2 != null) arg1 else blk: {
-            break :blk refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
-                try platform_impl.writeStderr("fatal: no branch to rename\n");
+            const cb = refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
+                try platform_impl.writeStderr("fatal: cannot rename the current branch while not on any\n");
                 std.process.exit(128);
                 unreachable;
             };
+            // Check if on detached HEAD
+            if (std.mem.eql(u8, cb, "HEAD")) {
+                allocator.free(cb);
+                try platform_impl.writeStderr("fatal: cannot rename the current branch while not on any\n");
+                std.process.exit(128);
+                unreachable;
+            }
+            break :blk cb;
         };
         defer if (arg2 == null) allocator.free(old_name);
         const new_name = arg2 orelse arg1;
+
+        // Check if target branch is currently checked out (can't rename onto it)
+        if (!std.mem.eql(u8, old_name, new_name)) {
+            const cur_br = refs.getCurrentBranch(git_path, platform_impl, allocator) catch null;
+            defer if (cur_br) |cb| allocator.free(cb);
+            if (cur_br) |cb| {
+                const short_cb = if (std.mem.startsWith(u8, cb, "refs/heads/")) cb["refs/heads/".len..] else cb;
+                if (std.mem.eql(u8, short_cb, new_name)) {
+                    const emsg_m = try std.fmt.allocPrint(allocator, "fatal: cannot force update the branch '{s}' used by worktree at '{s}'\n", .{ new_name, std.fs.path.dirname(git_path) orelse "." });
+                    defer allocator.free(emsg_m);
+                    try platform_impl.writeStderr(emsg_m);
+                    std.process.exit(128);
+                }
+            }
+        }
 
         // helpers.Read old branch hash
         const old_ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, old_name });
@@ -444,11 +467,18 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         };
         const arg2 = fake_args.next();
         const src_name = if (arg2 != null) arg1 else blk: {
-            break :blk refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
-                try platform_impl.writeStderr("fatal: no branch to copy\n");
+            const cb_c = refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
+                try platform_impl.writeStderr("fatal: cannot copy the current branch while not on any\n");
                 std.process.exit(128);
                 unreachable;
             };
+            if (std.mem.eql(u8, cb_c, "HEAD")) {
+                allocator.free(cb_c);
+                try platform_impl.writeStderr("fatal: cannot copy the current branch while not on any\n");
+                std.process.exit(128);
+                unreachable;
+            }
+            break :blk cb_c;
         };
         defer if (arg2 == null) allocator.free(src_name);
         const dst_name = arg2 orelse arg1;
