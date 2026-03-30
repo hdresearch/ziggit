@@ -100,6 +100,9 @@ pub fn build(b: *std.Build) void {
         "ziggit_gitignore_init",
         "ziggit_gitignore_match",
         "ziggit_gitignore_free",
+        "ziggit_validate_sha1",
+        "ziggit_validate_ref",
+        "ziggit_validate_path",
     };
 
     const wasm_step = b.step("wasm", "Build WASM module for browser");

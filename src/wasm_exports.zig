@@ -2,6 +2,7 @@ const zlib_compat = @import("git/zlib_compat.zig");
 const stream_utils = @import("git/stream_utils.zig");
 const DeltaCache = @import("git/delta_cache.zig").DeltaCache;
 const gitignore = @import("git/gitignore.zig");
+const validation = @import("git/validation.zig");
 /// WASM exports for browser integration
 /// Provides a C-ABI compatible interface to ziggit's git operations.
 /// All strings are passed as (ptr, len) pairs. Errors return negative values.
@@ -1464,4 +1465,27 @@ export fn ziggit_gitignore_free() void {
         gi.deinit();
         global_gitignore = null;
     }
+}
+
+// ========== Validation exports ==========
+
+/// Validate a SHA-1 hash string (40 hex chars).
+/// Returns 0 if valid, 1 if invalid.
+export fn ziggit_validate_sha1(hash_ptr: [*]const u8, hash_len: u32) i32 {
+    validation.validateSHA1Hash(hash_ptr[0..hash_len]) catch return 1;
+    return 0;
+}
+
+/// Validate a git ref name.
+/// Returns 0 if valid, 1 if invalid.
+export fn ziggit_validate_ref(ref_ptr: [*]const u8, ref_len: u32) i32 {
+    validation.validateRefName(ref_ptr[0..ref_len]) catch return 1;
+    return 0;
+}
+
+/// Validate path security (no .git traversal attacks, etc.).
+/// Returns 0 if safe, 1 if unsafe.
+export fn ziggit_validate_path(path_ptr: [*]const u8, path_len: u32) i32 {
+    validation.validatePathSecurity(path_ptr[0..path_len]) catch return 1;
+    return 0;
 }
