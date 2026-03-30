@@ -258,6 +258,16 @@ fn worktreeAdd(
     defer allocator.free(commondir_file);
     try writeFileContent(commondir_file, "../..\n");
 
+    // Create symlinks for shared directories so object loading works
+    const shared_dirs = [_][]const u8{ "objects", "refs", "packed-refs", "info" };
+    for (shared_dirs) |shared| {
+        const dst = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ wt_admin_dir, shared });
+        defer allocator.free(dst);
+        const rel_src = try std.fmt.allocPrint(allocator, "../../{s}", .{shared});
+        defer allocator.free(rel_src);
+        std.posix.symlinkat(rel_src, std.fs.cwd().fd, dst) catch {};
+    }
+
     // Write .git/worktrees/<name>/HEAD
     const head_file = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{wt_admin_dir});
     defer allocator.free(head_file);
@@ -280,29 +290,65 @@ fn worktreeAdd(
 
     // Checkout the tree if not --no-checkout and not orphan
     if (!no_checkout and orphan_branch == null) {
-        helpers.checkoutCommitTree(wt_admin_dir, commit_hash, allocator, platform_impl) catch {};
-
-        // Also write index for the worktree
-        const tree_hash = helpers.getCommitTree(wt_admin_dir, commit_hash, allocator, platform_impl) catch null;
+        // Load objects from common_dir, checkout to full_wt_path
+        const tree_hash = helpers.getCommitTree(common_dir, commit_hash, allocator, platform_impl) catch null;
         if (tree_hash) |th| {
             defer allocator.free(th);
-            helpers.updateIndexFromTree(wt_admin_dir, th, allocator, platform_impl) catch {};
+            const tree_obj = objects.GitObject.load(th, common_dir, platform_impl, allocator) catch null;
+            if (tree_obj) |to| {
+                defer to.deinit(allocator);
+                // Checkout files to worktree path
+                helpers.checkoutTreeRecursive(common_dir, to.data, full_wt_path, "", allocator, platform_impl) catch {};
+                // Build and save index for the worktree
+                var wt_index = index_mod.Index.init(allocator);
+                defer wt_index.deinit();
+                helpers.populateIndexFromTree(common_dir, to.data, full_wt_path, "", &wt_index, allocator, platform_impl) catch {};
+                wt_index.save(wt_admin_dir, platform_impl) catch {};
+            }
         }
     }
 
     // Print output
-    const branch_display = if (target_branch) |tb|
-        try std.fmt.allocPrint(allocator, "branch '{s}'", .{tb})
-    else
-        try std.fmt.allocPrint(allocator, "HEAD {s}", .{commit_hash[0..7]});
-    defer allocator.free(branch_display);
+    // Get subject line from commit
+    const subject = getCommitSubject(allocator, common_dir, commit_hash) catch try allocator.dupe(u8, "");
+    defer allocator.free(subject);
 
-    const msg = try std.fmt.allocPrint(allocator, "Preparing worktree (new branch '{s}')\nHEAD is now at {s}\n", .{
-        target_branch orelse commit_hash[0..7],
-        commit_hash[0..7],
-    });
-    defer allocator.free(msg);
-    try platform_impl.writeStderr(msg);
+    if (detach) {
+        const msg = try std.fmt.allocPrint(allocator, "Preparing worktree (detached HEAD {s})\nHEAD is now at {s} {s}\n", .{
+            commit_hash[0..7], commit_hash[0..7], subject,
+        });
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+    } else if (create_branch) {
+        const msg = try std.fmt.allocPrint(allocator, "Preparing worktree (new branch '{s}')\nHEAD is now at {s} {s}\n", .{
+            target_branch orelse wt_name, commit_hash[0..7], subject,
+        });
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+    } else if (orphan_branch != null) {
+        const msg = try std.fmt.allocPrint(allocator, "Preparing worktree (new branch '{s}')\n", .{
+            orphan_branch.?,
+        });
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+    } else {
+        const msg = try std.fmt.allocPrint(allocator, "Preparing worktree (checking out '{s}')\nHEAD is now at {s} {s}\n", .{
+            target_branch orelse commit_hash[0..7], commit_hash[0..7], subject,
+        });
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+    }
+}
+
+fn getCommitSubject(allocator: std.mem.Allocator, git_path: []const u8, commit_hash: []const u8) ![]u8 {
+    const data = try helpers.readGitObjectContent(git_path, commit_hash, allocator);
+    defer allocator.free(data);
+    if (std.mem.indexOf(u8, data, "\n\n")) |pos| {
+        const msg_start = data[pos + 2 ..];
+        const end = std.mem.indexOfScalar(u8, msg_start, '\n') orelse msg_start.len;
+        return try allocator.dupe(u8, msg_start[0..end]);
+    }
+    return try allocator.dupe(u8, "");
 }
 
 fn writeFileContent(path: []const u8, content: []const u8) !void {
