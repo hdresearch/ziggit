@@ -2415,3 +2415,146 @@ export fn ziggit_extract_all_objects(out_ptr: *u32, out_len: *u32) i32 {
     out_len.* = @intCast(owned.len);
     return 0;
 }
+
+// ========== Additional browser-useful exports ==========
+
+/// Read an object from the loaded pack, allocating the result in WASM memory.
+/// hash_ptr: 40 hex chars of object hash
+/// out_ptr/out_len: pointers to write result data pointer and length
+/// type_out: pointer to write object type (1=commit, 2=tree, 3=blob, 4=tag)
+/// Returns 0 on success, negative on error.
+/// Caller must free the result via ziggit_free(out_ptr, out_len).
+export fn ziggit_read_object_alloc(hash_ptr: [*]const u8, hash_len: u32, out_ptr: *u32, out_len: *u32, type_out: *u32) i32 {
+    if (hash_len < 40) return -1;
+    const allocator = getAllocator();
+    const pack_data = global_pack_data orelse return -2;
+    const idx_data = global_idx_data orelse return -3;
+
+    var target_hash: [20]u8 = undefined;
+    for (0..20) |i| {
+        target_hash[i] = std.fmt.parseInt(u8, hash_ptr[i * 2 .. i * 2 + 2], 16) catch return -4;
+    }
+
+    const offset = findOffsetInIdx(idx_data, target_hash) orelse return -5;
+    const obj = readPackedObjectFromData(pack_data, offset, allocator) catch return -6;
+    // Don't deinit - caller owns the data
+
+    out_ptr.* = @intFromPtr(obj.data.ptr);
+    out_len.* = @intCast(obj.data.len);
+    type_out.* = switch (obj.obj_type) {
+        .commit => 1,
+        .tree => 2,
+        .blob => 3,
+        .tag => 4,
+    };
+    return 0;
+}
+
+/// Find the merge base (common ancestor) of two commits.
+/// hash1_ptr, hash2_ptr: 40 hex chars each
+/// out_ptr: 40-byte buffer to write result hash (hex)
+/// Returns 0 on success, 1 if no common ancestor, negative on error.
+export fn ziggit_merge_base(hash1_ptr: [*]const u8, hash1_len: u32, hash2_ptr: [*]const u8, hash2_len: u32, out_ptr: [*]u8) i32 {
+    if (hash1_len < 40 or hash2_len < 40) return -1;
+    const allocator = getAllocator();
+    const pack_data = global_pack_data orelse return -2;
+    const idx_data = global_idx_data orelse return -3;
+
+    // Walk ancestors of hash1 into a set
+    var ancestors1 = std.AutoHashMap([20]u8, void).init(allocator);
+    defer ancestors1.deinit();
+
+    var queue = std.array_list.Managed([20]u8).init(allocator);
+    defer queue.deinit();
+
+    // Parse initial hash
+    var h1: [20]u8 = undefined;
+    for (0..20) |i| {
+        h1[i] = std.fmt.parseInt(u8, hash1_ptr[i * 2 .. i * 2 + 2], 16) catch return -4;
+    }
+    queue.append(h1) catch return -5;
+
+    // BFS from hash1 (limit depth to 10000 to avoid infinite loops)
+    var depth: u32 = 0;
+    while (queue.items.len > 0 and depth < 10000) : (depth += 1) {
+        const current = queue.orderedRemove(0);
+        if (ancestors1.contains(current)) continue;
+        ancestors1.put(current, {}) catch return -5;
+
+        // Read commit and get parents
+        const offset = findOffsetInIdx(idx_data, current) orelse continue;
+        const obj = readPackedObjectFromData(pack_data, offset, allocator) catch continue;
+        defer obj.deinit(allocator);
+        if (obj.obj_type != .commit) continue;
+
+        // Parse parent lines
+        var line_iter = std.mem.splitScalar(u8, obj.data, '\n');
+        while (line_iter.next()) |line| {
+            if (line.len == 0) break;
+            if (std.mem.startsWith(u8, line, "parent ") and line.len >= 47) {
+                var parent_hash: [20]u8 = undefined;
+                for (0..20) |i| {
+                    parent_hash[i] = std.fmt.parseInt(u8, line[7 + i * 2 .. 7 + i * 2 + 2], 16) catch break;
+                }
+                queue.append(parent_hash) catch continue;
+            }
+        }
+    }
+
+    // BFS from hash2, check if any ancestor is in ancestors1
+    var h2: [20]u8 = undefined;
+    for (0..20) |i| {
+        h2[i] = std.fmt.parseInt(u8, hash2_ptr[i * 2 .. i * 2 + 2], 16) catch return -4;
+    }
+
+    queue.clearRetainingCapacity();
+    queue.append(h2) catch return -5;
+    var visited2 = std.AutoHashMap([20]u8, void).init(allocator);
+    defer visited2.deinit();
+
+    depth = 0;
+    while (queue.items.len > 0 and depth < 10000) : (depth += 1) {
+        const current = queue.orderedRemove(0);
+        if (visited2.contains(current)) continue;
+        visited2.put(current, {}) catch return -5;
+
+        if (ancestors1.contains(current)) {
+            // Found merge base!
+            const hex = std.fmt.bytesToHex(&current, .lower);
+            @memcpy(out_ptr[0..40], &hex);
+            return 0;
+        }
+
+        const offset = findOffsetInIdx(idx_data, current) orelse continue;
+        const obj = readPackedObjectFromData(pack_data, offset, allocator) catch continue;
+        defer obj.deinit(allocator);
+        if (obj.obj_type != .commit) continue;
+
+        var line_iter = std.mem.splitScalar(u8, obj.data, '\n');
+        while (line_iter.next()) |line| {
+            if (line.len == 0) break;
+            if (std.mem.startsWith(u8, line, "parent ") and line.len >= 47) {
+                var parent_hash: [20]u8 = undefined;
+                for (0..20) |i| {
+                    parent_hash[i] = std.fmt.parseInt(u8, line[7 + i * 2 .. 7 + i * 2 + 2], 16) catch break;
+                }
+                queue.append(parent_hash) catch continue;
+            }
+        }
+    }
+
+    return 1; // No common ancestor found
+}
+
+/// Count lines in a text (useful for file stats in browser).
+export fn ziggit_count_lines(data_ptr: [*]const u8, data_len: u32) u32 {
+    if (data_len == 0) return 0;
+    const data = data_ptr[0..data_len];
+    var count: u32 = 0;
+    for (data) |c| {
+        if (c == '\n') count += 1;
+    }
+    // Count last line if it doesn't end with newline
+    if (data[data.len - 1] != '\n') count += 1;
+    return count;
+}
