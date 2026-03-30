@@ -115,9 +115,39 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
 
         for (branches.items) |branch| {
             const prefix = if (std.mem.eql(u8, branch, current_branch)) "* " else "  ";
-            const msg = try std.fmt.allocPrint(allocator, "{s}{s}\n", .{ prefix, branch });
-            defer allocator.free(msg);
-            try platform_impl.writeStdout(msg);
+            if (verbose) {
+                const ref_name = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch});
+                defer allocator.free(ref_name);
+                const hash_opt = refs.resolveRef(git_path, ref_name, platform_impl, allocator) catch null;
+                const hash = hash_opt orelse "";
+                defer if (hash.len > 0) allocator.free(hash);
+                const alen = abbrev_len orelse 7;
+                const short = if (hash.len >= alen) hash[0..alen] else hash;
+                var subj: []const u8 = "";
+                var free_subj = false;
+                if (hash.len >= 40) {
+                    if (objects.GitObject.load(hash, git_path, platform_impl, allocator)) |cobj| {
+                        defer cobj.deinit(allocator);
+                        if (std.mem.indexOf(u8, cobj.data, "\n\n")) |pos| {
+                            const ms = cobj.data[pos + 2 ..];
+                            if (std.mem.indexOfScalar(u8, ms, '\n')) |nl| {
+                                subj = allocator.dupe(u8, ms[0..nl]) catch "";
+                            } else {
+                                subj = allocator.dupe(u8, std.mem.trim(u8, ms, "\n")) catch "";
+                            }
+                            free_subj = true;
+                        }
+                    } else |_| {}
+                }
+                defer if (free_subj) allocator.free(subj);
+                const msg = try std.fmt.allocPrint(allocator, "{s}{s} {s} {s}\n", .{ prefix, branch, short, subj });
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+            } else {
+                const msg = try std.fmt.allocPrint(allocator, "{s}{s}\n", .{ prefix, branch });
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+            }
         }
     } else if (std.mem.startsWith(u8, first_arg.?, "--set-upstream-to=") or std.mem.eql(u8, first_arg.?, "--set-upstream-to") or std.mem.eql(u8, first_arg.?, "-u")) {
         // Set upstream tracking branch
