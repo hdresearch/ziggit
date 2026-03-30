@@ -271,13 +271,50 @@ pub fn loadAttrFile(allocator: std.mem.Allocator, repo_root: []const u8, subdir:
 }
 
 
+// Global macro definitions (e.g. [attr]binary -diff -merge -text)
+var global_macros: ?std.StringHashMap([]const AttrValue) = null;
+
+fn ensureMacros(allocator: std.mem.Allocator) void {
+    if (global_macros == null) {
+        global_macros = std.StringHashMap([]const AttrValue).init(allocator);
+        // Built-in macros
+        const binary_attrs = allocator.alloc(AttrValue, 3) catch return;
+        binary_attrs[0] = .{ .name = allocator.dupe(u8, "diff") catch return, .value = allocator.dupe(u8, "unset") catch return };
+        binary_attrs[1] = .{ .name = allocator.dupe(u8, "merge") catch return, .value = allocator.dupe(u8, "unset") catch return };
+        binary_attrs[2] = .{ .name = allocator.dupe(u8, "text") catch return, .value = allocator.dupe(u8, "unset") catch return };
+        global_macros.?.put(allocator.dupe(u8, "binary") catch return, binary_attrs) catch {};
+    }
+}
+
 pub fn parseAttrContent(allocator: std.mem.Allocator, content: []const u8, prefix: []const u8, rules: *std.ArrayList(AttrRule)) !void {
+    ensureMacros(allocator);
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0 or trimmed[0] == '#') continue;
-        // helpers.Skip macro definitions [attr]
-        if (std.mem.startsWith(u8, trimmed, "[attr]")) continue;
+        // Parse macro definitions [attr]name attrs...
+        if (std.mem.startsWith(u8, trimmed, "[attr]")) {
+            const macro_rest = trimmed["[attr]".len..];
+            var mparts = std.mem.tokenizeAny(u8, macro_rest, " \t");
+            const macro_name = mparts.next() orelse continue;
+            var macro_attrs = std.ArrayList(AttrValue).init(allocator);
+            while (mparts.next()) |aspec| {
+                if (aspec.len == 0) continue;
+                if (aspec[0] == '!') {
+                    try macro_attrs.append(.{ .name = try allocator.dupe(u8, aspec[1..]), .value = try allocator.dupe(u8, "unspecified") });
+                } else if (aspec[0] == '-') {
+                    try macro_attrs.append(.{ .name = try allocator.dupe(u8, aspec[1..]), .value = try allocator.dupe(u8, "unset") });
+                } else if (std.mem.indexOf(u8, aspec, "=")) |eq| {
+                    try macro_attrs.append(.{ .name = try allocator.dupe(u8, aspec[0..eq]), .value = try allocator.dupe(u8, aspec[eq + 1..]) });
+                } else {
+                    try macro_attrs.append(.{ .name = try allocator.dupe(u8, aspec), .value = try allocator.dupe(u8, "set") });
+                }
+            }
+            const key = try allocator.dupe(u8, macro_name);
+            global_macros.?.put(key, try allocator.dupe(AttrValue, macro_attrs.items)) catch {};
+            macro_attrs.deinit();
+            continue;
+        }
 
         // Parse: pattern attr1=val1 attr2 -attr3 !attr4
         // Handle quoted patterns before tokenizing
@@ -364,6 +401,16 @@ pub fn parseAttrContent(allocator: std.mem.Allocator, content: []const u8, prefi
                 const val = try allocator.dupe(u8, "unspecified");
                 try attrs.append(.{ .name = name, .value = val });
             } else {
+                // Check if this is a macro name
+                if (global_macros) |macros| {
+                    if (macros.get(attr_spec)) |macro_attrs| {
+                        // Expand macro
+                        for (macro_attrs) |ma| {
+                            try attrs.append(.{ .name = try allocator.dupe(u8, ma.name), .value = try allocator.dupe(u8, ma.value) });
+                        }
+                        continue;
+                    }
+                }
                 // attr (set to true)
                 const name = try allocator.dupe(u8, attr_spec);
                 const val = try allocator.dupe(u8, "set");
