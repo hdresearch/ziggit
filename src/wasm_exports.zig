@@ -1,5 +1,6 @@
 const zlib_compat = @import("git/zlib_compat.zig");
 const stream_utils = @import("git/stream_utils.zig");
+const DeltaCache = @import("git/delta_cache.zig").DeltaCache;
 /// WASM exports for browser integration
 /// Provides a C-ABI compatible interface to ziggit's git operations.
 /// All strings are passed as (ptr, len) pairs. Errors return negative values.
