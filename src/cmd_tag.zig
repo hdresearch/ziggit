@@ -500,11 +500,8 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                         var out_buf2 = std.array_list.Managed(u8).init(allocator);
                         defer out_buf2.deinit();
                         try out_buf2.appendSlice(tag);
-                        // Check if this is an annotated tag (pad even if empty annotation)
-                        const is_annotated = isAnnotatedTag(allocator, git_path, tag, platform_impl);
-                        if (is_annotated) {
-                            while (out_buf2.items.len < 16) try out_buf2.append(' ');
-                        }
+                        // Always pad when -n is set (git pads all tags)
+                        while (out_buf2.items.len < 16) try out_buf2.append(' ');
                         try out_buf2.append('\n');
                         try platform_impl.writeStdout(out_buf2.items);
                     }
