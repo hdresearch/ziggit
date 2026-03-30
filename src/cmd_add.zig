@@ -233,7 +233,9 @@ pub fn addSingleFile(allocator: std.mem.Allocator, relative_path: []const u8, fu
     }
 
     // Emit CRLF conversion warnings before adding
-    emitCrlfWarning(allocator, relative_path, full_path, git_path, platform_impl) catch {};
+    // For files already in the index, use stricter warning criteria (git's safe behavior)
+    const is_new_file = !fileExistsInIndex(index, relative_path);
+    emitCrlfWarning(allocator, relative_path, full_path, git_path, platform_impl, is_new_file) catch {};
 
     // Apply CRLF→LF normalization for text files
     const filtered = applyCrlfNormalization(allocator, relative_path, full_path, git_path, platform_impl);
@@ -251,8 +253,15 @@ pub fn addSingleFile(allocator: std.mem.Allocator, relative_path: []const u8, fu
     };
 }
 
+fn fileExistsInIndex(index: *index_mod.Index, path: []const u8) bool {
+    for (index.entries.items) |entry| {
+        if (std.mem.eql(u8, entry.path, path)) return true;
+    }
+    return false;
+}
+
 /// Emit CRLF/LF conversion warnings to stderr, matching git's behavior.
-fn emitCrlfWarning(allocator: std.mem.Allocator, relative_path: []const u8, full_path: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
+fn emitCrlfWarning(allocator: std.mem.Allocator, relative_path: []const u8, full_path: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, is_new_file: bool) !void {
     const content = platform_impl.fs.readFile(allocator, full_path) catch return;
     defer allocator.free(content);
 
@@ -308,36 +317,45 @@ fn emitCrlfWarning(allocator: std.mem.Allocator, relative_path: []const u8, full
         },
         .text_auto => {
             if (!is_text) return;
-            // Same as text but only for detected-text files
-            if (hasCrlf(content)) {
-                const normalized = crlf_mod.convertCrlfToLf(allocator, content) catch return;
-                defer allocator.free(normalized);
-                const co_action = crlf_mod.getCheckoutAction(.text_auto, attrs.eol, autocrlf_val, eol_config_val, normalized);
-                if (co_action != .lf_to_crlf) {
-                    const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', CRLF will be replaced by LF the next time Git touches it\n", .{relative_path});
-                    defer allocator.free(msg);
-                    platform_impl.writeStderr(msg) catch {};
-                    return;
-                }
-            }
-            if (hasBareLf(content)) {
-                const co_action = crlf_mod.getCheckoutAction(.text_auto, attrs.eol, autocrlf_val, eol_config_val, content);
-                if (co_action == .lf_to_crlf) {
-                    const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', LF will be replaced by CRLF the next time Git touches it\n", .{relative_path});
-                    defer allocator.free(msg);
-                    platform_impl.writeStderr(msg) catch {};
-                }
+            // For existing files with text=auto, suppress most warnings (safe behavior)
+            if (!is_new_file) return;
+            // Normalize content to check checkout behavior
+            const normalized = crlf_mod.convertCrlfToLf(allocator, content) catch return;
+            defer allocator.free(normalized);
+            const co_action = crlf_mod.getCheckoutAction(.text_auto, attrs.eol, autocrlf_val, eol_config_val, normalized);
+            if (hasCrlf(content) and co_action != .lf_to_crlf) {
+                // CRLF->LF on add, checkout won't restore CRLF
+                const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', CRLF will be replaced by LF the next time Git touches it\n", .{relative_path});
+                defer allocator.free(msg);
+                platform_impl.writeStderr(msg) catch {};
+            } else if (hasBareLf(content) and co_action == .lf_to_crlf) {
+                // LF->CRLF on checkout
+                const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', LF will be replaced by CRLF the next time Git touches it\n", .{relative_path});
+                defer allocator.free(msg);
+                platform_impl.writeStderr(msg) catch {};
             }
         },
         .no_text => {},
         .unspecified => {
-            // No text attribute - only autocrlf=true generates warnings
+            // No text attribute
+            // For existing files, git uses "safe" behavior and suppresses warnings
+            if (!is_new_file) return;
             // Don't warn for files with lone CR (inconsistent endings)
             if (autocrlf_val) |ac| {
-                if (std.mem.eql(u8, ac, "true") and is_text and hasBareLf(content) and !hasLoneCr(content)) {
-                    const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', LF will be replaced by CRLF the next time Git touches it\n", .{relative_path});
-                    defer allocator.free(msg);
-                    platform_impl.writeStderr(msg) catch {};
+                if (std.mem.eql(u8, ac, "true") and is_text and !hasLoneCr(content)) {
+                    // autocrlf=true: warn about LF->CRLF for files with bare LF
+                    if (hasBareLf(content) and !hasCrlf(content)) {
+                        const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', LF will be replaced by CRLF the next time Git touches it\n", .{relative_path});
+                        defer allocator.free(msg);
+                        platform_impl.writeStderr(msg) catch {};
+                    }
+                } else if (std.mem.eql(u8, ac, "input") and is_text and !hasLoneCr(content)) {
+                    // autocrlf=input: warn about CRLF->LF for files with CRLF
+                    if (hasCrlf(content)) {
+                        const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', CRLF will be replaced by LF the next time Git touches it\n", .{relative_path});
+                        defer allocator.free(msg);
+                        platform_impl.writeStderr(msg) catch {};
+                    }
                 }
             }
         },
