@@ -999,6 +999,27 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         };
         // Set up tracking
         if (start_point_raw) |sp| {
+            // Validate: start point must be a branch (local or remote tracking), not a tag
+            const is_branch_start = blk: {
+                // Check if it's a local branch
+                const local_ref = std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, sp }) catch break :blk false;
+                defer allocator.free(local_ref);
+                if ((std.fs.cwd().access(local_ref, .{}) catch null) != null) break :blk true;
+                // Check if it's a remote tracking branch
+                if (std.mem.indexOf(u8, sp, "/")) |_| {
+                    const remote_ref_check = std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}", .{ git_path, sp }) catch break :blk false;
+                    defer allocator.free(remote_ref_check);
+                    if ((std.fs.cwd().access(remote_ref_check, .{}) catch null) != null) break :blk true;
+                }
+                break :blk false;
+            };
+            if (!is_branch_start) {
+                const emsg_t = try std.fmt.allocPrint(allocator, "fatal: cannot set up tracking information; starting point '{s}' is not a branch\n", .{sp});
+                defer allocator.free(emsg_t);
+                try platform_impl.writeStderr(emsg_t);
+                std.process.exit(128);
+            }
+
             // Determine remote and merge ref from start_point
             var remote_name: []const u8 = ".";
             var merge_ref: []const u8 = undefined;
