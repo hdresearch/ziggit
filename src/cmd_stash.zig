@@ -351,6 +351,7 @@ fn createStashCommit(
     include_all: bool,
     pathspecs: []const []const u8,
     platform_impl: *const platform_mod.Platform,
+    staged_only_flag: bool,
 ) !?[]u8 {
     const repo_root = try getRepoRoot(allocator, git_path);
     defer allocator.free(repo_root);
@@ -423,7 +424,10 @@ fn createStashCommit(
         return null;
     }
 
-    const wt_tree_hash = try helpers.writeTreeFromIndex(allocator, &wt_idx, git_path, platform_impl);
+    const wt_tree_hash = if (staged_only_flag)
+        try allocator.dupe(u8, index_tree_hash)
+    else
+        try helpers.writeTreeFromIndex(allocator, &wt_idx, git_path, platform_impl);
     defer allocator.free(wt_tree_hash);
 
     if (std.mem.eql(u8, wt_tree_hash, head_tree_hash) and std.mem.eql(u8, index_tree_hash, head_tree_hash) and !include_untracked) {
@@ -574,6 +578,7 @@ fn stashPush(
     var include_all = false;
     var keep_index = false;
     var quiet = false;
+    var staged_only = false;
     var pathspecs = std.array_list.Managed([]const u8).init(allocator);
     defer pathspecs.deinit();
     var after_dashdash = false;
@@ -612,7 +617,7 @@ fn stashPush(
             try platform_impl.writeStderr("error: stash --patch is not supported in ziggit\n");
             std.process.exit(1);
         } else if (std.mem.eql(u8, arg, "-S") or std.mem.eql(u8, arg, "--staged")) {
-            // staged_only mode is handled below
+            staged_only = true;
         } else if (std.mem.eql(u8, arg, "--intent-to-add")) {
             // handled silently
         } else if (std.mem.startsWith(u8, arg, "-") and arg.len > 1) {
@@ -663,6 +668,7 @@ fn stashPush(
     const stash_hash = try createStashCommit(
         allocator, git_path, head_hash, branch_name, message,
         include_untracked, include_all, pathspecs.items, platform_impl,
+        staged_only,
     ) orelse {
         if (!quiet) {
             try platform_impl.writeStdout("No local changes to save\n");
@@ -694,7 +700,53 @@ fn stashPush(
     helpers.writeReflogEntry(git_path, "refs/stash", old_stash, stash_hash, reflog_msg, allocator, platform_impl) catch {};
 
     // Reset working tree
-    if (pathspecs.items.len == 0) {
+    if (staged_only) {
+        // For --staged: reset the index to HEAD and restore staged files in working tree
+        const repo_root_s = try getRepoRoot(allocator, git_path);
+        defer allocator.free(repo_root_s);
+        const head_tree = helpers.getCommitTree(git_path, head_hash, allocator, platform_impl) catch null;
+        if (head_tree) |ht| {
+            defer allocator.free(ht);
+            // Load current index (has staged changes) to know which files were staged
+            var staged_idx = index_mod.Index.load(git_path, platform_impl, allocator) catch index_mod.Index.init(allocator);
+            defer staged_idx.deinit();
+            // Build HEAD tree blob map
+            var head_blobs = std.StringHashMap([]const u8).init(allocator);
+            defer {
+                var vit = head_blobs.valueIterator();
+                while (vit.next()) |v| allocator.free(v.*);
+                var kit = head_blobs.keyIterator();
+                while (kit.next()) |k| allocator.free(k.*);
+                head_blobs.deinit();
+            }
+            helpers.collectTreeBlobs(allocator, ht, "", git_path, platform_impl, &head_blobs) catch {};
+            // For each file that differs between index and HEAD, restore working tree to HEAD version
+            for (staged_idx.entries.items) |entry| {
+                var entry_hex: [40]u8 = undefined;
+                for (entry.sha1, 0..) |byte, bi| {
+                    entry_hex[bi * 2] = "0123456789abcdef"[byte >> 4];
+                    entry_hex[bi * 2 + 1] = "0123456789abcdef"[byte & 0xf];
+                }
+                const head_hash_for_file = head_blobs.get(entry.path);
+                if (head_hash_for_file) |hh| {
+                    if (!std.mem.eql(u8, &entry_hex, hh)) {
+                        // File was staged (index differs from HEAD) - restore to HEAD
+                        const blob = objects.GitObject.load(hh, git_path, platform_impl, allocator) catch continue;
+                        defer blob.deinit(allocator);
+                        const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root_s, entry.path }) catch continue;
+                        defer allocator.free(full_path);
+                        platform_impl.fs.writeFile(full_path, blob.data) catch {};
+                    }
+                } else {
+                    // File exists in index but not in HEAD - it was a new staged file, delete it
+                    const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root_s, entry.path }) catch continue;
+                    defer allocator.free(full_path);
+                    std.fs.cwd().deleteFile(full_path) catch {};
+                }
+            }
+            helpers.updateIndexFromTree(git_path, ht, allocator, platform_impl) catch {};
+        }
+    } else if (pathspecs.items.len == 0) {
         // Full reset to HEAD
         const repo_root = try getRepoRoot(allocator, git_path);
         defer allocator.free(repo_root);
@@ -2103,6 +2155,7 @@ fn stashCreate(
     const stash_hash = createStashCommit(
         allocator, git_path, head_hash, branch_name, user_message,
         false, false, &.{}, platform_impl,
+        false,
     ) catch {
         std.process.exit(1);
     } orelse {
