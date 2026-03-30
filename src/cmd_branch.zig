@@ -35,8 +35,38 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     };
     defer allocator.free(git_path);
 
-    const first_arg = args.next();
+    // Collect all args first for multi-flag handling
+    var all_args = std.array_list.Managed([]const u8).init(allocator);
+    defer all_args.deinit();
+    while (args.next()) |a| try all_args.append(a);
 
+    // Pre-scan for modifier flags that can appear in any position
+    var verbose = false;
+    {
+        var i: usize = 0;
+        while (i < all_args.items.len) {
+            if (std.mem.eql(u8, all_args.items[i], "-v") or std.mem.eql(u8, all_args.items[i], "--verbose")) {
+                verbose = true;
+                _ = all_args.orderedRemove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+    // Reconstruct arg iterator from remaining args
+    var arg_idx: usize = 0;
+    const ArgIter = struct {
+        items: []const []const u8,
+        idx: *usize,
+        pub fn next(self: *@This()) ?[]const u8 {
+            if (self.idx.* >= self.items.len) return null;
+            const v = self.items[self.idx.*];
+            self.idx.* += 1;
+            return v;
+        }
+    };
+    var fake_args = ArgIter{ .items = all_args.items, .idx = &arg_idx };
+    const first_arg = fake_args.next();
     if (first_arg == null) {
         // List branches
         const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch "master";
@@ -61,12 +91,12 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         const upstream_name = if (std.mem.startsWith(u8, first_arg.?, "--set-upstream-to="))
             first_arg.?["--set-upstream-to=".len..]
         else
-            args.next() orelse {
+            fake_args.next() orelse {
                 try platform_impl.writeStderr("fatal: no upstream branch specified\n");
                 std.process.exit(128);
                 unreachable;
             };
-        const branch_name = args.next() orelse blk: {
+        const branch_name = fake_args.next() orelse blk: {
             break :blk refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
                 try platform_impl.writeStderr("fatal: no branch specified and no current branch\n");
                 std.process.exit(128);
@@ -114,7 +144,7 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         try platform_impl.writeStdout(success_msg);
     } else if (std.mem.eql(u8, first_arg.?, "--unset-upstream")) {
         // Unset upstream
-        const branch_name = args.next() orelse blk: {
+        const branch_name = fake_args.next() orelse blk: {
             break :blk refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
                 try platform_impl.writeStderr("fatal: no branch specified\n");
                 std.process.exit(128);
@@ -144,7 +174,7 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         var is_remote = false;
         var names_to_delete = std.array_list.Managed([]const u8).init(allocator);
         defer names_to_delete.deinit();
-        while (args.next()) |darg| {
+        while (fake_args.next()) |darg| {
             if (std.mem.eql(u8, darg, "-r") or std.mem.eql(u8, darg, "--remotes")) {
                 is_remote = true;
             } else if (std.mem.startsWith(u8, darg, "@{-")) {
@@ -228,11 +258,11 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         }
     } else if (std.mem.eql(u8, first_arg.?, "-m") or std.mem.eql(u8, first_arg.?, "-M")) {
         // Rename branch
-        const arg1 = args.next() orelse {
+        const arg1 = fake_args.next() orelse {
             try platform_impl.writeStderr("fatal: branch name required\n");
             std.process.exit(128);
         };
-        const arg2 = args.next();
+        const arg2 = fake_args.next();
 
         // helpers.If only one argument: rename current branch to arg1
         // helpers.If two arguments: rename arg1 to arg2
@@ -285,11 +315,11 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         }
     } else if (std.mem.eql(u8, first_arg.?, "-c") or std.mem.eql(u8, first_arg.?, "-C")) {
         // helpers.Copy branch
-        const arg1 = args.next() orelse {
+        const arg1 = fake_args.next() orelse {
             try platform_impl.writeStderr("fatal: branch name required\n");
             std.process.exit(128);
         };
-        const arg2 = args.next();
+        const arg2 = fake_args.next();
         const src_name = if (arg2 != null) arg1 else blk: {
             break :blk refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
                 try platform_impl.writeStderr("fatal: no branch to copy\n");
@@ -315,11 +345,11 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         try std.fs.cwd().writeFile(.{ .sub_path = dst_ref_path, .data = src_hash });
     } else if (std.mem.eql(u8, first_arg.?, "--force") or std.mem.eql(u8, first_arg.?, "-f")) {
         // Force create/reset branch
-        const branch_name = args.next() orelse {
+        const branch_name = fake_args.next() orelse {
             try platform_impl.writeStderr("fatal: branch name required\n");
             std.process.exit(128);
         };
-        const start_point = args.next();
+        const start_point = fake_args.next();
         // helpers.Resolve start_point using helpers.resolveRevision for complex helpers.refs like HEAD~1
         const resolved_sp_force: ?[]const u8 = if (start_point) |sp|
             helpers.resolveRevision(git_path, sp, platform_impl, allocator) catch null
@@ -349,7 +379,7 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             for (branches2.items) |branch| allocator.free(branch);
             branches2.deinit();
         }
-        const pattern = args.next();
+        const pattern = fake_args.next();
         for (branches2.items) |branch| {
             if (pattern) |p| {
                 // helpers.Simple glob matching
@@ -362,11 +392,11 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         }
     } else if (std.mem.eql(u8, first_arg.?, "--create-reflog")) {
         // helpers.Create branch with reflog
-        const branch_name = args.next() orelse {
+        const branch_name = fake_args.next() orelse {
             try platform_impl.writeStderr("fatal: branch name required\n");
             std.process.exit(128);
         };
-        const start_point = args.next();
+        const start_point = fake_args.next();
         // helpers.Resolve start_point using helpers.resolveRevision for complex helpers.refs
         const resolved_sp_reflog: ?[]const u8 = if (start_point) |sp|
             helpers.resolveRevision(git_path, sp, platform_impl, allocator) catch null
@@ -394,12 +424,12 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             helpers.writeReflogEntry(git_path, std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name}) catch "", "0000000000000000000000000000000000000000", nh, "branch: Created from HEAD", allocator, platform_impl) catch {};
         }
     } else if (std.mem.eql(u8, first_arg.?, "--copy")) {
-        const copy_src = args.next() orelse {
+        const copy_src = fake_args.next() orelse {
             try platform_impl.writeStderr("fatal: branch name required\n");
             std.process.exit(128);
             unreachable;
         };
-        const copy_dst = args.next() orelse copy_src;
+        const copy_dst = fake_args.next() orelse copy_src;
         const src_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{copy_src});
         defer allocator.free(src_ref);
         const src_hash2 = refs.resolveRef(git_path, src_ref, platform_impl, allocator) catch {
@@ -429,7 +459,7 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             for (branches4.items) |br4| allocator.free(br4);
             branches4.deinit();
         }
-        while (args.next()) |_| {}
+        while (fake_args.next()) |_| {}
         for (branches4.items) |br4| {
             const p4 = if (std.mem.eql(u8, br4, current_branch4)) "* " else "  ";
             const m4 = try std.fmt.allocPrint(allocator, "{s}{s}\n", .{ p4, br4 });
@@ -439,7 +469,7 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     } else {
         // helpers.Create new branch
         const branch_name = first_arg.?;
-        const start_point = args.next();
+        const start_point = fake_args.next();
         
         // helpers.Check if branch already exists
         const existing_ref = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, branch_name });
