@@ -39,6 +39,7 @@ const importObject = {
       const bytes = typeof data === 'string' ? encoder.encode(data) : data;
       const ptr = wasmInstance.exports.ziggit_alloc(bytes.length);
       if (ptr === 0) return 0;
+      // Re-read buffer after alloc (memory may have grown)
       new Uint8Array(wasmMemory.buffer, ptr, bytes.length).set(bytes);
       new DataView(wasmMemory.buffer).setUint32(dataPtrPtr, ptr, true);
       new DataView(wasmMemory.buffer).setUint32(dataLenPtr, bytes.length, true);
@@ -152,24 +153,33 @@ function runCommand() {
   output.textContent += '$ ziggit ' + args.join(' ') + '\n';
 
   try {
-    // Write each arg as null-terminated string, build argv array
+    // Write each arg as null-terminated string using proper WASM allocation
     const argPtrs = [];
-    let offset = wasmMemory.buffer.byteLength - 8192;
+    const allocPtrs = []; // track for cleanup
     for (const arg of fullArgs) {
       const bytes = encoder.encode(arg + '\0');
-      new Uint8Array(wasmMemory.buffer).set(bytes, offset);
-      argPtrs.push(offset);
-      offset += bytes.length;
+      const ptr = wasmInstance.exports.ziggit_alloc(bytes.length);
+      if (ptr === 0) { log('[error] allocation failed\n'); return; }
+      allocPtrs.push({ ptr, len: bytes.length });
+      argPtrs.push(ptr);
+    }
+    // Write all string data after all allocations (buffer is now stable)
+    for (let i = 0; i < fullArgs.length; i++) {
+      const bytes = encoder.encode(fullArgs[i] + '\0');
+      new Uint8Array(wasmMemory.buffer, argPtrs[i], bytes.length).set(bytes);
     }
     // Write argv pointer array
-    const argvBase = offset;
+    const argvPtr = wasmInstance.exports.ziggit_alloc(argPtrs.length * 4);
+    allocPtrs.push({ ptr: argvPtr, len: argPtrs.length * 4 });
     const dv = new DataView(wasmMemory.buffer);
     for (let i = 0; i < argPtrs.length; i++) {
-      dv.setUint32(argvBase + i * 4, argPtrs[i], true);
+      dv.setUint32(argvPtr + i * 4, argPtrs[i], true);
     }
 
-    const rc = wasmInstance.exports.ziggit_command_line(fullArgs.length, argvBase);
+    const rc = wasmInstance.exports.ziggit_command_line(fullArgs.length, argvPtr);
     if (rc !== 0) log('[exit code: ' + rc + ']\n');
+    // Free allocated memory
+    for (const a of allocPtrs) wasmInstance.exports.ziggit_free(a.ptr, a.len);
   } catch (e) {
     log('[error] ' + e.message + '\n');
     console.error(e);
@@ -196,10 +206,10 @@ function doClone() {
     const target = '/repo';
     const targetBytes = encoder.encode(target);
 
-    // Write URL to WASM memory
+    // Write URL and target to WASM memory (allocate first, write after)
     const urlPtr = wasmInstance.exports.ziggit_alloc(urlBytes.length);
-    new Uint8Array(wasmMemory.buffer, urlPtr, urlBytes.length).set(urlBytes);
     const targetPtr = wasmInstance.exports.ziggit_alloc(targetBytes.length);
+    new Uint8Array(wasmMemory.buffer, urlPtr, urlBytes.length).set(urlBytes);
     new Uint8Array(wasmMemory.buffer, targetPtr, targetBytes.length).set(targetBytes);
 
     const rc = wasmInstance.exports.ziggit_clone_bare(urlPtr, urlBytes.length, targetPtr, targetBytes.length);
