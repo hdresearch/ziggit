@@ -64,6 +64,11 @@
 
   <div class="row">
     <input type="text" id="corsProxy" placeholder="CORS proxy URL" value="https://corsproxy.io/?">
+    <select id="proxyPreset" onchange="document.getElementById('corsProxy').value=this.value" style="background:#161b22;border:1px solid #30363d;color:#c9d1d9;padding:4px 8px;border-radius:4px;font-family:inherit;font-size:0.85em">
+      <option value="https://corsproxy.io/?">corsproxy.io</option>
+      <option value="https://api.allorigins.win/raw?url=">allorigins.win</option>
+      <option value="">No proxy (same-origin)</option>
+    </select>
     <span class="info">CORS proxy prefix</span>
   </div>
   <div class="row">
@@ -341,6 +346,41 @@
 
     const TYPE_NAMES = { 1: 'commit', 2: 'tree', 3: 'blob', 4: 'tag' };
 
+    function applyDeltaWasm(base, delta) {
+      if (!wasmInstance) return null;
+      try {
+        const e = wasmInstance.exports;
+        const basePtr = e.ziggit_alloc(base.length);
+        if (!basePtr) return null;
+        const deltaPtr = e.ziggit_alloc(delta.length);
+        if (!deltaPtr) { e.ziggit_free(basePtr, base.length); return null; }
+        const resPtrPtr = e.ziggit_alloc(4);
+        const resLenPtr = e.ziggit_alloc(4);
+        // Write data after all allocations
+        new Uint8Array(e.memory.buffer, basePtr, base.length).set(base);
+        new Uint8Array(e.memory.buffer, deltaPtr, delta.length).set(delta);
+        const rc = e.ziggit_apply_delta(basePtr, base.length, deltaPtr, delta.length, resPtrPtr, resLenPtr);
+        if (rc === 0) {
+          const buf = e.memory.buffer;
+          const view = new DataView(buf);
+          const resultPtr = view.getUint32(resPtrPtr, true);
+          const resultLen = view.getUint32(resLenPtr, true);
+          const result = new Uint8Array(buf, resultPtr, resultLen).slice();
+          e.ziggit_free(basePtr, base.length);
+          e.ziggit_free(deltaPtr, delta.length);
+          e.ziggit_free(resPtrPtr, 4);
+          e.ziggit_free(resLenPtr, 4);
+          e.ziggit_free(resultPtr, resultLen);
+          return result;
+        }
+        e.ziggit_free(basePtr, base.length);
+        e.ziggit_free(deltaPtr, delta.length);
+        e.ziggit_free(resPtrPtr, 4);
+        e.ziggit_free(resLenPtr, 4);
+      } catch (err) { /* fall through */ }
+      return null;
+    }
+
     function applyDelta(base, delta) {
       let pos = 0;
       // Read base size (variable length)
@@ -468,7 +508,28 @@
         } catch (e) {
           console.error('Error parsing object', i, 'at offset', objStart, ':', e.message);
           parseErrors++;
-          break; // Can't recover from inflate errors since offset is lost
+          // Try to continue - scan forward for next valid zlib header
+          let recovered = false;
+          for (let scan = objStart + 1; scan < packData.length - 2; scan++) {
+            const cmf = packData[scan];
+            const flg = packData[scan + 1];
+            // Check for valid zlib header
+            if ((cmf & 0x0F) === 8 && (cmf * 256 + flg) % 31 === 0) {
+              // Try to parse from a few bytes before (to include the varint header)
+              for (let backtrack = Math.min(10, scan - objStart); backtrack >= 1; backtrack--) {
+                try {
+                  const testHdr = readVarInt(packData, scan - backtrack);
+                  if (testHdr.type >= 1 && testHdr.type <= 7 && testHdr.offset === scan) {
+                    offset = scan - backtrack;
+                    recovered = true;
+                    break;
+                  }
+                } catch (_) {}
+              }
+              if (recovered) break;
+            }
+          }
+          if (!recovered) break;
         }
       }
       if (parseErrors > 0) console.warn('Pack parse errors:', parseErrors);
@@ -499,7 +560,8 @@
           }
         }
 
-        const resolved = applyDelta(base.data, obj.deltaData);
+        // Try WASM-accelerated delta first, fall back to JS
+        const resolved = applyDeltaWasm(base.data, obj.deltaData) || applyDelta(base.data, obj.deltaData);
         obj.typeName = base.typeName;
         obj.data = resolved;
         // Compute hash
