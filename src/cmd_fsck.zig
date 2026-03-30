@@ -187,7 +187,7 @@ fn doLostFound(allocator: std.mem.Allocator, git_dir: []const u8, platform_impl:
     }
 
     // Collect ref tips
-    var tips = std.ArrayList([]const u8).init(allocator);
+    var tips = std.array_list.Managed([]const u8).init(allocator);
     defer tips.deinit();
 
     // HEAD
@@ -317,7 +317,7 @@ fn doLostFound(allocator: std.mem.Allocator, git_dir: []const u8, platform_impl:
     }
 }
 
-fn collectRefTips(allocator: std.mem.Allocator, dir_path: []const u8, tips: *std.ArrayList([]const u8), platform_impl: *const platform_mod.Platform) !void {
+fn collectRefTips(allocator: std.mem.Allocator, dir_path: []const u8, tips: *std.array_list.Managed([]const u8), platform_impl: *const platform_mod.Platform) !void {
     var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
     defer dir.close();
     var it = dir.iterate();
@@ -336,7 +336,7 @@ fn collectRefTips(allocator: std.mem.Allocator, dir_path: []const u8, tips: *std
     }
 }
 
-fn collectReflogHashes(allocator: std.mem.Allocator, dir_path: []const u8, tips: *std.ArrayList([]const u8), platform_impl: *const platform_mod.Platform) !void {
+fn collectReflogHashes(allocator: std.mem.Allocator, dir_path: []const u8, tips: *std.array_list.Managed([]const u8), platform_impl: *const platform_mod.Platform) !void {
     var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
     defer dir.close();
     var it = dir.iterate();

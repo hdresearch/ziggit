@@ -500,7 +500,7 @@ pub fn catFileBatch(allocator: std.mem.Allocator, git_path: []const u8, full_con
 
 
 pub fn formatCatFileOutput(allocator: std.mem.Allocator, fmt: []const u8, obj_hash: []const u8, type_str: []const u8, size: usize) ![]u8 {
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     defer result.deinit();
 
     var i: usize = 0;
@@ -580,7 +580,7 @@ fn runTextconv(git_path: []const u8, file_path: []const u8, blob_data: []const u
         try platform_impl.writeStdout(blob_data);
         return;
     };
-    const output = child.stdout.?.reader().readAllAlloc(allocator, 1024 * 1024) catch {
+    const output = child.stdout.?.readToEndAlloc(allocator, 1024 * 1024) catch {
         _ = child.wait() catch {};
         try platform_impl.writeStdout(blob_data);
         return;

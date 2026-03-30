@@ -27,7 +27,7 @@ pub fn nativeCmdMergeBase(allocator: std.mem.Allocator, args: [][]const u8, comm
     var independent = false;
     var fork_point = false;
     var octopus = false;
-    var commits = std.ArrayList([]const u8).init(allocator);
+    var commits = std.array_list.Managed([]const u8).init(allocator);
     defer commits.deinit();
 
     var i = command_index + 1;
@@ -58,7 +58,7 @@ pub fn nativeCmdMergeBase(allocator: std.mem.Allocator, args: [][]const u8, comm
     };
 
     // helpers.Resolve all commit arguments to hashes
-    var resolved = std.ArrayList([]const u8).init(allocator);
+    var resolved = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (resolved.items) |h| allocator.free(h);
         resolved.deinit();
@@ -109,7 +109,7 @@ pub fn nativeCmdMergeBase(allocator: std.mem.Allocator, args: [][]const u8, comm
     if (independent) {
         // helpers.Find commits that are not ancestors of any other commit in the list
         // helpers.For each commit, check if it's an ancestor of any other
-        var indep = std.ArrayList([]const u8).init(allocator);
+        var indep = std.array_list.Managed([]const u8).init(allocator);
         defer indep.deinit();
 
         for (resolved.items, 0..) |commit_hash, ci| {
@@ -255,7 +255,7 @@ pub fn findAllMergeBases(git_dir: []const u8, hash1: []const u8, hash2: []const 
     try helpers.collectAncestors(git_dir, hash2, &ancestors2, allocator, platform_impl);
 
     // Common ancestors are the intersection
-    var common = std.ArrayList([]const u8).init(allocator);
+    var common = std.array_list.Managed([]const u8).init(allocator);
     defer common.deinit();
 
     var it = ancestors1.iterator();
@@ -267,7 +267,7 @@ pub fn findAllMergeBases(git_dir: []const u8, hash1: []const u8, hash2: []const 
 
     // Filter out non-maximal: remove any common ancestor that is itself
     // an ancestor of another common ancestor
-    var result = std.ArrayList([]const u8).init(allocator);
+    var result = std.array_list.Managed([]const u8).init(allocator);
     defer result.deinit();
 
     for (common.items) |candidate| {

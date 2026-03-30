@@ -90,7 +90,7 @@ pub fn nativeCmdColumn(_: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     const data = helpers.readStdin(allocator, 10 * 1024 * 1024) catch return;
     defer allocator.free(data);
     
-    var lines = std.ArrayList([]const u8).init(allocator);
+    var lines = std.array_list.Managed([]const u8).init(allocator);
     defer lines.deinit();
     var max_len: u32 = 0;
     

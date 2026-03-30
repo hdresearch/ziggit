@@ -29,7 +29,7 @@ fn getArgsImpl(allocator: std.mem.Allocator) !interface.ArgIterator {
         if (getGlobalArgv()) |argv_ptr| {
             const argv = argv_ptr[0..argc];
             // Create a copy of the args for the iterator
-            var arg_list = std.ArrayList([]u8).init(allocator);
+            var arg_list = std.array_list.Managed([]u8).init(allocator);
             for (argv) |arg| {
                 const owned_arg = try allocator.dupe(u8, arg);
                 try arg_list.append(owned_arg);
@@ -43,7 +43,7 @@ fn getArgsImpl(allocator: std.mem.Allocator) !interface.ArgIterator {
     }
     
     // Default to ziggit --help if no args provided
-    var arg_list = std.ArrayList([]u8).init(allocator);
+    var arg_list = std.array_list.Managed([]u8).init(allocator);
     try arg_list.append(try allocator.dupe(u8, "ziggit"));
     try arg_list.append(try allocator.dupe(u8, "--help"));
     

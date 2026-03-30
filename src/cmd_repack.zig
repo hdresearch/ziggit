@@ -72,7 +72,7 @@ pub fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platfor
 
     // helpers.Simple repack: collect all loose helpers.objects and write them into a pack file
     // helpers.Also consolidate existing packs
-    var all_objects = std.ArrayList([20]u8).init(allocator);
+    var all_objects = std.array_list.Managed([20]u8).init(allocator);
     defer all_objects.deinit();
 
     const objects_dir_path = std.fmt.allocPrint(allocator, "{s}/objects", .{git_dir}) catch return;
@@ -104,7 +104,7 @@ pub fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platfor
     }
 
     // helpers.Also collect helpers.objects from existing packs
-    var object_hashes = std.ArrayList([]const u8).init(allocator);
+    var object_hashes = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (object_hashes.items) |h| allocator.free(h);
         object_hashes.deinit();
@@ -124,7 +124,7 @@ pub fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platfor
     defer allocator.free(pack_dir);
     std.fs.cwd().makePath(pack_dir) catch {};
 
-    var existing_packs = std.ArrayList([]const u8).init(allocator);
+    var existing_packs = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (existing_packs.items) |p| allocator.free(p);
         existing_packs.deinit();
@@ -176,10 +176,10 @@ pub fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platfor
     if (object_hashes.items.len == 0) return;
 
     // helpers.Build pack data, tracking offsets and SHA-1s for idx generation
-    var pack_data = std.ArrayList(u8).init(allocator);
+    var pack_data = std.array_list.Managed(u8).init(allocator);
     defer pack_data.deinit();
 
-    var pack_entries = std.ArrayList(helpers.PackIdxEntry).init(allocator);
+    var pack_entries = std.array_list.Managed(helpers.PackIdxEntry).init(allocator);
     defer pack_entries.deinit();
 
     // Pack header
@@ -295,13 +295,13 @@ pub fn doNativeRepack(allocator: std.mem.Allocator, git_dir: []const u8, platfor
         const packs_file_path = std.fmt.allocPrint(allocator, "{s}/objects/info/packs", .{git_dir}) catch return;
         defer allocator.free(packs_file_path);
 
-        var content = std.ArrayList(u8).init(allocator);
+        var content = std.array_list.Managed(u8).init(allocator);
         defer content.deinit();
 
         if (std.fs.cwd().openDir(pack_dir, .{ .iterate = true })) |pd| {
             var pack_d2 = pd;
             defer pack_d2.close();
-            var pack_names2 = std.ArrayList([]const u8).init(allocator);
+            var pack_names2 = std.array_list.Managed([]const u8).init(allocator);
             defer {
                 for (pack_names2.items) |n| allocator.free(n);
                 pack_names2.deinit();

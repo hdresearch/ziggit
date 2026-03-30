@@ -106,7 +106,7 @@ pub fn cmdStripspace(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     }
     
     // helpers.Strip trailing whitespace, collapse blank lines, strip comments
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     defer result.deinit();
     var blank_count: u32 = 0;
     var lines = std.mem.splitScalar(u8, stdin_data, '\n');

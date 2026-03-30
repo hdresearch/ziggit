@@ -27,7 +27,7 @@ const stash_usage = "usage: git stash list [<log-options>]\n   or: git stash sho
 const push_usage = "usage: git stash [push [-p | --patch] [-S | --staged] [-k | --[no-]keep-index] [-q | --quiet]\n                 [-u | --include-untracked] [-a | --all] [(-m | --message) <message>]\n                 [--pathspec-from-file=<file> [--pathspec-file-nul]]\n                 [--] [<pathspec>...]]\n";
 
 pub fn nativeCmdStash(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
-    var all_args = std.ArrayList([]const u8).init(allocator);
+    var all_args = std.array_list.Managed([]const u8).init(allocator);
     defer all_args.deinit();
     while (args.next()) |arg| {
         try all_args.append(arg);
@@ -297,7 +297,7 @@ fn parseStashCommit(allocator: std.mem.Allocator, git_path: []const u8, stash_ha
     defer allocator.free(data);
 
     var stash_tree: ?[]u8 = null;
-    var parents = std.ArrayList([]u8).init(allocator);
+    var parents = std.array_list.Managed([]u8).init(allocator);
     defer parents.deinit();
 
     var lines_iter = std.mem.splitScalar(u8, data, '\n');
@@ -383,7 +383,7 @@ fn createStashCommit(
             defer allocator.free(new_hash_hex);
 
             var old_hex: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&old_hex, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch continue;
+            _ = std.fmt.bufPrint(&old_hex, "{x}", .{&entry.sha1}) catch continue;
             if (!std.mem.eql(u8, &old_hex, new_hash_hex)) {
                 has_wt_changes = true;
                 var hash_bytes: [20]u8 = undefined;
@@ -447,7 +447,7 @@ fn createStashCommit(
     }
 
     // Create stash commit
-    var parents = std.ArrayList([]const u8).init(allocator);
+    var parents = std.array_list.Managed([]const u8).init(allocator);
     defer parents.deinit();
     try parents.append(head_hash);
     try parents.append(index_commit_hash);
@@ -554,7 +554,7 @@ fn stashPush(
     var include_all = false;
     var keep_index = false;
     var quiet = false;
-    var pathspecs = std.ArrayList([]const u8).init(allocator);
+    var pathspecs = std.array_list.Managed([]const u8).init(allocator);
     defer pathspecs.deinit();
     var after_dashdash = false;
 
@@ -611,7 +611,7 @@ fn stashPush(
             }
             // For "save" subcommand, remaining args are the message
             if (std.mem.eql(u8, subcmd, "save")) {
-                var msg_parts = std.ArrayList(u8).init(allocator);
+                var msg_parts = std.array_list.Managed(u8).init(allocator);
                 try msg_parts.appendSlice(arg);
                 var j = i + 1;
                 while (j < sub_args.len) : (j += 1) {
@@ -862,7 +862,7 @@ fn stashList(
     const content = std.fs.cwd().readFileAlloc(allocator, reflog_path, 10 * 1024 * 1024) catch return;
     defer allocator.free(content);
 
-    var lines = std.ArrayList([]const u8).init(allocator);
+    var lines = std.array_list.Managed([]const u8).init(allocator);
     defer lines.deinit();
     var line_iter = std.mem.splitScalar(u8, content, '\n');
     while (line_iter.next()) |line| {
@@ -971,7 +971,7 @@ fn stashShow(
     collectTreeFilesRecursive(allocator, git_path, stash_tree_hash, "", &stash_map_show, platform_impl) catch {};
 
     // Collect changed files
-    var changed_files = std.ArrayList(ChangedFile).init(allocator);
+    var changed_files = std.array_list.Managed(ChangedFile).init(allocator);
     defer {
         for (changed_files.items) |cf| {
             allocator.free(cf.path);
@@ -1061,9 +1061,9 @@ const ChangedFile = struct {
 
 fn countDiffStats(old: []const u8, new: []const u8, ins: *usize, del: *usize) void {
     // Simple line-based diff counting
-    var old_lines = std.ArrayList([]const u8).init(std.heap.page_allocator);
+    var old_lines = std.array_list.Managed([]const u8).init(std.heap.page_allocator);
     defer old_lines.deinit();
-    var new_lines = std.ArrayList([]const u8).init(std.heap.page_allocator);
+    var new_lines = std.array_list.Managed([]const u8).init(std.heap.page_allocator);
     defer new_lines.deinit();
 
     var oit = std.mem.splitScalar(u8, old, '\n');
@@ -1111,7 +1111,7 @@ fn outputDiffstatFromFiles(
     var max_name_len: usize = 0;
     var total_ins: usize = 0;
     var total_del: usize = 0;
-    var file_stats = std.ArrayList(FileStat).init(allocator);
+    var file_stats = std.array_list.Managed(FileStat).init(allocator);
     defer file_stats.deinit();
 
     for (files) |cf| {
@@ -1215,7 +1215,7 @@ fn outputPatchForFile(
 
 fn outputDiffstat(allocator: std.mem.Allocator, diff_output: []const u8, platform_impl: *const platform_mod.Platform) !void {
     // Parse diff output to extract file stats
-    var files = std.ArrayList(FileStat).init(allocator);
+    var files = std.array_list.Managed(FileStat).init(allocator);
     defer files.deinit();
 
     var lines_iter = std.mem.splitScalar(u8, diff_output, '\n');
@@ -1680,7 +1680,7 @@ fn collectTreeFilesRecursive(
         if (null_pos + 21 > tree_obj.data.len) break;
         const hash_bytes = tree_obj.data[null_pos + 1 .. null_pos + 21];
         var hash_hex: [40]u8 = undefined;
-        _ = std.fmt.bufPrint(&hash_hex, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch break;
+        _ = std.fmt.bufPrint(&hash_hex, "{x}", .{hash_bytes}) catch break;
         pos = null_pos + 21;
 
         const full_name = if (prefix.len > 0)
@@ -1782,7 +1782,7 @@ fn checkoutUntrackedTree(
         if (null_pos + 21 > tree_data.len) break;
         const hash_bytes = tree_data[null_pos + 1 .. null_pos + 21];
         var hash_hex: [40]u8 = undefined;
-        _ = std.fmt.bufPrint(&hash_hex, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch break;
+        _ = std.fmt.bufPrint(&hash_hex, "{x}", .{hash_bytes}) catch break;
         pos = null_pos + 21;
 
         const full_name = if (prefix.len > 0)
@@ -1889,7 +1889,7 @@ fn stashDropByIndex(
     const content = std.fs.cwd().readFileAlloc(allocator, reflog_path, 10 * 1024 * 1024) catch return error.NoStash;
     defer allocator.free(content);
 
-    var lines = std.ArrayList([]const u8).init(allocator);
+    var lines = std.array_list.Managed([]const u8).init(allocator);
     defer lines.deinit();
     var line_iter = std.mem.splitScalar(u8, content, '\n');
     while (line_iter.next()) |line| {
@@ -1908,7 +1908,7 @@ fn stashDropByIndex(
         defer allocator.free(stash_ref_path);
         std.fs.cwd().deleteFile(stash_ref_path) catch {};
     } else {
-        var new_content = std.ArrayList(u8).init(allocator);
+        var new_content = std.array_list.Managed(u8).init(allocator);
         defer new_content.deinit();
         for (lines.items) |line| {
             try new_content.appendSlice(line);
@@ -2045,7 +2045,7 @@ fn stashCreate(
     defer if (user_message) |m| allocator.free(m);
 
     if (sub_args.len > 0) {
-        var msg_buf = std.ArrayList(u8).init(allocator);
+        var msg_buf = std.array_list.Managed(u8).init(allocator);
         for (sub_args, 0..) |arg, idx| {
             if (idx > 0) try msg_buf.append(' ');
             try msg_buf.appendSlice(arg);

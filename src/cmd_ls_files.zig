@@ -46,11 +46,11 @@ pub fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     var resolve_undo_flag = false;
     var deduplicate_flag = false;
     var eol_flag = false;
-    var exclude_patterns = std.ArrayList([]const u8).init(allocator);
+    var exclude_patterns = std.array_list.Managed([]const u8).init(allocator);
     defer exclude_patterns.deinit();
-    var exclude_files = std.ArrayList([]const u8).init(allocator);
+    var exclude_files = std.array_list.Managed([]const u8).init(allocator);
     defer exclude_files.deinit();
-    var pathspecs = std.ArrayList([]const u8).init(allocator);
+    var pathspecs = std.array_list.Managed([]const u8).init(allocator);
     defer pathspecs.deinit();
 
     const ls_files_usage = "usage: git ls-files [<options>] [<file>...]\n\n    -z                  paths are separated with helpers.NUL character\n    -c, --cached        show cached files in the output (default)\n    -d, --deleted       show deleted files in the output\n    -m, --modified      show modified files in the output\n    -o, --others        show other files in the output\n    -s, --stage         show staged contents' object name in the output\n    --directory         show 'other' directories' names only\n    --no-empty-directory  don't show empty directories\n    --error-unmatch     if any <file> is not in the index, treat this as an error\n    -x, --exclude <pattern>  skip files matching pattern\n    -X, --exclude-from <file>  read exclude patterns from <file>\n    --exclude-standard  add the standard git exclusions\n\n";
@@ -150,7 +150,7 @@ pub fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
 
     // helpers.Normalize pathspecs: convert absolute paths to repo-relative paths
     const repo_root = std.fs.path.dirname(git_path) orelse ".";
-    var normalized_pathspecs = std.ArrayList([]const u8).init(allocator);
+    var normalized_pathspecs = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (normalized_pathspecs.items) |p| allocator.free(@constCast(p));
         normalized_pathspecs.deinit();
@@ -301,7 +301,7 @@ pub fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
 
         // Load .gitattributes for attribute resolution
         const check_attr = @import("cmd_check_attr.zig");
-        var attr_rules = std.ArrayList(check_attr.AttrRule).init(allocator);
+        var attr_rules = std.array_list.Managed(check_attr.AttrRule).init(allocator);
         defer {
             for (attr_rules.items) |*rule| rule.deinit(allocator);
             attr_rules.deinit();
@@ -376,7 +376,7 @@ pub fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             };
             defer gitignore.deinit();
 
-            var untracked_files = helpers.findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.ArrayList([]u8).init(allocator);
+            var untracked_files = helpers.findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.array_list.Managed([]u8).init(allocator);
             defer {
                 for (untracked_files.items) |file| allocator.free(file);
                 untracked_files.deinit();
@@ -451,7 +451,7 @@ pub fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                     defer blob2.deinit(allocator);
                     const current_hash2 = blob2.hash(allocator) catch continue;
                     defer allocator.free(current_hash2);
-                    const index_hash2 = std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch continue;
+                    const index_hash2 = std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1}) catch continue;
                     defer allocator.free(index_hash2);
                     if (std.mem.eql(u8, current_hash2, index_hash2)) continue; // not modified
                 }
@@ -512,7 +512,7 @@ pub fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                 if (stage_check == 0) continue;
             }
             if (stage) {
-                const hash_str = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
+                const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
                 defer allocator.free(hash_str);
                 const stage_num = (entry.flags >> 12) & 0x3;
                 const quoted = if (z_terminator) try allocator.dupe(u8, entry.path) else try helpers.cQuotePath(allocator, entry.path, true);
@@ -594,7 +594,7 @@ pub fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                     defer blob.deinit(allocator);
                     const current_hash = blob.hash(allocator) catch break :blk false;
                     defer allocator.free(current_hash);
-                    const index_hash = std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch break :blk false;
+                    const index_hash = std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1}) catch break :blk false;
                     defer allocator.free(index_hash);
                     break :blk !std.mem.eql(u8, current_hash, index_hash);
                 };
@@ -618,7 +618,7 @@ pub fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
 
         var others_found: usize = 0;
         if (directory) {
-            var dir_entries = std.ArrayList([]u8).init(allocator);
+            var dir_entries = std.array_list.Managed([]u8).init(allocator);
             defer {
                 for (dir_entries.items) |e| allocator.free(e);
                 dir_entries.deinit();
@@ -635,7 +635,7 @@ pub fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                 try platform_impl.writeStdout(output);
             }
         } else {
-            var untracked_files = helpers.findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.ArrayList([]u8).init(allocator);
+            var untracked_files = helpers.findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.array_list.Managed([]u8).init(allocator);
             defer {
                 for (untracked_files.items) |file| allocator.free(file);
                 untracked_files.deinit();
@@ -678,7 +678,7 @@ fn makeRelativePath(allocator: std.mem.Allocator, path: []const u8, cwd_prefix: 
     for (cwd_prefix) |c| {
         if (c == '/') depth += 1;
     }
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     for (0..depth) |_| {
         try result.appendSlice("../");
     }
@@ -758,7 +758,7 @@ fn detectEolInfo(content: []const u8) []const u8 {
 
 /// Compute the "attr/" field for ls-files --eol.
 /// This resolves .gitattributes text/eol settings for a file path.
-fn getEolAttr(allocator: std.mem.Allocator, path: []const u8, attr_rules: *const std.ArrayList(@import("cmd_check_attr.zig").AttrRule), autocrlf_val: ?[]const u8, eol_config_val: ?[]const u8) []u8 {
+fn getEolAttr(allocator: std.mem.Allocator, path: []const u8, attr_rules: *const std.array_list.Managed(@import("cmd_check_attr.zig").AttrRule), autocrlf_val: ?[]const u8, eol_config_val: ?[]const u8) []u8 {
     const check_attr = @import("cmd_check_attr.zig");
     var text_val: ?[]const u8 = null; // null=unspecified, "set"=text, "auto"=text=auto, "unset"=-text
     var eol_val: ?[]const u8 = null; // null=unspecified, "lf", "crlf"
@@ -826,7 +826,7 @@ fn getEolInfoIndex(allocator: std.mem.Allocator, entry: anytype, git_path: []con
     // Symlinks and submodules have no eol info
     if (entry.mode & 0o170000 == 0o120000) return "";
     if (entry.mode & 0o170000 == 0o160000) return "";
-    const hash_hex = std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch return "";
+    const hash_hex = std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1}) catch return "";
     defer allocator.free(hash_hex);
     const content = helpers.readBlobContent(allocator, git_path, hash_hex, platform_impl) catch return "";
     defer allocator.free(content);
@@ -846,7 +846,7 @@ fn getEolInfoWorktree(allocator: std.mem.Allocator, entry: anytype, repo_root: [
 }
 
 pub fn formatLsFilesEntry(allocator: std.mem.Allocator, fmt: []const u8, entry: anytype, git_path: []const u8, platform_impl: anytype, cwd_prefix: ?[]const u8) ![]u8 {
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     defer result.deinit();
 
     var i: usize = 0;
@@ -884,7 +884,7 @@ pub fn formatLsFilesEntry(allocator: std.mem.Allocator, fmt: []const u8, entry: 
                     defer allocator.free(mode_str);
                     try result.appendSlice(mode_str);
                 } else if (std.mem.eql(u8, field, "objectname")) {
-                    const hash_str = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)});
+                    const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
                     defer allocator.free(hash_str);
                     try result.appendSlice(hash_str);
                 } else if (std.mem.eql(u8, field, "objecttype")) {

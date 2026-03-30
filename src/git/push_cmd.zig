@@ -205,7 +205,7 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
 
     // Parse arguments
     var remote_name: ?[]const u8 = null;
-    var refspecs_list = std.ArrayList([]const u8).init(allocator);
+    var refspecs_list = std.array_list.Managed([]const u8).init(allocator);
     defer refspecs_list.deinit();
     var force_push = false;
     var push_all = false;
@@ -707,7 +707,7 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
 
     // Handle --prune: delete remote refs that don't exist locally
     if (push_prune and !dry_run) {
-        var remote_all_refs = fetch_cmd.collectAllRefs(allocator, remote_git_dir) catch std.ArrayList(fetch_cmd.RefEntry).init(allocator);
+        var remote_all_refs = fetch_cmd.collectAllRefs(allocator, remote_git_dir) catch std.array_list.Managed(fetch_cmd.RefEntry).init(allocator);
         defer {
             for (remote_all_refs.items) |e| {
                 allocator.free(e.name);
@@ -715,7 +715,7 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             }
             remote_all_refs.deinit();
         }
-        var local_all_refs = fetch_cmd.collectAllRefs(allocator, git_path) catch std.ArrayList(fetch_cmd.RefEntry).init(allocator);
+        var local_all_refs = fetch_cmd.collectAllRefs(allocator, git_path) catch std.array_list.Managed(fetch_cmd.RefEntry).init(allocator);
         defer {
             for (local_all_refs.items) |e| {
                 allocator.free(e.name);
@@ -1206,7 +1206,7 @@ fn setUpstreamConfig(allocator: std.mem.Allocator, config_path: []const u8, bran
     const section = std.fmt.allocPrint(allocator, "[branch \"{s}\"]", .{branch}) catch return;
     defer allocator.free(section);
 
-    var new_content = std.ArrayList(u8).init(allocator);
+    var new_content = std.array_list.Managed(u8).init(allocator);
     defer new_content.deinit();
 
     var found_section = false;

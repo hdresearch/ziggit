@@ -18,8 +18,8 @@ const CfgOverride = struct {
 
 const BuildOverridesError = error{ BogusConfigParameters, OutOfMemory };
 
-fn buildConfigOverrides(allocator: Allocator) BuildOverridesError!std.ArrayList(CfgOverride) {
-    var overrides = std.ArrayList(CfgOverride).init(allocator);
+fn buildConfigOverrides(allocator: Allocator) BuildOverridesError!std.array_list.Managed(CfgOverride) {
+    var overrides = std.array_list.Managed(CfgOverride).init(allocator);
     errdefer {
         for (overrides.items) |item| {
             allocator.free(item.key);
@@ -77,7 +77,7 @@ fn buildConfigOverrides(allocator: Allocator) BuildOverridesError!std.ArrayList(
         if (cmdline) |cl| {
             defer allocator.free(cl);
             // Split by null bytes into args
-            var args_list = std.ArrayList([]const u8).init(allocator);
+            var args_list = std.array_list.Managed([]const u8).init(allocator);
             defer args_list.deinit();
             var split_iter = std.mem.splitScalar(u8, cl, 0);
             while (split_iter.next()) |arg| {
@@ -169,11 +169,11 @@ fn buildConfigOverrides(allocator: Allocator) BuildOverridesError!std.ArrayList(
     return overrides;
 }
 
-fn parseGitConfigParams(params: []const u8, overrides: *std.ArrayList(CfgOverride), allocator: Allocator) !void {
+fn parseGitConfigParams(params: []const u8, overrides: *std.array_list.Managed(CfgOverride), allocator: Allocator) !void {
     var i: usize = 0;
-    var key_buf = std.ArrayList(u8).init(allocator);
+    var key_buf = std.array_list.Managed(u8).init(allocator);
     defer key_buf.deinit();
-    var val_buf = std.ArrayList(u8).init(allocator);
+    var val_buf = std.array_list.Managed(u8).init(allocator);
     defer val_buf.deinit();
 
     while (i < params.len) {
@@ -242,7 +242,7 @@ fn parseGitConfigParams(params: []const u8, overrides: *std.ArrayList(CfgOverrid
     }
 }
 
-fn gcpExtract(params: []const u8, start: usize, buf: *std.ArrayList(u8)) ?usize {
+fn gcpExtract(params: []const u8, start: usize, buf: *std.array_list.Managed(u8)) ?usize {
     var i = start;
     if (i >= params.len or params[i] != '\'') return null;
     i += 1;
@@ -265,7 +265,7 @@ fn gcpExtract(params: []const u8, start: usize, buf: *std.ArrayList(u8)) ?usize 
     return null; // unterminated
 }
 
-fn processConfigEnvArg(arg: []const u8, overrides: *std.ArrayList(CfgOverride), allocator: Allocator) !void {
+fn processConfigEnvArg(arg: []const u8, overrides: *std.array_list.Managed(CfgOverride), allocator: Allocator) !void {
     // arg is "key=ENVVAR" - find the last = to split key from env var name
     // (key can contain = in subsection, e.g. section.sub=section.var=ENVVAR)
     const eq = std.mem.lastIndexOfScalar(u8, arg, '=') orelse return;
@@ -341,7 +341,7 @@ const CfgAction = enum {
 };
 
 fn readStdin(allocator: Allocator, max_size: usize) ![]u8 {
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     errdefer result.deinit();
     const f = std.fs.File{ .handle = std.posix.STDIN_FILENO };
     var buf: [4096]u8 = undefined;
@@ -356,7 +356,7 @@ fn readStdin(allocator: Allocator, max_size: usize) ![]u8 {
 
 pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     // Collect all remaining args
-    var config_args = std.ArrayList([]const u8).init(allocator);
+    var config_args = std.array_list.Managed([]const u8).init(allocator);
     defer config_args.deinit();
     while (args.next()) |arg| {
         try config_args.append(arg);
@@ -378,7 +378,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
     var default_value: ?[]const u8 = null;
     var fixed_value = false;
     var sub_value_pattern: ?[]const u8 = null;
-    var positionals = std.ArrayList([]const u8).init(allocator);
+    var positionals = std.array_list.Managed([]const u8).init(allocator);
     defer positionals.deinit();
     var new_style_sub = false;
     var do_all = false;
@@ -747,7 +747,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
     }
 
     // Build source list
-    var sources = std.ArrayList(ConfigSource).init(allocator);
+    var sources = std.array_list.Managed(ConfigSource).init(allocator);
     defer {
         for (sources.items) |s| {
             if (s.needs_free) allocator.free(s.path);
@@ -1013,7 +1013,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
     switch (action) {
         .list => {
             // Collect all entries with include support
-            var all_entries = std.ArrayList(CfgEntry).init(allocator);
+            var all_entries = std.array_list.Managed(CfgEntry).init(allocator);
             defer {
                 for (all_entries.items) |*e| e.deinit(allocator);
                 all_entries.deinit();
@@ -1054,7 +1054,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
             for (all_entries.items) |e| {
                 const term: []const u8 = if (null_terminator) "\x00" else "\n";
                 const origin_sep: u8 = if (null_terminator) '\x00' else '\t';
-                var out = std.ArrayList(u8).init(allocator);
+                var out = std.array_list.Managed(u8).init(allocator);
                 defer out.deinit();
                 if (show_scope) {
                     try out.appendSlice(e.source_scope orelse "local");
@@ -1086,7 +1086,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
             for (cfg_overrides.items) |ov| {
                 const term3: []const u8 = if (null_terminator) "\x00" else "\n";
                 const origin_sep3: u8 = if (null_terminator) '\x00' else '\t';
-                var out3 = std.ArrayList(u8).init(allocator);
+                var out3 = std.array_list.Managed(u8).init(allocator);
                 defer out3.deinit();
                 if (show_scope) {
                     try out3.appendSlice(ov.source);
@@ -1119,7 +1119,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
             };
             // Editor priority: GIT_EDITOR env, core.editor config, VISUAL env, EDITOR env, vi
             // For core.editor lookup, always use main config sources (not the -f file)
-            var editor_sources = std.ArrayList(ConfigSource).init(allocator);
+            var editor_sources = std.array_list.Managed(ConfigSource).init(allocator);
             defer {
                 for (editor_sources.items) |es| {
                     if (es.needs_free) allocator.free(es.path);
@@ -1219,7 +1219,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
             });
 
             // Collect all entries
-            var all_entries = std.ArrayList(CfgEntry).init(allocator);
+            var all_entries = std.array_list.Managed(CfgEntry).init(allocator);
             defer {
                 for (all_entries.items) |*e| e.deinit(allocator);
                 all_entries.deinit();
@@ -1292,7 +1292,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
                 }
 
                 // Collect and sort by variable name
-                var keys_list = std.ArrayList([]const u8).init(allocator);
+                var keys_list = std.array_list.Managed([]const u8).init(allocator);
                 defer keys_list.deinit();
                 var it = results.iterator();
                 while (it.next()) |entry| {
@@ -1311,7 +1311,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
                     else
                         try allocator.dupe(u8, entry.value);
                     defer allocator.free(fmt_val);
-                    var out = std.ArrayList(u8).init(allocator);
+                    var out = std.array_list.Managed(u8).init(allocator);
                     defer out.deinit();
                     if (show_scope) {
                         try out.appendSlice(entry.scope);
@@ -1373,7 +1373,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
                 if (best_value) |val| {
                     const fmt_val = try cfgFormatType(val, config_type, allocator, platform_impl);
                     defer allocator.free(fmt_val);
-                    var out = std.ArrayList(u8).init(allocator);
+                    var out = std.array_list.Managed(u8).init(allocator);
                     defer out.deinit();
                     if (show_scope) {
                         try out.appendSlice(best_scope);
@@ -1397,7 +1397,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
             const vpat = sub_value_pattern orelse (if (positionals.items.len >= 2) positionals.items[1] else null);
 
             // Collect all entries with include support
-            var all_entries = std.ArrayList(CfgEntry).init(allocator);
+            var all_entries = std.array_list.Managed(CfgEntry).init(allocator);
             defer {
                 for (all_entries.items) |*e| e.deinit(allocator);
                 all_entries.deinit();
@@ -1425,7 +1425,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
                     const fmt2 = try cfgFormatTypeWithContext(cfgEffectiveValue(e), config_type, key2, e.source_path, allocator, platform_impl);
                     defer allocator.free(fmt2);
                     const term: []const u8 = if (null_terminator) "\x00" else "\n";
-                    var out = std.ArrayList(u8).init(allocator);
+                    var out = std.array_list.Managed(u8).init(allocator);
                     defer out.deinit();
                     if (show_scope) {
                         try out.appendSlice(e.source_scope orelse "local");
@@ -1495,7 +1495,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
                     defer allocator.free(fmt2);
                     // Color type with empty key outputs without trailing newline (like --get-color)
                     const term: []const u8 = if (config_type == .color_type and key2.len == 0) "" else if (null_terminator) "\x00" else "\n";
-                    var out = std.ArrayList(u8).init(allocator);
+                    var out = std.array_list.Managed(u8).init(allocator);
                     defer out.deinit();
                     if (show_scope) {
                         try out.appendSlice(last_scope);
@@ -1523,7 +1523,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
             const vpat = sub_value_pattern orelse (if (positionals.items.len >= 2) positionals.items[1] else null);
 
             // Collect all entries with include support
-            var all_entries = std.ArrayList(CfgEntry).init(allocator);
+            var all_entries = std.array_list.Managed(CfgEntry).init(allocator);
             defer {
                 for (all_entries.items) |*e| e.deinit(allocator);
                 all_entries.deinit();
@@ -1552,7 +1552,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
                 }
                 found_any = true;
                 const term: []const u8 = if (null_terminator) "\x00" else "\n";
-                var out = std.ArrayList(u8).init(allocator);
+                var out = std.array_list.Managed(u8).init(allocator);
                 defer out.deinit();
                 if (show_scope) {
                     try out.appendSlice(e.source_scope orelse "local");
@@ -1586,7 +1586,7 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
                 }
                 found_any = true;
                 const term2: []const u8 = if (null_terminator) "\x00" else "\n";
-                var out2 = std.ArrayList(u8).init(allocator);
+                var out2 = std.array_list.Managed(u8).init(allocator);
                 defer out2.deinit();
                 if (show_scope) {
                     try out2.appendSlice(ov.source);
@@ -1766,7 +1766,7 @@ fn cfgValidateAndReport(content: []const u8, source_path: []const u8, allocator:
     }
 }
 
-pub fn cfgParseEntries(content: []const u8, entries: *std.ArrayList(CfgEntry), allocator: Allocator) !void {
+pub fn cfgParseEntries(content: []const u8, entries: *std.array_list.Managed(CfgEntry), allocator: Allocator) !void {
     var line_iter = std.mem.splitSequence(u8, content, "\n");
     var current_section: ?[]u8 = null;
     var line_num: usize = 0;
@@ -1784,7 +1784,7 @@ pub fn cfgParseEntries(content: []const u8, entries: *std.ArrayList(CfgEntry), a
             if (after.len == 0 or after[0] == '#' or after[0] == ';') continue;
             if (std.mem.indexOf(u8, after, "=")) |eq| {
                 const k = std.mem.trim(u8, after[0..eq], " \t");
-                var vbuf = std.ArrayList(u8).init(allocator);
+                var vbuf = std.array_list.Managed(u8).init(allocator);
                 defer vbuf.deinit();
                 try cfgAppendValuePart(&vbuf, after[eq + 1 ..]);
                 try entries.append(.{
@@ -1810,7 +1810,7 @@ pub fn cfgParseEntries(content: []const u8, entries: *std.ArrayList(CfgEntry), a
             const untrimmed = std.mem.trimLeft(u8, raw_line, " \t");
             const ut_eq = std.mem.indexOf(u8, untrimmed, "=") orelse eq_pos;
             var raw_value = untrimmed[ut_eq + 1 ..];
-            var vbuf = std.ArrayList(u8).init(allocator);
+            var vbuf = std.array_list.Managed(u8).init(allocator);
             defer vbuf.deinit();
             while (true) {
                 const tv = std.mem.trimRight(u8, raw_value, " \t");
@@ -1853,7 +1853,7 @@ fn collectEntriesWithIncludes(
     scope: []const u8,
     allocator: Allocator,
     platform_impl: *const platform_mod.Platform,
-    all_entries: *std.ArrayList(CfgEntry),
+    all_entries: *std.array_list.Managed(CfgEntry),
     git_path_opt: ?[]const u8,
     follow_includes: bool,
 ) !void {
@@ -1866,7 +1866,7 @@ fn collectEntriesWithIncludesD(
     scope: []const u8,
     allocator: Allocator,
     platform_impl: *const platform_mod.Platform,
-    all_entries: *std.ArrayList(CfgEntry),
+    all_entries: *std.array_list.Managed(CfgEntry),
     git_path_opt: ?[]const u8,
     follow_includes: bool,
     depth: u32,
@@ -1875,7 +1875,7 @@ fn collectEntriesWithIncludesD(
         try platform_impl.writeStderr("fatal: exceeded maximum include depth (10) while expanding includes\n");
         std.process.exit(128);
     }
-    var entries = std.ArrayList(CfgEntry).init(allocator);
+    var entries = std.array_list.Managed(CfgEntry).init(allocator);
     defer {
         for (entries.items) |*e| e.deinit(allocator);
         entries.deinit();
@@ -2254,7 +2254,7 @@ fn cfgParseSectionToKey(header: []const u8, allocator: Allocator) ![]u8 {
         const section = std.mem.trim(u8, inner[0..q_start], " \t");
         var rest = inner[q_start + 1 ..];
         if (std.mem.lastIndexOfScalar(u8, rest, '"')) |q_end| rest = rest[0..q_end];
-        var sub = std.ArrayList(u8).init(allocator);
+        var sub = std.array_list.Managed(u8).init(allocator);
         defer sub.deinit();
         var si: usize = 0;
         while (si < rest.len) : (si += 1) {
@@ -2295,7 +2295,7 @@ fn cfgQuoteValue(value: []const u8, allocator: Allocator) ![]u8 {
         }
     }
     if (!needs_quoting) return try allocator.dupe(u8, value);
-    var buf = std.ArrayList(u8).init(allocator);
+    var buf = std.array_list.Managed(u8).init(allocator);
     defer buf.deinit();
     try buf.append('"');
     for (value) |c| {
@@ -2338,7 +2338,7 @@ fn cfgValueMatchesPattern(val: []const u8, pattern: []const u8, fixed_val: bool)
     return if (negated) !m else m;
 }
 
-fn cfgAppendValuePart(buf: *std.ArrayList(u8), raw: []const u8) !void {
+fn cfgAppendValuePart(buf: *std.array_list.Managed(u8), raw: []const u8) !void {
     const trimmed = std.mem.trimLeft(u8, raw, " \t");
     var in_quotes = false;
     var last_quoted_end: usize = 0;
@@ -2392,7 +2392,7 @@ pub fn cfgKeyMatches(full_key: []const u8, query: []const u8) bool {
     return false;
 }
 
-fn cfgAppendOrigin(out: *std.ArrayList(u8), source_path: []const u8) !void {
+fn cfgAppendOrigin(out: *std.array_list.Managed(u8), source_path: []const u8) !void {
     if (std.mem.eql(u8, source_path, "standard input")) {
         try out.appendSlice("standard input:");
     } else if (std.mem.eql(u8, source_path, "command line") or source_path.len == 0) {
@@ -2794,7 +2794,7 @@ fn cfgConvertRelativeDate(s: []const u8, allocator: Allocator) ?[]u8 {
     // Convert "3 weeks 5 days 00:00" -> "3 weeks ago 5 days ago 00:00"
     // by inserting "ago" after each relative unit
     const rel_units = [_][]const u8{ "second", "minute", "hour", "day", "week", "month", "year", "seconds", "minutes", "hours", "days", "weeks", "months", "years" };
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     var iter = std.mem.tokenizeAny(u8, s, " \t");
     var has_ago = false;
     // Check if "ago" is already present
@@ -2869,7 +2869,7 @@ fn cfgLookup(sources: []const ConfigSource, key: []const u8, allocator: Allocato
     for (sources) |source| {
         const content = cfgReadSource(source.path, allocator, platform_impl) orelse continue;
         defer allocator.free(content);
-        var entries = std.ArrayList(CfgEntry).init(allocator);
+        var entries = std.array_list.Managed(CfgEntry).init(allocator);
         defer {
             for (entries.items) |*e| e.deinit(allocator);
             entries.deinit();
@@ -2972,7 +2972,7 @@ fn cfgSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add:
         error.FileNotFound => {
             const cs = try cfgFormatComment(comment, allocator);
             defer allocator.free(cs);
-            var out = std.ArrayList(u8).init(allocator);
+            var out = std.array_list.Managed(u8).init(allocator);
             defer out.deinit();
             const qv = try cfgQuoteValue(value, allocator);
             defer allocator.free(qv);
@@ -2990,7 +2990,7 @@ fn cfgSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add:
     defer allocator.free(content);
 
     const LI = struct { start: usize, end: usize, cont_end: usize, is_key: bool, regex_ok: bool, inline_on_header: bool };
-    var infos = std.ArrayList(LI).init(allocator);
+    var infos = std.array_list.Managed(LI).init(allocator);
     defer infos.deinit();
 
     var cur_sec: ?[]u8 = null;
@@ -3025,7 +3025,7 @@ fn cfgSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add:
                     cur_sec = try allocator.dupe(u8, std.mem.trim(u8, inner[0..q], " \t"));
                     var r = inner[q + 1 ..];
                     if (std.mem.lastIndexOfScalar(u8, r, '"')) |q2| r = r[0..q2];
-                    var sb = std.ArrayList(u8).init(allocator);
+                    var sb = std.array_list.Managed(u8).init(allocator);
                     defer sb.deinit();
                     var si: usize = 0;
                     while (si < r.len) : (si += 1) {
@@ -3077,7 +3077,7 @@ fn cfgSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add:
                     if (std.mem.indexOf(u8, after_bracket, "=")) |aeq| {
                         const ak = std.mem.trim(u8, after_bracket[0..aeq], " \t");
                         if (std.ascii.eqlIgnoreCase(ak, pk.variable)) {
-                            var vbuf2 = std.ArrayList(u8).init(allocator);
+                            var vbuf2 = std.array_list.Managed(u8).init(allocator);
                             defer vbuf2.deinit();
                             cfgAppendValuePart(&vbuf2, after_bracket[aeq + 1 ..]) catch {};
                             var rok2 = true;
@@ -3131,7 +3131,7 @@ fn cfgSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add:
                             if (ct.len == 0 or ct[ct.len - 1] != '\\') break;
                         }
                     }
-                    var vbuf = std.ArrayList(u8).init(allocator);
+                    var vbuf = std.array_list.Managed(u8).init(allocator);
                     defer vbuf.deinit();
                     cfgAppendValuePart(&vbuf, raw_v) catch {};
                     if (ce > le) {
@@ -3201,7 +3201,7 @@ fn cfgSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add:
     defer allocator.free(new_line);
 
     const writeReplacement = struct {
-        fn f(res: *std.ArrayList(u8), li: LI, nl2: []const u8, cont: []const u8) !void {
+        fn f(res: *std.array_list.Managed(u8), li: LI, nl2: []const u8, cont: []const u8) !void {
             if (li.inline_on_header) {
                 const line_data = cont[li.start..li.end];
                 const cb = std.mem.indexOf(u8, line_data, "]");
@@ -3216,7 +3216,7 @@ fn cfgSetValue(cfg_path: []const u8, key: []const u8, value: []const u8, do_add:
         }
     };
 
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     defer result.deinit();
 
     if (do_add) {
@@ -3359,7 +3359,7 @@ fn cfgUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, value_r
     var match_count: usize = 0;
     var rmatch_count: usize = 0;
     {
-        var ents = std.ArrayList(CfgEntry).init(allocator);
+        var ents = std.array_list.Managed(CfgEntry).init(allocator);
         defer {
             for (ents.items) |*e| e.deinit(allocator);
             ents.deinit();
@@ -3387,7 +3387,7 @@ fn cfgUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, value_r
     }
 
     // Build output
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     defer result.deinit();
     var cur_sec: ?[]u8 = null;
     var cur_sub: ?[]u8 = null;
@@ -3415,7 +3415,7 @@ fn cfgUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, value_r
                     cur_sec = try allocator.dupe(u8, std.mem.trim(u8, inner[0..q], " \t"));
                     var r = inner[q + 1 ..];
                     if (std.mem.lastIndexOfScalar(u8, r, '"')) |q2| r = r[0..q2];
-                    var sb = std.ArrayList(u8).init(allocator);
+                    var sb = std.array_list.Managed(u8).init(allocator);
                     defer sb.deinit();
                     var si: usize = 0;
                     while (si < r.len) : (si += 1) {
@@ -3443,7 +3443,7 @@ fn cfgUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, value_r
                 if (std.ascii.eqlIgnoreCase(k, pk.variable)) {
                     var should_rm = true;
                     if (value_regex) |vr| {
-                        var vbuf = std.ArrayList(u8).init(allocator);
+                        var vbuf = std.array_list.Managed(u8).init(allocator);
                         defer vbuf.deinit();
                         cfgAppendValuePart(&vbuf, trimmed[eq + 1 ..]) catch {};
                         const neg = vr.len > 0 and vr[0] == '!';
@@ -3492,12 +3492,12 @@ fn cfgUnsetValue(cfg_path: []const u8, key: []const u8, unset_all: bool, value_r
 /// Git's heuristic: remove an empty section only if there are no comment lines
 /// between the previous section header (or start of file) and this section header.
 fn cfgRemoveTargetEmptySections(cont: []const u8, pk: CfgParsedKey, allocator: Allocator) ![]u8 {
-    var lines_list = std.ArrayList([]const u8).init(allocator);
+    var lines_list = std.array_list.Managed([]const u8).init(allocator);
     defer lines_list.deinit();
     var iter_sec = std.mem.splitSequence(u8, cont, "\n");
     while (iter_sec.next()) |line| try lines_list.append(line);
     const lines_arr = lines_list.items;
-    var res = std.ArrayList(u8).init(allocator);
+    var res = std.array_list.Managed(u8).init(allocator);
     defer res.deinit();
     var idx_s: usize = 0;
     while (idx_s < lines_arr.len) {
@@ -3637,7 +3637,7 @@ fn cfgRenameSection(cfg_path: []const u8, old_name: []const u8, new_name: []cons
     const new_sec = if (new_dot) |d| new_name[0..d] else new_name;
     const new_sub = if (new_dot) |d| new_name[d + 1 ..] else null;
 
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     defer result.deinit();
     var found = false;
     var first_line = true;
@@ -3744,7 +3744,7 @@ fn cfgRemoveSection(cfg_path: []const u8, section_name: []const u8, allocator: A
     const rm_sec = if (sec_dot) |d| section_name[0..d] else section_name;
     const rm_sub = if (sec_dot) |d| section_name[d + 1 ..] else null;
 
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     defer result.deinit();
     var in_removed = false;
     var found = false;
@@ -3858,7 +3858,7 @@ fn colorToAnsiAlloc(allocator: Allocator, color_str: []const u8) ![]u8 {
     var bg_set = false;
     var fg_rgb: ?[3]u8 = null;
     var bg_rgb: ?[3]u8 = null;
-    var attrs = std.ArrayList(u8).init(allocator);
+    var attrs = std.array_list.Managed(u8).init(allocator);
     defer attrs.deinit();
     var has_reset = false;
 
@@ -3930,7 +3930,7 @@ fn colorToAnsiAlloc(allocator: Allocator, color_str: []const u8) ![]u8 {
         return error.InvalidColor;
     }
 
-    var codes = std.ArrayList(u8).init(allocator);
+    var codes = std.array_list.Managed(u8).init(allocator);
     defer codes.deinit();
     var first = true;
 
@@ -4028,7 +4028,7 @@ fn colorToAnsiAlloc(allocator: Allocator, color_str: []const u8) ![]u8 {
         return try allocator.dupe(u8, "");
     }
 
-    var out_result = std.ArrayList(u8).init(allocator);
+    var out_result = std.array_list.Managed(u8).init(allocator);
     try out_result.append(0x1b);
     try out_result.append('[');
     try out_result.appendSlice(codes.items);

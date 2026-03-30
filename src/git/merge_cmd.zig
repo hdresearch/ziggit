@@ -52,8 +52,8 @@ const MergeOpts = struct {
     no_rerere_autoupdate: bool = false,
     no_verify: bool = false,
     verify_signatures: bool = false,
-    strategy_options: std.ArrayList([]const u8),
-    targets: std.ArrayList([]const u8),
+    strategy_options: std.array_list.Managed([]const u8),
+    targets: std.array_list.Managed([]const u8),
     progress: ?bool = null,
     into_name: ?[]const u8 = null,
     overwrite_ignore: bool = true,
@@ -63,8 +63,8 @@ const MergeOpts = struct {
 
     fn init(allocator: Allocator) MergeOpts {
         return .{
-            .strategy_options = std.ArrayList([]const u8).init(allocator),
-            .targets = std.ArrayList([]const u8).init(allocator),
+            .strategy_options = std.array_list.Managed([]const u8).init(allocator),
+            .targets = std.array_list.Managed([]const u8).init(allocator),
         };
     }
 
@@ -380,7 +380,7 @@ pub fn cmdMerge(allocator: Allocator, args: *pm.ArgIterator, platform_impl: *con
     }
 
     // Resolve all targets to hashes
-    var target_hashes = std.ArrayList([]const u8).init(allocator);
+    var target_hashes = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (target_hashes.items) |h| allocator.free(h);
         target_hashes.deinit();
@@ -447,9 +447,9 @@ pub fn cmdMerge(allocator: Allocator, args: *pm.ArgIterator, platform_impl: *con
 
     // Check if already up to date - filter out targets that are ancestors of HEAD
     {
-        var non_merged = std.ArrayList([]const u8).init(allocator);
+        var non_merged = std.array_list.Managed([]const u8).init(allocator);
         defer non_merged.deinit();
-        var non_merged_names = std.ArrayList([]const u8).init(allocator);
+        var non_merged_names = std.array_list.Managed([]const u8).init(allocator);
         defer non_merged_names.deinit();
 
         for (target_hashes.items, 0..) |target_hash, ti| {
@@ -829,7 +829,7 @@ fn invokeEditor(git_path: []const u8, message: []const u8, allocator: Allocator)
 }
 
 fn readStdinAll(allocator: Allocator) ![]u8 {
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     errdefer result.deinit();
     const f = std.fs.File{ .handle = std.posix.STDIN_FILENO };
     var buf: [4096]u8 = undefined;
@@ -974,7 +974,7 @@ fn peelToCommit(git_path: []const u8, hash: []u8, allocator: Allocator, platform
 fn isAncestor(git_path: []const u8, ancestor_hash: []const u8, descendant_hash: []const u8, allocator: Allocator, platform_impl: *const pm.Platform) !bool {
     if (std.mem.eql(u8, ancestor_hash, descendant_hash)) return true;
 
-    var queue = std.ArrayList([]const u8).init(allocator);
+    var queue = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (queue.items) |h| allocator.free(h);
         queue.deinit();
@@ -1026,7 +1026,7 @@ fn findMergeBase(git_path: []const u8, hash1: []const u8, hash2: []const u8, all
     try collectAncestorsWithDepth(git_path, hash1, &ancestors1, 0, allocator, platform_impl);
 
     // BFS from hash2, find first common ancestor (closest)
-    var queue = std.ArrayList([]const u8).init(allocator);
+    var queue = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (queue.items) |h| allocator.free(h);
         queue.deinit();
@@ -1277,7 +1277,7 @@ fn doSquashMerge(git_path: []const u8, current_hash: []const u8, target_hash: []
     defer if (merge_base) |b| allocator.free(b);
 
     const base = merge_base orelse current_hash;
-    var conflict_files = std.ArrayList([]const u8).init(allocator);
+    var conflict_files = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (conflict_files.items) |f| allocator.free(f);
         conflict_files.deinit();
@@ -1383,7 +1383,7 @@ fn doThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_hash: 
     defer if (merge_base) |b| allocator.free(b);
 
     const base = merge_base orelse current_hash;
-    var conflict_files = std.ArrayList([]const u8).init(allocator);
+    var conflict_files = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (conflict_files.items) |f| allocator.free(f);
         conflict_files.deinit();
@@ -1408,7 +1408,7 @@ fn doThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_hash: 
     }
 
     // Build final message with log if needed
-    var final_msg_buf = std.ArrayList(u8).init(allocator);
+    var final_msg_buf = std.array_list.Managed(u8).init(allocator);
     defer final_msg_buf.deinit();
     final_msg_buf.appendSlice(merge_msg) catch {};
 
@@ -1434,7 +1434,7 @@ fn doThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_hash: 
                 final_msg = edited_msg;
             } else {
                 // Strip comment lines (starting with #) and trailing whitespace
-                var clean_buf = std.ArrayList(u8).init(allocator);
+                var clean_buf = std.array_list.Managed(u8).init(allocator);
                 var line_iter = std.mem.splitScalar(u8, edited_msg, '\n');
                 while (line_iter.next()) |line| {
                     if (line.len > 0 and line[0] == '#') continue;
@@ -1485,7 +1485,7 @@ fn doThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_hash: 
 
 fn doOctopusMerge(git_path: []const u8, current_hash: []const u8, current_branch: []const u8, opts: *MergeOpts, target_hashes_orig: []const []const u8, allocator: Allocator, platform_impl: *const pm.Platform) void {
     // Reduce heads: remove targets that are ancestors of other targets
-    var reduced = std.ArrayList(usize).init(allocator);
+    var reduced = std.array_list.Managed(usize).init(allocator);
     defer reduced.deinit();
     for (0..target_hashes_orig.len) |i| {
         var dominated = false;
@@ -1499,9 +1499,9 @@ fn doOctopusMerge(git_path: []const u8, current_hash: []const u8, current_branch
         if (!dominated) reduced.append(i) catch {};
     }
     // Build reduced list
-    var reduced_hashes = std.ArrayList([]const u8).init(allocator);
+    var reduced_hashes = std.array_list.Managed([]const u8).init(allocator);
     defer reduced_hashes.deinit();
-    var reduced_names = std.ArrayList([]const u8).init(allocator);
+    var reduced_names = std.array_list.Managed([]const u8).init(allocator);
     defer reduced_names.deinit();
     for (reduced.items) |idx| {
         reduced_hashes.append(target_hashes_orig[idx]) catch {};
@@ -1566,7 +1566,7 @@ fn doOctopusMerge(git_path: []const u8, current_hash: []const u8, current_branch
                 // FF + one actual merge that conflicted: treat as regular conflict
                 // Write MERGE_HEAD with target hashes (excluding any we ff'd to)
                 {
-                    var mh_buf = std.ArrayList(u8).init(allocator);
+                    var mh_buf = std.array_list.Managed(u8).init(allocator);
                     defer mh_buf.deinit();
                     for (target_hashes) |th| {
                         if (!std.mem.eql(u8, th, head)) {
@@ -1633,7 +1633,7 @@ fn doOctopusMerge(git_path: []const u8, current_hash: []const u8, current_branch
         // Don't create commit, write merge state
         if (opts.squash) {
             // Build proper squash message matching git log --no-merges ^HEAD targets...
-            var squash_buf = std.ArrayList(u8).init(allocator);
+            var squash_buf = std.array_list.Managed(u8).init(allocator);
             defer squash_buf.deinit();
             squash_buf.appendSlice("Squashed commit of the following:\n\n") catch {};
             // Match git log behavior: walk from last target only
@@ -1651,7 +1651,7 @@ fn doOctopusMerge(git_path: []const u8, current_hash: []const u8, current_branch
             writeStdout(platform_impl, "Squash commit -- not updating HEAD\n");
         } else {
             // Write MERGE_HEAD with all target hashes
-            var mh_buf = std.ArrayList(u8).init(allocator);
+            var mh_buf = std.array_list.Managed(u8).init(allocator);
             defer mh_buf.deinit();
             for (target_hashes) |th| {
                 mh_buf.appendSlice(th) catch {};
@@ -1701,7 +1701,7 @@ fn doOctopusMerge(git_path: []const u8, current_hash: []const u8, current_branch
     // through any targets that are descendants. Remaining targets become additional parents.
     // We track which target was ff'd to (it becomes first parent).
     {
-        var parents = std.ArrayList([]const u8).init(allocator);
+        var parents = std.array_list.Managed([]const u8).init(allocator);
         defer parents.deinit();
 
         // Find which target head was fast-forwarded to (if any)
@@ -1758,7 +1758,7 @@ fn doOctopusMerge(git_path: []const u8, current_hash: []const u8, current_branch
     const new_commit = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
     defer if (new_commit) |c| allocator.free(c);
     if (new_commit) |nc| {
-        var reflog_parts = std.ArrayList(u8).init(allocator);
+        var reflog_parts = std.array_list.Managed(u8).init(allocator);
         defer reflog_parts.deinit();
         reflog_parts.appendSlice("merge ") catch {};
         for (opts.targets.items, 0..) |t, i| {
@@ -1887,7 +1887,7 @@ fn freeTreeMap(map: *TreeFileMap, allocator: Allocator) void {
 }
 
 /// Perform 3-way tree merge tracking conflict files. Returns true if conflicts found.
-fn doTreeMergeTracked(git_path: []const u8, base_hash: []const u8, ours_hash: []const u8, theirs_hash: []const u8, conflict_files: *std.ArrayList([]const u8), allocator: Allocator, platform_impl: *const pm.Platform) bool {
+fn doTreeMergeTracked(git_path: []const u8, base_hash: []const u8, ours_hash: []const u8, theirs_hash: []const u8, conflict_files: *std.array_list.Managed([]const u8), allocator: Allocator, platform_impl: *const pm.Platform) bool {
     return doTreeMergeImpl(git_path, base_hash, ours_hash, theirs_hash, conflict_files, allocator, platform_impl);
 }
 
@@ -1896,7 +1896,7 @@ fn doTreeMerge(git_path: []const u8, base_hash: []const u8, ours_hash: []const u
     return doTreeMergeImpl(git_path, base_hash, ours_hash, theirs_hash, null, allocator, platform_impl);
 }
 
-fn doTreeMergeImpl(git_path: []const u8, base_hash: []const u8, ours_hash: []const u8, theirs_hash: []const u8, conflict_files: ?*std.ArrayList([]const u8), allocator: Allocator, platform_impl: *const pm.Platform) bool {
+fn doTreeMergeImpl(git_path: []const u8, base_hash: []const u8, ours_hash: []const u8, theirs_hash: []const u8, conflict_files: ?*std.array_list.Managed([]const u8), allocator: Allocator, platform_impl: *const pm.Platform) bool {
     const base_tree = getCommitTree(git_path, base_hash, allocator, platform_impl) catch return true;
     defer allocator.free(base_tree);
     const ours_tree = getCommitTree(git_path, ours_hash, allocator, platform_impl) catch return true;
@@ -1943,7 +1943,7 @@ fn doTreeMergeImpl(git_path: []const u8, base_hash: []const u8, ours_hash: []con
     var conflicts = false;
 
     // Track conflict entries for writing proper index stages
-    var conflict_entries = std.ArrayList(ConflictEntry).init(allocator);
+    var conflict_entries = std.array_list.Managed(ConflictEntry).init(allocator);
     defer conflict_entries.deinit();
 
     var path_it = all_paths.iterator();
@@ -2140,7 +2140,7 @@ fn writeConflictFile(git_path: []const u8, path: []const u8, base_hash: []const 
         (std.mem.indexOf(u8, theirs_content, "\r\n") != null);
     const nl: []const u8 = if (use_crlf) "\r\n" else "\n";
 
-    var buf = std.ArrayList(u8).init(allocator);
+    var buf = std.array_list.Managed(u8).init(allocator);
     defer buf.deinit();
     buf.appendSlice("<<<<<<< HEAD") catch return;
     buf.appendSlice(nl) catch return;
@@ -2271,7 +2271,7 @@ fn isDefaultBranch(branch: []const u8, allocator: Allocator) bool {
 }
 
 fn buildOctopusMessage(targets: []const []const u8, current_branch: []const u8, git_path: []const u8, allocator: Allocator, _: *const pm.Platform) ![]u8 {
-    var buf = std.ArrayList(u8).init(allocator);
+    var buf = std.array_list.Managed(u8).init(allocator);
     errdefer buf.deinit();
     const short_branch = if (std.mem.startsWith(u8, current_branch, "refs/heads/")) current_branch["refs/heads/".len..] else current_branch;
 
@@ -2324,21 +2324,21 @@ fn buildOctopusMessage(targets: []const []const u8, current_branch: []const u8, 
     return buf.toOwnedSlice();
 }
 
-fn buildSquashMsgBuf(git_path: []const u8, current_hash: []const u8, merge_target: []const u8, allocator: Allocator, platform_impl: *const pm.Platform) std.ArrayList(u8) {
-    var buf = std.ArrayList(u8).init(allocator);
+fn buildSquashMsgBuf(git_path: []const u8, current_hash: []const u8, merge_target: []const u8, allocator: Allocator, platform_impl: *const pm.Platform) std.array_list.Managed(u8) {
+    var buf = std.array_list.Managed(u8).init(allocator);
     buf.appendSlice("Squashed commit of the following:\n\n") catch {};
     buildSquashMsgInto(&buf, git_path, current_hash, merge_target, allocator, platform_impl);
     return buf;
 }
 
 fn buildSquashMsg(git_path: []const u8, current_hash: []const u8, merge_target: []const u8, allocator: Allocator, platform_impl: *const pm.Platform) []const u8 {
-    var buf = std.ArrayList(u8).init(allocator);
+    var buf = std.array_list.Managed(u8).init(allocator);
     buf.appendSlice("Squashed commit of the following:\n\n") catch return "";
     buildSquashMsgInto(&buf, git_path, current_hash, merge_target, allocator, platform_impl);
     return buf.toOwnedSlice() catch "";
 }
 
-fn buildSquashMsgMultiple(buf: *std.ArrayList(u8), git_path: []const u8, current_hash: []const u8, targets: []const []const u8, allocator: Allocator, platform_impl: *const pm.Platform) void {
+fn buildSquashMsgMultiple(buf: *std.array_list.Managed(u8), git_path: []const u8, current_hash: []const u8, targets: []const []const u8, allocator: Allocator, platform_impl: *const pm.Platform) void {
     // Walk all targets and collect commits in timestamp-descending order (like git log)
     // This matches git log --no-merges ^HEAD <targets> behavior
     const SquashCommitInfo = struct {
@@ -2347,7 +2347,7 @@ fn buildSquashMsgMultiple(buf: *std.ArrayList(u8), git_path: []const u8, current
         data: []const u8,
     };
 
-    var commits = std.ArrayList(SquashCommitInfo).init(allocator);
+    var commits = std.array_list.Managed(SquashCommitInfo).init(allocator);
     defer {
         for (commits.items) |ci| {
             allocator.free(ci.hash);
@@ -2457,7 +2457,7 @@ fn buildSquashMsgMultiple(buf: *std.ArrayList(u8), git_path: []const u8, current
     }
 }
 
-fn buildSquashMsgInto(buf: *std.ArrayList(u8), git_path: []const u8, current_hash: []const u8, merge_target: []const u8, allocator: Allocator, platform_impl: *const pm.Platform) void {
+fn buildSquashMsgInto(buf: *std.array_list.Managed(u8), git_path: []const u8, current_hash: []const u8, merge_target: []const u8, allocator: Allocator, platform_impl: *const pm.Platform) void {
 
     // Get target hash
     const target_hash = resolveToCommitHash(git_path, merge_target, allocator, platform_impl) catch return;
@@ -2532,7 +2532,7 @@ fn collectAncestorSet(git_path: []const u8, hash: []const u8, set: *std.StringHa
     }
 }
 
-fn formatCommitForSquash(data: []const u8, hash: []const u8, buf: *std.ArrayList(u8)) void {
+fn formatCommitForSquash(data: []const u8, hash: []const u8, buf: *std.array_list.Managed(u8)) void {
     const msg_start = std.mem.indexOf(u8, data, "\n\n") orelse return;
     const headers = data[0..msg_start];
     const msg_body = data[msg_start + 2 ..];
@@ -2658,7 +2658,7 @@ fn isLeapYear(y: i64) bool {
     return (@mod(y, 4) == 0 and @mod(y, 100) != 0) or @mod(y, 400) == 0;
 }
 
-fn appendMergeLog(git_path: []const u8, current_hash: []const u8, merge_target: []const u8, buf: *std.ArrayList(u8), max_count: ?u32, allocator: Allocator, platform_impl: *const pm.Platform) void {
+fn appendMergeLog(git_path: []const u8, current_hash: []const u8, merge_target: []const u8, buf: *std.array_list.Managed(u8), max_count: ?u32, allocator: Allocator, platform_impl: *const pm.Platform) void {
     const target_hash = resolveToCommitHash(git_path, merge_target, allocator, platform_impl) catch return;
     defer allocator.free(target_hash);
 
@@ -2724,7 +2724,7 @@ fn appendMergeLog(git_path: []const u8, current_hash: []const u8, merge_target: 
     }
 }
 
-fn appendSignoff(buf: *std.ArrayList(u8), allocator: Allocator) void {
+fn appendSignoff(buf: *std.array_list.Managed(u8), allocator: Allocator) void {
     const committer_str = getCommitterString(allocator) catch return;
     defer allocator.free(committer_str);
     const gt = std.mem.lastIndexOf(u8, committer_str, ">") orelse committer_str.len;
@@ -3072,7 +3072,7 @@ fn createOctopusMergeCommit(git_path: []const u8, current_hash: []const u8, targ
     defer allocator.free(committer_line);
 
     // Build parents list
-    var parents = std.ArrayList([]const u8).init(allocator);
+    var parents = std.array_list.Managed([]const u8).init(allocator);
     defer parents.deinit();
     parents.append(current_hash) catch return;
     for (target_hashes) |th| parents.append(th) catch {};
@@ -3125,7 +3125,7 @@ fn showDiffstatEx(git_path: []const u8, from_hash: []const u8, to_hash: []const 
     const to_tree = getCommitTree(git_path, to_hash, allocator, platform_impl) catch return;
     defer allocator.free(to_tree);
 
-    var entries = std.ArrayList(diff_stats.StatEntry).init(allocator);
+    var entries = std.array_list.Managed(diff_stats.StatEntry).init(allocator);
     defer {
         for (entries.items) |e| {
             allocator.free(e.path);
@@ -3215,7 +3215,7 @@ fn formatStatCompact(entries: []const diff_stats.StatEntry, pi: *const pm.Platfo
         }
     }
 
-    var s = std.ArrayList(u8).init(allocator);
+    var s = std.array_list.Managed(u8).init(allocator);
     defer s.deinit();
     const w = s.writer();
     try w.print(" {d} file{s} changed", .{entries.len, if (entries.len != 1) "s" else ""});
@@ -3233,7 +3233,7 @@ fn writeMergeStateWithConflicts(git_path: []const u8, target_hash: []const u8, m
     platform_impl.fs.writeFile(merge_head_path, head_content) catch {};
 
     // Build MERGE_MSG with conflict info
-    var msg_buf = std.ArrayList(u8).init(allocator);
+    var msg_buf = std.array_list.Managed(u8).init(allocator);
     defer msg_buf.deinit();
     msg_buf.appendSlice(message) catch {};
     if (message.len > 0 and message[message.len - 1] != '\n') msg_buf.append('\n') catch {};
@@ -3248,7 +3248,7 @@ fn writeMergeStateWithConflicts(git_path: []const u8, target_hash: []const u8, m
     platform_impl.fs.writeFile(merge_mode_path, "") catch {};
 }
 
-fn appendConflictInfo(buf: *std.ArrayList(u8), conflict_files: []const []const u8, cleanup: ?[]const u8) void {
+fn appendConflictInfo(buf: *std.array_list.Managed(u8), conflict_files: []const []const u8, cleanup: ?[]const u8) void {
     if (conflict_files.len == 0) return;
 
     const is_scissors = if (cleanup) |c| std.ascii.eqlIgnoreCase(c, "scissors") else false;
@@ -3312,7 +3312,7 @@ fn applyMessageCleanup(msg: []const u8, cleanup_mode: ?[]const u8, allocator: Al
         return msg;
     }
 
-    var buf = std.ArrayList(u8).init(allocator);
+    var buf = std.array_list.Managed(u8).init(allocator);
 
     if (std.ascii.eqlIgnoreCase(mode, "scissors")) {
         // Strip everything after the scissors line (must start with # at column 0)
@@ -3346,7 +3346,7 @@ fn applyMessageCleanup(msg: []const u8, cleanup_mode: ?[]const u8, allocator: Al
     }
 
     // Strip trailing whitespace from each line and strip leading/trailing blank lines
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     var rlines = std.mem.splitScalar(u8, buf.items, '\n');
     while (rlines.next()) |line| {
         const trimmed = std.mem.trimRight(u8, line, " \t\r");
@@ -3444,7 +3444,7 @@ fn lineMerge3Way(base: []const u8, ours: []const u8, theirs: []const u8, allocat
     for (theirs_lcs) |bi| theirs_kept[bi] = true;
 
     // Find common anchors
-    var anchors = std.ArrayList(usize).init(allocator);
+    var anchors = std.array_list.Managed(usize).init(allocator);
     defer anchors.deinit();
     for (0..base_lines.len) |bi| {
         if (ours_kept[bi] and theirs_kept[bi])
@@ -3452,9 +3452,9 @@ fn lineMerge3Way(base: []const u8, ours: []const u8, theirs: []const u8, allocat
     }
 
     // Map anchors to ours/theirs indices
-    var ours_map = std.ArrayList(usize).init(allocator);
+    var ours_map = std.array_list.Managed(usize).init(allocator);
     defer ours_map.deinit();
-    var theirs_map2 = std.ArrayList(usize).init(allocator);
+    var theirs_map2 = std.array_list.Managed(usize).init(allocator);
     defer theirs_map2.deinit();
 
     {
@@ -3485,7 +3485,7 @@ fn lineMerge3Way(base: []const u8, ours: []const u8, theirs: []const u8, allocat
     if (ours_map.items.len != anchors.items.len or theirs_map2.items.len != anchors.items.len)
         return null;
 
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     const ac = anchors.items.len;
     var prev_base: usize = 0;
     var prev_ours: usize = 0;
@@ -3548,7 +3548,7 @@ fn slicesEqual(a: []const []const u8, b: []const []const u8) bool {
 
 fn splitLines2(text: []const u8, allocator: Allocator) ?[][]const u8 {
     if (text.len == 0) return allocator.alloc([]const u8, 0) catch null;
-    var lines = std.ArrayList([]const u8).init(allocator);
+    var lines = std.array_list.Managed([]const u8).init(allocator);
     var iter = std.mem.splitScalar(u8, text, '\n');
     while (iter.next()) |line| {
         if (line.len == 0 and iter.peek() == null) break;
@@ -3564,7 +3564,7 @@ fn computeLCS(a: []const []const u8, b: []const []const u8, allocator: Allocator
 
     if (m * n > 1000000) {
         // Greedy LCS for large inputs
-        var res = std.ArrayList(usize).init(allocator);
+        var res = std.array_list.Managed(usize).init(allocator);
         var bj: usize = 0;
         for (0..m) |ai| {
             while (bj < n) : (bj += 1) {
@@ -3598,7 +3598,7 @@ fn computeLCS(a: []const []const u8, b: []const []const u8, allocator: Allocator
         }
     }
 
-    var res = std.ArrayList(usize).init(allocator);
+    var res = std.array_list.Managed(usize).init(allocator);
     var ii: usize = m;
     var jj: usize = n;
     while (ii > 0 and jj > 0) {
@@ -3622,7 +3622,7 @@ fn computeLCS(a: []const []const u8, b: []const []const u8, allocator: Allocator
 
 fn writeTreeFromIndex(allocator: Allocator, idx: *index_mod.Index, git_dir: []const u8, platform_impl: *const pm.Platform) ![]u8 {
     // Build tree entries from index
-    var entries = std.ArrayList(objects.TreeEntry).init(allocator);
+    var entries = std.array_list.Managed(objects.TreeEntry).init(allocator);
     defer {
         for (entries.items) |e| {
             allocator.free(e.name);
@@ -3632,7 +3632,7 @@ fn writeTreeFromIndex(allocator: Allocator, idx: *index_mod.Index, git_dir: []co
     }
 
     // Group by directory for nested trees
-    var dirs = std.StringHashMap(std.ArrayList(index_mod.IndexEntry)).init(allocator);
+    var dirs = std.StringHashMap(std.array_list.Managed(index_mod.IndexEntry)).init(allocator);
     defer {
         var it = dirs.iterator();
         while (it.next()) |e| {
@@ -3650,7 +3650,7 @@ fn writeTreeFromIndex(allocator: Allocator, idx: *index_mod.Index, git_dir: []co
                 const top_dir = entry.path[0..s];
                 const gop = dirs.getOrPut(allocator.dupe(u8, top_dir) catch continue) catch continue;
                 if (!gop.found_existing) {
-                    gop.value_ptr.* = std.ArrayList(index_mod.IndexEntry).init(allocator);
+                    gop.value_ptr.* = std.array_list.Managed(index_mod.IndexEntry).init(allocator);
                 }
                 gop.value_ptr.append(entry) catch {};
                 _ = dir;

@@ -25,7 +25,7 @@ pub fn cmdSymbolicRef(allocator: std.mem.Allocator, args: *platform_mod.ArgItera
     var quiet = false;
     var short = false;
     var delete = false;
-    var positional = std.ArrayList([]const u8).init(allocator);
+    var positional = std.array_list.Managed([]const u8).init(allocator);
     defer positional.deinit();
 
     while (args.next()) |arg| {

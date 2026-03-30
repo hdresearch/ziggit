@@ -27,7 +27,7 @@ pub fn nativeCmdCheckIgnore(allocator: std.mem.Allocator, args: *platform_mod.Ar
     var use_stdin = false;
     var use_z = false;
     var non_matching = false;
-    var paths = std.ArrayList([]const u8).init(allocator);
+    var paths = std.array_list.Managed([]const u8).init(allocator);
     defer paths.deinit();
 
     while (args.next()) |arg| {

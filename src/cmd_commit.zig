@@ -38,7 +38,7 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     var no_verify = false;
     var author_override: ?[]const u8 = null;
     var msg_source: enum { none, m_flag, f_flag, c_flag } = .none;
-    var commit_files = std.ArrayList([]const u8).init(allocator);
+    var commit_files = std.array_list.Managed([]const u8).init(allocator);
     defer commit_files.deinit();
     var seen_dashdash = false;
 
@@ -332,7 +332,7 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     defer allocator.free(tree_hash);
 
     // helpers.Get parent commit (if any)
-    var parent_hashes = std.ArrayList([]const u8).init(allocator);
+    var parent_hashes = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (parent_hashes.items) |hash| {
             allocator.free(hash);

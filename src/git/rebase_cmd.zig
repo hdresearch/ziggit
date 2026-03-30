@@ -80,7 +80,7 @@ const RebaseOpts = struct {
     keep_base: bool = false,
     interactive: bool = false,
     has_exec: bool = false,
-    exec_cmds: std.ArrayList([]const u8),
+    exec_cmds: std.array_list.Managed([]const u8),
     has_rebase_merges: bool = false,
     has_update_refs: bool = false,
     has_root: bool = false,
@@ -108,9 +108,9 @@ const RebaseOpts = struct {
 
 fn parseRebaseArgs(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const Platform) !RebaseOpts {
     var opts = RebaseOpts{
-        .exec_cmds = std.ArrayList([]const u8).init(allocator),
+        .exec_cmds = std.array_list.Managed([]const u8).init(allocator),
     };
-    var positionals = std.ArrayList([]const u8).init(allocator);
+    var positionals = std.array_list.Managed([]const u8).init(allocator);
     defer positionals.deinit();
 
     var i: usize = command_index + 1;
@@ -415,7 +415,7 @@ fn startRebase(git_path: []const u8, repo_root: []const u8, allocator: std.mem.A
     defer allocator.free(merge_base);
 
     // Collect commits to replay
-    var commits_to_replay = std.ArrayList([]u8).init(allocator);
+    var commits_to_replay = std.array_list.Managed([]u8).init(allocator);
     defer {
         for (commits_to_replay.items) |c| allocator.free(c);
         commits_to_replay.deinit();
@@ -478,7 +478,7 @@ fn startRebase(git_path: []const u8, repo_root: []const u8, allocator: std.mem.A
     const use_merge_backend = opts.merge_mode or opts.interactive or opts.has_exec or !opts.apply_mode;
 
     // Generate todo list
-    var todo = std.ArrayList(u8).init(allocator);
+    var todo = std.array_list.Managed(u8).init(allocator);
     defer todo.deinit();
     for (commits_to_replay.items) |c| {
         const subject = getCommitSubject(c, git_path, platform_impl, allocator) catch try allocator.dupe(u8, "");
@@ -492,7 +492,7 @@ fn startRebase(git_path: []const u8, repo_root: []const u8, allocator: std.mem.A
 
     // Add exec commands after each pick if --exec was specified
     if (opts.has_exec and opts.exec_cmds.items.len > 0) {
-        var new_todo = std.ArrayList(u8).init(allocator);
+        var new_todo = std.array_list.Managed(u8).init(allocator);
         defer new_todo.deinit();
         var lines = std.mem.splitScalar(u8, todo.items, '\n');
         while (lines.next()) |line| {
@@ -647,7 +647,7 @@ fn startRebase(git_path: []const u8, repo_root: []const u8, allocator: std.mem.A
                 }
             }
 
-            var untracked_conflicts = std.ArrayList([]const u8).init(allocator);
+            var untracked_conflicts = std.array_list.Managed([]const u8).init(allocator);
             defer untracked_conflicts.deinit();
 
             var it = onto_entries.iterator();
@@ -737,8 +737,8 @@ const TodoItem = struct {
     original_line: []const u8,
 };
 
-fn parseTodoItems(todo_content: []const u8, allocator: std.mem.Allocator) !std.ArrayList(TodoItem) {
-    var items = std.ArrayList(TodoItem).init(allocator);
+fn parseTodoItems(todo_content: []const u8, allocator: std.mem.Allocator) !std.array_list.Managed(TodoItem) {
+    var items = std.array_list.Managed(TodoItem).init(allocator);
     var lines = std.mem.splitScalar(u8, todo_content, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
@@ -1075,7 +1075,7 @@ fn executeSquashFixup(git_path: []const u8, item: TodoItem, dir_name: []const u8
                 // Update the count in the header and append new message
                 const count_str = try std.fmt.allocPrint(allocator, "{d}", .{count});
                 defer allocator.free(count_str);
-                var updated = std.ArrayList(u8).init(allocator);
+                var updated = std.array_list.Managed(u8).init(allocator);
                 // Replace count in first line
                 if (std.mem.indexOf(u8, es, "# This is a combination of ")) |pos| {
                     const prefix_end = pos + "# This is a combination of ".len;
@@ -1300,7 +1300,7 @@ fn rebaseContinue(git_path: []const u8, repo_root: []const u8, allocator: std.me
 
     // Read opts
     var dummy_opts = RebaseOpts{
-        .exec_cmds = std.ArrayList([]const u8).init(allocator),
+        .exec_cmds = std.array_list.Managed([]const u8).init(allocator),
     };
     defer dummy_opts.deinit(allocator);
 
@@ -1564,7 +1564,7 @@ fn rebaseSkip(git_path: []const u8, repo_root: []const u8, allocator: std.mem.Al
     }
 
     var dummy_opts = RebaseOpts{
-        .exec_cmds = std.ArrayList([]const u8).init(allocator),
+        .exec_cmds = std.array_list.Managed([]const u8).init(allocator),
     };
     defer dummy_opts.deinit(allocator);
 
@@ -1781,7 +1781,7 @@ fn readRebaseFile(git_path: []const u8, filename: []const u8, allocator: std.mem
 }
 
 fn writeRemainingTodo(git_path: []const u8, dir_name: []const u8, remaining: []const TodoItem, allocator: std.mem.Allocator, platform_impl: *const Platform) !void {
-    var buf = std.ArrayList(u8).init(allocator);
+    var buf = std.array_list.Managed(u8).init(allocator);
     defer buf.deinit();
     for (remaining) |item| {
         try buf.appendSlice(item.original_line);
@@ -1863,7 +1863,7 @@ fn writePatchFile(git_path: []const u8, dir_name: []const u8, commit_hash: []con
     }
     collectTreeEntriesFlat(git_path, commit_tree, "", &commit_entries, allocator, platform_impl) catch {};
 
-    var output = std.ArrayList(u8).init(allocator);
+    var output = std.array_list.Managed(u8).init(allocator);
     defer output.deinit();
 
     // Collect all paths
@@ -1878,7 +1878,7 @@ fn writePatchFile(git_path: []const u8, dir_name: []const u8, commit_hash: []con
         while (it.next()) |e| all_paths.put(e.key_ptr.*, {}) catch {};
     }
 
-    var path_list = std.ArrayList([]const u8).init(allocator);
+    var path_list = std.array_list.Managed([]const u8).init(allocator);
     defer path_list.deinit();
     {
         var it = all_paths.iterator();
@@ -2190,7 +2190,7 @@ fn runShellCommand(cmd: []const u8, allocator: std.mem.Allocator) !bool {
 }
 
 fn stripCommentLines(text: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    var buf = std.ArrayList(u8).init(allocator);
+    var buf = std.array_list.Managed(u8).init(allocator);
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         if (!std.mem.startsWith(u8, line, "#")) {
@@ -2303,7 +2303,7 @@ fn getAuthorString(allocator: std.mem.Allocator) ![]u8 {
     return try std.fmt.allocPrint(allocator, "{s} <{s}> {d} +0000", .{ name, email, timestamp });
 }
 
-fn collectCommitsToReplay(git_path: []const u8, head_hash: []const u8, base_hash: []const u8, commits: *std.ArrayList([]u8), allocator: std.mem.Allocator, platform_impl: *const Platform) !void {
+fn collectCommitsToReplay(git_path: []const u8, head_hash: []const u8, base_hash: []const u8, commits: *std.array_list.Managed([]u8), allocator: std.mem.Allocator, platform_impl: *const Platform) !void {
     var current = try allocator.dupe(u8, head_hash);
     var depth: usize = 0;
     while (depth < 10000) : (depth += 1) {
@@ -2333,7 +2333,7 @@ fn checkRebaseClean(git_path: []const u8, repo_root: []const u8, head_hash: []co
     defer tree_map.deinit();
     var tree_count: usize = 0;
     {
-        var tree_entries_list = std.ArrayList(TreeFileEntry).init(allocator);
+        var tree_entries_list = std.array_list.Managed(TreeFileEntry).init(allocator);
         defer {
             for (tree_entries_list.items) |*e| allocator.free(e.path);
             tree_entries_list.deinit();
@@ -2417,7 +2417,7 @@ fn checkUntrackedConflicts(git_path: []const u8, onto_hash: []const u8, allocato
     if (std.mem.eql(u8, onto_tree, head_tree)) return;
 
     // Collect files in onto tree but not in HEAD tree
-    var onto_entries = std.ArrayList(TreeFileEntry).init(allocator);
+    var onto_entries = std.array_list.Managed(TreeFileEntry).init(allocator);
     defer {
         for (onto_entries.items) |*e| allocator.free(e.path);
         onto_entries.deinit();
@@ -2428,7 +2428,7 @@ fn checkUntrackedConflicts(git_path: []const u8, onto_hash: []const u8, allocato
     defer onto_map.deinit();
     for (onto_entries.items) |e| onto_map.put(e.path, e.sha1) catch {};
 
-    var head_entries = std.ArrayList(TreeFileEntry).init(allocator);
+    var head_entries = std.array_list.Managed(TreeFileEntry).init(allocator);
     defer {
         for (head_entries.items) |*e| allocator.free(e.path);
         head_entries.deinit();
@@ -2450,7 +2450,7 @@ fn checkUntrackedConflicts(git_path: []const u8, onto_hash: []const u8, allocato
 
     // Check for files in onto that are NOT in HEAD/index but exist as untracked on disk
     const repo_root = std.fs.path.dirname(git_path) orelse ".";
-    var conflicts = std.ArrayList([]const u8).init(allocator);
+    var conflicts = std.array_list.Managed([]const u8).init(allocator);
     defer conflicts.deinit();
 
     var dir = std.fs.cwd().openDir(repo_root, .{}) catch return;
@@ -2505,7 +2505,7 @@ const TreeFileEntry = struct {
     sha1: [20]u8,
 };
 
-fn collectTreeEntriesForCheck(git_path: []const u8, tree_hash: []const u8, prefix: []const u8, entries: *std.ArrayList(TreeFileEntry), allocator: std.mem.Allocator, platform_impl: *const Platform) !void {
+fn collectTreeEntriesForCheck(git_path: []const u8, tree_hash: []const u8, prefix: []const u8, entries: *std.array_list.Managed(TreeFileEntry), allocator: std.mem.Allocator, platform_impl: *const Platform) !void {
     const tree_obj = try objects.GitObject.load(tree_hash, git_path, platform_impl, allocator);
     defer tree_obj.deinit(allocator);
 
@@ -2796,7 +2796,7 @@ fn writeTreeFromIndex(allocator: std.mem.Allocator, idx: *index_mod.Index, git_d
 
 fn writeTreeRecursive(allocator: std.mem.Allocator, idx: *index_mod.Index, prefix: []const u8, git_dir: []const u8, platform_impl: *const Platform) ![]u8 {
     // Build tree data from index entries
-    var tree_data = std.ArrayList(u8).init(allocator);
+    var tree_data = std.array_list.Managed(u8).init(allocator);
     defer tree_data.deinit();
 
     var seen_dirs = std.StringHashMap(void).init(allocator);
@@ -3262,7 +3262,7 @@ fn copyRebaseNotes(git_path: []const u8, old_commit: []const u8, new_commit: []c
     defer tree_obj.deinit(allocator);
 
     // Build new tree with added entry
-    var new_tree_data = std.ArrayList(u8).init(allocator);
+    var new_tree_data = std.array_list.Managed(u8).init(allocator);
     defer new_tree_data.deinit();
 
     var pos: usize = 0;
@@ -3380,7 +3380,7 @@ fn resolvePreviousBranch(git_path: []const u8, n: u32, allocator: std.mem.Alloca
     const reflog_content = platform_impl.fs.readFile(allocator, head_reflog_path) catch return error.NotFound;
     defer allocator.free(reflog_content);
 
-    var checkout_entries = std.ArrayList([]const u8).init(allocator);
+    var checkout_entries = std.array_list.Managed([]const u8).init(allocator);
     defer checkout_entries.deinit();
 
     var lines = std.mem.splitScalar(u8, reflog_content, '\n');

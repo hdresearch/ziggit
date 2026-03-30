@@ -27,7 +27,7 @@ pub fn cmdHashObject(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     var stdin_mode = false;
     var stdin_paths = false;
     var obj_type: []const u8 = "blob";
-    var files = std.ArrayList([]const u8).init(allocator);
+    var files = std.array_list.Managed([]const u8).init(allocator);
     defer files.deinit();
     var literally = false;
     var path_opt: ?[]const u8 = null;
@@ -169,7 +169,7 @@ fn applyCrlfConversion(allocator: std.mem.Allocator, data: []const u8, path: []c
     if (std.mem.indexOf(u8, data, "\r") == null) return null;
 
     // Load gitattributes
-    var attr_rules = std.ArrayList(cmd_check_attr.AttrRule).init(allocator);
+    var attr_rules = std.array_list.Managed(cmd_check_attr.AttrRule).init(allocator);
     defer {
         for (attr_rules.items) |*rule| rule.deinit(allocator);
         attr_rules.deinit();
@@ -214,7 +214,7 @@ fn applyCrlfConversion(allocator: std.mem.Allocator, data: []const u8, path: []c
     if (!should_convert) return null;
 
     // Convert CRLF to LF
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     var i: usize = 0;
     while (i < data.len) {
         if (i + 1 < data.len and data[i] == '\r' and data[i + 1] == '\n') {

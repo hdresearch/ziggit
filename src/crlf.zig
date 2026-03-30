@@ -234,8 +234,8 @@ pub fn applyCommitConversion(allocator: std.mem.Allocator, content: []const u8, 
 }
 
 /// Load .gitattributes rules for a repository.
-pub fn loadAttrRules(allocator: std.mem.Allocator, repo_root: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) !std.ArrayList(check_attr.AttrRule) {
-    var rules = std.ArrayList(check_attr.AttrRule).init(allocator);
+pub fn loadAttrRules(allocator: std.mem.Allocator, repo_root: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) !std.array_list.Managed(check_attr.AttrRule) {
+    var rules = std.array_list.Managed(check_attr.AttrRule).init(allocator);
     check_attr.loadAttrFile(allocator, repo_root, "", platform_impl, &rules) catch {};
     // Load info/attributes
     const info_attr_path = try std.fmt.allocPrint(allocator, "{s}/info/attributes", .{git_path});

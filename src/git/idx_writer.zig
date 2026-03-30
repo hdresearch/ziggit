@@ -2,7 +2,6 @@ const zlib_compat = @import("zlib_compat.zig");
 const std = @import("std");
 const stream_utils = @import("stream_utils.zig");
 const DeltaCache = @import("delta_cache.zig").DeltaCache;
-const zlib = std.compress.zlib;
 
 const DecompResult = struct { decompressed_size: usize, consumed: usize };
 
@@ -46,38 +45,28 @@ pub fn generateIdx(allocator: std.mem.Allocator, pack_path: []const u8) !void {
 }
 
 /// Decompress zlib data from a slice, returning decompressed data and number of
-/// compressed bytes consumed. Uses pure Zig std.compress.zlib.
+/// compressed bytes consumed.
 fn decompressWithConsumed(input: []const u8, out_buf: []u8) !DecompResult {
-    var fbs = std.io.fixedBufferStream(input);
-    var dcp = zlib.decompressor(fbs.reader());
-    const n = dcp.reader().readAll(out_buf) catch return error.ZlibDecompressError;
-    const consumed = fbs.pos - dcp.unreadBytes();
-    return .{ .decompressed_size = n, .consumed = consumed };
+    const result = zlib_compat.decompressSliceWithConsumed(std.heap.page_allocator, input) catch return error.ZlibDecompressError;
+    defer std.heap.page_allocator.free(result.data);
+    const n = @min(result.data.len, out_buf.len);
+    @memcpy(out_buf[0..n], result.data[0..n]);
+    return .{ .decompressed_size = n, .consumed = result.consumed };
 }
 
 /// Decompress zlib data, returning only the number of compressed bytes consumed (skip the output).
 fn skipZlibPure(compressed: []const u8) !usize {
-    var fbs = std.io.fixedBufferStream(compressed);
-    var dcp = zlib.decompressor(fbs.reader());
-    var discard_buf: [16384]u8 = undefined;
-    while (true) {
-        const n = dcp.reader().read(&discard_buf) catch return error.ZlibDecompressError;
-        if (n == 0) break;
-    }
-    return fbs.pos - dcp.unreadBytes();
+    const result = zlib_compat.decompressSliceWithConsumed(std.heap.page_allocator, compressed) catch return error.ZlibDecompressError;
+    std.heap.page_allocator.free(result.data);
+    return result.consumed;
 }
 
 /// Decompress zlib data into an ArrayList, returning consumed bytes.
-fn decompressToList(input: []const u8, output: *std.ArrayList(u8)) !usize {
-    var fbs = std.io.fixedBufferStream(input);
-    var dcp = zlib.decompressor(fbs.reader());
-    var buf: [16384]u8 = undefined;
-    while (true) {
-        const n = dcp.reader().read(&buf) catch return error.ZlibDecompressError;
-        if (n == 0) break;
-        try output.appendSlice(buf[0..n]);
-    }
-    return fbs.pos - dcp.unreadBytes();
+fn decompressToList(input: []const u8, output: *std.array_list.Managed(u8)) !usize {
+    const result = zlib_compat.decompressSliceWithConsumed(std.heap.page_allocator, input) catch return error.ZlibDecompressError;
+    defer std.heap.page_allocator.free(result.data);
+    try output.appendSlice(result.data);
+    return result.consumed;
 }
 
 /// Generate idx data from in-memory pack data. Returns owned slice.
@@ -277,7 +266,7 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
         var cache = DeltaCache.init(allocator, 128 * 1024 * 1024);
         defer cache.deinit();
 
-        var decomp_buf = std.ArrayList(u8).init(allocator);
+        var decomp_buf = std.array_list.Managed(u8).init(allocator);
         defer decomp_buf.deinit();
 
         // --- Resolve OFS_DELTAs in pack order ---
@@ -343,7 +332,7 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
     // ═══════════════════════════════════════════════════════════════════
     // Build sorted entries from resolved records
     // ═══════════════════════════════════════════════════════════════════
-    var entries = try std.ArrayList(IndexEntry).initCapacity(allocator, total_objects);
+    var entries = try std.array_list.Managed(IndexEntry).initCapacity(allocator, total_objects);
     defer entries.deinit();
 
     for (records[0..total_objects]) |rec| {
@@ -391,7 +380,7 @@ fn resolveOfsDelta(
     records: []ObjRecord,
     offset_to_idx: *std.AutoHashMap(usize, u32),
     cache: *DeltaCache,
-    decomp_buf: *std.ArrayList(u8),
+    decomp_buf: *std.array_list.Managed(u8),
     sha_to_offset: *std.AutoHashMap([20]u8, usize),
 ) !void {
     return resolveDelta(allocator, pack_data, content_end, rec, rec.base_offset, records, offset_to_idx, cache, decomp_buf, sha_to_offset);
@@ -406,7 +395,7 @@ fn resolveDelta(
     records: []ObjRecord,
     offset_to_idx: *std.AutoHashMap(usize, u32),
     cache: *DeltaCache,
-    decomp_buf: *std.ArrayList(u8),
+    decomp_buf: *std.array_list.Managed(u8),
     sha_to_offset: *std.AutoHashMap([20]u8, usize),
 ) !void {
     const base = try getBaseData(allocator, pack_data, content_end, base_offset, records, offset_to_idx, cache, decomp_buf);
@@ -436,7 +425,7 @@ fn getBaseData(
     records: []ObjRecord,
     offset_to_idx: *std.AutoHashMap(usize, u32),
     cache: *DeltaCache,
-    decomp_buf: *std.ArrayList(u8),
+    decomp_buf: *std.array_list.Managed(u8),
 ) !DeltaCache.Entry {
     if (cache.get(offset)) |e| return e;
 
@@ -463,7 +452,7 @@ fn getBaseData(
 
         const base = try getBaseData(allocator, pack_data, content_end, rec.base_offset, records, offset_to_idx, cache, decomp_buf);
 
-        var tmp = try std.ArrayList(u8).initCapacity(allocator, if (rec.size > 0) rec.size else 256);
+        var tmp = try std.array_list.Managed(u8).initCapacity(allocator, if (rec.size > 0) rec.size else 256);
         defer tmp.deinit();
         _ = try stream_utils.decompressInto(
             pack_data[rec.comp_start .. rec.comp_start + rec.comp_len],
@@ -586,7 +575,7 @@ fn readDeltaVarint(data: []const u8, pos_ptr: *usize) usize {
 }
 
 fn buildIdxFile(allocator: std.mem.Allocator, entries: []const IndexEntry, pack_checksum: *const [20]u8) ![]u8 {
-    var idx = std.ArrayList(u8).init(allocator);
+    var idx = std.array_list.Managed(u8).init(allocator);
     defer idx.deinit();
     try idx.ensureTotalCapacity(8 + 256 * 4 + entries.len * (20 + 4 + 4) + 40);
 
@@ -612,7 +601,7 @@ fn buildIdxFile(allocator: std.mem.Allocator, entries: []const IndexEntry, pack_
     for (entries) |entry| try writer.writeInt(u32, entry.crc32, .big);
 
     // Offset table (+ large offset overflow)
-    var large_offsets = std.ArrayList(u64).init(allocator);
+    var large_offsets = std.array_list.Managed(u64).init(allocator);
     defer large_offsets.deinit();
     for (entries) |entry| {
         if (entry.offset >= 0x80000000) {

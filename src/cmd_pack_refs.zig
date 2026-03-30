@@ -87,7 +87,7 @@ pub fn packRefsImpl(allocator: std.mem.Allocator, git_dir: []const u8, prune: bo
     } else |_| {}
 
     // helpers.Collect loose helpers.refs from refs/ directory
-    var loose_refs = std.ArrayList([]const u8).init(allocator);
+    var loose_refs = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (loose_refs.items) |r| allocator.free(r);
         loose_refs.deinit();
@@ -95,12 +95,12 @@ pub fn packRefsImpl(allocator: std.mem.Allocator, git_dir: []const u8, prune: bo
     try helpers.collectLooseRefsForPack(allocator, git_dir, "refs", &ref_map, &loose_refs);
 
     // helpers.Write packed-helpers.refs file
-    var output = std.ArrayList(u8).init(allocator);
+    var output = std.array_list.Managed(u8).init(allocator);
     defer output.deinit();
     try output.appendSlice("# pack-helpers.refs with: peeled fully-peeled sorted \n");
 
     // helpers.Sort ref names
-    var names = std.ArrayList([]const u8).init(allocator);
+    var names = std.array_list.Managed([]const u8).init(allocator);
     defer names.deinit();
     var it = ref_map.iterator();
     while (it.next()) |entry| {

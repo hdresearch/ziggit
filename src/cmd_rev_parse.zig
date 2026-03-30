@@ -28,7 +28,7 @@ pub fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
     }
 
     // helpers.Collect all args
-    var all_args = std.ArrayList([]const u8).init(allocator);
+    var all_args = std.array_list.Managed([]const u8).init(allocator);
     defer all_args.deinit();
     while (args.next()) |arg| {
         try all_args.append(arg);
@@ -57,7 +57,7 @@ pub fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
     var no_flags = false;
     var path_format_absolute = false;
     var default_rev: ?[]const u8 = null;
-    var positional_args = std.ArrayList([]const u8).init(allocator);
+    var positional_args = std.array_list.Managed([]const u8).init(allocator);
     defer positional_args.deinit();
 
     var arg_i: usize = 0;
@@ -87,7 +87,7 @@ pub fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
             // Ignore for now (shell quoting)
         } else if (std.mem.eql(u8, arg, "--sq-quote")) {
             // Shell-quote remaining args
-            var output_buf = std.ArrayList(u8).init(allocator);
+            var output_buf = std.array_list.Managed(u8).init(allocator);
             defer output_buf.deinit();
             var first = true;
             arg_i += 1;
@@ -382,7 +382,7 @@ pub fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                 for (rel) |c| {
                     if (c == '/') depth += 1;
                 }
-                var buf = std.ArrayList(u8).init(allocator);
+                var buf = std.array_list.Managed(u8).init(allocator);
                 defer buf.deinit();
                 var d: usize = 0;
                 while (d < depth) : (d += 1) {
@@ -821,7 +821,7 @@ fn isInfoSparseCheckout(path: []const u8) bool {
 
 /// Normalize a path by collapsing multiple slashes
 fn normalizePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     var prev_slash = false;
     for (path) |c| {
         if (c == '/') {

@@ -13,7 +13,7 @@ pub const PackFileCache = struct {
         }
     };
     
-    entries: std.ArrayList(CacheEntry),
+    entries: std.array_list.Managed(CacheEntry),
     allocator: std.mem.Allocator,
     max_entries: usize,
     max_total_size: usize,
@@ -21,7 +21,7 @@ pub const PackFileCache = struct {
     
     pub fn init(allocator: std.mem.Allocator, max_entries: usize, max_total_size: usize) PackFileCache {
         return PackFileCache{
-            .entries = std.ArrayList(CacheEntry).init(allocator),
+            .entries = std.array_list.Managed(CacheEntry).init(allocator),
             .allocator = allocator,
             .max_entries = max_entries,
             .max_total_size = max_total_size,

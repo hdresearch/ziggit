@@ -183,7 +183,7 @@ pub const GitObject = struct {
         var digest: [20]u8 = undefined;
         hasher.final(&digest);
 
-        return try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&digest)});
+        return try std.fmt.allocPrint(allocator, "{x}", .{&digest});
     }
 
     pub fn store(self: GitObject, git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![]u8 {
@@ -310,7 +310,7 @@ pub fn loadFromAlternates(hash_str: []const u8, git_dir: []const u8, platform_im
         
         if (platform_impl.fs.readFile(allocator, obj_file_path)) |compressed_content| {
             defer allocator.free(compressed_content);
-            var content = std.ArrayList(u8).init(allocator);
+            var content = std.array_list.Managed(u8).init(allocator);
             defer content.deinit();
             var compressed_stream = std.io.fixedBufferStream(compressed_content);
             zlib_compat.decompress(compressed_stream.reader(), content.writer()) catch continue;
@@ -384,7 +384,7 @@ pub fn createBlobObject(data: []const u8, allocator: std.mem.Allocator) !GitObje
 }
 
 pub fn createTreeObject(entries: []const TreeEntry, allocator: std.mem.Allocator) !GitObject {
-    var content = std.ArrayList(u8).init(allocator);
+    var content = std.array_list.Managed(u8).init(allocator);
     defer content.deinit();
 
     for (entries) |entry| {
@@ -425,7 +425,7 @@ pub const TreeEntry = struct {
 };
 
 pub fn createCommitObjectWithEncoding(tree_hash: []const u8, parent_hashes: []const []const u8, author: []const u8, committer: []const u8, message: []const u8, encoding: ?[]const u8, allocator: std.mem.Allocator) !GitObject {
-    var content = std.ArrayList(u8).init(allocator);
+    var content = std.array_list.Managed(u8).init(allocator);
     defer content.deinit();
 
     try content.writer().print("tree {s}\n", .{tree_hash});
@@ -1002,7 +1002,7 @@ fn readPackedObject(pack_data: []const u8, offset: usize, pack_path: []const u8,
             // Convert SHA-1 to hex string for recursive lookup
             const base_hash_str = try allocator.alloc(u8, 40);
             defer allocator.free(base_hash_str);
-            _ = try std.fmt.bufPrint(base_hash_str, "{}", .{std.fmt.fmtSliceHexLower(base_sha1)});
+            _ = try std.fmt.bufPrint(base_hash_str, "{x}", .{base_sha1});
             
             // Look up base object offset in pack index, then read directly from pack_data (avoid recursive cycle)
             const pack_dir = std.fs.path.dirname(pack_path) orelse return error.ObjectNotFound;
@@ -1236,7 +1236,7 @@ pub fn deltaResultSize(delta_data: []const u8) !usize {
 
 /// Apply delta writing into a reusable ArrayList. Clears the list first but
 /// retains its capacity, so repeated calls avoid allocation.
-pub fn applyDeltaReuse(base_data: []const u8, delta_data: []const u8, output: *std.ArrayList(u8)) ![]u8 {
+pub fn applyDeltaReuse(base_data: []const u8, delta_data: []const u8, output: *std.array_list.Managed(u8)) ![]u8 {
     output.clearRetainingCapacity();
     const result_size = try deltaResultSize(delta_data);
     try output.ensureTotalCapacity(result_size);
@@ -1261,7 +1261,7 @@ fn applyDeltaPermissive(base_data: []const u8, delta_data: []const u8, allocator
     // Read result size varint
     const result_size = readVarint(delta_data, &pos);
 
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     defer result.deinit();
     if (result_size > 0 and result_size < 1024 * 1024 * 1024) {
         try result.ensureTotalCapacity(result_size);
@@ -1461,9 +1461,9 @@ pub fn analyzePackFileHealth(pack_dir_path: []const u8, platform_impl: anytype, 
     var report = PackHealthReport{
         .total_packs = 0,
         .total_objects = 0,
-        .corrupted_packs = std.ArrayList([]const u8).init(allocator),
-        .missing_indices = std.ArrayList([]const u8).init(allocator),
-        .pack_sizes = std.ArrayList(u64).init(allocator),
+        .corrupted_packs = std.array_list.Managed([]const u8).init(allocator),
+        .missing_indices = std.array_list.Managed([]const u8).init(allocator),
+        .pack_sizes = std.array_list.Managed(u64).init(allocator),
         .health_score = 1.0,
     };
     
@@ -1529,9 +1529,9 @@ pub fn analyzePackFileHealth(pack_dir_path: []const u8, platform_impl: anytype, 
 pub const PackHealthReport = struct {
     total_packs: u32,
     total_objects: u64,
-    corrupted_packs: std.ArrayList([]const u8),
-    missing_indices: std.ArrayList([]const u8),
-    pack_sizes: std.ArrayList(u64),
+    corrupted_packs: std.array_list.Managed([]const u8),
+    missing_indices: std.array_list.Managed([]const u8),
+    pack_sizes: std.array_list.Managed(u64),
     health_score: f32, // 0.0 = very unhealthy, 1.0 = perfect health
     
     pub fn deinit(self: *PackHealthReport) void {
@@ -1610,7 +1610,7 @@ pub fn verifyPackFile(pack_path: []const u8, platform_impl: anytype, allocator: 
         .header_valid = false,
         .objects_readable = 0,
         .total_objects = 0,
-        .corrupted_objects = std.ArrayList(u32).init(allocator),
+        .corrupted_objects = std.array_list.Managed(u32).init(allocator),
         .file_size = pack_data.len,
     };
     
@@ -1664,7 +1664,7 @@ pub const PackVerificationResult = struct {
     header_valid: bool,
     objects_readable: u32,
     total_objects: u32,
-    corrupted_objects: std.ArrayList(u32),
+    corrupted_objects: std.array_list.Managed(u32),
     file_size: usize,
     
     pub fn deinit(self: PackVerificationResult) void {
@@ -1754,7 +1754,7 @@ pub fn optimizePackFiles(git_dir: []const u8, platform_impl: anytype, allocator:
             .packs_found = 0,
             .packs_optimized = 0,
             .space_saved = 0,
-            .errors = std.ArrayList([]const u8).init(allocator),
+            .errors = std.array_list.Managed([]const u8).init(allocator),
         },
         else => return err,
     };
@@ -1764,7 +1764,7 @@ pub fn optimizePackFiles(git_dir: []const u8, platform_impl: anytype, allocator:
         .packs_found = 0,
         .packs_optimized = 0,
         .space_saved = 0,
-        .errors = std.ArrayList([]const u8).init(allocator),
+        .errors = std.array_list.Managed([]const u8).init(allocator),
     };
     
     var iterator = pack_dir.iterate();
@@ -1812,7 +1812,7 @@ pub const PackOptimizationResult = struct {
     packs_found: u32,
     packs_optimized: u32,
     space_saved: u64,
-    errors: std.ArrayList([]const u8),
+    errors: std.array_list.Managed([]const u8),
     
     pub fn deinit(self: PackOptimizationResult) void {
         for (self.errors.items) |_| {
@@ -1838,7 +1838,7 @@ pub fn readObject(allocator: std.mem.Allocator, objects_dir: []const u8, hash_by
     // Convert hash bytes to hex string
     const hash_str = try allocator.alloc(u8, 40);
     defer allocator.free(hash_str);
-    _ = try std.fmt.bufPrint(hash_str, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
+    _ = try std.fmt.bufPrint(hash_str, "{x}", .{hash_bytes});
     
     // Build object file path
     const obj_dir = hash_str[0..2];
@@ -1851,7 +1851,7 @@ pub fn readObject(allocator: std.mem.Allocator, objects_dir: []const u8, hash_by
     defer allocator.free(compressed_data);
     
     // Decompress using zlib
-    var decompressed = std.ArrayList(u8).init(allocator);
+    var decompressed = std.array_list.Managed(u8).init(allocator);
     defer decompressed.deinit();
     
     var stream = std.io.fixedBufferStream(compressed_data);
@@ -1987,7 +1987,7 @@ pub fn checkRepositoryPackHealth(git_dir: []const u8, platform_impl: anytype, al
         .estimated_total_size = 0,
         .compression_ratio = 0.0,
         .has_delta_objects = false,
-        .issues = std.ArrayList([]const u8).init(allocator),
+        .issues = std.array_list.Managed([]const u8).init(allocator),
     };
     
     const pack_dir_path = try std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir});
@@ -2055,7 +2055,7 @@ pub const RepositoryPackHealth = struct {
     estimated_total_size: u64,
     compression_ratio: f32,
     has_delta_objects: bool,
-    issues: std.ArrayList([]const u8),
+    issues: std.array_list.Managed([]const u8),
     
     pub fn deinit(self: RepositoryPackHealth) void {
         _ = self.issues.items;
@@ -2254,14 +2254,14 @@ pub const PackValidationResult = struct {
     version: u32 = 0,
     total_objects: u32 = 0,
     objects_validated: u32 = 0,
-    errors: std.ArrayList([]const u8),
-    warnings: std.ArrayList([]const u8),
+    errors: std.array_list.Managed([]const u8),
+    warnings: std.array_list.Managed([]const u8),
     allocator: std.mem.Allocator,
     
     pub fn init(allocator: std.mem.Allocator) PackValidationResult {
         return PackValidationResult{
-            .errors = std.ArrayList([]const u8).init(allocator),
-            .warnings = std.ArrayList([]const u8).init(allocator),
+            .errors = std.array_list.Managed([]const u8).init(allocator),
+            .warnings = std.array_list.Managed([]const u8).init(allocator),
             .allocator = allocator,
         };
     }
@@ -2354,7 +2354,7 @@ pub fn fixThinPack(pack_data: []const u8, git_dir: []const u8, platform_impl: an
         
         // Skip compressed data by decompressing (to find the end)
         if (pos < content_end) {
-            var decompressed = std.ArrayList(u8).init(allocator);
+            var decompressed = std.array_list.Managed(u8).init(allocator);
             defer decompressed.deinit();
             var stream = std.io.fixedBufferStream(pack_data[pos..content_end]);
             zlib_compat.decompress(stream.reader(), decompressed.writer()) catch {};
@@ -2375,7 +2375,7 @@ pub fn fixThinPack(pack_data: []const u8, git_dir: []const u8, platform_impl: an
     // For now, try loading from pack first, and only fetch from repo if that fails.
     
     // Second pass: resolve base objects from the local repository and build new pack
-    var base_objects = std.ArrayList(struct { sha1: [20]u8, obj: GitObject }) .init(allocator);
+    var base_objects = std.array_list.Managed(struct { sha1: [20]u8, obj: GitObject }) .init(allocator);
     defer {
         for (base_objects.items) |*item| {
             item.obj.deinit(allocator);
@@ -2387,7 +2387,7 @@ pub fn fixThinPack(pack_data: []const u8, git_dir: []const u8, platform_impl: an
     while (it.next()) |sha1_ptr| {
         const sha1 = sha1_ptr.*;
         var hex: [40]u8 = undefined;
-        _ = std.fmt.bufPrint(&hex, "{}", .{std.fmt.fmtSliceHexLower(&sha1)}) catch unreachable;
+        _ = std.fmt.bufPrint(&hex, "{x}", .{&sha1}) catch unreachable;
         
         // Try loading from local repo (loose objects or other pack files)
         const obj = GitObject.load(&hex, git_dir, platform_impl, allocator) catch continue;
@@ -2397,7 +2397,7 @@ pub fn fixThinPack(pack_data: []const u8, git_dir: []const u8, platform_impl: an
     // Build new pack: prepend base objects, then all original objects, update count
     const new_count = object_count + @as(u32, @intCast(base_objects.items.len));
     
-    var new_pack = std.ArrayList(u8).init(allocator);
+    var new_pack = std.array_list.Managed(u8).init(allocator);
     defer new_pack.deinit();
     
     // Header
@@ -2428,7 +2428,7 @@ pub fn fixThinPack(pack_data: []const u8, git_dir: []const u8, platform_impl: an
         }
         
         // Compress object data
-        var compressed = std.ArrayList(u8).init(allocator);
+        var compressed = std.array_list.Managed(u8).init(allocator);
         defer compressed.deinit();
         var input = std.io.fixedBufferStream(item.obj.data);
         try zlib_compat.compress(input.reader(), compressed.writer(), .{});
@@ -2489,7 +2489,7 @@ pub fn saveReceivedPack(pack_data: []const u8, git_dir: []const u8, platform_imp
     }
     
     // Checksum hex for filename
-    const checksum_hex = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(stored_checksum)});
+    const checksum_hex = try std.fmt.allocPrint(allocator, "{x}", .{stored_checksum});
     defer allocator.free(checksum_hex);
     
     // Ensure pack directory exists
@@ -2546,7 +2546,7 @@ fn readPackedObjectFromData(pack_data: []const u8, offset: usize, allocator: std
     switch (pack_type) {
         .commit, .tree, .blob, .tag => {
             if (pos >= pack_data.len) return error.ObjectNotFound;
-            var decompressed = std.ArrayList(u8).init(allocator);
+            var decompressed = std.array_list.Managed(u8).init(allocator);
             defer decompressed.deinit();
             var stream = std.io.fixedBufferStream(pack_data[pos..]);
             zlib_compat.decompress(stream.reader(), decompressed.writer()) catch return error.ObjectNotFound;
@@ -2577,7 +2577,7 @@ fn readPackedObjectFromData(pack_data: []const u8, offset: usize, allocator: std
             const base_offset = offset - base_offset_delta;
             const base_object = readPackedObjectFromData(pack_data, base_offset, allocator) catch return error.ObjectNotFound;
             defer base_object.deinit(allocator);
-            var delta_data = std.ArrayList(u8).init(allocator);
+            var delta_data = std.array_list.Managed(u8).init(allocator);
             defer delta_data.deinit();
             var stream = std.io.fixedBufferStream(pack_data[pos..]);
             zlib_compat.decompress(stream.reader(), delta_data.writer()) catch return error.ObjectNotFound;
@@ -2599,7 +2599,7 @@ pub fn generatePackIndex(pack_data: []const u8, allocator: std.mem.Allocator) ![
     const pack_checksum = pack_data[content_end..pack_data.len];
     
     // Collect all objects: parse each object to get its SHA-1, offset, and CRC32
-    var entries = std.ArrayList(IndexEntry).init(allocator);
+    var entries = std.array_list.Managed(IndexEntry).init(allocator);
     defer entries.deinit();
     
     var pos: usize = 12; // After header
@@ -2656,7 +2656,7 @@ pub fn generatePackIndex(pack_data: []const u8, allocator: std.mem.Allocator) ![
         
         // Decompress object data to find end of zlib stream and compute SHA-1
         const compressed_start = pos;
-        var decompressed = std.ArrayList(u8).init(allocator);
+        var decompressed = std.array_list.Managed(u8).init(allocator);
         defer decompressed.deinit();
         
         var stream = std.io.fixedBufferStream(pack_data[pos..content_end]);
@@ -2774,7 +2774,7 @@ pub fn generatePackIndex(pack_data: []const u8, allocator: std.mem.Allocator) ![
     }.lessThan);
     
     // Build v2 idx file
-    var idx = std.ArrayList(u8).init(allocator);
+    var idx = std.array_list.Managed(u8).init(allocator);
     defer idx.deinit();
     
     // Magic + version
@@ -2801,7 +2801,7 @@ pub fn generatePackIndex(pack_data: []const u8, allocator: std.mem.Allocator) ![
     }
     
     // Offset table (32-bit; 64-bit entries would go in a separate table for offsets >= 2GB)
-    var large_offsets = std.ArrayList(u64).init(allocator);
+    var large_offsets = std.array_list.Managed(u64).init(allocator);
     defer large_offsets.deinit();
     
     for (entries.items) |entry| {

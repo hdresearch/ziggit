@@ -66,7 +66,7 @@ pub const DumbHttpProtocol = struct {
     }
     
     /// Get the list of references from info/refs
-    pub fn getRefs(self: DumbHttpProtocol) !std.ArrayList(RefInfo) {
+    pub fn getRefs(self: DumbHttpProtocol) !std.array_list.Managed(RefInfo) {
         const refs_url = try std.fmt.allocPrint(self.allocator, "{s}/info/refs", .{self.base_url});
         defer self.allocator.free(refs_url);
         
@@ -76,7 +76,7 @@ pub const DumbHttpProtocol = struct {
         };
         defer self.allocator.free(refs_content);
         
-        var ref_list = std.ArrayList(RefInfo).init(self.allocator);
+        var ref_list = std.array_list.Managed(RefInfo).init(self.allocator);
         
         var lines = std.mem.splitSequence(u8, refs_content, "\n");
         while (lines.next()) |line| {
@@ -150,7 +150,7 @@ pub const DumbHttpProtocol = struct {
         };
         defer self.allocator.free(packs_content);
         
-        var pack_list = std.ArrayList([]const u8).init(self.allocator);
+        var pack_list = std.array_list.Managed([]const u8).init(self.allocator);
         
         var lines = std.mem.splitSequence(u8, packs_content, "\n");
         while (lines.next()) |line| {
@@ -260,7 +260,7 @@ fn downloadObjects(protocol: DumbHttpProtocol, start_hash: []const u8, git_dir: 
         visited.deinit();
     }
     
-    var to_download = std.ArrayList([]const u8).init(allocator);
+    var to_download = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (to_download.items) |hash| {
             allocator.free(hash);
@@ -326,7 +326,7 @@ fn storeObject(git_dir: []const u8, hash: []const u8, obj_data: []const u8, plat
 }
 
 /// Add object dependencies to the download queue  
-fn addObjectDependencies(obj: objects.GitObject, to_download: *std.ArrayList([]const u8), allocator: std.mem.Allocator) !void {
+fn addObjectDependencies(obj: objects.GitObject, to_download: *std.array_list.Managed([]const u8), allocator: std.mem.Allocator) !void {
     switch (obj.type) {
         .commit => {
             var lines = std.mem.splitSequence(u8, obj.data, "\n");
@@ -356,7 +356,7 @@ fn addObjectDependencies(obj: objects.GitObject, to_download: *std.ArrayList([]c
                 // Next 20 bytes are the hash
                 if (pos + 20 <= obj.data.len) {
                     const hash_bytes = obj.data[pos..pos + 20];
-                    const hash_str = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
+                    const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{hash_bytes});
                     try to_download.append(hash_str);
                     pos += 20;
                 } else {
@@ -447,7 +447,7 @@ fn checkoutTree(git_dir: []const u8, tree_hash: []const u8, base_dir: []const u8
         // Get hash (20 bytes)
         if (pos + 20 > tree_obj.data.len) break;
         const hash_bytes = tree_obj.data[pos..pos + 20];
-        const hash_str = try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)});
+        const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{hash_bytes});
         defer allocator.free(hash_str);
         pos += 20;
         
@@ -551,7 +551,7 @@ pub fn cmdBundle(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
 
 fn bundleCreate(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     var bundle_file: ?[]const u8 = null;
-    var rev_args = std.ArrayList([]const u8).init(allocator);
+    var rev_args = std.array_list.Managed([]const u8).init(allocator);
     defer rev_args.deinit();
     var bundle_version: u32 = 2; // default v2
 
@@ -600,7 +600,7 @@ fn bundleCreate(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     // 1. Positive refs (tips to include)
     // 2. Negative refs (prerequisites/exclusions)
     // 3. Range specs like A..B
-    var positive_refs = std.ArrayList(BundleRef).init(allocator);
+    var positive_refs = std.array_list.Managed(BundleRef).init(allocator);
     defer {
         for (positive_refs.items) |r| {
             allocator.free(r.hash);
@@ -608,7 +608,7 @@ fn bundleCreate(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         }
         positive_refs.deinit();
     }
-    var negative_hashes = std.ArrayList([]const u8).init(allocator);
+    var negative_hashes = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (negative_hashes.items) |h| allocator.free(h);
         negative_hashes.deinit();
@@ -711,7 +711,7 @@ fn bundleCreate(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
 
     // Determine prerequisite commits (parents of boundary)
     // For prerequisites, we need to find commits that are in the negative set
-    var prereq_list = std.ArrayList(PrereqEntry).init(allocator);
+    var prereq_list = std.array_list.Managed(PrereqEntry).init(allocator);
     defer {
         for (prereq_list.items) |p| {
             allocator.free(p.hash);
@@ -728,7 +728,7 @@ fn bundleCreate(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     }
 
     // Build the bundle file
-    var bundle_data = std.ArrayList(u8).init(allocator);
+    var bundle_data = std.array_list.Managed(u8).init(allocator);
     defer bundle_data.deinit();
 
     // Header
@@ -765,7 +765,7 @@ fn bundleCreate(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     // Collect all reachable objects from positive refs, excluding objects reachable from negative refs
     var object_set = std.StringHashMap(void).init(allocator);
     defer object_set.deinit();
-    var object_hashes = std.ArrayList([]const u8).init(allocator);
+    var object_hashes = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (object_hashes.items) |h| allocator.free(h);
         object_hashes.deinit();
@@ -788,7 +788,7 @@ fn bundleCreate(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     }
 
     // Build pack data
-    var pack_data = std.ArrayList(u8).init(allocator);
+    var pack_data = std.array_list.Managed(u8).init(allocator);
     defer pack_data.deinit();
 
     try pack_data.appendSlice("PACK");
@@ -1003,7 +1003,7 @@ fn walkReachableObjects(
     set: *std.StringHashMap(void),
     platform_impl: *const platform_mod.Platform,
 ) !void {
-    var worklist = std.ArrayList([]const u8).init(allocator);
+    var worklist = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (worklist.items) |item| allocator.free(item);
         worklist.deinit();
@@ -1067,11 +1067,11 @@ fn walkAndCollectObjects(
     git_dir: []const u8,
     start_hash: []const u8,
     object_set: *std.StringHashMap(void),
-    object_hashes: *std.ArrayList([]const u8),
+    object_hashes: *std.array_list.Managed([]const u8),
     exclude_set: *std.StringHashMap(void),
     platform_impl: *const platform_mod.Platform,
 ) !void {
-    var worklist = std.ArrayList([]const u8).init(allocator);
+    var worklist = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (worklist.items) |item| allocator.free(item);
         worklist.deinit();
@@ -1132,8 +1132,8 @@ fn walkAndCollectObjects(
     }
 }
 
-fn collectAllRefsForBundle(allocator: std.mem.Allocator, git_dir: []const u8, platform_impl: *const platform_mod.Platform) !std.ArrayList(BundleRef) {
-    var result = std.ArrayList(BundleRef).init(allocator);
+fn collectAllRefsForBundle(allocator: std.mem.Allocator, git_dir: []const u8, platform_impl: *const platform_mod.Platform) !std.array_list.Managed(BundleRef) {
+    var result = std.array_list.Managed(BundleRef).init(allocator);
 
     // HEAD
     if (refs.resolveRef(git_dir, "HEAD", platform_impl, allocator) catch null) |head_hash| {
@@ -1146,7 +1146,7 @@ fn collectAllRefsForBundle(allocator: std.mem.Allocator, git_dir: []const u8, pl
     return result;
 }
 
-fn collectRefsFromDir(allocator: std.mem.Allocator, git_dir: []const u8, prefix: []const u8, result: *std.ArrayList(BundleRef), platform_impl: *const platform_mod.Platform) !void {
+fn collectRefsFromDir(allocator: std.mem.Allocator, git_dir: []const u8, prefix: []const u8, result: *std.array_list.Managed(BundleRef), platform_impl: *const platform_mod.Platform) !void {
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_dir, prefix });
     defer allocator.free(dir_path);
 

@@ -24,7 +24,7 @@ const wildmatch_mod = @import("wildmatch.zig");
 pub fn nativeCmdVerifyPack(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
     var verbose = false;
     var stat_only = false;
-    var pack_files = std.ArrayList([]const u8).init(allocator);
+    var pack_files = std.array_list.Managed([]const u8).init(allocator);
     defer pack_files.deinit();
 
     var i = command_index + 1;

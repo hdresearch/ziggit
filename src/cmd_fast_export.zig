@@ -41,7 +41,7 @@ pub fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     var export_marks_file: ?[]const u8 = null;
     var no_data = false;
     var use_done_feature = false;
-    var positional_args = std.ArrayList([]const u8).init(allocator);
+    var positional_args = std.array_list.Managed([]const u8).init(allocator);
     defer positional_args.deinit();
     var seen_dashdash = false;
 
@@ -109,7 +109,7 @@ pub fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     }
 
     // helpers.Determine which helpers.refs to export
-    var ref_targets = std.ArrayList([]const u8).init(allocator);
+    var ref_targets = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (ref_targets.items) |r| allocator.free(r);
         ref_targets.deinit();
@@ -140,7 +140,7 @@ pub fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             const exc_hash = helpers.resolveRevision(git_path, exc_ref, platform_impl, allocator) catch continue;
             try excluded_commits.put(exc_hash, {});
             // helpers.Walk back and exclude all ancestors
-            var walk_list = std.ArrayList([]const u8).init(allocator);
+            var walk_list = std.array_list.Managed([]const u8).init(allocator);
             defer {
                 for (walk_list.items) |w| allocator.free(w);
                 walk_list.deinit();
@@ -201,7 +201,7 @@ pub fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     }.lessThan);
 
     // helpers.Collect all commits reachable from target helpers.refs
-    var all_commits = std.ArrayList([]const u8).init(allocator);
+    var all_commits = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (all_commits.items) |c| allocator.free(c);
         all_commits.deinit();
@@ -240,7 +240,7 @@ pub fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
 
         // helpers.Walk commits
         if (!excluded_commits.contains(commit_hash) and !commit_set.contains(commit_hash)) {
-            var walk_stack = std.ArrayList([]const u8).init(allocator);
+            var walk_stack = std.array_list.Managed([]const u8).init(allocator);
             defer {
                 for (walk_stack.items) |w| allocator.free(w);
                 walk_stack.deinit();
@@ -378,7 +378,7 @@ pub fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         }
     }
 
-    var output = std.ArrayList(u8).init(allocator);
+    var output = std.array_list.Managed(u8).init(allocator);
     defer output.deinit();
 
     // helpers.Track which helpers.refs have been seen (for reset lines)
@@ -426,7 +426,7 @@ pub fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
 
         // helpers.Check for gpgsig
         var has_gpgsig = false;
-        var gpgsig_content = std.ArrayList(u8).init(allocator);
+        var gpgsig_content = std.array_list.Managed(u8).init(allocator);
         defer gpgsig_content.deinit();
         {
             var lines_it = std.mem.splitScalar(u8, cobj.data, '\n');
@@ -473,7 +473,7 @@ pub fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         }
 
         // helpers.Collect parents
-        var parents = std.ArrayList([]const u8).init(allocator);
+        var parents = std.array_list.Managed([]const u8).init(allocator);
         defer parents.deinit();
         {
             var plines = std.mem.splitScalar(u8, cobj.data, '\n');
@@ -486,7 +486,7 @@ pub fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         }
 
         // helpers.Collect file entries from current tree
-        var file_entries = std.ArrayList(FastExportEntry).init(allocator);
+        var file_entries = std.array_list.Managed(FastExportEntry).init(allocator);
         defer {
             for (file_entries.items) |fe| allocator.free(fe.path);
             file_entries.deinit();
@@ -507,7 +507,7 @@ pub fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
                 if (pobj.type == .commit) {
                     const ptree = helpers.extractHeaderField(pobj.data, "tree");
                     if (ptree.len > 0) {
-                        var pfe_list = std.ArrayList(FastExportEntry).init(allocator);
+                        var pfe_list = std.array_list.Managed(FastExportEntry).init(allocator);
                         defer pfe_list.deinit();
                         fastExportCollectTree(git_path, ptree, "", platform_impl, allocator, &pfe_list) catch {};
                         for (pfe_list.items) |pfe| {
@@ -519,7 +519,7 @@ pub fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         }
 
         // helpers.Compute changed entries (new or modified vs parent)
-        var changed_entries = std.ArrayList(FastExportEntry).init(allocator);
+        var changed_entries = std.array_list.Managed(FastExportEntry).init(allocator);
         defer changed_entries.deinit();
         for (file_entries.items) |fe| {
             if (parent_entries.get(fe.path)) |pe| {
@@ -532,7 +532,7 @@ pub fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         }
 
         // helpers.Compute deleted entries
-        var deleted_paths = std.ArrayList([]const u8).init(allocator);
+        var deleted_paths = std.array_list.Managed([]const u8).init(allocator);
         defer deleted_paths.deinit();
         {
             var peit2 = parent_entries.iterator();
@@ -898,7 +898,7 @@ pub fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
 
     // helpers.Write export marks
     if (export_marks_file) |marks_path| {
-        var marks_buf = std.ArrayList(u8).init(allocator);
+        var marks_buf = std.array_list.Managed(u8).init(allocator);
         defer marks_buf.deinit();
         var bit = blob_to_mark.iterator();
         while (bit.next()) |entry| {
@@ -932,7 +932,7 @@ pub fn cmdFastExport(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
 }
 
 
-pub fn fastExportCollectTree(git_path: []const u8, tree_hash_str: []const u8, prefix: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, result: *std.ArrayList(FastExportEntry)) !void {
+pub fn fastExportCollectTree(git_path: []const u8, tree_hash_str: []const u8, prefix: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, result: *std.array_list.Managed(FastExportEntry)) !void {
     const tree_obj = objects.GitObject.load(tree_hash_str, git_path, platform_impl, allocator) catch return;
     defer tree_obj.deinit(allocator);
 

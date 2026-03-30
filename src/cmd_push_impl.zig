@@ -37,7 +37,7 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
 
     // helpers.Parse arguments
     var remote_name: ?[]const u8 = null;
-    var refspecs = std.ArrayList([]const u8).init(allocator);
+    var refspecs = std.array_list.Managed([]const u8).init(allocator);
     defer refspecs.deinit();
     var force_push = false;
     var push_all = false;
@@ -618,7 +618,7 @@ pub fn resolvePushRef(refname: []const u8, allocator: std.mem.Allocator) ![]cons
 
 pub fn copyObjectsForPush(allocator: std.mem.Allocator, src_git_dir: []const u8, dst_git_dir: []const u8, commit_hash: []const u8, platform_impl: *const platform_mod.Platform) !void {
     // helpers.Walk commit chain and copy all reachable helpers.objects
-    var to_visit = std.ArrayList([]const u8).init(allocator);
+    var to_visit = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (to_visit.items) |item| allocator.free(item);
         to_visit.deinit();

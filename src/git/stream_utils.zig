@@ -1,5 +1,5 @@
 const std = @import("std");
-const zlib = std.compress.zlib;
+const zlib_compat = @import("zlib_compat.zig");
 
 /// Result of streaming decompress+hash operation.
 pub const DecompressHashResult = struct {
@@ -21,26 +21,18 @@ pub fn decompressAndHash(
     const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ git_type, object_size }) catch unreachable;
     sha_hasher.update(header);
 
-    var fbs = std.io.fixedBufferStream(compressed_data);
-    var dcp = zlib.decompressor(fbs.reader());
+    const result = zlib_compat.decompressSliceWithConsumed(std.heap.page_allocator, compressed_data) catch return error.ZlibDecompressError;
+    defer std.heap.page_allocator.free(result.data);
 
-    var total_decompressed: usize = 0;
-    var chunk_buf: [32768]u8 = undefined;
-
-    while (true) {
-        const n = dcp.reader().read(&chunk_buf) catch return error.ZlibDecompressError;
-        if (n == 0) break;
-        sha_hasher.update(chunk_buf[0..n]);
-        total_decompressed += n;
-    }
+    sha_hasher.update(result.data);
 
     var result_sha1: [20]u8 = undefined;
     sha_hasher.final(&result_sha1);
 
     return .{
         .sha1 = result_sha1,
-        .decompressed_size = total_decompressed,
-        .bytes_consumed = fbs.pos - dcp.unreadBytes(),
+        .decompressed_size = result.data.len,
+        .bytes_consumed = result.consumed,
     };
 }
 
@@ -49,7 +41,7 @@ pub fn decompressHashAndCapture(
     compressed_data: []const u8,
     git_type: []const u8,
     object_size: usize,
-    output: *std.ArrayList(u8),
+    output: *std.array_list.Managed(u8),
 ) !DecompressHashResult {
     var sha_hasher = std.crypto.hash.Sha1.init(.{});
 
@@ -57,31 +49,19 @@ pub fn decompressHashAndCapture(
     const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ git_type, object_size }) catch unreachable;
     sha_hasher.update(header);
 
-    if (object_size > 0) {
-        try output.ensureTotalCapacity(output.items.len + object_size);
-    }
+    const res = zlib_compat.decompressSliceWithConsumed(std.heap.page_allocator, compressed_data) catch return error.ZlibDecompressError;
+    defer std.heap.page_allocator.free(res.data);
 
-    var fbs = std.io.fixedBufferStream(compressed_data);
-    var dcp = zlib.decompressor(fbs.reader());
-
-    var total_decompressed: usize = 0;
-    var chunk_buf: [16384]u8 = undefined;
-
-    while (true) {
-        const n = dcp.reader().read(&chunk_buf) catch return error.ZlibDecompressError;
-        if (n == 0) break;
-        sha_hasher.update(chunk_buf[0..n]);
-        try output.appendSlice(chunk_buf[0..n]);
-        total_decompressed += n;
-    }
+    sha_hasher.update(res.data);
+    try output.appendSlice(res.data);
 
     var result_sha1: [20]u8 = undefined;
     sha_hasher.final(&result_sha1);
 
     return .{
         .sha1 = result_sha1,
-        .decompressed_size = total_decompressed,
-        .bytes_consumed = fbs.pos - dcp.unreadBytes(),
+        .decompressed_size = res.data.len,
+        .bytes_consumed = res.consumed,
     };
 }
 
@@ -100,19 +80,12 @@ pub fn hashGitObject(git_type: []const u8, data: []const u8) [20]u8 {
 /// Decompress zlib data into a pre-cleared ArrayList, returning bytes consumed.
 pub fn decompressInto(
     compressed_data: []const u8,
-    output: *std.ArrayList(u8),
+    output: *std.array_list.Managed(u8),
 ) !struct { decompressed_size: usize, bytes_consumed: usize } {
-    var fbs = std.io.fixedBufferStream(compressed_data);
-    var dcp = zlib.decompressor(fbs.reader());
-    var chunk_buf: [16384]u8 = undefined;
-    var total: usize = 0;
-    while (true) {
-        const n = dcp.reader().read(&chunk_buf) catch return error.ZlibDecompressError;
-        if (n == 0) break;
-        try output.appendSlice(chunk_buf[0..n]);
-        total += n;
-    }
-    return .{ .decompressed_size = total, .bytes_consumed = fbs.pos - dcp.unreadBytes() };
+    const res = zlib_compat.decompressSliceWithConsumed(std.heap.page_allocator, compressed_data) catch return error.ZlibDecompressError;
+    defer std.heap.page_allocator.free(res.data);
+    try output.appendSlice(res.data);
+    return .{ .decompressed_size = res.data.len, .bytes_consumed = res.consumed };
 }
 
 /// Decompress zlib data into a pre-sized buffer (no allocation).
@@ -120,10 +93,11 @@ pub fn decompressIntoBuf(
     compressed_data: []const u8,
     buf: []u8,
 ) !struct { decompressed_size: usize, bytes_consumed: usize } {
-    var fbs = std.io.fixedBufferStream(compressed_data);
-    var dcp = zlib.decompressor(fbs.reader());
-    const n = dcp.reader().readAll(buf) catch return error.ZlibDecompressError;
-    return .{ .decompressed_size = n, .bytes_consumed = fbs.pos - dcp.unreadBytes() };
+    const res = zlib_compat.decompressSliceWithConsumed(std.heap.page_allocator, compressed_data) catch return error.ZlibDecompressError;
+    defer std.heap.page_allocator.free(res.data);
+    const n = @min(res.data.len, buf.len);
+    @memcpy(buf[0..n], res.data[0..n]);
+    return .{ .decompressed_size = n, .bytes_consumed = res.consumed };
 }
 
 /// Decompress zlib data and simultaneously hash it, writing into a caller-provided buffer.
@@ -139,19 +113,12 @@ pub fn decompressHashIntoBuf(
     const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ git_type, object_size }) catch unreachable;
     sha_hasher.update(header);
 
-    var fbs = std.io.fixedBufferStream(compressed_data);
-    var dcp = zlib.decompressor(fbs.reader());
+    const res = zlib_compat.decompressSliceWithConsumed(std.heap.page_allocator, compressed_data) catch return error.ZlibDecompressError;
+    defer std.heap.page_allocator.free(res.data);
 
-    var total: usize = 0;
-    // Read in chunks so we can hash as we go
-    while (total < buf.len) {
-        const remaining = buf[total..];
-        const to_read = @min(remaining.len, 16384);
-        const n = dcp.reader().read(remaining[0..to_read]) catch return error.ZlibDecompressError;
-        if (n == 0) break;
-        sha_hasher.update(remaining[0..n]);
-        total += n;
-    }
+    const total = @min(res.data.len, buf.len);
+    @memcpy(buf[0..total], res.data[0..total]);
+    sha_hasher.update(buf[0..total]);
 
     var result_sha1: [20]u8 = undefined;
     sha_hasher.final(&result_sha1);
@@ -159,7 +126,7 @@ pub fn decompressHashIntoBuf(
     return .{
         .sha1 = result_sha1,
         .decompressed_size = total,
-        .bytes_consumed = fbs.pos - dcp.unreadBytes(),
+        .bytes_consumed = res.consumed,
     };
 }
 

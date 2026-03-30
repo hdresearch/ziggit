@@ -203,7 +203,7 @@ pub fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, co
     // helpers.Collect object hashes to pack (deduplicated)
     var object_set = std.StringHashMap(void).init(allocator);
     defer object_set.deinit();
-    var object_hashes = std.ArrayList([]const u8).init(allocator);
+    var object_hashes = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (object_hashes.items) |h| allocator.free(h);
         object_hashes.deinit();
@@ -418,7 +418,7 @@ pub fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, co
     }
 
     // helpers.Build the pack
-    var pack_data = std.ArrayList(u8).init(allocator);
+    var pack_data = std.array_list.Managed(u8).init(allocator);
     defer pack_data.deinit();
 
     try pack_data.appendSlice("PACK");
@@ -857,7 +857,7 @@ pub fn nativeCmdUnpackObjects(allocator: std.mem.Allocator, args: [][]const u8, 
 
             // Compress and write object
             const zlib_compat2 = @import("git/zlib_compat.zig");
-            var combined = std.ArrayList(u8).init(allocator);
+            var combined = std.array_list.Managed(u8).init(allocator);
             defer combined.deinit();
             try combined.appendSlice(header);
             try combined.appendSlice(final_content);
@@ -887,11 +887,11 @@ pub fn generatePackIdx(allocator: std.mem.Allocator, pack_data: []const u8, outp
     const num_objects = std.mem.readInt(u32, pack_data[8..12], .big);
 
     // helpers.Collect object hashes by parsing pack entries
-    var object_shas = std.ArrayList([20]u8).init(allocator);
+    var object_shas = std.array_list.Managed([20]u8).init(allocator);
     defer object_shas.deinit();
-    var offsets = std.ArrayList(u32).init(allocator);
+    var offsets = std.array_list.Managed(u32).init(allocator);
     defer offsets.deinit();
-    var crcs = std.ArrayList(u32).init(allocator);
+    var crcs = std.array_list.Managed(u32).init(allocator);
     defer crcs.deinit();
 
     var pos: usize = 12;
@@ -963,7 +963,7 @@ pub fn generatePackIdx(allocator: std.mem.Allocator, pack_data: []const u8, outp
     }
 
     // helpers.Write v2 idx file
-    var idx = std.ArrayList(u8).init(allocator);
+    var idx = std.array_list.Managed(u8).init(allocator);
     defer idx.deinit();
 
     // Magic + version
@@ -1058,7 +1058,7 @@ pub fn generatePackIdxFromEntries(allocator: std.mem.Allocator, entries: []const
         }
     }.lessThan);
 
-    var idx = std.ArrayList(u8).init(allocator);
+    var idx = std.array_list.Managed(u8).init(allocator);
     defer idx.deinit();
 
     // Magic + version
@@ -1117,11 +1117,11 @@ pub fn generatePackIdxToFile(allocator: std.mem.Allocator, pack_data: []const u8
     const num_objects = std.mem.readInt(u32, pack_data[8..12], .big);
 
     // helpers.Collect object hashes by parsing pack entries
-    var object_shas = std.ArrayList([20]u8).init(allocator);
+    var object_shas = std.array_list.Managed([20]u8).init(allocator);
     defer object_shas.deinit();
-    var offsets_list = std.ArrayList(u32).init(allocator);
+    var offsets_list = std.array_list.Managed(u32).init(allocator);
     defer offsets_list.deinit();
-    var crcs_list = std.ArrayList(u32).init(allocator);
+    var crcs_list = std.array_list.Managed(u32).init(allocator);
     defer crcs_list.deinit();
 
     var pos: usize = 12;
@@ -1192,7 +1192,7 @@ pub fn generatePackIdxToFile(allocator: std.mem.Allocator, pack_data: []const u8
     }
 
     // helpers.Write v2 idx file
-    var idx = std.ArrayList(u8).init(allocator);
+    var idx = std.array_list.Managed(u8).init(allocator);
     defer idx.deinit();
 
     // Magic + version
@@ -1270,7 +1270,7 @@ pub fn packObjectsAddAllObjects(
     allocator: std.mem.Allocator,
     git_dir: []const u8,
     object_set: *std.StringHashMap(void),
-    object_hashes: *std.ArrayList([]const u8),
+    object_hashes: *std.array_list.Managed([]const u8),
 ) !void {
     const objects_dir_path = try std.fmt.allocPrint(allocator, "{s}/objects", .{git_dir});
     defer allocator.free(objects_dir_path);
@@ -1304,10 +1304,10 @@ pub fn packObjectsWalkReachable(
     git_dir: []const u8,
     start_hash: []const u8,
     object_set: *std.StringHashMap(void),
-    object_hashes: *std.ArrayList([]const u8),
+    object_hashes: *std.array_list.Managed([]const u8),
     platform_impl: *const platform_mod.Platform,
 ) !void {
-    var worklist = std.ArrayList([]const u8).init(allocator);
+    var worklist = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (worklist.items) |item| allocator.free(item);
         worklist.deinit();

@@ -45,7 +45,7 @@ pub fn nativeCmdCherryPick(allocator: std.mem.Allocator, args: [][]const u8, com
     const git_path = try git_helpers_mod.findGitDirectory(allocator, platform_impl);
     defer allocator.free(git_path);
 
-    var positionals = std.ArrayList([]const u8).init(allocator);
+    var positionals = std.array_list.Managed([]const u8).init(allocator);
     defer positionals.deinit();
     var no_commit = false;
     var allow_empty = false;
@@ -338,7 +338,7 @@ fn threeWayMerge(git_path: []const u8, base_tree: []const u8, ours_tree: []const
                 }
 
                 // Write conflict file
-                var conflict = std.ArrayList(u8).init(allocator);
+                var conflict = std.array_list.Managed(u8).init(allocator);
                 defer conflict.deinit();
                 conflict.appendSlice("<<<<<<< HEAD\n") catch {};
                 if (ours_content) |c| conflict.appendSlice(c) catch {};
@@ -398,7 +398,7 @@ fn threeWayMerge(git_path: []const u8, base_tree: []const u8, ours_tree: []const
     idx.save(git_path, platform_impl) catch {};
 
     // Build the tree directly from our collected entries
-    var tree_entries_list = std.ArrayList(objects.TreeEntry).init(allocator);
+    var tree_entries_list = std.array_list.Managed(objects.TreeEntry).init(allocator);
     defer {
         for (tree_entries_list.items) |te| te.deinit(allocator);
         tree_entries_list.deinit();
@@ -616,7 +616,7 @@ fn updateIndexFromTree(git_path: []const u8, tree_hash: []const u8, allocator: s
 
 fn writeTreeFromIndex(allocator: std.mem.Allocator, idx: *index_mod.Index, git_path: []const u8, platform_impl: *const Platform) ![]u8 {
     // Build tree from index entries (single level for now, supporting subdirectories)
-    var dirs = std.StringHashMap(std.ArrayList(index_mod.IndexEntry)).init(allocator);
+    var dirs = std.StringHashMap(std.array_list.Managed(index_mod.IndexEntry)).init(allocator);
     defer {
         var it = dirs.iterator();
         while (it.next()) |e| {
@@ -636,7 +636,7 @@ fn writeTreeFromIndex(allocator: std.mem.Allocator, idx: *index_mod.Index, git_p
             "";
         const gop = try dirs.getOrPut(if (dir.len > 0) try allocator.dupe(u8, dir) else "");
         if (!gop.found_existing) {
-            gop.value_ptr.* = std.ArrayList(index_mod.IndexEntry).init(allocator);
+            gop.value_ptr.* = std.array_list.Managed(index_mod.IndexEntry).init(allocator);
         }
         try gop.value_ptr.append(entry);
     }
@@ -644,8 +644,8 @@ fn writeTreeFromIndex(allocator: std.mem.Allocator, idx: *index_mod.Index, git_p
     return try writeTreeForDir(allocator, &dirs, "", git_path, platform_impl);
 }
 
-fn writeTreeForDir(allocator: std.mem.Allocator, dirs: *std.StringHashMap(std.ArrayList(index_mod.IndexEntry)), prefix: []const u8, git_path: []const u8, platform_impl: *const Platform) ![]u8 {
-    var tree_buf = std.ArrayList(u8).init(allocator);
+fn writeTreeForDir(allocator: std.mem.Allocator, dirs: *std.StringHashMap(std.array_list.Managed(index_mod.IndexEntry)), prefix: []const u8, git_path: []const u8, platform_impl: *const Platform) ![]u8 {
+    var tree_buf = std.array_list.Managed(u8).init(allocator);
     defer tree_buf.deinit();
 
     // Collect subdirectory names at this level
@@ -679,7 +679,7 @@ fn writeTreeForDir(allocator: std.mem.Allocator, dirs: *std.StringHashMap(std.Ar
 
     // Collect all entries: files at this level + subdirectories
     const TreeEntry = struct { name: []const u8, mode: u32, sha1: [20]u8 };
-    var entries = std.ArrayList(TreeEntry).init(allocator);
+    var entries = std.array_list.Managed(TreeEntry).init(allocator);
     defer entries.deinit();
 
     // Add files at this level
@@ -738,7 +738,7 @@ fn writeTreeForDir(allocator: std.mem.Allocator, dirs: *std.StringHashMap(std.Ar
     }.lessThan);
 
     // Build TreeEntry list for objects.createTreeObject
-    var tree_entries = std.ArrayList(objects.TreeEntry).init(allocator);
+    var tree_entries = std.array_list.Managed(objects.TreeEntry).init(allocator);
     defer {
         for (tree_entries.items) |te| te.deinit(allocator);
         tree_entries.deinit();

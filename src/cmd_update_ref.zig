@@ -29,7 +29,7 @@ pub fn cmdUpdateRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
     var create_reflog = false;
     var stdin_mode = false;
     var msg: ?[]const u8 = null;
-    var positional = std.ArrayList([]const u8).init(allocator);
+    var positional = std.array_list.Managed([]const u8).init(allocator);
     defer positional.deinit();
 
     while (args.next()) |arg| {
@@ -107,13 +107,13 @@ pub fn cmdUpdateRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
         defer allocator.free(packed_refs_path);
         if (platform_impl.fs.readFile(allocator, packed_refs_path)) |packed_data| {
             defer allocator.free(packed_data);
-            var new_packed = std.ArrayList(u8).init(allocator);
+            var new_packed = std.array_list.Managed(u8).init(allocator);
             defer new_packed.deinit();
             var lines_iter = std.mem.splitScalar(u8, packed_data, '\n');
             var ref_was_removed = false;
             var skip_peel = false;
             // First, collect the header lines
-            var header_end = std.ArrayList(u8).init(allocator);
+            var header_end = std.array_list.Managed(u8).init(allocator);
             defer header_end.deinit();
             while (lines_iter.next()) |line| {
                 if (line.len == 0) continue;
@@ -146,14 +146,14 @@ pub fn cmdUpdateRef(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
             }
             if (ref_was_removed) {
                 // Rewrite with fresh header
-                var final_packed = std.ArrayList(u8).init(allocator);
+                var final_packed = std.array_list.Managed(u8).init(allocator);
                 defer final_packed.deinit();
                 try final_packed.appendSlice("# pack-refs with: peeled fully-peeled sorted \n");
                 try final_packed.appendSlice(new_packed.items);
                 platform_impl.fs.writeFile(packed_refs_path, final_packed.items) catch {};
             } else {
                 // No change needed, but write back with original headers
-                var final_packed = std.ArrayList(u8).init(allocator);
+                var final_packed = std.array_list.Managed(u8).init(allocator);
                 defer final_packed.deinit();
                 try final_packed.appendSlice(header_end.items);
                 try final_packed.appendSlice(new_packed.items);
