@@ -446,7 +446,12 @@ pub fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                 try platform_impl.writeStdout("\n");
                 continue;
             }
-            const repo_root = std.fs.path.dirname(real_git) orelse real_git;
+            // When GIT_DIR is explicitly set, the working tree root is CWD
+            // (unless GIT_WORK_TREE is also set)
+            const repo_root = if (std.posix.getenv("GIT_DIR") != null and std.posix.getenv("GIT_WORK_TREE") == null)
+                real_cwd
+            else
+                std.fs.path.dirname(real_git) orelse real_git;
             if (std.mem.eql(u8, real_cwd, repo_root)) {
                 try platform_impl.writeStdout("\n");
             } else if (std.mem.startsWith(u8, real_cwd, repo_root) and real_cwd.len > repo_root.len and real_cwd[repo_root.len] == '/') {

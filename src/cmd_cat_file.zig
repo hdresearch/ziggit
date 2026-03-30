@@ -157,16 +157,14 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
 
     // Too many positional arguments for cmdmode options
     if (extra_args > 0 and cmdmode_count > 0) {
-        const mode_name = if (show_exists) "-e" else if (show_type) "-t" else if (show_size) "-s" else if (show_pretty) "-p" else if (textconv) "--textconv" else "--filters";
-        var ebuf: [256]u8 = undefined;
-        const emsg = std.fmt.bufPrint(&ebuf, "error: too many arguments for {s} mode\n", .{mode_name}) catch "error: too many arguments\n";
+        const emsg = "fatal: too many arguments\n";
         try platform_impl.writeStderr(emsg);
         std.process.exit(129);
     }
 
     // --buffer is incompatible with cmdmode options
     if (buffer_mode and cmdmode_count > 0) {
-        const mode_name = if (show_exists) "-e" else if (show_type) "-t" else if (show_size) "-s" else if (show_pretty) "-p" else if (textconv) "--textconv" else "--filters";
+        const mode_name: []const u8 = if (show_exists) "-e" else if (show_type) "-t" else if (show_size) "-s" else if (show_pretty) "-p" else if (textconv) "--textconv" else "--filters";
         var bbuf: [256]u8 = undefined;
         const bmsg = std.fmt.bufPrint(&bbuf, "error: {s} is incompatible with --buffer\n", .{mode_name}) catch "error: options are incompatible\n";
         try platform_impl.writeStderr(bmsg);
