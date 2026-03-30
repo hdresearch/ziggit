@@ -4,6 +4,7 @@ const DeltaCache = @import("git/delta_cache.zig").DeltaCache;
 const gitignore = @import("git/gitignore.zig");
 const validation = @import("git/validation.zig");
 const diff = @import("git/diff.zig");
+const blame = @import("git/blame.zig");
 /// WASM exports for browser integration
 /// Provides a C-ABI compatible interface to ziggit's git operations.
 /// All strings are passed as (ptr, len) pairs. Errors return negative values.
@@ -1509,5 +1510,29 @@ export fn ziggit_diff(old_ptr: [*]const u8, old_len: u32, new_ptr: [*]const u8, 
     ) catch return -1;
     out_ptr.* = @intFromPtr(result.ptr);
     out_len.* = @intCast(result.len);
+    return 0;
+}
+
+/// Split text into lines. Returns JSON array of line strings.
+/// Useful for diff/blame operations in the browser.
+export fn ziggit_split_lines(text_ptr: [*]const u8, text_len: u32, out_ptr: *u32, out_len: *u32) i32 {
+    const allocator = getAllocator();
+    var lines = blame.splitLines(allocator, text_ptr[0..text_len]) catch return -1;
+    defer lines.deinit();
+
+    // Build JSON array
+    var json = std.array_list.Managed(u8).init(allocator);
+    json.appendSlice("[") catch return -2;
+    for (lines.items, 0..) |line, i| {
+        if (i > 0) json.appendSlice(",") catch return -2;
+        json.appendSlice("\"") catch return -2;
+        appendJsonEscaped(&json, line) catch return -2;
+        json.appendSlice("\"") catch return -2;
+    }
+    json.appendSlice("]") catch return -2;
+
+    const owned = json.toOwnedSlice() catch return -3;
+    out_ptr.* = @intFromPtr(owned.ptr);
+    out_len.* = @intCast(owned.len);
     return 0;
 }
