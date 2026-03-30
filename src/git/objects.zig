@@ -2,10 +2,11 @@ const zlib_compat = @import("zlib_compat.zig");
 const std = @import("std");
 const crypto = std.crypto;
 
-// Dynamic C zlib for reliable compression (Zig's flate can hang on some inputs)
+// Dynamic C zlib for reliable compression/decompression
 var zlib_lib: ?std.DynLib = null;
 var zlib_compress_fn: ?*const fn ([*]u8, *c_ulong, [*]const u8, c_ulong) callconv(.c) c_int = null;
 var zlib_compress_bound_fn: ?*const fn (c_ulong) callconv(.c) c_ulong = null;
+var zlib_uncompress_fn: ?*const fn ([*]u8, *c_ulong, [*]const u8, c_ulong) callconv(.c) c_int = null;
 var zlib_init_attempted: bool = false;
 
 fn initCZlib() void {
@@ -24,8 +25,42 @@ fn initCZlib() void {
         zlib_lib = lib;
         zlib_compress_fn = lib.lookup(*const fn ([*]u8, *c_ulong, [*]const u8, c_ulong) callconv(.c) c_int, "compress");
         zlib_compress_bound_fn = lib.lookup(*const fn (c_ulong) callconv(.c) c_ulong, "compressBound");
+        zlib_uncompress_fn = lib.lookup(*const fn ([*]u8, *c_ulong, [*]const u8, c_ulong) callconv(.c) c_int, "uncompress");
         return;
     }
+}
+
+/// Fast decompress using C zlib's uncompress (much faster than Zig's pure-Zig deflate).
+/// Returns decompressed data or null if C zlib is unavailable.
+fn cDecompressSlice(allocator: std.mem.Allocator, input: []const u8, size_hint: usize) ?[]u8 {
+    initCZlib();
+    const uncompress_fn = zlib_uncompress_fn orelse return null;
+    // Start with size_hint or 4× input size
+    var dest_size: usize = if (size_hint > 0) size_hint else @min(input.len * 4, 1024 * 1024);
+    var attempts: u8 = 0;
+    while (attempts < 8) : (attempts += 1) {
+        const dest = allocator.alloc(u8, dest_size) catch return null;
+        var dest_len: c_ulong = @intCast(dest.len);
+        const ret = uncompress_fn(dest.ptr, &dest_len, input.ptr, @intCast(input.len));
+        if (ret == 0) {
+            // Success - shrink to actual size
+            if (@as(usize, @intCast(dest_len)) < dest.len) {
+                const result = allocator.realloc(dest, @intCast(dest_len)) catch {
+                    return dest[0..@intCast(dest_len)];
+                };
+                return result[0..@intCast(dest_len)];
+            }
+            return dest[0..@intCast(dest_len)];
+        } else if (ret == -5) {
+            // Z_BUF_ERROR - buffer too small, double it
+            allocator.free(dest);
+            dest_size *= 2;
+        } else {
+            allocator.free(dest);
+            return null;
+        }
+    }
+    return null;
 }
 
 /// Compress data using C zlib (more reliable than Zig flate)
@@ -1040,10 +1075,11 @@ fn readPackedObject(pack_data: []const u8, offset: usize, pack_path: []const u8,
     
     switch (pack_type) {
         .commit, .tree, .blob, .tag => {
-            // Regular object - decompress using C zlib directly
+            // Regular object - decompress, preferring C zlib for speed
             if (pos >= pack_data.len) return error.ObjectNotFound;
             
-            const data = zlib_compat.decompressSlice(allocator, pack_data[pos..]) catch return error.ObjectNotFound;
+            const data = cDecompressSlice(allocator, pack_data[pos..], size) orelse
+                (zlib_compat.decompressSlice(allocator, pack_data[pos..]) catch return error.ObjectNotFound);
             
             if (data.len != size) {
                 allocator.free(data);
@@ -1090,8 +1126,9 @@ fn readPackedObject(pack_data: []const u8, offset: usize, pack_path: []const u8,
             const base_object = readPackedObject(pack_data, base_offset, pack_path, platform_impl, allocator) catch return error.ObjectNotFound;
             defer base_object.deinit(allocator);
             
-            // Read and decompress delta data using C zlib directly
-            const delta_data = zlib_compat.decompressSlice(allocator, pack_data[pos..]) catch return error.ObjectNotFound;
+            // Read and decompress delta data
+            const delta_data = cDecompressSlice(allocator, pack_data[pos..], 0) orelse
+                (zlib_compat.decompressSlice(allocator, pack_data[pos..]) catch return error.ObjectNotFound);
             defer allocator.free(delta_data);
             
             // Apply delta to base object
@@ -1127,8 +1164,9 @@ fn readPackedObject(pack_data: []const u8, offset: usize, pack_path: []const u8,
             const base_object = readPackedObject(pack_data, base_offset2, pack_path, platform_impl, allocator) catch return error.ObjectNotFound;
             defer base_object.deinit(allocator);
             
-            // Read and decompress delta data using C zlib directly
-            const delta_data = zlib_compat.decompressSlice(allocator, pack_data[pos..]) catch return error.ObjectNotFound;
+            // Read and decompress delta data
+            const delta_data = cDecompressSlice(allocator, pack_data[pos..], 0) orelse
+                (zlib_compat.decompressSlice(allocator, pack_data[pos..]) catch return error.ObjectNotFound);
             defer allocator.free(delta_data);
             
             // Apply delta to base object
