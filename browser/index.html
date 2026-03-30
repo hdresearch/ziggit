@@ -17,6 +17,8 @@
     button { background: #238636; color: #fff; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-family: inherit; font-size: 0.9em; }
     button:hover { background: #2ea043; }
     button:disabled { background: #30363d; cursor: not-allowed; }
+    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #30363d; border-top-color: #f0883e; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 6px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
     #status { color: #f0883e; font-size: 0.85em; min-height: 1.4em; }
     .panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; margin-bottom: 12px; overflow: auto; }
     .panel h2 { color: #58a6ff; font-size: 1em; margin-bottom: 8px; border-bottom: 1px solid #21262d; padding-bottom: 4px; }
@@ -109,8 +111,12 @@
 
     function status(msg, isError) {
       const el = document.getElementById('status');
-      el.textContent = msg;
       el.style.color = isError ? '#f85149' : '#f0883e';
+      if (!isError && msg && msg !== 'Ready! Click folders to expand, files to view.') {
+        el.innerHTML = '<span class="spinner"></span>' + escHtml(msg);
+      } else {
+        el.textContent = msg;
+      }
     }
 
     function escHtml(s) {
