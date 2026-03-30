@@ -42,6 +42,7 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
 
     // Pre-scan for modifier flags and validate mode conflicts
     var verbose = false;
+    var abbrev_len: ?usize = null;
     var mode_count: u32 = 0;
     var has_delete = false;
     var has_move = false;
@@ -49,6 +50,13 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     var has_list = false;
     for (all_args.items) |a| {
         if (std.mem.eql(u8, a, "-v") or std.mem.eql(u8, a, "--verbose")) verbose = true;
+        if (std.mem.eql(u8, a, "--no-abbrev") or std.mem.eql(u8, a, "--abbrev=0")) abbrev_len = 40;
+        if (std.mem.startsWith(u8, a, "--abbrev=")) {
+            if (std.fmt.parseInt(usize, a["--abbrev=".len..], 10)) |n| {
+                abbrev_len = if (n == 0) 40 else n;
+            } else |_| {}
+        }
+        if (std.mem.eql(u8, a, "--abbrev")) abbrev_len = 7;
         if (std.mem.eql(u8, a, "-d") or std.mem.eql(u8, a, "-D")) { has_delete = true; mode_count += 1; }
         if (std.mem.eql(u8, a, "-m") or std.mem.eql(u8, a, "-M")) { has_move = true; mode_count += 1; }
         if (std.mem.eql(u8, a, "-c") or std.mem.eql(u8, a, "-C")) { has_copy = true; mode_count += 1; }
@@ -62,7 +70,10 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     {
         var i: usize = 0;
         while (i < all_args.items.len) {
-            if (std.mem.eql(u8, all_args.items[i], "-v") or std.mem.eql(u8, all_args.items[i], "--verbose")) {
+            if (std.mem.eql(u8, all_args.items[i], "-v") or std.mem.eql(u8, all_args.items[i], "--verbose") or
+                std.mem.eql(u8, all_args.items[i], "--no-abbrev") or std.mem.eql(u8, all_args.items[i], "--abbrev") or
+                std.mem.startsWith(u8, all_args.items[i], "--abbrev="))
+            {
                 _ = all_args.orderedRemove(i);
             } else {
                 i += 1;
@@ -499,7 +510,8 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                 const hash_opt = refs.resolveRef(git_path, ref_name, platform_impl, allocator) catch null;
                 const hash = hash_opt orelse "";
                 defer if (hash.len > 0) allocator.free(hash);
-                const short = if (hash.len >= 7) hash[0..7] else hash;
+                const alen = abbrev_len orelse 7;
+                const short = if (hash.len >= alen) hash[0..alen] else hash;
                 // Get commit subject
                 var subject: []const u8 = "";
                 var free_subject = false;
