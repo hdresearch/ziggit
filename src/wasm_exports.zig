@@ -1312,3 +1312,80 @@ fn appendJsonEscaped(list: *std.array_list.Managed(u8), s: []const u8) !void {
         }
     }
 }
+
+// ========== Zlib decompression exports for browser use ==========
+
+/// Decompress zlib data in WASM memory.
+/// input_ptr/input_len: compressed zlib data
+/// out_ptr: pointer to write decompressed data pointer (u32)
+/// out_len: pointer to write decompressed data length (u32)
+/// consumed_out: pointer to write number of input bytes consumed (u32)
+/// Returns 0 on success, negative on error.
+export fn ziggit_zlib_decompress(input_ptr: [*]const u8, input_len: u32, out_ptr: *u32, out_len: *u32, consumed_out: *u32) i32 {
+    const allocator = getAllocator();
+    const input = input_ptr[0..input_len];
+    const result = zlib_compat.decompressSliceWithConsumed(allocator, input) catch return -1;
+    out_ptr.* = @intFromPtr(result.data.ptr);
+    out_len.* = @intCast(result.data.len);
+    consumed_out.* = @intCast(result.consumed);
+    return 0;
+}
+
+/// Compute SHA-1 hash of data. Writes 20 bytes to out_ptr.
+export fn ziggit_sha1(data_ptr: [*]const u8, data_len: u32, out_ptr: [*]u8) void {
+    var hasher = std.crypto.hash.Sha1.init(.{});
+    hasher.update(data_ptr[0..data_len]);
+    var digest: [20]u8 = undefined;
+    hasher.final(&digest);
+    @memcpy(out_ptr[0..20], &digest);
+}
+
+/// Apply a git delta: base + delta -> result.
+/// Returns result data length on success, negative on error.
+/// Result is written starting at result_ptr (must be pre-allocated with enough space).
+export fn ziggit_apply_delta(base_ptr: [*]const u8, base_len: u32, delta_ptr: [*]const u8, delta_len: u32, result_ptr_out: *u32, result_len_out: *u32) i32 {
+    const allocator = getAllocator();
+    const base = base_ptr[0..base_len];
+    const delta = delta_ptr[0..delta_len];
+    const result = applyDelta(base, delta, allocator) catch return -1;
+    result_ptr_out.* = @intFromPtr(result.ptr);
+    result_len_out.* = @intCast(result.len);
+    return 0;
+}
+
+/// Load raw pack data directly into WASM memory for indexing.
+/// pack_ptr/pack_len: raw pack bytes (starting with PACK header)
+/// Returns 0 on success, negative on error.
+/// After this call, use ziggit_read_object() to retrieve objects.
+export fn ziggit_load_pack(pack_ptr: [*]const u8, pack_len: u32) i32 {
+    const allocator = getAllocator();
+    const pack_data = pack_ptr[0..pack_len];
+
+    // Free previous data
+    if (global_pack_data) |d| allocator.free(d);
+    if (global_idx_data) |d| allocator.free(d);
+    global_pack_data = null;
+    global_idx_data = null;
+
+    // Copy pack data to our own allocation
+    const owned_pack = allocator.dupe(u8, pack_data) catch return -1;
+
+    // Generate index
+    const idx = generateIdxFromPackData(allocator, owned_pack) catch {
+        allocator.free(owned_pack);
+        return -2;
+    };
+
+    global_pack_data = owned_pack;
+    global_idx_data = idx;
+    return 0;
+}
+
+/// Get the number of objects in the loaded pack.
+/// Returns count on success, negative if no pack loaded.
+export fn ziggit_pack_object_count() i32 {
+    const idx_data = global_idx_data orelse return -1;
+    if (idx_data.len < 8 + 256 * 4) return -2;
+    const total = std.mem.readInt(u32, idx_data[8 + 255 * 4 ..][0..4], .big);
+    return @intCast(total);
+}
