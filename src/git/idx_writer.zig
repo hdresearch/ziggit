@@ -3,13 +3,6 @@ const std = @import("std");
 const stream_utils = @import("stream_utils.zig");
 const DeltaCache = @import("delta_cache.zig").DeltaCache;
 const zlib = std.compress.zlib;
-const builtin = @import("builtin");
-
-// Native builds use C zlib/libdeflate for maximum performance.
-// WASM builds use pure Zig std.compress.zlib.
-const use_c_zlib = builtin.target.os.tag != .wasi and builtin.target.cpu.arch != .wasm32 and builtin.target.cpu.arch != .wasm64;
-const c_zlib = if (use_c_zlib) @cImport({ @cInclude("zlib.h"); }) else struct {};
-const c_deflate = if (use_c_zlib) @cImport({ @cInclude("libdeflate.h"); }) else struct {};
 
 const DecompResult = struct { decompressed_size: usize, consumed: usize };
 
@@ -55,10 +48,6 @@ pub fn generateIdx(allocator: std.mem.Allocator, pack_path: []const u8) !void {
 /// Decompress zlib data from a slice, returning decompressed data and number of
 /// compressed bytes consumed. Uses pure Zig std.compress.zlib.
 fn decompressWithConsumed(input: []const u8, out_buf: []u8) !DecompResult {
-    if (use_c_zlib) {
-        return decompressWithConsumedNative(input, out_buf);
-    }
-    // Pure Zig fallback for WASM
     var fbs = std.io.fixedBufferStream(input);
     var dcp = zlib.decompressor(fbs.reader());
     const n = dcp.reader().readAll(out_buf) catch return error.ZlibDecompressError;
@@ -66,42 +55,8 @@ fn decompressWithConsumed(input: []const u8, out_buf: []u8) !DecompResult {
     return .{ .decompressed_size = n, .consumed = consumed };
 }
 
-/// Native decompression using libdeflate (2-4× faster) with C zlib fallback
-fn decompressWithConsumedNative(input: []const u8, out_buf: []u8) !DecompResult {
-    // Try libdeflate first (fastest)
-    const dc = c_deflate.libdeflate_alloc_decompressor();
-    if (dc) |decompressor| {
-        defer c_deflate.libdeflate_free_decompressor(decompressor);
-        var in_consumed: usize = 0;
-        var out_size: usize = 0;
-        const ret = c_deflate.libdeflate_zlib_decompress_ex(
-            decompressor,
-            input.ptr,
-            input.len,
-            out_buf.ptr,
-            out_buf.len,
-            &in_consumed,
-            &out_size,
-        );
-        if (ret == c_deflate.LIBDEFLATE_SUCCESS) {
-            return .{ .decompressed_size = out_size, .consumed = in_consumed };
-        }
-    }
-    // Fallback to C zlib uncompress2
-    var dest_len: c_ulong = @intCast(out_buf.len);
-    var src_len: c_ulong = @intCast(@min(input.len, std.math.maxInt(c_ulong)));
-    const ret = c_zlib.uncompress2(out_buf.ptr, &dest_len, input.ptr, &src_len);
-    if (ret == c_zlib.Z_OK) {
-        return .{ .decompressed_size = @intCast(dest_len), .consumed = @intCast(src_len) };
-    }
-    return error.ZlibDecompressError;
-}
-
 /// Decompress zlib data, returning only the number of compressed bytes consumed (skip the output).
 fn skipZlibPure(compressed: []const u8) !usize {
-    if (use_c_zlib) {
-        return skipZlibNative(compressed);
-    }
     var fbs = std.io.fixedBufferStream(compressed);
     var dcp = zlib.decompressor(fbs.reader());
     var discard_buf: [16384]u8 = undefined;
@@ -110,24 +65,6 @@ fn skipZlibPure(compressed: []const u8) !usize {
         if (n == 0) break;
     }
     return fbs.pos - dcp.unreadBytes();
-}
-
-/// Native skip using C zlib inflate (faster than pure Zig for large data)
-fn skipZlibNative(compressed: []const u8) !usize {
-    var stream: c_zlib.z_stream = std.mem.zeroes(c_zlib.z_stream);
-    stream.next_in = @constCast(compressed.ptr);
-    stream.avail_in = @intCast(@min(compressed.len, std.math.maxInt(c_uint)));
-    if (c_zlib.inflateInit(&stream) != c_zlib.Z_OK) return error.ZlibDecompressError;
-    defer _ = c_zlib.inflateEnd(&stream);
-    var buf: [16384]u8 = undefined;
-    while (true) {
-        stream.next_out = &buf;
-        stream.avail_out = buf.len;
-        const ret = c_zlib.inflate(&stream, c_zlib.Z_NO_FLUSH);
-        if (ret == c_zlib.Z_STREAM_END) break;
-        if (ret != c_zlib.Z_OK) return error.ZlibDecompressError;
-    }
-    return @intCast(stream.total_in);
 }
 
 /// Decompress zlib data into an ArrayList, returning consumed bytes.

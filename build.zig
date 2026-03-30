@@ -19,14 +19,6 @@ pub fn build(b: *std.Build) void {
     });
     exe.linkLibC();
 
-    // Link C zlib and libdeflate for native targets (2-4× faster decompression).
-    // WASM builds use pure Zig std.compress.zlib instead.
-    const is_wasm = target.result.cpu.arch == .wasm32 or target.result.cpu.arch == .wasm64;
-    if (!is_wasm) {
-        exe.linkSystemLibrary("z");
-        exe.linkSystemLibrary("deflate");
-    }
-
     b.installArtifact(exe);
 
     // Expose ziggit as a library module for downstream consumers (e.g., bun fork)
