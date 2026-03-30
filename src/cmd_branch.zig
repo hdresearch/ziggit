@@ -160,22 +160,49 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         try platform_impl.writeStdout(success_msg);
     } else if (std.mem.eql(u8, first_arg.?, "--unset-upstream")) {
         // Unset upstream
-        const branch_name = fake_args.next() orelse blk: {
+        const branch_arg = fake_args.next();
+        // Check for too many arguments
+        if (branch_arg != null and fake_args.next() != null) {
+            try platform_impl.writeStderr("fatal: too many arguments to unset upstream\n");
+            std.process.exit(128);
+        }
+        const branch_name = branch_arg orelse blk: {
+            // Check for detached HEAD
+            const head_path_u = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+            defer allocator.free(head_path_u);
+            if (platform_impl.fs.readFile(allocator, head_path_u)) |hd| {
+                defer allocator.free(hd);
+                const tr = std.mem.trim(u8, hd, " \t\r\n");
+                if (!std.mem.startsWith(u8, tr, "ref: refs/heads/")) {
+                    try platform_impl.writeStderr("fatal: could not unset upstream of HEAD when it does not point to any branch.\n");
+                    std.process.exit(128);
+                }
+            } else |_| {}
             break :blk refs.getCurrentBranch(git_path, platform_impl, allocator) catch {
-                try platform_impl.writeStderr("fatal: no branch specified\n");
+                try platform_impl.writeStderr("fatal: could not unset upstream of HEAD when it does not point to any branch.\n");
                 std.process.exit(128);
                 unreachable;
             };
         };
+        const short_name = if (std.mem.startsWith(u8, branch_name, "refs/heads/")) branch_name["refs/heads/".len..] else branch_name;
         const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
         defer allocator.free(config_path);
         const existing = platform_impl.fs.readFile(allocator, config_path) catch try allocator.dupe(u8, "");
         defer allocator.free(existing);
+
+        // Check if branch has upstream info
+        const section_header = try std.fmt.allocPrint(allocator, "[branch \"{s}\"]", .{short_name});
+        defer allocator.free(section_header);
+        if (std.mem.indexOf(u8, existing, section_header) == null) {
+            const emsg_u = try std.fmt.allocPrint(allocator, "fatal: branch '{s}' has no upstream information\n", .{short_name});
+            defer allocator.free(emsg_u);
+            try platform_impl.writeStderr(emsg_u);
+            std.process.exit(128);
+        }
+
         var new_config = std.array_list.Managed(u8).init(allocator);
         defer new_config.deinit();
         var skip_section = false;
-        const section_header = try std.fmt.allocPrint(allocator, "[branch \"{s}\"]", .{branch_name});
-        defer allocator.free(section_header);
         var line_iter = std.mem.splitScalar(u8, existing, '\n');
         while (line_iter.next()) |line| {
             const trimmed = std.mem.trim(u8, line, " \t\r");
