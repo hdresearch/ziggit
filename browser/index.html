@@ -719,7 +719,7 @@
 
         // Count tags
         const tags = Object.keys(refs).filter(r => r.startsWith('refs/tags/')).map(r => r.replace('refs/tags/', ''));
-        const tagInfo = tags.length > 0 ? ` &nbsp; <strong>Tags:</strong> ${tags.length}` : '';
+        const tagInfo = tags.length > 0 ? ` &nbsp; <strong>Tags:</strong> ${tags.slice(0, 5).map(t => escHtml(t)).join(', ')}${tags.length > 5 ? ' (+' + (tags.length - 5) + ' more)' : ''}` : '';
 
         const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
 
@@ -728,7 +728,8 @@
           `<strong>HEAD:</strong> <span class="hash" onclick="inspectCommit('${headHash}')">${headHash.slice(0,12)}</span> &nbsp; ` +
           `<strong>Objects:</strong> ${Object.keys(objectDb).length} &nbsp; ` +
           `<strong>Downloaded:</strong> ${dlSize} &nbsp; ` +
-          `<span class="timing">Cloned in ${elapsed}s</span>` + tagInfo;
+          `<span class="timing">Cloned in ${elapsed}s</span>` + tagInfo +
+          (wasmInstance ? ' &nbsp; <span class="info">⚡ WASM-accelerated</span>' : '');
 
         // Show commit log
         showLog(headHash);

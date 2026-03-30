@@ -1791,6 +1791,86 @@ export fn ziggit_verify_pack(pack_ptr: [*]const u8, pack_len: u32) i32 {
     return 1; // checksum mismatch
 }
 
+/// Parse a tag object and return fields as JSON.
+/// data_ptr/data_len: raw tag object data (uncompressed)
+/// out_ptr/out_len: pointers to write result JSON
+/// Returns 0 on success, negative on error.
+export fn ziggit_parse_tag(data_ptr: [*]const u8, data_len: u32, out_ptr: *u32, out_len: *u32) i32 {
+    const allocator = getAllocator();
+    const data = data_ptr[0..data_len];
+
+    var json = std.array_list.Managed(u8).init(allocator);
+    defer json.deinit();
+    json.appendSlice("{") catch return -1;
+
+    var object: ?[]const u8 = null;
+    var tag_type: ?[]const u8 = null;
+    var tag_name: ?[]const u8 = null;
+    var tagger: ?[]const u8 = null;
+    var message_start: usize = data.len;
+
+    var line_iter = std.mem.splitScalar(u8, data, '\n');
+    var pos: usize = 0;
+    while (line_iter.next()) |line| {
+        pos += line.len + 1;
+        if (line.len == 0) {
+            message_start = pos;
+            break;
+        }
+        if (std.mem.startsWith(u8, line, "object ") and line.len >= 47) {
+            object = line[7..47];
+        } else if (std.mem.startsWith(u8, line, "type ")) {
+            tag_type = line[5..];
+        } else if (std.mem.startsWith(u8, line, "tag ")) {
+            tag_name = line[4..];
+        } else if (std.mem.startsWith(u8, line, "tagger ")) {
+            tagger = line[7..];
+        }
+    }
+
+    var first = true;
+    if (object) |o| {
+        json.appendSlice("\"object\":\"") catch return -1;
+        json.appendSlice(o) catch return -1;
+        json.appendSlice("\"") catch return -1;
+        first = false;
+    }
+    if (tag_type) |t| {
+        if (!first) json.appendSlice(",") catch return -1;
+        json.appendSlice("\"type\":\"") catch return -1;
+        appendJsonEscaped(&json, t) catch return -1;
+        json.appendSlice("\"") catch return -1;
+        first = false;
+    }
+    if (tag_name) |n| {
+        if (!first) json.appendSlice(",") catch return -1;
+        json.appendSlice("\"tag\":\"") catch return -1;
+        appendJsonEscaped(&json, n) catch return -1;
+        json.appendSlice("\"") catch return -1;
+        first = false;
+    }
+    if (tagger) |t| {
+        if (!first) json.appendSlice(",") catch return -1;
+        json.appendSlice("\"tagger\":\"") catch return -1;
+        appendJsonEscaped(&json, t) catch return -1;
+        json.appendSlice("\"") catch return -1;
+        first = false;
+    }
+    if (message_start < data.len) {
+        const msg = std.mem.trimRight(u8, data[message_start..], "\n\r ");
+        if (!first) json.appendSlice(",") catch return -1;
+        json.appendSlice("\"message\":\"") catch return -1;
+        appendJsonEscaped(&json, msg) catch return -1;
+        json.appendSlice("\"") catch return -1;
+    }
+
+    json.appendSlice("}") catch return -1;
+    const owned = json.toOwnedSlice() catch return -2;
+    out_ptr.* = @intFromPtr(owned.ptr);
+    out_len.* = @intCast(owned.len);
+    return 0;
+}
+
 /// Parse a commit object and return fields as JSON.
 /// data_ptr/data_len: raw commit object data (uncompressed)
 /// out_ptr/out_len: pointers to write result JSON
