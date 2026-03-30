@@ -44,4 +44,35 @@ pub fn build(b: *std.Build) void {
     // Create git -> ziggit symlink so test suite can find 'git' command
     const symlink = b.addSystemCommand(&.{ "ln", "-sf", "ziggit", b.getInstallPath(.bin, "git") });
     b.getInstallStep().dependOn(&symlink.step);
+
+    // WASM build target (wasm32-freestanding)
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+    });
+    const wasm = b.addExecutable(.{
+        .name = "ziggit",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main_freestanding.zig"),
+            .target = wasm_target,
+            .optimize = .ReleaseSmall,
+            .imports = &.{
+                .{ .name = "config", .module = b.createModule(.{ .root_source_file = b.path("src/wasm_config.zig") }) },
+            },
+        }),
+    });
+    wasm.entry = .disabled;
+    wasm.root_module.export_symbol_names = &.{
+        "ziggit_main",
+        "ziggit_command",
+        "ziggit_command_line",
+        "ziggit_set_args",
+        "getGlobalArgc",
+        "getGlobalArgv",
+    };
+
+    const wasm_step = b.step("wasm", "Build WASM module for browser");
+    wasm_step.dependOn(&b.addInstallArtifact(wasm, .{
+        .dest_dir = .{ .override = .{ .custom = "wasm" } },
+    }).step);
 }
