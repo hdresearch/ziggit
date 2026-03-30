@@ -13900,7 +13900,7 @@ pub fn populateIndexFromTree(git_path: []const u8, tree_data: []const u8, repo_r
             const stat = std.fs.cwd().statFile(file_path) catch std.fs.File.Stat{
                 .inode = 0,
                 .size = 0,
-                .mode = @truncate(mode),
+                .mode = @as(std.fs.File.Mode, mode),
                 .kind = .file,
                 .atime = 0,
                 .mtime = 0,
