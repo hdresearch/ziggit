@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ziggit — Git in the Browser</title>
+  <title>ziggit — Git Clone in Browser</title>
+  <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; background: #0d1117; color: #c9d1d9; padding: 20px; line-height: 1.6; }
@@ -16,8 +17,6 @@
     button { background: #238636; color: #fff; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-family: inherit; font-size: 0.9em; }
     button:hover { background: #2ea043; }
     button:disabled { background: #30363d; cursor: not-allowed; }
-    .btn-secondary { background: #30363d; }
-    .btn-secondary:hover { background: #484f58; }
     #status { color: #f0883e; font-size: 0.85em; min-height: 1.4em; }
     .panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; margin-bottom: 12px; overflow: auto; }
     .panel h2 { color: #58a6ff; font-size: 1em; margin-bottom: 8px; border-bottom: 1px solid #21262d; padding-bottom: 4px; }
@@ -43,14 +42,14 @@
 </head>
 <body>
   <h1>⚡ ziggit</h1>
-  <p class="subtitle">A pure Zig git implementation running in WebAssembly — no server needed</p>
+  <p class="subtitle">Git clone in the browser — pure JavaScript + pako for decompression</p>
 
   <div class="row">
-    <input type="text" id="corsProxy" placeholder="CORS proxy URL (optional)" value="">
-    <span class="info">e.g. https://corsproxy.io/?</span>
+    <input type="text" id="corsProxy" placeholder="CORS proxy URL" value="https://corsproxy.io/?">
+    <span class="info">CORS proxy prefix</span>
   </div>
   <div class="row">
-    <input type="text" id="url" value="https://github.com/nicholasgasior/gzig.git" placeholder="Repository URL">
+    <input type="text" id="url" value="https://github.com/nicolo-ribaudo/tc39-proposal-structs" placeholder="Repository URL">
     <button id="cloneBtn" onclick="doClone()">Clone</button>
     <span id="status"></span>
   </div>
@@ -78,10 +77,9 @@
     <pre class="file-content" id="file-content"></pre>
   </div>
 
-  <script src="ziggit.js"></script>
   <script>
-    let ziggit = null;
-    let repoPath = '/repo';
+    // Object database: sha1 hex -> { type: string, data: Uint8Array }
+    const objectDb = {};
     let currentCommit = null;
 
     function status(msg, isError) {
@@ -90,49 +88,513 @@
       el.style.color = isError ? '#f85149' : '#f0883e';
     }
 
+    function escHtml(s) {
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // --- SHA-1 ---
+    async function sha1hex(data) {
+      const hash = await crypto.subtle.digest('SHA-1', data);
+      return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    function bytesToHex(bytes) {
+      return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    // --- Pkt-line ref parsing ---
+    function parsePktLineRefs(text) {
+      const refs = {};
+      const lines = text.split('\n');
+      for (const line of lines) {
+        const headMatch = line.match(/([0-9a-f]{40})\s+HEAD/);
+        if (headMatch) refs['HEAD'] = headMatch[1];
+        const refMatch = line.match(/([0-9a-f]{40})\s+(refs\/[^\s\0]+)/);
+        if (refMatch) refs[refMatch[2]] = refMatch[1];
+      }
+      return refs;
+    }
+
+    // --- Build want request ---
+    function buildWantRequest(hash) {
+      // want line with minimal capabilities
+      const wantLine = `want ${hash} multi_ack_detailed no-done side-band-64k thin-pack ofs-delta agent=ziggit-browser\n`;
+      const pktWant = (wantLine.length + 4).toString(16).padStart(4, '0') + wantLine;
+      return pktWant + '00000009done\n';
+    }
+
+    // --- Find PACK signature in response ---
+    function findPackStart(buf) {
+      const data = new Uint8Array(buf);
+      // The response may have sideband framing or NAK lines before PACK
+      // Look for 'PACK' signature
+      for (let i = 0; i < data.length - 4; i++) {
+        if (data[i] === 0x50 && data[i+1] === 0x41 && data[i+2] === 0x43 && data[i+3] === 0x4B) {
+          return i;
+        }
+      }
+      return -1;
+    }
+
+    // --- Pack parser ---
+    function readVarInt(data, offset) {
+      // First byte: bits 6-4 = type (only for first byte), bits 3-0 = size start
+      // MSB = continuation bit
+      let byte = data[offset];
+      const type = (byte >> 4) & 0x07;
+      let size = byte & 0x0f;
+      let shift = 4;
+      let off = offset + 1;
+      while (byte & 0x80) {
+        byte = data[off++];
+        size |= (byte & 0x7f) << shift;
+        shift += 7;
+      }
+      return { type, size, offset: off };
+    }
+
+    function readOfsOffset(data, offset) {
+      // Variable-length offset encoding for OFS_DELTA
+      let byte = data[offset++];
+      let value = byte & 0x7f;
+      while (byte & 0x80) {
+        byte = data[offset++];
+        value = ((value + 1) << 7) | (byte & 0x7f);
+      }
+      return { value, offset };
+    }
+
+    function inflateAt(data, offset) {
+      // Use pako to inflate, returns { result, bytesRead }
+      const inflator = new pako.Inflate();
+      // We need to figure out how many bytes were consumed
+      // pako doesn't directly tell us, so we try with increasing chunks
+      // Actually, pako.inflate with the raw stream can work
+      // Let's use a Z_SYNC_FLUSH approach
+      let end = offset + 2; // minimum zlib data
+      while (end <= data.length) {
+        try {
+          const chunk = data.slice(offset, end);
+          const result = pako.inflate(chunk);
+          return { result, bytesRead: end - offset };
+        } catch (e) {
+          if (e.message && (e.message.includes('unexpected end') || e.message.includes('buffer error') || e.message.includes('invalid'))) {
+            end = Math.min(end + Math.max(1, Math.floor((end - offset) * 0.5)), data.length + 1);
+            if (end > data.length + 1) break;
+            continue;
+          }
+          // Try with full remaining data
+          try {
+            const result = pako.inflate(data.slice(offset));
+            // Need to figure out bytes consumed - use Inflate with onEnd
+            const inf = new pako.Inflate();
+            inf.push(data.slice(offset), true);
+            if (inf.err) throw new Error(inf.msg);
+            return { result: inf.result, bytesRead: data.length - offset };
+          } catch (e2) {
+            throw e;
+          }
+        }
+      }
+      // Last resort: try the entire remaining buffer
+      const result = pako.inflate(data.slice(offset));
+      return { result, bytesRead: data.length - offset };
+    }
+
+    // Better inflate that tracks consumed bytes using raw deflate
+    function inflateObject(data, offset) {
+      // zlib format: 2 byte header + deflate data + 4 byte checksum
+      // Use pako.Inflate in raw mode to control streaming
+      const inf = new pako.Inflate();
+
+      // Try binary search for the right slice length
+      let lo = offset + 8;
+      let hi = data.length;
+      let lastGood = null;
+      let lastGoodLen = hi;
+
+      // First try with all remaining data
+      try {
+        const result = pako.inflate(data.slice(offset));
+        // Now find exact consumed bytes via binary search
+        // Start with a reasonable guess
+        let tryLen = Math.min(result.length * 2 + 20, data.length - offset);
+        while (tryLen <= data.length - offset) {
+          try {
+            const r = pako.inflate(data.slice(offset, offset + tryLen));
+            if (r.length === result.length) {
+              // Try smaller
+              let lo2 = 8, hi2 = tryLen;
+              while (lo2 < hi2) {
+                const mid = (lo2 + hi2) >> 1;
+                try {
+                  const r2 = pako.inflate(data.slice(offset, offset + mid));
+                  if (r2.length === result.length) hi2 = mid;
+                  else lo2 = mid + 1;
+                } catch { lo2 = mid + 1; }
+              }
+              return { result, bytesRead: lo2 };
+            }
+          } catch { }
+          tryLen = Math.min(tryLen * 2, data.length - offset);
+          if (tryLen === data.length - offset) break;
+        }
+        return { result, bytesRead: data.length - offset };
+      } catch (e) {
+        throw new Error('inflate failed at offset ' + offset + ': ' + e.message);
+      }
+    }
+
+    // Simpler approach: use pako.Inflate in streaming mode to find consumed bytes
+    function smartInflate(data, offset) {
+      // Use the inflateRaw with wbits trick won't work easily.
+      // Instead: use a Inflate instance and push data in small chunks
+      const inf = new pako.Inflate();
+      const chunkSize = 4096;
+      let pos = offset;
+      let done = false;
+
+      while (pos < data.length && !done) {
+        const end = Math.min(pos + chunkSize, data.length);
+        const chunk = data.slice(pos, end);
+        const isLast = (end >= data.length);
+        inf.push(chunk, isLast);
+        pos = end;
+
+        if (inf.err && inf.err !== 0) {
+          // Z_BUF_ERROR (code -5) or Z_DATA_ERROR can mean we've hit extra data
+          // pako uses err codes: 0=ok, 1=stream_end
+          break;
+        }
+        if (inf.ended) {
+          done = true;
+          break;
+        }
+      }
+
+      if (inf.err && inf.err !== 0 && !inf.result) {
+        throw new Error('inflate error: ' + inf.msg);
+      }
+
+      // inf.strm.total_in tells us how many bytes were consumed
+      const bytesRead = inf.strm ? inf.strm.total_in : (pos - offset);
+      return { result: inf.result, bytesRead };
+    }
+
+    const TYPE_NAMES = { 1: 'commit', 2: 'tree', 3: 'blob', 4: 'tag' };
+
+    function applyDelta(base, delta) {
+      let pos = 0;
+      // Read base size (variable length)
+      let baseSize = 0, shift = 0, byte;
+      do {
+        byte = delta[pos++];
+        baseSize |= (byte & 0x7f) << shift;
+        shift += 7;
+      } while (byte & 0x80);
+
+      // Read result size
+      let resultSize = 0;
+      shift = 0;
+      do {
+        byte = delta[pos++];
+        resultSize |= (byte & 0x7f) << shift;
+        shift += 7;
+      } while (byte & 0x80);
+
+      const result = new Uint8Array(resultSize);
+      let resultPos = 0;
+
+      while (pos < delta.length) {
+        const cmd = delta[pos++];
+        if (cmd & 0x80) {
+          // Copy from base
+          let copyOff = 0, copySize = 0;
+          if (cmd & 0x01) copyOff = delta[pos++];
+          if (cmd & 0x02) copyOff |= delta[pos++] << 8;
+          if (cmd & 0x04) copyOff |= delta[pos++] << 16;
+          if (cmd & 0x08) copyOff |= delta[pos++] << 24;
+          if (cmd & 0x10) copySize = delta[pos++];
+          if (cmd & 0x20) copySize |= delta[pos++] << 8;
+          if (cmd & 0x40) copySize |= delta[pos++] << 16;
+          if (copySize === 0) copySize = 0x10000;
+          result.set(base.slice(copyOff, copyOff + copySize), resultPos);
+          resultPos += copySize;
+        } else if (cmd > 0) {
+          // Insert literal
+          result.set(delta.slice(pos, pos + cmd), resultPos);
+          resultPos += cmd;
+          pos += cmd;
+        } else {
+          throw new Error('unexpected delta cmd 0');
+        }
+      }
+
+      return result;
+    }
+
+    async function parsePack(packData) {
+      status('Parsing pack file...');
+      const view = new DataView(packData.buffer, packData.byteOffset, packData.byteLength);
+
+      // Header: PACK + version(4) + numObjects(4)
+      const version = view.getUint32(4);
+      const numObjects = view.getUint32(8);
+      status(`Pack v${version}, ${numObjects} objects. Parsing...`);
+
+      let offset = 12;
+      // First pass: parse all objects, store raw data
+      const objects = []; // { type, data, offset, baseOfsOffset?, baseRef? }
+
+      for (let i = 0; i < numObjects; i++) {
+        if (i % 100 === 0) status(`Parsing object ${i}/${numObjects}...`);
+        const objStart = offset;
+        const hdr = readVarInt(packData, offset);
+        offset = hdr.offset;
+
+        if (hdr.type >= 1 && hdr.type <= 4) {
+          // Regular object
+          const inf = smartInflate(packData, offset);
+          offset += inf.bytesRead;
+          const typeName = TYPE_NAMES[hdr.type];
+          // Compute SHA1
+          const header = new TextEncoder().encode(`${typeName} ${inf.result.length}\0`);
+          const full = new Uint8Array(header.length + inf.result.length);
+          full.set(header);
+          full.set(inf.result, header.length);
+          const hash = await sha1hex(full);
+          objectDb[hash] = { type: typeName, data: inf.result };
+          objects.push({ type: hdr.type, typeName, hash, data: inf.result, packOffset: objStart });
+        } else if (hdr.type === 6) {
+          // OFS_DELTA
+          const ofs = readOfsOffset(packData, offset);
+          offset = ofs.offset;
+          const baseOffset = objStart - ofs.value;
+          const inf = smartInflate(packData, offset);
+          offset += inf.bytesRead;
+          objects.push({ type: 6, deltaData: inf.result, basePackOffset: baseOffset, packOffset: objStart });
+        } else if (hdr.type === 7) {
+          // REF_DELTA
+          const baseHash = bytesToHex(packData.slice(offset, offset + 20));
+          offset += 20;
+          const inf = smartInflate(packData, offset);
+          offset += inf.bytesRead;
+          objects.push({ type: 7, deltaData: inf.result, baseHash, packOffset: objStart });
+        } else {
+          throw new Error('Unknown pack object type: ' + hdr.type);
+        }
+      }
+
+      // Build offset->index map for OFS_DELTA resolution
+      const offsetToIdx = {};
+      objects.forEach((obj, idx) => { offsetToIdx[obj.packOffset] = idx; });
+
+      // Resolve deltas
+      status('Resolving deltas...');
+      function resolveObject(idx) {
+        const obj = objects[idx];
+        if (obj.hash) return obj; // already resolved
+
+        let base;
+        if (obj.type === 6) {
+          const baseIdx = offsetToIdx[obj.basePackOffset];
+          if (baseIdx === undefined) throw new Error('OFS_DELTA base not found at offset ' + obj.basePackOffset);
+          base = resolveObject(baseIdx);
+        } else if (obj.type === 7) {
+          if (objectDb[obj.baseHash]) {
+            base = { typeName: objectDb[obj.baseHash].type, data: objectDb[obj.baseHash].data };
+          } else {
+            // Find in objects array
+            const baseObj = objects.find(o => o.hash === obj.baseHash);
+            if (!baseObj) throw new Error('REF_DELTA base not found: ' + obj.baseHash);
+            base = resolveObject(objects.indexOf(baseObj));
+          }
+        }
+
+        const resolved = applyDelta(base.data, obj.deltaData);
+        obj.typeName = base.typeName;
+        obj.data = resolved;
+        // Compute hash
+        const header = new TextEncoder().encode(`${obj.typeName} ${resolved.length}\0`);
+        const full = new Uint8Array(header.length + resolved.length);
+        full.set(header);
+        full.set(resolved, header.length);
+        // sha1hex is async, we'll handle this differently
+        obj._needsHash = true;
+        obj._full = full;
+        return obj;
+      }
+
+      for (let i = 0; i < objects.length; i++) {
+        if (!objects[i].hash) {
+          resolveObject(i);
+        }
+      }
+
+      // Now compute hashes for resolved deltas (async)
+      for (let i = 0; i < objects.length; i++) {
+        const obj = objects[i];
+        if (obj._needsHash) {
+          obj.hash = await sha1hex(obj._full);
+          objectDb[obj.hash] = { type: obj.typeName, data: obj.data };
+          delete obj._needsHash;
+          delete obj._full;
+        }
+      }
+
+      status(`Parsed ${numObjects} objects, ${Object.keys(objectDb).length} in database.`);
+      return objects;
+    }
+
+    // --- Tree parsing ---
+    function parseTree(data) {
+      const entries = [];
+      let pos = 0;
+      while (pos < data.length) {
+        // Find space after mode
+        let spaceIdx = pos;
+        while (data[spaceIdx] !== 0x20) spaceIdx++;
+        const mode = new TextDecoder().decode(data.slice(pos, spaceIdx));
+
+        // Find null after name
+        let nullIdx = spaceIdx + 1;
+        while (data[nullIdx] !== 0) nullIdx++;
+        const name = new TextDecoder().decode(data.slice(spaceIdx + 1, nullIdx));
+
+        // 20-byte SHA1
+        const hash = bytesToHex(data.slice(nullIdx + 1, nullIdx + 21));
+        pos = nullIdx + 21;
+
+        const type = mode === '40000' ? 'tree' : 'blob';
+        entries.push({ mode, name, hash, type });
+      }
+      return entries;
+    }
+
+    // --- Commit parsing ---
+    function parseCommit(data) {
+      const text = new TextDecoder().decode(data);
+      const lines = text.split('\n');
+      const result = { tree: null, parents: [], author: '', message: '' };
+      let i = 0;
+      for (; i < lines.length; i++) {
+        if (lines[i] === '') { i++; break; }
+        if (lines[i].startsWith('tree ')) result.tree = lines[i].slice(5);
+        else if (lines[i].startsWith('parent ')) result.parents.push(lines[i].slice(7));
+        else if (lines[i].startsWith('author ')) result.author = lines[i].slice(7);
+      }
+      result.message = lines.slice(i).join('\n').trim();
+      return result;
+    }
+
+    // --- Clone ---
     async function doClone() {
-      const url = document.getElementById('url').value.trim();
-      const proxy = document.getElementById('corsProxy').value.trim();
-      if (!url) return status('Enter a URL', true);
+      const repoUrl = document.getElementById('url').value.trim().replace(/\.git$/, '').replace(/\/$/, '');
+      const corsProxy = document.getElementById('corsProxy').value.trim();
+      if (!repoUrl) return status('Enter a URL', true);
 
       const btn = document.getElementById('cloneBtn');
       btn.disabled = true;
-      status('Loading WASM...');
+
+      // Clear previous state
+      Object.keys(objectDb).forEach(k => delete objectDb[k]);
+      currentCommit = null;
+      document.getElementById('repo-info').style.display = 'none';
+      document.getElementById('log-panel').style.display = 'none';
+      document.getElementById('tree-panel').style.display = 'none';
+      document.getElementById('file-panel').style.display = 'none';
 
       try {
-        ziggit = new ZiggitBrowser(proxy);
-        await ziggit.load('ziggit.wasm');
-        status('WASM loaded (' + ziggit.version() + '). Cloning...');
-
-        const rc = ziggit.cloneBare(url, repoPath);
-        if (rc !== 0) { status('Clone failed (error ' + rc + ')', true); btn.disabled = false; return; }
-        status('Clone OK. Indexing pack...');
-
-        const irc = ziggit.indexPack(repoPath);
-        if (irc !== 0) { status('Index failed (error ' + irc + ')', true); btn.disabled = false; return; }
-
-        // Show repo info
-        const head = ziggit.getHead(repoPath);
-        const branch = ziggit.getBranch(repoPath);
-        currentCommit = head;
-
-        const info = document.getElementById('repo-info');
-        info.style.display = 'block';
-        document.getElementById('repo-details').innerHTML =
-          `<strong>Branch:</strong> ${branch || 'detached'} &nbsp; <strong>HEAD:</strong> <span class="hash">${head}</span>` +
-          ` &nbsp; <strong>Pack:</strong> ${(ziggit.fs.get(repoPath + '/.git/objects/pack/pack-clone.pack') || []).length} bytes` +
-          ` &nbsp; <strong>In-memory files:</strong> ${ziggit.fs.size}`;
-
-        // Show log
-        showLog();
-
-        // Show tree at HEAD
-        if (head) {
-          const treeHash = ziggit.commitTree(head);
-          if (treeHash) showTree(treeHash, '/');
+        // 1. Fetch refs
+        status('Fetching refs...');
+        const gitUrl = repoUrl + '.git';
+        const refsUrl = corsProxy + encodeURIComponent(gitUrl + '/info/refs?service=git-upload-pack');
+        const refsResp = await fetch(refsUrl);
+        if (!refsResp.ok) {
+          // Try without .git
+          const refsUrl2 = corsProxy + encodeURIComponent(repoUrl + '/info/refs?service=git-upload-pack');
+          const refsResp2 = await fetch(refsUrl2);
+          if (!refsResp2.ok) throw new Error('Failed to fetch refs: ' + refsResp.status);
+          var refsText = await refsResp2.text();
+          var baseUrl = repoUrl;
+        } else {
+          var refsText = await refsResp.text();
+          var baseUrl = gitUrl;
         }
 
-        status('Ready! Click hashes to explore.');
+        const refs = parsePktLineRefs(refsText);
+        console.log('Refs:', refs);
+
+        const headHash = refs['HEAD'];
+        if (!headHash) throw new Error('No HEAD ref found');
+        status(`HEAD: ${headHash.slice(0, 8)}. Fetching pack...`);
+
+        // 2. Request pack
+        const packBody = buildWantRequest(headHash);
+        console.log('Pack request:', packBody);
+        const packResp = await fetch(corsProxy + encodeURIComponent(baseUrl + '/git-upload-pack'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-git-upload-pack-request' },
+          body: packBody
+        });
+        if (!packResp.ok) throw new Error('Failed to fetch pack: ' + packResp.status);
+
+        const packBuffer = await packResp.arrayBuffer();
+        const packBytes = new Uint8Array(packBuffer);
+        console.log('Pack response size:', packBytes.length);
+
+        // 3. Find PACK signature (skip sideband framing / NAK)
+        // With side-band-64k, data comes in pkt-line frames with channel byte
+        // Let's extract pack data from sideband
+        let packData;
+        const packStart = findPackStart(packBytes);
+        if (packStart >= 0) {
+          // Check if it's sideband encoded
+          // Try to extract from sideband first
+          packData = extractFromSideband(packBytes);
+          if (!packData) {
+            packData = packBytes.slice(packStart);
+          }
+        } else {
+          throw new Error('PACK signature not found in response');
+        }
+
+        console.log('Pack data size:', packData.length);
+
+        // 4. Parse pack
+        await parsePack(packData);
+
+        // 5. Display results
+        currentCommit = headHash;
+        const commit = objectDb[headHash];
+        if (!commit) throw new Error('HEAD commit not in object database');
+
+        // Show repo info
+        const info = document.getElementById('repo-info');
+        info.style.display = 'block';
+
+        // Find branch name for HEAD
+        let branchName = 'detached';
+        for (const [ref, hash] of Object.entries(refs)) {
+          if (hash === headHash && ref.startsWith('refs/heads/')) {
+            branchName = ref.replace('refs/heads/', '');
+            break;
+          }
+        }
+
+        document.getElementById('repo-details').innerHTML =
+          `<strong>Branch:</strong> ${escHtml(branchName)} &nbsp; ` +
+          `<strong>HEAD:</strong> <span class="hash">${headHash}</span> &nbsp; ` +
+          `<strong>Objects:</strong> ${Object.keys(objectDb).length}`;
+
+        // Show commit log
+        showLog(headHash);
+
+        // Show tree
+        const parsed = parseCommit(commit.data);
+        if (parsed.tree) showTree(parsed.tree, '/');
+
+        status('Ready! Click folders to expand, files to view.');
       } catch (e) {
         status('Error: ' + e.message, true);
         console.error(e);
@@ -140,24 +602,114 @@
       btn.disabled = false;
     }
 
-    function showLog() {
-      const log = ziggit.getLog(repoPath, 25);
+    // --- Sideband extraction ---
+    function extractFromSideband(data) {
+      // git smart HTTP with side-band-64k: response is pkt-line encoded
+      // Each pkt-line: 4 hex bytes length, then 1 byte channel, then payload
+      // Channel 1 = pack data, channel 2 = progress, channel 3 = error
+      // Also there may be "NAK\n" or flush packets (0000)
+      const chunks = [];
+      let pos = 0;
+      let foundPack = false;
+
+      while (pos + 4 <= data.length) {
+        // Read 4-byte hex length
+        const lenHex = new TextDecoder().decode(data.slice(pos, pos + 4));
+
+        if (lenHex === '0000' || lenHex === '0001' || lenHex === '0002') {
+          pos += 4;
+          continue;
+        }
+
+        const len = parseInt(lenHex, 16);
+        if (isNaN(len) || len < 4) {
+          // Not valid pkt-line, might be raw data
+          break;
+        }
+
+        if (pos + len > data.length) break;
+
+        const payload = data.slice(pos + 4, pos + len);
+        pos += len;
+
+        if (payload.length === 0) continue;
+
+        const channel = payload[0];
+        if (channel === 1) {
+          // Pack data
+          chunks.push(payload.slice(1));
+          foundPack = true;
+        } else if (channel === 2) {
+          // Progress
+          const msg = new TextDecoder().decode(payload.slice(1));
+          console.log('git progress:', msg.trim());
+        } else if (channel === 3) {
+          // Error
+          const msg = new TextDecoder().decode(payload.slice(1));
+          console.error('git error:', msg);
+        }
+        // NAK line etc - just skip
+      }
+
+      if (!foundPack || chunks.length === 0) return null;
+
+      // Concatenate chunks
+      const totalLen = chunks.reduce((s, c) => s + c.length, 0);
+      const result = new Uint8Array(totalLen);
+      let offset = 0;
+      for (const chunk of chunks) {
+        result.set(chunk, offset);
+        offset += chunk.length;
+      }
+
+      // Verify PACK header
+      if (result[0] === 0x50 && result[1] === 0x41 && result[2] === 0x43 && result[3] === 0x4B) {
+        return result;
+      }
+
+      // Maybe there's some prefix before PACK
+      const packIdx = findPackStart(result);
+      if (packIdx >= 0) return result.slice(packIdx);
+
+      return null;
+    }
+
+    // --- Display ---
+    function showLog(headHash) {
       const panel = document.getElementById('log-panel');
       panel.style.display = 'block';
       const tbody = document.querySelector('#log-table tbody');
       tbody.innerHTML = '';
-      log.forEach(c => {
+
+      let hash = headHash;
+      let count = 0;
+      while (hash && count < 50) {
+        const obj = objectDb[hash];
+        if (!obj || obj.type !== 'commit') break;
+        const c = parseCommit(obj.data);
+        const authorShort = c.author.replace(/<[^>]+>.*/, '').trim();
+        const msgShort = c.message.split('\n')[0].slice(0, 80);
+
         const tr = document.createElement('tr');
         tr.innerHTML =
-          `<td><span class="hash" onclick="inspectCommit('${c.hash}')">${c.hash.slice(0, 8)}</span></td>` +
-          `<td>${escHtml(c.author)}</td>` +
-          `<td>${escHtml(c.message)}</td>`;
+          `<td><span class="hash" onclick="inspectCommit('${hash}')">${hash.slice(0, 8)}</span></td>` +
+          `<td>${escHtml(authorShort)}</td>` +
+          `<td>${escHtml(msgShort)}</td>`;
         tbody.appendChild(tr);
-      });
+
+        hash = c.parents[0] || null;
+        count++;
+      }
     }
 
     function showTree(treeHash, path) {
-      const entries = ziggit.lsTree(treeHash);
+      const obj = objectDb[treeHash];
+      if (!obj || obj.type !== 'tree') {
+        status('Tree not found: ' + treeHash, true);
+        return;
+      }
+
+      const entries = parseTree(obj.data);
       const panel = document.getElementById('tree-panel');
       panel.style.display = 'block';
 
@@ -165,14 +717,13 @@
       const bc = document.getElementById('tree-breadcrumb');
       const parts = path.split('/').filter(Boolean);
       let bcHtml = `<a onclick="showTreeFromCommit()">root</a>`;
-      // Simple breadcrumb — just show current path
-      if (parts.length > 0) bcHtml += ' / ' + parts.join(' / ');
+      if (parts.length > 0) bcHtml += ' / ' + parts.map(p => escHtml(p)).join(' / ');
       bc.innerHTML = bcHtml;
 
       const tbody = document.querySelector('#tree-table tbody');
       tbody.innerHTML = '';
 
-      // Sort: trees first, then blobs
+      // Sort: trees first, then by name
       entries.sort((a, b) => {
         if (a.type === 'tree' && b.type !== 'tree') return -1;
         if (a.type !== 'tree' && b.type === 'tree') return 1;
@@ -184,7 +735,7 @@
         const nameClass = e.type === 'tree' ? 'tree-link' : 'blob-link';
         const onclick = e.type === 'tree'
           ? `showTree('${e.hash}', '${path}${e.name}/')`
-          : `showFile('${e.hash}', '${e.name}')`;
+          : `showFile('${e.hash}', '${escHtml(e.name)}')`;
         tr.innerHTML =
           `<td class="info">${e.mode}</td>` +
           `<td class="info">${e.type}</td>` +
@@ -196,33 +747,33 @@
 
     function showTreeFromCommit() {
       if (!currentCommit) return;
-      const treeHash = ziggit.commitTree(currentCommit);
-      if (treeHash) showTree(treeHash, '/');
+      const obj = objectDb[currentCommit];
+      if (!obj) return;
+      const c = parseCommit(obj.data);
+      if (c.tree) showTree(c.tree, '/');
     }
 
     function showFile(blobHash, name) {
-      const obj = ziggit.readObject(blobHash);
-      if (!obj) { status('Failed to read blob ' + blobHash, true); return; }
+      const obj = objectDb[blobHash];
+      if (!obj) { status('Blob not found: ' + blobHash, true); return; }
       document.getElementById('file-panel').style.display = 'block';
       document.getElementById('file-name').textContent = name;
-      // Show as text (may be binary, but best effort)
-      const content = obj.text;
-      document.getElementById('file-content').textContent =
-        content.length > 100000 ? content.slice(0, 100000) + '\n... (truncated)' : content;
+      try {
+        const text = new TextDecoder('utf-8', { fatal: false }).decode(obj.data);
+        document.getElementById('file-content').textContent =
+          text.length > 200000 ? text.slice(0, 200000) + '\n... (truncated)' : text;
+      } catch {
+        document.getElementById('file-content').textContent = `[Binary file, ${obj.data.length} bytes]`;
+      }
     }
 
     function inspectCommit(hash) {
       currentCommit = hash;
-      const obj = ziggit.readObject(hash);
-      if (!obj) { status('Failed to read commit', true); return; }
-      // Show tree for this commit
-      const treeHash = ziggit.commitTree(hash);
-      if (treeHash) showTree(treeHash, '/');
+      const obj = objectDb[hash];
+      if (!obj) { status('Commit not found', true); return; }
+      const c = parseCommit(obj.data);
+      if (c.tree) showTree(c.tree, '/');
       status('Viewing commit ' + hash.slice(0, 8));
-    }
-
-    function escHtml(s) {
-      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
   </script>
 </body>
