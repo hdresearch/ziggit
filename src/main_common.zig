@@ -1109,7 +1109,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "restore")) {
         try cmd_checkout.cmdRestore(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "worktree")) {
-        try cmd_checkout.cmdWorktree(allocator, &args_iter, &platform_impl);
+        try @import("cmd_worktree.zig").cmdWorktree(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "stripspace")) {
         try cmd_stripspace.cmdStripspace(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "show-branch")) {
