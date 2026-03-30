@@ -118,7 +118,7 @@
     // --- Build want request ---
     function buildWantRequest(hash) {
       // want line with capabilities
-      const wantLine = `want ${hash} side-band-64k ofs-delta agent=ziggit-browser\n`;
+      const wantLine = `want ${hash} side-band-64k ofs-delta no-progress agent=ziggit-browser\n`;
       const pktWant = (wantLine.length + 4).toString(16).padStart(4, '0') + wantLine;
       return pktWant + '00000009done\n';
     }
