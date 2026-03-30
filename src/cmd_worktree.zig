@@ -223,13 +223,74 @@ fn worktreeAdd(
     }
     defer allocator.free(commit_hash);
 
+    // Check if the branch is already checked out in another worktree
+    if (target_branch != null and !detach and !force) {
+        const tb = target_branch.?;
+        // Check main worktree HEAD
+        const main_branch = getCurrentBranch(allocator, common_dir, platform_impl) catch null;
+        defer if (main_branch) |b| allocator.free(b);
+        if (main_branch) |mb| {
+            if (std.mem.eql(u8, mb, tb)) {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' is already checked out at '{s}'\n", .{ tb, std.fs.path.dirname(common_dir) orelse "." });
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            }
+        }
+        // Check linked worktrees
+        const wt_dir_path = try std.fmt.allocPrint(allocator, "{s}/worktrees", .{common_dir});
+        defer allocator.free(wt_dir_path);
+        if (std.fs.cwd().openDir(wt_dir_path, .{ .iterate = true })) |*dp| {
+            var ddir = dp.*;
+            defer ddir.close();
+            var wit = ddir.iterate();
+            while (try wit.next()) |we| {
+                if (we.kind != .directory) continue;
+                const wt_head_path = try std.fmt.allocPrint(allocator, "{s}/{s}/HEAD", .{ wt_dir_path, we.name });
+                defer allocator.free(wt_head_path);
+                const wt_head = std.fs.cwd().readFileAlloc(allocator, wt_head_path, 4096) catch continue;
+                defer allocator.free(wt_head);
+                const wt_head_trim = std.mem.trimRight(u8, wt_head, "\n\r \t");
+                if (std.mem.startsWith(u8, wt_head_trim, "ref: refs/heads/")) {
+                    if (std.mem.eql(u8, wt_head_trim["ref: refs/heads/".len..], tb)) {
+                        // Read gitdir to get the worktree path
+                        const gd_path = try std.fmt.allocPrint(allocator, "{s}/{s}/gitdir", .{ wt_dir_path, we.name });
+                        defer allocator.free(gd_path);
+                        const gd_content = std.fs.cwd().readFileAlloc(allocator, gd_path, 4096) catch continue;
+                        defer allocator.free(gd_content);
+                        const gd = std.mem.trimRight(u8, gd_content, "\n\r \t");
+                        const wt_root = if (std.mem.endsWith(u8, gd, "/.git")) gd[0 .. gd.len - 5] else gd;
+                        const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' is already checked out at '{s}'\n", .{ tb, wt_root });
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                        std.process.exit(128);
+                    }
+                }
+            }
+        } else |_| {}
+    }
+
     // Check if path already exists
     if (!force) {
         if (std.fs.cwd().access(full_wt_path, .{})) {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' already exists\n", .{path});
-            defer allocator.free(msg);
-            try platform_impl.writeStderr(msg);
-            std.process.exit(128);
+            // Check if it's an empty directory (OK to use)
+            var is_empty_dir = false;
+            if (std.fs.cwd().openDir(full_wt_path, .{ .iterate = true })) |*d| {
+                var dir = d.*;
+                defer dir.close();
+                var iter = dir.iterate();
+                is_empty_dir = true;
+                while (iter.next() catch null) |_| {
+                    is_empty_dir = false;
+                    break;
+                }
+            } else |_| {}
+            if (!is_empty_dir) {
+                const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' already exists\n", .{path});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            }
         } else |_| {}
     }
 
