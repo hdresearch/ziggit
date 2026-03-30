@@ -87,6 +87,23 @@ pub fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         const name = add_positionals.items[0];
         const url = add_positionals.items[1];
 
+        // Validate remote name
+        if (std.mem.indexOf(u8, name, "..") != null or
+            name.len == 0 or name[0] == '.' or
+            name[name.len - 1] == '.' or
+            std.mem.indexOfScalar(u8, name, ' ') != null or
+            std.mem.indexOfScalar(u8, name, '~') != null or
+            std.mem.indexOfScalar(u8, name, '^') != null or
+            std.mem.indexOfScalar(u8, name, ':') != null or
+            std.mem.indexOfScalar(u8, name, '\\') != null or
+            std.mem.indexOf(u8, name, "@{") != null)
+        {
+            const vmsg = try std.fmt.allocPrint(allocator, "fatal: '{s}' is not a valid remote name\n", .{name});
+            defer allocator.free(vmsg);
+            try platform_impl.writeStderr(vmsg);
+            std.process.exit(128);
+        }
+
         // helpers.Append to config file
         const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
         defer allocator.free(config_path);
@@ -99,7 +116,7 @@ pub fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         defer allocator.free(remote_section);
 
         if (std.mem.indexOf(u8, existing, remote_section) != null) {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: remote {s} already exists.\n", .{name});
+            const msg = try std.fmt.allocPrint(allocator, "error: remote {s} already exists.\n", .{name});
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);
             std.process.exit(3);
@@ -262,6 +279,23 @@ pub fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         const old_name = positionals.items[0];
         const new_name = positionals.items[1];
 
+        // Validate new remote name (check-ref-format rules)
+        if (std.mem.indexOf(u8, new_name, "..") != null or
+            new_name.len == 0 or new_name[0] == '.' or
+            new_name[new_name.len - 1] == '.' or
+            std.mem.indexOfScalar(u8, new_name, ' ') != null or
+            std.mem.indexOfScalar(u8, new_name, '~') != null or
+            std.mem.indexOfScalar(u8, new_name, '^') != null or
+            std.mem.indexOfScalar(u8, new_name, ':') != null or
+            std.mem.indexOfScalar(u8, new_name, '\\') != null or
+            std.mem.indexOf(u8, new_name, "@{") != null)
+        {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' is not a valid remote name\n", .{new_name});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(128);
+        }
+
         const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
         defer allocator.free(config_path);
         const existing = platform_impl.fs.readFile(allocator, config_path) catch {
@@ -274,7 +308,7 @@ pub fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         const old_header = try std.fmt.allocPrint(allocator, "[remote \"{s}\"]", .{old_name});
         defer allocator.free(old_header);
         if (std.mem.indexOf(u8, existing, old_header) == null) {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: No such remote: '{s}'\n", .{old_name});
+            const msg = try std.fmt.allocPrint(allocator, "error: No such remote: '{s}'\n", .{old_name});
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);
             std.process.exit(2);
