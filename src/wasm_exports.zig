@@ -2828,3 +2828,47 @@ export fn ziggit_parse_tree(data_ptr: [*]const u8, data_len: u32, out_ptr: *u32,
     out_len.* = @intCast(owned.len);
     return 0;
 }
+
+/// Read a single object by index from the loaded pack.
+/// idx: 0-based object index in the pack
+/// out_ptr/out_len: pointers to write result data pointer and length
+/// type_out: pointer to write object type (1=commit, 2=tree, 3=blob, 4=tag)
+/// hash_out: pointer to 40-byte buffer for hex hash output
+/// Returns 0 on success, negative on error.
+/// Caller must free the result via ziggit_free(*out_ptr, *out_len).
+export fn ziggit_read_object_by_index(idx: u32, out_ptr: *u32, out_len: *u32, type_out: *u32, hash_out: [*]u8) i32 {
+    const allocator = getAllocator();
+    const pack_data = global_pack_data orelse return -1;
+    const idx_data = global_idx_data orelse return -2;
+
+    if (idx_data.len < 8 + 256 * 4) return -3;
+    const total_objects = std.mem.readInt(u32, idx_data[8 + 255 * 4 ..][0..4], .big);
+    if (idx >= total_objects) return -4;
+
+    const sha1_table_start: usize = 8 + 256 * 4;
+    const crc_table_start = sha1_table_start + @as(usize, total_objects) * 20;
+    const offset_table_start = crc_table_start + @as(usize, total_objects) * 4;
+
+    const sha_offset = sha1_table_start + @as(usize, idx) * 20;
+    if (sha_offset + 20 > idx_data.len) return -5;
+    const obj_hash = idx_data[sha_offset .. sha_offset + 20];
+    const hex = std.fmt.bytesToHex(obj_hash[0..20].*, .lower);
+    @memcpy(hash_out[0..40], &hex);
+
+    const off_offset = offset_table_start + @as(usize, idx) * 4;
+    if (off_offset + 4 > idx_data.len) return -6;
+    const offset_val = std.mem.readInt(u32, idx_data[off_offset..][0..4], .big);
+
+    const obj = readPackedObjectFromData(pack_data, offset_val, allocator) catch return -7;
+    // Don't deinit - caller owns the data via ziggit_free
+
+    out_ptr.* = @intFromPtr(obj.data.ptr);
+    out_len.* = @intCast(obj.data.len);
+    type_out.* = switch (obj.obj_type) {
+        .commit => 1,
+        .tree => 2,
+        .blob => 3,
+        .tag => 4,
+    };
+    return 0;
+}

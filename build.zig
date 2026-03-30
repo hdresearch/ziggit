@@ -130,6 +130,7 @@ pub fn build(b: *std.Build) void {
         "ziggit_diff_trees",
         "ziggit_enumerate_objects",
         "ziggit_find_objects",
+        "ziggit_read_object_by_index",
     };
 
     const wasm_step = b.step("wasm", "Build WASM module for browser");
