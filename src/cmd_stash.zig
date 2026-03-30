@@ -453,6 +453,85 @@ fn createStashCommit(
         }
     }
 
+    // Also check for files that are in HEAD tree but not in index (e.g., git rm'd) and still exist on disk
+    // These need to be included in the working tree tree to capture the full working tree state
+    {
+        var head_tree_files = std.StringHashMap([]const u8).init(allocator);
+        defer freeStringMap(&head_tree_files, allocator);
+        const ht_hash = helpers.getCommitTree(git_path, head_hash, allocator, platform_impl) catch null;
+        if (ht_hash) |hth| {
+            defer allocator.free(hth);
+            collectTreeFilesRecursive(allocator, git_path, hth, "", &head_tree_files, platform_impl) catch {};
+        }
+
+        var ht_iter = head_tree_files.iterator();
+        while (ht_iter.next()) |ht_entry| {
+            const ht_path = ht_entry.key_ptr.*;
+            // Check if this file is already in wt_idx
+            var in_wt_idx = false;
+            for (wt_idx.entries.items) |e| {
+                if (std.mem.eql(u8, e.path, ht_path)) {
+                    in_wt_idx = true;
+                    break;
+                }
+            }
+            if (in_wt_idx) continue;
+
+            // File is in HEAD but not in index - check if it exists on disk
+            const disk_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, ht_path }) catch continue;
+            defer allocator.free(disk_path);
+
+            if (std.fs.cwd().openFile(disk_path, .{})) |file| {
+                defer file.close();
+                const content = file.readToEndAlloc(allocator, 100 * 1024 * 1024) catch continue;
+                defer allocator.free(content);
+
+                const blob_obj = objects.GitObject.init(.blob, content);
+                const new_hash_hex = blob_obj.store(git_path, platform_impl, allocator) catch continue;
+                defer allocator.free(new_hash_hex);
+
+                var hash_bytes: [20]u8 = undefined;
+                for (0..20) |bi| {
+                    hash_bytes[bi] = std.fmt.parseInt(u8, new_hash_hex[bi * 2 .. bi * 2 + 2], 16) catch 0;
+                }
+
+                const stat = file.stat() catch continue;
+                const path_copy = allocator.dupe(u8, ht_path) catch continue;
+                const path_len: u16 = if (ht_path.len >= 0xFFF) 0xFFF else @intCast(ht_path.len);
+                const new_entry = index_mod.IndexEntry{
+                    .ctime_sec = @intCast(@divFloor(stat.ctime, 1_000_000_000)),
+                    .ctime_nsec = @intCast(@mod(stat.ctime, 1_000_000_000)),
+                    .mtime_sec = @intCast(@divFloor(stat.mtime, 1_000_000_000)),
+                    .mtime_nsec = @intCast(@mod(stat.mtime, 1_000_000_000)),
+                    .dev = 0,
+                    .ino = 0,
+                    .mode = 0o100644,
+                    .uid = 0,
+                    .gid = 0,
+                    .size = @truncate(stat.size),
+                    .sha1 = hash_bytes,
+                    .flags = path_len,
+                    .extended_flags = null,
+                    .path = path_copy,
+                };
+                wt_idx.entries.append(new_entry) catch continue;
+                has_wt_changes = true;
+            } else |_| {
+                // File doesn't exist on disk - it was truly deleted, which is a working tree change
+                // The wt_idx not having it is correct (file deleted)
+                has_wt_changes = true;
+            }
+        }
+
+        // Re-sort after adding entries
+        std.sort.block(index_mod.IndexEntry, wt_idx.entries.items, {}, struct {
+            fn lessThan(context: void, lhs: index_mod.IndexEntry, rhs: index_mod.IndexEntry) bool {
+                _ = context;
+                return std.mem.lessThan(u8, lhs.path, rhs.path);
+            }
+        }.lessThan);
+    }
+
     if (!has_wt_changes and !has_index_changes and !include_untracked) {
         return null;
     }
