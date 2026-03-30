@@ -20,7 +20,11 @@
     @keyframes spin { to { transform: rotate(360deg); } }
     #status { color: #f0883e; font-size: 0.85em; min-height: 1.4em; }
     .panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; margin-bottom: 12px; overflow: auto; }
-    .panel h2 { color: #58a6ff; font-size: 1em; margin-bottom: 8px; border-bottom: 1px solid #21262d; padding-bottom: 4px; }
+    .panel h2 { color: #58a6ff; font-size: 1em; margin-bottom: 8px; border-bottom: 1px solid #21262d; padding-bottom: 4px; cursor: pointer; user-select: none; display: flex; align-items: center; gap: 6px; }
+    .panel h2 .chevron { transition: transform 0.2s; display: inline-block; font-size: 0.7em; }
+    .panel h2 .chevron.collapsed { transform: rotate(-90deg); }
+    .panel .panel-body { transition: max-height 0.3s ease, opacity 0.2s ease; overflow: hidden; }
+    .panel .panel-body.collapsed { max-height: 0 !important; opacity: 0; overflow: hidden; }
     #log-panel, #tree-panel, #file-panel { max-height: 400px; overflow-y: auto; }
     table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
     th { text-align: left; color: #8b949e; padding: 4px 8px; border-bottom: 1px solid #21262d; }
@@ -74,38 +78,61 @@
   <div class="progress-bar" id="progress"><div class="progress-fill" id="progress-fill"></div></div>
 
   <div id="diag-panel" class="panel" style="display:none">
-    <div id="diag-details"></div>
+    <h2 onclick="togglePanel(this)"><span class="chevron">▼</span> Diagnostics</h2>
+    <div class="panel-body">
+      <div id="diag-details"></div>
+    </div>
   </div>
 
   <div id="repo-info" class="panel" style="display:none">
-    <div id="repo-details"></div>
+    <h2 onclick="togglePanel(this)"><span class="chevron">▼</span> Repository</h2>
+    <div class="panel-body">
+      <div id="repo-details"></div>
+    </div>
   </div>
 
   <div class="panels">
     <div id="log-panel" class="panel" style="display:none">
-      <h2>Commit Log</h2>
-      <table id="log-table"><thead><tr><th>Hash</th><th>Author</th><th>Message</th></tr></thead><tbody></tbody></table>
+      <h2 onclick="togglePanel(this)"><span class="chevron">▼</span> Commit Log</h2>
+      <div class="panel-body">
+        <table id="log-table"><thead><tr><th>Hash</th><th>Author</th><th>Message</th></tr></thead><tbody></tbody></table>
+      </div>
     </div>
 
     <div id="tree-panel" class="panel" style="display:none">
-      <h2>Files</h2>
-      <input type="text" id="search" placeholder="Filter files..." oninput="filterTree()">
-      <div id="tree-breadcrumb" class="breadcrumb"></div>
-      <table id="tree-table"><thead><tr><th>Mode</th><th>Type</th><th>Name</th><th>Size</th><th>Hash</th></tr></thead><tbody></tbody></table>
+      <h2 onclick="togglePanel(this)"><span class="chevron">▼</span> Files</h2>
+      <div class="panel-body">
+        <input type="text" id="search" placeholder="Filter files..." oninput="filterTree()">
+        <div id="tree-breadcrumb" class="breadcrumb"></div>
+        <table id="tree-table"><thead><tr><th>Mode</th><th>Type</th><th>Name</th><th>Size</th><th>Hash</th></tr></thead><tbody></tbody></table>
+      </div>
     </div>
   </div>
 
   <div id="commit-panel" class="panel" style="display:none">
-    <h2>Commit: <span id="commit-hash" class="hash"></span></h2>
-    <div id="commit-details"></div>
+    <h2 onclick="togglePanel(this)"><span class="chevron">▼</span> Commit: <span id="commit-hash" class="hash"></span></h2>
+    <div class="panel-body">
+      <div id="commit-details"></div>
+    </div>
   </div>
 
   <div id="file-panel" class="panel" style="display:none">
-    <h2>File: <span id="file-name"></span></h2>
-    <pre class="file-content" id="file-content"></pre>
+    <h2 onclick="togglePanel(this)"><span class="chevron">▼</span> File: <span id="file-name"></span></h2>
+    <div class="panel-body">
+      <pre class="file-content" id="file-content"></pre>
+    </div>
   </div>
 
   <script>
+    // --- Collapsible panels ---
+    function togglePanel(h2) {
+      const chevron = h2.querySelector('.chevron');
+      const body = h2.nextElementSibling;
+      if (!body || !body.classList.contains('panel-body')) return;
+      const isCollapsed = body.classList.toggle('collapsed');
+      chevron.classList.toggle('collapsed', isCollapsed);
+    }
+
     // --- WASM module (required — no JS fallbacks) ---
     let wasmInstance = null;
     let wasmReady = new Promise((resolve, reject) => {
