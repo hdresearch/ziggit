@@ -45,6 +45,8 @@ pub fn cmdRemote(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
             verbose = true;
+        } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--no-query")) {
+            // -n: don't query remote for additional info (show command)
         } else if (subcommand == null and !std.mem.startsWith(u8, arg, "-")) {
             subcommand = arg;
         } else {
