@@ -298,19 +298,116 @@ pub fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     // Handle --eol output mode
     if (eol_flag) {
         const terminator_eol: []const u8 = if (z_terminator) "\x00" else "\n";
-        for (index.entries.items) |entry| {
-            const eol_i = getEolInfoIndex(allocator, entry, git_path, platform_impl);
-            const eol_w = getEolInfoWorktree(allocator, entry, repo_root, platform_impl);
-            // Format: i/<eolinfo:index>    w/<eolinfo:worktree>    attr/<eolattr>                 \t<path>
-            const i_field = try std.fmt.allocPrint(allocator, "i/{s}", .{eol_i});
-            defer allocator.free(i_field);
-            const w_field = try std.fmt.allocPrint(allocator, "w/{s}", .{eol_w});
-            defer allocator.free(w_field);
-            const attr_field = try std.fmt.allocPrint(allocator, "attr/", .{});
-            defer allocator.free(attr_field);
-            const output = try std.fmt.allocPrint(allocator, "{s: <8}{s: <8}{s: <22}\t{s}{s}", .{ i_field, w_field, attr_field, entry.path, terminator_eol });
-            defer allocator.free(output);
-            try platform_impl.writeStdout(output);
+
+        // Load .gitattributes for attribute resolution
+        const check_attr = @import("cmd_check_attr.zig");
+        var attr_rules = std.ArrayList(check_attr.AttrRule).init(allocator);
+        defer {
+            for (attr_rules.items) |*rule| rule.deinit(allocator);
+            attr_rules.deinit();
+        }
+        check_attr.loadAttrFile(allocator, repo_root, "", platform_impl, &attr_rules) catch {};
+        // Load info/attributes
+        const info_attr_path = try std.fmt.allocPrint(allocator, "{s}/info/attributes", .{git_path});
+        defer allocator.free(info_attr_path);
+        if (platform_impl.fs.readFile(allocator, info_attr_path)) |ia_content| {
+            defer allocator.free(ia_content);
+            check_attr.parseAttrContent(allocator, ia_content, "", &attr_rules) catch {};
+        } else |_| {}
+
+        // Read core.autocrlf and core.eol config
+        const autocrlf_val = helpers.getConfigValueByKey(git_path, "core.autocrlf", allocator);
+        defer if (autocrlf_val) |v| allocator.free(v);
+        const eol_config_val = helpers.getConfigValueByKey(git_path, "core.eol", allocator);
+        defer if (eol_config_val) |v| allocator.free(v);
+
+        if (!others) {
+            // Show tracked files
+            for (index.entries.items) |entry| {
+                if (effective_pathspecs.len > 0) {
+                    var matches = false;
+                    for (effective_pathspecs) |ps| {
+                        if (std.mem.eql(u8, ps, ":/") or
+                            std.mem.eql(u8, entry.path, ps) or
+                            (std.mem.startsWith(u8, entry.path, ps) and entry.path.len > ps.len and entry.path[ps.len] == '/') or
+                            helpers.pathspecMatchesPath(ps, entry.path, false))
+                        {
+                            matches = true;
+                            break;
+                        }
+                    }
+                    if (!matches) continue;
+                }
+
+                if (deleted) {
+                    // Only show deleted files
+                    const fp = if (repo_root.len > 0 and !std.mem.eql(u8, repo_root, "."))
+                        std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path }) catch continue
+                    else
+                        allocator.dupe(u8, entry.path) catch continue;
+                    defer allocator.free(fp);
+                    const file_exists = platform_impl.fs.exists(fp) catch false;
+                    if (file_exists) continue;
+                }
+
+                const eol_i = getEolInfoIndex(allocator, entry, git_path, platform_impl);
+                const eol_w = getEolInfoWorktree(allocator, entry, repo_root, platform_impl);
+                const attr_str = getEolAttr(allocator, entry.path, &attr_rules, autocrlf_val, eol_config_val);
+                defer allocator.free(attr_str);
+                const i_field = try std.fmt.allocPrint(allocator, "i/{s}", .{eol_i});
+                defer allocator.free(i_field);
+                const w_field = try std.fmt.allocPrint(allocator, "w/{s}", .{eol_w});
+                defer allocator.free(w_field);
+                const attr_field = try std.fmt.allocPrint(allocator, "attr/{s}", .{attr_str});
+                defer allocator.free(attr_field);
+                const output = try std.fmt.allocPrint(allocator, "{s: <8}{s: <8}{s: <22}\t{s}{s}", .{ i_field, w_field, attr_field, entry.path, terminator_eol });
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            }
+        }
+
+        if (others) {
+            // Show untracked files with eol info
+            const gitignore_path = try std.fmt.allocPrint(allocator, "{s}/.gitignore", .{repo_root});
+            defer allocator.free(gitignore_path);
+            var gitignore = gitignore_mod.GitIgnore.loadFromFile(allocator, gitignore_path, platform_impl) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => gitignore_mod.GitIgnore.init(allocator),
+            };
+            defer gitignore.deinit();
+
+            var untracked_files = helpers.findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.ArrayList([]u8).init(allocator);
+            defer {
+                for (untracked_files.items) |file| allocator.free(file);
+                untracked_files.deinit();
+            }
+            std.sort.block([]u8, untracked_files.items, {}, struct {
+                fn lt(_: void, a: []u8, b: []u8) bool { return std.mem.order(u8, a, b) == .lt; }
+            }.lt);
+            for (untracked_files.items) |file| {
+                if (effective_pathspecs.len > 0) {
+                    var matches = false;
+                    for (effective_pathspecs) |ps| {
+                        if (helpers.pathspecMatchesPath(ps, file, false)) { matches = true; break; }
+                    }
+                    if (!matches) continue;
+                }
+                const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, file });
+                defer allocator.free(full_path);
+                const wt_content = platform_impl.fs.readFile(allocator, full_path) catch "";
+                defer if (wt_content.len > 0) allocator.free(wt_content);
+                const eol_w = detectEolInfo(wt_content);
+                const attr_str = getEolAttr(allocator, file, &attr_rules, autocrlf_val, eol_config_val);
+                defer allocator.free(attr_str);
+                const i_field = "i/";
+                const w_field = try std.fmt.allocPrint(allocator, "w/{s}", .{eol_w});
+                defer allocator.free(w_field);
+                const attr_field = try std.fmt.allocPrint(allocator, "attr/{s}", .{attr_str});
+                defer allocator.free(attr_field);
+                const output = try std.fmt.allocPrint(allocator, "{s: <8}{s: <8}{s: <22}\t{s}{s}", .{ i_field, w_field, attr_field, file, terminator_eol });
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            }
         }
         return;
     }
@@ -591,22 +688,137 @@ fn makeRelativePath(allocator: std.mem.Allocator, path: []const u8, cwd_prefix: 
 
 /// Detect line ending type in content. Returns "lf", "crlf", "mixed", or "" (no line endings).
 fn detectEolInfo(content: []const u8) []const u8 {
-    var has_lf = false;
-    var has_crlf = false;
+    if (content.len == 0) return "";
+
+    // Match git's gather_stats / convert_is_binary / gather_convert_stats_ascii logic
+    var nul_count: usize = 0;
+    var lone_cr: usize = 0;
+    var lone_lf: usize = 0;
+    var crlf_count: usize = 0;
+    var printable: usize = 0;
+    var nonprintable: usize = 0;
+
     var i: usize = 0;
-    while (i < content.len) : (i += 1) {
-        if (content[i] == '\n') {
-            if (i > 0 and content[i - 1] == '\r') {
-                has_crlf = true;
+    while (i < content.len) {
+        const c = content[i];
+        if (c == '\r') {
+            if (i + 1 < content.len and content[i + 1] == '\n') {
+                crlf_count += 1;
+                i += 2;
             } else {
-                has_lf = true;
+                lone_cr += 1;
+                i += 1;
             }
+            continue;
         }
+        if (c == '\n') {
+            lone_lf += 1;
+            i += 1;
+            continue;
+        }
+        if (c == 127) {
+            nonprintable += 1;
+        } else if (c < 32) {
+            switch (c) {
+                '\x08', '\t', '\x1b', '\x0c' => {
+                    printable += 1;
+                },
+                0 => {
+                    nul_count += 1;
+                    nonprintable += 1;
+                },
+                else => {
+                    nonprintable += 1;
+                },
+            }
+        } else {
+            printable += 1;
+        }
+        i += 1;
     }
+
+    // If file ends with \032 (SUB/Ctrl+Z/EOF), don't count it as non-printable
+    if (content.len >= 1 and content[content.len - 1] == '\x1a') {
+        if (nonprintable > 0) nonprintable -= 1;
+    }
+
+    // Binary detection: lone CR, NUL bytes, or too many non-printable chars
+    if (lone_cr > 0 or nul_count > 0 or (printable >> 7) < nonprintable) {
+        return "-text";
+    }
+
+    // Text line ending detection
+    const has_lf = lone_lf > 0;
+    const has_crlf = crlf_count > 0;
     if (has_lf and has_crlf) return "mixed";
     if (has_lf) return "lf";
     if (has_crlf) return "crlf";
-    return "";
+    return "none";
+}
+
+/// Compute the "attr/" field for ls-files --eol.
+/// This resolves .gitattributes text/eol settings for a file path.
+fn getEolAttr(allocator: std.mem.Allocator, path: []const u8, attr_rules: *const std.ArrayList(@import("cmd_check_attr.zig").AttrRule), autocrlf_val: ?[]const u8, eol_config_val: ?[]const u8) []u8 {
+    const check_attr = @import("cmd_check_attr.zig");
+    var text_val: ?[]const u8 = null; // null=unspecified, "set"=text, "auto"=text=auto, "unset"=-text
+    var eol_val: ?[]const u8 = null; // null=unspecified, "lf", "crlf"
+    _ = autocrlf_val;
+    _ = eol_config_val;
+
+    // Search attribute rules (last match wins)
+    for (attr_rules.items) |rule| {
+        if (check_attr.attrPatternMatches(rule.pattern, path)) {
+            for (rule.attrs.items) |attr| {
+                if (std.mem.eql(u8, attr.name, "text")) {
+                    if (std.mem.eql(u8, attr.value, "set")) {
+                        text_val = "set";
+                    } else if (std.mem.eql(u8, attr.value, "unset")) {
+                        text_val = "unset";
+                    } else if (std.mem.eql(u8, attr.value, "auto")) {
+                        text_val = "auto";
+                    } else if (std.mem.eql(u8, attr.value, "unspecified")) {
+                        text_val = null;
+                    }
+                } else if (std.mem.eql(u8, attr.name, "eol")) {
+                    if (std.mem.eql(u8, attr.value, "lf")) {
+                        eol_val = "lf";
+                    } else if (std.mem.eql(u8, attr.value, "crlf")) {
+                        eol_val = "crlf";
+                    }
+                } else if (std.mem.eql(u8, attr.name, "binary")) {
+                    if (std.mem.eql(u8, attr.value, "set")) {
+                        text_val = "unset"; // binary implies -text
+                    }
+                }
+            }
+        }
+    }
+
+    // Build the attr string
+    // When text is unset (-text), show "-text"
+    if (text_val) |tv| {
+        if (std.mem.eql(u8, tv, "unset")) {
+            return allocator.dupe(u8, "-text") catch return allocator.dupe(u8, "") catch unreachable;
+        } else if (std.mem.eql(u8, tv, "auto")) {
+            if (eol_val) |ev| {
+                return std.fmt.allocPrint(allocator, "text=auto eol={s}", .{ev}) catch return allocator.dupe(u8, "") catch unreachable;
+            }
+            return allocator.dupe(u8, "text=auto") catch return allocator.dupe(u8, "") catch unreachable;
+        } else if (std.mem.eql(u8, tv, "set")) {
+            if (eol_val) |ev| {
+                return std.fmt.allocPrint(allocator, "text eol={s}", .{ev}) catch return allocator.dupe(u8, "") catch unreachable;
+            }
+            return allocator.dupe(u8, "text") catch return allocator.dupe(u8, "") catch unreachable;
+        }
+    }
+
+    // No explicit text attribute - check if eol attribute alone implies text
+    if (eol_val) |ev| {
+        return std.fmt.allocPrint(allocator, "text eol={s}", .{ev}) catch return allocator.dupe(u8, "") catch unreachable;
+    }
+
+    // No attributes set - return empty
+    return allocator.dupe(u8, "") catch unreachable;
 }
 
 /// Get eolinfo for an index entry by reading the object content.
