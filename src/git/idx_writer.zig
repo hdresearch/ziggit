@@ -88,6 +88,13 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
         @cInclude("zlib.h");
     });
 
+    // libdeflate for faster one-shot decompression (2-4× faster than zlib)
+    const ld = @cImport({
+        @cInclude("libdeflate.h");
+    });
+    const decompressor = ld.libdeflate_alloc_decompressor();
+    defer if (decompressor) |d| ld.libdeflate_free_decompressor(d);
+
     // Reusable decompression buffer for base objects (one-shot uncompress2).
     // Starts at 256KB and grows as needed. Avoids per-object allocation.
     var decomp_buf_cap: usize = 262144;
@@ -129,14 +136,42 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
                 decomp_buf_ptr = try allocator.alloc(u8, decomp_buf_cap);
             }
 
-            // Try one-shot uncompress2 first (much faster than streaming)
-            var dest_len: c_ulong = @intCast(decomp_buf_cap);
-            var src_len: c_ulong = @intCast(@min(in_avail, std.math.maxInt(c_ulong)));
-            const uc_ret = zc.uncompress2(decomp_buf_ptr.ptr, &dest_len, pack_data[comp_start..].ptr, &src_len);
+            // Try libdeflate first (2-4× faster than zlib), then uncompress2 fallback
+            var actual_in: usize = 0;
+            var actual_out: usize = 0;
+            var decomp_ok = false;
 
-            if (uc_ret == zc.Z_OK) {
-                const actual_in: usize = @intCast(src_len);
-                const actual_out: usize = @intCast(dest_len);
+            if (decompressor) |dc| {
+                var ld_in_consumed: usize = 0;
+                var ld_out_size: usize = 0;
+                const ld_ret = ld.libdeflate_zlib_decompress_ex(
+                    dc,
+                    pack_data[comp_start..].ptr,
+                    in_avail,
+                    decomp_buf_ptr.ptr,
+                    decomp_buf_cap,
+                    &ld_in_consumed,
+                    &ld_out_size,
+                );
+                if (ld_ret == ld.LIBDEFLATE_SUCCESS) {
+                    actual_in = ld_in_consumed;
+                    actual_out = ld_out_size;
+                    decomp_ok = true;
+                }
+            }
+
+            if (!decomp_ok) {
+                var dest_len: c_ulong = @intCast(decomp_buf_cap);
+                var src_len: c_ulong = @intCast(@min(in_avail, std.math.maxInt(c_ulong)));
+                const uc_ret = zc.uncompress2(decomp_buf_ptr.ptr, &dest_len, pack_data[comp_start..].ptr, &src_len);
+                if (uc_ret == zc.Z_OK) {
+                    actual_in = @intCast(src_len);
+                    actual_out = @intCast(dest_len);
+                    decomp_ok = true;
+                }
+            }
+
+            if (decomp_ok) {
                 pos = comp_start + actual_in;
 
                 // Hash decompressed data
@@ -251,7 +286,26 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
                 decomp_buf_ptr = try allocator.alloc(u8, decomp_buf_cap);
             }
 
-            {
+            // Try libdeflate first for OFS_DELTA
+            if (decompressor) |dc| {
+                var ld_in_consumed: usize = 0;
+                var ld_out_size: usize = 0;
+                const ld_ret = ld.libdeflate_zlib_decompress_ex(
+                    dc,
+                    pack_data[comp_start..].ptr,
+                    in_avail,
+                    decomp_buf_ptr.ptr,
+                    decomp_buf_cap,
+                    &ld_in_consumed,
+                    &ld_out_size,
+                );
+                if (ld_ret == ld.LIBDEFLATE_SUCCESS) {
+                    actual_in = ld_in_consumed;
+                    skip_ok = true;
+                }
+            }
+
+            if (!skip_ok) {
                 var dest_len: c_ulong = @intCast(decomp_buf_cap);
                 var src_len: c_ulong = @intCast(@min(in_avail, std.math.maxInt(c_ulong)));
                 const uc_ret = zc.uncompress2(decomp_buf_ptr.ptr, &dest_len, pack_data[comp_start..].ptr, &src_len);
@@ -331,7 +385,26 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
                 decomp_buf_ptr = try allocator.alloc(u8, decomp_buf_cap);
             }
 
-            {
+            // Try libdeflate first for REF_DELTA
+            if (decompressor) |dc| {
+                var ld_in_consumed: usize = 0;
+                var ld_out_size: usize = 0;
+                const ld_ret = ld.libdeflate_zlib_decompress_ex(
+                    dc,
+                    pack_data[comp_start..].ptr,
+                    in_avail,
+                    decomp_buf_ptr.ptr,
+                    decomp_buf_cap,
+                    &ld_in_consumed,
+                    &ld_out_size,
+                );
+                if (ld_ret == ld.LIBDEFLATE_SUCCESS) {
+                    actual_in = ld_in_consumed;
+                    skip_ok = true;
+                }
+            }
+
+            if (!skip_ok) {
                 var dest_len: c_ulong = @intCast(decomp_buf_cap);
                 var src_len: c_ulong = @intCast(@min(in_avail, std.math.maxInt(c_ulong)));
                 const uc_ret = zc.uncompress2(decomp_buf_ptr.ptr, &dest_len, pack_data[comp_start..].ptr, &src_len);

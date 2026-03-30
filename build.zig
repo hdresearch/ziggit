@@ -19,6 +19,7 @@ pub fn build(b: *std.Build) void {
     });
     exe.linkLibC();
     exe.linkSystemLibrary("z");
+    exe.linkSystemLibrary("deflate");
 
     b.installArtifact(exe);
 
