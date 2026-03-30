@@ -432,6 +432,24 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         }
 
         if (!is_unborn) {
+            // helpers.Delete old branch ref FIRST (if different name)
+            // This is needed when renaming m -> m/m (old file conflicts with new dir)
+            if (!std.mem.eql(u8, old_name, new_name)) {
+                std.fs.cwd().deleteFile(old_ref_path) catch {};
+                // Also clean up empty parent dirs from old ref
+                if (std.fs.path.dirname(old_ref_path)) |old_parent| {
+                    const repo_refs_heads = std.fmt.allocPrint(allocator, "{s}/refs/heads", .{git_path}) catch null;
+                    if (repo_refs_heads) |rrh| {
+                        defer allocator.free(rrh);
+                        var cleanup_dir = old_parent;
+                        while (cleanup_dir.len > rrh.len) {
+                            std.fs.cwd().deleteDir(cleanup_dir) catch break;
+                            cleanup_dir = std.fs.path.dirname(cleanup_dir) orelse break;
+                        }
+                    }
+                }
+            }
+
             // helpers.Write new branch ref
             const new_ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, new_name });
             defer allocator.free(new_ref_path);
@@ -440,11 +458,6 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                 std.fs.cwd().makePath(parent_dir) catch {};
             }
             try std.fs.cwd().writeFile(.{ .sub_path = new_ref_path, .data = old_hash });
-
-            // helpers.Delete old branch ref (if different name)
-            if (!std.mem.eql(u8, old_name, new_name)) {
-                std.fs.cwd().deleteFile(old_ref_path) catch {};
-            }
         }
 
         // Move the reflog from old to new branch
