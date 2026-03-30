@@ -2776,7 +2776,7 @@ fn populateIndexFromTree(git_path: []const u8, tree_hash: []const u8, repo_root:
             const stat = std.fs.cwd().statFile(full_path) catch std.fs.File.Stat{
                 .inode = 0,
                 .size = 0,
-                .mode = mode,
+                .mode = @truncate(mode),
                 .mtime = 0,
                 .ctime = 0,
                 .atime = 0,
@@ -3098,7 +3098,7 @@ fn addIndexEntryStaged(idx: *index_mod.Index, path: []const u8, sha1: [20]u8, mo
     const stat = std.fs.cwd().statFile(full_path) catch std.fs.File.Stat{
         .inode = 0,
         .size = 0,
-        .mode = mode,
+        .mode = @truncate(mode),
         .mtime = 0,
         .ctime = 0,
         .atime = 0,

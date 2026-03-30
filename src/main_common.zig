@@ -822,7 +822,24 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     }
 
     // Pre-command config validation (core.bare boolean check, etc.)
-    if (@import("builtin").target.os.tag != .freestanding) helpers.config_helpers_mod.validatePreCommandConfig(&platform_impl);
+    // Skip for commands that don't need an existing git repo, and guard
+    // against crashes when no git directory exists (e.g. `git init`, `git --version`).
+    const skip_preconfig = std.mem.eql(u8, command, "init") or
+        std.mem.eql(u8, command, "init-db") or
+        std.mem.eql(u8, command, "clone") or
+        std.mem.eql(u8, command, "--version") or
+        std.mem.eql(u8, command, "-v") or
+        std.mem.eql(u8, command, "--version-info") or
+        std.mem.eql(u8, command, "help") or
+        std.mem.eql(u8, command, "--help") or
+        std.mem.eql(u8, command, "-h");
+    if (@import("builtin").target.os.tag != .freestanding and !skip_preconfig) {
+        // Only validate if we're in a git repository
+        if (helpers.findGitDirectory(allocator, &platform_impl)) |git_path| {
+            allocator.free(git_path);
+            helpers.config_helpers_mod.validatePreCommandConfig(&platform_impl);
+        } else |_| {}
+    }
 
     // Commands with native ziggit implementations
     if (std.mem.eql(u8, command, "init") or std.mem.eql(u8, command, "init-db")) {

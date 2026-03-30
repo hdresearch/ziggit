@@ -225,7 +225,7 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             // For "." or paths ending in "/.", use the directory path
             const is_dot_path = std.mem.eql(u8, file_path, ".") or std.mem.endsWith(u8, file_path, "/.");
             const metadata = if (is_dot_path)
-                std.fs.File.Stat{ .inode = 0, .size = 0, .mode = 0o40755, .kind = .directory, .atime = 0, .mtime = 0, .ctime = 0 }
+                std.fs.File.Stat{ .inode = 0, .size = 0, .mode = @as(std.posix.mode_t, 0o40755), .kind = .directory, .atime = 0, .mtime = 0, .ctime = 0 }
             else
                 std.fs.cwd().statFile(full_file_path) catch {
                     // helpers.If we can't stat it (e.g. broken symlink), try to add it
@@ -634,7 +634,7 @@ fn addSubmoduleEntry(allocator: std.mem.Allocator, relative_path: []const u8, su
     const fake_stat = std.fs.File.Stat{
         .inode = 0,
         .size = 0,
-        .mode = 0o160000,
+        .mode = @as(std.posix.mode_t, @truncate(0o160000)),
         .kind = .file,
         .atime = 0,
         .mtime = 0,
