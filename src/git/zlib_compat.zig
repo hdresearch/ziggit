@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const flate = std.compress.flate;
 const Decompress = flate.Decompress;
 const Compress = flate.Compress;

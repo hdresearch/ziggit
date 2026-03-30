@@ -1,5 +1,16 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zlib_compat = @import("zlib_compat.zig");
+
+/// Get the appropriate allocator for temporary decompression buffers.
+/// On freestanding/WASM, page_allocator.free() is a no-op which leaks memory.
+/// Use wasm_allocator instead which can actually reclaim memory.
+fn getTempAllocator() std.mem.Allocator {
+    return if (comptime builtin.os.tag == .freestanding)
+        std.heap.wasm_allocator
+    else
+        std.heap.page_allocator;
+}
 
 /// Result of streaming decompress+hash operation.
 pub const DecompressHashResult = struct {
@@ -21,8 +32,9 @@ pub fn decompressAndHash(
     const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ git_type, object_size }) catch unreachable;
     sha_hasher.update(header);
 
-    const result = zlib_compat.decompressSliceWithConsumed(std.heap.page_allocator, compressed_data) catch return error.ZlibDecompressError;
-    defer std.heap.page_allocator.free(result.data);
+    const tmp_alloc = getTempAllocator();
+    const result = zlib_compat.decompressSliceWithConsumed(tmp_alloc, compressed_data) catch return error.ZlibDecompressError;
+    defer tmp_alloc.free(result.data);
 
     sha_hasher.update(result.data);
 
@@ -49,8 +61,9 @@ pub fn decompressHashAndCapture(
     const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ git_type, object_size }) catch unreachable;
     sha_hasher.update(header);
 
-    const res = zlib_compat.decompressSliceWithConsumed(std.heap.page_allocator, compressed_data) catch return error.ZlibDecompressError;
-    defer std.heap.page_allocator.free(res.data);
+    const tmp_alloc = getTempAllocator();
+    const res = zlib_compat.decompressSliceWithConsumed(tmp_alloc, compressed_data) catch return error.ZlibDecompressError;
+    defer tmp_alloc.free(res.data);
 
     sha_hasher.update(res.data);
     try output.appendSlice(res.data);
@@ -82,8 +95,9 @@ pub fn decompressInto(
     compressed_data: []const u8,
     output: *std.array_list.Managed(u8),
 ) !struct { decompressed_size: usize, bytes_consumed: usize } {
-    const res = zlib_compat.decompressSliceWithConsumed(std.heap.page_allocator, compressed_data) catch return error.ZlibDecompressError;
-    defer std.heap.page_allocator.free(res.data);
+    const tmp_alloc = getTempAllocator();
+    const res = zlib_compat.decompressSliceWithConsumed(tmp_alloc, compressed_data) catch return error.ZlibDecompressError;
+    defer tmp_alloc.free(res.data);
     try output.appendSlice(res.data);
     return .{ .decompressed_size = res.data.len, .bytes_consumed = res.consumed };
 }
@@ -93,8 +107,9 @@ pub fn decompressIntoBuf(
     compressed_data: []const u8,
     buf: []u8,
 ) !struct { decompressed_size: usize, bytes_consumed: usize } {
-    const res = zlib_compat.decompressSliceWithConsumed(std.heap.page_allocator, compressed_data) catch return error.ZlibDecompressError;
-    defer std.heap.page_allocator.free(res.data);
+    const tmp_alloc = getTempAllocator();
+    const res = zlib_compat.decompressSliceWithConsumed(tmp_alloc, compressed_data) catch return error.ZlibDecompressError;
+    defer tmp_alloc.free(res.data);
     const n = @min(res.data.len, buf.len);
     @memcpy(buf[0..n], res.data[0..n]);
     return .{ .decompressed_size = n, .bytes_consumed = res.consumed };
@@ -113,8 +128,9 @@ pub fn decompressHashIntoBuf(
     const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ git_type, object_size }) catch unreachable;
     sha_hasher.update(header);
 
-    const res = zlib_compat.decompressSliceWithConsumed(std.heap.page_allocator, compressed_data) catch return error.ZlibDecompressError;
-    defer std.heap.page_allocator.free(res.data);
+    const tmp_alloc = getTempAllocator();
+    const res = zlib_compat.decompressSliceWithConsumed(tmp_alloc, compressed_data) catch return error.ZlibDecompressError;
+    defer tmp_alloc.free(res.data);
 
     const total = @min(res.data.len, buf.len);
     @memcpy(buf[0..total], res.data[0..total]);
