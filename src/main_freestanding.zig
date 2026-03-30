@@ -1,6 +1,12 @@
 // Freestanding main optimized for browser/JS integration with minimal dependencies
 const std = @import("std");
 
+// Import wasm_exports to link all git operations into the WASM binary
+const wasm_exports = @import("wasm_exports.zig");
+comptime {
+    _ = wasm_exports; // Force linking of all exports
+}
+
 // Simple fixed buffer allocator for freestanding environment
 // Can be configured at compile time with -Dfreestanding-memory-size=<size>
 const config = @import("config");

@@ -233,7 +233,7 @@ export fn ziggit_store_blob(path_ptr: [*]const u8, path_len: u32, data_ptr: [*]c
     var compressed = std.ArrayList(u8).init(allocator);
     defer compressed.deinit();
 
-    var comp = zlib_compat.compressor(compressed.writer(), .{}) catch return -3;
+    var comp = zlib_compat.compressorWriter(compressed.writer(), .{}) catch return -3;
     _ = comp.write(full_content) catch return -3;
     comp.finish() catch return -3;
 
