@@ -7,6 +7,7 @@ const helpers = @import("git_helpers.zig");
 
 // Re-export commonly used types from helpers
 const objects = helpers.objects;
+const commit_graph_mod = @import("git/commit_graph.zig");
 const index_mod = helpers.index_mod;
 const refs = helpers.refs;
 const tree_mod = helpers.tree_mod;
@@ -318,6 +319,113 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         return;
     }
     
+    // Try commit-graph fast path for common cases (oneline, no filters, no excludes)
+    const has_filters = author_filters.items.len > 0 or committer_filters.items.len > 0 or grep_filters.items.len > 0;
+    if (oneline and !has_filters and exclude_refs.items.len == 0 and include_refs.items.len == 0 and format_string == null and output_encoding == null) {
+        if (commit_graph_mod.CommitGraph.open(git_path, allocator)) |cg| {
+            // Fast path: use commit-graph for traversal, only load objects for message
+            var cg_queue = std.array_list.Managed(struct { pos: u32, hash_hex: [40]u8, timestamp: i64 }).init(allocator);
+            defer cg_queue.deinit();
+
+            var cg_visited = std.AutoHashMap(u32, void).init(allocator);
+            defer cg_visited.deinit();
+
+            // Seed with start commit
+            if (cg.findCommit(start_commit)) |start_pos| {
+                const cd = cg.getCommitData(start_pos);
+                var hash_hex: [40]u8 = undefined;
+                cg.getOidHex(start_pos, &hash_hex);
+                try cg_queue.append(.{ .pos = start_pos, .hash_hex = hash_hex, .timestamp = cd.commit_time });
+                try cg_visited.put(start_pos, {});
+
+                var cg_count: u32 = 0;
+                var out_buf = std.array_list.Managed(u8).init(allocator);
+                defer out_buf.deinit();
+                try out_buf.ensureTotalCapacity(256 * 1024);
+
+                while (cg_queue.items.len > 0 and (max_count == null or cg_count < max_count.?)) {
+                    // Find best (highest timestamp)
+                    var best: usize = 0;
+                    for (cg_queue.items, 0..) |entry, idx| {
+                        if (entry.timestamp > cg_queue.items[best].timestamp) best = idx;
+                    }
+                    const current = cg_queue.swapRemove(best);
+                    const entry_data = cg.getCommitData(current.pos);
+
+                    // Load object to get commit message first line
+                    const hash_slice = current.hash_hex[0..40];
+                    const commit_obj = objects.GitObject.load(hash_slice, git_path, platform_impl, allocator) catch {
+                        // If object can't be loaded, skip
+                        continue;
+                    };
+                    defer commit_obj.deinit(allocator);
+
+                    // Extract first line of message
+                    const cdata = commit_obj.data;
+                    var first_msg_line: []const u8 = "";
+                    {
+                        // Skip headers to find message
+                        var pos: usize = 0;
+                        while (pos < cdata.len) {
+                            const nl = std.mem.indexOfScalarPos(u8, cdata, pos, '\n') orelse cdata.len;
+                            if (nl == pos) {
+                                // Empty line - message starts after
+                                const msg_start = pos + 1;
+                                if (msg_start < cdata.len) {
+                                    const msg_end = std.mem.indexOfScalarPos(u8, cdata, msg_start, '\n') orelse cdata.len;
+                                    first_msg_line = cdata[msg_start..msg_end];
+                                }
+                                break;
+                            }
+                            pos = nl + 1;
+                        }
+                    }
+
+                    // Write oneline output
+                    try out_buf.appendSlice(hash_slice[0..7]);
+                    try out_buf.append(' ');
+                    try out_buf.appendSlice(first_msg_line);
+                    try out_buf.append('\n');
+
+                    // Flush buffer periodically
+                    if (out_buf.items.len > 128 * 1024) {
+                        try platform_impl.writeStdout(out_buf.items);
+                        out_buf.clearRetainingCapacity();
+                    }
+
+                    cg_count += 1;
+
+                    // Add parents from commit-graph
+                    if (entry_data.parent1 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT) {
+                        if (!cg_visited.contains(entry_data.parent1)) {
+                            try cg_visited.put(entry_data.parent1, {});
+                            const pd = cg.getCommitData(entry_data.parent1);
+                            var phex: [40]u8 = undefined;
+                            cg.getOidHex(entry_data.parent1, &phex);
+                            try cg_queue.append(.{ .pos = entry_data.parent1, .hash_hex = phex, .timestamp = pd.commit_time });
+                        }
+                    }
+                    if (entry_data.parent2 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT and entry_data.parent2 & commit_graph_mod.CommitGraph.GRAPH_EXTRA_EDGES == 0) {
+                        if (!cg_visited.contains(entry_data.parent2)) {
+                            try cg_visited.put(entry_data.parent2, {});
+                            const pd = cg.getCommitData(entry_data.parent2);
+                            var phex: [40]u8 = undefined;
+                            cg.getOidHex(entry_data.parent2, &phex);
+                            try cg_queue.append(.{ .pos = entry_data.parent2, .hash_hex = phex, .timestamp = pd.commit_time });
+                        }
+                    }
+                }
+
+                // Flush remaining
+                if (out_buf.items.len > 0) {
+                    try platform_impl.writeStdout(out_buf.items);
+                }
+                return;
+            }
+            // If start commit not in graph, fall through to normal path
+        }
+    }
+
     // helpers.Walk the commit history using priority queue (sorted by committer date)
     const CommitQueueEntry = struct {
         hash: []const u8,

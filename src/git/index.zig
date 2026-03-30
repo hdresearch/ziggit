@@ -653,7 +653,7 @@ pub const Index = struct {
         const fake_stat = std.fs.File.Stat{
             .inode = if (real_stat) |s| s.inode else 0,
             .size = content.len,
-            .mode = @as(std.fs.File.Mode, file_mode),
+            .mode = @intCast(file_mode),
             .kind = if (symlink_target != null) .sym_link else .file,
             .atime = if (real_stat) |s| s.atime else 0,
             .mtime = if (real_stat) |s| s.mtime else 0,
