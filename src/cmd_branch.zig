@@ -495,7 +495,63 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         defer allocator.free(src_hash);
         const dst_ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, dst_name });
         defer allocator.free(dst_ref_path);
+        if (std.fs.path.dirname(dst_ref_path)) |parent_dir| {
+            std.fs.cwd().makePath(parent_dir) catch {};
+        }
         try std.fs.cwd().writeFile(.{ .sub_path = dst_ref_path, .data = src_hash });
+
+        // Copy reflog
+        {
+            const src_reflog = std.fmt.allocPrint(allocator, "{s}/logs/refs/heads/{s}", .{ git_path, src_name }) catch null;
+            const dst_reflog = std.fmt.allocPrint(allocator, "{s}/logs/refs/heads/{s}", .{ git_path, dst_name }) catch null;
+            if (src_reflog) |sr| {
+                defer allocator.free(sr);
+                if (dst_reflog) |dr| {
+                    defer allocator.free(dr);
+                    if (std.fs.path.dirname(dr)) |pd| std.fs.cwd().makePath(pd) catch {};
+                    if (std.fs.cwd().readFileAlloc(allocator, sr, 10 * 1024 * 1024)) |content| {
+                        defer allocator.free(content);
+                        std.fs.cwd().writeFile(.{ .sub_path = dr, .data = content }) catch {};
+                    } else |_| {}
+                }
+            }
+        }
+
+        // Copy config section
+        {
+            const config_path_c = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch null;
+            if (config_path_c) |cp| {
+                defer allocator.free(cp);
+                const config_data = std.fs.cwd().readFileAlloc(allocator, cp, 1024 * 1024) catch null;
+                if (config_data) |cd| {
+                    defer allocator.free(cd);
+                    const src_section = std.fmt.allocPrint(allocator, "[branch \"{s}\"]", .{src_name}) catch null;
+                    if (src_section) |ss| {
+                        defer allocator.free(ss);
+                        if (std.mem.indexOf(u8, cd, ss)) |start| {
+                            // Find end of section
+                            var end = start + ss.len;
+                            while (end < cd.len) {
+                                if (cd[end] == '\n' and end + 1 < cd.len and cd[end + 1] == '[') break;
+                                end += 1;
+                            }
+                            const section_content = cd[start + ss.len .. end];
+                            const dst_section = std.fmt.allocPrint(allocator, "[branch \"{s}\"]{s}", .{ dst_name, section_content }) catch null;
+                            if (dst_section) |ds| {
+                                defer allocator.free(ds);
+                                var new_cfg = std.array_list.Managed(u8).init(allocator);
+                                defer new_cfg.deinit();
+                                new_cfg.appendSlice(cd) catch {};
+                                if (cd.len > 0 and cd[cd.len - 1] != '\n') new_cfg.append('\n') catch {};
+                                new_cfg.appendSlice(ds) catch {};
+                                new_cfg.append('\n') catch {};
+                                std.fs.cwd().writeFile(.{ .sub_path = cp, .data = new_cfg.items }) catch {};
+                            }
+                        }
+                    }
+                }
+            }
+        }
     } else if (std.mem.eql(u8, first_arg.?, "--force") or std.mem.eql(u8, first_arg.?, "-f")) {
         // Force create/reset branch
         const branch_name = fake_args.next() orelse {
