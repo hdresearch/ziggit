@@ -246,8 +246,10 @@
       let shift = 4;
       let off = offset + 1;
       while (byte & 0x80) {
+        if (off >= data.length) throw new Error('pack header extends past end of data');
         byte = data[off++];
-        size |= (byte & 0x7f) << shift;
+        // Use multiplication for shifts > 30 to avoid signed 32-bit issues
+        size += (byte & 0x7f) * (2 ** shift);
         shift += 7;
       }
       return { type, size, offset: off };
@@ -255,11 +257,15 @@
 
     function readOfsOffset(data, offset) {
       // Variable-length offset encoding for OFS_DELTA
+      // Uses the "offset encoding" described in git pack format:
+      // each byte has MSB continuation, value = ((prev+1)<<7) | (byte&0x7f)
       let byte = data[offset++];
       let value = byte & 0x7f;
       while (byte & 0x80) {
+        if (offset >= data.length) throw new Error('OFS offset extends past end of data');
         byte = data[offset++];
-        value = ((value + 1) << 7) | (byte & 0x7f);
+        // Use Math operations to avoid signed 32-bit overflow
+        value = ((value + 1) * 128) + (byte & 0x7f);
       }
       return { value, offset };
     }
@@ -354,6 +360,10 @@
         shift += 7;
       } while (byte & 0x80);
 
+      if (baseSize !== base.length) {
+        console.warn(`Delta base size mismatch: expected ${baseSize}, got ${base.length}`);
+      }
+
       const result = new Uint8Array(resultSize);
       let resultPos = 0;
 
@@ -365,21 +375,33 @@
           if (cmd & 0x01) copyOff = delta[pos++];
           if (cmd & 0x02) copyOff |= delta[pos++] << 8;
           if (cmd & 0x04) copyOff |= delta[pos++] << 16;
-          if (cmd & 0x08) copyOff |= delta[pos++] << 24;
+          if (cmd & 0x08) copyOff |= (delta[pos++] << 24) >>> 0;
+          // Ensure unsigned (JS bitwise ops produce signed 32-bit)
+          copyOff = copyOff >>> 0;
           if (cmd & 0x10) copySize = delta[pos++];
           if (cmd & 0x20) copySize |= delta[pos++] << 8;
           if (cmd & 0x40) copySize |= delta[pos++] << 16;
           if (copySize === 0) copySize = 0x10000;
-          result.set(base.slice(copyOff, copyOff + copySize), resultPos);
+          if (copyOff + copySize > base.length) {
+            throw new Error(`delta copy out of bounds: offset=${copyOff} size=${copySize} base=${base.length}`);
+          }
+          result.set(base.subarray(copyOff, copyOff + copySize), resultPos);
           resultPos += copySize;
         } else if (cmd > 0) {
           // Insert literal
-          result.set(delta.slice(pos, pos + cmd), resultPos);
+          if (pos + cmd > delta.length) {
+            throw new Error(`delta insert out of bounds: pos=${pos} cmd=${cmd} delta=${delta.length}`);
+          }
+          result.set(delta.subarray(pos, pos + cmd), resultPos);
           resultPos += cmd;
           pos += cmd;
         } else {
           throw new Error('unexpected delta cmd 0');
         }
+      }
+
+      if (resultPos !== resultSize) {
+        console.warn(`Delta result size mismatch: expected ${resultSize}, got ${resultPos}`);
       }
 
       return result;
