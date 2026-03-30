@@ -254,7 +254,11 @@
     // --- Build want request ---
     function buildWantRequest(hash) {
       // want line with capabilities
-      const wantLine = `want ${hash} side-band-64k ofs-delta no-progress include-tag agent=ziggit-browser\n`;
+      // no-progress: suppress progress messages (cleaner sideband parsing)
+      // ofs-delta: accept offset deltas (more compact packs)
+      // side-band-64k: multiplexed response with pack data on channel 1
+      // include-tag: include tag objects for matching refs
+      const wantLine = `want ${hash} multi_ack_detailed side-band-64k ofs-delta no-progress include-tag no-thin agent=ziggit-browser\n`;
       const pktWant = (wantLine.length + 4).toString(16).padStart(4, '0') + wantLine;
       return pktWant + '00000009done\n';
     }
@@ -366,6 +370,12 @@
         inf.push(rawData, true);
         if (inf.err === 0 && inf.result instanceof Uint8Array && inf.strm) {
           // bytesRead = zlib header + raw deflate bytes consumed + ADLER32 (4 bytes)
+          return { result: inf.result, bytesRead: headerSize + inf.strm.total_in + 4 };
+        }
+        // pako 2.x may report err=2 (Z_DATA_ERROR) with trailing data.
+        // If we got valid output, use it anyway.
+        if (inf.result instanceof Uint8Array && inf.result.length > 0 && inf.strm) {
+          console.warn('pako inflate warning at offset', offset, ':', inf.msg || 'err=' + inf.err, '- using partial result');
           return { result: inf.result, bytesRead: headerSize + inf.strm.total_in + 4 };
         }
         throw new Error('inflate failed: pako error ' + inf.err + ' ' + (inf.msg || ''));
@@ -571,7 +581,8 @@
 
       // Resolve deltas
       status('Resolving deltas...');
-      function resolveObject(idx) {
+      function resolveObject(idx, depth) {
+        if (depth > 100) throw new Error('Delta chain too deep (>100 levels)');
         const obj = objects[idx];
         if (obj.hash || obj._needsHash) return obj; // already resolved
 
@@ -579,15 +590,18 @@
         if (obj.type === 6) {
           const baseIdx = offsetToIdx[obj.basePackOffset];
           if (baseIdx === undefined) throw new Error('OFS_DELTA base not found at offset ' + obj.basePackOffset);
-          base = resolveObject(baseIdx);
+          base = resolveObject(baseIdx, depth + 1);
         } else if (obj.type === 7) {
           if (objectDb[obj.baseHash]) {
             base = { typeName: objectDb[obj.baseHash].type, data: objectDb[obj.baseHash].data };
           } else {
-            // Find in objects array
-            const baseObj = objects.find(o => o.hash === obj.baseHash);
-            if (!baseObj) throw new Error('REF_DELTA base not found: ' + obj.baseHash);
-            base = resolveObject(objects.indexOf(baseObj));
+            // Find in objects array - check both resolved and unresolved objects
+            let baseIdx = -1;
+            for (let j = 0; j < objects.length; j++) {
+              if (objects[j].hash === obj.baseHash) { baseIdx = j; break; }
+            }
+            if (baseIdx < 0) throw new Error('REF_DELTA base not found: ' + obj.baseHash);
+            base = resolveObject(baseIdx, depth + 1);
           }
         }
 
@@ -595,20 +609,24 @@
         const resolved = applyDeltaWasm(base.data, obj.deltaData) || applyDelta(base.data, obj.deltaData);
         obj.typeName = base.typeName;
         obj.data = resolved;
-        // Compute hash
+        // Compute hash synchronously if WASM available, otherwise mark for async
         const header = new TextEncoder().encode(`${obj.typeName} ${resolved.length}\0`);
         const full = new Uint8Array(header.length + resolved.length);
         full.set(header);
         full.set(resolved, header.length);
-        // sha1hex is async, we'll handle this differently
         obj._needsHash = true;
         obj._full = full;
         return obj;
       }
 
       for (let i = 0; i < objects.length; i++) {
-        if (!objects[i].hash) {
-          resolveObject(i);
+        try {
+          if (!objects[i].hash) {
+            resolveObject(i, 0);
+          }
+        } catch (e) {
+          console.error('Error resolving delta', i, ':', e.message);
+          parseErrors++;
         }
       }
 
@@ -692,7 +710,7 @@
     async function parsePackWasmFull(packData) {
       if (!wasmInstance) return false;
       const e = wasmInstance.exports;
-      if (!e.ziggit_load_pack || !e.ziggit_extract_all_objects) return false;
+      if (!e.ziggit_load_pack || !e.ziggit_pack_object_count) return false;
 
       status('WASM: Loading pack...');
       showProgress(20);
@@ -704,68 +722,78 @@
       e.ziggit_free(packPtr, packData.length);
       if (rc !== 0) { console.warn('WASM load_pack failed:', rc); return false; }
 
-      status('WASM: Extracting objects...');
-      showProgress(50);
+      const totalObjects = e.ziggit_pack_object_count();
+      if (totalObjects <= 0) { console.warn('WASM: no objects in pack'); return false; }
 
-      const outPtrPtr = e.ziggit_alloc(4);
-      const outLenPtr = e.ziggit_alloc(4);
-      if (!outPtrPtr || !outLenPtr) return false;
+      status(`WASM: Extracting ${totalObjects} objects...`);
+      showProgress(30);
 
-      const rc2 = e.ziggit_extract_all_objects(outPtrPtr, outLenPtr);
-      if (rc2 !== 0) {
-        e.ziggit_free(outPtrPtr, 4);
-        e.ziggit_free(outLenPtr, 4);
-        console.warn('WASM extract_all_objects failed:', rc2);
-        return false;
-      }
+      // Use streaming per-object extraction for better memory efficiency
+      const TYPE_NAMES_WASM = { 1: 'commit', 2: 'tree', 3: 'blob', 4: 'tag' };
+      const useByIndex = !!e.ziggit_read_object_by_index;
+      let extracted = 0;
+      let errors = 0;
 
-      const buf = e.memory.buffer;
-      const view = new DataView(buf);
-      const jsonPtr = view.getUint32(outPtrPtr, true);
-      const jsonLen = view.getUint32(outLenPtr, true);
-      const jsonStr = new TextDecoder().decode(new Uint8Array(buf, jsonPtr, jsonLen));
-      e.ziggit_free(outPtrPtr, 4);
-      e.ziggit_free(outLenPtr, 4);
-      e.ziggit_free(jsonPtr, jsonLen);
+      if (useByIndex) {
+        // Streaming extraction: one object at a time
+        const op = e.ziggit_alloc(4), ol = e.ziggit_alloc(4), tp = e.ziggit_alloc(4), hp = e.ziggit_alloc(40);
+        if (!op || !ol || !tp || !hp) return false;
 
-      let objects;
-      try { objects = JSON.parse(jsonStr); } catch (err) {
-        console.warn('WASM: Failed to parse object JSON:', err);
-        return false;
-      }
-
-      status(`WASM: Reading ${objects.length} objects...`);
-      showProgress(70);
-
-      let count = 0;
-      for (const obj of objects) {
-        // Read object data from WASM memory
-        const data = new Uint8Array(e.memory.buffer, obj.ptr, obj.size).slice();
-        objectDb[obj.hash] = { type: obj.type, data };
-        // Free the WASM allocation
-        e.ziggit_free(obj.ptr, obj.size);
-        count++;
-        if (count % 100 === 0) {
-          status(`WASM: Read ${count}/${objects.length} objects...`);
-          showProgress(70 + (count / objects.length) * 30);
-          await new Promise(r => setTimeout(r, 0));
+        for (let i = 0; i < totalObjects; i++) {
+          const rc2 = e.ziggit_read_object_by_index(i, op, ol, tp, hp);
+          if (rc2 !== 0) { errors++; continue; }
+          // Re-read buffer refs after each WASM call (memory may grow)
+          const buf = e.memory.buffer;
+          const v = new DataView(buf);
+          const dp = v.getUint32(op, true), dl = v.getUint32(ol, true), dt = v.getUint32(tp, true);
+          const hash = new TextDecoder().decode(new Uint8Array(buf, hp, 40));
+          const data = new Uint8Array(buf, dp, dl).slice();
+          e.ziggit_free(dp, dl);
+          const typeName = TYPE_NAMES_WASM[dt];
+          if (typeName) objectDb[hash] = { type: typeName, data };
+          extracted++;
+          if (extracted % 100 === 0) {
+            status(`WASM: Extracted ${extracted}/${totalObjects} objects...`);
+            showProgress(30 + (extracted / totalObjects) * 70);
+            await new Promise(r => setTimeout(r, 0));
+          }
         }
+        e.ziggit_free(op, 4); e.ziggit_free(ol, 4); e.ziggit_free(tp, 4); e.ziggit_free(hp, 40);
+      } else if (e.ziggit_extract_all_objects) {
+        // Fallback: bulk extraction via JSON
+        const outPtrPtr = e.ziggit_alloc(4), outLenPtr = e.ziggit_alloc(4);
+        if (!outPtrPtr || !outLenPtr) return false;
+        const rc2 = e.ziggit_extract_all_objects(outPtrPtr, outLenPtr);
+        if (rc2 !== 0) { e.ziggit_free(outPtrPtr, 4); e.ziggit_free(outLenPtr, 4); return false; }
+        const buf = e.memory.buffer;
+        const v = new DataView(buf);
+        const jp = v.getUint32(outPtrPtr, true), jl = v.getUint32(outLenPtr, true);
+        const objects = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, jp, jl)));
+        e.ziggit_free(outPtrPtr, 4); e.ziggit_free(outLenPtr, 4); e.ziggit_free(jp, jl);
+        for (const obj of objects) {
+          const data = new Uint8Array(e.memory.buffer, obj.ptr, obj.size).slice();
+          objectDb[obj.hash] = { type: obj.type, data };
+          e.ziggit_free(obj.ptr, obj.size);
+          extracted++;
+        }
+      } else {
+        return false;
       }
 
       showProgress(100);
+      if (errors > 0) console.warn('WASM extraction errors:', errors);
       const typeCounts = {};
       for (const h of Object.keys(objectDb)) {
         typeCounts[objectDb[h].type] = (typeCounts[objectDb[h].type] || 0) + 1;
       }
       const typeStr = Object.entries(typeCounts).map(([t,c]) => `${c} ${t}s`).join(', ');
       console.log(`WASM pack extraction: ${Object.keys(objectDb).length} objects (${typeStr})`);
-      status(`WASM extracted ${objects.length} objects: ${typeStr}`);
+      status(`WASM extracted ${extracted} objects: ${typeStr}`);
 
-      // Show diagnostics
       const diag = document.getElementById('diag-panel');
       diag.style.display = 'block';
       document.getElementById('diag-details').innerHTML =
-        `⚡ <strong>WASM full extraction</strong>: ${objects.length} objects (${typeStr}) — all parsing done in WASM`;
+        `⚡ <strong>WASM full extraction</strong>: ${extracted} objects (${typeStr})${errors > 0 ? ' (' + errors + ' errors)' : ''} — all parsing done in WASM`;
 
       return true;
     }
@@ -877,7 +905,10 @@
         console.log('Pack request:', packBody);
         const packResp = await fetch(proxyUrl(baseUrl + '/git-upload-pack'), {
           method: 'POST',
-          headers: { 'Content-Type': 'application/x-git-upload-pack-request' },
+          headers: {
+            'Content-Type': 'application/x-git-upload-pack-request',
+            'Accept': 'application/x-git-upload-pack-result',
+          },
           body: packBody
         });
         if (!packResp.ok) {
