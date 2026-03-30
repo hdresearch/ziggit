@@ -1549,11 +1549,12 @@ pub const Repository = struct {
     }
 
     pub fn cloneBare(allocator: std.mem.Allocator, source: []const u8, target: []const u8) !Repository {
-        // Debug trace using raw Linux syscall
-        const trace_fd = std.os.linux.open("/tmp/ziggit_net_trace.log", .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644);
-        if (trace_fd < 4096) {
-            _ = std.os.linux.write(@intCast(trace_fd), "cloneBare ENTER\n", 16);
-            _ = std.os.linux.close(@intCast(trace_fd));
+        if (comptime @import("builtin").os.tag == .linux) {
+            const trace_fd = std.os.linux.open("/tmp/ziggit_net_trace.log", .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644);
+            if (trace_fd < 4096) {
+                _ = std.os.linux.write(@intCast(trace_fd), "cloneBare ENTER\n", 16);
+                _ = std.os.linux.close(@intCast(trace_fd));
+            }
         }
         if (std.mem.startsWith(u8, source, "https://") or
             std.mem.startsWith(u8, source, "http://")) {
@@ -1702,11 +1703,12 @@ pub const Repository = struct {
 
     /// Clone from HTTPS URL into a bare repository
     fn cloneBareHttps(allocator: std.mem.Allocator, url: []const u8, target: []const u8) !Repository {
-        // Debug trace using raw Linux syscall
-        const trace_fd = std.os.linux.open("/tmp/ziggit_net_trace.log", .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644);
-        if (trace_fd < 4096) {
-            _ = std.os.linux.write(@intCast(trace_fd), "cloneBareHttps\n", 15);
-            _ = std.os.linux.close(@intCast(trace_fd));
+        if (comptime @import("builtin").os.tag == .linux) {
+            const trace_fd = std.os.linux.open("/tmp/ziggit_net_trace.log", .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644);
+            if (trace_fd < 4096) {
+                _ = std.os.linux.write(@intCast(trace_fd), "cloneBareHttps\n", 15);
+                _ = std.os.linux.close(@intCast(trace_fd));
+            }
         }
         const smart_http = @import("git/smart_http.zig");
         const pack_writer = @import("git/pack_writer.zig");
@@ -3563,23 +3565,28 @@ fn copyDirectoryImpl(source: []const u8, dest: []const u8, try_hardlinks: bool) 
 
 /// Try to create a hardlink (instant, no IO). Falls back on error.
 fn hardlinkFile(source_path: []const u8, dest_path: []const u8) !void {
-    var src_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var dst_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (source_path.len >= src_buf.len or dest_path.len >= dst_buf.len) return error.NameTooLong;
-    @memcpy(src_buf[0..source_path.len], source_path);
-    src_buf[source_path.len] = 0;
-    @memcpy(dst_buf[0..dest_path.len], dest_path);
-    dst_buf[dest_path.len] = 0;
-    const src_z: [*:0]const u8 = @ptrCast(&src_buf);
-    const dst_z: [*:0]const u8 = @ptrCast(&dst_buf);
-    const rc = std.os.linux.link(src_z, dst_z);
-    switch (std.os.linux.E.init(rc)) {
-        .SUCCESS => {},
-        else => return error.LinkFailed,
+    if (comptime @import("builtin").os.tag == .linux) {
+        var src_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var dst_buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (source_path.len >= src_buf.len or dest_path.len >= dst_buf.len) return error.NameTooLong;
+        @memcpy(src_buf[0..source_path.len], source_path);
+        src_buf[source_path.len] = 0;
+        @memcpy(dst_buf[0..dest_path.len], dest_path);
+        dst_buf[dest_path.len] = 0;
+        const src_z: [*:0]const u8 = @ptrCast(&src_buf);
+        const dst_z: [*:0]const u8 = @ptrCast(&dst_buf);
+        const rc = std.os.linux.link(src_z, dst_z);
+        switch (std.os.linux.E.init(rc)) {
+            .SUCCESS => {},
+            else => return error.LinkFailed,
+        }
+    } else {
+        return error.LinkFailed;
     }
 }
 
-/// Zero-copy file copy using copy_file_range or sendfile syscall
+/// Zero-copy file copy using copy_file_range or sendfile syscall (Linux only).
+/// On other platforms, falls back to a simple read/write copy.
 fn copyFileZeroCopy(source_path: []const u8, dest_path: []const u8) !void {
     const source_file = try std.fs.openFileAbsolute(source_path, .{});
     defer source_file.close();
@@ -3592,33 +3599,43 @@ fn copyFileZeroCopy(source_path: []const u8, dest_path: []const u8) !void {
 
     if (file_size == 0) return;
 
-    // Use copy_file_range for zero-copy kernel-space copy
-    var remaining: u64 = file_size;
-    while (remaining > 0) {
-        const copied = std.os.linux.copy_file_range(source_file.handle, null, dest_file.handle, null, remaining, 0);
-        switch (std.os.linux.E.init(copied)) {
-            .SUCCESS => {
-                const n: u64 = @intCast(copied);
-                if (n == 0) break;
-                remaining -= n;
-            },
-            else => {
-                // Fallback to sendfile
-                var sf_remaining = remaining;
-                while (sf_remaining > 0) {
-                    const chunk: usize = @min(sf_remaining, 0x7ffff000);
-                    const sent = std.os.linux.sendfile(dest_file.handle, source_file.handle, null, chunk);
-                    switch (std.os.linux.E.init(sent)) {
-                        .SUCCESS => {
-                            const s: u64 = @intCast(sent);
-                            if (s == 0) break;
-                            sf_remaining -= s;
-                        },
-                        else => return error.CopyFailed,
+    if (comptime @import("builtin").os.tag == .linux) {
+        // Use copy_file_range for zero-copy kernel-space copy
+        var remaining: u64 = file_size;
+        while (remaining > 0) {
+            const copied = std.os.linux.copy_file_range(source_file.handle, null, dest_file.handle, null, remaining, 0);
+            switch (std.os.linux.E.init(copied)) {
+                .SUCCESS => {
+                    const n: u64 = @intCast(copied);
+                    if (n == 0) break;
+                    remaining -= n;
+                },
+                else => {
+                    // Fallback to sendfile
+                    var sf_remaining = remaining;
+                    while (sf_remaining > 0) {
+                        const chunk: usize = @min(sf_remaining, 0x7ffff000);
+                        const sent = std.os.linux.sendfile(dest_file.handle, source_file.handle, null, chunk);
+                        switch (std.os.linux.E.init(sent)) {
+                            .SUCCESS => {
+                                const s: u64 = @intCast(sent);
+                                if (s == 0) break;
+                                sf_remaining -= s;
+                            },
+                            else => return error.CopyFailed,
+                        }
                     }
-                }
-                return;
-            },
+                    return;
+                },
+            }
+        }
+    } else {
+        // Generic fallback: read/write copy
+        var buf: [65536]u8 = undefined;
+        while (true) {
+            const n = try source_file.read(&buf);
+            if (n == 0) break;
+            try dest_file.writeAll(buf[0..n]);
         }
     }
 }
