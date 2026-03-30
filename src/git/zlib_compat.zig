@@ -123,7 +123,11 @@ pub fn compressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     const ret = c.compress2(output.ptr, &dest_len, input.ptr, @intCast(input.len), 1);
     if (ret != c.Z_OK) return error.CompressionFailed;
     const final_len: usize = @intCast(dest_len);
-    return output[0..final_len];
+    // Dupe the actual compressed data and free the oversized buffer
+    // so that free() works correctly (sub-slices cause Invalid free with debug allocator)
+    const result = try allocator.dupe(u8, output[0..final_len]);
+    allocator.free(output);
+    return result;
 }
 
 pub fn decompressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
@@ -135,7 +139,9 @@ pub fn decompressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     const uc_ret = c.uncompress2(dest.ptr, &dest_len, input.ptr, &src_len);
     if (uc_ret == c.Z_OK) {
         const final_len: usize = @intCast(dest_len);
-        return dest[0..final_len];
+        const result = try allocator.dupe(u8, dest[0..final_len]);
+        allocator.free(dest);
+        return result;
     }
     allocator.free(dest);
 
