@@ -634,6 +634,9 @@ pub fn run(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl:
         } else if (std.mem.eql(u8, arg, "edit") and positionals.items.len == 0 and action == .none) {
             new_style_sub = true;
             action = .edit;
+        } else if (positionals.items.len > 0) {
+            // After the first positional (key), treat everything as positional (value)
+            try positionals.append(arg);
         } else if (std.mem.startsWith(u8, arg, "--no-") and !std.mem.eql(u8, arg, "--no-type")) {
             const em = try std.fmt.allocPrint(allocator, "error: unknown option `{s}'\n", .{arg[2..]});
             defer allocator.free(em);
