@@ -168,7 +168,10 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             } else {
                 contains_val = args.next();
             }
-        } else if (std.mem.startsWith(u8, arg, "--no-contains") or std.mem.startsWith(u8, arg, "--without") or std.mem.startsWith(u8, arg, "--no-with")) {
+        } else if (std.mem.eql(u8, arg, "--no-with") or std.mem.eql(u8, arg, "--no-without")) {
+            try platform_impl.writeStderr("error: unknown option\n");
+            std.process.exit(1);
+        } else if (std.mem.startsWith(u8, arg, "--no-contains") or std.mem.startsWith(u8, arg, "--without")) {
             list_mode = true;
             if (std.mem.indexOfScalar(u8, arg, '=')) |eq| {
                 no_contains_val = arg[eq + 1 ..];
@@ -229,6 +232,55 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     if (verify_mode and (annotated or message != null)) {
         try platform_impl.writeStderr("error: -v and creation options are incompatible\n");
         std.process.exit(1);
+    }
+
+    // Check --contains + --no-contains incompatibility
+    if (contains_val != null and no_contains_val != null) {
+        // Actually git allows both - they filter differently. Skip this check.
+    }
+
+    // Validate --contains/--no-contains values resolve to commits
+    if (contains_val) |cv| {
+        const resolved = helpers.resolveRevision(git_path, cv, platform_impl, allocator) catch {
+            const emsg = try std.fmt.allocPrint(allocator, "error: malformed object name '{s}'\n", .{cv});
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
+            std.process.exit(1);
+        };
+        defer allocator.free(resolved);
+        // Check object type - must be a commit
+        if (objects.GitObject.load(resolved, git_path, platform_impl, allocator)) |obj| {
+            defer obj.deinit(allocator);
+            if (obj.type != .commit) {
+                // Follow tag objects
+                if (obj.type == .tag) {
+                    // OK, we'll follow tags
+                } else {
+                    const emsg = try std.fmt.allocPrint(allocator, "error: object {s} is a {s}, not a commit\n", .{ resolved, obj.type.toString() });
+                    defer allocator.free(emsg);
+                    try platform_impl.writeStderr(emsg);
+                    std.process.exit(1);
+                }
+            }
+        } else |_| {}
+    }
+    if (no_contains_val) |ncv| {
+        const resolved = helpers.resolveRevision(git_path, ncv, platform_impl, allocator) catch {
+            const emsg = try std.fmt.allocPrint(allocator, "error: malformed object name '{s}'\n", .{ncv});
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
+            std.process.exit(1);
+        };
+        defer allocator.free(resolved);
+        if (objects.GitObject.load(resolved, git_path, platform_impl, allocator)) |obj| {
+            defer obj.deinit(allocator);
+            if (obj.type != .commit and obj.type != .tag) {
+                const emsg = try std.fmt.allocPrint(allocator, "error: object {s} is a {s}, not a commit\n", .{ resolved, obj.type.toString() });
+                defer allocator.free(emsg);
+                try platform_impl.writeStderr(emsg);
+                std.process.exit(1);
+            }
+        } else |_| {}
     }
 
     // helpers.Handle delete mode
