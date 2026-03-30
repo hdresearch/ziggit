@@ -1743,6 +1743,110 @@ export fn ziggit_zlib_compress(input_ptr: [*]const u8, input_len: u32, out_ptr: 
     return 0;
 }
 
+/// Enumerate all objects in the loaded pack. Returns JSON array of hashes with types.
+/// Format: [{"hash":"abc...","type":"commit"|"tree"|"blob"|"tag","size":N},...]  
+/// Limit controls max entries (0 = all).
+/// Returns 0 on success, negative on error.
+export fn ziggit_enumerate_objects(limit: u32, out_ptr: *u32, out_len: *u32) i32 {
+    const allocator = getAllocator();
+    const pack_data = global_pack_data orelse return -1;
+    const idx_data = global_idx_data orelse return -2;
+
+    if (idx_data.len < 8 + 256 * 4) return -3;
+    const total_objects = std.mem.readInt(u32, idx_data[8 + 255 * 4 ..][0..4], .big);
+    const sha1_table_start: usize = 8 + 256 * 4;
+    const crc_table_start = sha1_table_start + @as(usize, total_objects) * 20;
+    const offset_table_start = crc_table_start + @as(usize, total_objects) * 4;
+
+    const max_count = if (limit > 0) @min(limit, total_objects) else total_objects;
+
+    var json = std.array_list.Managed(u8).init(allocator);
+    defer json.deinit();
+    json.appendSlice("[") catch return -4;
+
+    var count: u32 = 0;
+    while (count < max_count) : (count += 1) {
+        const sha_offset = sha1_table_start + @as(usize, count) * 20;
+        if (sha_offset + 20 > idx_data.len) break;
+        const obj_hash = idx_data[sha_offset .. sha_offset + 20];
+        const hex = std.fmt.bytesToHex(obj_hash[0..20].*, .lower);
+
+        // Get offset and read object type
+        const off_offset = offset_table_start + @as(usize, count) * 4;
+        if (off_offset + 4 > idx_data.len) break;
+        const offset_val = std.mem.readInt(u32, idx_data[off_offset..][0..4], .big);
+
+        const obj = readPackedObjectFromData(pack_data, offset_val, allocator) catch continue;
+        defer obj.deinit(allocator);
+
+        const type_str: []const u8 = switch (obj.obj_type) {
+            .commit => "commit",
+            .tree => "tree",
+            .blob => "blob",
+            .tag => "tag",
+        };
+
+        if (count > 0) json.appendSlice(",") catch return -4;
+        json.appendSlice("{\"hash\":\"") catch return -4;
+        json.appendSlice(&hex) catch return -4;
+        json.appendSlice("\",\"type\":\"") catch return -4;
+        json.appendSlice(type_str) catch return -4;
+        json.writer().print("\",\"size\":{d}}}", .{obj.data.len}) catch return -4;
+    }
+
+    json.appendSlice("]") catch return -4;
+    const owned = json.toOwnedSlice() catch return -5;
+    out_ptr.* = @intFromPtr(owned.ptr);
+    out_len.* = @intCast(owned.len);
+    return 0;
+}
+
+/// Search for objects by partial hash prefix (for auto-complete).
+/// prefix_ptr/prefix_len: hex prefix (min 4 chars)
+/// Returns JSON array of matching full hashes, or negative on error.
+export fn ziggit_find_objects(prefix_ptr: [*]const u8, prefix_len: u32, out_ptr: *u32, out_len: *u32) i32 {
+    if (prefix_len < 4 or prefix_len > 40) return -1;
+    const allocator = getAllocator();
+    const idx_data = global_idx_data orelse return -2;
+
+    if (idx_data.len < 8 + 256 * 4) return -3;
+    const sha1_table_start: usize = 8 + 256 * 4;
+    const prefix = prefix_ptr[0..prefix_len];
+
+    // Parse first byte of prefix to narrow search via fanout
+    const first_byte = std.fmt.parseInt(u8, prefix[0..2], 16) catch return -4;
+    const start_index: u32 = if (first_byte == 0) 0 else std.mem.readInt(u32, idx_data[8 + (@as(usize, first_byte) - 1) * 4 ..][0..4], .big);
+    const end_index = std.mem.readInt(u32, idx_data[8 + @as(usize, first_byte) * 4 ..][0..4], .big);
+
+    var json = std.array_list.Managed(u8).init(allocator);
+    defer json.deinit();
+    json.appendSlice("[") catch return -5;
+
+    var first = true;
+    var idx = start_index;
+    while (idx < end_index) : (idx += 1) {
+        const sha_offset = sha1_table_start + @as(usize, idx) * 20;
+        if (sha_offset + 20 > idx_data.len) break;
+        const obj_hash = idx_data[sha_offset .. sha_offset + 20];
+        const hex = std.fmt.bytesToHex(obj_hash[0..20].*, .lower);
+
+        // Check if hex starts with prefix
+        if (std.mem.startsWith(u8, &hex, prefix)) {
+            if (!first) json.appendSlice(",") catch return -5;
+            first = false;
+            json.appendSlice("\"") catch return -5;
+            json.appendSlice(&hex) catch return -5;
+            json.appendSlice("\"") catch return -5;
+        }
+    }
+
+    json.appendSlice("]") catch return -5;
+    const owned = json.toOwnedSlice() catch return -6;
+    out_ptr.* = @intFromPtr(owned.ptr);
+    out_len.* = @intCast(owned.len);
+    return 0;
+}
+
 fn matchDriverToExt(driver_name: []const u8, ext: []const u8) bool {
     const mappings = .{
         .{ "cpp", &[_][]const u8{ ".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".cxx", ".hxx" } },
