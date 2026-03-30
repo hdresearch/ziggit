@@ -3453,6 +3453,10 @@ fn writeRemoteRef(allocator: std.mem.Allocator, git_dir: []const u8, remote_name
 }
 
 fn copyDirectory(source: []const u8, dest: []const u8) !void {
+    return copyDirectoryImpl(source, dest, true);
+}
+
+fn copyDirectoryImpl(source: []const u8, dest: []const u8, try_hardlinks: bool) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -3473,13 +3477,37 @@ fn copyDirectory(source: []const u8, dest: []const u8) !void {
 
             switch (entry.kind) {
                 .file => {
-                    try copyFileZeroCopy(source_path, dest_path);
+                    if (try_hardlinks) {
+                        hardlinkFile(source_path, dest_path) catch {
+                            try copyFileZeroCopy(source_path, dest_path);
+                        };
+                    } else {
+                        try copyFileZeroCopy(source_path, dest_path);
+                    }
                 },
-                .directory => try copyDirectory(source_path, dest_path),
+                .directory => try copyDirectoryImpl(source_path, dest_path, try_hardlinks),
                 else => {},
             }
         }
     } else |err| return err;
+}
+
+/// Try to create a hardlink (instant, no IO). Falls back on error.
+fn hardlinkFile(source_path: []const u8, dest_path: []const u8) !void {
+    var src_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var dst_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (source_path.len >= src_buf.len or dest_path.len >= dst_buf.len) return error.NameTooLong;
+    @memcpy(src_buf[0..source_path.len], source_path);
+    src_buf[source_path.len] = 0;
+    @memcpy(dst_buf[0..dest_path.len], dest_path);
+    dst_buf[dest_path.len] = 0;
+    const src_z: [*:0]const u8 = @ptrCast(&src_buf);
+    const dst_z: [*:0]const u8 = @ptrCast(&dst_buf);
+    const rc = std.os.linux.link(src_z, dst_z);
+    switch (std.os.linux.E.init(rc)) {
+        .SUCCESS => {},
+        else => return error.LinkFailed,
+    }
 }
 
 /// Zero-copy file copy using copy_file_range or sendfile syscall
