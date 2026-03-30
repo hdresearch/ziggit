@@ -188,6 +188,28 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         }
     }
 
+    // Validate incompatible modes (must be before delete/verify handling)
+    if (list_mode and delete_mode) {
+        try platform_impl.writeStderr("error: -l and -d are incompatible\n");
+        std.process.exit(1);
+    }
+    if (list_mode and verify_mode) {
+        try platform_impl.writeStderr("error: -l and -v are incompatible\n");
+        std.process.exit(1);
+    }
+    if (list_mode and (annotated or message != null or force)) {
+        try platform_impl.writeStderr("error: -l and creation options are incompatible\n");
+        std.process.exit(1);
+    }
+    if (delete_mode and verify_mode) {
+        try platform_impl.writeStderr("error: -d and -v are incompatible\n");
+        std.process.exit(1);
+    }
+    if (verify_mode and (annotated or message != null)) {
+        try platform_impl.writeStderr("error: -v and creation options are incompatible\n");
+        std.process.exit(1);
+    }
+
     // helpers.Handle delete mode
     if (delete_mode) {
         if (delete_names.items.len == 0) {
@@ -286,6 +308,19 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         try platform_impl.writeStderr("error: no signature found\n");
         std.process.exit(1);
         unreachable;
+    }
+
+    if (annotated and tag_name == null and !list_mode) {
+        try platform_impl.writeStderr("fatal: tag name is required\n");
+        std.process.exit(1);
+    }
+    if (message != null and tag_name == null and !list_mode) {
+        try platform_impl.writeStderr("fatal: tag name is required\n");
+        std.process.exit(1);
+    }
+    if (force and tag_name == null and !list_mode and !delete_mode) {
+        try platform_impl.writeStderr("fatal: tag name is required\n");
+        std.process.exit(1);
     }
 
     if (tag_name == null or list_mode) {
