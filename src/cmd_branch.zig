@@ -414,6 +414,17 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         const old_hash = if (old_hash_result) |h| h else |_| try allocator.dupe(u8, "");
         defer allocator.free(old_hash);
 
+        // Check if the source is a symbolic ref (not allowed to rename)
+        if (!is_unborn) {
+            const old_hash_trimmed = std.mem.trim(u8, old_hash, " \t\r\n");
+            if (std.mem.startsWith(u8, old_hash_trimmed, "ref: ")) {
+                const emsg_sym = try std.fmt.allocPrint(allocator, "fatal: Branch {s} is a symbolic ref, renaming it is not supported.\n", .{old_name});
+                defer allocator.free(emsg_sym);
+                try platform_impl.writeStderr(emsg_sym);
+                std.process.exit(128);
+            }
+        }
+
         // Check if target branch already exists (for -m, not -M)
         if (!std.mem.eql(u8, old_name, new_name) and std.mem.eql(u8, first_arg.?, "-m")) {
             const target_ref = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, new_name });
