@@ -106,6 +106,7 @@ pub fn build(b: *std.Build) void {
         "ziggit_diff",
         "ziggit_split_lines",
         "ziggit_tree_walk",
+        "ziggit_detect_language",
     };
 
     const wasm_step = b.step("wasm", "Build WASM module for browser");

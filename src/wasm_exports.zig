@@ -6,6 +6,7 @@ const gitignore = @import("git/gitignore.zig");
 const validation = @import("git/validation.zig");
 const diff = @import("git/diff.zig");
 const blame = @import("git/blame.zig");
+const userdiff = @import("git/userdiff.zig");
 /// WASM exports for browser integration
 /// Provides a C-ABI compatible interface to ziggit's git operations.
 /// All strings are passed as (ptr, len) pairs. Errors return negative values.
@@ -1630,4 +1631,64 @@ fn walkTreeRecursive(
             json.appendSlice("\"}") catch return;
         }
     }
+}
+
+// ========== Userdiff / language detection ==========
+
+/// Detect diff driver name for a file path.
+/// Returns bytes written to out_ptr, or negative on error.
+/// Known drivers: ada, bash, bibtex, cpp, csharp, css, dts, elixir, fortran, etc.
+export fn ziggit_detect_language(path_ptr: [*]const u8, path_len: u32, out_ptr: [*]u8, out_cap: u32) i32 {
+    const path = path_ptr[0..path_len];
+
+    // Match by file extension
+    const ext = if (std.mem.lastIndexOfScalar(u8, path, '.')) |dot| path[dot..] else "";
+
+    for (userdiff.builtin_drivers) |driver| {
+        // Simple extension-based matching
+        if (matchDriverToExt(driver.name, ext)) {
+            const copy_len = @min(driver.name.len, out_cap);
+            @memcpy(out_ptr[0..copy_len], driver.name[0..copy_len]);
+            return @intCast(copy_len);
+        }
+    }
+
+    return 0; // No match
+}
+
+fn matchDriverToExt(driver_name: []const u8, ext: []const u8) bool {
+    const mappings = .{
+        .{ "cpp", &[_][]const u8{ ".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".cxx", ".hxx" } },
+        .{ "csharp", &[_][]const u8{ ".cs" } },
+        .{ "css", &[_][]const u8{ ".css", ".scss", ".less" } },
+        .{ "elixir", &[_][]const u8{ ".ex", ".exs" } },
+        .{ "fortran", &[_][]const u8{ ".f", ".f90", ".f95", ".f03" } },
+        .{ "golang", &[_][]const u8{".go"} },
+        .{ "html", &[_][]const u8{ ".html", ".htm", ".xhtml" } },
+        .{ "java", &[_][]const u8{ ".java" } },
+        .{ "markdown", &[_][]const u8{ ".md", ".markdown" } },
+        .{ "matlab", &[_][]const u8{".m"} },
+        .{ "objc", &[_][]const u8{".mm"} },
+        .{ "pascal", &[_][]const u8{ ".pas", ".pp" } },
+        .{ "perl", &[_][]const u8{ ".pl", ".pm" } },
+        .{ "php", &[_][]const u8{".php"} },
+        .{ "python", &[_][]const u8{ ".py" } },
+        .{ "ruby", &[_][]const u8{ ".rb" } },
+        .{ "rust", &[_][]const u8{".rs"} },
+        .{ "scheme", &[_][]const u8{ ".scm", ".ss" } },
+        .{ "tex", &[_][]const u8{ ".tex", ".sty", ".cls" } },
+        .{ "ada", &[_][]const u8{ ".adb", ".ads" } },
+        .{ "bash", &[_][]const u8{ ".sh", ".bash" } },
+        .{ "bibtex", &[_][]const u8{".bib"} },
+        .{ "dts", &[_][]const u8{ ".dts", ".dtsi" } },
+    };
+
+    inline for (mappings) |mapping| {
+        if (std.mem.eql(u8, driver_name, mapping[0])) {
+            for (mapping[1]) |e| {
+                if (std.ascii.eqlIgnoreCase(ext, e)) return true;
+            }
+        }
+    }
+    return false;
 }
