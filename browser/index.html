@@ -176,7 +176,7 @@
 
       if (inf.err && inf.err !== 0) {
         if (!inf.result || inf.result.length === 0) {
-          throw new Error('inflate error at offset ' + offset + ': ' + inf.msg + ' (err=' + inf.err + ')');
+          throw new Error('inflate error at offset ' + offset + ': ' + (inf.msg || 'unknown'));
         }
       }
 
