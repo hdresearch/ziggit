@@ -276,7 +276,7 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
 
     if (batch_mode or batch_check) {
         // Batch mode: read object names from stdin
-        try catFileBatch(allocator, git_path, batch_mode, batch_format, platform_impl);
+        try catFileBatch(allocator, git_path, batch_mode, batch_format, platform_impl, batch_command);
         return;
     }
 
@@ -430,7 +430,7 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
 }
 
 
-pub fn catFileBatch(allocator: std.mem.Allocator, git_path: []const u8, full_content: bool, custom_format: ?[]const u8, platform_impl: *const platform_mod.Platform) !void {
+pub fn catFileBatch(allocator: std.mem.Allocator, git_path: []const u8, full_content: bool, custom_format: ?[]const u8, platform_impl: *const platform_mod.Platform, is_batch_command: bool) !void {
     const stdin_data = helpers.readStdin(allocator, 10 * 1024 * 1024) catch return;
     defer allocator.free(stdin_data);
     
@@ -438,19 +438,42 @@ pub fn catFileBatch(allocator: std.mem.Allocator, git_path: []const u8, full_con
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0) continue;
+
+        // In --batch-command mode, parse command prefix
+        var object_name = trimmed;
+        var cmd_is_contents = full_content; // default behavior
+        var cmd_is_info = !full_content;
+        if (is_batch_command) {
+            if (std.mem.eql(u8, trimmed, "flush")) {
+                continue;
+            } else if (std.mem.startsWith(u8, trimmed, "contents ")) {
+                object_name = std.mem.trim(u8, trimmed["contents ".len..], " \t");
+                cmd_is_contents = true;
+                cmd_is_info = false;
+            } else if (std.mem.startsWith(u8, trimmed, "info ")) {
+                object_name = std.mem.trim(u8, trimmed["info ".len..], " \t");
+                cmd_is_contents = false;
+                cmd_is_info = true;
+            } else {
+                const msg = try std.fmt.allocPrint(allocator, "{s} missing\n", .{trimmed});
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+                continue;
+            }
+        }
         
         // helpers.Resolve object
         var obj_hash: []u8 = undefined;
-        if (helpers.isValidHashPrefix(trimmed)) {
-            obj_hash = helpers.resolveCommitHash(git_path, trimmed, platform_impl, allocator) catch {
-                const msg = try std.fmt.allocPrint(allocator, "{s} missing\n", .{trimmed});
+        if (helpers.isValidHashPrefix(object_name)) {
+            obj_hash = helpers.resolveCommitHash(git_path, object_name, platform_impl, allocator) catch {
+                const msg = try std.fmt.allocPrint(allocator, "{s} missing\n", .{object_name});
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
                 continue;
             };
         } else {
-            obj_hash = helpers.resolveCommittish(git_path, trimmed, platform_impl, allocator) catch {
-                const msg = try std.fmt.allocPrint(allocator, "{s} missing\n", .{trimmed});
+            obj_hash = helpers.resolveCommittish(git_path, object_name, platform_impl, allocator) catch {
+                const msg = try std.fmt.allocPrint(allocator, "{s} missing\n", .{object_name});
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
                 continue;
@@ -459,7 +482,7 @@ pub fn catFileBatch(allocator: std.mem.Allocator, git_path: []const u8, full_con
         defer allocator.free(obj_hash);
         
         const git_object = objects.GitObject.load(obj_hash, git_path, platform_impl, allocator) catch {
-            const msg = try std.fmt.allocPrint(allocator, "{s} missing\n", .{trimmed});
+            const msg = try std.fmt.allocPrint(allocator, "{s} missing\n", .{object_name});
             defer allocator.free(msg);
             try platform_impl.writeStdout(msg);
             continue;
@@ -472,17 +495,17 @@ pub fn catFileBatch(allocator: std.mem.Allocator, git_path: []const u8, full_con
             .commit => "commit",
             .tag => "tag",
         };
-        
+
         if (custom_format) |fmt| {
             const formatted = try formatCatFileOutput(allocator, fmt, obj_hash, type_str, git_object.data.len);
             defer allocator.free(formatted);
             try platform_impl.writeStdout(formatted);
             try platform_impl.writeStdout("\n");
-            if (full_content) {
+            if (cmd_is_contents) {
                 try platform_impl.writeStdout(git_object.data);
                 try platform_impl.writeStdout("\n");
             }
-        } else if (full_content) {
+        } else if (cmd_is_contents) {
             const header = try std.fmt.allocPrint(allocator, "{s} {s} {d}\n", .{ obj_hash, type_str, git_object.data.len });
             defer allocator.free(header);
             try platform_impl.writeStdout(header);
