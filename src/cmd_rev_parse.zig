@@ -344,6 +344,19 @@ pub fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                     continue;
                 }
             } else |_| {}
+            // Check if we're inside the git dir (then we're NOT in work tree)
+            const cwd_wt = try platform_impl.fs.getCwd(allocator);
+            defer allocator.free(cwd_wt);
+            const real_git_wt = std.fs.cwd().realpathAlloc(allocator, git_path) catch try allocator.dupe(u8, git_path);
+            defer allocator.free(real_git_wt);
+            const real_cwd_wt = std.fs.cwd().realpathAlloc(allocator, cwd_wt) catch try allocator.dupe(u8, cwd_wt);
+            defer allocator.free(real_cwd_wt);
+            if (std.mem.eql(u8, real_cwd_wt, real_git_wt) or
+                (std.mem.startsWith(u8, real_cwd_wt, real_git_wt) and real_cwd_wt.len > real_git_wt.len and real_cwd_wt[real_git_wt.len] == '/'))
+            {
+                try platform_impl.writeStdout("false\n");
+                continue;
+            }
             try platform_impl.writeStdout("true\n");
             continue;
         } else if (std.mem.eql(u8, arg, "--is-inside-git-dir")) {
