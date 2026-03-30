@@ -26,6 +26,7 @@ pub fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command
     var ref_name: []const u8 = "HEAD";
     var ref_name_set = false;
     var end_of_options = false;
+    var format: ?[]const u8 = null;
 
     var i = command_index + 1;
     while (i < args.len) : (i += 1) {
@@ -44,6 +45,8 @@ pub fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command
         } else if (std.mem.eql(u8, arg, "-h")) {
             try platform_impl.writeStdout("usage: git reflog [show|expire|delete|exists] [<ref>]\n");
             std.process.exit(129);
+        } else if (std.mem.startsWith(u8, arg, "--format=")) {
+            format = arg["--format=".len..];
         } else if (std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "-n") or
             std.mem.startsWith(u8, arg, "--expire=") or std.mem.eql(u8, arg, "--verbose") or
             std.mem.eql(u8, arg, "--rewrite") or std.mem.eql(u8, arg, "--updateref") or
@@ -87,7 +90,14 @@ pub fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command
         } else if (std.mem.startsWith(u8, ref_name, "refs/")) {
             reflog_path = std.fmt.allocPrint(allocator, "{s}/logs/{s}", .{ git_dir, ref_name }) catch unreachable;
         } else {
-            reflog_path = std.fmt.allocPrint(allocator, "{s}/logs/refs/heads/{s}", .{ git_dir, ref_name }) catch unreachable;
+            // Try refs/<name> first (for stash, bisect, etc.), then refs/heads/<name>
+            const try_ref = std.fmt.allocPrint(allocator, "{s}/logs/refs/{s}", .{ git_dir, ref_name }) catch unreachable;
+            if (std.fs.cwd().access(try_ref, .{})) |_| {
+                reflog_path = try_ref;
+            } else |_| {
+                allocator.free(try_ref);
+                reflog_path = std.fmt.allocPrint(allocator, "{s}/logs/refs/heads/{s}", .{ git_dir, ref_name }) catch unreachable;
+            }
         }
         defer allocator.free(reflog_path);
 
@@ -116,14 +126,43 @@ pub fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command
             // Format: <old-sha1> <new-sha1> <author> <timestamp> <tz>\t<message>
             if (std.mem.indexOfScalar(u8, line, '\t')) |tab| {
                 const msg = line[tab + 1..];
-                // helpers.Extract new sha
+                // helpers.Extract new sha and old sha
                 if (line.len >= 82) {
                     const new_sha = line[41..81];
-                    const selector = std.fmt.allocPrint(allocator, "{s}@{{{d}}}", .{ ref_name, seq }) catch continue;
-                    defer allocator.free(selector);
-                    const output = std.fmt.allocPrint(allocator, "{s} {s}: {s}\n", .{ new_sha[0..@min(7, new_sha.len)], selector, msg }) catch continue;
-                    defer allocator.free(output);
-                    try platform_impl.writeStdout(output);
+                    const old_sha = line[0..40];
+                    _ = old_sha;
+                    if (format) |fmt| {
+                        // Simple format string handling
+                        var output_buf = std.array_list.Managed(u8).init(allocator);
+                        defer output_buf.deinit();
+                        var fi: usize = 0;
+                        while (fi < fmt.len) {
+                            if (fmt[fi] == '%' and fi + 1 < fmt.len) {
+                                switch (fmt[fi + 1]) {
+                                    'H' => output_buf.appendSlice(new_sha) catch {},
+                                    'h' => output_buf.appendSlice(new_sha[0..@min(7, new_sha.len)]) catch {},
+                                    's' => output_buf.appendSlice(msg) catch {},
+                                    'n' => output_buf.append('\n') catch {},
+                                    else => {
+                                        output_buf.append('%') catch {};
+                                        output_buf.append(fmt[fi + 1]) catch {};
+                                    },
+                                }
+                                fi += 2;
+                            } else {
+                                output_buf.append(fmt[fi]) catch {};
+                                fi += 1;
+                            }
+                        }
+                        output_buf.append('\n') catch {};
+                        try platform_impl.writeStdout(output_buf.items);
+                    } else {
+                        const selector = std.fmt.allocPrint(allocator, "{s}@{{{d}}}", .{ ref_name, seq }) catch continue;
+                        defer allocator.free(selector);
+                        const output = std.fmt.allocPrint(allocator, "{s} {s}: {s}\n", .{ new_sha[0..@min(7, new_sha.len)], selector, msg }) catch continue;
+                        defer allocator.free(output);
+                        try platform_impl.writeStdout(output);
+                    }
                 }
             }
             seq += 1;
