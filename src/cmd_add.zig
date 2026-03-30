@@ -361,9 +361,15 @@ fn applyCrlfNormalization(allocator: std.mem.Allocator, relative_path: []const u
         attr_rules.deinit();
     }
 
+    // Check if we should normalize based on attributes
+    const attrs = crlf_mod.getFileAttrs(relative_path, attr_rules.items);
+
+    // Only normalize when text attribute is explicitly set as "text" (not auto)
+    // With unspecified/auto attr and autocrlf, git uses "safe" behavior:
+    // it doesn't normalize if the file already exists in the index with CRLF
+    if (attrs.text != .text) return null;
+
     const converted = crlf_mod.applyCommitConversion(allocator, content, relative_path, attr_rules.items, autocrlf_val) catch return null;
-    // If the conversion returned a new allocation (different from original), return it
-    // applyCommitConversion always allocates a new buffer (dupe or converted)
     return converted;
 }
 
