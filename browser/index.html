@@ -63,7 +63,7 @@
     <span class="info">CORS proxy prefix</span>
   </div>
   <div class="row">
-    <input type="text" id="url" value="https://github.com/nicolo-ribaudo/tc39-proposal-structs" placeholder="Repository URL" onkeydown="if(event.key==='Enter')doClone()">
+    <input type="text" id="url" value="https://github.com/nicolo-ribaudo/jest-light-runner" placeholder="Repository URL" onkeydown="if(event.key==='Enter')doClone()">
     <button id="cloneBtn" onclick="doClone()">Clone</button>
     <span id="status"></span>
   </div>
@@ -374,7 +374,7 @@
       status('Resolving deltas...');
       function resolveObject(idx) {
         const obj = objects[idx];
-        if (obj.hash) return obj; // already resolved
+        if (obj.hash || obj._needsHash) return obj; // already resolved
 
         let base;
         if (obj.type === 6) {

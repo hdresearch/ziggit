@@ -95,6 +95,8 @@ pub fn build(b: *std.Build) void {
         "ziggit_apply_delta",
         "ziggit_load_pack",
         "ziggit_pack_object_count",
+        "ziggit_decompress_and_hash",
+        "ziggit_parse_pack_header",
     };
 
     const wasm_step = b.step("wasm", "Build WASM module for browser");

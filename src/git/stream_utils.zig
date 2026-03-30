@@ -151,14 +151,16 @@ pub fn parsePackObjectHeader(pack_data: []const u8, offset: usize) error{Invalid
     pos += 1;
     const type_num: u3 = @intCast((first_byte >> 4) & 7);
     var size: usize = @intCast(first_byte & 0x0F);
-    var shift: u6 = 4;
+    const ShiftT = std.math.Log2Int(usize);
+    var shift: ShiftT = 4;
     var current_byte = first_byte;
+    const max_shift: ShiftT = @bitSizeOf(usize) - 7;
 
     while (current_byte & 0x80 != 0 and pos < pack_data.len) {
         current_byte = pack_data[pos];
         pos += 1;
         size |= @as(usize, @intCast(current_byte & 0x7F)) << shift;
-        if (shift < 60) shift += 7 else break;
+        if (shift < max_shift) shift += 7 else break;
     }
 
     return .{
