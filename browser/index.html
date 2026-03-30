@@ -614,12 +614,23 @@
           headers: { 'Content-Type': 'application/x-git-upload-pack-request' },
           body: packBody
         });
-        if (!packResp.ok) throw new Error('Failed to fetch pack: ' + packResp.status);
+        if (!packResp.ok) throw new Error('Failed to fetch pack: HTTP ' + packResp.status + ' ' + packResp.statusText);
 
         const packBuffer = await packResp.arrayBuffer();
         const packBytes = new Uint8Array(packBuffer);
         const dlSize = formatSize(packBytes.length);
         console.log('Pack response size:', packBytes.length);
+
+        // Check for error responses (HTML error pages, JSON errors, etc.)
+        if (packBytes.length < 20) {
+          throw new Error('Pack response too small (' + packBytes.length + ' bytes). The CORS proxy may not support POST requests.');
+        }
+        // Check if response is HTML/JSON error page
+        const firstBytes = String.fromCharCode(...packBytes.subarray(0, Math.min(50, packBytes.length)));
+        if (firstBytes.startsWith('{"error') || firstBytes.startsWith('<!DOCTYPE') || firstBytes.startsWith('<html')) {
+          throw new Error('CORS proxy returned an error page instead of pack data. Try a different proxy or check if POST requests are supported.\n' + firstBytes.slice(0, 200));
+        }
+
         showProgress(15);
         status(`Downloaded ${dlSize}. Extracting pack...`);
 
@@ -632,7 +643,9 @@
           if (packStart >= 0) {
             packData = packBytes.slice(packStart);
           } else {
-            throw new Error('PACK signature not found in response');
+            // Log first bytes for debugging
+            console.error('No PACK signature found. First 100 bytes:', bytesToHex(packBytes.subarray(0, 100)));
+            throw new Error('PACK signature not found in response (' + dlSize + '). The server response may be in an unexpected format.');
           }
         }
 
