@@ -558,7 +558,7 @@ fn addIndexEntryStaged(idx: *index_mod.Index, path: []const u8, sha1: [20]u8, mo
     const stat = std.fs.cwd().statFile(full_path) catch std.fs.File.Stat{
         .inode = 0,
         .size = 0,
-        .mode = @truncate(mode),
+        .mode = @as(std.fs.File.Mode, mode),
         .mtime = 0,
         .ctime = 0,
         .atime = 0,
