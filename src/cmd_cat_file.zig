@@ -439,8 +439,17 @@ pub fn catFileBatch(allocator: std.mem.Allocator, git_path: []const u8, full_con
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0) continue;
 
-        // In --batch-command mode, parse command prefix
+        // Split object name from rest (for %(rest) format)
         var object_name = trimmed;
+        var rest_text: []const u8 = "";
+        const has_rest_format = if (custom_format) |fmt| std.mem.indexOf(u8, fmt, "%(rest)") != null else false;
+        if (!is_batch_command and has_rest_format) {
+            // In regular batch/batch-check mode with %(rest), split on whitespace
+            if (std.mem.indexOfAny(u8, trimmed, " \t")) |ws_idx| {
+                object_name = trimmed[0..ws_idx];
+                rest_text = std.mem.trimLeft(u8, trimmed[ws_idx..], " \t");
+            }
+        }
         var cmd_is_contents = full_content; // default behavior
         var cmd_is_info = !full_content;
         if (is_batch_command) {
@@ -497,7 +506,7 @@ pub fn catFileBatch(allocator: std.mem.Allocator, git_path: []const u8, full_con
         };
 
         if (custom_format) |fmt| {
-            const formatted = try formatCatFileOutput(allocator, fmt, obj_hash, type_str, git_object.data.len);
+            const formatted = try formatCatFileOutput(allocator, fmt, obj_hash, type_str, git_object.data.len, rest_text);
             defer allocator.free(formatted);
             try platform_impl.writeStdout(formatted);
             try platform_impl.writeStdout("\n");
@@ -520,7 +529,7 @@ pub fn catFileBatch(allocator: std.mem.Allocator, git_path: []const u8, full_con
 }
 
 
-pub fn formatCatFileOutput(allocator: std.mem.Allocator, fmt: []const u8, obj_hash: []const u8, type_str: []const u8, size: usize) ![]u8 {
+pub fn formatCatFileOutput(allocator: std.mem.Allocator, fmt: []const u8, obj_hash: []const u8, type_str: []const u8, size: usize, rest_text: []const u8) ![]u8 {
     var result = std.array_list.Managed(u8).init(allocator);
     defer result.deinit();
 
@@ -546,7 +555,7 @@ pub fn formatCatFileOutput(allocator: std.mem.Allocator, fmt: []const u8, obj_ha
             } else if (std.mem.eql(u8, field, "objectsize:disk")) {
                 try result.append('0'); // placeholder
             } else if (std.mem.eql(u8, field, "rest")) {
-                // rest of input line - empty for now
+                try result.appendSlice(rest_text);
             }
         } else if (fmt[i] == '%' and i + 1 < fmt.len and fmt[i + 1] == '%') {
             try result.append('%');
