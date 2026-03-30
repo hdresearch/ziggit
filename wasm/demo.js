@@ -77,7 +77,8 @@ const importObject = {
     },
     host_http_get(urlPtr, urlLen, respPtrPtr, respLenPtr) {
       const rawUrl = getStr(urlPtr, urlLen);
-      const url = (window._corsProxy || '') + rawUrl;
+      const proxy = window._corsProxy || '';
+      const url = proxy ? proxy + encodeURIComponent(rawUrl) : rawUrl;
       log('[http] GET ' + url + '\n');
       const xhr = new XMLHttpRequest();
       xhr.open('GET', url, false);
@@ -94,7 +95,8 @@ const importObject = {
     },
     host_http_post(urlPtr, urlLen, bodyPtr, bodyLen, ctPtr, ctLen, respPtrPtr, respLenPtr) {
       const rawUrl = getStr(urlPtr, urlLen);
-      const url = (window._corsProxy || '') + rawUrl;
+      const proxy = window._corsProxy || '';
+      const url = proxy ? proxy + encodeURIComponent(rawUrl) : rawUrl;
       const body = new Uint8Array(wasmMemory.buffer, bodyPtr, bodyLen).slice();
       const contentType = getStr(ctPtr, ctLen);
       log('[http] POST ' + url + ' (' + body.length + ' bytes)\n');
