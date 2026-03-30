@@ -446,6 +446,33 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             }
         }
 
+        // Rename config section [branch "old"] to [branch "new"]
+        if (!std.mem.eql(u8, old_name, new_name)) {
+            const config_path_r = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+            defer allocator.free(config_path_r);
+            const cfg_data = std.fs.cwd().readFileAlloc(allocator, config_path_r, 1024 * 1024) catch null;
+            if (cfg_data) |cd| {
+                defer allocator.free(cd);
+                const old_section = try std.fmt.allocPrint(allocator, "[branch \"{s}\"]", .{old_name});
+                defer allocator.free(old_section);
+                if (std.mem.indexOf(u8, cd, old_section)) |_| {
+                    const new_section = try std.fmt.allocPrint(allocator, "[branch \"{s}\"]", .{new_name});
+                    defer allocator.free(new_section);
+                    // Simple replacement of section header
+                    var new_cfg = std.array_list.Managed(u8).init(allocator);
+                    defer new_cfg.deinit();
+                    var pos: usize = 0;
+                    while (std.mem.indexOf(u8, cd[pos..], old_section)) |idx| {
+                        new_cfg.appendSlice(cd[pos .. pos + idx]) catch {};
+                        new_cfg.appendSlice(new_section) catch {};
+                        pos += idx + old_section.len;
+                    }
+                    new_cfg.appendSlice(cd[pos..]) catch {};
+                    std.fs.cwd().writeFile(.{ .sub_path = config_path_r, .data = new_cfg.items }) catch {};
+                }
+            }
+        }
+
         // helpers.Update helpers.HEAD if it pointed to the old branch
         const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
         defer allocator.free(head_path);
