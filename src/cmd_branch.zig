@@ -536,6 +536,38 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             defer allocator.free(m4);
             try platform_impl.writeStdout(m4);
         }
+    } else if (std.mem.eql(u8, first_arg.?, "--track") or std.mem.eql(u8, first_arg.?, "-t")) {
+        // --track <branch> <start-point>: create branch with tracking
+        const branch_name = fake_args.next() orelse {
+            try platform_impl.writeStderr("fatal: branch name required\n");
+            std.process.exit(128);
+            unreachable;
+        };
+        const start_point = fake_args.next();
+        refs.createBranch(git_path, branch_name, start_point, platform_impl, allocator) catch |err| switch (err) {
+            error.NoCommitsYet => {
+                try platform_impl.writeStderr("fatal: not a valid object name: 'HEAD'\n");
+                std.process.exit(128);
+            },
+            else => return err,
+        };
+        // Set up tracking
+        if (start_point) |sp| {
+            const tracking_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{sp});
+            defer allocator.free(tracking_ref);
+            // Write tracking config
+            const config_path2 = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+            defer allocator.free(config_path2);
+            const existing_config = std.fs.cwd().readFileAlloc(allocator, config_path2, 1024 * 1024) catch try allocator.dupe(u8, "");
+            defer allocator.free(existing_config);
+            var new_config = std.array_list.Managed(u8).init(allocator);
+            defer new_config.deinit();
+            new_config.appendSlice(existing_config) catch {};
+            const tracking_section = try std.fmt.allocPrint(allocator, "[branch \"{s}\"]\n\tremote = .\n\tmerge = {s}\n", .{branch_name, tracking_ref});
+            defer allocator.free(tracking_section);
+            new_config.appendSlice(tracking_section) catch {};
+            std.fs.cwd().writeFile(.{ .sub_path = config_path2, .data = new_config.items }) catch {};
+        }
     } else {
         // helpers.Create new branch
         const branch_name = first_arg.?;
