@@ -579,7 +579,11 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             try platform_impl.writeStdout("no changes added to commit (use \"git add\" and/or \"git commit -a\")\n");
         }
         if (!show_untracked) {
-            try platform_impl.writeStdout("Untracked files not listed (use -u option to show untracked files)\n");
+            if (show_hints) {
+                try platform_impl.writeStdout("\nUntracked files not listed (use -u option to show untracked files)\n");
+            } else {
+                try platform_impl.writeStdout("\nUntracked files not listed\n");
+            }
         }
     }
 }
