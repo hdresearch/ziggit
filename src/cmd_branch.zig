@@ -974,7 +974,22 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             std.process.exit(128);
             unreachable;
         };
-        const start_point = fake_args.next();
+        const start_point_raw = fake_args.next();
+        // Resolve start point (handles remote tracking branches like origin/main)
+        var resolved_sp_track: ?[]u8 = null;
+        defer if (resolved_sp_track) |rsp| allocator.free(rsp);
+        if (start_point_raw) |sp| {
+            resolved_sp_track = helpers.resolveRevision(git_path, sp, platform_impl, allocator) catch null;
+            // Try as remote tracking ref
+            if (resolved_sp_track == null) {
+                const remote_ref = try std.fmt.allocPrint(allocator, "refs/remotes/{s}", .{sp});
+                defer allocator.free(remote_ref);
+                if ((refs.resolveRef(git_path, remote_ref, platform_impl, allocator) catch null) orelse null) |hash| {
+                    resolved_sp_track = hash;
+                }
+            }
+        }
+        const start_point: ?[]const u8 = if (resolved_sp_track) |r| r else start_point_raw;
         refs.createBranch(git_path, branch_name, start_point, platform_impl, allocator) catch |err| switch (err) {
             error.NoCommitsYet => {
                 try platform_impl.writeStderr("fatal: not a valid object name: 'HEAD'\n");
@@ -983,7 +998,7 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             else => return err,
         };
         // Set up tracking
-        if (start_point) |sp| {
+        if (start_point_raw) |sp| {
             // Determine remote and merge ref from start_point
             var remote_name: []const u8 = ".";
             var merge_ref: []const u8 = undefined;
@@ -1035,11 +1050,25 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         const existing_ref = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, branch_name });
         defer allocator.free(existing_ref);
         const branch_exists = if (std.fs.cwd().access(existing_ref, .{})) |_| true else |_| false;
-        if (branch_exists) {
+        if (branch_exists and !force_flag) {
             const emsg = try std.fmt.allocPrint(allocator, "fatal: a branch named '{s}' already exists\n", .{branch_name});
             defer allocator.free(emsg);
             try platform_impl.writeStderr(emsg);
             std.process.exit(128);
+        }
+        // For --force on checked-out branch, fail
+        if (force_flag and branch_exists) {
+            const cur_br_f = refs.getCurrentBranch(git_path, platform_impl, allocator) catch null;
+            defer if (cur_br_f) |cb| allocator.free(cb);
+            if (cur_br_f) |cb| {
+                const short_cb_f = if (std.mem.startsWith(u8, cb, "refs/heads/")) cb["refs/heads/".len..] else cb;
+                if (std.mem.eql(u8, short_cb_f, branch_name)) {
+                    const emsg_f = try std.fmt.allocPrint(allocator, "fatal: cannot force update the branch '{s}' used by worktree at '{s}'\n", .{ branch_name, std.fs.path.dirname(git_path) orelse "." });
+                    defer allocator.free(emsg_f);
+                    try platform_impl.writeStderr(emsg_f);
+                    std.process.exit(128);
+                }
+            }
         }
         
         // helpers.Validate branch name
