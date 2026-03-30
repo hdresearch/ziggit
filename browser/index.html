@@ -760,6 +760,13 @@
       const typeStr = Object.entries(typeCounts).map(([t,c]) => `${c} ${t}s`).join(', ');
       console.log(`WASM pack extraction: ${Object.keys(objectDb).length} objects (${typeStr})`);
       status(`WASM extracted ${objects.length} objects: ${typeStr}`);
+
+      // Show diagnostics
+      const diag = document.getElementById('diag-panel');
+      diag.style.display = 'block';
+      document.getElementById('diag-details').innerHTML =
+        `⚡ <strong>WASM full extraction</strong>: ${objects.length} objects (${typeStr}) — all parsing done in WASM`;
+
       return true;
     }
 
