@@ -13363,7 +13363,7 @@ pub fn checkoutTreeRecursive(git_path: []const u8, tree_data: []const u8, repo_r
                 try checkoutTreeRecursive(git_path, subtree_obj.data, repo_root, full_path, allocator, platform_impl);
             }
         } else {
-            // This is a blob (file)
+            // This is a blob (file) or symlink
             const blob_obj = objects.GitObject.load(hash_hex, git_path, platform_impl, allocator) catch continue;
             defer blob_obj.deinit(allocator);
             
@@ -13376,8 +13376,25 @@ pub fn checkoutTreeRecursive(git_path: []const u8, tree_data: []const u8, repo_r
                     };
                 }
                 
-                // Write file content
-                try platform_impl.fs.writeFile(file_path, blob_obj.data);
+                // Remove existing file/symlink first
+                std.fs.cwd().deleteFile(file_path) catch {};
+                
+                // Check if this is a symlink (mode 120000)
+                if (std.mem.eql(u8, mode, "120000")) {
+                    // Create symlink - blob data is the symlink target
+                    const target = std.mem.trimRight(u8, blob_obj.data, "\n");
+                    std.posix.symlinkat(target, std.fs.cwd().fd, file_path) catch {};
+                } else {
+                    // Write file content
+                    try platform_impl.fs.writeFile(file_path, blob_obj.data);
+                    // Handle executable bit (mode 100755)
+                    if (std.mem.eql(u8, mode, "100755")) {
+                        const file = std.fs.cwd().openFile(file_path, .{ .mode = .read_write }) catch continue;
+                        defer file.close();
+                        const stat = file.stat() catch continue;
+                        file.chmod(stat.mode | 0o111) catch {};
+                    }
+                }
             }
         }
     }

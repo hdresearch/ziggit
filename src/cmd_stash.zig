@@ -1950,6 +1950,10 @@ fn stashBranch(
     }
 
     const branch_name = sub_args[0];
+    if (sub_args.len > 2) {
+        try platform_impl.writeStderr("error: Too many revisions specified: stash\n");
+        std.process.exit(1);
+    }
     const stash_ref = if (sub_args.len > 1) sub_args[1] else "stash@{0}";
 
     // Check if branch already exists
