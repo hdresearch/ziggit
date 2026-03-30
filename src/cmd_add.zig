@@ -4,6 +4,8 @@
 const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 const helpers = @import("git_helpers.zig");
+const crlf_mod = @import("crlf.zig");
+const check_attr = @import("cmd_check_attr.zig");
 
 // Re-export commonly used types from helpers
 const objects = helpers.objects;
@@ -230,6 +232,9 @@ pub fn addSingleFile(allocator: std.mem.Allocator, relative_path: []const u8, fu
         return;
     }
 
+    // Emit CRLF conversion warnings before adding
+    emitCrlfWarning(allocator, relative_path, full_path, git_path, platform_impl) catch {};
+
     // helpers.Add to index
     index.add(relative_path, full_path, platform_impl, git_path) catch |err| switch (err) {
         error.OutOfMemory => return err,
@@ -240,6 +245,80 @@ pub fn addSingleFile(allocator: std.mem.Allocator, relative_path: []const u8, fu
             return err;
         },
     };
+}
+
+/// Emit CRLF/LF conversion warnings to stderr, matching git's behavior.
+/// Git warns when the round-trip (add+checkout) will change the file's line endings.
+fn emitCrlfWarning(allocator: std.mem.Allocator, relative_path: []const u8, full_path: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
+    const content = platform_impl.fs.readFile(allocator, full_path) catch return;
+    defer allocator.free(content);
+
+    if (content.len == 0) return;
+
+    // Get config values
+    const autocrlf_val = helpers.getConfigValueByKey(git_path, "core.autocrlf", allocator);
+    defer if (autocrlf_val) |v| allocator.free(v);
+    const eol_config_val = helpers.getConfigValueByKey(git_path, "core.eol", allocator);
+    defer if (eol_config_val) |v| allocator.free(v);
+
+    // Load .gitattributes rules
+    const repo_root = std.fs.path.dirname(git_path) orelse ".";
+    var attr_rules = crlf_mod.loadAttrRules(allocator, repo_root, git_path, platform_impl) catch return;
+    defer {
+        for (attr_rules.items) |*rule| rule.deinit(allocator);
+        attr_rules.deinit();
+    }
+
+    // Get the attrs for this file
+    const attrs = crlf_mod.getFileAttrs(relative_path, attr_rules.items);
+    const commit_action = crlf_mod.getCommitAction(attrs.text, attrs.eol, autocrlf_val, content);
+
+    // After normalization (CRLF->LF), what would checkout do?
+    // We need to simulate: after add normalizes the content, what does checkout produce?
+    // If checkout would convert LF->CRLF, then the file ends up with CRLF regardless.
+    // The warning is about what the user will see in the working directory after a round-trip.
+
+    if (commit_action == .crlf_to_lf and hasCrlf(content)) {
+        // Content has CRLF, commit will normalize to LF.
+        // Check if checkout would convert back to CRLF.
+        // Simulate normalized content for checkout check.
+        const normalized = crlf_mod.convertCrlfToLf(allocator, content) catch return;
+        defer allocator.free(normalized);
+        const co_action = crlf_mod.getCheckoutAction(attrs.text, attrs.eol, autocrlf_val, eol_config_val, normalized);
+        if (co_action != .lf_to_crlf) {
+            // Checkout won't restore CRLF, so the file will change from CRLF to LF
+            const msg = try std.fmt.allocPrint(allocator, "warning: CRLF will be replaced by LF in {s}.\nThe file will have its original line endings in your working directory\n", .{relative_path});
+            defer allocator.free(msg);
+            platform_impl.writeStderr(msg) catch {};
+        }
+        return; // Don't also emit LF->CRLF warning
+    }
+
+    // Check if checkout would add CRLF to a file that currently has bare LF
+    if (hasBareLf(content) and crlf_mod.isTextContent(content)) {
+        // What action would happen on checkout for this content after normalization?
+        const co_action = crlf_mod.getCheckoutAction(attrs.text, attrs.eol, autocrlf_val, eol_config_val, content);
+        if (co_action == .lf_to_crlf) {
+            const msg = try std.fmt.allocPrint(allocator, "warning: LF will be replaced by CRLF in {s}.\nThe file will have its original line endings in your working directory\n", .{relative_path});
+            defer allocator.free(msg);
+            platform_impl.writeStderr(msg) catch {};
+        }
+    }
+}
+
+fn hasCrlf(content: []const u8) bool {
+    var i: usize = 0;
+    while (i < content.len - 1) : (i += 1) {
+        if (content[i] == '\r' and content[i + 1] == '\n') return true;
+    }
+    return false;
+}
+
+fn hasBareLf(content: []const u8) bool {
+    for (content, 0..) |c, i| {
+        if (c == '\n' and (i == 0 or content[i - 1] != '\r')) return true;
+    }
+    return false;
 }
 
 

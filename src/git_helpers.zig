@@ -12990,6 +12990,10 @@ pub fn getCompletionHelperOptions(command: []const u8) []const u8 {
 
 
 pub fn getConfigValueByKey(git_path: []const u8, key: []const u8, allocator: std.mem.Allocator) ?[]const u8 {
+    // Check -c command line overrides first (last -c wins over config file)
+    if (getConfigOverride(key)) |override_val| {
+        return allocator.dupe(u8, override_val) catch null;
+    }
     var config = config_mod.loadGitConfig(git_path, allocator) catch return null;
     defer config.deinit();
     const last_dot = std.mem.lastIndexOf(u8, key, ".") orelse return null;
