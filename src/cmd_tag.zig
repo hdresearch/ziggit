@@ -84,6 +84,10 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var ignore_case = false;
     var create_reflog = false;
     var target_ref: ?[]const u8 = null;
+    var points_at_vals = std.array_list.Managed([]const u8).init(allocator);
+    defer points_at_vals.deinit();
+    var contains_val: ?[]const u8 = null;
+    var no_contains_val: ?[]const u8 = null;
 
     // helpers.Parse arguments
     while (args.next()) |arg| {
@@ -150,15 +154,32 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             // -n<num>
             n_lines = std.fmt.parseInt(i32, arg[2..], 10) catch 1;
             list_mode = true;
-        } else if (std.mem.startsWith(u8, arg, "--contains") or std.mem.startsWith(u8, arg, "--no-contains") or
-            std.mem.startsWith(u8, arg, "--merged") or std.mem.startsWith(u8, arg, "--no-merged") or
-            std.mem.startsWith(u8, arg, "--points-at") or std.mem.startsWith(u8, arg, "--with") or
-            std.mem.startsWith(u8, arg, "--without") or std.mem.startsWith(u8, arg, "--no-with"))
+        } else if (std.mem.startsWith(u8, arg, "--points-at")) {
+            list_mode = true;
+            if (std.mem.indexOfScalar(u8, arg, '=')) |eq| {
+                try points_at_vals.append(arg[eq + 1 ..]);
+            } else {
+                if (args.next()) |v| try points_at_vals.append(v);
+            }
+        } else if (std.mem.startsWith(u8, arg, "--contains")) {
+            list_mode = true;
+            if (std.mem.indexOfScalar(u8, arg, '=')) |eq| {
+                contains_val = arg[eq + 1 ..];
+            } else {
+                contains_val = args.next();
+            }
+        } else if (std.mem.startsWith(u8, arg, "--no-contains") or std.mem.startsWith(u8, arg, "--without") or std.mem.startsWith(u8, arg, "--no-with")) {
+            list_mode = true;
+            if (std.mem.indexOfScalar(u8, arg, '=')) |eq| {
+                no_contains_val = arg[eq + 1 ..];
+            } else {
+                no_contains_val = args.next();
+            }
+        } else if (std.mem.startsWith(u8, arg, "--merged") or std.mem.startsWith(u8, arg, "--no-merged") or
+            std.mem.startsWith(u8, arg, "--with"))
         {
-            list_mode = true; // These imply list mode
-            // Value may be after = or as next arg; just skip next if no =
+            list_mode = true;
             if (std.mem.indexOfScalar(u8, arg, '=') == null) {
-                // Consume next arg as value (e.g. --contains helpers.HEAD)
                 _ = args.next();
             }
         } else if (std.mem.startsWith(u8, arg, "--sort=")) {
@@ -398,6 +419,38 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             }
         } else |_| {}
         
+        // Filter by --points-at
+        if (points_at_vals.items.len > 0) {
+            var resolved_points = std.array_list.Managed([]const u8).init(allocator);
+            defer {
+                for (resolved_points.items) |h| allocator.free(h);
+                resolved_points.deinit();
+            }
+            for (points_at_vals.items) |pv| {
+                const resolved = helpers.resolveRevision(git_path, pv, platform_impl, allocator) catch continue;
+                try resolved_points.append(resolved);
+            }
+            // Filter tag_list: keep only tags whose target matches one of the resolved hashes
+            var i: usize = 0;
+            while (i < tag_list.items.len) {
+                const tag = tag_list.items[i];
+                const tag_target = getTagTarget(allocator, git_path, tag, platform_impl) catch {
+                    _ = tag_list.orderedRemove(i);
+                    continue;
+                };
+                defer allocator.free(tag_target);
+                var matched_pt = false;
+                for (resolved_points.items) |rp| {
+                    if (std.mem.eql(u8, tag_target, rp)) { matched_pt = true; break; }
+                }
+                if (!matched_pt) {
+                    _ = tag_list.orderedRemove(i);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
         // Sort tags
         const reverse = if (sort_key) |sk| std.mem.startsWith(u8, sk, "-") else false;
         if (ignore_case) {
@@ -676,6 +729,50 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         
         try platform_impl.fs.writeFile(tag_ref_path, ref_content);
     }
+}
+
+/// Get the commit hash a tag points at (follows annotated tags to their target)
+fn getTagTarget(allocator: std.mem.Allocator, git_path: []const u8, tag_name: []const u8, platform_impl: anytype) ![]const u8 {
+    const ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags/{s}", .{ git_path, tag_name });
+    defer allocator.free(ref_path);
+    const ref_content = platform_impl.fs.readFile(allocator, ref_path) catch |err| {
+        // Try packed-refs
+        const packed_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_path});
+        defer allocator.free(packed_path);
+        const packed_data = platform_impl.fs.readFile(allocator, packed_path) catch return err;
+        defer allocator.free(packed_data);
+        const search = try std.fmt.allocPrint(allocator, "refs/tags/{s}", .{tag_name});
+        defer allocator.free(search);
+        var pr_lines = std.mem.splitScalar(u8, packed_data, '\n');
+        while (pr_lines.next()) |line| {
+            if (line.len < 40 or line[0] == '#') continue;
+            if (std.mem.indexOf(u8, line, search) != null) {
+                return try allocator.dupe(u8, line[0..40]);
+            }
+        }
+        return err;
+    };
+    defer allocator.free(ref_content);
+    const hash = std.mem.trim(u8, ref_content, " \t\n\r");
+    if (hash.len < 40) return error.InvalidRef;
+    // Follow tag objects to find ultimate target
+    var current_hash = try allocator.dupe(u8, hash[0..40]);
+    var depth: usize = 0;
+    while (depth < 10) : (depth += 1) {
+        const obj = objects.GitObject.load(current_hash, git_path, platform_impl, allocator) catch break;
+        defer obj.deinit(allocator);
+        if (obj.type == .tag) {
+            // Extract "object <hash>" from tag data
+            if (std.mem.startsWith(u8, obj.data, "object ")) {
+                const target = obj.data[7..47];
+                allocator.free(current_hash);
+                current_hash = try allocator.dupe(u8, target);
+                continue;
+            }
+        }
+        break;
+    }
+    return current_hash;
 }
 
 fn isAnnotatedTag(allocator: std.mem.Allocator, git_path: []const u8, tag_name: []const u8, platform_impl: anytype) bool {
