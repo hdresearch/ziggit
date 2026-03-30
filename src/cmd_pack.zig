@@ -445,7 +445,10 @@ pub fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, co
                 if (obj_size > 0) byte |= 0x80;
                 try pack_data.append(byte);
             }
-            const compressed = zlib_compat_mod.compressSlice(allocator, obj.data) catch continue;
+            const compressed = if (@import("builtin").target.os.tag == .freestanding or @import("builtin").target.os.tag == .wasi)
+                zlib_compat_mod.compressSlice(allocator, obj.data) catch continue
+            else
+                objects.cCompressSlice(allocator, obj.data) catch continue;
             defer allocator.free(compressed);
             try pack_data.appendSlice(compressed);
             actual_count += 1;
