@@ -118,7 +118,7 @@
     // --- Build want request ---
     function buildWantRequest(hash) {
       // want line with capabilities
-      const wantLine = `want ${hash} side-band-64k ofs-delta no-progress agent=ziggit-browser\n`;
+      const wantLine = `want ${hash} side-band-64k ofs-delta no-progress include-tag agent=ziggit-browser\n`;
       const pktWant = (wantLine.length + 4).toString(16).padStart(4, '0') + wantLine;
       return pktWant + '00000009done\n';
     }
@@ -165,30 +165,29 @@
     }
 
     function smartInflate(data, offset) {
-      // Git pack uses zlib format (2-byte header + deflate + 4-byte adler32).
-      // Strategy: use pako non-raw mode first (it handles header+checksum natively).
-      // Fall back to raw mode if needed.
-      const inputSlice = data.subarray(offset);
+      // Git pack uses zlib format. Use pako to decompress.
+      // Pass all remaining data; zlib stream is self-terminating.
+      // strm.total_in tells us how many bytes were actually consumed.
+      const input = data.subarray(offset);
 
-      // Try non-raw (zlib) mode first
       const inf = new pako.Inflate();
-      inf.push(inputSlice);
+      inf.push(input, true);
 
+      // Even if pako reports an error (due to trailing data after the zlib stream),
+      // we may have valid output
       if (inf.result && inf.result.length > 0 && inf.strm) {
-        // total_in in non-raw mode includes zlib header + deflate + adler32
         return { result: inf.result, bytesRead: inf.strm.total_in };
       }
 
-      // Fallback: raw inflate, manually handle zlib wrapper
-      const flg = data[offset + 1];
-      const headerSize = 2 + ((flg & 0x20) ? 4 : 0);
+      // Fallback: try raw inflate (skip 2-byte zlib header manually)
       const inf2 = new pako.Inflate({ raw: true });
-      inf2.push(data.subarray(offset + headerSize));
-      if (!inf2.result || inf2.result.length === 0) {
-        throw new Error('inflate error at offset ' + offset);
+      inf2.push(input.subarray(2), true);
+      if (inf2.result && inf2.result.length > 0 && inf2.strm) {
+        // +2 for zlib header, +4 for adler32 checksum
+        return { result: inf2.result, bytesRead: 2 + inf2.strm.total_in + 4 };
       }
-      const rawConsumed = inf2.strm ? inf2.strm.total_in : 0;
-      return { result: inf2.result, bytesRead: headerSize + rawConsumed + 4 };
+
+      throw new Error('inflate error at offset ' + offset);
     }
 
     const TYPE_NAMES = { 1: 'commit', 2: 'tree', 3: 'blob', 4: 'tag' };
