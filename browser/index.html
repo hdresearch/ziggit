@@ -94,7 +94,8 @@
   </div>
 
   <script>
-    // Load WASM module for version display
+    // Load WASM module — provides zlib decompression, SHA-1, delta application
+    let wasmInstance = null;
     (async function() {
       try {
         const noopFn = () => {};
@@ -108,13 +109,16 @@
         };
         const resp = await fetch('ziggit.wasm');
         const { instance } = await WebAssembly.instantiateStreaming(resp, { env });
+        wasmInstance = instance;
         const mem = instance.exports.memory;
         const ptr = instance.exports.ziggit_alloc(128);
         const len = instance.exports.ziggit_version(ptr, 128);
         const ver = new TextDecoder().decode(new Uint8Array(mem.buffer, ptr, len));
-        document.getElementById('wasm-version').textContent = ver;
+        const numExports = Object.keys(instance.exports).filter(k => typeof instance.exports[k] === 'function').length;
+        document.getElementById('wasm-version').textContent = `${ver} (${numExports} exports, WASM active)`;
+        console.log('WASM loaded:', ver, '— exports:', Object.keys(instance.exports).filter(k => typeof instance.exports[k] === 'function'));
       } catch (e) {
-        document.getElementById('wasm-version').textContent = 'wasm not loaded';
+        document.getElementById('wasm-version').textContent = 'wasm not loaded (JS fallback active)';
         console.warn('WASM load failed:', e);
       }
     })();
@@ -147,8 +151,26 @@
 
     // --- SHA-1 ---
     async function sha1hex(data) {
+      // Use WASM SHA-1 if available (synchronous, avoids async overhead)
+      if (wasmInstance) {
+        return wasmSha1Hex(data);
+      }
       const hash = await crypto.subtle.digest('SHA-1', data);
       return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    function wasmSha1Hex(data) {
+      const e = wasmInstance.exports;
+      const ptr = e.ziggit_alloc(data.length);
+      if (!ptr) return null;
+      new Uint8Array(e.memory.buffer, ptr, data.length).set(data);
+      const hashPtr = e.ziggit_alloc(20);
+      e.ziggit_sha1(ptr, data.length, hashPtr);
+      const hashBytes = new Uint8Array(e.memory.buffer, hashPtr, 20);
+      const hex = bytesToHex(hashBytes);
+      e.ziggit_free(ptr, data.length);
+      e.ziggit_free(hashPtr, 20);
+      return hex;
     }
 
     function bytesToHex(bytes) {
