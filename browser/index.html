@@ -40,6 +40,9 @@
     .breadcrumb { color: #8b949e; font-size: 0.85em; margin-bottom: 8px; }
     .breadcrumb a { color: #58a6ff; cursor: pointer; text-decoration: none; }
     .breadcrumb a:hover { text-decoration: underline; }
+    .progress-bar { background: #21262d; border-radius: 4px; height: 6px; margin: 8px 0; overflow: hidden; display: none; }
+    .progress-fill { background: #58a6ff; height: 100%; width: 0%; transition: width 0.2s; }
+    .stats { color: #8b949e; font-size: 0.8em; margin-top: 4px; }
   </style>
 </head>
 <body>
@@ -55,6 +58,7 @@
     <button id="cloneBtn" onclick="doClone()">Clone</button>
     <span id="status"></span>
   </div>
+  <div class="progress-bar" id="progress"><div class="progress-fill" id="progress-fill"></div></div>
 
   <div id="repo-info" class="panel" style="display:none">
     <h2>Repository</h2>
@@ -117,6 +121,14 @@
       } else {
         el.textContent = msg;
       }
+    }
+
+    function showProgress(pct) {
+      const bar = document.getElementById('progress');
+      const fill = document.getElementById('progress-fill');
+      if (pct < 0) { bar.style.display = 'none'; return; }
+      bar.style.display = 'block';
+      fill.style.width = Math.min(100, pct) + '%';
     }
 
     function escHtml(s) {
