@@ -427,12 +427,11 @@ fn interactiveResetPatch(allocator: std.mem.Allocator, platform_impl: *const pla
     // Process each index entry
     for (idx.entries.items, 0..) |entry, ei| {
         // Check if this file is in HEAD tree
-        var in_head = false;
+        var in_head = false; _ = &in_head;
         if (head_tree_hash) |_| {
             // File exists in HEAD - show modification diff
             // For simplicity, just check if it exists
             in_head = true;
-            _ = in_head;
         }
 
         // Generate diff for this entry
