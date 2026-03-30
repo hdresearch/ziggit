@@ -27,6 +27,7 @@ pub fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command
     var ref_name_set = false;
     var end_of_options = false;
     var format: ?[]const u8 = null;
+    var max_count: ?usize = null;
 
     var i = command_index + 1;
     while (i < args.len) : (i += 1) {
@@ -47,15 +48,20 @@ pub fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command
             std.process.exit(129);
         } else if (std.mem.startsWith(u8, arg, "--format=")) {
             format = arg["--format=".len..];
-        } else if (std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "-n") or
+        } else if (std.mem.eql(u8, arg, "-n")) {
+            if (i + 1 < args.len) {
+                i += 1;
+                max_count = std.fmt.parseInt(usize, args[i], 10) catch null;
+            }
+        } else if (arg.len >= 2 and arg[0] == '-' and arg[1] >= '0' and arg[1] <= '9') {
+            // -N shorthand for -n N
+            max_count = std.fmt.parseInt(usize, arg[1..], 10) catch null;
+        } else if (std.mem.eql(u8, arg, "--all") or
             std.mem.startsWith(u8, arg, "--expire=") or std.mem.eql(u8, arg, "--verbose") or
             std.mem.eql(u8, arg, "--rewrite") or std.mem.eql(u8, arg, "--updateref") or
             std.mem.eql(u8, arg, "--stale-fix") or std.mem.eql(u8, arg, "--dry-run"))
         {
             // Accepted flags
-            if (std.mem.eql(u8, arg, "-n")) {
-                i += 1; // skip count
-            }
         } else if (std.mem.startsWith(u8, arg, "-")) {
             // helpers.Unknown option
             if (std.mem.eql(u8, subcmd, "exists")) {
@@ -120,7 +126,11 @@ pub fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command
         // helpers.Output in reverse order
         var entry_idx: usize = entries.items.len;
         var seq: usize = 0;
+        var output_count: usize = 0;
         while (entry_idx > 0) {
+            if (max_count) |mc| {
+                if (output_count >= mc) break;
+            }
             entry_idx -= 1;
             const line = entries.items[entry_idx];
             // Format: <old-sha1> <new-sha1> <author> <timestamp> <tz>\t<message>
@@ -163,6 +173,7 @@ pub fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command
                         defer allocator.free(output);
                         try platform_impl.writeStdout(output);
                     }
+                    output_count += 1;
                 }
             }
             seq += 1;
