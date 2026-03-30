@@ -7698,14 +7698,48 @@ pub fn listCommits(git_path: []const u8, start_commit: []const u8, max_count: ?u
 }
 
 
+pub fn latin1ToUtf8(input: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+    var buf = std.array_list.Managed(u8).init(allocator);
+    errdefer buf.deinit();
+    for (input) |byte| {
+        if (byte < 0x80) {
+            try buf.append(byte);
+        } else {
+            try buf.append(0xC0 | (byte >> 6));
+            try buf.append(0x80 | (byte & 0x3F));
+        }
+    }
+    return buf.toOwnedSlice();
+}
+
 pub fn getCommitSubject(hash: []const u8, git_path: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) ![]const u8 {
     const obj = objects.GitObject.load(hash, git_path, platform_impl, allocator) catch return "";
     defer obj.deinit(allocator);
     var lines = std.mem.splitSequence(u8, obj.data, "\n");
     var past_header = false;
+    var encoding: ?[]const u8 = null;
     while (lines.next()) |line| {
-        if (past_header) return allocator.dupe(u8, line) catch "";
-        if (line.len == 0) past_header = true;
+        if (past_header) {
+            const raw = allocator.dupe(u8, line) catch return "";
+            // Re-encode from commit encoding to UTF-8 if needed
+            if (encoding) |enc| {
+                const is_latin1 = std.ascii.eqlIgnoreCase(enc, "ISO8859-1") or
+                    std.ascii.eqlIgnoreCase(enc, "ISO-8859-1") or
+                    std.ascii.eqlIgnoreCase(enc, "LATIN-1") or
+                    std.ascii.eqlIgnoreCase(enc, "latin1");
+                if (is_latin1) {
+                    const utf8 = latin1ToUtf8(raw, allocator) catch return raw;
+                    allocator.free(raw);
+                    return utf8;
+                }
+            }
+            return raw;
+        }
+        if (line.len == 0) {
+            past_header = true;
+        } else if (std.mem.startsWith(u8, line, "encoding ")) {
+            encoding = line["encoding ".len..];
+        }
     }
     return "";
 }

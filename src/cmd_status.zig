@@ -439,7 +439,6 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                     try platform_impl.writeStdout(msg);
                 }
             }
-            try platform_impl.writeStdout("\n");
         }
     }
 
@@ -459,7 +458,6 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
             }
-            try platform_impl.writeStdout("\n");
         }
     }
 
@@ -481,7 +479,6 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
             }
-            try platform_impl.writeStdout("\n");
         }
     }
 
