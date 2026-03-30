@@ -190,26 +190,27 @@
     }
 
     function smartInflate(data, offset) {
-      // Git pack uses zlib format. Use pako to decompress.
-      // Pass all remaining data; zlib stream is self-terminating.
-      // strm.total_in tells us how many bytes were actually consumed.
-      const input = data.subarray(offset);
+      // Git pack uses zlib format (2-byte header + deflate + 4-byte adler32).
+      // Use pako raw inflate, manually handling the zlib wrapper for precise
+      // byte tracking. This avoids issues with pako's total_in handling.
+      const flg = data[offset + 1];
+      const headerSize = 2 + ((flg & 0x20) ? 4 : 0); // FDICT adds 4 bytes
+      const rawData = data.subarray(offset + headerSize);
 
-      const inf = new pako.Inflate();
-      inf.push(input, true);
+      const inf = new pako.Inflate({ raw: true });
+      inf.push(rawData);
 
-      // Even if pako reports an error (due to trailing data after the zlib stream),
-      // we may have valid output
       if (inf.result && inf.result.length > 0 && inf.strm) {
-        return { result: inf.result, bytesRead: inf.strm.total_in };
+        // total_in = raw deflate bytes consumed
+        // Full zlib frame = header + deflate + 4-byte adler32
+        return { result: inf.result, bytesRead: headerSize + inf.strm.total_in + 4 };
       }
 
-      // Fallback: try raw inflate (skip 2-byte zlib header manually)
+      // Second attempt: push with Z_FINISH
       const inf2 = new pako.Inflate({ raw: true });
-      inf2.push(input.subarray(2), true);
+      inf2.push(rawData, true);
       if (inf2.result && inf2.result.length > 0 && inf2.strm) {
-        // +2 for zlib header, +4 for adler32 checksum
-        return { result: inf2.result, bytesRead: 2 + inf2.strm.total_in + 4 };
+        return { result: inf2.result, bytesRead: headerSize + inf2.strm.total_in + 4 };
       }
 
       throw new Error('inflate error at offset ' + offset);
