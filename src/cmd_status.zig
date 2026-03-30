@@ -30,6 +30,7 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
 
     // helpers.Check for flags
     var porcelain = false;
+    var nul_terminate = false;
     var show_branch = false;
     var short_format = false;
     var show_untracked = true; // default: show untracked files
@@ -75,8 +76,7 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             }
             break;
         } else if (std.mem.eql(u8, arg, "-z")) {
-            // NUL-terminate output entries - accept but treat as no-op for now
-            // (porcelain mode already uses line-based output)
+            nul_terminate = true;
         } else if (std.mem.eql(u8, arg, "--column") or std.mem.startsWith(u8, arg, "--column=")) {
             // Column display - accept as no-op
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
@@ -233,22 +233,27 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                 // helpers.Read upstream tracking info
                 const upstream_info = helpers.getUpstreamTrackingInfo(git_path, current_branch, allocator, platform_impl);
                 defer if (upstream_info) |info| allocator.free(info);
+                const branch_line_end: []const u8 = if (nul_terminate) "\x00" else "\n";
                 if (upstream_info) |info| {
-                    const branch_header = try std.fmt.allocPrint(allocator, "## {s}...{s}\n", .{current_branch, info});
+                    const branch_header = try std.fmt.allocPrint(allocator, "## {s}...{s}", .{current_branch, info});
                     defer allocator.free(branch_header);
                     try platform_impl.writeStdout(branch_header);
+                    try platform_impl.writeStdout(branch_line_end);
                 } else {
-                    const branch_header = try std.fmt.allocPrint(allocator, "## {s}\n", .{current_branch});
+                    const branch_header = try std.fmt.allocPrint(allocator, "## {s}", .{current_branch});
                     defer allocator.free(branch_header);
                     try platform_impl.writeStdout(branch_header);
+                    try platform_impl.writeStdout(branch_line_end);
                 }
             } else {
-                try platform_impl.writeStdout("## helpers.HEAD (no branch)\n");
+                try platform_impl.writeStdout("## helpers.HEAD (no branch)");
+                try platform_impl.writeStdout(if (nul_terminate) "\x00" else "\n");
             }
         } else {
-            const branch_header = try std.fmt.allocPrint(allocator, "## {s}\n", .{current_branch});
+            const branch_header = try std.fmt.allocPrint(allocator, "## {s}", .{current_branch});
             defer allocator.free(branch_header);
             try platform_impl.writeStdout(branch_header);
+            try platform_impl.writeStdout(if (nul_terminate) "\x00" else "\n");
         }
     }
 
@@ -553,10 +558,10 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                 return std.mem.order(u8, a_path, b_path) == .lt;
             }
         }.lessThan);
+        const line_end: []const u8 = if (nul_terminate) "\x00" else "\n";
         for (porcelain_lines.items) |line| {
-            const msg = try std.fmt.allocPrint(allocator, "{s}\n", .{line});
-            defer allocator.free(msg);
-            try platform_impl.writeStdout(msg);
+            try platform_impl.writeStdout(line);
+            try platform_impl.writeStdout(line_end);
         }
     }
 
