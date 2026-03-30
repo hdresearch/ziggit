@@ -315,7 +315,11 @@
       const objects = []; // { type, data, offset, baseOfsOffset?, baseRef? }
 
       for (let i = 0; i < numObjects; i++) {
-        if (i % 100 === 0) status(`Parsing object ${i}/${numObjects}...`);
+        if (i % 50 === 0) {
+          status(`Parsing object ${i}/${numObjects}...`);
+          showProgress((i / numObjects) * 70);
+          await new Promise(r => setTimeout(r, 0)); // yield to UI
+        }
         const objStart = offset;
         const hdr = readVarInt(packData, offset);
         offset = hdr.offset;
@@ -400,6 +404,8 @@
       }
 
       // Now compute hashes for resolved deltas (async)
+      let resolved = 0;
+      const totalToResolve = objects.filter(o => o._needsHash).length;
       for (let i = 0; i < objects.length; i++) {
         const obj = objects[i];
         if (obj._needsHash) {
@@ -407,9 +413,16 @@
           objectDb[obj.hash] = { type: obj.typeName, data: obj.data };
           delete obj._needsHash;
           delete obj._full;
+          resolved++;
+          if (resolved % 50 === 0) {
+            status(`Resolving deltas ${resolved}/${totalToResolve}...`);
+            showProgress(70 + (resolved / totalToResolve) * 30);
+            await new Promise(r => setTimeout(r, 0));
+          }
         }
       }
 
+      showProgress(100);
       status(`Parsed ${numObjects} objects, ${Object.keys(objectDb).length} in database.`);
       return objects;
     }
@@ -498,6 +511,7 @@
 
         const headHash = refs['HEAD'];
         if (!headHash) throw new Error('No HEAD ref found');
+        showProgress(5);
         status(`HEAD: ${headHash.slice(0, 8)}. Fetching pack...`);
 
         // 2. Request pack
@@ -512,7 +526,10 @@
 
         const packBuffer = await packResp.arrayBuffer();
         const packBytes = new Uint8Array(packBuffer);
+        const dlSize = formatSize(packBytes.length);
         console.log('Pack response size:', packBytes.length);
+        showProgress(15);
+        status(`Downloaded ${dlSize}. Extracting pack...`);
 
         // 3. Extract pack data
         // Try sideband extraction first (we requested side-band-64k)
@@ -553,7 +570,8 @@
         document.getElementById('repo-details').innerHTML =
           `<strong>Branch:</strong> ${escHtml(branchName)} &nbsp; ` +
           `<strong>HEAD:</strong> <span class="hash">${headHash}</span> &nbsp; ` +
-          `<strong>Objects:</strong> ${Object.keys(objectDb).length}`;
+          `<strong>Objects:</strong> ${Object.keys(objectDb).length} &nbsp; ` +
+          `<strong>Downloaded:</strong> ${dlSize}`;
 
         // Show commit log
         showLog(headHash);
@@ -562,8 +580,10 @@
         const parsed = parseCommit(commit.data);
         if (parsed.tree) showTree(parsed.tree, '/');
 
+        showProgress(-1);
         status('Ready! Click folders to expand, files to view.');
       } catch (e) {
+        showProgress(-1);
         status('Error: ' + e.message, true);
         console.error(e);
       }
