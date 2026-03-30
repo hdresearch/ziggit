@@ -208,8 +208,9 @@
       const headerSize = 2 + ((flg & 0x20) ? 4 : 0); // FDICT adds 4 bytes
       const rawData = data.subarray(offset + headerSize);
 
+      // Try with Z_FINISH (tells pako this is the complete input)
       const inf = new pako.Inflate({ raw: true });
-      inf.push(rawData);
+      inf.push(rawData, true);
 
       if (inf.result && inf.result.length > 0 && inf.strm) {
         // total_in = raw deflate bytes consumed
@@ -217,9 +218,9 @@
         return { result: inf.result, bytesRead: headerSize + inf.strm.total_in + 4 };
       }
 
-      // Second attempt: push with Z_FINISH
+      // Second attempt: without Z_FINISH
       const inf2 = new pako.Inflate({ raw: true });
-      inf2.push(rawData, true);
+      inf2.push(rawData);
       if (inf2.result && inf2.result.length > 0 && inf2.strm) {
         return { result: inf2.result, bytesRead: headerSize + inf2.strm.total_in + 4 };
       }
