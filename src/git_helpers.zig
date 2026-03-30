@@ -1117,7 +1117,6 @@ pub fn findGitDirectory(allocator: std.mem.Allocator, platform_impl: *const plat
 
         // First check for .git subdirectory (normal repository) or valid gitdir link
         const git_path = try std.fmt.allocPrint(allocator, "{s}/.git", .{dir_to_check});
-
         const git_is_valid = blk: {
             // Check if it's a directory
             if (std.fs.cwd().openDir(git_path, .{})) |d| {
@@ -3720,7 +3719,7 @@ pub fn cfgMakeKey(section: ?[]const u8, variable: []const u8, allocator: std.mem
 }
 
 /// Normalize a config key like "Section.SubSection.Variable" ->
-/// lowercase section, preserve subsection case, lowercase variabl case, lowercase variable
+/// lowercase section, preserve subsection case, lowercase variable
 
 pub fn cfgNormalizeKey(key_raw: []const u8, allocator: std.mem.Allocator) ![]u8 {
     const key = try allocator.dupe(u8, key_raw);
@@ -9685,7 +9684,7 @@ pub fn extractTrailers(message: []const u8) []const u8 {
     return trailer_block;
 }
 
-fn isTrailerLine(line: []const u8) bool {
+pub fn isTrailerLine(line: []const u8) bool {
     if (std.mem.indexOf(u8, line, ": ")) |colon_pos| {
         if (colon_pos == 0) return false;
         const key = line[0..colon_pos];
@@ -13935,7 +13934,7 @@ pub fn populateIndexFromTree(git_path: []const u8, tree_data: []const u8, repo_r
             const stat = std.fs.cwd().statFile(file_path) catch std.fs.File.Stat{
                 .inode = 0,
                 .size = 0,
-                .mode = @as(std.fs.File.Mode, mode),
+                .mode = @intCast(mode),
                 .kind = .file,
                 .atime = 0,
                 .mtime = 0,

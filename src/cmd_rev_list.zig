@@ -7,6 +7,7 @@ const helpers = @import("git_helpers.zig");
 
 // Re-export commonly used types from helpers
 const objects = helpers.objects;
+const commit_graph_mod = @import("git/commit_graph.zig");
 const index_mod = helpers.index_mod;
 const refs = helpers.refs;
 const tree_mod = helpers.tree_mod;
@@ -287,6 +288,55 @@ pub fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     if (include_hashes.items.len == 0) {
         try platform_impl.writeStderr("fatal: bad default revision 'HEAD'\n");
         std.process.exit(128);
+    }
+
+    // Ultra-fast path: --count with commit-graph (no object decompression needed)
+    if (do_count and !topo_order and skip_count == 0 and format_str == null and !show_objects and !show_parents and !show_children and !graph) {
+        if (commit_graph_mod.CommitGraph.open(git_path, allocator)) |cg| {
+            // Use commit-graph for pure parent traversal - no zlib needed!
+            if (exclude_hashes.count() == 0) {
+                var cg_visited = std.AutoHashMap(u32, void).init(allocator);
+                defer cg_visited.deinit();
+                var cg_stack = std.array_list.Managed(u32).init(allocator);
+                defer cg_stack.deinit();
+
+                var all_found = true;
+                for (include_hashes.items) |h| {
+                    if (cg.findCommit(h)) |pos| {
+                        try cg_stack.append(pos);
+                    } else {
+                        all_found = false;
+                        break;
+                    }
+                }
+
+                if (all_found) {
+                    var total_count: usize = 0;
+                    while (cg_stack.items.len > 0) {
+                        const last_idx = cg_stack.items.len - 1;
+                        const pos = cg_stack.items[last_idx];
+                        cg_stack.items.len = last_idx;
+                        if (cg_visited.contains(pos)) continue;
+                        try cg_visited.put(pos, {});
+                        total_count += 1;
+                        const cd = cg.getCommitData(pos);
+                        if (cd.parent1 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT) {
+                            try cg_stack.append(cd.parent1);
+                        }
+                        if (cd.parent2 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT and cd.parent2 & commit_graph_mod.CommitGraph.GRAPH_EXTRA_EDGES == 0) {
+                            try cg_stack.append(cd.parent2);
+                        }
+                    }
+                    if (max_count) |mc| {
+                        if (mc >= 0) total_count = @min(total_count, @as(usize, @intCast(mc)));
+                    }
+                    var buf: [20]u8 = undefined;
+                    const count_str = std.fmt.bufPrint(&buf, "{d}\n", .{total_count}) catch unreachable;
+                    try platform_impl.writeStdout(count_str);
+                    return;
+                }
+            }
+        }
     }
 
     // Fast path for --count: simple DFS, no sorting needed
