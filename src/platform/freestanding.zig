@@ -15,6 +15,10 @@ extern fn host_delete_file(path_ptr: [*]const u8, path_len: u32) bool;
 extern fn host_get_cwd(data_ptr: *[*]u8, data_len: *u32) bool;
 extern fn host_read_dir(path_ptr: [*]const u8, path_len: u32, entries_ptr: *[*][*]const u8, entries_len: *[*]u32, count: *u32) bool;
 
+// HTTP functions for git clone over smart HTTP protocol
+extern fn host_http_get(url_ptr: [*]const u8, url_len: u32, resp_ptr: *[*]u8, resp_len: *u32) i32;
+extern fn host_http_post(url_ptr: [*]const u8, url_len: u32, body_ptr: [*]const u8, body_len: u32, resp_ptr: *[*]u8, resp_len: *u32) i32;
+
 // External functions to get global args from main_freestanding.zig
 extern fn getGlobalArgc() u32;
 extern fn getGlobalArgv() ?[*][]const u8;
@@ -142,6 +146,30 @@ fn statImpl(path: []const u8) !std.fs.File.Stat {
     // Basic implementation for freestanding mode
     _ = path;
     return error.NotSupported;
+}
+
+/// Perform an HTTP GET request. Returns response body as owned slice.
+pub fn httpGet(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
+    var resp_ptr: [*]u8 = undefined;
+    var resp_len: u32 = undefined;
+    const rc = host_http_get(url.ptr, @intCast(url.len), &resp_ptr, &resp_len);
+    if (rc != 0) return error.HttpRequestFailed;
+    if (resp_len == 0) return try allocator.alloc(u8, 0);
+    const result = try allocator.alloc(u8, resp_len);
+    @memcpy(result, resp_ptr[0..resp_len]);
+    return result;
+}
+
+/// Perform an HTTP POST request. Returns response body as owned slice.
+pub fn httpPost(allocator: std.mem.Allocator, url: []const u8, body: []const u8) ![]u8 {
+    var resp_ptr: [*]u8 = undefined;
+    var resp_len: u32 = undefined;
+    const rc = host_http_post(url.ptr, @intCast(url.len), body.ptr, @intCast(body.len), &resp_ptr, &resp_len);
+    if (rc != 0) return error.HttpRequestFailed;
+    if (resp_len == 0) return try allocator.alloc(u8, 0);
+    const result = try allocator.alloc(u8, resp_len);
+    @memcpy(result, resp_ptr[0..resp_len]);
+    return result;
 }
 
 pub const freestanding_platform = interface.Platform{
