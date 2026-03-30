@@ -136,6 +136,28 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         } else |_| {}
     }
 
+    // Check status.displayCommentPrefix config
+    var comment_prefix: []const u8 = "";
+    {
+        if (helpers.getConfigOverride("status.displayCommentPrefix")) |val| {
+            if (std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "yes") or std.mem.eql(u8, val, "1")) {
+                comment_prefix = "# ";
+            }
+        } else {
+            const config_path_cp = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+            defer allocator.free(config_path_cp);
+            if (platform_impl.fs.readFile(allocator, config_path_cp)) |cfg| {
+                defer allocator.free(cfg);
+                if (helpers.parseConfigValue(cfg, "status.displaycommentprefix", allocator) catch null) |val| {
+                    defer allocator.free(val);
+                    if (std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "yes") or std.mem.eql(u8, val, "1")) {
+                        comment_prefix = "# ";
+                    }
+                }
+            } else |_| {}
+        }
+    }
+
     // Check advice.statusHints config
     var show_hints = true;
     {
