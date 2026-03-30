@@ -515,6 +515,8 @@ pub fn cmdDiffFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterato
             df_show_raw = false;
             name_only = false;
             name_status = false;
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            try df_pathspecs.append(arg);
         }
     }
     const git_dir = helpers.findGitDirectory(allocator, platform_impl) catch {

@@ -91,6 +91,8 @@ fn worktreeAdd(
     var detach = false;
     var force = false;
     var no_checkout = false;
+    var do_lock = false;
+    var lock_reason: ?[]const u8 = null;
     var orphan_branch: ?[]const u8 = null;
     var after_dashdash = false;
 
@@ -118,9 +120,9 @@ fn worktreeAdd(
         } else if (std.mem.eql(u8, arg, "--orphan")) {
             orphan_branch = args.next();
         } else if (std.mem.eql(u8, arg, "--lock")) {
-            // TODO: create lock file
+            do_lock = true;
         } else if (std.mem.eql(u8, arg, "--reason")) {
-            _ = args.next(); // skip reason
+            lock_reason = args.next();
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             // quiet
         } else if (std.mem.eql(u8, arg, "--track") or std.mem.eql(u8, arg, "--no-track")) {
@@ -367,6 +369,13 @@ fn worktreeAdd(
                 wt_index.save(wt_admin_dir, platform_impl) catch {};
             }
         }
+    }
+
+    // Create lock file if --lock was specified
+    if (do_lock) {
+        const lock_path = try std.fmt.allocPrint(allocator, "{s}/locked", .{wt_admin_dir});
+        defer allocator.free(lock_path);
+        try writeFileContent(lock_path, lock_reason orelse "");
     }
 
     // Print output

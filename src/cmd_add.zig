@@ -92,8 +92,15 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                     allocator.dupe(u8, entry.path) catch continue;
                 defer allocator.free(fp);
                 // helpers.Check if file exists and re-add it to update the hash
-                if (platform_impl.fs.exists(fp) catch false) {
-                    const content = platform_impl.fs.readFile(allocator, fp) catch continue;
+                // Check for symlinks first
+                var link_buf_upd: [4096]u8 = undefined;
+                const is_symlink = if (std.fs.cwd().readLink(fp, &link_buf_upd)) |_| true else |_| false;
+                const file_exists_upd = if (is_symlink) true else if (platform_impl.fs.exists(fp) catch false) true else false;
+                if (file_exists_upd) {
+                    const content = if (is_symlink) blk: {
+                        const target = std.fs.cwd().readLink(fp, &link_buf_upd) catch continue;
+                        break :blk allocator.dupe(u8, target) catch continue;
+                    } else platform_impl.fs.readFile(allocator, fp) catch continue;
                     defer allocator.free(content);
                     const blob = objects.createBlobObject(content, allocator) catch continue;
                     defer blob.deinit(allocator);
@@ -106,13 +113,17 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                         new_sha1[hi] = std.fmt.parseInt(u8, hash_str[hi * 2 .. hi * 2 + 2], 16) catch 0;
                     }
                     entry.sha1 = new_sha1;
-                    // helpers.Update stat info
-                    const stat = std.fs.cwd().statFile(fp) catch continue;
-                    entry.mtime_sec = @intCast(@divFloor(stat.mtime, 1_000_000_000));
-                    entry.mtime_nsec = @intCast(@mod(stat.mtime, 1_000_000_000));
-                    entry.ctime_sec = @intCast(@divFloor(stat.ctime, 1_000_000_000));
-                    entry.ctime_nsec = @intCast(@mod(stat.ctime, 1_000_000_000));
-                    entry.size = @intCast(stat.size);
+                    // Update mode for symlinks
+                    if (is_symlink) {
+                        entry.mode = 0o120000;
+                    }
+                    // helpers.Update stat info - use lstat for symlinks
+                    const stat_result = std.fs.cwd().statFile(fp) catch continue;
+                    entry.mtime_sec = @intCast(@divFloor(stat_result.mtime, 1_000_000_000));
+                    entry.mtime_nsec = @intCast(@mod(stat_result.mtime, 1_000_000_000));
+                    entry.ctime_sec = @intCast(@divFloor(stat_result.ctime, 1_000_000_000));
+                    entry.ctime_nsec = @intCast(@mod(stat_result.ctime, 1_000_000_000));
+                    entry.size = @intCast(stat_result.size);
                 }
             }
         } else if (std.mem.eql(u8, file_path, ".")) {
@@ -182,6 +193,41 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                     const sub_gp = try std.fmt.allocPrint(allocator, "{s}/.git", .{full_file_path});
                     defer allocator.free(sub_gp);
                     try addSubmoduleEntry(allocator, relative_file_path, sub_gp, &index, git_path, platform_impl);
+                } else if (update_flag) {
+                    // -u with directory: only update tracked files under this directory
+                    const upd_repo_root = std.fs.path.dirname(git_path) orelse ".";
+                    for (index.entries.items) |*entry| {
+                        // Check if entry is under the specified directory
+                        if (!std.mem.startsWith(u8, entry.path, relative_file_path) or
+                            (entry.path.len > relative_file_path.len and entry.path[relative_file_path.len] != '/'))
+                            continue;
+                        const fp2 = if (upd_repo_root.len > 0 and !std.mem.eql(u8, upd_repo_root, "."))
+                            std.fmt.allocPrint(allocator, "{s}/{s}", .{ upd_repo_root, entry.path }) catch continue
+                        else
+                            allocator.dupe(u8, entry.path) catch continue;
+                        defer allocator.free(fp2);
+                        if (platform_impl.fs.exists(fp2) catch false) {
+                            const content = platform_impl.fs.readFile(allocator, fp2) catch continue;
+                            defer allocator.free(content);
+                            const blob = objects.createBlobObject(content, allocator) catch continue;
+                            defer blob.deinit(allocator);
+                            const hash_str = blob.store(git_path, platform_impl, allocator) catch continue;
+                            defer allocator.free(hash_str);
+                            var new_sha1: [20]u8 = undefined;
+                            var hi: usize = 0;
+                            while (hi < 20) : (hi += 1) {
+                                new_sha1[hi] = std.fmt.parseInt(u8, hash_str[hi * 2 .. hi * 2 + 2], 16) catch 0;
+                            }
+                            entry.sha1 = new_sha1;
+                            const stat = std.fs.cwd().statFile(fp2) catch continue;
+                            entry.mtime_sec = @intCast(@divFloor(stat.mtime, 1_000_000_000));
+                            entry.mtime_nsec = @intCast(@mod(stat.mtime, 1_000_000_000));
+                            entry.ctime_sec = @intCast(@divFloor(stat.ctime, 1_000_000_000));
+                            entry.ctime_nsec = @intCast(@mod(stat.ctime, 1_000_000_000));
+                            entry.size = @intCast(stat.size);
+                        }
+                    }
+                    has_directory_add = true;
                 } else {
                     // helpers.Add directory recursively
                     try addDirectoryRecursively(allocator, repo_root_for_rel, relative_file_path, &index, git_path, platform_impl);
