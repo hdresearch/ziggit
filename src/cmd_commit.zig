@@ -382,6 +382,38 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         } else |_| {}
     }
 
+    // Check user.useconfigonly - if set, require user.name and user.email
+    if (helpers.getConfigValueByKey(git_path, "user.useconfigonly", allocator)) |uco_val| {
+        defer allocator.free(uco_val);
+        if (std.ascii.eqlIgnoreCase(uco_val, "true")) {
+            const has_author_name = std.posix.getenv("GIT_AUTHOR_NAME") != null or
+                (helpers.getConfigValueByKey(git_path, "user.name", allocator) != null);
+            const has_author_email = std.posix.getenv("GIT_AUTHOR_EMAIL") != null or
+                (helpers.getConfigValueByKey(git_path, "user.email", allocator) != null);
+            if (!has_author_name or !has_author_email) {
+                try platform_impl.writeStderr(
+                    \\Author identity unknown\n
+                    \\\n
+                    \\*** Please tell me who you are.\n
+                    \\\n
+                    \\Run\n
+                    \\\n
+                    \\  git config --global user.email "you@example.com"\n
+                    \\  git config --global user.name "Your Name"\n
+                    \\\n
+                    \\to set your account's default identity.\n
+                    \\Omit --global to set the identity only in this repository.\n
+                    \\\n
+                    \\fatal: no existing author found with 'user.useconfigonly'\n
+                );
+                std.process.exit(128);
+            }
+            // Free the config values if we got them
+            if (helpers.getConfigValueByKey(git_path, "user.name", allocator)) |v| allocator.free(v);
+            if (helpers.getConfigValueByKey(git_path, "user.email", allocator)) |v| allocator.free(v);
+        }
+    }
+
     // helpers.Create commit object - use GIT_AUTHOR_DATE/GIT_COMMITTER_DATE if set
     // helpers.For --amend, preserve original commit's author info unless explicitly overridden
     const author_info = if (amend) blk: {
