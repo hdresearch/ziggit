@@ -6414,6 +6414,17 @@ pub fn resolveRevision(git_path: []const u8, rev: []const u8, platform_impl: *co
         return resolveTreePath(git_path, tree_hash, path_part, platform_impl, allocator) catch return error.BadRevision;
     }
 
+    // Handle A...B (merge-base) and A..B syntax
+    if (std.mem.indexOf(u8, rev, "...")) |dot3_pos| {
+        const left = if (dot3_pos == 0) "HEAD" else rev[0..dot3_pos];
+        const right = if (dot3_pos + 3 >= rev.len) "HEAD" else rev[dot3_pos + 3 ..];
+        const left_hash = resolveRevision(git_path, left, platform_impl, allocator) catch return error.BadRevision;
+        defer allocator.free(left_hash);
+        const right_hash = resolveRevision(git_path, right, platform_impl, allocator) catch return error.BadRevision;
+        defer allocator.free(right_hash);
+        return findMergeBase(git_path, left_hash, right_hash, allocator, platform_impl) catch return error.BadRevision;
+    }
+
     // Handle ^{type} peel suffix: e.g. "v1.0^{commit}" or "HEAD^{tree}"
     if (std.mem.indexOf(u8, rev, "^{")) |peel_start| {
         if (std.mem.indexOfScalar(u8, rev[peel_start..], '}')) |close_offset| {
