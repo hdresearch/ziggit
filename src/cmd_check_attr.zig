@@ -194,9 +194,11 @@ pub fn nativeCmdCheckAttr(allocator: std.mem.Allocator, args: *platform_mod.ArgI
                 }
             }
 
+            const quoted_path = try helpers.cQuotePath(allocator, path, false);
+            defer allocator.free(quoted_path);
             var iter = shown.iterator();
             while (iter.next()) |entry| {
-                const msg = try std.fmt.allocPrint(allocator, "{s}: {s}: {s}\n", .{ path, entry.key_ptr.*, entry.value_ptr.* });
+                const msg = try std.fmt.allocPrint(allocator, "{s}: {s}: {s}\n", .{ quoted_path, entry.key_ptr.*, entry.value_ptr.* });
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
             }
@@ -226,7 +228,9 @@ pub fn nativeCmdCheckAttr(allocator: std.mem.Allocator, args: *platform_mod.ArgI
                     }
                 }
 
-                const msg = try std.fmt.allocPrint(allocator, "{s}: {s}: {s}\n", .{ path, attr_name, value });
+                const qp = try helpers.cQuotePath(allocator, path, false);
+                defer allocator.free(qp);
+                const msg = try std.fmt.allocPrint(allocator, "{s}: {s}: {s}\n", .{ qp, attr_name, value });
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
             }
@@ -276,15 +280,48 @@ pub fn parseAttrContent(allocator: std.mem.Allocator, content: []const u8, prefi
         if (std.mem.startsWith(u8, trimmed, "[attr]")) continue;
 
         // Parse: pattern attr1=val1 attr2 -attr3 !attr4
-        var parts = std.mem.tokenizeAny(u8, trimmed, " \t");
-        const raw_pattern = parts.next() orelse continue;
-
-        // helpers.Handle quoted patterns
-        var pattern: []const u8 = raw_pattern;
-        if (pattern.len > 0 and pattern[0] == '"') {
-            // helpers.Skip quoted patterns for now - they're complex
-            continue;
+        // Handle quoted patterns before tokenizing
+        var pattern: []const u8 = undefined;
+        var pattern_allocated = false;
+        var attr_start: usize = 0;
+        if (trimmed[0] == '"') {
+            // Quoted pattern - find closing quote handling escape sequences
+            var end_idx: usize = 1;
+            while (end_idx < trimmed.len) {
+                if (trimmed[end_idx] == '\\' and end_idx + 1 < trimmed.len) {
+                    end_idx += 2;
+                    continue;
+                }
+                if (trimmed[end_idx] == '"') break;
+                end_idx += 1;
+            }
+            if (end_idx >= trimmed.len) continue; // no closing quote
+            const quoted_content = trimmed[1..end_idx];
+            var unquoted = std.ArrayList(u8).init(allocator);
+            defer unquoted.deinit();
+            var qi: usize = 0;
+            while (qi < quoted_content.len) {
+                if (quoted_content[qi] == '\\' and qi + 1 < quoted_content.len) {
+                    qi += 1;
+                    try unquoted.append(quoted_content[qi]);
+                } else {
+                    try unquoted.append(quoted_content[qi]);
+                }
+                qi += 1;
+            }
+            pattern = try allocator.dupe(u8, unquoted.items);
+            pattern_allocated = true;
+            attr_start = end_idx + 1;
+        } else {
+            // Unquoted pattern - first whitespace-delimited token
+            var end_idx: usize = 0;
+            while (end_idx < trimmed.len and trimmed[end_idx] != ' ' and trimmed[end_idx] != '\t') {
+                end_idx += 1;
+            }
+            pattern = trimmed[0..end_idx];
+            attr_start = end_idx;
         }
+        var parts = std.mem.tokenizeAny(u8, trimmed[attr_start..], " \t");
 
         // helpers.If pattern starts with /, it's anchored to the directory
         var is_anchored = false;
@@ -294,12 +331,15 @@ pub fn parseAttrContent(allocator: std.mem.Allocator, content: []const u8, prefi
         }
 
         // Prepend prefix for subdirectory patterns
+        // In git, patterns with / are relative to the .gitattributes directory
         var full_pattern: []u8 = undefined;
-        if (prefix.len > 0 and !is_anchored) {
-            // helpers.For non-anchored patterns, they can match anywhere
-            full_pattern = try allocator.dupe(u8, pattern);
-        } else if (prefix.len > 0 and is_anchored) {
+        const has_slash = std.mem.indexOf(u8, pattern, "/") != null;
+        if (prefix.len > 0 and (is_anchored or has_slash)) {
+            // Anchored or path pattern: prepend directory prefix
             full_pattern = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, pattern });
+        } else if (prefix.len > 0 and !is_anchored) {
+            // Non-anchored basename patterns can match anywhere
+            full_pattern = try allocator.dupe(u8, pattern);
         } else {
             full_pattern = try allocator.dupe(u8, pattern);
         }
@@ -342,7 +382,19 @@ pub fn parseAttrContent(allocator: std.mem.Allocator, content: []const u8, prefi
 
 
 pub fn attrPatternMatches(pattern: []const u8, path: []const u8) bool {
-    // helpers.Use the gitignore glob matching
+    // For simple literal patterns (no glob chars), do direct matching
+    // This avoids the GitignoreEntry trimming issue with spaces
+    const has_glob = std.mem.indexOfAny(u8, pattern, "*?[") != null;
+    if (!has_glob and std.mem.indexOf(u8, pattern, "/") == null) {
+        // Simple basename match: match against the last path component
+        const basename = if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx| path[idx + 1 ..] else path;
+        return std.mem.eql(u8, pattern, basename);
+    }
+    if (!has_glob and std.mem.indexOf(u8, pattern, "/") != null) {
+        // Pattern with slash: match the full path
+        return std.mem.eql(u8, pattern, path);
+    }
+    // Use the gitignore glob matching for patterns with wildcards
     if (gitignore_mod.GitignoreEntry.init(pattern, std.heap.page_allocator)) |entry| {
         defer entry.deinit(std.heap.page_allocator);
         return entry.matches(path, false);
