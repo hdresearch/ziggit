@@ -675,19 +675,95 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         std.mem.eql(u8, first_arg.?, "-a") or std.mem.eql(u8, first_arg.?, "--all") or
         std.mem.eql(u8, first_arg.?, "-r") or std.mem.eql(u8, first_arg.?, "--remotes"))
     {
+        const is_remote_only = std.mem.eql(u8, first_arg.?, "-r") or std.mem.eql(u8, first_arg.?, "--remotes");
+        const is_all = std.mem.eql(u8, first_arg.?, "-a") or std.mem.eql(u8, first_arg.?, "--all");
         const current_branch4 = refs.getCurrentBranch(git_path, platform_impl, allocator) catch "master";
         defer allocator.free(current_branch4);
-        var branches4 = try refs.listBranches(git_path, platform_impl, allocator);
-        defer {
-            for (branches4.items) |br4| allocator.free(br4);
-            branches4.deinit();
-        }
         while (fake_args.next()) |_| {}
-        for (branches4.items) |br4| {
-            const p4 = if (std.mem.eql(u8, br4, current_branch4)) "* " else "  ";
-            const m4 = try std.fmt.allocPrint(allocator, "{s}{s}\n", .{ p4, br4 });
-            defer allocator.free(m4);
-            try platform_impl.writeStdout(m4);
+
+        // Show local branches (unless -r only)
+        if (!is_remote_only) {
+            var branches4 = try refs.listBranches(git_path, platform_impl, allocator);
+            defer {
+                for (branches4.items) |br4| allocator.free(br4);
+                branches4.deinit();
+            }
+            std.sort.pdq([]u8, branches4.items, {}, struct {
+                fn lt(_: void, a: []u8, b: []u8) bool {
+                    return std.mem.order(u8, a, b) == .lt;
+                }
+            }.lt);
+            for (branches4.items) |br4| {
+                const p4 = if (std.mem.eql(u8, br4, current_branch4)) "* " else "  ";
+                const m4 = try std.fmt.allocPrint(allocator, "{s}{s}\n", .{ p4, br4 });
+                defer allocator.free(m4);
+                try platform_impl.writeStdout(m4);
+            }
+        }
+
+        // Show remote branches (if -r or -a)
+        if (is_remote_only or is_all) {
+            // List refs/remotes/ directory
+            const remotes_path = try std.fmt.allocPrint(allocator, "{s}/refs/remotes", .{git_path});
+            defer allocator.free(remotes_path);
+            var remote_branches = std.array_list.Managed([]u8).init(allocator);
+            defer {
+                for (remote_branches.items) |rb| allocator.free(rb);
+                remote_branches.deinit();
+            }
+            if (std.fs.cwd().openDir(remotes_path, .{ .iterate = true })) |rdir_val| {
+                var rdir = rdir_val;
+                defer rdir.close();
+                var riter = rdir.iterate();
+                while (riter.next() catch null) |entry| {
+                    if (entry.kind == .directory) {
+                        // List branches under this remote
+                        const remote_dir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ remotes_path, entry.name });
+                        defer allocator.free(remote_dir_path);
+                        if (std.fs.cwd().openDir(remote_dir_path, .{ .iterate = true })) |bdir_val| {
+                            var bdir = bdir_val;
+                            defer bdir.close();
+                            // Check for HEAD symref
+                            const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{remote_dir_path});
+                            defer allocator.free(head_path);
+                            var head_target: ?[]const u8 = null;
+                            if (platform_impl.fs.readFile(allocator, head_path)) |hcontent| {
+                                defer allocator.free(hcontent);
+                                if (std.mem.startsWith(u8, hcontent, "ref: refs/remotes/")) {
+                                    const target = std.mem.trim(u8, hcontent["ref: refs/remotes/".len..], " \t\n\r");
+                                    head_target = try allocator.dupe(u8, target);
+                                }
+                            } else |_| {}
+                            defer if (head_target) |ht| allocator.free(ht);
+                            if (head_target) |ht| {
+                                const hm = try std.fmt.allocPrint(allocator, "  {s}/HEAD -> {s}\n", .{ entry.name, ht });
+                                defer allocator.free(hm);
+                                try platform_impl.writeStdout(hm);
+                            }
+                            var biter = bdir.iterate();
+                            while (biter.next() catch null) |bentry| {
+                                if (bentry.kind == .directory) continue;
+                                if (std.mem.eql(u8, bentry.name, "HEAD")) continue;
+                                const rb_name = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ entry.name, bentry.name });
+                                try remote_branches.append(rb_name);
+                            }
+                        } else |_| {}
+                    }
+                }
+            } else |_| {}
+            std.sort.pdq([]u8, remote_branches.items, {}, struct {
+                fn lt(_: void, a: []u8, b: []u8) bool {
+                    return std.mem.order(u8, a, b) == .lt;
+                }
+            }.lt);
+            for (remote_branches.items) |rb| {
+                const m4 = try std.fmt.allocPrint(allocator, "  {s}\n", .{rb});
+                defer allocator.free(m4);
+                try platform_impl.writeStdout(m4);
+            }
+        }
+        // Dummy loop to consume unused branches4
+        {
         }
     } else if (std.mem.eql(u8, first_arg.?, "--track") or std.mem.eql(u8, first_arg.?, "-t")) {
         // --track <branch> <start-point>: create branch with tracking
