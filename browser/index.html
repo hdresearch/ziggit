@@ -42,7 +42,7 @@
 </head>
 <body>
   <h1>⚡ ziggit</h1>
-  <p class="subtitle">Git clone in the browser — pure JavaScript + pako for decompression</p>
+  <p class="subtitle">A pure Zig git implementation — clone &amp; browse repos in the browser</p>
 
   <div class="row">
     <input type="text" id="corsProxy" placeholder="CORS proxy URL" value="https://corsproxy.io/?">
@@ -165,22 +165,25 @@
     }
 
     function smartInflate(data, offset) {
-      // Use pako.Inflate to decompress, tracking exact bytes consumed via total_in
-      const inf = new pako.Inflate();
-      // Push all remaining data; pako will consume only the zlib stream
-      inf.push(data.slice(offset));
+      // Git pack uses zlib format (2-byte header + deflate + 4-byte adler32).
+      // Use pako raw inflate, manually handling the zlib wrapper.
+      const cmf = data[offset];
+      const flg = data[offset + 1];
+      const headerSize = 2 + ((flg & 0x20) ? 4 : 0); // FDICT adds 4 bytes
 
-      // Check for errors (but Z_STREAM_END and Z_BUF_ERROR after complete decompression are OK)
+      const inf = new pako.Inflate({ raw: true });
+      inf.push(data.subarray(offset + headerSize));
+
       if (inf.err && inf.err !== 0) {
-        // If we got data, it's probably just trailing bytes causing error
         if (!inf.result || inf.result.length === 0) {
           throw new Error('inflate error at offset ' + offset + ': ' + inf.msg + ' (err=' + inf.err + ')');
         }
       }
 
-      // total_in tells us exactly how many compressed bytes were consumed
-      const bytesRead = inf.strm ? inf.strm.total_in : (data.length - offset);
-      return { result: inf.result, bytesRead };
+      // Total: zlib header + raw deflate bytes consumed + 4-byte adler32 checksum
+      const rawBytesConsumed = inf.strm ? inf.strm.total_in : 0;
+      const bytesRead = headerSize + rawBytesConsumed + 4;
+      return { result: inf.result || new Uint8Array(0), bytesRead };
     }
 
     const TYPE_NAMES = { 1: 'commit', 2: 'tree', 3: 'blob', 4: 'tag' };
@@ -412,7 +415,7 @@
         let refsText, baseUrl;
         for (const suffix of ['.git', '']) {
           const tryUrl = repoUrl + suffix;
-          const refsUrl = corsProxy + encodeURIComponent(tryUrl + '/info/refs?service=git-upload-pack');
+          const refsUrl = corsProxy + tryUrl + '/info/refs?service=git-upload-pack';
           try {
             const refsResp = await fetch(refsUrl);
             if (refsResp.ok) {
@@ -437,7 +440,7 @@
         // 2. Request pack
         const packBody = buildWantRequest(headHash);
         console.log('Pack request:', packBody);
-        const packResp = await fetch(corsProxy + encodeURIComponent(baseUrl + '/git-upload-pack'), {
+        const packResp = await fetch(corsProxy + baseUrl + '/git-upload-pack', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-git-upload-pack-request' },
           body: packBody
