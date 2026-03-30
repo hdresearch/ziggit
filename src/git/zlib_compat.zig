@@ -6,9 +6,18 @@ const Compress = flate.Compress;
 const Container = flate.Container;
 const Io = std.Io;
 
+/// Get the appropriate allocator for internal temporary buffers.
+/// On freestanding/WASM, page_allocator.free() is a no-op which leaks memory.
+fn getTempAllocator() std.mem.Allocator {
+    return if (comptime builtin.os.tag == .freestanding)
+        std.heap.wasm_allocator
+    else
+        std.heap.page_allocator;
+}
+
 pub fn decompress(reader: anytype, writer: anytype) !void {
     // Read all input from the generic reader into a buffer
-    var input_buf = std.array_list.Managed(u8).init(std.heap.page_allocator);
+    var input_buf = std.array_list.Managed(u8).init(getTempAllocator());
     defer input_buf.deinit();
     while (true) {
         var tmp: [16384]u8 = undefined;
@@ -18,15 +27,15 @@ pub fn decompress(reader: anytype, writer: anytype) !void {
     }
 
     // Decompress using slice-based API and write result
-    const decompressed = decompressSlice(std.heap.page_allocator, input_buf.items) catch return error.InvalidInput;
-    defer std.heap.page_allocator.free(decompressed);
+    const decompressed = decompressSlice(getTempAllocator(), input_buf.items) catch return error.InvalidInput;
+    defer getTempAllocator().free(decompressed);
     writer.writeAll(decompressed) catch return error.InvalidInput;
 }
 
 pub fn compress(reader: anytype, writer: anytype, options: anytype) !void {
     _ = options;
     // Read all input
-    var input_buf = std.array_list.Managed(u8).init(std.heap.page_allocator);
+    var input_buf = std.array_list.Managed(u8).init(getTempAllocator());
     defer input_buf.deinit();
     while (true) {
         var tmp: [16384]u8 = undefined;
@@ -36,7 +45,7 @@ pub fn compress(reader: anytype, writer: anytype, options: anytype) !void {
     }
 
     // Use allocating writer for compressed output
-    var aw: Io.Writer.Allocating = .init(std.heap.page_allocator);
+    var aw: Io.Writer.Allocating = .init(getTempAllocator());
     defer aw.deinit();
 
     // Compress with zlib container
@@ -80,7 +89,7 @@ pub fn Decompressor(comptime ReaderType: type) type {
 
 pub fn decompressor(reader: anytype) Decompressor(@TypeOf(reader)) {
     // Read all data from the reader first
-    var input_buf = std.array_list.Managed(u8).init(std.heap.page_allocator);
+    var input_buf = std.array_list.Managed(u8).init(getTempAllocator());
     while (true) {
         var tmp: [16384]u8 = undefined;
         const n = reader.read(&tmp) catch break;
@@ -94,7 +103,7 @@ pub fn decompressor(reader: anytype) Decompressor(@TypeOf(reader)) {
     _ = &decomp_buf;
     var dec: Decompress = .init(&in, .zlib, &.{});
 
-    var output = std.array_list.Managed(u8).init(std.heap.page_allocator);
+    var output = std.array_list.Managed(u8).init(getTempAllocator());
     while (true) {
         var buf: [16384]u8 = undefined;
         const n = dec.reader.read(&buf) catch break;
@@ -127,7 +136,7 @@ pub fn Compressor(comptime WriterType: type) type {
                 // Store uncompressed as a fallback.
                 return error.CompressionFailed;
             }
-            var aw: Io.Writer.Allocating = .init(std.heap.page_allocator);
+            var aw: Io.Writer.Allocating = .init(getTempAllocator());
             defer aw.deinit();
 
             const comp_buf_size = flate.max_window_len * 2 + 512 * 1024;
@@ -153,7 +162,7 @@ pub fn Compressor(comptime WriterType: type) type {
 
 pub fn compressorWriter(writer: anytype, options: anytype) !Compressor(@TypeOf(writer)) {
     _ = options;
-    return .{ .inner_writer = writer, .buffer = std.array_list.Managed(u8).init(std.heap.page_allocator) };
+    return .{ .inner_writer = writer, .buffer = std.array_list.Managed(u8).init(getTempAllocator()) };
 }
 
 pub fn compressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
