@@ -1290,9 +1290,10 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             const cleaned_slice = try cleaned.toOwnedSlice();
             const trimmed_msg = std.mem.trim(u8, cleaned_slice, "\n");
             if (trimmed_msg.len == 0) {
-                // Empty message after stripping - abort? No, git allows empty.
-                message = "";
+                // Empty message after stripping comments - abort
                 allocator.free(cleaned_slice);
+                try platform_impl.writeStderr("fatal: no tag message?\n");
+                std.process.exit(1);
             } else {
                 message = cleaned_slice;
             }
@@ -1427,6 +1428,24 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
 
         var tag_content: []u8 = undefined;
         if (sign_mode) {
+            // Read gpg config
+            var effective_sign_key = sign_key;
+            var gpg_program: []const u8 = "gpg";
+            {
+                const cfg_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+                defer allocator.free(cfg_path);
+                if (std.fs.cwd().readFileAlloc(allocator, cfg_path, 1024 * 1024)) |cfg_data| {
+                    defer allocator.free(cfg_data);
+                    if (effective_sign_key == null) {
+                        if (getConfigValue(cfg_data, "user", "signingkey")) |key| {
+                            effective_sign_key = key;
+                        }
+                    }
+                    if (getConfigValue(cfg_data, "gpg", "program")) |prog| {
+                        gpg_program = prog;
+                    }
+                } else |_| {}
+            }
             // Build unsigned tag content
             const unsigned = if (final_msg.len == 0)
                 try std.fmt.allocPrint(allocator, "object {s}\ntype {s}\ntag {s}\ntagger {s} <{s}> {d} {s}\n\n", .{ commit_hash, obj_type_str, tag_name.?, tagger_name, tagger_email, timestamp, tz_str })
@@ -1434,7 +1453,7 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 try std.fmt.allocPrint(allocator, "object {s}\ntype {s}\ntag {s}\ntagger {s} <{s}> {d} {s}\n\n{s}\n", .{ commit_hash, obj_type_str, tag_name.?, tagger_name, tagger_email, timestamp, tz_str, final_msg });
 
             // Try to sign with gpg
-            const signed_content = signWithGpg(allocator, unsigned, sign_key) catch |err| {
+            const signed_content = signWithGpg(allocator, unsigned, effective_sign_key, gpg_program) catch |err| {
                 allocator.free(unsigned);
                 switch (err) {
                     error.GpgFailed => {
@@ -1708,10 +1727,10 @@ fn verifyGpgSignature(allocator: std.mem.Allocator, content: []const u8, signatu
     if (term.Exited != 0) return error.GpgVerifyFailed;
 }
 
-fn signWithGpg(allocator: std.mem.Allocator, content: []const u8, sign_key: ?[]const u8) ![]u8 {
+fn signWithGpg(allocator: std.mem.Allocator, content: []const u8, sign_key: ?[]const u8, gpg_program: []const u8) ![]u8 {
     var argv = std.array_list.Managed([]const u8).init(allocator);
     defer argv.deinit();
-    try argv.append("gpg");
+    try argv.append(gpg_program);
     try argv.append("--status-fd=2");
     if (sign_key) |key| {
         try argv.append("-bsau");
@@ -1840,7 +1859,12 @@ fn getAnnotationFromHash(allocator: std.mem.Allocator, git_path: []const u8, has
         return "";
     }
     if (std.mem.indexOf(u8, obj.data, "\n\n")) |pos| {
-        const msg = std.mem.trimRight(u8, obj.data[pos + 2 ..], "\n\r ");
+        var raw_msg = obj.data[pos + 2 ..];
+        // Strip PGP signature if present
+        if (std.mem.indexOf(u8, raw_msg, "-----BEGIN PGP SIGNATURE-----")) |sig_start| {
+            raw_msg = raw_msg[0..sig_start];
+        }
+        const msg = std.mem.trimRight(u8, raw_msg, "\n\r ");
         if (msg.len == 0) return "";
         var result = std.array_list.Managed(u8).init(allocator);
         errdefer result.deinit();
