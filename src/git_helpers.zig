@@ -9686,7 +9686,7 @@ pub fn extractTrailers(message: []const u8) []const u8 {
     return trailer_block;
 }
 
-pub fn isTrailerLine(line: []const u8) bool {
+fn isTrailerLine(line: []const u8) bool {
     if (std.mem.indexOf(u8, line, ": ")) |colon_pos| {
         if (colon_pos == 0) return false;
         const key = line[0..colon_pos];
