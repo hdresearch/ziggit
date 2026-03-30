@@ -33,6 +33,10 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var format_is_separator = false; // true for "format:", false for "tformat:" / "--format="
     var max_count: ?u32 = null;
     var committish: ?[]const u8 = null;
+    var exclude_refs = std.ArrayList([]const u8).init(allocator);
+    defer exclude_refs.deinit();
+    var include_refs = std.ArrayList([]const u8).init(allocator);
+    defer include_refs.deinit();
     var walk_reflog = false;
     var pretty_alias: ?[]const u8 = null; // unresolved pretty.<name> alias
     var author_filters = std.ArrayList([]const u8).init(allocator);
@@ -110,9 +114,25 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             invert_grep = true;
         } else if (std.mem.startsWith(u8, arg, "--encoding=")) {
             output_encoding = arg["--encoding=".len..];
+        } else if (std.mem.eql(u8, arg, "--")) {
+            // Everything after -- is a path, ignore for now
+            break;
+        } else if (std.mem.startsWith(u8, arg, "^") and arg.len > 1) {
+            // ^ref means exclude commits reachable from ref
+            try exclude_refs.append(arg[1..]);
+        } else if (std.mem.indexOf(u8, arg, "..")) |dot_pos| {
+            // A..B means ^A B
+            if (dot_pos > 0) try exclude_refs.append(arg[0..dot_pos]);
+            if (dot_pos + 2 < arg.len) committish = arg[dot_pos + 2..];
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             // helpers.This is likely a committish (commit hash, branch name, etc.)
-            committish = arg;
+            if (committish == null) {
+                committish = arg;
+            } else {
+                // Multiple include refs - use the last one as committish
+                try include_refs.append(committish.?);
+                committish = arg;
+            }
         }
     }
 
@@ -318,10 +338,51 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         visited.deinit();
     }
 
-    // Seed the queue with the start commit
+    // Build excluded commit set from ^ref arguments
+    var excluded = std.StringHashMap(void).init(allocator);
+    defer {
+        var exc_it = excluded.iterator();
+        while (exc_it.next()) |entry| allocator.free(entry.key_ptr.*);
+        excluded.deinit();
+    }
+    for (exclude_refs.items) |exc_ref| {
+        const exc_hash = helpers.resolveCommittish(git_path, exc_ref, platform_impl, allocator) catch continue;
+        defer allocator.free(exc_hash);
+        // Walk excluded ref's ancestors
+        var exc_queue = std.ArrayList([]const u8).init(allocator);
+        defer exc_queue.deinit();
+        try exc_queue.append(try allocator.dupe(u8, exc_hash));
+        while (exc_queue.items.len > 0) {
+            const h = exc_queue.pop();
+            if (excluded.contains(h)) { allocator.free(h); continue; }
+            try excluded.put(h, {});
+            // Get parents
+            const obj = objects.GitObject.load(h, git_path, platform_impl, allocator) catch continue;
+            defer obj.deinit(allocator);
+            var lit = std.mem.splitSequence(u8, obj.data, "\n");
+            while (lit.next()) |line| {
+                if (line.len == 0) break;
+                if (std.mem.startsWith(u8, line, "parent ")) {
+                    try exc_queue.append(try allocator.dupe(u8, line["parent ".len..]));
+                }
+            }
+        }
+    }
+
+    // Seed the queue with the start commit (and any additional include refs)
     const start_ts = helpers.getCommitTimestamp(start_commit, git_path, platform_impl, allocator);
     try queue.append(.{ .hash = try allocator.dupe(u8, start_commit), .timestamp = start_ts });
     try visited.put(try allocator.dupe(u8, start_commit), {});
+    // Add additional include refs
+    for (include_refs.items) |inc_ref| {
+        const inc_hash = helpers.resolveCommittish(git_path, inc_ref, platform_impl, allocator) catch continue;
+        if (!visited.contains(inc_hash)) {
+            const inc_ts = helpers.getCommitTimestamp(inc_hash, git_path, platform_impl, allocator);
+            try queue.append(.{ .hash = try allocator.dupe(u8, inc_hash), .timestamp = inc_ts });
+            try visited.put(try allocator.dupe(u8, inc_hash), {});
+        }
+        allocator.free(inc_hash);
+    }
 
     var count: u32 = 0;
     while (queue.items.len > 0 and (max_count == null or count < max_count.?)) {
@@ -335,6 +396,9 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         const current = queue.orderedRemove(best_idx);
         const cur_hash = current.hash;
         defer allocator.free(@constCast(cur_hash));
+
+        // Skip excluded commits (from ^ref arguments)
+        if (excluded.contains(cur_hash)) continue;
 
         // helpers.Load commit object
         const commit_object = objects.GitObject.load(cur_hash, git_path, platform_impl, allocator) catch |err| switch (err) {
