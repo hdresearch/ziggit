@@ -169,7 +169,38 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                 unreachable;
             };
         };
-        // branch_name may need freeing if allocated
+        // Check for too many args
+        if (fake_args.next() != null) {
+            try platform_impl.writeStderr("fatal: too many arguments to set new upstream\n");
+            std.process.exit(128);
+        }
+        const short_branch_name = if (std.mem.startsWith(u8, branch_name, "refs/heads/")) branch_name["refs/heads/".len..] else branch_name;
+        // Check branch exists
+        {
+            const br_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, short_branch_name });
+            defer allocator.free(br_path);
+            if (!((std.fs.cwd().access(br_path, .{}) catch null) != null)) {
+                const emsg = try std.fmt.allocPrint(allocator, "fatal: branch '{s}' does not exist\n", .{short_branch_name});
+                defer allocator.free(emsg);
+                try platform_impl.writeStderr(emsg);
+                std.process.exit(128);
+            }
+        }
+        // Check upstream exists (as branch or remote tracking branch)
+        {
+            const u_heads = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, upstream_name });
+            defer allocator.free(u_heads);
+            const u_remotes = try std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}", .{ git_path, upstream_name });
+            defer allocator.free(u_remotes);
+            const upstream_exists = ((std.fs.cwd().access(u_heads, .{}) catch null) != null) or
+                ((std.fs.cwd().access(u_remotes, .{}) catch null) != null);
+            if (!upstream_exists) {
+                const emsg = try std.fmt.allocPrint(allocator, "fatal: the requested upstream branch '{s}' does not exist\n", .{upstream_name});
+                defer allocator.free(emsg);
+                try platform_impl.writeStderr(emsg);
+                std.process.exit(128);
+            }
+        }
         
         // helpers.Write tracking config: [branch "name"] remote = . merge = refs/heads/upstream
         const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
