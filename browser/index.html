@@ -387,7 +387,7 @@
       let baseSize = 0, shift = 0, byte;
       do {
         byte = delta[pos++];
-        baseSize |= (byte & 0x7f) << shift;
+        baseSize += (byte & 0x7f) * (2 ** shift);
         shift += 7;
       } while (byte & 0x80);
 
@@ -396,7 +396,7 @@
       shift = 0;
       do {
         byte = delta[pos++];
-        resultSize |= (byte & 0x7f) << shift;
+        resultSize += (byte & 0x7f) * (2 ** shift);
         shift += 7;
       } while (byte & 0x80);
 
@@ -710,9 +710,20 @@
         // 1. Fetch refs - try with .git suffix first, then without
         status('Fetching refs...');
         let refsText, baseUrl;
+
+        // Build proxied URL - handle different proxy formats
+        function proxyUrl(url) {
+          if (!corsProxy) return url; // no proxy
+          if (corsProxy.includes('?url=') || corsProxy.endsWith('?')) {
+            return corsProxy + encodeURIComponent(url);
+          }
+          // For proxies that want the URL appended directly
+          return corsProxy + encodeURIComponent(url);
+        }
+
         for (const suffix of ['.git', '']) {
           const tryUrl = repoUrl + suffix;
-          const refsUrl = corsProxy + encodeURIComponent(tryUrl + '/info/refs?service=git-upload-pack');
+          const refsUrl = proxyUrl(tryUrl + '/info/refs?service=git-upload-pack');
           try {
             const refsResp = await fetch(refsUrl);
             if (refsResp.ok) {
@@ -738,7 +749,7 @@
         // 2. Request pack
         const packBody = buildWantRequest(headHash);
         console.log('Pack request:', packBody);
-        const packResp = await fetch(corsProxy + encodeURIComponent(baseUrl + '/git-upload-pack'), {
+        const packResp = await fetch(proxyUrl(baseUrl + '/git-upload-pack'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-git-upload-pack-request' },
           body: packBody
