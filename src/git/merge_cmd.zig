@@ -35,8 +35,10 @@ const MergeOpts = struct {
     ff_only: bool = false,
     explicit_ff: bool = false,
     squash: bool = false,
+    explicit_squash: bool = false,
     no_commit: bool = false,
     explicit_commit: bool = false,
+    explicit_stat: bool = false,
     strategy: ?[]const u8 = null,
     octopus_strategies: ?[]const u8 = null, // space-separated list from pull.octopus
     signoff: bool = false,
@@ -165,10 +167,13 @@ pub fn cmdMerge(allocator: Allocator, args: *pm.ArgIterator, platform_impl: *con
             opts.explicit_ff = true;
         } else if (std.mem.eql(u8, arg, "--squash")) {
             opts.squash = true;
+            opts.explicit_squash = true;
         } else if (std.mem.eql(u8, arg, "--no-squash")) {
             opts.squash = false;
+            opts.explicit_squash = true;
         } else if (std.mem.eql(u8, arg, "--no-commit")) {
             opts.no_commit = true;
+            opts.explicit_commit = true;
         } else if (std.mem.eql(u8, arg, "--commit")) {
             opts.no_commit = false;
             opts.explicit_commit = true;
@@ -182,12 +187,16 @@ pub fn cmdMerge(allocator: Allocator, args: *pm.ArgIterator, platform_impl: *con
             opts.edit = false;
         } else if (std.mem.eql(u8, arg, "--stat")) {
             opts.stat = true;
+            opts.explicit_stat = true;
         } else if (std.mem.eql(u8, arg, "--no-stat") or std.mem.eql(u8, arg, "-n")) {
             opts.stat = false;
+            opts.explicit_stat = true;
         } else if (std.mem.eql(u8, arg, "--summary")) {
             opts.stat = true;
+            opts.explicit_stat = true;
         } else if (std.mem.eql(u8, arg, "--no-summary")) {
             opts.stat = false;
+            opts.explicit_stat = true;
         } else if (std.mem.eql(u8, arg, "--compact-summary")) {
             opts.compact_summary = true;
             opts.stat = true;
@@ -744,15 +753,15 @@ fn applyConfigDefaults(git_path: []const u8, opts: *MergeOpts, allocator: Alloca
                 opts.no_ff = false;
                 opts.ff_only = false;
             } else if (std.mem.eql(u8, opt, "--squash")) {
-                opts.squash = true;
+                if (!opts.explicit_squash) opts.squash = true;
             } else if (std.mem.eql(u8, opt, "--no-commit")) {
-                opts.no_commit = true;
+                if (!opts.explicit_commit) opts.no_commit = true;
             } else if (std.mem.eql(u8, opt, "--commit")) {
-                opts.no_commit = false;
+                if (!opts.explicit_commit) opts.no_commit = false;
             } else if (std.mem.eql(u8, opt, "--stat")) {
-                opts.stat = true;
+                if (!opts.explicit_stat) opts.stat = true;
             } else if (std.mem.eql(u8, opt, "--no-stat") or std.mem.eql(u8, opt, "-n")) {
-                opts.stat = false;
+                if (!opts.explicit_stat) opts.stat = false;
             } else if (std.mem.eql(u8, opt, "--log")) {
                 opts.log = true;
             } else if (std.mem.eql(u8, opt, "--no-log")) {
