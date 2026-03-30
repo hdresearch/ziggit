@@ -233,11 +233,19 @@ pub fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                 std.process.exit(128);
             };
             defer allocator.free(git_path);
-            // helpers.GIT_DIR env: output directly
+            // helpers.GIT_DIR env: output (convert to absolute if needed)
             if (std.posix.getenv("GIT_DIR")) |gd| {
-                const gd_out = try std.fmt.allocPrint(allocator, "{s}\n", .{gd});
-                defer allocator.free(gd_out);
-                try platform_impl.writeStdout(gd_out);
+                if (path_format_absolute and !std.fs.path.isAbsolute(gd)) {
+                    const abs_gd = std.fs.cwd().realpathAlloc(allocator, gd) catch try allocator.dupe(u8, gd);
+                    defer allocator.free(abs_gd);
+                    const gd_out = try std.fmt.allocPrint(allocator, "{s}\n", .{abs_gd});
+                    defer allocator.free(gd_out);
+                    try platform_impl.writeStdout(gd_out);
+                } else {
+                    const gd_out = try std.fmt.allocPrint(allocator, "{s}\n", .{gd});
+                    defer allocator.free(gd_out);
+                    try platform_impl.writeStdout(gd_out);
+                }
                 continue;
             }
             // Gitdir link target (absolute, not standard .git): output as-is
@@ -424,9 +432,19 @@ pub fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
             defer allocator.free(output);
             try platform_impl.writeStdout(output);
             continue;
-        } else if (std.mem.eql(u8, arg, "--show-object-format") or std.mem.startsWith(u8, arg, "--show-object-format=")) {
+        } else if (std.mem.eql(u8, arg, "--show-object-format") or
+            std.mem.eql(u8, arg, "--show-object-format=storage") or
+            std.mem.eql(u8, arg, "--show-object-format=input") or
+            std.mem.eql(u8, arg, "--show-object-format=output"))
+        {
             try platform_impl.writeStdout("sha1\n");
             continue;
+        } else if (std.mem.startsWith(u8, arg, "--show-object-format=")) {
+            const mode = arg["--show-object-format=".len..];
+            const msg = try std.fmt.allocPrint(allocator, "fatal: unknown mode for --show-object-format: {s}\n", .{mode});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(1);
         } else if (std.mem.eql(u8, arg, "--show-ref-format")) {
             try platform_impl.writeStdout("files\n");
             continue;
