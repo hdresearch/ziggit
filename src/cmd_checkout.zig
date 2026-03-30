@@ -666,12 +666,30 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                     defer allocator.free(val);
                     if (std.ascii.eqlIgnoreCase(val, "false")) show_advice = false;
                 }
+                // Get commit subject for output
+                var commit_subj: []const u8 = "";
+                var free_subj = false;
+                if (actual_target.len >= 40) {
+                    if (objects.GitObject.load(actual_target, git_path, platform_impl, allocator)) |cobj| {
+                        defer cobj.deinit(allocator);
+                        if (std.mem.indexOf(u8, cobj.data, "\n\n")) |p| {
+                            const ms = cobj.data[p + 2 ..];
+                            if (std.mem.indexOfScalar(u8, ms, '\n')) |nl| {
+                                commit_subj = allocator.dupe(u8, ms[0..nl]) catch "";
+                            } else {
+                                commit_subj = allocator.dupe(u8, std.mem.trim(u8, ms, "\n")) catch "";
+                            }
+                            free_subj = true;
+                        }
+                    } else |_| {}
+                }
+                defer if (free_subj) allocator.free(commit_subj);
                 if (show_advice) {
-                    const det_msg = try std.fmt.allocPrint(allocator, "Note: switching to '{s}'.\nHEAD is now at {s}\n", .{ target, actual_target[0..7] });
+                    const det_msg = try std.fmt.allocPrint(allocator, "Note: switching to '{s}'.\nHEAD is now at {s} {s}\n", .{ target, actual_target[0..7], commit_subj });
                     defer allocator.free(det_msg);
                     try platform_impl.writeStderr(det_msg);
                 } else {
-                    const det_msg = try std.fmt.allocPrint(allocator, "HEAD is now at {s}\n", .{ actual_target[0..7] });
+                    const det_msg = try std.fmt.allocPrint(allocator, "HEAD is now at {s} {s}\n", .{ actual_target[0..7], commit_subj });
                     defer allocator.free(det_msg);
                     try platform_impl.writeStderr(det_msg);
                 }
