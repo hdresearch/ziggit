@@ -73,6 +73,7 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var tag_name: ?[]const u8 = null;
     var delete_mode = false;
     var list_mode = false;
+    var n_lines: ?i32 = null; // -n<num> for showing annotation lines
     var force = false;
     var verify_mode = false;
     var delete_names = std.array_list.Managed([]const u8).init(allocator);
@@ -142,8 +143,13 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             if (std.mem.eql(u8, arg, "-u")) _ = args.next(); // skip key-id
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verify")) {
             verify_mode = true;
-        } else if (std.mem.eql(u8, arg, "-n") or std.mem.startsWith(u8, arg, "-n")) {
-            // -n<num> for listing annotation lines
+        } else if (std.mem.eql(u8, arg, "-n")) {
+            n_lines = 1; // -n defaults to 1 line
+            list_mode = true;
+        } else if (arg.len > 2 and arg[0] == '-' and arg[1] == 'n' and arg[2] >= '0' and arg[2] <= '9') {
+            // -n<num>
+            n_lines = std.fmt.parseInt(i32, arg[2..], 10) catch 1;
+            list_mode = true;
         } else if (std.mem.startsWith(u8, arg, "--contains") or std.mem.startsWith(u8, arg, "--no-contains") or
             std.mem.startsWith(u8, arg, "--merged") or std.mem.startsWith(u8, arg, "--no-merged") or
             std.mem.startsWith(u8, arg, "--points-at") or std.mem.startsWith(u8, arg, "--with") or
@@ -386,9 +392,36 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         }
         
         for (tag_list.items) |tag| {
-            const output = try std.fmt.allocPrint(allocator, "{s}\n", .{tag});
-            defer allocator.free(output);
-            try platform_impl.writeStdout(output);
+            if (n_lines) |nl| {
+                if (nl > 0) {
+                    // Show annotation lines for annotated tags
+                    const annotation = getTagAnnotation(allocator, git_path, tag, platform_impl, @intCast(nl)) catch "";
+                    defer if (annotation.len > 0) allocator.free(annotation);
+                    if (annotation.len > 0) {
+                        // Git pads tag names to a minimum width with spaces
+                        var out_buf = std.array_list.Managed(u8).init(allocator);
+                        defer out_buf.deinit();
+                        try out_buf.appendSlice(tag);
+                        // Pad to at least 16 chars total (tag + spaces)
+                        while (out_buf.items.len < 16) try out_buf.append(' ');
+                        try out_buf.appendSlice(annotation);
+                        try out_buf.append('\n');
+                        try platform_impl.writeStdout(out_buf.items);
+                    } else {
+                        const output = try std.fmt.allocPrint(allocator, "{s}\n", .{tag});
+                        defer allocator.free(output);
+                        try platform_impl.writeStdout(output);
+                    }
+                } else {
+                    const output = try std.fmt.allocPrint(allocator, "{s}\n", .{tag});
+                    defer allocator.free(output);
+                    try platform_impl.writeStdout(output);
+                }
+            } else {
+                const output = try std.fmt.allocPrint(allocator, "{s}\n", .{tag});
+                defer allocator.free(output);
+                try platform_impl.writeStdout(output);
+            }
         }
         
         return;
@@ -530,19 +563,31 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 try msg_lines_arr.append(stripped);
             }
         }
-        // helpers.Remove trailing empty lines
-        while (msg_lines_arr.items.len > 0 and msg_lines_arr.items[msg_lines_arr.items.len - 1].len == 0) {
-            _ = msg_lines_arr.pop();
+        // Apply stripspace-like cleanup: collapse consecutive blank lines, remove leading/trailing blanks
+        var stripped_lines = std.array_list.Managed([]const u8).init(allocator);
+        defer stripped_lines.deinit();
+        {
+            var prev_blank = false;
+            for (msg_lines_arr.items) |mline| {
+                if (mline.len == 0) {
+                    if (!prev_blank and stripped_lines.items.len > 0) {
+                        try stripped_lines.append(mline);
+                    }
+                    prev_blank = true;
+                } else {
+                    try stripped_lines.append(mline);
+                    prev_blank = false;
+                }
+            }
         }
-        // helpers.Remove leading empty lines
-        var lead_skip: usize = 0;
-        while (lead_skip < msg_lines_arr.items.len and msg_lines_arr.items[lead_skip].len == 0) {
-            lead_skip += 1;
+        // Remove trailing empty lines
+        while (stripped_lines.items.len > 0 and stripped_lines.items[stripped_lines.items.len - 1].len == 0) {
+            _ = stripped_lines.pop();
         }
-        // helpers.Build final message
+        // Build final message
         var cleaned_msg = std.array_list.Managed(u8).init(allocator);
         defer cleaned_msg.deinit();
-        for (msg_lines_arr.items[lead_skip..]) |mline| {
+        for (stripped_lines.items) |mline| {
             try cleaned_msg.appendSlice(mline);
             try cleaned_msg.append('\n');
         }
@@ -570,38 +615,12 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             try std.fmt.allocPrint(allocator, "object {s}\ntype {s}\ntag {s}\ntagger {s} <{s}> {d} {s}\n\n{s}\n", .{ commit_hash, obj_type_str, tag_name.?, tagger_name, tagger_email, timestamp, tz_str, final_msg });
         defer allocator.free(tag_content);
         
-        // Hash and write tag object
-        const header = try std.fmt.allocPrint(allocator, "tag {d}\x00", .{tag_content.len});
-        defer allocator.free(header);
-        var hasher = std.crypto.hash.Sha1.init(.{});
-        hasher.update(header);
-        hasher.update(tag_content);
-        const tag_sha = hasher.finalResult();
-        
+        // Create and store tag object using objects module (uses C zlib)
+        const tag_obj = objects.GitObject{ .type = .tag, .data = tag_content };
+        const tag_hex_slice = try tag_obj.store(git_path, platform_impl, allocator);
+        defer allocator.free(tag_hex_slice);
         var tag_hex: [40]u8 = undefined;
-        for (tag_sha, 0..) |b, bi| {
-            _ = std.fmt.bufPrint(tag_hex[bi * 2 .. bi * 2 + 2], "{x:0>2}", .{b}) catch continue;
-        }
-        
-        // helpers.Write tag object
-        const obj_dir = try std.fmt.allocPrint(allocator, "{s}/objects/{s}", .{ git_path, tag_hex[0..2] });
-        defer allocator.free(obj_dir);
-        std.fs.cwd().makePath(obj_dir) catch {};
-        const obj_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ obj_dir, tag_hex[2..] });
-        defer allocator.free(obj_path);
-        
-        // Compress and write
-        var full_obj = std.array_list.Managed(u8).init(allocator);
-        defer full_obj.deinit();
-        try full_obj.appendSlice(header);
-        try full_obj.appendSlice(tag_content);
-        const compressed = zlib_compat_mod.compressSlice(allocator, full_obj.items) catch {
-            try platform_impl.writeStderr("fatal: unable to compress tag object\n");
-            std.process.exit(128);
-            unreachable;
-        };
-        defer allocator.free(compressed);
-        std.fs.cwd().writeFile(.{ .sub_path = obj_path, .data = compressed }) catch {};
+        @memcpy(&tag_hex, tag_hex_slice[0..40]);
         
         // helpers.Write ref pointing to tag object
         const ref_content = try std.fmt.allocPrint(allocator, "{s}\n", .{tag_hex});
@@ -616,4 +635,70 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     }
 }
 
+/// Get annotation text for a tag (first n_lines of message)
+fn getTagAnnotation(allocator: std.mem.Allocator, git_path: []const u8, tag_name: []const u8, platform_impl: anytype, max_lines: usize) ![]const u8 {
+    // Read tag ref to get hash
+    const ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags/{s}", .{ git_path, tag_name });
+    defer allocator.free(ref_path);
+    const ref_content = platform_impl.fs.readFile(allocator, ref_path) catch {
+        // Try packed-refs
+        const packed_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_path});
+        defer allocator.free(packed_path);
+        const packed_data = platform_impl.fs.readFile(allocator, packed_path) catch return "";
+        defer allocator.free(packed_data);
+        var lines_iter = std.mem.splitScalar(u8, packed_data, '\n');
+        while (lines_iter.next()) |line| {
+            if (line.len == 0 or line[0] == '#') continue;
+            const search = try std.fmt.allocPrint(allocator, "refs/tags/{s}", .{tag_name});
+            defer allocator.free(search);
+            if (std.mem.indexOf(u8, line, search)) |_| {
+                if (line.len >= 40) {
+                    const hash = line[0..40];
+                    return getAnnotationFromHash(allocator, git_path, hash, platform_impl, max_lines);
+                }
+            }
+        }
+        return "";
+    };
+    defer allocator.free(ref_content);
+    const hash = std.mem.trim(u8, ref_content, " \t\n\r");
+    if (hash.len < 40) return "";
+    return getAnnotationFromHash(allocator, git_path, hash[0..40], platform_impl, max_lines);
+}
+
+fn getAnnotationFromHash(allocator: std.mem.Allocator, git_path: []const u8, hash: []const u8, platform_impl: anytype, max_lines: usize) ![]const u8 {
+    const obj = objects.GitObject.load(hash, git_path, platform_impl, allocator) catch return "";
+    defer obj.deinit(allocator);
+    if (obj.type != .tag) {
+        // For lightweight tags pointing to commits, show commit message first line
+        if (obj.type == .commit) {
+            if (std.mem.indexOf(u8, obj.data, "\n\n")) |pos| {
+                const msg = obj.data[pos + 2 ..];
+                if (std.mem.indexOfScalar(u8, msg, '\n')) |nl| {
+                    return try allocator.dupe(u8, msg[0..nl]);
+                }
+                return try allocator.dupe(u8, std.mem.trim(u8, msg, "\n"));
+            }
+        }
+        return "";
+    }
+    // Tag object: extract message (after blank line)
+    if (std.mem.indexOf(u8, obj.data, "\n\n")) |pos| {
+        const msg = std.mem.trimRight(u8, obj.data[pos + 2 ..], "\n\r ");
+        if (msg.len == 0) return "";
+        var result = std.array_list.Managed(u8).init(allocator);
+        errdefer result.deinit();
+        var lines_iter = std.mem.splitScalar(u8, msg, '\n');
+        var count: usize = 0;
+        while (lines_iter.next()) |line| {
+            if (count >= max_lines) break;
+            const trimmed = std.mem.trimRight(u8, line, " \t\r");
+            if (count > 0) try result.appendSlice("\n    ");
+            try result.appendSlice(trimmed);
+            count += 1;
+        }
+        return try result.toOwnedSlice();
+    }
+    return "";
+}
 
