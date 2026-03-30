@@ -849,12 +849,22 @@
       return false;
     }
 
+    function downloadFile(blobHash, name) {
+      const obj = objectDb[blobHash];
+      if (!obj) return;
+      const blob = new Blob([obj.data]);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = name; a.click();
+      URL.revokeObjectURL(url);
+    }
+
     function showFile(blobHash, name) {
       const obj = objectDb[blobHash];
       if (!obj) { status('Blob not found: ' + blobHash, true); return; }
       const panel = document.getElementById('file-panel');
       panel.style.display = 'block';
-      document.getElementById('file-name').textContent = name + ' (' + formatSize(obj.data.length) + ')';
+      document.getElementById('file-name').innerHTML = escHtml(name) + ' (' + formatSize(obj.data.length) + ') <button onclick="downloadFile(\'' + blobHash + '\', \'' + name.replace(/'/g, "\\'") + '\')" style="font-size:0.8em;padding:2px 8px">⬇ Download</button>';
       const contentEl = document.getElementById('file-content');
       if (isBinary(obj.data)) {
         // Check if it's an image
