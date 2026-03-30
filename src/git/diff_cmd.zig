@@ -4871,6 +4871,31 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
             };
             defer obj.deinit(allocator);
 
+            if (obj.type == .blob) {
+                try pi.writeStdout(obj.data);
+                continue;
+            }
+            if (obj.type == .tree) {
+                const hdr = try std.fmt.allocPrint(allocator, "tree {s}\n\n", .{hash});
+                defer allocator.free(hdr);
+                try pi.writeStdout(hdr);
+                // List tree entries
+                var tpos: usize = 0;
+                while (tpos < obj.data.len) {
+                    const sp = std.mem.indexOfScalarPos(u8, obj.data, tpos, ' ') orelse break;
+                    tpos = sp + 1;
+                    const np = std.mem.indexOfScalarPos(u8, obj.data, tpos, 0) orelse break;
+                    const ename = obj.data[tpos..np];
+                    try pi.writeStdout(ename);
+                    try pi.writeStdout("\n");
+                    tpos = np + 1 + 20;
+                }
+                continue;
+            }
+            if (obj.type == .tag) {
+                try pi.writeStdout(obj.data);
+                continue;
+            }
             if (obj.type != .commit) continue;
 
             const parents = try getAllParents(obj.data, allocator);
