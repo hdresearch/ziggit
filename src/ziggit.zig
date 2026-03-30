@@ -35,6 +35,11 @@ pub const Repository = struct {
     _cached_index_entries: ?[]CachedIndexEntry = null,
     _cached_index_entries_mtime: ?i128 = null,
 
+    // PACK CACHE: Avoid re-reading pack/idx files from disk for every object lookup
+    _cached_pack_data: ?[]u8 = null,
+    _cached_idx_data: ?[]u8 = null,
+    _cached_pack_path: ?[]u8 = null,
+
     /// Open an existing repository at the specified path
     pub fn open(allocator: std.mem.Allocator, path: []const u8) !Repository {
         const abs_path = if (std.fs.path.isAbsolute(path))
@@ -106,6 +111,9 @@ pub const Repository = struct {
             }
             self.allocator.free(entries);
         }
+        if (self._cached_pack_data) |d| self.allocator.free(d);
+        if (self._cached_idx_data) |d| self.allocator.free(d);
+        if (self._cached_pack_path) |p| self.allocator.free(p);
         self.allocator.free(self.path);
         self.allocator.free(self.git_dir);
     }
@@ -2259,24 +2267,17 @@ pub const Repository = struct {
     /// Returns the raw decompressed content INCLUDING the header ("type size\0...").
     /// Caller owns the returned slice and must free it with self.allocator.
     fn readRawObject(self: *Repository, hash_hex: *const [40]u8) ObjectReadError![]u8 {
-        // Try loose object first
-        const obj_path = try std.fmt.allocPrint(self.allocator, "{s}/objects/{s}/{s}", .{ self.git_dir, hash_hex[0..2], hash_hex[2..] });
-        defer self.allocator.free(obj_path);
+        // Try loose object first (stack-allocated path)
+        var obj_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const obj_path = std.fmt.bufPrint(&obj_path_buf, "{s}/objects/{s}/{s}", .{ self.git_dir, hash_hex[0..2], hash_hex[2..] }) catch return error.ObjectNotFound;
 
         if (std.fs.openFileAbsolute(obj_path, .{})) |obj_file| {
             defer obj_file.close();
             const compressed = try obj_file.readToEndAlloc(self.allocator, 100 * 1024 * 1024);
             defer self.allocator.free(compressed);
 
-            var decompressed = std.ArrayList(u8).init(self.allocator);
-            errdefer decompressed.deinit();
-
-            var stream = std.io.fixedBufferStream(compressed);
-            zlib_compat.decompress(stream.reader(), decompressed.writer()) catch {
-                decompressed.deinit();
+            return zlib_compat.decompressSlice(self.allocator, compressed) catch
                 return error.CorruptObject;
-            };
-            return decompressed.toOwnedSlice();
         } else |_| {}
 
         // Fall back to pack files
@@ -2284,48 +2285,81 @@ pub const Repository = struct {
     }
 
     /// Read an object from pack files. Returns raw content with header.
+    /// OPTIMIZED: Caches pack and idx data to avoid re-reading from disk.
     fn readObjectFromPacks(self: *Repository, hash_hex: *const [40]u8) ObjectReadError![]u8 {
-        const pack_dir_path = try std.fmt.allocPrint(self.allocator, "{s}/objects/pack", .{self.git_dir});
-        defer self.allocator.free(pack_dir_path);
-
-        var pack_dir = std.fs.openDirAbsolute(pack_dir_path, .{ .iterate = true }) catch return error.ObjectNotFound;
-        defer pack_dir.close();
-
         // Convert hex to bytes for idx lookup
         var target_hash: [20]u8 = undefined;
         _ = std.fmt.hexToBytes(&target_hash, hash_hex) catch return error.ObjectNotFound;
 
+        // Fast path: use cached pack/idx data
+        if (self._cached_pack_data != null and self._cached_idx_data != null) {
+            const offset = lookupIdxForOffsetFromData(self._cached_idx_data.?, &target_hash) catch
+                return error.ObjectNotFound;
+            return self.readPackObjectFromData(self._cached_pack_data.?, offset) catch
+                return error.ObjectNotFound;
+        }
+
+        // Slow path: scan pack directory and cache first pack found
+        var pack_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const pack_dir_path = std.fmt.bufPrint(&pack_dir_buf, "{s}/objects/pack", .{self.git_dir}) catch return error.ObjectNotFound;
+
+        var pack_dir = std.fs.openDirAbsolute(pack_dir_path, .{ .iterate = true }) catch return error.ObjectNotFound;
+        defer pack_dir.close();
+
         var iter = pack_dir.iterate();
-        while (try iter.next()) |entry| {
+        while (iter.next() catch return error.ObjectNotFound) |entry| {
             if (entry.kind != .file) continue;
             if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
 
-            const idx_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ pack_dir_path, entry.name });
-            defer self.allocator.free(idx_path);
+            // Load and cache idx data
+            var idx_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const idx_path = std.fmt.bufPrint(&idx_path_buf, "{s}/{s}", .{ pack_dir_path, entry.name }) catch continue;
 
-            // Derive .pack path from .idx path
-            const pack_name = try std.fmt.allocPrint(self.allocator, "{s}.pack", .{entry.name[0 .. entry.name.len - 4]});
-            defer self.allocator.free(pack_name);
-            const pack_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ pack_dir_path, pack_name });
-            defer self.allocator.free(pack_path);
+            const idx_data = blk: {
+                const f = std.fs.openFileAbsolute(idx_path, .{}) catch continue;
+                defer f.close();
+                break :blk f.readToEndAlloc(self.allocator, 100 * 1024 * 1024) catch continue;
+            };
 
-            // Look up offset in idx
-            const offset = self.lookupIdxForOffset(idx_path, &target_hash) catch continue;
+            // Try lookup in this idx
+            const offset = lookupIdxForOffsetFromData(idx_data, &target_hash) catch {
+                self.allocator.free(idx_data);
+                continue;
+            };
 
-            // Read object from pack at that offset
-            return self.readPackObjectAtOffset(pack_path, offset) catch continue;
+            // Found! Load and cache the pack data too
+            var pack_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const pack_path = std.fmt.bufPrint(&pack_path_buf, "{s}/{s}.pack", .{ pack_dir_path, entry.name[0 .. entry.name.len - 4] }) catch {
+                self.allocator.free(idx_data);
+                continue;
+            };
+
+            const pack_data = blk: {
+                const f = std.fs.openFileAbsolute(pack_path, .{}) catch {
+                    self.allocator.free(idx_data);
+                    continue;
+                };
+                defer f.close();
+                break :blk f.readToEndAlloc(self.allocator, 1024 * 1024 * 1024) catch {
+                    self.allocator.free(idx_data);
+                    continue;
+                };
+            };
+
+            // Cache for future lookups
+            if (self._cached_pack_data) |old| self.allocator.free(old);
+            if (self._cached_idx_data) |old| self.allocator.free(old);
+            self._cached_pack_data = pack_data;
+            self._cached_idx_data = idx_data;
+
+            return self.readPackObjectFromData(pack_data, offset) catch continue;
         }
 
         return error.ObjectNotFound;
     }
 
-    /// Look up a SHA-1 hash in an .idx file and return the pack offset.
-    fn lookupIdxForOffset(self: *Repository, idx_path: []const u8, target_hash: *const [20]u8) ObjectReadError!u64 {
-        const idx_file = try std.fs.openFileAbsolute(idx_path, .{});
-        defer idx_file.close();
-
-        const idx_data = try idx_file.readToEndAlloc(self.allocator, 100 * 1024 * 1024);
-        defer self.allocator.free(idx_data);
+    /// Look up a SHA-1 hash in already-loaded idx data and return the pack offset.
+    fn lookupIdxForOffsetFromData(idx_data: []const u8, target_hash: *const [20]u8) ObjectReadError!u64 {
 
         // Validate v2 idx header
         if (idx_data.len < 1028) return error.InvalidIdx;
@@ -2385,15 +2419,19 @@ pub const Repository = struct {
     }
 
     /// Read a single object from a pack file at the given offset.
-    /// Returns the full decompressed content with git header ("type size\0content").
-    /// This loads the entire pack into memory once; for delta resolution, use
-    /// readPackObjectFromData to avoid re-reading the pack file.
+    /// OPTIMIZED: Uses cached pack data if available, otherwise reads and caches.
     fn readPackObjectAtOffset(self: *Repository, pack_path: []const u8, offset: u64) ObjectReadError![]u8 {
+        // Check if we already have this pack cached
+        if (self._cached_pack_data) |cached| {
+            return self.readPackObjectFromData(cached, offset);
+        }
+
+        // Read and cache
         const pack_file = try std.fs.openFileAbsolute(pack_path, .{});
         defer pack_file.close();
 
-        const pack_data = try pack_file.readToEndAlloc(self.allocator, 1024 * 1024 * 1024); // 1GB max
-        defer self.allocator.free(pack_data);
+        const pack_data = try pack_file.readToEndAlloc(self.allocator, 1024 * 1024 * 1024);
+        self._cached_pack_data = pack_data;
 
         return self.readPackObjectFromData(pack_data, offset);
     }
@@ -2428,21 +2466,17 @@ pub const Repository = struct {
             else => return error.InvalidPackObject,
         };
 
-        // Decompress the object data
-        var decompressed = std.ArrayList(u8).init(self.allocator);
-        errdefer decompressed.deinit();
+        // Decompress the object data using C zlib directly (faster than streaming wrapper)
+        const decompressed = zlib_compat.decompressSlice(self.allocator, pack_data[pos..]) catch return error.CorruptObject;
+        defer self.allocator.free(decompressed);
 
-        var stream = std.io.fixedBufferStream(pack_data[pos..]);
-        zlib_compat.decompress(stream.reader(), decompressed.writer()) catch return error.CorruptObject;
+        // Build "type size\0content" format using stack buffer for header
+        var hdr_buf: [64]u8 = undefined;
+        const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ type_name, decompressed.len }) catch return error.CorruptObject;
 
-        // Build "type size\0content" format
-        const header = try std.fmt.allocPrint(self.allocator, "{s} {}\x00", .{ type_name, decompressed.items.len });
-        defer self.allocator.free(header);
-
-        var result = try self.allocator.alloc(u8, header.len + decompressed.items.len);
+        var result = try self.allocator.alloc(u8, header.len + decompressed.len);
         @memcpy(result[0..header.len], header);
-        @memcpy(result[header.len..], decompressed.items);
-        decompressed.deinit();
+        @memcpy(result[header.len..], decompressed);
 
         return result;
     }
@@ -2467,14 +2501,12 @@ pub const Repository = struct {
         const base_obj = try self.readPackObjectFromData(pack_data, base_offset);
         defer self.allocator.free(base_obj);
 
-        // Decompress delta data
-        var delta_data = std.ArrayList(u8).init(self.allocator);
-        defer delta_data.deinit();
-        var stream = std.io.fixedBufferStream(pack_data[pos..]);
-        zlib_compat.decompress(stream.reader(), delta_data.writer()) catch return error.CorruptObject;
+        // Decompress delta data using C zlib directly
+        const delta_data = zlib_compat.decompressSlice(self.allocator, pack_data[pos..]) catch return error.CorruptObject;
+        defer self.allocator.free(delta_data);
 
         // Apply delta to base
-        return self.applyDelta(base_obj, delta_data.items);
+        return self.applyDelta(base_obj, delta_data);
     }
 
     /// Handle REF_DELTA pack objects — reuses already-loaded pack_data
@@ -2491,13 +2523,11 @@ pub const Repository = struct {
         const base_obj = try self.readRawObject(&base_hash_hex);
         defer self.allocator.free(base_obj);
 
-        // Decompress delta data
-        var delta_data = std.ArrayList(u8).init(self.allocator);
-        defer delta_data.deinit();
-        var stream = std.io.fixedBufferStream(pack_data[pos..]);
-        zlib_compat.decompress(stream.reader(), delta_data.writer()) catch return error.CorruptObject;
+        // Decompress delta data using C zlib directly
+        const delta_data = zlib_compat.decompressSlice(self.allocator, pack_data[pos..]) catch return error.CorruptObject;
+        defer self.allocator.free(delta_data);
 
-        return self.applyDelta(base_obj, delta_data.items);
+        return self.applyDelta(base_obj, delta_data);
     }
 
     /// Apply a git delta to a base object. Returns new raw object with header.

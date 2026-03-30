@@ -47,14 +47,77 @@ pub fn nativeCmdLsRemote(allocator: std.mem.Allocator, args: [][]const u8, comma
         if (helpers.getRemoteUrl(gd, "origin", platform_impl, allocator)) |u| { allocator.free(u); break :blk "origin"; } else |_| {
             const f = helpers.t5FindSingle(allocator, gd); if (f) |n| { drb = n; break :blk n; }
             try platform_impl.writeStderr("fatal: helpers.No remote configured to list helpers.refs from.\n"); std.process.exit(2); } };
+    // Resolve remote name to URL
+    var resolved_url: ?[]u8 = null;
+    defer if (resolved_url) |u| allocator.free(u);
+    const effective_url: []const u8 = blk: {
+        // If it's already an HTTP(S) URL, use directly
+        if (std.mem.startsWith(u8, rn, "https://") or std.mem.startsWith(u8, rn, "http://")) break :blk rn;
+        // Try to resolve remote name to URL from git config
+        if (helpers.findGitDir() catch null) |gd| {
+            if (helpers.getRemoteUrl(gd, rn, platform_impl, allocator)) |u| {
+                resolved_url = u;
+                break :blk u;
+            } else |_| {}
+        }
+        break :blk rn;
+    };
+    const is_http = std.mem.startsWith(u8, effective_url, "https://") or std.mem.startsWith(u8, effective_url, "http://");
+
+    if (get_url) {
+        const o = try std.fmt.allocPrint(allocator, "{s}\n", .{effective_url}); defer allocator.free(o);
+        try platform_impl.writeStdout(o); return;
+    }
+    if (quiet) return;
+
+    if (is_http) {
+        // HTTPS path: use smart HTTP protocol for a single round-trip
+        const smart_http = @import("git/smart_http.zig");
+        const fm = try std.fmt.allocPrint(allocator, "From {s}\n", .{effective_url}); defer allocator.free(fm);
+        try platform_impl.writeStderr(fm);
+        var discovery = smart_http.discoverRefs(allocator, effective_url) catch {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n", .{rn});
+            defer allocator.free(msg); try platform_impl.writeStderr(msg); std.process.exit(128);
+        };
+        defer discovery.deinit();
+
+        // Sort refs: HEAD first, then alphabetically
+        std.mem.sort(smart_http.Ref, discovery.refs, {}, struct {
+            fn lt(_: void, a: smart_http.Ref, b: smart_http.Ref) bool {
+                if (std.mem.eql(u8, a.name, "HEAD")) return true;
+                if (std.mem.eql(u8, b.name, "HEAD")) return false;
+                return std.mem.order(u8, a.name, b.name).compare(.lt);
+            }
+        }.lt);
+
+        var fa = false;
+        for (discovery.refs) |ref| {
+            if (show_tags and !show_heads and !std.mem.startsWith(u8, ref.name, "refs/tags/")) continue;
+            if (show_heads and !show_tags and !std.mem.startsWith(u8, ref.name, "refs/heads/")) continue;
+            if (show_heads and show_tags and !std.mem.startsWith(u8, ref.name, "refs/heads/") and !std.mem.startsWith(u8, ref.name, "refs/tags/")) continue;
+            if (patterns.items.len > 0) { var m = false; for (patterns.items) |p| { if (helpers.t5LsMatch(ref.name, p)) { m = true; break; } } if (!m) continue; }
+            fa = true;
+            if (symref_flag and std.mem.eql(u8, ref.name, "HEAD")) {
+                // Check capabilities for symref info
+                if (std.mem.indexOf(u8, discovery.capabilities, "symref=HEAD:")) |si| {
+                    const rest = discovery.capabilities[si + "symref=HEAD:".len ..];
+                    const end = std.mem.indexOfAny(u8, rest, " \t\n") orelse rest.len;
+                    const so = try std.fmt.allocPrint(allocator, "ref: {s}\tHEAD\n", .{rest[0..end]});
+                    defer allocator.free(so); try platform_impl.writeStdout(so);
+                }
+            }
+            const o = try std.fmt.allocPrint(allocator, "{s}\t{s}\n", .{ref.hash, ref.name}); defer allocator.free(o);
+            try platform_impl.writeStdout(o);
+        }
+        if (ecf and !fa) std.process.exit(2);
+        return;
+    }
+
+    // Local path: resolve and read refs from filesystem
     const tgd = helpers.t5ResolveRemote(allocator, rn, platform_impl) catch {
         const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' does not appear to be a git repository\nfatal: helpers.Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n", .{rn});
         defer allocator.free(msg); try platform_impl.writeStderr(msg); std.process.exit(128); };
     defer allocator.free(tgd);
-    if (get_url) { var du: []const u8 = rn; var duo: ?[]u8 = null; defer if (duo) |u| allocator.free(u);
-        if (helpers.findGitDir() catch null) |gd| { if (helpers.getRemoteUrl(gd, rn, platform_impl, allocator)) |u| { duo = u; du = u; } else |_| {} }
-        const o = try std.fmt.allocPrint(allocator, "{s}\n", .{du}); defer allocator.free(o); try platform_impl.writeStdout(o); return; }
-    if (quiet) return;
     { var du: []const u8 = rn; var duo: ?[]u8 = null; defer if (duo) |u| allocator.free(u);
       if (helpers.findGitDir() catch null) |gd| { if (helpers.getRemoteUrl(gd, rn, platform_impl, allocator)) |u| { duo = u; du = u; } else |_| {} }
       const fm = try std.fmt.allocPrint(allocator, "From {s}\n", .{du}); defer allocator.free(fm); try platform_impl.writeStderr(fm); }

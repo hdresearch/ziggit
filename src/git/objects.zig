@@ -8,6 +8,8 @@ const CachedPackFile = struct {
     idx_data: []const u8,
     pack_path: []const u8,
     pack_data: []const u8,
+    pack_verified: bool,
+    idx_verified: bool,
     allocator: std.mem.Allocator,
     
     fn deinit(self: *CachedPackFile) void {
@@ -54,9 +56,55 @@ fn addToCache(allocator: std.mem.Allocator, idx_path: []const u8, idx_data: []co
         .idx_data = allocator.dupe(u8, idx_data) catch return,
         .pack_path = allocator.dupe(u8, pack_path) catch return,
         .pack_data = allocator.dupe(u8, pack_data) catch return,
+        .pack_verified = false,
+        .idx_verified = false,
         .allocator = allocator,
     };
     cached_pack_count += 1;
+}
+
+fn isPackVerified(pack_path: []const u8) bool {
+    for (cached_packs[0..cached_pack_count]) |maybe_entry| {
+        if (maybe_entry) |entry| {
+            if (std.mem.eql(u8, entry.pack_path, pack_path)) {
+                return entry.pack_verified;
+            }
+        }
+    }
+    return false;
+}
+
+fn markPackVerified(pack_path: []const u8) void {
+    for (&cached_packs) |*maybe_entry| {
+        if (maybe_entry.*) |*entry| {
+            if (std.mem.eql(u8, entry.pack_path, pack_path)) {
+                entry.pack_verified = true;
+                return;
+            }
+        }
+    }
+}
+
+fn isIdxVerified(idx_path: []const u8) bool {
+    for (cached_packs[0..cached_pack_count]) |maybe_entry| {
+        if (maybe_entry) |entry| {
+            if (std.mem.eql(u8, entry.idx_path, idx_path)) {
+                return entry.idx_verified;
+            }
+        }
+    }
+    return false;
+}
+
+fn markIdxVerified(idx_path: []const u8) void {
+    for (&cached_packs) |*maybe_entry| {
+        if (maybe_entry.*) |*entry| {
+            if (std.mem.eql(u8, entry.idx_path, idx_path)) {
+                entry.idx_verified = true;
+                return;
+            }
+        }
+    }
 }
 
 // Cache for pack directory listing
@@ -200,34 +248,21 @@ pub const GitObject = struct {
         };
         defer allocator.free(compressed_content);
 
-        // Decompress using zlib for git compatibility (handle both compressed and uncompressed)
-        var content = std.ArrayList(u8).init(allocator);
-        defer content.deinit();
-        
-        // For WASM builds, handle both compressed and uncompressed objects
-        if (@import("builtin").target.os.tag == .wasi or @import("builtin").target.os.tag == .freestanding) {
-            // Check if this looks like a git object header (uncompressed)
-            if (std.mem.indexOf(u8, compressed_content, "\x00")) |_| {
-                // Looks like uncompressed object, use directly
-                try content.appendSlice(compressed_content);
-            } else {
-                // Try decompression
-                var compressed_stream = std.io.fixedBufferStream(compressed_content);
-                zlib_compat.decompress(compressed_stream.reader(), content.writer()) catch {
-                    // If decompression fails, treat as uncompressed
-                    try content.appendSlice(compressed_content);
-                };
-            }
-        } else {
-            var compressed_stream = std.io.fixedBufferStream(compressed_content);
-            try zlib_compat.decompress(compressed_stream.reader(), content.writer());
-        }
+        // Decompress using C zlib directly (faster than streaming wrapper)
+        const content = if (@import("builtin").target.os.tag == .wasi or @import("builtin").target.os.tag == .freestanding) blk: {
+            // For WASM builds, handle both compressed and uncompressed objects
+            break :blk zlib_compat.decompressSlice(allocator, compressed_content) catch
+                try allocator.dupe(u8, compressed_content);
+        } else blk: {
+            break :blk try zlib_compat.decompressSlice(allocator, compressed_content);
+        };
+        defer allocator.free(content);
 
         // Parse the object
-        const null_pos = std.mem.indexOf(u8, content.items, "\x00") orelse return error.InvalidObject;
+        const null_pos = std.mem.indexOf(u8, content, "\x00") orelse return error.InvalidObject;
         
-        const header = content.items[0..null_pos];
-        const data = content.items[null_pos + 1 ..];
+        const header = content[0..null_pos];
+        const data = content[null_pos + 1 ..];
         
         const space_pos = std.mem.indexOf(u8, header, " ") orelse return error.InvalidObject;
         const type_str = header[0..space_pos];
@@ -576,37 +611,47 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
         addToCache(allocator, idx_path, idx_data, "", "");
     }
     
-    // Enhanced size validation with better error messages
-    if (idx_data.len < 8) {
-        return error.PackIndexTooSmall;
-    }
+    // Skip expensive validation if this idx is already verified in cache
+    const idx_already_verified = !idx_data_owned and isIdxVerified(idx_path);
     
-    // More conservative size limit for pack indices (50MB should be plenty)
-    if (idx_data.len > 50 * 1024 * 1024) { 
-        return error.PackIndexTooLarge;
-    }
-    
-    // Verify file is not obviously corrupted (all zeros or all ones)
-    // Check a larger sample for better detection
-    const sample_size = @min(256, idx_data.len);
-    var all_zeros = true;
-    var all_ones = true;
-    var byte_variety = std.AutoHashMap(u8, void).init(allocator);
-    defer byte_variety.deinit();
-    
-    for (idx_data[0..sample_size]) |byte| {
-        if (byte != 0) all_zeros = false;
-        if (byte != 0xFF) all_ones = false;
-        byte_variety.put(byte, {}) catch {}; // Ignore OOM for this heuristic
-    }
-    
-    if (all_zeros or all_ones) {
-        return error.PackIndexCorrupted;
-    }
-    
-    // Additional corruption check: very low byte variety suggests corruption
-    if (byte_variety.count() < 3 and sample_size > 64) {
-        return error.PackIndexLowEntropy;
+    if (!idx_already_verified) {
+        // Enhanced size validation with better error messages
+        if (idx_data.len < 8) {
+            return error.PackIndexTooSmall;
+        }
+        
+        // More conservative size limit for pack indices (50MB should be plenty)
+        if (idx_data.len > 50 * 1024 * 1024) { 
+            return error.PackIndexTooLarge;
+        }
+        
+        // Verify file is not obviously corrupted (all zeros or all ones)
+        const sample_size = @min(256, idx_data.len);
+        var all_zeros = true;
+        var all_ones = true;
+        var byte_variety_count: u16 = 0;
+        var byte_seen = [_]bool{false} ** 256;
+        
+        for (idx_data[0..sample_size]) |byte| {
+            if (byte != 0) all_zeros = false;
+            if (byte != 0xFF) all_ones = false;
+            if (!byte_seen[byte]) {
+                byte_seen[byte] = true;
+                byte_variety_count += 1;
+            }
+        }
+        
+        if (all_zeros or all_ones) {
+            return error.PackIndexCorrupted;
+        }
+        
+        // Additional corruption check: very low byte variety suggests corruption
+        if (byte_variety_count < 3 and sample_size > 64) {
+            return error.PackIndexLowEntropy;
+        }
+        
+        // Mark as verified for future lookups
+        markIdxVerified(idx_path);
     }
     
     // Check for pack index magic and version
@@ -793,6 +838,7 @@ fn findObjectInPackV1(idx_data: []const u8, target_hash: [20]u8, pack_dir_path: 
 
 /// Read object from pack file at given offset with validation
 fn readObjectFromPack(pack_path: []const u8, offset: u64, platform_impl: anytype, allocator: std.mem.Allocator) !GitObject {
+    const already_verified = isPackVerified(pack_path);
     var pack_data_owned = false;
     const pack_data = getCachedPack(pack_path) orelse blk: {
         pack_data_owned = true;
@@ -810,38 +856,43 @@ fn readObjectFromPack(pack_path: []const u8, offset: u64, platform_impl: anytype
     // Enhanced pack file validation
     if (pack_data.len < 28) return error.PackFileTooSmall; // Header (12) + minimum object (4) + checksum (20)
     
-    // Check pack file header: "PACK" + version + object count
-    if (!std.mem.eql(u8, pack_data[0..4], "PACK")) {
-        return error.InvalidPackSignature;
-    }
-    
-    const version = std.mem.readInt(u32, @ptrCast(pack_data[4..8]), .big);
-    if (version < 2 or version > 4) {
-        return error.UnsupportedPackVersion;
-    }
-    
-    const object_count = std.mem.readInt(u32, @ptrCast(pack_data[8..12]), .big);
-    if (object_count == 0) {
-        return error.EmptyPackFile;
-    }
-    
-    // Enhanced sanity checks
-    const max_reasonable_objects = 50_000_000; // Increased to 50M for very large repositories
-    if (object_count > max_reasonable_objects) {
-        return error.TooManyObjectsInPack;
-    }
-    
-    // Verify pack file checksum (last 20 bytes)
     const content_end = pack_data.len - 20;
-    const stored_checksum = pack_data[content_end..];
     
-    var hasher = std.crypto.hash.Sha1.init(.{});
-    hasher.update(pack_data[0..content_end]);
-    var computed_checksum: [20]u8 = undefined;
-    hasher.final(&computed_checksum);
-    
-    if (!std.mem.eql(u8, &computed_checksum, stored_checksum)) {
-        return error.PackChecksumMismatch;
+    if (!already_verified) {
+        // Check pack file header: "PACK" + version + object count
+        if (!std.mem.eql(u8, pack_data[0..4], "PACK")) {
+            return error.InvalidPackSignature;
+        }
+        
+        const version = std.mem.readInt(u32, @ptrCast(pack_data[4..8]), .big);
+        if (version < 2 or version > 4) {
+            return error.UnsupportedPackVersion;
+        }
+        
+        const object_count = std.mem.readInt(u32, @ptrCast(pack_data[8..12]), .big);
+        if (object_count == 0) {
+            return error.EmptyPackFile;
+        }
+        
+        // Enhanced sanity checks
+        const max_reasonable_objects = 50_000_000;
+        if (object_count > max_reasonable_objects) {
+            return error.TooManyObjectsInPack;
+        }
+        
+        // Verify pack file checksum (last 20 bytes) - only once per pack
+        const stored_checksum = pack_data[content_end..];
+        
+        var hasher = std.crypto.hash.Sha1.init(.{});
+        hasher.update(pack_data[0..content_end]);
+        var computed_checksum: [20]u8 = undefined;
+        hasher.final(&computed_checksum);
+        
+        if (!std.mem.eql(u8, &computed_checksum, stored_checksum)) {
+            return error.PackChecksumMismatch;
+        }
+        
+        markPackVerified(pack_path);
     }
     
     // Validate offset bounds
@@ -883,16 +934,15 @@ fn readPackedObject(pack_data: []const u8, offset: usize, pack_path: []const u8,
     
     switch (pack_type) {
         .commit, .tree, .blob, .tag => {
-            // Regular object - decompress and return
+            // Regular object - decompress using C zlib directly
             if (pos >= pack_data.len) return error.ObjectNotFound;
             
-            var decompressed = std.ArrayList(u8).init(allocator);
-            defer decompressed.deinit();
+            const data = zlib_compat.decompressSlice(allocator, pack_data[pos..]) catch return error.ObjectNotFound;
             
-            var stream = std.io.fixedBufferStream(pack_data[pos..]);
-            zlib_compat.decompress(stream.reader(), decompressed.writer()) catch return error.ObjectNotFound;
-            
-            if (decompressed.items.len != size) return error.ObjectNotFound;
+            if (data.len != size) {
+                allocator.free(data);
+                return error.ObjectNotFound;
+            }
             
             const obj_type: ObjectType = switch (pack_type) {
                 .commit => .commit,
@@ -902,7 +952,6 @@ fn readPackedObject(pack_data: []const u8, offset: usize, pack_path: []const u8,
                 else => unreachable,
             };
             
-            const data = try allocator.dupe(u8, decompressed.items);
             return GitObject.init(obj_type, data);
         },
         .ofs_delta => {
@@ -935,15 +984,12 @@ fn readPackedObject(pack_data: []const u8, offset: usize, pack_path: []const u8,
             const base_object = readPackedObject(pack_data, base_offset, pack_path, platform_impl, allocator) catch return error.ObjectNotFound;
             defer base_object.deinit(allocator);
             
-            // Read and decompress delta data
-            var delta_data = std.ArrayList(u8).init(allocator);
-            defer delta_data.deinit();
-            
-            var stream = std.io.fixedBufferStream(pack_data[pos..]);
-            zlib_compat.decompress(stream.reader(), delta_data.writer()) catch return error.ObjectNotFound;
+            // Read and decompress delta data using C zlib directly
+            const delta_data = zlib_compat.decompressSlice(allocator, pack_data[pos..]) catch return error.ObjectNotFound;
+            defer allocator.free(delta_data);
             
             // Apply delta to base object
-            const result_data = try applyDelta(base_object.data, delta_data.items, allocator);
+            const result_data = try applyDelta(base_object.data, delta_data, allocator);
             return GitObject.init(base_object.type, result_data);
         },
         .ref_delta => {
@@ -975,15 +1021,12 @@ fn readPackedObject(pack_data: []const u8, offset: usize, pack_path: []const u8,
             const base_object = readPackedObject(pack_data, base_offset2, pack_path, platform_impl, allocator) catch return error.ObjectNotFound;
             defer base_object.deinit(allocator);
             
-            // Read and decompress delta data
-            var delta_data = std.ArrayList(u8).init(allocator);
-            defer delta_data.deinit();
-            
-            var stream = std.io.fixedBufferStream(pack_data[pos..]);
-            zlib_compat.decompress(stream.reader(), delta_data.writer()) catch return error.ObjectNotFound;
+            // Read and decompress delta data using C zlib directly
+            const delta_data = zlib_compat.decompressSlice(allocator, pack_data[pos..]) catch return error.ObjectNotFound;
+            defer allocator.free(delta_data);
             
             // Apply delta to base object
-            const result_data = try applyDelta(base_object.data, delta_data.items, allocator);
+            const result_data = try applyDelta(base_object.data, delta_data, allocator);
             return GitObject.init(base_object.type, result_data);
         },
     }
