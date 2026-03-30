@@ -317,6 +317,23 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         const old_hash = if (old_hash_result) |h| h else |_| try allocator.dupe(u8, "");
         defer allocator.free(old_hash);
 
+        // Check if target branch already exists (for -m, not -M)
+        if (!std.mem.eql(u8, old_name, new_name) and std.mem.eql(u8, first_arg.?, "-m")) {
+            const target_ref = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, new_name });
+            defer allocator.free(target_ref);
+            // Only fail if target has a valid hash (not a broken symref)
+            if (std.fs.cwd().readFileAlloc(allocator, target_ref, 4096)) |target_content| {
+                defer allocator.free(target_content);
+                const trimmed = std.mem.trimRight(u8, target_content, "\r\n\t ");
+                if (trimmed.len >= 40 and helpers.isValidHexString(trimmed[0..40])) {
+                    const emsg = try std.fmt.allocPrint(allocator, "fatal: a branch named '{s}' already exists\n", .{new_name});
+                    defer allocator.free(emsg);
+                    try platform_impl.writeStderr(emsg);
+                    std.process.exit(128);
+                }
+            } else |_| {}
+        }
+
         if (!is_unborn) {
             // helpers.Write new branch ref
             const new_ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, new_name });
