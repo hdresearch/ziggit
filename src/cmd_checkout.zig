@@ -145,6 +145,15 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
 
         // helpers.Get optional start point - resolve it to a hash
         const start_point_arg = args.next();
+        // Check for extra args (e.g., git checkout -b name start extra)
+        if (start_point_arg != null) {
+            if (args.next()) |extra| {
+                const emsg_extra = try std.fmt.allocPrint(allocator, "fatal: Cannot update paths and switch to branch '{s}' at the same time.\nDid you intend to checkout '{s}' which can not be resolved as commit?\n", .{ branch_name, extra });
+                defer allocator.free(emsg_extra);
+                try platform_impl.writeStderr(emsg_extra);
+                std.process.exit(128);
+            }
+        }
         var resolved_start: ?[]const u8 = null;
         if (start_point_arg) |sp| {
             resolved_start = helpers.resolveRevision(git_path, sp, platform_impl, allocator) catch null;
@@ -191,7 +200,13 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                 return;
             },
             error.InvalidStartPoint => {
-                try platform_impl.writeStderr("fatal: not a valid object name\n");
+                if (start_point_arg) |sp| {
+                    const emsg2 = try std.fmt.allocPrint(allocator, "fatal: '{s}' is not a commit and a branch '{s}' cannot be created from it\n", .{ sp, branch_name });
+                    defer allocator.free(emsg2);
+                    try platform_impl.writeStderr(emsg2);
+                } else {
+                    try platform_impl.writeStderr("fatal: not a valid object name\n");
+                }
                 std.process.exit(128);
             },
             else => return err,
