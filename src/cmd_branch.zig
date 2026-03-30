@@ -106,6 +106,12 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             }
             branches.deinit();
         }
+        // Sort branches alphabetically
+        std.sort.pdq([]u8, branches.items, {}, struct {
+            fn lt(_: void, a: []u8, b: []u8) bool {
+                return std.mem.order(u8, a, b) == .lt;
+            }
+        }.lt);
 
         for (branches.items) |branch| {
             const prefix = if (std.mem.eql(u8, branch, current_branch)) "* " else "  ";
@@ -509,6 +515,11 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             for (branches2.items) |branch| allocator.free(branch);
             branches2.deinit();
         }
+        std.sort.pdq([]u8, branches2.items, {}, struct {
+            fn lt(_: void, a: []u8, b: []u8) bool {
+                return std.mem.order(u8, a, b) == .lt;
+            }
+        }.lt);
         const pattern = fake_args.next();
         for (branches2.items) |branch| {
             if (pattern) |p| {
