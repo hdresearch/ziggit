@@ -120,11 +120,10 @@ pub fn compressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     const output = try allocator.alloc(u8, @intCast(bound));
     errdefer allocator.free(output);
     var dest_len: c.uLongf = @intCast(output.len);
-    const ret = c.compress2(output.ptr, &dest_len, input.ptr, @intCast(input.len), 6);
+    const ret = c.compress2(output.ptr, &dest_len, input.ptr, @intCast(input.len), 1);
     if (ret != c.Z_OK) return error.CompressionFailed;
-    const result = try allocator.dupe(u8, output[0..@intCast(dest_len)]);
-    allocator.free(output);
-    return result;
+    const final_len: usize = @intCast(dest_len);
+    return output[0..final_len];
 }
 
 pub fn decompressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {

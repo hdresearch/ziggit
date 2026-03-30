@@ -87,16 +87,14 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
     const zc = @cImport({
         @cInclude("zlib.h");
     });
-    const decompressor: ?*anyopaque = null;
-    _ = decompressor;
 
-    // Reusable decompression buffer for base objects.
-    // Starts at 64KB and grows as needed. Avoids per-object allocation.
-    var decomp_buf_cap: usize = 65536;
+    // Reusable decompression buffer for base objects (one-shot uncompress2).
+    // Starts at 256KB and grows as needed. Avoids per-object allocation.
+    var decomp_buf_cap: usize = 262144;
     var decomp_buf_ptr = try allocator.alloc(u8, decomp_buf_cap);
     defer allocator.free(decomp_buf_ptr);
 
-    // Fallback zlib stream for cases where libdeflate fails
+    // Fallback zlib stream for cases where uncompress2 fails (buffer too small for unknown size)
     var zstream: zc.z_stream = std.mem.zeroes(zc.z_stream);
     if (zc.inflateInit(&zstream) != zc.Z_OK) return error.ZlibInitFailed;
     defer _ = zc.inflateEnd(&zstream);
@@ -118,23 +116,27 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
         const pt = hdr.type_num;
 
         if (pt >= 1 and pt <= 4) {
-            // Base object: one-shot decompress + hash using libdeflate.
+            // Base object: one-shot decompress + hash using uncompress2.
             const type_str = stream_utils.packTypeToString(pt) orelse "blob";
             const comp_start = pos;
             const in_avail = content_end - comp_start;
 
-            // Ensure decomp buffer is large enough
-            if (hdr.size > decomp_buf_cap) {
+            // Ensure decomp buffer is large enough for declared size
+            const needed_cap = if (hdr.size > 0) hdr.size else 256;
+            if (needed_cap > decomp_buf_cap) {
                 allocator.free(decomp_buf_ptr);
-                decomp_buf_cap = hdr.size;
+                decomp_buf_cap = needed_cap;
                 decomp_buf_ptr = try allocator.alloc(u8, decomp_buf_cap);
             }
 
-            const actual_in: usize = 0;
-            const actual_out: usize = 0;
-            const decomp_ok = false;
+            // Try one-shot uncompress2 first (much faster than streaming)
+            var dest_len: c_ulong = @intCast(decomp_buf_cap);
+            var src_len: c_ulong = @intCast(@min(in_avail, std.math.maxInt(c_ulong)));
+            const uc_ret = zc.uncompress2(decomp_buf_ptr.ptr, &dest_len, pack_data[comp_start..].ptr, &src_len);
 
-            if (decomp_ok) {
+            if (uc_ret == zc.Z_OK) {
+                const actual_in: usize = @intCast(src_len);
+                const actual_out: usize = @intCast(dest_len);
                 pos = comp_start + actual_in;
 
                 // Hash decompressed data
@@ -161,7 +163,7 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
                 offset_to_idx.putAssumeCapacity(obj_start, obj_idx);
                 sha_to_offset.putAssumeCapacity(result_sha1, obj_start);
             } else {
-                // Fallback to zlib streaming for this object
+                // Fallback to zlib streaming (uncompress2 failed, e.g. buffer too small)
                 if (zc.inflateReset(&zstream) != zc.Z_OK) {
                     records[obj_idx] = emptyRecord(obj_start);
                     obj_idx += 1;
@@ -237,15 +239,30 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
             const in_avail = content_end - comp_start;
 
             // For OFS_DELTA, we only need the compressed length (not the data).
-            // Use libdeflate only if buffer is already large enough; otherwise
-            // use zlib streaming with fixed chunk_buf to avoid growing decomp_buf.
+            // Use uncompress2 with decomp_buf to get input consumed, or fall back to streaming.
             var actual_in: usize = 0;
             var skip_ok = false;
 
-            // libdeflate not available
+            // Ensure decomp buffer is large enough
+            const delta_needed = if (hdr.size > 0) hdr.size else 256;
+            if (delta_needed > decomp_buf_cap) {
+                allocator.free(decomp_buf_ptr);
+                decomp_buf_cap = delta_needed;
+                decomp_buf_ptr = try allocator.alloc(u8, decomp_buf_cap);
+            }
+
+            {
+                var dest_len: c_ulong = @intCast(decomp_buf_cap);
+                var src_len: c_ulong = @intCast(@min(in_avail, std.math.maxInt(c_ulong)));
+                const uc_ret = zc.uncompress2(decomp_buf_ptr.ptr, &dest_len, pack_data[comp_start..].ptr, &src_len);
+                if (uc_ret == zc.Z_OK) {
+                    actual_in = @intCast(src_len);
+                    skip_ok = true;
+                }
+            }
 
             if (!skip_ok) {
-                // Use zlib streaming with fixed buffer — avoids large alloc for delta skip
+                // Fallback to zlib streaming
                 if (zc.inflateReset(&zstream) != zc.Z_OK) {
                     records[obj_idx] = emptyRecord(obj_start);
                     obj_idx += 1;
@@ -269,7 +286,6 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
                     continue;
                 }
                 actual_in = @intCast(zstream.total_in);
-                skip_ok = true;
             }
 
             pos = comp_start + actual_in;
@@ -307,7 +323,23 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
             var actual_in: usize = 0;
             var skip_ok = false;
 
-            // libdeflate not available
+            // Ensure decomp buffer is large enough
+            const ref_delta_needed = if (hdr.size > 0) hdr.size else 256;
+            if (ref_delta_needed > decomp_buf_cap) {
+                allocator.free(decomp_buf_ptr);
+                decomp_buf_cap = ref_delta_needed;
+                decomp_buf_ptr = try allocator.alloc(u8, decomp_buf_cap);
+            }
+
+            {
+                var dest_len: c_ulong = @intCast(decomp_buf_cap);
+                var src_len: c_ulong = @intCast(@min(in_avail, std.math.maxInt(c_ulong)));
+                const uc_ret = zc.uncompress2(decomp_buf_ptr.ptr, &dest_len, pack_data[comp_start..].ptr, &src_len);
+                if (uc_ret == zc.Z_OK) {
+                    actual_in = @intCast(src_len);
+                    skip_ok = true;
+                }
+            }
 
             if (!skip_ok) {
                 if (zc.inflateReset(&zstream) != zc.Z_OK) {
@@ -333,7 +365,6 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
                     continue;
                 }
                 actual_in = @intCast(zstream.total_in);
-                skip_ok = true;
             }
 
             pos = comp_start + actual_in;
