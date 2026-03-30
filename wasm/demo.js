@@ -37,11 +37,10 @@ const importObject = {
       const data = fs.get(path);
       if (data === undefined) return 0;
       const bytes = typeof data === 'string' ? encoder.encode(data) : data;
-      const wasmBuf = new Uint8Array(wasmMemory.buffer);
-      // Simple: write data at end of memory (not production-safe)
-      const offset = wasmMemory.buffer.byteLength - bytes.length - 256;
-      wasmBuf.set(bytes, offset);
-      new DataView(wasmMemory.buffer).setUint32(dataPtrPtr, offset, true);
+      const ptr = wasmInstance.exports.ziggit_alloc(bytes.length);
+      if (ptr === 0) return 0;
+      new Uint8Array(wasmMemory.buffer, ptr, bytes.length).set(bytes);
+      new DataView(wasmMemory.buffer).setUint32(dataPtrPtr, ptr, true);
       new DataView(wasmMemory.buffer).setUint32(dataLenPtr, bytes.length, true);
       return 1;
     },
@@ -64,10 +63,10 @@ const importObject = {
     },
     host_get_cwd(dataPtrPtr, dataLenPtr) {
       const bytes = encoder.encode(cwd);
-      const wasmBuf = new Uint8Array(wasmMemory.buffer);
-      const offset = wasmMemory.buffer.byteLength - bytes.length - 512;
-      wasmBuf.set(bytes, offset);
-      new DataView(wasmMemory.buffer).setUint32(dataPtrPtr, offset, true);
+      const ptr = wasmInstance.exports.ziggit_alloc(bytes.length);
+      if (ptr === 0) return 0;
+      new Uint8Array(wasmMemory.buffer, ptr, bytes.length).set(bytes);
+      new DataView(wasmMemory.buffer).setUint32(dataPtrPtr, ptr, true);
       new DataView(wasmMemory.buffer).setUint32(dataLenPtr, bytes.length, true);
       return 1;
     },
@@ -77,13 +76,41 @@ const importObject = {
       return 1;
     },
     host_http_get(urlPtr, urlLen, respPtrPtr, respLenPtr) {
-      // Async HTTP not directly possible from sync WASM – stub for now
-      log('[http] GET ' + getStr(urlPtr, urlLen) + ' (not yet implemented)\n');
-      return -1;
+      const rawUrl = getStr(urlPtr, urlLen);
+      const url = (window._corsProxy || '') + rawUrl;
+      log('[http] GET ' + url + '\n');
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', url, false);
+      xhr.responseType = 'arraybuffer';
+      try { xhr.send(); } catch (e) { log('[http] GET error: ' + e.message + '\n'); return -1; }
+      if (xhr.status < 200 || xhr.status >= 300) { log('[http] GET status: ' + xhr.status + '\n'); return -1; }
+      const data = new Uint8Array(xhr.response);
+      const ptr = wasmInstance.exports.ziggit_alloc(data.length);
+      if (ptr === 0) return -2;
+      new Uint8Array(wasmMemory.buffer, ptr, data.length).set(data);
+      new DataView(wasmMemory.buffer).setUint32(respPtrPtr, ptr, true);
+      new DataView(wasmMemory.buffer).setUint32(respLenPtr, data.length, true);
+      return 0;
     },
-    host_http_post(urlPtr, urlLen, bodyPtr, bodyLen, respPtrPtr, respLenPtr) {
-      log('[http] POST ' + getStr(urlPtr, urlLen) + ' (not yet implemented)\n');
-      return -1;
+    host_http_post(urlPtr, urlLen, bodyPtr, bodyLen, ctPtr, ctLen, respPtrPtr, respLenPtr) {
+      const rawUrl = getStr(urlPtr, urlLen);
+      const url = (window._corsProxy || '') + rawUrl;
+      const body = new Uint8Array(wasmMemory.buffer, bodyPtr, bodyLen).slice();
+      const contentType = getStr(ctPtr, ctLen);
+      log('[http] POST ' + url + ' (' + body.length + ' bytes)\n');
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', url, false);
+      xhr.setRequestHeader('Content-Type', contentType);
+      xhr.responseType = 'arraybuffer';
+      try { xhr.send(body); } catch (e) { log('[http] POST error: ' + e.message + '\n'); return -1; }
+      if (xhr.status < 200 || xhr.status >= 300) { log('[http] POST status: ' + xhr.status + '\n'); return -1; }
+      const data = new Uint8Array(xhr.response);
+      const ptr = wasmInstance.exports.ziggit_alloc(data.length);
+      if (ptr === 0) return -2;
+      new Uint8Array(wasmMemory.buffer, ptr, data.length).set(data);
+      new DataView(wasmMemory.buffer).setUint32(respPtrPtr, ptr, true);
+      new DataView(wasmMemory.buffer).setUint32(respLenPtr, data.length, true);
+      return 0;
     },
     // Global args access (provided by main_freestanding.zig as exports, but
     // the linker may also look for them as imports in some configurations)
@@ -94,7 +121,7 @@ const importObject = {
 
 async function init() {
   try {
-    const resp = await fetch('ziggit.wasm');
+    const resp = await fetch('../zig-out/wasm/ziggit.wasm');
     const bytes = await resp.arrayBuffer();
     const result = await WebAssembly.instantiate(bytes, importObject);
     wasmInstance = result.instance;
@@ -146,6 +173,73 @@ function runCommand() {
     console.error(e);
   }
   log('\n');
+}
+
+function doClone() {
+  if (!wasmInstance) { log('WASM not loaded yet\n'); return; }
+  const url = document.getElementById('clone-url').value.trim();
+  const proxy = document.getElementById('cors-proxy').value.trim();
+  if (!url) { log('Enter a repository URL\n'); return; }
+
+  // For clone, we need to prepend the CORS proxy to HTTP URLs
+  // The host_http_get/post functions will be called by WASM with the raw URL
+  // We need to make the proxy available to those functions
+  window._corsProxy = proxy;
+
+  log('\n== Cloning ' + url + ' ==\n');
+  log('CORS proxy: ' + (proxy || '(none)') + '\n');
+
+  try {
+    const urlBytes = encoder.encode(url);
+    const target = '/repo';
+    const targetBytes = encoder.encode(target);
+
+    // Write URL to WASM memory
+    const urlPtr = wasmInstance.exports.ziggit_alloc(urlBytes.length);
+    new Uint8Array(wasmMemory.buffer, urlPtr, urlBytes.length).set(urlBytes);
+    const targetPtr = wasmInstance.exports.ziggit_alloc(targetBytes.length);
+    new Uint8Array(wasmMemory.buffer, targetPtr, targetBytes.length).set(targetBytes);
+
+    const rc = wasmInstance.exports.ziggit_clone_bare(urlPtr, urlBytes.length, targetPtr, targetBytes.length);
+    log('Clone result: ' + rc + '\n');
+
+    if (rc === 0) {
+      log('Clone succeeded! Indexing pack...\n');
+      const irc = wasmInstance.exports.ziggit_index_pack(targetPtr, targetBytes.length);
+      log('Index result: ' + irc + '\n');
+
+      if (irc === 0) {
+        // Show version
+        const vBuf = wasmInstance.exports.ziggit_alloc(128);
+        const vLen = wasmInstance.exports.ziggit_version(vBuf, 128);
+        log('Version: ' + getStr(vBuf, vLen) + '\n');
+
+        // Show HEAD
+        const headBuf = wasmInstance.exports.ziggit_alloc(40);
+        const headRc = wasmInstance.exports.ziggit_rev_parse_head(targetPtr, targetBytes.length, headBuf);
+        if (headRc === 0) {
+          log('HEAD: ' + getStr(headBuf, 40) + '\n');
+        }
+
+        // Show log
+        const logBuf = wasmInstance.exports.ziggit_alloc(65536);
+        const logLen = wasmInstance.exports.ziggit_log(targetPtr, targetBytes.length, 10, logBuf, 65536);
+        if (logLen > 0) {
+          const logJson = getStr(logBuf, logLen);
+          try {
+            const commits = JSON.parse(logJson);
+            log('\nCommit log (' + commits.length + ' commits):\n');
+            commits.forEach(c => {
+              log('  ' + c.hash.slice(0, 8) + ' ' + c.author + ': ' + c.message + '\n');
+            });
+          } catch(e) { log('Log parse error: ' + e.message + '\n'); }
+        }
+      }
+    }
+  } catch (e) {
+    log('[error] ' + e.message + '\n');
+    console.error(e);
+  }
 }
 
 // Enter key runs command

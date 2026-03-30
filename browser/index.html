@@ -101,7 +101,7 @@
 
       try {
         ziggit = new ZiggitBrowser(proxy);
-        await ziggit.load('ziggit-browser.wasm');
+        await ziggit.load('../zig-out/wasm/ziggit.wasm');
         status('WASM loaded (' + ziggit.version() + '). Cloning...');
 
         const rc = ziggit.cloneBare(url, repoPath);
