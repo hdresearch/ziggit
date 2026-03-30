@@ -975,6 +975,9 @@
         }
 
         console.log('Pack data size:', packData.length);
+        if (packData.length > 20 * 1024 * 1024) {
+          status(`Large pack (${formatSize(packData.length)}). Parsing may take a while...`);
+        }
 
         // 4. Parse pack
         // Try full WASM-native extraction first (fastest path)
