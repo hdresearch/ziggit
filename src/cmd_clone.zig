@@ -506,11 +506,18 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         };
         if (head_commit) |commit_hash| {
             defer allocator.free(commit_hash);
+            const checkout_trace = std.posix.getenv("ZIGGIT_TRACE_TIMING") != null;
+            var checkout_timer = if (checkout_trace) std.time.Timer.start() catch null else null;
             helpers.checkoutCommitTree(bare_target, commit_hash, allocator, platform_impl) catch |err| {
                 const emsg = try std.fmt.allocPrint(allocator, "warning: checkout failed: {}, repository cloned but working tree not populated\n", .{err});
                 defer allocator.free(emsg);
                 try platform_impl.writeStderr(emsg);
             };
+            if (checkout_trace) {
+                if (checkout_timer) |*ct| {
+                    std.debug.print("[timing] checkout: {}ms\n", .{ct.read() / std.time.ns_per_ms});
+                }
+            }
         }
 
         return;

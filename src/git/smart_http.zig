@@ -269,7 +269,44 @@ fn httpGetWithClientV2(allocator: std.mem.Allocator, existing_client: ?*std.http
 }
 
 fn httpGetWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.http.Client, url: []const u8, v2: bool) ![]u8 {
-    _ = allocator; _ = existing_client; _ = url; _ = v2; return error.HttpError;
+    const auth = extractAuth(allocator, url) catch return error.HttpError;
+    defer if (auth.needs_free) allocator.free(@constCast(auth.clean_url));
+
+    var owned_client: ?std.http.Client = if (existing_client == null) std.http.Client{ .allocator = allocator } else null;
+    defer if (owned_client) |*c| c.deinit();
+    const client = if (existing_client) |c| c else &(owned_client.?);
+
+    const uri = std.Uri.parse(auth.clean_url) catch return error.InvalidUrl;
+
+    // Build extra headers
+    var headers_buf: [4]std.http.Header = undefined;
+    var n_headers: usize = 0;
+    headers_buf[n_headers] = .{ .name = "User-Agent", .value = "ziggit/0.1" };
+    n_headers += 1;
+    if (v2) {
+        headers_buf[n_headers] = .{ .name = "Git-Protocol", .value = "version=2" };
+        n_headers += 1;
+    }
+    var bearer_buf: [512]u8 = undefined;
+    if (auth.token) |token| {
+        const bearer = std.fmt.bufPrint(&bearer_buf, "Bearer {s}", .{token}) catch return error.Overflow;
+        headers_buf[n_headers] = .{ .name = "Authorization", .value = bearer };
+        n_headers += 1;
+    }
+
+    var server_header_buffer: [16384]u8 = undefined;
+    var req = client.open(.GET, uri, .{
+        .server_header_buffer = &server_header_buffer,
+        .extra_headers = headers_buf[0..n_headers],
+    }) catch return error.HttpError;
+    defer req.deinit();
+
+    req.send() catch return error.HttpError;
+    req.wait() catch return error.HttpError;
+
+    if (req.response.status != .ok) return error.HttpError;
+
+    return req.reader().readAllAlloc(allocator, max_response_size) catch return error.HttpError;
 }
 
 fn httpPost(allocator: std.mem.Allocator, url: []const u8, body: []const u8, content_type: []const u8) ![]u8 {
@@ -285,7 +322,82 @@ fn httpPostWithClientV2(allocator: std.mem.Allocator, existing_client: ?*std.htt
 }
 
 fn httpPostWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.http.Client, url: []const u8, body: []const u8, content_type: []const u8, v2: bool) ![]u8 {
-    _ = allocator; _ = existing_client; _ = url; _ = body; _ = content_type; _ = v2; return error.HttpError;
+    const trace_timing = std.posix.getenv("ZIGGIT_TRACE_TIMING") != null;
+    var post_timer = if (trace_timing) std.time.Timer.start() catch null else null;
+
+    const auth = extractAuth(allocator, url) catch return error.HttpError;
+    defer if (auth.needs_free) allocator.free(@constCast(auth.clean_url));
+
+    var owned_client: ?std.http.Client = if (existing_client == null) std.http.Client{ .allocator = allocator } else null;
+    defer if (owned_client) |*c| c.deinit();
+    const client = if (existing_client) |c| c else &(owned_client.?);
+
+    const uri = std.Uri.parse(auth.clean_url) catch return error.InvalidUrl;
+
+    var headers_buf: [5]std.http.Header = undefined;
+    var n_headers: usize = 0;
+    headers_buf[n_headers] = .{ .name = "User-Agent", .value = "ziggit/0.1" };
+    n_headers += 1;
+    headers_buf[n_headers] = .{ .name = "Content-Type", .value = content_type };
+    n_headers += 1;
+    if (v2) {
+        headers_buf[n_headers] = .{ .name = "Git-Protocol", .value = "version=2" };
+        n_headers += 1;
+    }
+    var bearer_buf: [512]u8 = undefined;
+    if (auth.token) |token| {
+        const bearer = std.fmt.bufPrint(&bearer_buf, "Bearer {s}", .{token}) catch return error.Overflow;
+        headers_buf[n_headers] = .{ .name = "Authorization", .value = bearer };
+        n_headers += 1;
+    }
+
+    var server_header_buffer: [16384]u8 = undefined;
+    var req = client.open(.POST, uri, .{
+        .server_header_buffer = &server_header_buffer,
+        .extra_headers = headers_buf[0..n_headers],
+    }) catch return error.HttpError;
+    defer req.deinit();
+
+    req.transfer_encoding = .{ .content_length = body.len };
+
+    if (trace_timing) {
+        if (post_timer) |*t| {
+            std.debug.print("[timing]       POST connect: {}ms\n", .{t.read() / std.time.ns_per_ms});
+            t.reset();
+        }
+    }
+
+    req.send() catch return error.HttpError;
+    req.writer().writeAll(body) catch return error.HttpError;
+    req.finish() catch return error.HttpError;
+
+    if (trace_timing) {
+        if (post_timer) |*t| {
+            std.debug.print("[timing]       POST send body ({} bytes): {}ms\n", .{ body.len, t.read() / std.time.ns_per_ms });
+            t.reset();
+        }
+    }
+
+    req.wait() catch return error.HttpError;
+
+    if (trace_timing) {
+        if (post_timer) |*t| {
+            std.debug.print("[timing]       POST recv headers: {}ms\n", .{t.read() / std.time.ns_per_ms});
+            t.reset();
+        }
+    }
+
+    if (req.response.status != .ok) return error.HttpError;
+
+    const result = req.reader().readAllAlloc(allocator, max_response_size) catch return error.HttpError;
+
+    if (trace_timing) {
+        if (post_timer) |*t| {
+            std.debug.print("[timing]       POST recv body ({} bytes): {}ms\n", .{ result.len, t.read() / std.time.ns_per_ms });
+        }
+    }
+
+    return result;
 }
 
 // ============================================================================
