@@ -418,7 +418,7 @@ fn createStashCommit(
     // Build the base message "branch: subject"
     const head_subject = try getHeadSubject(allocator, git_path, head_hash);
     defer allocator.free(head_subject);
-    const base_msg = try std.fmt.allocPrint(allocator, "{s}: {s}", .{ branch_name, head_subject });
+    const base_msg = try std.fmt.allocPrint(allocator, "{s}: {s} {s}", .{ branch_name, head_hash[0..@min(head_hash.len, 7)], head_subject });
     defer allocator.free(base_msg);
 
     // Create index commit
