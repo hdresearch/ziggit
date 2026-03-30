@@ -389,7 +389,28 @@ fn httpPostWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.h
 
     if (req.response.status != .ok) return error.HttpError;
 
-    const result = req.reader().readAllAlloc(allocator, max_response_size) catch return error.HttpError;
+    // Pre-allocate based on Content-Length if available (avoids repeated reallocs for large packs)
+    const result = blk: {
+        if (req.response.content_length) |cl| {
+            if (cl > 0 and cl <= max_response_size) {
+                const buf = allocator.alloc(u8, cl) catch break :blk req.reader().readAllAlloc(allocator, max_response_size) catch return error.HttpError;
+                var total_read: usize = 0;
+                while (total_read < cl) {
+                    const n = req.reader().read(buf[total_read..]) catch {
+                        allocator.free(buf);
+                        return error.HttpError;
+                    };
+                    if (n == 0) break;
+                    total_read += n;
+                }
+                if (total_read < cl) {
+                    break :blk allocator.realloc(buf, total_read) catch buf[0..total_read];
+                }
+                break :blk buf;
+            }
+        }
+        break :blk req.reader().readAllAlloc(allocator, max_response_size) catch return error.HttpError;
+    };
 
     if (trace_timing) {
         if (post_timer) |*t| {
