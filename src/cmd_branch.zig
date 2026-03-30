@@ -448,9 +448,40 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                 if (!helpers.simpleGlobMatch(p, branch)) continue;
             }
             const prefix2 = if (std.mem.eql(u8, branch, current_branch2)) "* " else "  ";
-            const msg2 = try std.fmt.allocPrint(allocator, "{s}{s}\n", .{ prefix2, branch });
-            defer allocator.free(msg2);
-            try platform_impl.writeStdout(msg2);
+            if (verbose) {
+                // Show hash and commit subject
+                const ref_name = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch});
+                defer allocator.free(ref_name);
+                const hash_opt = refs.resolveRef(git_path, ref_name, platform_impl, allocator) catch null;
+                const hash = hash_opt orelse "";
+                defer if (hash.len > 0) allocator.free(hash);
+                const short = if (hash.len >= 7) hash[0..7] else hash;
+                // Get commit subject
+                var subject: []const u8 = "";
+                var free_subject = false;
+                if (hash.len >= 40) {
+                    if (objects.GitObject.load(hash, git_path, platform_impl, allocator)) |cobj| {
+                        defer cobj.deinit(allocator);
+                        if (std.mem.indexOf(u8, cobj.data, "\n\n")) |pos| {
+                            const msg_start = cobj.data[pos + 2 ..];
+                            if (std.mem.indexOfScalar(u8, msg_start, '\n')) |nl| {
+                                subject = allocator.dupe(u8, msg_start[0..nl]) catch "";
+                            } else {
+                                subject = allocator.dupe(u8, std.mem.trim(u8, msg_start, "\n")) catch "";
+                            }
+                            free_subject = true;
+                        }
+                    } else |_| {}
+                }
+                defer if (free_subject) allocator.free(subject);
+                const msg2 = try std.fmt.allocPrint(allocator, "{s}{s} {s} {s}\n", .{ prefix2, branch, short, subject });
+                defer allocator.free(msg2);
+                try platform_impl.writeStdout(msg2);
+            } else {
+                const msg2 = try std.fmt.allocPrint(allocator, "{s}{s}\n", .{ prefix2, branch });
+                defer allocator.free(msg2);
+                try platform_impl.writeStdout(msg2);
+            }
         }
     } else if (std.mem.eql(u8, first_arg.?, "--create-reflog")) {
         // helpers.Create branch with reflog
