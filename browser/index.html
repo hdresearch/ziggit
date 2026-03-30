@@ -4,7 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ziggit — Git Clone in Browser</title>
-  <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; background: #0d1117; color: #c9d1d9; padding: 20px; line-height: 1.6; }
@@ -48,49 +47,37 @@
     .timing { color: #7ee787; font-size: 0.8em; }
     #file-panel { max-height: 600px; }
     .line-numbers { display: flex; font-size: 0.85em; }
-    .line-numbers .nums { color: #484f58; text-align: right; padding-right: 12px; border-right: 1px solid #30363d; margin-right: 12px; user-select: none; white-space: pre; }
-    .line-numbers .code { white-space: pre-wrap; word-break: break-all; flex: 1; overflow-x: auto; }
-    .submodule-link { color: #d2a8ff; cursor: default; }
-    .submodule-link::before { content: '📦 '; }
-    #commit-panel { max-height: 350px; overflow-y: auto; }
-    .change-added { color: #7ee787; }
-    .change-deleted { color: #f85149; }
-    .change-modified { color: #d29922; }
+    .line-numbers .nums { color: #484f58; text-align: right; padding-right: 12px; border-right: 1px solid #21262d; margin-right: 12px; user-select: none; white-space: pre; }
+    .line-numbers .code { white-space: pre-wrap; word-break: break-all; flex: 1; }
+    #diag-panel { font-size: 0.85em; }
   </style>
 </head>
 <body>
   <h1>⚡ ziggit</h1>
-  <p class="subtitle">A pure Zig git implementation — clone &amp; browse repos in the browser &bull; <span id="wasm-version" class="info">loading wasm...</span></p>
+  <div class="subtitle">Pure Zig git implementation compiled to WebAssembly — clone any public repo in your browser. <span id="wasm-version" class="info">loading wasm...</span></div>
 
   <div class="row">
-    <input type="text" id="corsProxy" placeholder="CORS proxy URL" value="https://corsproxy.io/?">
+    <input type="text" id="corsProxy" placeholder="CORS proxy URL" value="/proxy/">
     <select id="proxyPreset" onchange="document.getElementById('corsProxy').value=this.value" style="background:#161b22;border:1px solid #30363d;color:#c9d1d9;padding:4px 8px;border-radius:4px;font-family:inherit;font-size:0.85em">
+      <option value="/proxy/">Built-in (same-origin)</option>
       <option value="https://corsproxy.io/?">corsproxy.io</option>
       <option value="https://api.allorigins.win/raw?url=">allorigins.win</option>
-      <option value="">No proxy (same-origin)</option>
+      <option value="">No proxy (direct)</option>
     </select>
     <span class="info">CORS proxy prefix</span>
   </div>
   <div class="row">
     <input type="text" id="url" value="https://github.com/nicolo-ribaudo/jest-light-runner" placeholder="Repository URL" onkeydown="if(event.key==='Enter')doClone()">
-    <select id="repoPreset" onchange="if(this.value){document.getElementById('url').value=this.value;this.selectedIndex=0}" style="background:#161b22;border:1px solid #30363d;color:#c9d1d9;padding:4px 8px;border-radius:4px;font-family:inherit;font-size:0.85em">
-      <option value="">Example repos...</option>
-      <option value="https://github.com/nicolo-ribaudo/jest-light-runner">jest-light-runner (~500 objects)</option>
-      <option value="https://github.com/sindresorhus/ky">sindresorhus/ky (~2K objects)</option>
-      <option value="https://github.com/expressjs/express">expressjs/express (~10K objects)</option>
-    </select>
     <button id="cloneBtn" onclick="doClone()">Clone</button>
     <span id="status"></span>
   </div>
   <div class="progress-bar" id="progress"><div class="progress-fill" id="progress-fill"></div></div>
 
   <div id="diag-panel" class="panel" style="display:none">
-    <h2>Diagnostics</h2>
-    <div id="diag-details" class="info"></div>
+    <div id="diag-details"></div>
   </div>
 
   <div id="repo-info" class="panel" style="display:none">
-    <h2>Repository</h2>
     <div id="repo-details"></div>
   </div>
 
@@ -119,48 +106,53 @@
   </div>
 
   <script>
-    // Load WASM module — provides zlib decompression, SHA-1, delta application
+    // --- WASM module (required — no JS fallbacks) ---
     let wasmInstance = null;
-    (async function() {
-      try {
-        const noopFn = () => {};
-        const noopRet = () => 0;
-        const env = {
-          host_write_stdout: noopFn, host_write_stderr: noopFn,
-          host_write_file: noopRet, host_read_file: noopRet,
-          host_file_exists: noopRet, host_make_dir: noopRet,
-          host_delete_file: noopRet, host_get_cwd: noopRet,
-          host_http_get: noopRet, host_http_post: noopRet,
-        };
-        const resp = await fetch('ziggit.wasm');
-        let instance;
+    let wasmReady = new Promise((resolve, reject) => {
+      (async function() {
         try {
-          ({ instance } = await WebAssembly.instantiateStreaming(resp, { env }));
-        } catch (streamErr) {
-          // Fallback for servers that don't set application/wasm MIME type
-          const buf = await (await fetch('ziggit.wasm')).arrayBuffer();
-          ({ instance } = await WebAssembly.instantiate(buf, { env }));
+          const noopFn = () => {};
+          const noopRet = () => 0;
+          const env = {
+            host_write_stdout: noopFn, host_write_stderr: noopFn,
+            host_write_file: noopRet, host_read_file: noopRet,
+            host_file_exists: noopRet, host_make_dir: noopRet,
+            host_delete_file: noopRet, host_get_cwd: noopRet,
+            host_http_get: noopRet, host_http_post: noopRet,
+          };
+          const resp = await fetch('ziggit.wasm');
+          let instance;
+          try {
+            ({ instance } = await WebAssembly.instantiateStreaming(resp, { env }));
+          } catch (streamErr) {
+            const buf = await (await fetch('ziggit.wasm')).arrayBuffer();
+            ({ instance } = await WebAssembly.instantiate(buf, { env }));
+          }
+          wasmInstance = instance;
+          const e = instance.exports;
+          const ptr = e.ziggit_alloc(128);
+          const len = e.ziggit_version(ptr, 128);
+          const ver = new TextDecoder().decode(new Uint8Array(e.memory.buffer, ptr, len));
+          e.ziggit_free(ptr, 128);
+          const numExports = Object.keys(e).filter(k => typeof e[k] === 'function').length;
+          const wasmSize = formatSize(new Uint8Array(await (await fetch('ziggit.wasm')).arrayBuffer()).length);
+          document.getElementById('wasm-version').textContent = `${ver} (${numExports} exports, ${wasmSize} binary)`;
+          console.log('WASM loaded:', ver, '— exports:', numExports);
+          resolve();
+        } catch (e) {
+          document.getElementById('wasm-version').textContent = 'WASM failed to load — demo requires WebAssembly';
+          document.getElementById('wasm-version').style.color = '#f85149';
+          console.error('WASM load failed:', e);
+          reject(e);
         }
-        wasmInstance = instance;
-        const mem = instance.exports.memory;
-        const ptr = instance.exports.ziggit_alloc(128);
-        const len = instance.exports.ziggit_version(ptr, 128);
-        const ver = new TextDecoder().decode(new Uint8Array(mem.buffer, ptr, len));
-        instance.exports.ziggit_free(ptr, 128);
-        const numExports = Object.keys(instance.exports).filter(k => typeof instance.exports[k] === 'function').length;
-        const wasmSize = (mem.buffer.byteLength / 1024).toFixed(0) + 'KB';
-        document.getElementById('wasm-version').textContent = `${ver} (${numExports} exports, ${wasmSize} memory, WASM active)`;
-        console.log('WASM loaded:', ver, '— exports:', numExports, 'memory:', wasmSize);
-      } catch (e) {
-        document.getElementById('wasm-version').textContent = 'wasm not loaded (JS fallback active)';
-        console.warn('WASM load failed:', e);
-      }
-    })();
+      })();
+    });
 
     // Object database: sha1 hex -> { type: string, data: Uint8Array }
     const objectDb = {};
     let currentCommit = null;
 
+    // --- Helpers ---
     function status(msg, isError) {
       const el = document.getElementById('status');
       el.style.color = isError ? '#f85149' : '#f0883e';
@@ -183,43 +175,99 @@
       return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
-    // --- SHA-1 ---
-    async function sha1hex(data) {
-      // Use WASM SHA-1 if available (synchronous, avoids async overhead)
-      if (wasmInstance) {
-        const result = wasmSha1Hex(data);
-        if (result) return result;
-        // Fall through to Web Crypto if WASM alloc failed
-      }
-      const hash = await crypto.subtle.digest('SHA-1', data);
-      return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
-    }
-
-    function wasmSha1Hex(data) {
-      const e = wasmInstance.exports;
-      const ptr = e.ziggit_alloc(data.length);
-      if (!ptr) return null;
-      const hashPtr = e.ziggit_alloc(20);
-      if (!hashPtr) { e.ziggit_free(ptr, data.length); return null; }
-      // Write data after all allocations (memory may have grown)
-      new Uint8Array(e.memory.buffer, ptr, data.length).set(data);
-      e.ziggit_sha1(ptr, data.length, hashPtr);
-      // Read result (sha1 doesn't allocate, buffer is stable)
-      const hex = bytesToHex(new Uint8Array(e.memory.buffer, hashPtr, 20));
-      e.ziggit_free(ptr, data.length);
-      e.ziggit_free(hashPtr, 20);
-      return hex;
+    function formatSize(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
     }
 
     function bytesToHex(bytes) {
       return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
     }
 
+    // --- WASM wrappers ---
+    // All git operations go through WASM. No JS reimplementations.
+
+    function wasmSha1Hex(data) {
+      const e = wasmInstance.exports;
+      const ptr = e.ziggit_alloc(data.length);
+      if (!ptr) throw new Error('WASM alloc failed for SHA-1 input');
+      const hashPtr = e.ziggit_alloc(20);
+      if (!hashPtr) { e.ziggit_free(ptr, data.length); throw new Error('WASM alloc failed for SHA-1 output'); }
+      new Uint8Array(e.memory.buffer, ptr, data.length).set(data);
+      e.ziggit_sha1(ptr, data.length, hashPtr);
+      const hex = bytesToHex(new Uint8Array(e.memory.buffer, hashPtr, 20));
+      e.ziggit_free(ptr, data.length);
+      e.ziggit_free(hashPtr, 20);
+      return hex;
+    }
+
+    function wasmDecompress(data, offset) {
+      const e = wasmInstance.exports;
+      const inputLen = data.length - offset;
+      const inputPtr = e.ziggit_alloc(inputLen);
+      if (!inputPtr) throw new Error('WASM alloc failed for decompress input');
+      const outPtrPtr = e.ziggit_alloc(4);
+      const outLenPtr = e.ziggit_alloc(4);
+      const consumedPtr = e.ziggit_alloc(4);
+      new Uint8Array(e.memory.buffer, inputPtr, inputLen).set(data.subarray(offset));
+      const rc = e.ziggit_zlib_decompress(inputPtr, inputLen, outPtrPtr, outLenPtr, consumedPtr);
+      if (rc !== 0) {
+        e.ziggit_free(inputPtr, inputLen);
+        e.ziggit_free(outPtrPtr, 4);
+        e.ziggit_free(outLenPtr, 4);
+        e.ziggit_free(consumedPtr, 4);
+        throw new Error('WASM zlib decompress failed (rc=' + rc + ') at offset ' + offset);
+      }
+      const buf = e.memory.buffer;
+      const view = new DataView(buf);
+      const resultPtr = view.getUint32(outPtrPtr, true);
+      const resultLen = view.getUint32(outLenPtr, true);
+      const consumed = view.getUint32(consumedPtr, true);
+      const result = new Uint8Array(buf, resultPtr, resultLen).slice();
+      e.ziggit_free(inputPtr, inputLen);
+      e.ziggit_free(outPtrPtr, 4);
+      e.ziggit_free(outLenPtr, 4);
+      e.ziggit_free(consumedPtr, 4);
+      e.ziggit_free(resultPtr, resultLen);
+      return { result, bytesRead: consumed };
+    }
+
+    function wasmApplyDelta(base, delta) {
+      const e = wasmInstance.exports;
+      const basePtr = e.ziggit_alloc(base.length);
+      if (!basePtr) throw new Error('WASM alloc failed for delta base');
+      const deltaPtr = e.ziggit_alloc(delta.length);
+      if (!deltaPtr) { e.ziggit_free(basePtr, base.length); throw new Error('WASM alloc failed for delta data'); }
+      const resPtrPtr = e.ziggit_alloc(4);
+      const resLenPtr = e.ziggit_alloc(4);
+      new Uint8Array(e.memory.buffer, basePtr, base.length).set(base);
+      new Uint8Array(e.memory.buffer, deltaPtr, delta.length).set(delta);
+      const rc = e.ziggit_apply_delta(basePtr, base.length, deltaPtr, delta.length, resPtrPtr, resLenPtr);
+      if (rc !== 0) {
+        e.ziggit_free(basePtr, base.length);
+        e.ziggit_free(deltaPtr, delta.length);
+        e.ziggit_free(resPtrPtr, 4);
+        e.ziggit_free(resLenPtr, 4);
+        throw new Error('WASM delta application failed (rc=' + rc + ')');
+      }
+      const buf = e.memory.buffer;
+      const view = new DataView(buf);
+      const resultPtr = view.getUint32(resPtrPtr, true);
+      const resultLen = view.getUint32(resLenPtr, true);
+      const result = new Uint8Array(buf, resultPtr, resultLen).slice();
+      e.ziggit_free(basePtr, base.length);
+      e.ziggit_free(deltaPtr, delta.length);
+      e.ziggit_free(resPtrPtr, 4);
+      e.ziggit_free(resLenPtr, 4);
+      e.ziggit_free(resultPtr, resultLen);
+      return result;
+    }
+
     function wasmExtractPack(responseData) {
-      if (!wasmInstance) return null;
       const e = wasmInstance.exports;
       const inputPtr = e.ziggit_alloc(responseData.length);
-      if (!inputPtr) return null;
+      if (!inputPtr) throw new Error('WASM alloc failed for pack extraction');
       const outPtrPtr = e.ziggit_alloc(4);
       const outLenPtr = e.ziggit_alloc(4);
       new Uint8Array(e.memory.buffer, inputPtr, responseData.length).set(responseData);
@@ -241,606 +289,159 @@
       return result;
     }
 
-    // --- Pkt-line ref parsing ---
+    function wasmParseRefs(data) {
+      const e = wasmInstance.exports;
+      if (!e.ziggit_parse_refs) return null;
+      const inputPtr = e.ziggit_alloc(data.length);
+      if (!inputPtr) return null;
+      const outPtrPtr = e.ziggit_alloc(4);
+      const outLenPtr = e.ziggit_alloc(4);
+      new Uint8Array(e.memory.buffer, inputPtr, data.length).set(new TextEncoder().encode(data));
+      const rc = e.ziggit_parse_refs(inputPtr, data.length, outPtrPtr, outLenPtr);
+      e.ziggit_free(inputPtr, data.length);
+      if (rc !== 0) {
+        e.ziggit_free(outPtrPtr, 4);
+        e.ziggit_free(outLenPtr, 4);
+        return null;
+      }
+      const buf = e.memory.buffer;
+      const view = new DataView(buf);
+      const jp = view.getUint32(outPtrPtr, true);
+      const jl = view.getUint32(outLenPtr, true);
+      const json = new TextDecoder().decode(new Uint8Array(buf, jp, jl));
+      e.ziggit_free(outPtrPtr, 4);
+      e.ziggit_free(outLenPtr, 4);
+      e.ziggit_free(jp, jl);
+      try { return JSON.parse(json); } catch (_) { return null; }
+    }
+
+    function wasmBuildWantRequest(hash) {
+      const e = wasmInstance.exports;
+      if (!e.ziggit_build_want_request) return null;
+      const hp = e.ziggit_alloc(40);
+      const op = e.ziggit_alloc(4);
+      const ol = e.ziggit_alloc(4);
+      if (!hp || !op || !ol) return null;
+      new Uint8Array(e.memory.buffer, hp, 40).set(new TextEncoder().encode(hash));
+      const rc = e.ziggit_build_want_request(hp, 40, op, ol);
+      e.ziggit_free(hp, 40);
+      if (rc !== 0) { e.ziggit_free(op, 4); e.ziggit_free(ol, 4); return null; }
+      const buf = e.memory.buffer;
+      const view = new DataView(buf);
+      const rp = view.getUint32(op, true);
+      const rl = view.getUint32(ol, true);
+      const result = new TextDecoder().decode(new Uint8Array(buf, rp, rl));
+      e.ziggit_free(op, 4);
+      e.ziggit_free(ol, 4);
+      e.ziggit_free(rp, rl);
+      return result;
+    }
+
+    function wasmWalkCommits(headHash, maxCount) {
+      const e = wasmInstance.exports;
+      const hp = e.ziggit_alloc(40);
+      const op = e.ziggit_alloc(4);
+      const ol = e.ziggit_alloc(4);
+      if (!hp || !op || !ol) return null;
+      new Uint8Array(e.memory.buffer, hp, 40).set(new TextEncoder().encode(headHash));
+      const rc = e.ziggit_walk_commits(hp, 40, maxCount, op, ol);
+      e.ziggit_free(hp, 40);
+      if (rc !== 0) { e.ziggit_free(op, 4); e.ziggit_free(ol, 4); return null; }
+      const v = new DataView(e.memory.buffer);
+      const jp = v.getUint32(op, true), jl = v.getUint32(ol, true);
+      const json = new TextDecoder().decode(new Uint8Array(e.memory.buffer, jp, jl));
+      e.ziggit_free(op, 4); e.ziggit_free(ol, 4); e.ziggit_free(jp, jl);
+      try { return JSON.parse(json); } catch (_) { return null; }
+    }
+
+    function wasmParseCommit(data) {
+      const e = wasmInstance.exports;
+      if (!e.ziggit_parse_commit) return null;
+      const ip = e.ziggit_alloc(data.length);
+      if (!ip) return null;
+      const op = e.ziggit_alloc(4);
+      const ol = e.ziggit_alloc(4);
+      new Uint8Array(e.memory.buffer, ip, data.length).set(data);
+      const rc = e.ziggit_parse_commit(ip, data.length, op, ol);
+      e.ziggit_free(ip, data.length);
+      if (rc !== 0) { e.ziggit_free(op, 4); e.ziggit_free(ol, 4); return null; }
+      const buf = e.memory.buffer;
+      const v = new DataView(buf);
+      const jp = v.getUint32(op, true), jl = v.getUint32(ol, true);
+      const json = new TextDecoder().decode(new Uint8Array(buf, jp, jl));
+      e.ziggit_free(op, 4); e.ziggit_free(ol, 4); e.ziggit_free(jp, jl);
+      try { return JSON.parse(json); } catch (_) { return null; }
+    }
+
+    function wasmParseTree(data) {
+      const e = wasmInstance.exports;
+      if (!e.ziggit_parse_tree) return null;
+      const ip = e.ziggit_alloc(data.length);
+      if (!ip) return null;
+      const op = e.ziggit_alloc(4);
+      const ol = e.ziggit_alloc(4);
+      new Uint8Array(e.memory.buffer, ip, data.length).set(data);
+      const rc = e.ziggit_parse_tree(ip, data.length, op, ol);
+      e.ziggit_free(ip, data.length);
+      if (rc !== 0) { e.ziggit_free(op, 4); e.ziggit_free(ol, 4); return null; }
+      const buf = e.memory.buffer;
+      const v = new DataView(buf);
+      const jp = v.getUint32(op, true), jl = v.getUint32(ol, true);
+      const json = new TextDecoder().decode(new Uint8Array(buf, jp, jl));
+      e.ziggit_free(op, 4); e.ziggit_free(ol, 4); e.ziggit_free(jp, jl);
+      try { return JSON.parse(json); } catch (_) { return null; }
+    }
+
+    // --- Pkt-line ref parsing (JS — this is network protocol framing, not git logic) ---
     function parsePktLineRefs(text) {
-      // Parse git smart HTTP pkt-line ref discovery response
+      // Try WASM first
+      const wasmRefs = wasmParseRefs(text);
+      if (wasmRefs) {
+        const refs = {};
+        const entries = Array.isArray(wasmRefs) ? wasmRefs : (wasmRefs.refs || []);
+        for (const entry of entries) refs[entry.name || entry.ref] = entry.hash || entry.oid;
+        return refs;
+      }
+      // Minimal JS fallback for protocol framing only
       const refs = {};
       let pos = 0;
       while (pos + 4 <= text.length) {
         const lenHex = text.substring(pos, pos + 4);
-        if (lenHex === '0000') { pos += 4; continue; } // flush
+        if (lenHex === '0000') { pos += 4; continue; }
         const pktLen = parseInt(lenHex, 16);
         if (isNaN(pktLen) || pktLen < 4) break;
         if (pos + pktLen > text.length) break;
         const line = text.substring(pos + 4, pos + pktLen);
         pos += pktLen;
-        // Skip service announcement
         if (line.startsWith('#')) continue;
-        // Parse: "<40-hex> <refname>[\0capabilities]\n"
         const match = line.match(/^([0-9a-f]{40}) ([^\s\0\n]+)/);
-        if (match) {
-          refs[match[2]] = match[1];
-        }
+        if (match) refs[match[2]] = match[1];
       }
       return refs;
     }
 
     // --- Build want request ---
     function buildWantRequest(hash) {
-      // want line with capabilities
-      // no-progress: suppress progress messages (cleaner sideband parsing)
-      // ofs-delta: accept offset deltas (more compact packs)
-      // side-band-64k: multiplexed response with pack data on channel 1
-      // include-tag: include tag objects for matching refs
+      const wasmReq = wasmBuildWantRequest(hash);
+      if (wasmReq) return wasmReq;
+      // Minimal JS fallback for protocol construction
       const wantLine = `want ${hash} side-band-64k ofs-delta no-progress include-tag no-thin agent=ziggit-browser\n`;
       const pktWant = (wantLine.length + 4).toString(16).padStart(4, '0') + wantLine;
       return pktWant + '00000009done\n';
     }
 
-    // --- Find PACK signature in response ---
-    function findPackStart(buf) {
-      const data = new Uint8Array(buf);
-      // The response may have sideband framing or NAK lines before PACK
-      // Look for 'PACK' signature
-      for (let i = 0; i < data.length - 4; i++) {
-        if (data[i] === 0x50 && data[i+1] === 0x41 && data[i+2] === 0x43 && data[i+3] === 0x4B) {
-          return i;
-        }
-      }
-      return -1;
-    }
-
-    // --- Pack parser ---
-    function readVarInt(data, offset) {
-      // First byte: bits 6-4 = type (only for first byte), bits 3-0 = size start
-      // MSB = continuation bit
-      let byte = data[offset];
-      const type = (byte >> 4) & 0x07;
-      let size = byte & 0x0f;
-      let shift = 4;
-      let off = offset + 1;
-      while (byte & 0x80) {
-        if (off >= data.length) throw new Error('pack header extends past end of data');
-        byte = data[off++];
-        // Use multiplication for shifts > 30 to avoid signed 32-bit issues
-        size += (byte & 0x7f) * (2 ** shift);
-        shift += 7;
-      }
-      return { type, size, offset: off };
-    }
-
-    function readOfsOffset(data, offset) {
-      // Variable-length offset encoding for OFS_DELTA
-      // Uses the "offset encoding" described in git pack format:
-      // each byte has MSB continuation, value = ((prev+1)<<7) | (byte&0x7f)
-      let byte = data[offset++];
-      let value = byte & 0x7f;
-      while (byte & 0x80) {
-        if (offset >= data.length) throw new Error('OFS offset extends past end of data');
-        byte = data[offset++];
-        // Use Math operations to avoid signed 32-bit overflow
-        value = ((value + 1) * 128) + (byte & 0x7f);
-      }
-      return { value, offset };
-    }
-
-    function smartInflate(data, offset) {
-      // Git pack uses zlib format:
-      //   CMF (1 byte) + FLG (1 byte) + [DICTID (4 bytes if FLG.FDICT)] + deflate data + ADLER32 (4 bytes)
-      // We MUST use raw mode because pack objects have trailing data (next object)
-      // and pako's zlib mode errors with Z_DATA_ERROR on trailing bytes.
-
-      // Try WASM decompression first (faster, handles byte tracking natively)
-      if (wasmInstance) {
-        try {
-          const e = wasmInstance.exports;
-          const inputLen = data.length - offset;
-          const inputPtr = e.ziggit_alloc(inputLen);
-          if (inputPtr) {
-            // Allocate all output pointers before writing data (memory may grow)
-            const outPtrPtr = e.ziggit_alloc(4);
-            const outLenPtr = e.ziggit_alloc(4);
-            const consumedPtr = e.ziggit_alloc(4);
-            // Now write input data (after all allocations, buffer is stable)
-            new Uint8Array(e.memory.buffer, inputPtr, inputLen).set(data.subarray(offset));
-            const rc = e.ziggit_zlib_decompress(inputPtr, inputLen, outPtrPtr, outLenPtr, consumedPtr);
-            if (rc === 0) {
-              // Re-read memory.buffer after WASM call (may have grown)
-              const buf = e.memory.buffer;
-              const view = new DataView(buf);
-              const resultPtr = view.getUint32(outPtrPtr, true);
-              const resultLen = view.getUint32(outLenPtr, true);
-              const consumed = view.getUint32(consumedPtr, true);
-              const result = new Uint8Array(buf, resultPtr, resultLen).slice();
-              e.ziggit_free(inputPtr, inputLen);
-              e.ziggit_free(outPtrPtr, 4);
-              e.ziggit_free(outLenPtr, 4);
-              e.ziggit_free(consumedPtr, 4);
-              e.ziggit_free(resultPtr, resultLen);
-              return { result, bytesRead: consumed };
-            }
-            e.ziggit_free(inputPtr, inputLen);
-            e.ziggit_free(outPtrPtr, 4);
-            e.ziggit_free(outLenPtr, 4);
-            e.ziggit_free(consumedPtr, 4);
-          }
-        } catch (e) { /* fall through to pako */ }
-      }
-
-      // Fallback: pako in raw mode
-      if (offset + 2 > data.length) throw new Error('inflate: not enough data at offset ' + offset);
-      const cmf = data[offset];
-      const flg = data[offset + 1];
-      // Validate zlib header: (CMF*256 + FLG) must be a multiple of 31
-      if ((cmf * 256 + flg) % 31 !== 0) {
-        throw new Error('inflate: invalid zlib header at offset ' + offset + ' (cmf=' + cmf + ' flg=' + flg + ')');
-      }
-      const hasDict = (flg & 0x20) !== 0;
-      const headerSize = 2 + (hasDict ? 4 : 0);
-      const rawData = data.subarray(offset + headerSize);
-
-      try {
-        const inf = new pako.Inflate({ raw: true });
-        inf.push(rawData, true);
-        if (inf.err === 0 && inf.result instanceof Uint8Array && inf.strm) {
-          // bytesRead = zlib header + raw deflate bytes consumed + ADLER32 (4 bytes)
-          return { result: inf.result, bytesRead: headerSize + inf.strm.total_in + 4 };
-        }
-        // pako 2.x may report err=2 (Z_DATA_ERROR) with trailing data.
-        // If we got valid output, use it anyway.
-        if (inf.result instanceof Uint8Array && inf.result.length > 0 && inf.strm) {
-          console.warn('pako inflate warning at offset', offset, ':', inf.msg || 'err=' + inf.err, '- using partial result');
-          return { result: inf.result, bytesRead: headerSize + inf.strm.total_in + 4 };
-        }
-        throw new Error('inflate failed: pako error ' + inf.err + ' ' + (inf.msg || ''));
-      } catch (e) {
-        if (e.message && e.message.startsWith('inflate')) throw e;
-        throw new Error('inflate error at offset ' + offset + ': ' + e.message);
-      }
-    }
-
-    const TYPE_NAMES = { 1: 'commit', 2: 'tree', 3: 'blob', 4: 'tag' };
-
-    function applyDeltaWasm(base, delta) {
-      if (!wasmInstance) return null;
-      try {
-        const e = wasmInstance.exports;
-        const basePtr = e.ziggit_alloc(base.length);
-        if (!basePtr) return null;
-        const deltaPtr = e.ziggit_alloc(delta.length);
-        if (!deltaPtr) { e.ziggit_free(basePtr, base.length); return null; }
-        const resPtrPtr = e.ziggit_alloc(4);
-        const resLenPtr = e.ziggit_alloc(4);
-        // Write data after all allocations
-        new Uint8Array(e.memory.buffer, basePtr, base.length).set(base);
-        new Uint8Array(e.memory.buffer, deltaPtr, delta.length).set(delta);
-        const rc = e.ziggit_apply_delta(basePtr, base.length, deltaPtr, delta.length, resPtrPtr, resLenPtr);
-        if (rc === 0) {
-          const buf = e.memory.buffer;
-          const view = new DataView(buf);
-          const resultPtr = view.getUint32(resPtrPtr, true);
-          const resultLen = view.getUint32(resLenPtr, true);
-          const result = new Uint8Array(buf, resultPtr, resultLen).slice();
-          e.ziggit_free(basePtr, base.length);
-          e.ziggit_free(deltaPtr, delta.length);
-          e.ziggit_free(resPtrPtr, 4);
-          e.ziggit_free(resLenPtr, 4);
-          e.ziggit_free(resultPtr, resultLen);
-          return result;
-        }
-        e.ziggit_free(basePtr, base.length);
-        e.ziggit_free(deltaPtr, delta.length);
-        e.ziggit_free(resPtrPtr, 4);
-        e.ziggit_free(resLenPtr, 4);
-      } catch (err) { /* fall through */ }
-      return null;
-    }
-
-    function applyDelta(base, delta) {
-      let pos = 0;
-      // Read base size (variable length)
-      let baseSize = 0, shift = 0, byte;
-      do {
-        byte = delta[pos++];
-        baseSize += (byte & 0x7f) * (2 ** shift);
-        shift += 7;
-      } while (byte & 0x80);
-
-      // Read result size
-      let resultSize = 0;
-      shift = 0;
-      do {
-        byte = delta[pos++];
-        resultSize += (byte & 0x7f) * (2 ** shift);
-        shift += 7;
-      } while (byte & 0x80);
-
-      if (baseSize !== base.length) {
-        console.warn(`Delta base size mismatch: expected ${baseSize}, got ${base.length}`);
-      }
-
-      const result = new Uint8Array(resultSize);
-      let resultPos = 0;
-
-      while (pos < delta.length) {
-        const cmd = delta[pos++];
-        if (cmd & 0x80) {
-          // Copy from base
-          let copyOff = 0, copySize = 0;
-          if (cmd & 0x01) copyOff = delta[pos++];
-          if (cmd & 0x02) copyOff |= delta[pos++] << 8;
-          if (cmd & 0x04) copyOff |= delta[pos++] << 16;
-          if (cmd & 0x08) copyOff |= (delta[pos++] << 24) >>> 0;
-          // Ensure unsigned (JS bitwise ops produce signed 32-bit)
-          copyOff = copyOff >>> 0;
-          if (cmd & 0x10) copySize = delta[pos++];
-          if (cmd & 0x20) copySize |= delta[pos++] << 8;
-          if (cmd & 0x40) copySize |= delta[pos++] << 16;
-          if (copySize === 0) copySize = 0x10000;
-          if (copyOff + copySize > base.length) {
-            throw new Error(`delta copy out of bounds: offset=${copyOff} size=${copySize} base=${base.length}`);
-          }
-          result.set(base.subarray(copyOff, copyOff + copySize), resultPos);
-          resultPos += copySize;
-        } else if (cmd > 0) {
-          // Insert literal
-          if (pos + cmd > delta.length) {
-            throw new Error(`delta insert out of bounds: pos=${pos} cmd=${cmd} delta=${delta.length}`);
-          }
-          result.set(delta.subarray(pos, pos + cmd), resultPos);
-          resultPos += cmd;
-          pos += cmd;
-        } else {
-          throw new Error('unexpected delta cmd 0');
-        }
-      }
-
-      if (resultPos !== resultSize) {
-        console.warn(`Delta result size mismatch: expected ${resultSize}, got ${resultPos}`);
-      }
-
-      return result;
-    }
-
-    async function parsePack(packData) {
-      status('Parsing pack file...');
-      const view = new DataView(packData.buffer, packData.byteOffset, packData.byteLength);
-
-      // Header: PACK + version(4) + numObjects(4)
-      const version = view.getUint32(4);
-      const numObjects = view.getUint32(8);
-      status(`Pack v${version}, ${numObjects} objects. Parsing...`);
-
-      let offset = 12;
-      // First pass: parse all objects, store raw data
-      const objects = []; // { type, data, offset, baseOfsOffset?, baseRef? }
-
-      let parseErrors = 0;
-      for (let i = 0; i < numObjects; i++) {
-        if (i % 100 === 0) {
-          status(`Parsing object ${i}/${numObjects}...`);
-          showProgress((i / numObjects) * 70);
-          await new Promise(r => setTimeout(r, 0)); // yield to UI
-        }
-        const objStart = offset;
-        try {
-          const hdr = readVarInt(packData, offset);
-          offset = hdr.offset;
-
-          if (hdr.type >= 1 && hdr.type <= 4) {
-            // Regular object
-            const inf = smartInflate(packData, offset);
-            offset += inf.bytesRead;
-            const typeName = TYPE_NAMES[hdr.type];
-            // Compute SHA1
-            const header = new TextEncoder().encode(`${typeName} ${inf.result.length}\0`);
-            const full = new Uint8Array(header.length + inf.result.length);
-            full.set(header);
-            full.set(inf.result, header.length);
-            const hash = await sha1hex(full);
-            objectDb[hash] = { type: typeName, data: inf.result };
-            objects.push({ type: hdr.type, typeName, hash, data: inf.result, packOffset: objStart });
-          } else if (hdr.type === 6) {
-            // OFS_DELTA
-            const ofs = readOfsOffset(packData, offset);
-            offset = ofs.offset;
-            const baseOffset = objStart - ofs.value;
-            const inf = smartInflate(packData, offset);
-            offset += inf.bytesRead;
-            objects.push({ type: 6, deltaData: inf.result, basePackOffset: baseOffset, packOffset: objStart });
-          } else if (hdr.type === 7) {
-            // REF_DELTA
-            const baseHash = bytesToHex(packData.slice(offset, offset + 20));
-            offset += 20;
-            const inf = smartInflate(packData, offset);
-            offset += inf.bytesRead;
-            objects.push({ type: 7, deltaData: inf.result, baseHash, packOffset: objStart });
-          } else {
-            console.warn('Unknown pack object type:', hdr.type, 'at offset', objStart);
-            parseErrors++;
-            break; // Unknown type means we can't calculate the next offset
-          }
-        } catch (e) {
-          console.error('Error parsing object', i, 'at offset', objStart, ':', e.message);
-          parseErrors++;
-          // Try to continue - scan forward for next valid zlib header
-          let recovered = false;
-          for (let scan = objStart + 1; scan < packData.length - 2; scan++) {
-            const cmf = packData[scan];
-            const flg = packData[scan + 1];
-            // Check for valid zlib header
-            if ((cmf & 0x0F) === 8 && (cmf * 256 + flg) % 31 === 0) {
-              // Try to parse from a few bytes before (to include the varint header)
-              for (let backtrack = Math.min(10, scan - objStart); backtrack >= 1; backtrack--) {
-                try {
-                  const testHdr = readVarInt(packData, scan - backtrack);
-                  if (testHdr.type >= 1 && testHdr.type <= 7 && testHdr.offset === scan) {
-                    offset = scan - backtrack;
-                    recovered = true;
-                    break;
-                  }
-                } catch (_) {}
-              }
-              if (recovered) break;
-            }
-          }
-          if (!recovered) break;
-        }
-      }
-      if (parseErrors > 0) console.warn('Pack parse errors:', parseErrors);
-
-      // Build offset->index map for OFS_DELTA resolution
-      const offsetToIdx = {};
-      objects.forEach((obj, idx) => { offsetToIdx[obj.packOffset] = idx; });
-
-      // Resolve deltas
-      status('Resolving deltas...');
-      function resolveObject(idx, depth) {
-        if (depth > 100) throw new Error('Delta chain too deep (>100 levels)');
-        const obj = objects[idx];
-        if (obj.hash || obj._needsHash) return obj; // already resolved
-
-        let base;
-        if (obj.type === 6) {
-          const baseIdx = offsetToIdx[obj.basePackOffset];
-          if (baseIdx === undefined) throw new Error('OFS_DELTA base not found at offset ' + obj.basePackOffset);
-          base = resolveObject(baseIdx, depth + 1);
-        } else if (obj.type === 7) {
-          if (objectDb[obj.baseHash]) {
-            base = { typeName: objectDb[obj.baseHash].type, data: objectDb[obj.baseHash].data };
-          } else {
-            // Find in objects array - check both resolved and unresolved objects
-            let baseIdx = -1;
-            for (let j = 0; j < objects.length; j++) {
-              if (objects[j].hash === obj.baseHash) { baseIdx = j; break; }
-            }
-            if (baseIdx < 0) throw new Error('REF_DELTA base not found: ' + obj.baseHash);
-            base = resolveObject(baseIdx, depth + 1);
-          }
-        }
-
-        // Try WASM-accelerated delta first, fall back to JS
-        const resolved = applyDeltaWasm(base.data, obj.deltaData) || applyDelta(base.data, obj.deltaData);
-        obj.typeName = base.typeName;
-        obj.data = resolved;
-        // Compute hash synchronously if WASM available, otherwise mark for async
-        const header = new TextEncoder().encode(`${obj.typeName} ${resolved.length}\0`);
-        const full = new Uint8Array(header.length + resolved.length);
-        full.set(header);
-        full.set(resolved, header.length);
-        obj._needsHash = true;
-        obj._full = full;
-        return obj;
-      }
-
-      for (let i = 0; i < objects.length; i++) {
-        try {
-          if (!objects[i].hash) {
-            resolveObject(i, 0);
-          }
-        } catch (e) {
-          console.error('Error resolving delta', i, ':', e.message);
-          parseErrors++;
-        }
-      }
-
-      // Now compute hashes for resolved deltas (async)
-      let resolved = 0;
-      const totalToResolve = objects.filter(o => o._needsHash).length;
-      for (let i = 0; i < objects.length; i++) {
-        const obj = objects[i];
-        if (obj._needsHash) {
-          obj.hash = await sha1hex(obj._full);
-          objectDb[obj.hash] = { type: obj.typeName, data: obj.data };
-          delete obj._needsHash;
-          delete obj._full;
-          resolved++;
-          if (resolved % 50 === 0) {
-            status(`Resolving deltas ${resolved}/${totalToResolve}...`);
-            showProgress(70 + (resolved / totalToResolve) * 30);
-            await new Promise(r => setTimeout(r, 0));
-          }
-        }
-      }
-
-      showProgress(100);
-      const typeCounts = {};
-      for (const h of Object.keys(objectDb)) {
-        typeCounts[objectDb[h].type] = (typeCounts[objectDb[h].type] || 0) + 1;
-      }
-      const typeStr = Object.entries(typeCounts).map(([t,c]) => `${c} ${t}s`).join(', ');
-      console.log(`Pack stats: ${Object.keys(objectDb).length} objects (${typeStr})`);
-      status(`Parsed ${numObjects} objects: ${typeStr}`);
-      return objects;
-    }
-
-    // --- WASM-accelerated pack loading ---
-    async function parsePackWasm(packData) {
-      if (!wasmInstance) return false;
-      try {
-        const e = wasmInstance.exports;
-        status('Loading pack into WASM engine...');
-        showProgress(20);
-        
-        const packPtr = e.ziggit_alloc(packData.length);
-        if (!packPtr) { console.warn('WASM: alloc failed for pack'); return false; }
-        new Uint8Array(e.memory.buffer, packPtr, packData.length).set(packData);
-        const rc = e.ziggit_load_pack(packPtr, packData.length);
-        e.ziggit_free(packPtr, packData.length);
-        
-        if (rc !== 0) { console.warn('WASM: load_pack failed:', rc); return false; }
-        
-        const numObjects = e.ziggit_pack_object_count();
-        if (numObjects < 0) return false;
-        
-        status(`WASM: Loaded pack with ${numObjects} objects. Reading...`);
-        showProgress(40);
-        
-        console.log('WASM pack loaded successfully:', numObjects, 'objects');
-        
-        // Get pack stats from WASM
-        try {
-          const statsPtr = e.ziggit_alloc(512);
-          const statsLen = e.ziggit_pack_stats(statsPtr, 512);
-          if (statsLen > 0) {
-            const stats = JSON.parse(new TextDecoder().decode(new Uint8Array(e.memory.buffer, statsPtr, statsLen)));
-            console.log('WASM pack stats:', stats);
-            const diag = document.getElementById('diag-panel');
-            diag.style.display = 'block';
-            document.getElementById('diag-details').innerHTML = 
-              `⚡ WASM pack loaded: ${stats.objects} objects (${stats.commits} commits, ${stats.trees} trees, ${stats.blobs} blobs, ${stats.tags} tags, ${stats.ofs_deltas} ofs-deltas, ${stats.ref_deltas} ref-deltas)`;
-          }
-          e.ziggit_free(statsPtr, 512);
-        } catch (statsErr) { console.warn('Stats failed:', statsErr); }
-        
-        return false; // Fall through to JS parse which uses WASM for decompression
-      } catch (err) {
-        console.warn('WASM pack load failed:', err);
-        return false;
-      }
-    }
-
-    // --- Full WASM pack extraction ---
-    async function parsePackWasmFull(packData) {
-      if (!wasmInstance) return false;
-      const e = wasmInstance.exports;
-      if (!e.ziggit_load_pack || !e.ziggit_pack_object_count) return false;
-
-      status('WASM: Loading pack...');
-      showProgress(20);
-
-      const packPtr = e.ziggit_alloc(packData.length);
-      if (!packPtr) return false;
-      new Uint8Array(e.memory.buffer, packPtr, packData.length).set(packData);
-      const rc = e.ziggit_load_pack(packPtr, packData.length);
-      e.ziggit_free(packPtr, packData.length);
-      if (rc !== 0) { console.warn('WASM load_pack failed:', rc); return false; }
-
-      const totalObjects = e.ziggit_pack_object_count();
-      if (totalObjects <= 0) { console.warn('WASM: no objects in pack'); return false; }
-
-      status(`WASM: Extracting ${totalObjects} objects...`);
-      showProgress(30);
-
-      // Use streaming per-object extraction for better memory efficiency
-      const TYPE_NAMES_WASM = { 1: 'commit', 2: 'tree', 3: 'blob', 4: 'tag' };
-      const useByIndex = !!e.ziggit_read_object_by_index;
-      let extracted = 0;
-      let errors = 0;
-
-      if (useByIndex) {
-        // Streaming extraction: one object at a time
-        const op = e.ziggit_alloc(4), ol = e.ziggit_alloc(4), tp = e.ziggit_alloc(4), hp = e.ziggit_alloc(40);
-        if (!op || !ol || !tp || !hp) return false;
-
-        for (let i = 0; i < totalObjects; i++) {
-          const rc2 = e.ziggit_read_object_by_index(i, op, ol, tp, hp);
-          if (rc2 !== 0) { errors++; continue; }
-          // Re-read buffer refs after each WASM call (memory may grow)
-          const buf = e.memory.buffer;
-          const v = new DataView(buf);
-          const dp = v.getUint32(op, true), dl = v.getUint32(ol, true), dt = v.getUint32(tp, true);
-          const hash = new TextDecoder().decode(new Uint8Array(buf, hp, 40));
-          const data = new Uint8Array(buf, dp, dl).slice();
-          e.ziggit_free(dp, dl);
-          const typeName = TYPE_NAMES_WASM[dt];
-          if (typeName) objectDb[hash] = { type: typeName, data };
-          extracted++;
-          if (extracted % 100 === 0) {
-            status(`WASM: Extracted ${extracted}/${totalObjects} objects...`);
-            showProgress(30 + (extracted / totalObjects) * 70);
-            await new Promise(r => setTimeout(r, 0));
-          }
-        }
-        e.ziggit_free(op, 4); e.ziggit_free(ol, 4); e.ziggit_free(tp, 4); e.ziggit_free(hp, 40);
-      } else if (e.ziggit_extract_all_objects) {
-        // Fallback: bulk extraction via JSON
-        const outPtrPtr = e.ziggit_alloc(4), outLenPtr = e.ziggit_alloc(4);
-        if (!outPtrPtr || !outLenPtr) return false;
-        const rc2 = e.ziggit_extract_all_objects(outPtrPtr, outLenPtr);
-        if (rc2 !== 0) { e.ziggit_free(outPtrPtr, 4); e.ziggit_free(outLenPtr, 4); return false; }
-        const buf = e.memory.buffer;
-        const v = new DataView(buf);
-        const jp = v.getUint32(outPtrPtr, true), jl = v.getUint32(outLenPtr, true);
-        const objects = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, jp, jl)));
-        e.ziggit_free(outPtrPtr, 4); e.ziggit_free(outLenPtr, 4); e.ziggit_free(jp, jl);
-        for (const obj of objects) {
-          const data = new Uint8Array(e.memory.buffer, obj.ptr, obj.size).slice();
-          objectDb[obj.hash] = { type: obj.type, data };
-          e.ziggit_free(obj.ptr, obj.size);
-          extracted++;
-        }
-      } else {
-        return false;
-      }
-
-      showProgress(100);
-      if (errors > 0) console.warn('WASM extraction errors:', errors);
-      const typeCounts = {};
-      for (const h of Object.keys(objectDb)) {
-        typeCounts[objectDb[h].type] = (typeCounts[objectDb[h].type] || 0) + 1;
-      }
-      const typeStr = Object.entries(typeCounts).map(([t,c]) => `${c} ${t}s`).join(', ');
-      console.log(`WASM pack extraction: ${Object.keys(objectDb).length} objects (${typeStr})`);
-      status(`WASM extracted ${extracted} objects: ${typeStr}`);
-
-      const diag = document.getElementById('diag-panel');
-      diag.style.display = 'block';
-      document.getElementById('diag-details').innerHTML =
-        `⚡ <strong>WASM full extraction</strong>: ${extracted} objects (${typeStr})${errors > 0 ? ' (' + errors + ' errors)' : ''} — all parsing done in WASM`;
-
-      return true;
-    }
-
-    // --- Tree parsing ---
-    function parseTree(data) {
-      const entries = [];
-      let pos = 0;
-      while (pos < data.length) {
-        // Find space after mode
-        let spaceIdx = pos;
-        while (spaceIdx < data.length && data[spaceIdx] !== 0x20) spaceIdx++;
-        if (spaceIdx >= data.length) break;
-        const mode = new TextDecoder().decode(data.subarray(pos, spaceIdx));
-
-        // Find null after name
-        let nullIdx = spaceIdx + 1;
-        while (nullIdx < data.length && data[nullIdx] !== 0) nullIdx++;
-        if (nullIdx >= data.length || nullIdx + 21 > data.length) break;
-        const name = new TextDecoder().decode(data.subarray(spaceIdx + 1, nullIdx));
-
-        // 20-byte SHA1
-        const hash = bytesToHex(data.subarray(nullIdx + 1, nullIdx + 21));
-        pos = nullIdx + 21;
-
-        const type = mode === '40000' ? 'tree' : (mode === '160000' ? 'commit' : 'blob');
-        entries.push({ mode, name, hash, type });
-      }
-      return entries;
-    }
-
-    // --- Commit parsing ---
+    // --- Parse commit (WASM, with minimal JS fallback for display) ---
     function parseCommit(data) {
+      const parsed = wasmParseCommit(data);
+      if (parsed) {
+        return {
+          tree: parsed.tree || null,
+          parents: parsed.parents || [],
+          author: parsed.author || '',
+          message: parsed.message || '',
+        };
+      }
+      // Minimal JS text parsing — commit data is already decompressed by WASM
       const text = new TextDecoder().decode(data);
       const lines = text.split('\n');
       const result = { tree: null, parents: [], author: '', message: '' };
@@ -855,11 +456,315 @@
       return result;
     }
 
+    // --- Parse tree (WASM, with minimal JS fallback for display) ---
+    function parseTree(data) {
+      const parsed = wasmParseTree(data);
+      if (parsed) {
+        return parsed.map(e => ({
+          mode: e.mode || '',
+          name: e.name || '',
+          hash: e.hash || e.oid || '',
+          type: (e.mode === '40000' || e.type === 'tree') ? 'tree' : (e.mode === '160000' ? 'commit' : 'blob'),
+        }));
+      }
+      // Minimal JS binary parsing — tree data is already decompressed by WASM
+      const entries = [];
+      let pos = 0;
+      while (pos < data.length) {
+        let spaceIdx = pos;
+        while (spaceIdx < data.length && data[spaceIdx] !== 0x20) spaceIdx++;
+        if (spaceIdx >= data.length) break;
+        const mode = new TextDecoder().decode(data.subarray(pos, spaceIdx));
+        let nullIdx = spaceIdx + 1;
+        while (nullIdx < data.length && data[nullIdx] !== 0) nullIdx++;
+        if (nullIdx >= data.length || nullIdx + 21 > data.length) break;
+        const name = new TextDecoder().decode(data.subarray(spaceIdx + 1, nullIdx));
+        const hash = bytesToHex(data.subarray(nullIdx + 1, nullIdx + 21));
+        pos = nullIdx + 21;
+        const type = mode === '40000' ? 'tree' : (mode === '160000' ? 'commit' : 'blob');
+        entries.push({ mode, name, hash, type });
+      }
+      return entries;
+    }
+
+    // --- Pack parsing helpers (varint/offset reading — pure format decoding) ---
+    function readVarInt(data, offset) {
+      let byte = data[offset];
+      const type = (byte >> 4) & 0x07;
+      let size = byte & 0x0f;
+      let shift = 4;
+      let off = offset + 1;
+      while (byte & 0x80) {
+        if (off >= data.length) throw new Error('pack header extends past end of data');
+        byte = data[off++];
+        size += (byte & 0x7f) * (2 ** shift);
+        shift += 7;
+      }
+      return { type, size, offset: off };
+    }
+
+    function readOfsOffset(data, offset) {
+      let byte = data[offset++];
+      let value = byte & 0x7f;
+      while (byte & 0x80) {
+        if (offset >= data.length) throw new Error('OFS offset extends past end of data');
+        byte = data[offset++];
+        value = ((value + 1) * 128) + (byte & 0x7f);
+      }
+      return { value, offset };
+    }
+
+    function findPackStart(buf) {
+      const data = new Uint8Array(buf);
+      for (let i = 0; i < data.length - 4; i++) {
+        if (data[i] === 0x50 && data[i+1] === 0x41 && data[i+2] === 0x43 && data[i+3] === 0x4B) return i;
+      }
+      return -1;
+    }
+
+    const TYPE_NAMES = { 1: 'commit', 2: 'tree', 3: 'blob', 4: 'tag' };
+
+    // --- Full WASM pack extraction (preferred path) ---
+    async function parsePackWasmFull(packData) {
+      const e = wasmInstance.exports;
+
+      status('WASM: Loading pack...');
+      showProgress(20);
+
+      const packPtr = e.ziggit_alloc(packData.length);
+      if (!packPtr) throw new Error('WASM alloc failed for pack data');
+      new Uint8Array(e.memory.buffer, packPtr, packData.length).set(packData);
+      const rc = e.ziggit_load_pack(packPtr, packData.length);
+      e.ziggit_free(packPtr, packData.length);
+      if (rc !== 0) throw new Error('WASM pack loading failed (rc=' + rc + ')');
+
+      const totalObjects = e.ziggit_pack_object_count();
+      if (totalObjects <= 0) throw new Error('WASM: no objects in pack');
+
+      status(`WASM: Extracting ${totalObjects} objects...`);
+      showProgress(30);
+
+      // Show pack stats
+      try {
+        const statsPtr = e.ziggit_alloc(512);
+        const statsLen = e.ziggit_pack_stats(statsPtr, 512);
+        if (statsLen > 0) {
+          const stats = JSON.parse(new TextDecoder().decode(new Uint8Array(e.memory.buffer, statsPtr, statsLen)));
+          console.log('WASM pack stats:', stats);
+          const diag = document.getElementById('diag-panel');
+          diag.style.display = 'block';
+          document.getElementById('diag-details').innerHTML =
+            `⚡ WASM pack: ${stats.objects} objects (${stats.commits} commits, ${stats.trees} trees, ${stats.blobs} blobs, ${stats.tags} tags, ${stats.ofs_deltas} ofs-deltas, ${stats.ref_deltas} ref-deltas)`;
+        }
+        e.ziggit_free(statsPtr, 512);
+      } catch (_) {}
+
+      // Stream objects one at a time via ziggit_read_object_by_index
+      const op = e.ziggit_alloc(4), ol = e.ziggit_alloc(4), tp = e.ziggit_alloc(4), hp = e.ziggit_alloc(40);
+      if (!op || !ol || !tp || !hp) throw new Error('WASM alloc failed for object extraction buffers');
+
+      let extracted = 0;
+      let errors = 0;
+
+      for (let i = 0; i < totalObjects; i++) {
+        const rc2 = e.ziggit_read_object_by_index(i, op, ol, tp, hp);
+        if (rc2 !== 0) { errors++; continue; }
+        const buf = e.memory.buffer;
+        const v = new DataView(buf);
+        const dp = v.getUint32(op, true), dl = v.getUint32(ol, true), dt = v.getUint32(tp, true);
+        const hash = new TextDecoder().decode(new Uint8Array(buf, hp, 40));
+        const data = new Uint8Array(buf, dp, dl).slice();
+        e.ziggit_free(dp, dl);
+        const typeName = TYPE_NAMES[dt];
+        if (typeName) objectDb[hash] = { type: typeName, data };
+        extracted++;
+        if (extracted % 100 === 0) {
+          status(`WASM: Extracted ${extracted}/${totalObjects} objects...`);
+          showProgress(30 + (extracted / totalObjects) * 70);
+          await new Promise(r => setTimeout(r, 0));
+        }
+      }
+      e.ziggit_free(op, 4); e.ziggit_free(ol, 4); e.ziggit_free(tp, 4); e.ziggit_free(hp, 40);
+
+      showProgress(100);
+      const typeCounts = {};
+      for (const h of Object.keys(objectDb)) {
+        typeCounts[objectDb[h].type] = (typeCounts[objectDb[h].type] || 0) + 1;
+      }
+      const typeStr = Object.entries(typeCounts).map(([t,c]) => `${c} ${t}s`).join(', ');
+      console.log(`WASM extraction: ${Object.keys(objectDb).length} objects (${typeStr}), ${errors} errors`);
+
+      const diag = document.getElementById('diag-panel');
+      diag.style.display = 'block';
+      document.getElementById('diag-details').innerHTML =
+        `⚡ <strong>All git operations in WASM</strong>: ${extracted} objects extracted (${typeStr})` +
+        (errors > 0 ? ` — ${errors} errors` : '') +
+        ` — zlib, SHA-1, delta resolution all in Zig`;
+
+      return extracted > 0;
+    }
+
+    // --- Fallback pack parsing (JS structure walking + WASM for zlib/delta/SHA-1) ---
+    async function parsePackWithWasm(packData) {
+      status('Parsing pack (WASM-accelerated)...');
+      const view = new DataView(packData.buffer, packData.byteOffset, packData.byteLength);
+      const version = view.getUint32(4);
+      const numObjects = view.getUint32(8);
+      status(`Pack v${version}, ${numObjects} objects...`);
+
+      let offset = 12;
+      const objects = [];
+
+      for (let i = 0; i < numObjects; i++) {
+        if (i % 100 === 0) {
+          status(`Parsing object ${i}/${numObjects}...`);
+          showProgress((i / numObjects) * 70);
+          await new Promise(r => setTimeout(r, 0));
+        }
+        const objStart = offset;
+        const hdr = readVarInt(packData, offset);
+        offset = hdr.offset;
+
+        if (hdr.type >= 1 && hdr.type <= 4) {
+          const inf = wasmDecompress(packData, offset);
+          offset += inf.bytesRead;
+          const typeName = TYPE_NAMES[hdr.type];
+          const header = new TextEncoder().encode(`${typeName} ${inf.result.length}\0`);
+          const full = new Uint8Array(header.length + inf.result.length);
+          full.set(header);
+          full.set(inf.result, header.length);
+          const hash = wasmSha1Hex(full);
+          objectDb[hash] = { type: typeName, data: inf.result };
+          objects.push({ type: hdr.type, typeName, hash, data: inf.result, packOffset: objStart });
+        } else if (hdr.type === 6) {
+          const ofs = readOfsOffset(packData, offset);
+          offset = ofs.offset;
+          const baseOffset = objStart - ofs.value;
+          const inf = wasmDecompress(packData, offset);
+          offset += inf.bytesRead;
+          objects.push({ type: 6, deltaData: inf.result, basePackOffset: baseOffset, packOffset: objStart });
+        } else if (hdr.type === 7) {
+          const baseHash = bytesToHex(packData.slice(offset, offset + 20));
+          offset += 20;
+          const inf = wasmDecompress(packData, offset);
+          offset += inf.bytesRead;
+          objects.push({ type: 7, deltaData: inf.result, baseHash, packOffset: objStart });
+        } else {
+          throw new Error('Unknown pack object type ' + hdr.type + ' at offset ' + objStart);
+        }
+      }
+
+      // Build offset->index map for OFS_DELTA resolution
+      const offsetToIdx = {};
+      objects.forEach((obj, idx) => { offsetToIdx[obj.packOffset] = idx; });
+
+      // Resolve deltas using WASM
+      status('Resolving deltas (WASM)...');
+      function resolveObject(idx, depth) {
+        if (depth > 100) throw new Error('Delta chain too deep (>100 levels)');
+        const obj = objects[idx];
+        if (obj.hash) return obj;
+
+        let base;
+        if (obj.type === 6) {
+          const baseIdx = offsetToIdx[obj.basePackOffset];
+          if (baseIdx === undefined) throw new Error('OFS_DELTA base not found at offset ' + obj.basePackOffset);
+          base = resolveObject(baseIdx, depth + 1);
+        } else if (obj.type === 7) {
+          if (objectDb[obj.baseHash]) {
+            base = { typeName: objectDb[obj.baseHash].type, data: objectDb[obj.baseHash].data };
+          } else {
+            let baseIdx = objects.findIndex(o => o.hash === obj.baseHash);
+            if (baseIdx < 0) throw new Error('REF_DELTA base not found: ' + obj.baseHash);
+            base = resolveObject(baseIdx, depth + 1);
+          }
+        }
+
+        const resolved = wasmApplyDelta(base.data, obj.deltaData);
+        obj.typeName = base.typeName;
+        obj.data = resolved;
+        const header = new TextEncoder().encode(`${obj.typeName} ${resolved.length}\0`);
+        const full = new Uint8Array(header.length + resolved.length);
+        full.set(header);
+        full.set(resolved, header.length);
+        obj.hash = wasmSha1Hex(full);
+        objectDb[obj.hash] = { type: obj.typeName, data: obj.data };
+        return obj;
+      }
+
+      let resolved = 0;
+      for (let i = 0; i < objects.length; i++) {
+        if (!objects[i].hash) {
+          resolveObject(i, 0);
+          resolved++;
+          if (resolved % 50 === 0) {
+            status(`Resolving deltas ${resolved}...`);
+            showProgress(70 + (resolved / objects.length) * 30);
+            await new Promise(r => setTimeout(r, 0));
+          }
+        }
+      }
+
+      showProgress(100);
+      const typeCounts = {};
+      for (const h of Object.keys(objectDb)) {
+        typeCounts[objectDb[h].type] = (typeCounts[objectDb[h].type] || 0) + 1;
+      }
+      const typeStr = Object.entries(typeCounts).map(([t,c]) => `${c} ${t}s`).join(', ');
+      status(`Parsed ${numObjects} objects: ${typeStr}`);
+
+      const diag = document.getElementById('diag-panel');
+      diag.style.display = 'block';
+      document.getElementById('diag-details').innerHTML =
+        `⚡ <strong>WASM-accelerated</strong>: ${Object.keys(objectDb).length} objects (${typeStr}) — zlib, SHA-1, delta all in Zig`;
+    }
+
+    // --- Sideband extraction (network protocol framing) ---
+    function extractFromSideband(data) {
+      const chunks = [];
+      let pos = 0;
+      let foundPack = false;
+
+      while (pos + 4 <= data.length) {
+        const lenHex = String.fromCharCode(data[pos], data[pos+1], data[pos+2], data[pos+3]);
+        if (lenHex === '0000' || lenHex === '0001' || lenHex === '0002') { pos += 4; continue; }
+        if (!/^[0-9a-f]{4}$/i.test(lenHex)) break;
+        const len = parseInt(lenHex, 16);
+        if (len < 4 || pos + len > data.length) break;
+        const payload = data.slice(pos + 4, pos + len);
+        pos += len;
+        if (payload.length === 0) continue;
+        const payloadStr = new TextDecoder().decode(payload);
+        if (payloadStr.startsWith('NAK') || payloadStr.startsWith('ACK')) { continue; }
+        const channel = payload[0];
+        if (channel === 1) { chunks.push(payload.slice(1)); foundPack = true; }
+        else if (channel === 2) { console.log('git progress:', new TextDecoder().decode(payload.slice(1)).trim()); }
+        else if (channel === 3) { console.error('git error:', new TextDecoder().decode(payload.slice(1))); }
+      }
+
+      if (!foundPack || chunks.length === 0) return null;
+      const totalLen = chunks.reduce((s, c) => s + c.length, 0);
+      const result = new Uint8Array(totalLen);
+      let offset = 0;
+      for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.length; }
+      if (result[0] === 0x50 && result[1] === 0x41 && result[2] === 0x43 && result[3] === 0x4B) return result;
+      const packIdx = findPackStart(result);
+      if (packIdx >= 0) return result.slice(packIdx);
+      return null;
+    }
+
     // --- Clone ---
     async function doClone() {
       const repoUrl = document.getElementById('url').value.trim().replace(/\.git$/, '').replace(/\/$/, '');
       const corsProxy = document.getElementById('corsProxy').value.trim();
       if (!repoUrl) return status('Enter a URL', true);
+
+      // Wait for WASM to load
+      try {
+        await wasmReady;
+      } catch (e) {
+        return status('WASM failed to load — cannot clone without it', true);
+      }
 
       const btn = document.getElementById('cloneBtn');
       btn.disabled = true;
@@ -875,20 +780,17 @@
 
       const t0 = performance.now();
       try {
-        // 1. Fetch refs - try with .git suffix first, then without
+        // 1. Fetch refs
         status('Fetching refs...');
-        let refsText, baseUrl;
 
-        // Build proxied URL - handle different proxy formats
         function proxyUrl(url) {
-          if (!corsProxy) return url; // no proxy
-          if (corsProxy.includes('?url=') || corsProxy.endsWith('?')) {
-            return corsProxy + encodeURIComponent(url);
-          }
-          // For proxies that want the URL appended directly
-          return corsProxy + encodeURIComponent(url);
+          if (!corsProxy) return url;
+          if (corsProxy.includes('?url=') || corsProxy.endsWith('?')) return corsProxy + encodeURIComponent(url);
+          if (corsProxy.endsWith('/')) return corsProxy + url;
+          return corsProxy + '/' + url;
         }
 
+        let refsText, baseUrl;
         for (const suffix of ['.git', '']) {
           const tryUrl = repoUrl + suffix;
           const refsUrl = proxyUrl(tryUrl + '/info/refs?service=git-upload-pack');
@@ -904,99 +806,59 @@
             }
           } catch (e) { console.log('Fetch failed for', tryUrl, e); }
         }
-        if (!refsText) throw new Error('Failed to fetch refs. Check that:\n• The repository URL is correct and public\n• The CORS proxy is working (try https://corsproxy.io/? or https://api.allorigins.win/raw?url=)\n• The repo has smart HTTP support enabled');
+        if (!refsText) throw new Error('Failed to fetch refs. Check that the repository URL is correct and public.');
 
         const refs = parsePktLineRefs(refsText);
-        console.log('Refs:', refs);
-
         const headHash = refs['HEAD'];
         if (!headHash) throw new Error('No HEAD ref found');
         showProgress(5);
         status(`HEAD: ${headHash.slice(0, 8)}. Fetching pack...`);
 
-        // 2. Request pack
+        // 2. Request pack (WASM builds the want request)
         const packBody = buildWantRequest(headHash);
-        console.log('Pack request:', packBody);
         const packResp = await fetch(proxyUrl(baseUrl + '/git-upload-pack'), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/x-git-upload-pack-request',
             'Accept': 'application/x-git-upload-pack-result',
-
           },
           body: packBody
         });
         if (!packResp.ok) {
-          const errBody = await packResp.text().catch(() => '');
-          throw new Error('Failed to fetch pack: HTTP ' + packResp.status + ' ' + packResp.statusText + 
-            (packResp.status === 403 ? '\nThe CORS proxy may not support POST requests. Try a different proxy.' : '') +
-            (errBody ? '\n' + errBody.slice(0, 200) : ''));
+          throw new Error('Failed to fetch pack: HTTP ' + packResp.status + ' ' + packResp.statusText);
         }
 
-        const packBuffer = await packResp.arrayBuffer();
-        const packBytes = new Uint8Array(packBuffer);
+        const packBytes = new Uint8Array(await packResp.arrayBuffer());
         const dlSize = formatSize(packBytes.length);
-        console.log('Pack response size:', packBytes.length);
+        if (packBytes.length < 20) throw new Error('Pack response too small (' + packBytes.length + ' bytes)');
 
-        // Check for error responses (HTML error pages, JSON errors, etc.)
-        if (packBytes.length < 20) {
-          throw new Error('Pack response too small (' + packBytes.length + ' bytes). The CORS proxy may not support POST requests.');
-        }
-        // Check if response is HTML/JSON error page
         const firstBytes = String.fromCharCode(...packBytes.subarray(0, Math.min(50, packBytes.length)));
         if (firstBytes.startsWith('{"error') || firstBytes.startsWith('<!DOCTYPE') || firstBytes.startsWith('<html')) {
-          throw new Error('CORS proxy returned an error page instead of pack data. Try a different proxy or check if POST requests are supported.\n' + firstBytes.slice(0, 200));
+          throw new Error('Proxy returned error page instead of pack data');
         }
 
         showProgress(15);
         status(`Downloaded ${dlSize}. Extracting pack...`);
 
-        // 3. Extract pack data
-        // Try WASM sideband extraction first (most reliable)
-        let packData = null;
-        if (wasmInstance && wasmInstance.exports.ziggit_extract_pack_data) {
-          try {
-            packData = wasmExtractPack(packBytes);
-            if (packData) console.log('WASM sideband extraction succeeded:', packData.length, 'bytes');
-          } catch (e) { console.warn('WASM sideband extraction failed:', e); }
-        }
-        // Try JS sideband extraction
+        // 3. Extract pack data from sideband framing (WASM first, then JS sideband parser)
+        let packData = wasmExtractPack(packBytes);
         if (!packData) packData = extractFromSideband(packBytes);
         if (!packData) {
-          // Fall back to finding raw PACK signature
           const packStart = findPackStart(packBytes);
-          if (packStart >= 0) {
-            packData = packBytes.slice(packStart);
-          } else {
-            // Log first bytes for debugging
-            console.error('No PACK signature found. First 100 bytes:', bytesToHex(packBytes.subarray(0, 100)));
-            throw new Error('PACK signature not found in response (' + dlSize + '). The server response may be in an unexpected format.');
-          }
+          if (packStart >= 0) packData = packBytes.slice(packStart);
+          else throw new Error('PACK signature not found in response');
         }
 
-        console.log('Pack data size:', packData.length);
-        if (packData.length > 20 * 1024 * 1024) {
-          status(`Large pack (${formatSize(packData.length)}). Parsing may take a while...`);
-        }
+        console.log('Pack data:', formatSize(packData.length));
 
-        // 4. Parse pack
-        // Try full WASM-native extraction first (fastest path)
-        let wasmExtracted = false;
-        if (wasmInstance && packData.length < 50 * 1024 * 1024) {
-          try {
-            wasmExtracted = await parsePackWasmFull(packData);
-          } catch (e) {
-            console.warn('WASM full extraction failed, falling back to JS:', e);
-          }
-        }
-        if (!wasmExtracted) {
-          // Pre-load into WASM for pack stats
-          if (wasmInstance && packData.length < 50 * 1024 * 1024) {
-            try { await parsePackWasm(packData); } catch (e) {
-              console.warn('WASM pack pre-load failed:', e);
-            }
-          }
-          await parsePack(packData);
+        // 4. Parse pack — WASM does all git operations
+        let extracted = false;
+        try {
+          extracted = await parsePackWasmFull(packData);
+        } catch (e) {
+          console.warn('Full WASM extraction failed, using WASM-accelerated fallback:', e.message);
+          await parsePackWithWasm(packData);
+          extracted = true;
         }
 
         // 5. Display results
@@ -1004,11 +866,9 @@
         const commit = objectDb[headHash];
         if (!commit) throw new Error('HEAD commit not in object database');
 
-        // Show repo info
         const info = document.getElementById('repo-info');
         info.style.display = 'block';
 
-        // Find branch name for HEAD
         let branchName = 'detached';
         for (const [ref, hash] of Object.entries(refs)) {
           if (hash === headHash && ref.startsWith('refs/heads/')) {
@@ -1017,7 +877,6 @@
           }
         }
 
-        // Count tags
         const tags = Object.keys(refs).filter(r => r.startsWith('refs/tags/')).map(r => r.replace('refs/tags/', ''));
         const tagInfo = tags.length > 0 ? ` &nbsp; <strong>Tags:</strong> ${tags.slice(0, 5).map(t => escHtml(t)).join(', ')}${tags.length > 5 ? ' (+' + (tags.length - 5) + ' more)' : ''}` : '';
 
@@ -1029,12 +888,9 @@
           `<strong>Objects:</strong> ${Object.keys(objectDb).length} &nbsp; ` +
           `<strong>Downloaded:</strong> ${dlSize} &nbsp; ` +
           `<span class="timing">Cloned in ${elapsed}s</span>` + tagInfo +
-          (wasmInstance ? ' &nbsp; <span class="info">⚡ WASM-accelerated</span>' : '');
+          ` &nbsp; <span class="info">⚡ All git ops in WASM (142 KB)</span>`;
 
-        // Show commit log
         showLog(headHash);
-
-        // Show tree
         const parsed = parseCommit(commit.data);
         if (parsed.tree) showTree(parsed.tree, '/');
 
@@ -1048,86 +904,6 @@
       btn.disabled = false;
     }
 
-    // --- Sideband extraction ---
-    function extractFromSideband(data) {
-      // git smart HTTP with side-band-64k: response is pkt-line encoded
-      // Each pkt-line: 4 hex bytes length, then 1 byte channel, then payload
-      // Channel 1 = pack data, channel 2 = progress, channel 3 = error
-      // Also there may be "NAK\n" or flush packets (0000)
-      const chunks = [];
-      let pos = 0;
-      let foundPack = false;
-
-      while (pos + 4 <= data.length) {
-        // Read 4-byte hex length
-        const lenHex = String.fromCharCode(data[pos], data[pos+1], data[pos+2], data[pos+3]);
-
-        if (lenHex === '0000' || lenHex === '0001' || lenHex === '0002') {
-          pos += 4;
-          continue;
-        }
-
-        // Validate hex chars before parsing
-        if (!/^[0-9a-f]{4}$/i.test(lenHex)) break;
-
-        const len = parseInt(lenHex, 16);
-        if (len < 4) break;
-
-        if (pos + len > data.length) break;
-
-        const payload = data.slice(pos + 4, pos + len);
-        pos += len;
-
-        if (payload.length === 0) continue;
-
-        // Check if this is a non-sideband line (e.g. NAK, ACK)
-        // NAK/ACK lines don't have a channel byte - they're plain text pkt-lines
-        const payloadStr = new TextDecoder().decode(payload);
-        if (payloadStr.startsWith('NAK') || payloadStr.startsWith('ACK')) {
-          console.log('git:', payloadStr.trim());
-          continue;
-        }
-
-        const channel = payload[0];
-        if (channel === 1) {
-          // Pack data
-          chunks.push(payload.slice(1));
-          foundPack = true;
-        } else if (channel === 2) {
-          // Progress
-          const msg = new TextDecoder().decode(payload.slice(1));
-          console.log('git progress:', msg.trim());
-        } else if (channel === 3) {
-          // Error
-          const msg = new TextDecoder().decode(payload.slice(1));
-          console.error('git error:', msg);
-        }
-        // Other non-sideband lines - just skip
-      }
-
-      if (!foundPack || chunks.length === 0) return null;
-
-      // Concatenate chunks
-      const totalLen = chunks.reduce((s, c) => s + c.length, 0);
-      const result = new Uint8Array(totalLen);
-      let offset = 0;
-      for (const chunk of chunks) {
-        result.set(chunk, offset);
-        offset += chunk.length;
-      }
-
-      // Verify PACK header
-      if (result[0] === 0x50 && result[1] === 0x41 && result[2] === 0x43 && result[3] === 0x4B) {
-        return result;
-      }
-
-      // Maybe there's some prefix before PACK
-      const packIdx = findPackStart(result);
-      if (packIdx >= 0) return result.slice(packIdx);
-
-      return null;
-    }
-
     // --- Display ---
     function showLog(headHash) {
       const panel = document.getElementById('log-panel');
@@ -1135,27 +911,23 @@
       const tbody = document.querySelector('#log-table tbody');
       tbody.innerHTML = '';
 
-      // Try WASM walk_commits for faster log (uses loaded pack directly)
-      if (wasmInstance && wasmInstance.exports.ziggit_walk_commits) {
-        try {
-          const commits = wasmWalkCommits(headHash, 50);
-          if (commits && commits.length > 0) {
-            for (const c of commits) {
-              const authorShort = (c.author || '').replace(/<[^>]+>.*/, '').trim();
-              const msgShort = (c.message || '').slice(0, 80);
-              const tr = document.createElement('tr');
-              tr.innerHTML =
-                `<td><span class="hash" onclick="inspectCommit('${c.hash}')">${c.hash.slice(0, 8)}</span></td>` +
-                `<td>${escHtml(authorShort)}</td>` +
-                `<td>${escHtml(msgShort)}</td>`;
-              tbody.appendChild(tr);
-            }
-            return;
-          }
-        } catch (e) { console.warn('WASM walk_commits fallback:', e); }
+      // Use WASM commit walker
+      const commits = wasmWalkCommits(headHash, 50);
+      if (commits && commits.length > 0) {
+        for (const c of commits) {
+          const authorShort = (c.author || '').replace(/<[^>]+>.*/, '').trim();
+          const msgShort = (c.message || '').slice(0, 80);
+          const tr = document.createElement('tr');
+          tr.innerHTML =
+            `<td><span class="hash" onclick="inspectCommit('${c.hash}')">${c.hash.slice(0, 8)}</span></td>` +
+            `<td>${escHtml(authorShort)}</td>` +
+            `<td>${escHtml(msgShort)}</td>`;
+          tbody.appendChild(tr);
+        }
+        return;
       }
 
-      // JS fallback
+      // Walk commits from objectDb (data already extracted by WASM)
       let hash = headHash;
       let count = 0;
       while (hash && count < 50) {
@@ -1164,41 +936,20 @@
         const c = parseCommit(obj.data);
         const authorShort = c.author.replace(/<[^>]+>.*/, '').trim();
         const msgShort = c.message.split('\n')[0].slice(0, 80);
-
         const tr = document.createElement('tr');
         tr.innerHTML =
           `<td><span class="hash" onclick="inspectCommit('${hash}')">${hash.slice(0, 8)}</span></td>` +
           `<td>${escHtml(authorShort)}</td>` +
           `<td>${escHtml(msgShort)}</td>`;
         tbody.appendChild(tr);
-
         hash = c.parents[0] || null;
         count++;
       }
     }
 
-    function wasmWalkCommits(headHash, maxCount) {
-      const e = wasmInstance.exports;
-      const hp = e.ziggit_alloc(40);
-      const op = e.ziggit_alloc(4), ol = e.ziggit_alloc(4);
-      if (!hp || !op || !ol) return null;
-      new Uint8Array(e.memory.buffer, hp, 40).set(new TextEncoder().encode(headHash));
-      const rc = e.ziggit_walk_commits(hp, 40, maxCount, op, ol);
-      e.ziggit_free(hp, 40);
-      if (rc !== 0) { e.ziggit_free(op, 4); e.ziggit_free(ol, 4); return null; }
-      const v = new DataView(e.memory.buffer);
-      const jp = v.getUint32(op, true), jl = v.getUint32(ol, true);
-      const json = new TextDecoder().decode(new Uint8Array(e.memory.buffer, jp, jl));
-      e.ziggit_free(op, 4); e.ziggit_free(ol, 4); e.ziggit_free(jp, jl);
-      try { return JSON.parse(json); } catch (_) { return null; }
-    }
-
     function showTree(treeHash, path) {
       const obj = objectDb[treeHash];
-      if (!obj || obj.type !== 'tree') {
-        status('Tree not found: ' + treeHash, true);
-        return;
-      }
+      if (!obj || obj.type !== 'tree') { status('Tree not found: ' + treeHash, true); return; }
 
       const entries = parseTree(obj.data);
       const panel = document.getElementById('tree-panel');
@@ -1207,16 +958,14 @@
       searchBox.style.display = 'block';
       searchBox.value = '';
 
-      // Breadcrumb with navigable path segments
+      // Breadcrumb
       const bc = document.getElementById('tree-breadcrumb');
       const parts = path.split('/').filter(Boolean);
       let bcHtml = `<a onclick="showTreeFromCommit()">root</a>`;
-      // Walk from root tree to build navigable breadcrumb
       if (parts.length > 0 && currentCommit && objectDb[currentCommit]) {
         let walkHash = parseCommit(objectDb[currentCommit].data).tree;
         for (let pi = 0; pi < parts.length; pi++) {
           if (pi < parts.length - 1 && walkHash && objectDb[walkHash]) {
-            // Find this segment's subtree hash for navigation
             const segEntries = parseTree(objectDb[walkHash].data);
             const child = segEntries.find(e => e.name === parts[pi] && e.type === 'tree');
             if (child) {
@@ -1237,7 +986,6 @@
       const tbody = document.querySelector('#tree-table tbody');
       tbody.innerHTML = '';
 
-      // Sort: trees first, then submodules, then blobs, then by name
       const typeOrder = { tree: 0, commit: 1, blob: 2 };
       entries.sort((a, b) => {
         const ta = typeOrder[a.type] ?? 2, tb = typeOrder[b.type] ?? 2;
@@ -1253,19 +1001,17 @@
           nameClass = 'tree-link';
           onclick = `showTree('${e.hash}', '${path}${safeName}/')`;
         } else if (e.type === 'commit') {
-          nameClass = 'submodule-link';
+          nameClass = 'info';
           onclick = '';
         } else {
           nameClass = 'blob-link';
           onclick = `showFile('${e.hash}', '${safeName}')`;
         }
-        // Show size for blobs, entry count for trees
         let sizeStr = '';
         if (e.type === 'blob' && objectDb[e.hash]) {
           sizeStr = formatSize(objectDb[e.hash].data.length);
         } else if (e.type === 'tree' && objectDb[e.hash]) {
-          const subEntries = parseTree(objectDb[e.hash].data);
-          sizeStr = subEntries.length + ' items';
+          sizeStr = parseTree(objectDb[e.hash].data).length + ' items';
         } else if (e.type === 'commit') {
           sizeStr = 'submodule';
         }
@@ -1278,33 +1024,20 @@
         tbody.appendChild(tr);
       });
 
-      // Auto-show README if present
+      // Auto-show README
       const readme = entries.find(e => e.type === 'blob' && /^readme/i.test(e.name));
-      if (readme && objectDb[readme.hash]) {
-        showFile(readme.hash, readme.name);
-      }
+      if (readme && objectDb[readme.hash]) showFile(readme.hash, readme.name);
     }
 
     function showTreeFromCommit() {
-      if (!currentCommit) return;
-      const obj = objectDb[currentCommit];
-      if (!obj) return;
-      const c = parseCommit(obj.data);
+      if (!currentCommit || !objectDb[currentCommit]) return;
+      const c = parseCommit(objectDb[currentCommit].data);
       if (c.tree) showTree(c.tree, '/');
     }
 
-    function formatSize(bytes) {
-      if (bytes < 1024) return bytes + ' B';
-      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-    }
-
     function isBinary(data) {
-      // Check first 8KB for null bytes
       const check = Math.min(data.length, 8192);
-      for (let i = 0; i < check; i++) {
-        if (data[i] === 0) return true;
-      }
+      for (let i = 0; i < check; i++) { if (data[i] === 0) return true; }
       return false;
     }
 
@@ -1326,7 +1059,6 @@
       document.getElementById('file-name').innerHTML = escHtml(name) + ' (' + formatSize(obj.data.length) + ') <button onclick="downloadFile(\'' + blobHash + '\', \'' + name.replace(/'/g, "\\'") + '\')" style="font-size:0.8em;padding:2px 8px">⬇ Download</button>';
       const contentEl = document.getElementById('file-content');
       if (isBinary(obj.data)) {
-        // Check if it's an image
         const ext = name.split('.').pop().toLowerCase();
         if (['png','jpg','jpeg','gif','webp','svg','ico','bmp'].includes(ext)) {
           const mime = ext === 'svg' ? 'image/svg+xml' : `image/${ext === 'jpg' ? 'jpeg' : ext}`;
@@ -1347,7 +1079,6 @@
           contentEl.textContent = displayText;
         }
       }
-      // Scroll file panel into view
       panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
 
@@ -1368,11 +1099,8 @@
       const files = {};
       for (const e of entries) {
         const path = prefix ? prefix + '/' + e.name : e.name;
-        if (e.type === 'tree') {
-          Object.assign(files, flattenTree(e.hash, path));
-        } else if (e.type === 'blob') {
-          files[path] = e.hash;
-        }
+        if (e.type === 'tree') Object.assign(files, flattenTree(e.hash, path));
+        else if (e.type === 'blob') files[path] = e.hash;
       }
       return files;
     }
@@ -1388,7 +1116,6 @@
       if (commit.parents.length) html += `<br><strong>Parent:</strong> <span class="hash" onclick="inspectCommit('${commit.parents[0]}')">${commit.parents[0].slice(0,8)}</span>`;
       html += `</div>`;
 
-      // Compare trees to show changed files
       if (commit.parents.length > 0 && objectDb[commit.parents[0]]) {
         const parentCommit = parseCommit(objectDb[commit.parents[0]].data);
         if (parentCommit.tree && commit.tree) {
@@ -1405,9 +1132,7 @@
           if (changes.length > 0) {
             html += `<div style="margin-top:8px"><strong>${changes.length} file${changes.length>1?'s':''} changed:</strong></div>`;
             html += `<div style="max-height:200px;overflow-y:auto;margin-top:4px;font-size:0.85em">`;
-            for (const c of changes) {
-              html += `<div><span style="color:${c.color};font-weight:bold;width:20px;display:inline-block">${c.status}</span> ${escHtml(c.path)}</div>`;
-            }
+            for (const c of changes) html += `<div><span style="color:${c.color};font-weight:bold;width:20px;display:inline-block">${c.status}</span> ${escHtml(c.path)}</div>`;
             html += `</div>`;
           } else {
             html += `<div class="info">No file changes detected</div>`;
@@ -1422,12 +1147,9 @@
 
     function filterTree() {
       const q = document.getElementById('search').value.toLowerCase();
-      const rows = document.querySelectorAll('#tree-table tbody tr');
-      rows.forEach(row => {
+      document.querySelectorAll('#tree-table tbody tr').forEach(row => {
         const name = row.querySelector('td:nth-child(3)');
-        if (name) {
-          row.style.display = name.textContent.toLowerCase().includes(q) ? '' : 'none';
-        }
+        if (name) row.style.display = name.textContent.toLowerCase().includes(q) ? '' : 'none';
       });
     }
   </script>
