@@ -267,6 +267,23 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                     },
                     else => return err,
                 };
+                // Also delete the reflog for the branch
+                {
+                    const reflog_path = std.fmt.allocPrint(allocator, "{s}/logs/refs/heads/{s}", .{ git_path, branch_name }) catch null;
+                    if (reflog_path) |rp| {
+                        defer allocator.free(rp);
+                        std.fs.cwd().deleteFile(rp) catch {};
+                        // Clean up empty parent dirs
+                        var parent = std.fs.path.dirname(branch_name);
+                        while (parent) |dir| {
+                            if (dir.len == 0 or std.mem.eql(u8, dir, ".")) break;
+                            const dir_full = std.fmt.allocPrint(allocator, "{s}/logs/refs/heads/{s}", .{ git_path, dir }) catch break;
+                            defer allocator.free(dir_full);
+                            std.fs.cwd().deleteDir(dir_full) catch break;
+                            parent = std.fs.path.dirname(dir);
+                        }
+                    }
+                }
                 const success_msg = try std.fmt.allocPrint(allocator, "Deleted branch {s}.\n", .{branch_name});
                 defer allocator.free(success_msg);
                 try platform_impl.writeStdout(success_msg);
