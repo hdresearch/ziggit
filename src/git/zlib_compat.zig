@@ -127,6 +127,19 @@ pub fn compressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
 }
 
 pub fn decompressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    // Try uncompress2 first with a reasonable initial guess (4x input size)
+    const initial_guess = @max(input.len * 4, 256);
+    var dest = try allocator.alloc(u8, initial_guess);
+    var dest_len: c.uLongf = @intCast(dest.len);
+    var src_len: c.uLongf = @intCast(input.len);
+    const uc_ret = c.uncompress2(dest.ptr, &dest_len, input.ptr, &src_len);
+    if (uc_ret == c.Z_OK) {
+        const final_len: usize = @intCast(dest_len);
+        return dest[0..final_len];
+    }
+    allocator.free(dest);
+
+    // Fall back to streaming inflate for large/complex cases
     var stream: c.z_stream = std.mem.zeroes(c.z_stream);
     stream.next_in = @constCast(input.ptr);
     stream.avail_in = @intCast(input.len);
@@ -135,7 +148,7 @@ pub fn decompressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     defer _ = c.inflateEnd(&stream);
     var output = std.ArrayList(u8).init(allocator);
     errdefer output.deinit();
-    var buf: [16384]u8 = undefined;
+    var buf: [32768]u8 = undefined;
     while (true) {
         stream.next_out = &buf;
         stream.avail_out = buf.len;
@@ -146,6 +159,22 @@ pub fn decompressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
         if (ret != c.Z_OK) return error.InvalidInput;
     }
     return output.toOwnedSlice();
+}
+
+/// Fast decompression when the output size is known (e.g., from pack object headers).
+/// Uses uncompress2 for single-call decompression - much faster than streaming.
+pub fn decompressSliceKnownSize(allocator: std.mem.Allocator, input: []const u8, expected_size: usize) ![]u8 {
+    const dest = try allocator.alloc(u8, expected_size);
+    errdefer allocator.free(dest);
+    var dest_len: c.uLongf = @intCast(expected_size);
+    var src_len: c.uLongf = @intCast(input.len);
+    const ret = c.uncompress2(dest.ptr, &dest_len, input.ptr, &src_len);
+    if (ret == c.Z_OK and @as(usize, @intCast(dest_len)) == expected_size) {
+        return dest;
+    }
+    // Fall back to general decompression if uncompress2 fails
+    allocator.free(dest);
+    return decompressSlice(allocator, input);
 }
 
 pub fn decompressSliceWithConsumed(allocator: std.mem.Allocator, input: []const u8) !struct { data: []u8, consumed: usize } {
