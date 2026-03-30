@@ -333,6 +333,35 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             }
         }
 
+        // Move the reflog from old to new branch
+        if (!std.mem.eql(u8, old_name, new_name)) {
+            const old_reflog_path = try std.fmt.allocPrint(allocator, "{s}/logs/refs/heads/{s}", .{ git_path, old_name });
+            defer allocator.free(old_reflog_path);
+            const new_reflog_path = try std.fmt.allocPrint(allocator, "{s}/logs/refs/heads/{s}", .{ git_path, new_name });
+            defer allocator.free(new_reflog_path);
+            // Create parent directories for new reflog
+            if (std.fs.path.dirname(new_reflog_path)) |parent_dir| {
+                std.fs.cwd().makePath(parent_dir) catch {};
+            }
+            std.fs.cwd().rename(old_reflog_path, new_reflog_path) catch {
+                // If rename fails, try copy + delete
+                if (std.fs.cwd().readFileAlloc(allocator, old_reflog_path, 10 * 1024 * 1024)) |content| {
+                    defer allocator.free(content);
+                    std.fs.cwd().writeFile(.{ .sub_path = new_reflog_path, .data = content }) catch {};
+                    std.fs.cwd().deleteFile(old_reflog_path) catch {};
+                } else |_| {}
+            };
+            // Clean up empty parent dirs for old reflog
+            var parent = std.fs.path.dirname(old_name);
+            while (parent) |dir| {
+                if (dir.len == 0 or std.mem.eql(u8, dir, ".")) break;
+                const dir_full = std.fmt.allocPrint(allocator, "{s}/logs/refs/heads/{s}", .{ git_path, dir }) catch break;
+                defer allocator.free(dir_full);
+                std.fs.cwd().deleteDir(dir_full) catch break;
+                parent = std.fs.path.dirname(dir);
+            }
+        }
+
         // helpers.Update helpers.HEAD if it pointed to the old branch
         const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
         defer allocator.free(head_path);
