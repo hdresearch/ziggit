@@ -792,7 +792,10 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                             } else |_| {}
                             defer if (head_target) |ht| allocator.free(ht);
                             if (head_target) |ht| {
-                                const hm = try std.fmt.allocPrint(allocator, "  {s}/HEAD -> {s}\n", .{ entry.name, ht });
+                                const hm = if (is_all)
+                                    try std.fmt.allocPrint(allocator, "  remotes/{s}/HEAD -> {s}\n", .{ entry.name, ht })
+                                else
+                                    try std.fmt.allocPrint(allocator, "  {s}/HEAD -> {s}\n", .{ entry.name, ht });
                                 defer allocator.free(hm);
                                 try platform_impl.writeStdout(hm);
                             }
@@ -800,7 +803,10 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                             while (biter.next() catch null) |bentry| {
                                 if (bentry.kind == .directory) continue;
                                 if (std.mem.eql(u8, bentry.name, "HEAD")) continue;
-                                const rb_name = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ entry.name, bentry.name });
+                                const rb_name = if (is_all)
+                                    try std.fmt.allocPrint(allocator, "remotes/{s}/{s}", .{ entry.name, bentry.name })
+                                else
+                                    try std.fmt.allocPrint(allocator, "{s}/{s}", .{ entry.name, bentry.name });
                                 try remote_branches.append(rb_name);
                             }
                         } else |_| {}
@@ -853,6 +859,11 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             new_config.appendSlice(tracking_section) catch {};
             std.fs.cwd().writeFile(.{ .sub_path = config_path2, .data = new_config.items }) catch {};
         }
+    } else if (std.mem.eql(u8, first_arg.?, "--no-remotes") or std.mem.eql(u8, first_arg.?, "--no-all")) {
+        const msg = try std.fmt.allocPrint(allocator, "error: unknown option `{s}'\n", .{first_arg.?[2..]});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+        std.process.exit(129);
     } else {
         // helpers.Create new branch
         const branch_name = first_arg.?;
