@@ -78,6 +78,11 @@
   </div>
   <div class="progress-bar" id="progress"><div class="progress-fill" id="progress-fill"></div></div>
 
+  <div id="diag-panel" class="panel" style="display:none">
+    <h2>Diagnostics</h2>
+    <div id="diag-details" class="info"></div>
+  </div>
+
   <div id="repo-info" class="panel" style="display:none">
     <h2>Repository</h2>
     <div id="repo-details"></div>
@@ -633,11 +638,24 @@
         status(`WASM: Loaded pack with ${numObjects} objects. Reading...`);
         showProgress(40);
         
-        // Now we need to enumerate objects. We'll parse the pack header structure
-        // in JS to get hashes, then use WASM to read each object.
-        // For now, fall back to JS parsing but use WASM for decompression.
         console.log('WASM pack loaded successfully:', numObjects, 'objects');
-        return false; // Fall through to JS parse which already uses WASM decompress
+        
+        // Get pack stats from WASM
+        try {
+          const statsPtr = e.ziggit_alloc(512);
+          const statsLen = e.ziggit_pack_stats(statsPtr, 512);
+          if (statsLen > 0) {
+            const stats = JSON.parse(new TextDecoder().decode(new Uint8Array(e.memory.buffer, statsPtr, statsLen)));
+            console.log('WASM pack stats:', stats);
+            const diag = document.getElementById('diag-panel');
+            diag.style.display = 'block';
+            document.getElementById('diag-details').innerHTML = 
+              `⚡ WASM pack loaded: ${stats.objects} objects (${stats.commits} commits, ${stats.trees} trees, ${stats.blobs} blobs, ${stats.tags} tags, ${stats.ofs_deltas} ofs-deltas, ${stats.ref_deltas} ref-deltas)`;
+          }
+          e.ziggit_free(statsPtr, 512);
+        } catch (statsErr) { console.warn('Stats failed:', statsErr); }
+        
+        return false; // Fall through to JS parse which uses WASM for decompression
       } catch (err) {
         console.warn('WASM pack load failed:', err);
         return false;
@@ -796,13 +814,11 @@
 
         console.log('Pack data size:', packData.length);
 
-        // 4. Parse pack (try WASM-accelerated loading first)
-        let wasmPackLoaded = false;
+        // 4. Parse pack
+        // Pre-load into WASM for pack stats and object reading
         if (wasmInstance && packData.length < 50 * 1024 * 1024) {
-          try {
-            wasmPackLoaded = await parsePackWasm(packData);
-          } catch (e) {
-            console.warn('WASM pack load failed, falling back to JS:', e);
+          try { await parsePackWasm(packData); } catch (e) {
+            console.warn('WASM pack pre-load failed:', e);
           }
         }
         await parsePack(packData);
