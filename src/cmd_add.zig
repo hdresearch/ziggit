@@ -126,7 +126,11 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             defer allocator.free(full_file_path);
             
             // helpers.Convert to path relative to repo root
-            const repo_root_for_rel = std.fs.path.dirname(git_path) orelse ".";
+            // When --git-dir is used, the working tree is CWD, not dirname(git_path)
+            const repo_root_for_rel = if (helpers.global_git_dir_override != null or std.posix.getenv("GIT_DIR") != null)
+                cwd
+            else
+                std.fs.path.dirname(git_path) orelse ".";
             const real_full = std.fs.cwd().realpathAlloc(allocator, full_file_path) catch try allocator.dupe(u8, full_file_path);
             defer allocator.free(real_full);
             const real_root = std.fs.cwd().realpathAlloc(allocator, repo_root_for_rel) catch try allocator.dupe(u8, repo_root_for_rel);
