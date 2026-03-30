@@ -7,6 +7,7 @@ const tree_mod = @import("tree.zig");
 const index_mod = @import("index.zig");
 const diff_mod = @import("diff.zig");
 const diff_stats = @import("diff_stats.zig");
+const userdiff = @import("userdiff.zig");
 const mc = @import("../main_common.zig");
 
 const DiffOutputMode = enum {
@@ -1300,7 +1301,8 @@ fn outputPatch(changes: []const FileChange, opts: *const DiffOpts, pi: *const pm
 
             // Generate and output hunks
             if (c.old_content.len > 0 or c.new_content.len > 0) {
-                try outputDiffHunks(c.old_content, c.new_content, opts.context_lines, lp, pi, allocator, opts.suppress_blank_empty);
+                const fm = resolveFuncnameMatcher(c.path, allocator);
+                try outputDiffHunksWithMatcher(c.old_content, c.new_content, opts.context_lines, lp, pi, allocator, opts.suppress_blank_empty, fm);
             }
         }
     }
@@ -1598,10 +1600,98 @@ fn outputDiffHeader(c: FileChange, sp: []const u8, dp: []const u8, lp: []const u
     }
 }
 
+/// Resolve a funcname matcher for a file path by reading .gitattributes
+fn resolveFuncnameMatcher(file_path: []const u8, allocator: std.mem.Allocator) ?diff_mod.FuncnameMatcher {
+    // Try to read .gitattributes and find diff= attribute for this file
+    const gitattrs_content = std.fs.cwd().readFileAlloc(allocator, ".gitattributes", 256 * 1024) catch return null;
+    defer allocator.free(gitattrs_content);
+
+    return resolveFuncnameFromAttrs(gitattrs_content, file_path);
+}
+
+/// Parse .gitattributes content and find funcname matcher for a file
+fn resolveFuncnameFromAttrs(attrs_content: []const u8, file_path: []const u8) ?diff_mod.FuncnameMatcher {
+    // Parse .gitattributes lines in reverse (last match wins)
+    var driver_name: ?[]const u8 = null;
+    var lines_iter = std.mem.splitScalar(u8, attrs_content, '\n');
+    while (lines_iter.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0 or trimmed[0] == '#') continue;
+
+        // Parse: pattern attr1 attr2 ...
+        var parts = std.mem.tokenizeAny(u8, trimmed, " \t");
+        const pattern = parts.next() orelse continue;
+
+        // Check if pattern matches file_path
+        if (!gitattribPatternMatches(pattern, file_path)) continue;
+
+        // Look for diff= attribute
+        while (parts.next()) |attr| {
+            if (std.mem.startsWith(u8, attr, "diff=")) {
+                driver_name = attr[5..];
+            }
+        }
+    }
+
+    if (driver_name) |name| {
+        if (userdiff.findDriverByName(name)) |driver| {
+            return driver.match_fn;
+        }
+    }
+    return null;
+}
+
+/// Simple gitattributes pattern matching
+fn gitattribPatternMatches(pattern: []const u8, path: []const u8) bool {
+    // Handle patterns like "*.py", "python-*", "*.java"
+    const basename = std.fs.path.basename(path);
+    return attrGlobMatch(pattern, basename);
+}
+
+/// Simple glob matching supporting * and ?
+fn attrGlobMatch(pattern: []const u8, name: []const u8) bool {
+    var pi: usize = 0;
+    var ni: usize = 0;
+    var star_pi: ?usize = null;
+    var star_ni: ?usize = null;
+
+    while (ni < name.len or pi < pattern.len) {
+        if (pi < pattern.len) {
+            if (pattern[pi] == '*') {
+                star_pi = pi;
+                star_ni = ni;
+                pi += 1;
+                continue;
+            }
+            if (ni < name.len) {
+                if (pattern[pi] == '?' or pattern[pi] == name[ni]) {
+                    pi += 1;
+                    ni += 1;
+                    continue;
+                }
+            }
+        }
+        // Mismatch - backtrack to star
+        if (star_pi) |sp| {
+            pi = sp + 1;
+            star_ni = star_ni.? + 1;
+            ni = star_ni.?;
+            if (ni > name.len) return false;
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
 fn outputDiffHunks(old_content: []const u8, new_content: []const u8, context_lines: u32, lp: []const u8, pi: *const pm.Platform, allocator: std.mem.Allocator, suppress_blank_empty: bool) !void {
+    return outputDiffHunksWithMatcher(old_content, new_content, context_lines, lp, pi, allocator, suppress_blank_empty, null);
+}
+
+fn outputDiffHunksWithMatcher(old_content: []const u8, new_content: []const u8, context_lines: u32, lp: []const u8, pi: *const pm.Platform, allocator: std.mem.Allocator, suppress_blank_empty: bool, funcname_matcher: ?diff_mod.FuncnameMatcher) !void {
     // Use the existing diff module to generate the unified diff
-    const diff_output = diff_mod.generateUnifiedDiffWithHashesAndContext(
-        old_content, new_content, "placeholder", "0", "0", context_lines, allocator,
+    const diff_output = diff_mod.generateUnifiedDiffWithHashesContextAndFuncname(
+        old_content, new_content, "placeholder", "0", "0", context_lines, funcname_matcher, allocator,
     ) catch return;
     defer allocator.free(diff_output);
 

@@ -119,51 +119,55 @@ fn matchBash(line: []const u8) bool {
     const trimmed = skipWhitespace(line);
     if (trimmed.len == 0) return false;
 
-    // "function name ..." style
-    if (std.mem.startsWith(u8, trimmed, "function")) {
-        const rest = skipWhitespace(trimmed[8..]);
+    // "function name ..." style (bashism)
+    if (std.mem.startsWith(u8, trimmed, "function") and trimmed.len > 8 and
+        (trimmed[8] == ' ' or trimmed[8] == '\t'))
+    {
+        const rest = skipWhitespace(trimmed[9..]);
         if (rest.len > 0 and (std.ascii.isAlphabetic(rest[0]) or rest[0] == '_')) {
-            // Must end with {, (, ((, or [[
-            const tline = std.mem.trimRight(u8, line, " \t");
-            if (tline.len > 0) {
-                const last = tline[tline.len - 1];
-                if (last == '{' or last == '(' or last == '[') return true;
+            // Find end of identifier
+            var ei: usize = 1;
+            while (ei < rest.len and isIdent(rest[ei])) ei += 1;
+            // After identifier: either
+            // 1) optional-whitespace () optional-whitespace compound-opener
+            // 2) mandatory-whitespace compound-opener (no parens)
+            var pos = ei;
+            const ws_start = pos;
+            while (pos < rest.len and (rest[pos] == ' ' or rest[pos] == '\t')) pos += 1;
+            // Check for ()
+            if (pos + 1 < rest.len and rest[pos] == '(' and rest[pos + 1] == ')') {
+                pos += 2;
+                while (pos < rest.len and (rest[pos] == ' ' or rest[pos] == '\t')) pos += 1;
+                if (pos < rest.len and (rest[pos] == '{' or rest[pos] == '(' or rest[pos] == '[')) return true;
+            } else {
+                // No () - must have at least one whitespace before compound opener
+                if (pos > ws_start and pos < rest.len and (rest[pos] == '{' or rest[pos] == '(' or rest[pos] == '[')) return true;
             }
             return false;
         }
         return false;
     }
 
-    // "name()" or "name ()" style - identifier followed by ()
+    // "name()" or "name ()" style - POSIX: identifier followed by ( ) then compound
     var i: usize = 0;
     if (std.ascii.isAlphabetic(trimmed[0]) or trimmed[0] == '_') {
         i = 1;
         while (i < trimmed.len and isIdent(trimmed[i])) i += 1;
         // Skip whitespace
         while (i < trimmed.len and (trimmed[i] == ' ' or trimmed[i] == '\t')) i += 1;
-        // Check for ()
+        // Must have (
         if (i < trimmed.len and trimmed[i] == '(') {
-            // Must end with {, (, ((, [[
-            const tline = std.mem.trimRight(u8, line, " \t");
-            if (tline.len > 0) {
-                const last = tline[tline.len - 1];
-                if (last == '{' or last == '(' or last == '[') return true;
-                // Also check for # (comment at end)
-                if (std.mem.indexOf(u8, tline, "#")) |_| {
-                    // Has comment, check before comment
-                    var ci: usize = 0;
-                    while (ci < tline.len) {
-                        if (tline[ci] == '#') break;
-                        ci += 1;
-                    }
-                    const before_comment = std.mem.trimRight(u8, tline[0..ci], " \t");
-                    if (before_comment.len > 0) {
-                        const lc = before_comment[before_comment.len - 1];
-                        if (lc == '{' or lc == '(' or lc == '[') return true;
-                    }
-                }
+            // Skip to matching )
+            var depth: usize = 1;
+            var j = i + 1;
+            while (j < trimmed.len and depth > 0) {
+                if (trimmed[j] == '(') depth += 1;
+                if (trimmed[j] == ')') depth -= 1;
+                j += 1;
             }
-            return false;
+            // After ), skip whitespace, then must have compound opener
+            while (j < trimmed.len and (trimmed[j] == ' ' or trimmed[j] == '\t')) j += 1;
+            if (j < trimmed.len and (trimmed[j] == '{' or trimmed[j] == '(' or trimmed[j] == '[')) return true;
         }
     }
 
@@ -229,13 +233,13 @@ fn matchCss(line: []const u8) bool {
 }
 
 fn matchDts(line: []const u8) bool {
-    const trimmed_r = std.mem.trimRight(u8, line, " \t");
-    // Negative: lines ending with ; or =
-    if (trimmed_r.len > 0 and (trimmed_r[trimmed_r.len - 1] == ';' or trimmed_r[trimmed_r.len - 1] == '=')) return false;
+    // Negative: lines containing ; or =
+    if (std.mem.indexOfScalar(u8, line, ';') != null) return false;
+    if (std.mem.indexOfScalar(u8, line, '=') != null) return false;
 
     const trimmed = skipWhitespace(line);
     if (trimmed.len == 0) return false;
-    // Lines starting with / { (root node)
+    // Lines starting with / (root node)
     if (trimmed[0] == '/') return true;
     // Lines starting with & (reference)
     if (trimmed[0] == '&') return true;

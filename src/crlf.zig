@@ -70,7 +70,9 @@ pub fn getCheckoutAction(text_attr: TextAttr, eol_attr: EolAttr, autocrlf: ?[]co
         .no_text => return .none,
         .text_auto => {
             // Auto-detect: only convert if content looks like text (no NUL bytes)
+            // AND the content has been normalized (all LF, no CRLF)
             if (!isTextContent(content)) return .none;
+            if (!isNormalizedLf(content)) return .none;
             return getCheckoutEolAction(eol_attr, autocrlf, eol_config);
         },
         .text => {
@@ -82,6 +84,7 @@ pub fn getCheckoutAction(text_attr: TextAttr, eol_attr: EolAttr, autocrlf: ?[]co
                 if (std.mem.eql(u8, ac, "true")) {
                     // autocrlf=true: auto-detect + convert to CRLF on checkout
                     if (!isTextContent(content)) return .none;
+                    if (!isNormalizedLf(content)) return .none;
                     return .lf_to_crlf;
                 }
             }
@@ -135,6 +138,19 @@ fn getCheckoutEolAction(eol_attr: EolAttr, autocrlf: ?[]const u8, eol_config: ?[
 
     // Default: no conversion (native LF on Linux)
     return .none;
+}
+
+/// Check if content has been normalized to LF-only line endings.
+/// Returns false if content contains any CRLF or lone CR sequences.
+pub fn isNormalizedLf(content: []const u8) bool {
+    for (content, 0..) |c, i| {
+        if (c == '\r') {
+            // Any CR makes it non-normalized
+            _ = i;
+            return false;
+        }
+    }
+    return true;
 }
 
 /// Check if content is text (no NUL bytes in first 8000 bytes).

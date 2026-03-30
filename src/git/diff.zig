@@ -241,6 +241,10 @@ pub fn generateUnifiedDiffWithHashes(old_content: []const u8, new_content: []con
 }
 
 pub fn generateUnifiedDiffWithHashesAndContext(old_content: []const u8, new_content: []const u8, file_path: []const u8, old_hash: []const u8, new_hash: []const u8, context_lines: u32, allocator: std.mem.Allocator) ![]u8 {
+    return generateUnifiedDiffWithHashesContextAndFuncname(old_content, new_content, file_path, old_hash, new_hash, context_lines, null, allocator);
+}
+
+pub fn generateUnifiedDiffWithHashesContextAndFuncname(old_content: []const u8, new_content: []const u8, file_path: []const u8, old_hash: []const u8, new_hash: []const u8, context_lines: u32, funcname_matcher: ?FuncnameMatcher, allocator: std.mem.Allocator) ![]u8 {
     var old_lines = std.ArrayList([]const u8).init(allocator);
     defer old_lines.deinit();
     
@@ -289,7 +293,7 @@ pub fn generateUnifiedDiffWithHashesAndContext(old_content: []const u8, new_cont
     try writeDiffHeader(writer, file_path, old_hash, new_hash, old_content, new_content);
     
     for (hunks.items) |hunk| {
-        try writeHunkHeaderWithContext(writer, hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count, old_lines.items, null);
+        try writeHunkHeaderWithContext(writer, hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count, old_lines.items, funcname_matcher);
         
         for (hunk.lines.items) |line| {
             const prefix = switch (line.type) {
