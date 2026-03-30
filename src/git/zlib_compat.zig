@@ -1,89 +1,32 @@
 const std = @import("std");
 const zlib = std.compress.zlib;
 
-const c = @cImport({
-    @cInclude("zlib.h");
-});
-
 pub fn decompress(reader: anytype, writer: anytype) !void {
-    var all_input = std.ArrayList(u8).init(std.heap.page_allocator);
-    defer all_input.deinit();
-    var buf: [16384]u8 = undefined;
-    while (true) {
-        const n = reader.read(&buf) catch break;
-        if (n == 0) break;
-        try all_input.appendSlice(buf[0..n]);
-    }
-    const result = try decompressSlice(std.heap.page_allocator, all_input.items);
-    defer std.heap.page_allocator.free(result);
-    writer.writeAll(result) catch return error.InvalidInput;
+    zlib.decompress(reader, writer) catch return error.InvalidInput;
 }
 
 pub fn compress(reader: anytype, writer: anytype, options: anytype) !void {
     _ = options;
-    var all_input = std.ArrayList(u8).init(std.heap.page_allocator);
-    defer all_input.deinit();
-    var buf: [16384]u8 = undefined;
-    while (true) {
-        const n = reader.read(&buf) catch break;
-        if (n == 0) break;
-        try all_input.appendSlice(buf[0..n]);
-    }
-    const compressed = try compressSlice(std.heap.page_allocator, all_input.items);
-    defer std.heap.page_allocator.free(compressed);
-    writer.writeAll(compressed) catch return error.CompressionFailed;
+    zlib.compress(reader, writer, .{}) catch return error.CompressionFailed;
 }
 
 pub fn Decompressor(comptime ReaderType: type) type {
     return struct {
         const Self = @This();
-        source: ReaderType,
-        stream: c.z_stream,
-        input_buf: [16384]u8,
-        initialized: bool,
-        done: bool,
+        inner: zlib.Decompressor(ReaderType),
 
         pub fn read(self: *Self, out_buf: []u8) !usize {
-            if (self.done) return 0;
-            if (!self.initialized) {
-                self.stream = std.mem.zeroes(c.z_stream);
-                const ret = c.inflateInit(&self.stream);
-                if (ret != c.Z_OK) return error.InvalidInput;
-                self.initialized = true;
-            }
-            self.stream.next_out = out_buf.ptr;
-            self.stream.avail_out = @intCast(out_buf.len);
-            while (self.stream.avail_out > 0) {
-                if (self.stream.avail_in == 0) {
-                    const n = self.source.read(&self.input_buf) catch return error.InvalidInput;
-                    if (n == 0) {
-                        self.done = true;
-                        break;
-                    }
-                    self.stream.next_in = &self.input_buf;
-                    self.stream.avail_in = @intCast(n);
-                }
-                const ret = c.inflate(&self.stream, c.Z_NO_FLUSH);
-                if (ret == c.Z_STREAM_END) {
-                    self.done = true;
-                    break;
-                }
-                if (ret != c.Z_OK) return error.InvalidInput;
-            }
-            return out_buf.len - @as(usize, @intCast(self.stream.avail_out));
+            return self.inner.reader().readAll(out_buf) catch return error.InvalidInput;
         }
 
         pub fn deinit(self: *Self) void {
-            if (self.initialized) {
-                _ = c.inflateEnd(&self.stream);
-                self.initialized = false;
-            }
+            _ = self;
         }
     };
 }
 
 pub fn decompressor(reader: anytype) Decompressor(@TypeOf(reader)) {
-    return .{ .source = reader, .stream = std.mem.zeroes(c.z_stream), .input_buf = undefined, .initialized = false, .done = false };
+    return .{ .inner = zlib.decompressor(reader) };
 }
 
 pub fn Compressor(comptime WriterType: type) type {
@@ -91,19 +34,23 @@ pub fn Compressor(comptime WriterType: type) type {
         const Self = @This();
         inner_writer: WriterType,
         buffer: std.ArrayList(u8),
+
         pub fn write(self: *Self, data: []const u8) !usize {
             self.buffer.appendSlice(data) catch return error.CompressionFailed;
             return data.len;
         }
+
         pub fn finish(self: *Self) !void {
-            const cmp = compressSlice(self.buffer.allocator, self.buffer.items) catch return error.CompressionFailed;
-            defer self.buffer.allocator.free(cmp);
-            self.inner_writer.writeAll(cmp) catch return error.CompressionFailed;
+            var fbs = std.io.fixedBufferStream(self.buffer.items);
+            zlib.compress(fbs.reader(), self.inner_writer, .{}) catch return error.CompressionFailed;
         }
+
         pub fn writer(self: *Self) GenWriter {
             return .{ .context = self };
         }
+
         pub const GenWriter = std.io.GenericWriter(*Self, error{CompressionFailed}, writeAdapter);
+
         fn writeAdapter(self: *Self, data: []const u8) error{CompressionFailed}!usize {
             return self.write(data) catch return error.CompressionFailed;
         }
@@ -116,91 +63,52 @@ pub fn compressorWriter(writer: anytype, options: anytype) !Compressor(@TypeOf(w
 }
 
 pub fn compressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    const bound = c.compressBound(@intCast(input.len));
-    const output = try allocator.alloc(u8, @intCast(bound));
-    errdefer allocator.free(output);
-    var dest_len: c.uLongf = @intCast(output.len);
-    const ret = c.compress2(output.ptr, &dest_len, input.ptr, @intCast(input.len), 1);
-    if (ret != c.Z_OK) return error.CompressionFailed;
-    const final_len: usize = @intCast(dest_len);
-    // Dupe the actual compressed data and free the oversized buffer
-    // so that free() works correctly (sub-slices cause Invalid free with debug allocator)
-    const result = try allocator.dupe(u8, output[0..final_len]);
-    allocator.free(output);
-    return result;
+    var output = std.ArrayList(u8).init(allocator);
+    errdefer output.deinit();
+    var fbs = std.io.fixedBufferStream(input);
+    zlib.compress(fbs.reader(), output.writer(), .{}) catch return error.CompressionFailed;
+    return output.toOwnedSlice();
 }
 
 pub fn decompressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    // Try uncompress2 first with a reasonable initial guess (4x input size)
-    const initial_guess = @max(input.len * 4, 256);
-    var dest = try allocator.alloc(u8, initial_guess);
-    var dest_len: c.uLongf = @intCast(dest.len);
-    var src_len: c.uLongf = @intCast(input.len);
-    const uc_ret = c.uncompress2(dest.ptr, &dest_len, input.ptr, &src_len);
-    if (uc_ret == c.Z_OK) {
-        const final_len: usize = @intCast(dest_len);
-        const result = try allocator.dupe(u8, dest[0..final_len]);
-        allocator.free(dest);
-        return result;
-    }
-    allocator.free(dest);
-
-    // Fall back to streaming inflate for large/complex cases
-    var stream: c.z_stream = std.mem.zeroes(c.z_stream);
-    stream.next_in = @constCast(input.ptr);
-    stream.avail_in = @intCast(input.len);
-    var ret = c.inflateInit(&stream);
-    if (ret != c.Z_OK) return error.InvalidInput;
-    defer _ = c.inflateEnd(&stream);
     var output = std.ArrayList(u8).init(allocator);
     errdefer output.deinit();
-    var buf: [32768]u8 = undefined;
-    while (true) {
-        stream.next_out = &buf;
-        stream.avail_out = buf.len;
-        ret = c.inflate(&stream, c.Z_NO_FLUSH);
-        const have = buf.len - @as(usize, @intCast(stream.avail_out));
-        if (have > 0) try output.appendSlice(buf[0..have]);
-        if (ret == c.Z_STREAM_END) break;
-        if (ret != c.Z_OK) return error.InvalidInput;
-    }
+    var fbs = std.io.fixedBufferStream(input);
+    zlib.decompress(fbs.reader(), output.writer()) catch return error.InvalidInput;
     return output.toOwnedSlice();
 }
 
 /// Fast decompression when the output size is known (e.g., from pack object headers).
-/// Uses uncompress2 for single-call decompression - much faster than streaming.
 pub fn decompressSliceKnownSize(allocator: std.mem.Allocator, input: []const u8, expected_size: usize) ![]u8 {
     const dest = try allocator.alloc(u8, expected_size);
     errdefer allocator.free(dest);
-    var dest_len: c.uLongf = @intCast(expected_size);
-    var src_len: c.uLongf = @intCast(input.len);
-    const ret = c.uncompress2(dest.ptr, &dest_len, input.ptr, &src_len);
-    if (ret == c.Z_OK and @as(usize, @intCast(dest_len)) == expected_size) {
+    var fbs = std.io.fixedBufferStream(input);
+    var dcp = zlib.decompressor(fbs.reader());
+    const n = dcp.reader().readAll(dest) catch {
+        allocator.free(dest);
+        return decompressSlice(allocator, input);
+    };
+    if (n == expected_size) {
         return dest;
     }
-    // Fall back to general decompression if uncompress2 fails
+    // Size mismatch, fall back
     allocator.free(dest);
     return decompressSlice(allocator, input);
 }
 
 pub fn decompressSliceWithConsumed(allocator: std.mem.Allocator, input: []const u8) !struct { data: []u8, consumed: usize } {
-    var stream: c.z_stream = std.mem.zeroes(c.z_stream);
-    stream.next_in = @constCast(input.ptr);
-    stream.avail_in = @intCast(input.len);
-    var ret = c.inflateInit(&stream);
-    if (ret != c.Z_OK) return error.InvalidInput;
-    defer _ = c.inflateEnd(&stream);
     var output = std.ArrayList(u8).init(allocator);
     errdefer output.deinit();
-    var buf: [16384]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(input);
+    var dcp = zlib.decompressor(fbs.reader());
+    // Read all decompressed data
     while (true) {
-        stream.next_out = &buf;
-        stream.avail_out = buf.len;
-        ret = c.inflate(&stream, c.Z_NO_FLUSH);
-        const have = buf.len - @as(usize, @intCast(stream.avail_out));
-        if (have > 0) try output.appendSlice(buf[0..have]);
-        if (ret == c.Z_STREAM_END) break;
-        if (ret != c.Z_OK) return error.InvalidInput;
+        var buf: [16384]u8 = undefined;
+        const n = dcp.reader().read(&buf) catch return error.InvalidInput;
+        if (n == 0) break;
+        try output.appendSlice(buf[0..n]);
     }
-    return .{ .data = try output.toOwnedSlice(), .consumed = @intCast(stream.total_in) };
+    // Calculate consumed bytes: position in stream minus unread buffered bytes
+    const consumed = fbs.pos - dcp.unreadBytes();
+    return .{ .data = try output.toOwnedSlice(), .consumed = consumed };
 }
