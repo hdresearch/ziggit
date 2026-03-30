@@ -288,7 +288,11 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 }
             } else {
                 // helpers.Add single file
-                try addSingleFile(allocator, relative_file_path, full_file_path, &index, git_path, platform_impl, repo_root_for_rel);
+                if (intent_to_add) {
+                    try addIntentToAddEntry(allocator, relative_file_path, full_file_path, &index, git_path, platform_impl);
+                } else {
+                    try addSingleFile(allocator, relative_file_path, full_file_path, &index, git_path, platform_impl, repo_root_for_rel);
+                }
             }
         }
     }
@@ -332,6 +336,53 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     try index.save(git_path, platform_impl);
 }
 
+
+fn addIntentToAddEntry(allocator: std.mem.Allocator, relative_path: []const u8, full_path: []const u8, index: *index_mod.Index, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
+    _ = git_path;
+    _ = platform_impl;
+    // For intent-to-add (-N), add index entry with null hash and intent-to-add extended flag
+    // First remove any existing entry for this path
+    var i: usize = 0;
+    while (i < index.entries.items.len) {
+        if (std.mem.eql(u8, index.entries.items[i].path, relative_path)) {
+            index.entries.items[i].deinit(allocator);
+            _ = index.entries.orderedRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+
+    // Get file stat
+    const stat = std.fs.cwd().statFile(full_path) catch return error.FileNotFound;
+
+    const path_copy = try allocator.dupe(u8, relative_path);
+    const path_len: u16 = if (relative_path.len >= 0xFFF) 0xFFF else @intCast(relative_path.len);
+
+    const entry = index_mod.IndexEntry{
+        .ctime_sec = @intCast(@divFloor(stat.ctime, 1_000_000_000)),
+        .ctime_nsec = @intCast(@mod(stat.ctime, 1_000_000_000)),
+        .mtime_sec = @intCast(@divFloor(stat.mtime, 1_000_000_000)),
+        .mtime_nsec = @intCast(@mod(stat.mtime, 1_000_000_000)),
+        .dev = 0,
+        .ino = 0,
+        .mode = 0o100644,
+        .uid = 0,
+        .gid = 0,
+        .size = 0,
+        .sha1 = [_]u8{0} ** 20, // Null hash for intent-to-add
+        .flags = path_len | 0x4000, // CE_EXTENDED bit set
+        .extended_flags = 0x2000, // Intent-to-add flag
+        .path = path_copy,
+    };
+
+    try index.entries.append(entry);
+    std.sort.block(index_mod.IndexEntry, index.entries.items, {}, struct {
+        fn lessThan(context: void, lhs: index_mod.IndexEntry, rhs: index_mod.IndexEntry) bool {
+            _ = context;
+            return std.mem.lessThan(u8, lhs.path, rhs.path);
+        }
+    }.lessThan);
+}
 
 pub fn addSingleFile(allocator: std.mem.Allocator, relative_path: []const u8, full_path: []const u8, index: *index_mod.Index, git_path: []const u8, platform_impl: *const platform_mod.Platform, repo_root: []const u8) !void {
     // helpers.Check if file is ignored

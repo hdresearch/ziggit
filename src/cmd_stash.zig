@@ -99,6 +99,13 @@ pub fn nativeCmdStash(allocator: std.mem.Allocator, args: *platform_mod.ArgItera
     }
 }
 
+fn isIntentToAdd(entry: *const index_mod.IndexEntry) bool {
+    if (entry.extended_flags) |ef| {
+        return (ef & 0x2000) != 0;
+    }
+    return false;
+}
+
 fn isStashSubcommand(s: []const u8) bool {
     const cmds = [_][]const u8{
         "push", "save", "list", "show", "pop", "apply",
@@ -361,6 +368,19 @@ fn createStashCommit(
         index_mod.Index.init(allocator);
     defer idx.deinit();
 
+    // Remove intent-to-add entries before computing tree hash (they don't represent real staged content)
+    {
+        var i: usize = 0;
+        while (i < idx.entries.items.len) {
+            if (isIntentToAdd(&idx.entries.items[i])) {
+                idx.entries.items[i].deinit(allocator);
+                _ = idx.entries.orderedRemove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
     // Create index tree from current staged state
     const index_tree_hash = try helpers.writeTreeFromIndex(allocator, &idx, git_path, platform_impl);
     defer allocator.free(index_tree_hash);
@@ -377,6 +397,19 @@ fn createStashCommit(
 
     var has_wt_changes = false;
     const has_index_changes = !std.mem.eql(u8, index_tree_hash, head_tree_hash);
+
+    // Remove intent-to-add entries from working tree index too
+    {
+        var i: usize = 0;
+        while (i < wt_idx.entries.items.len) {
+            if (isIntentToAdd(&wt_idx.entries.items[i])) {
+                wt_idx.entries.items[i].deinit(allocator);
+                _ = wt_idx.entries.orderedRemove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
 
     // Update wt_idx entries with working tree content
     for (wt_idx.entries.items) |*entry| {
