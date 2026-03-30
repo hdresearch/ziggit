@@ -3,6 +3,17 @@
 
 const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
+
+fn isTrailerLine(line: []const u8) bool {
+    if (std.mem.indexOf(u8, line, ": ")) |colon_pos| {
+        if (colon_pos == 0) return false;
+        for (line[0..colon_pos]) |c| {
+            if (c == ' ' or c == '\t') return false;
+        }
+        return true;
+    }
+    return false;
+}
 const helpers = @import("git_helpers.zig");
 const cmd_reflog = @import("cmd_reflog.zig");
 const cmd_add = @import("cmd_add.zig");

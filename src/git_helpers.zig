@@ -1097,8 +1097,6 @@ pub fn findGitDirectory(allocator: std.mem.Allocator, platform_impl: *const plat
     var dir_to_check = try allocator.dupe(u8, current_dir);
     var is_first = true;
     
-    std.debug.print("findGitDirectory: starting from {s}\n", .{current_dir});
-    
     while (true) {
         // Check GIT_CEILING_DIRECTORIES - don't search at or above ceiling dirs
         // (but always check the starting directory itself)
@@ -1119,6 +1117,7 @@ pub fn findGitDirectory(allocator: std.mem.Allocator, platform_impl: *const plat
 
         // First check for .git subdirectory (normal repository) or valid gitdir link
         const git_path = try std.fmt.allocPrint(allocator, "{s}/.git", .{dir_to_check});
+        std.debug.print("  checking: {s}\n", .{git_path});
         const git_is_valid = blk: {
             // Check if it's a directory
             if (std.fs.cwd().openDir(git_path, .{})) |d| {
@@ -3721,7 +3720,7 @@ pub fn cfgMakeKey(section: ?[]const u8, variable: []const u8, allocator: std.mem
 }
 
 /// Normalize a config key like "Section.SubSection.Variable" ->
-/// lowercase section, preserve subsection case, lowercase variable
+/// lowercase section, preserve subsection case, lowercase variabl case, lowercase variable
 
 pub fn cfgNormalizeKey(key_raw: []const u8, allocator: std.mem.Allocator) ![]u8 {
     const key = try allocator.dupe(u8, key_raw);
@@ -13936,7 +13935,7 @@ pub fn populateIndexFromTree(git_path: []const u8, tree_data: []const u8, repo_r
             const stat = std.fs.cwd().statFile(file_path) catch std.fs.File.Stat{
                 .inode = 0,
                 .size = 0,
-                .mode = @truncate(mode),
+                .mode = @as(std.fs.File.Mode, mode),
                 .kind = .file,
                 .atime = 0,
                 .mtime = 0,
