@@ -56,6 +56,39 @@ pub fn nativeCmdCheckAttr(allocator: std.mem.Allocator, args: *platform_mod.ArgI
         }
     }
 
+    // Validate arguments
+    // check-attr requires: attr_name(s) -- path(s) OR --all -- path(s) OR --stdin attr path(s)
+    if (!all_attrs and attr_names.items.len == 0) {
+        // No attribute specified and not --all
+        try platform_impl.writeStderr("error: No attribute specified\n");
+        std.process.exit(128);
+    }
+    if (file_paths.items.len == 0 and !use_stdin) {
+        // No paths specified
+        try platform_impl.writeStderr("error: No file specified\n");
+        std.process.exit(128);
+    }
+    // --stdin and explicit paths are mutually exclusive
+    if (use_stdin and file_paths.items.len > 0) {
+        try platform_impl.writeStderr("error: Can't specify files with --stdin\n");
+        std.process.exit(128);
+    }
+    // Check for empty attribute names
+    for (attr_names.items) |name| {
+        if (name.len == 0) {
+            try platform_impl.writeStderr("error: No attribute specified\n");
+            std.process.exit(128);
+        }
+    }
+    // --source requires a valid ref
+    if (source != null) {
+        // Validate source ref - for now just check it's not empty
+        if (source.?.len == 0) {
+            try platform_impl.writeStderr("error: bad --source or --git-dir\n");
+            std.process.exit(128);
+        }
+    }
+
     // helpers.Read paths from stdin if --stdin
     var stdin_buf: ?[]u8 = null;
     defer if (stdin_buf) |b| allocator.free(b);
