@@ -1671,28 +1671,15 @@ fn isLeapYear(year: u32) bool {
 }
 
 fn signWithGpg(allocator: std.mem.Allocator, content: []const u8, sign_key: ?[]const u8) ![]u8 {
-    // Write content to temp file
-    const tmp_path = "/tmp/ziggit-tag-sign-tmp";
-    {
-        const f = try std.fs.cwd().createFile(tmp_path, .{});
-        defer f.close();
-        try f.writeAll(content);
-    }
-
     var argv = std.array_list.Managed([]const u8).init(allocator);
     defer argv.deinit();
     try argv.append("gpg");
-    if (sign_key) |key| {
-        try argv.append("-u");
-        try argv.append(key);
-    }
     try argv.append("--status-fd=2");
-    try argv.append("-bsau");
     if (sign_key) |key| {
+        try argv.append("-bsau");
         try argv.append(key);
     } else {
-        // Default key
-        try argv.append("");
+        try argv.append("-bsa");
     }
 
     var child = std.process.Child.init(argv.items, allocator);
