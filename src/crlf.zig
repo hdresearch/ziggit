@@ -31,7 +31,7 @@ pub fn getFileAttrs(path: []const u8, attr_rules: []const check_attr.AttrRule) s
 
     // Last matching rule wins
     for (attr_rules) |rule| {
-        if (check_attr.attrPatternMatches(rule.pattern, path)) {
+        if (check_attr.attrPatternMatches(rule.pattern, path, false)) {
             for (rule.attrs.items) |attr| {
                 if (std.mem.eql(u8, attr.name, "text")) {
                     if (std.mem.eql(u8, attr.value, "set")) {

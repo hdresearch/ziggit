@@ -179,7 +179,7 @@ fn applyCrlfConversion(allocator: std.mem.Allocator, data: []const u8, path: []c
     // Check crlf attribute for the path
     var crlf_attr: enum { unspecified, set, unset } = .unspecified;
     for (attr_rules.items) |rule| {
-        if (cmd_check_attr.attrPatternMatches(rule.pattern, path)) {
+        if (cmd_check_attr.attrPatternMatches(rule.pattern, path, false)) {
             for (rule.attrs.items) |attr| {
                 if (std.mem.eql(u8, attr.name, "crlf")) {
                     if (std.mem.eql(u8, attr.value, "set")) {

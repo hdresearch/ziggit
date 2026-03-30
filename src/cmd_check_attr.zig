@@ -32,6 +32,7 @@ pub fn nativeCmdCheckAttr(allocator: std.mem.Allocator, args: *platform_mod.ArgI
     var source: ?[]const u8 = null;
     var after_dashdash = false;
 
+
     while (args.next()) |arg| {
         if (after_dashdash) {
             try file_paths.append(arg);
@@ -115,6 +116,38 @@ pub fn nativeCmdCheckAttr(allocator: std.mem.Allocator, args: *platform_mod.ArgI
     const cwd = try platform_impl.fs.getCwd(allocator);
     defer allocator.free(cwd);
 
+    // Load config to check core.ignorecase and core.attributesfile
+    var ignore_case = false;
+    var global_attr_file: ?[]const u8 = null;
+    defer if (global_attr_file) |f| allocator.free(f);
+    {
+        const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch null;
+        defer if (config_path) |p| allocator.free(p);
+        if (config_path) |cp| {
+            var cfg = config_mod.GitConfig.init(allocator);
+            defer cfg.deinit();
+            cfg.parseFromFile(cp) catch {};
+            ignore_case = config_mod.getIgnoreCase(cfg);
+            if (cfg.get("core", null, "attributesfile")) |f| {
+                // Handle ~ expansion
+                if (std.mem.startsWith(u8, f, "~/")) {
+                    const home = std.posix.getenv("HOME") orelse "";
+                    global_attr_file = std.fmt.allocPrint(allocator, "{s}{s}", .{ home, f[1..] }) catch null;
+                } else {
+                    global_attr_file = allocator.dupe(u8, f) catch null;
+                }
+            }
+        }
+        // Check CLI -c overrides (via global config overrides set by main)
+        if (helpers.getConfigOverride("core.ignorecase")) |val| {
+            ignore_case = std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "1");
+        }
+        if (helpers.getConfigOverride("core.attributesfile")) |val| {
+            if (global_attr_file) |f| allocator.free(f);
+            global_attr_file = allocator.dupe(u8, val) catch null;
+        }
+    }
+
     // helpers.Load gitattributes from various sources
     var attr_rules = std.array_list.Managed(AttrRule).init(allocator);
     defer {
@@ -122,19 +155,25 @@ pub fn nativeCmdCheckAttr(allocator: std.mem.Allocator, args: *platform_mod.ArgI
         attr_rules.deinit();
     }
 
-    // helpers.Load repo .gitattributes
-    if (!cached) {
-        try loadAttrFile(allocator, repo_root, "", platform_impl, &attr_rules);
+    // Load in order of increasing precedence (last match wins):
+    // 1. Global attributes (core.attributesfile) - lowest precedence
+    if (global_attr_file) |gaf| {
+        if (platform_impl.fs.readFile(allocator, gaf)) |content| {
+            defer allocator.free(content);
+            parseAttrContent(allocator, content, "", &attr_rules) catch {};
+        } else |_| {}
     }
-
-    // helpers.Load global attributes if core.attributesfile is set
-    // helpers.Load info/attributes
+    // 2. $GIT_DIR/info/attributes
     const info_attr_path = try std.fmt.allocPrint(allocator, "{s}/info/attributes", .{git_path});
     defer allocator.free(info_attr_path);
     if (platform_impl.fs.readFile(allocator, info_attr_path)) |content| {
         defer allocator.free(content);
         parseAttrContent(allocator, content, "", &attr_rules) catch {};
     } else |_| {}
+    // 3. Root .gitattributes - highest precedence among repo-level rules
+    if (!cached) {
+        try loadAttrFile(allocator, repo_root, "", platform_impl, &attr_rules);
+    }
 
     for (file_paths.items) |path| {
         // helpers.Resolve path relative to repo root
@@ -174,22 +213,20 @@ pub fn nativeCmdCheckAttr(allocator: std.mem.Allocator, args: *platform_mod.ArgI
             var shown = std.StringHashMap([]const u8).init(allocator);
             defer shown.deinit();
 
-            // helpers.Check dir rules first (higher priority), then repo rules
-            for (dir_rules.items) |rule| {
-                if (attrPatternMatches(rule.pattern, check_path)) {
+            // Collect all matching attributes. Last match wins within a file,
+            // and dir-specific rules override repo-level rules.
+            // First apply repo-level rules, then dir rules (dir rules override).
+            for (attr_rules.items) |rule| {
+                if (attrPatternMatches(rule.pattern, check_path, ignore_case)) {
                     for (rule.attrs.items) |attr| {
-                        if (!shown.contains(attr.name)) {
-                            shown.put(attr.name, attr.value) catch {};
-                        }
+                        shown.put(attr.name, attr.value) catch {};
                     }
                 }
             }
-            for (attr_rules.items) |rule| {
-                if (attrPatternMatches(rule.pattern, check_path)) {
+            for (dir_rules.items) |rule| {
+                if (attrPatternMatches(rule.pattern, check_path, ignore_case)) {
                     for (rule.attrs.items) |attr| {
-                        if (!shown.contains(attr.name)) {
-                            shown.put(attr.name, attr.value) catch {};
-                        }
+                        shown.put(attr.name, attr.value) catch {};
                     }
                 }
             }
@@ -198,6 +235,8 @@ pub fn nativeCmdCheckAttr(allocator: std.mem.Allocator, args: *platform_mod.ArgI
             defer allocator.free(quoted_path);
             var iter = shown.iterator();
             while (iter.next()) |entry| {
+                // In --all mode, don't show 'unspecified' attributes
+                if (std.mem.eql(u8, entry.value_ptr.*, "unspecified")) continue;
                 const msg = try std.fmt.allocPrint(allocator, "{s}: {s}: {s}\n", .{ quoted_path, entry.key_ptr.*, entry.value_ptr.* });
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
@@ -207,10 +246,10 @@ pub fn nativeCmdCheckAttr(allocator: std.mem.Allocator, args: *platform_mod.ArgI
             for (attr_names.items) |attr_name| {
                 var value: []const u8 = "unspecified";
 
-                // Search dir rules first (higher priority), then repo rules
+                // Search repo rules first, then dir rules (dir rules override)
                 // Last matching pattern wins (within each file, last match wins)
                 for (attr_rules.items) |rule| {
-                    if (attrPatternMatches(rule.pattern, check_path)) {
+                    if (attrPatternMatches(rule.pattern, check_path, ignore_case)) {
                         for (rule.attrs.items) |attr| {
                             if (std.mem.eql(u8, attr.name, attr_name)) {
                                 value = attr.value;
@@ -219,7 +258,7 @@ pub fn nativeCmdCheckAttr(allocator: std.mem.Allocator, args: *platform_mod.ArgI
                     }
                 }
                 for (dir_rules.items) |rule| {
-                    if (attrPatternMatches(rule.pattern, check_path)) {
+                    if (attrPatternMatches(rule.pattern, check_path, ignore_case)) {
                         for (rule.attrs.items) |attr| {
                             if (std.mem.eql(u8, attr.name, attr_name)) {
                                 value = attr.value;
@@ -401,20 +440,18 @@ pub fn parseAttrContent(allocator: std.mem.Allocator, content: []const u8, prefi
                 const val = try allocator.dupe(u8, "unspecified");
                 try attrs.append(.{ .name = name, .value = val });
             } else {
-                // Check if this is a macro name
-                if (global_macros) |macros| {
-                    if (macros.get(attr_spec)) |macro_attrs| {
-                        // Expand macro
-                        for (macro_attrs) |ma| {
-                            try attrs.append(.{ .name = try allocator.dupe(u8, ma.name), .value = try allocator.dupe(u8, ma.value) });
-                        }
-                        continue;
-                    }
-                }
                 // attr (set to true)
                 const name = try allocator.dupe(u8, attr_spec);
                 const val = try allocator.dupe(u8, "set");
                 try attrs.append(.{ .name = name, .value = val });
+                // Check if this is a macro name - expand after adding the attr itself
+                if (global_macros) |macros| {
+                    if (macros.get(attr_spec)) |macro_attrs| {
+                        for (macro_attrs) |ma| {
+                            try attrs.append(.{ .name = try allocator.dupe(u8, ma.name), .value = try allocator.dupe(u8, ma.value) });
+                        }
+                    }
+                }
             }
         }
 
@@ -428,20 +465,47 @@ pub fn parseAttrContent(allocator: std.mem.Allocator, content: []const u8, prefi
 }
 
 
-pub fn attrPatternMatches(pattern: []const u8, path: []const u8) bool {
+pub fn attrPatternMatches(pattern: []const u8, path: []const u8, case_insensitive: bool) bool {
     // For simple literal patterns (no glob chars), do direct matching
     // This avoids the GitignoreEntry trimming issue with spaces
     const has_glob = std.mem.indexOfAny(u8, pattern, "*?[") != null;
     if (!has_glob and std.mem.indexOf(u8, pattern, "/") == null) {
         // Simple basename match: match against the last path component
         const basename = if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx| path[idx + 1 ..] else path;
+        if (case_insensitive) {
+            return std.ascii.eqlIgnoreCase(pattern, basename);
+        }
         return std.mem.eql(u8, pattern, basename);
     }
     if (!has_glob and std.mem.indexOf(u8, pattern, "/") != null) {
         // Pattern with slash: match the full path
+        if (case_insensitive) {
+            return std.ascii.eqlIgnoreCase(pattern, path);
+        }
         return std.mem.eql(u8, pattern, path);
     }
     // Use the gitignore glob matching for patterns with wildcards
+    if (case_insensitive) {
+        // Lowercase both pattern and path for case-insensitive matching
+        var lower_pattern_buf: [1024]u8 = undefined;
+        var lower_path_buf: [1024]u8 = undefined;
+        if (pattern.len <= lower_pattern_buf.len and path.len <= lower_path_buf.len) {
+            for (pattern, 0..) |c, i| {
+                lower_pattern_buf[i] = std.ascii.toLower(c);
+            }
+            for (path, 0..) |c, i| {
+                lower_path_buf[i] = std.ascii.toLower(c);
+            }
+            const lower_pattern = lower_pattern_buf[0..pattern.len];
+            const lower_path = lower_path_buf[0..path.len];
+            if (gitignore_mod.GitignoreEntry.init(lower_pattern, std.heap.page_allocator)) |entry| {
+                defer entry.deinit(std.heap.page_allocator);
+                return entry.matches(lower_path, false);
+            } else |_| {
+                return false;
+            }
+        }
+    }
     if (gitignore_mod.GitignoreEntry.init(pattern, std.heap.page_allocator)) |entry| {
         defer entry.deinit(std.heap.page_allocator);
         return entry.matches(path, false);
