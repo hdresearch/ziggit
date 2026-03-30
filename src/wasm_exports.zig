@@ -2872,3 +2872,26 @@ export fn ziggit_read_object_by_index(idx: u32, out_ptr: *u32, out_len: *u32, ty
     };
     return 0;
 }
+
+/// Return WASM memory usage statistics as JSON.
+/// Useful for browser debugging.
+/// out_ptr/out_len: pointers to write result JSON
+/// Format: {"total_pages":N,"total_bytes":N,"pack_loaded":bool,"pack_size":N,"idx_size":N,"objects":N}
+/// Returns 0 on success, negative on error.
+export fn ziggit_memory_stats(out_ptr: *u32, out_len: *u32) i32 {
+    const allocator = getAllocator();
+    const pack_loaded = global_pack_data != null;
+    const pack_size: usize = if (global_pack_data) |d| d.len else 0;
+    const idx_size: usize = if (global_idx_data) |d| d.len else 0;
+    const objects: i32 = if (global_idx_data) |idx| blk: {
+        if (idx.len < 8 + 256 * 4) break :blk 0;
+        break :blk @intCast(std.mem.readInt(u32, idx[8 + 255 * 4 ..][0..4], .big));
+    } else 0;
+
+    var buf: [256]u8 = undefined;
+    const json = std.fmt.bufPrint(&buf, "{{\"pack_loaded\":{},\"pack_size\":{d},\"idx_size\":{d},\"objects\":{d}}}", .{ pack_loaded, pack_size, idx_size, objects }) catch return -1;
+    const owned = allocator.dupe(u8, json) catch return -2;
+    out_ptr.* = @intFromPtr(owned.ptr);
+    out_len.* = @intCast(owned.len);
+    return 0;
+}
