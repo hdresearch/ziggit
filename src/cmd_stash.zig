@@ -1900,7 +1900,24 @@ fn stashDropByIndex(
     if (n >= lines.items.len) return error.InvalidRef;
 
     const target_line = lines.items.len - 1 - n;
+    // Get the "old" hash from the dropped line for reflog rewriting
+    const dropped_line = lines.items[target_line];
+    const dropped_old_hash = if (dropped_line.len >= 40) dropped_line[0..40] else null;
     _ = lines.orderedRemove(target_line);
+
+    // Rewrite: update the "old" field of the line that follows the dropped one
+    // (which is now at target_line position after removal)
+    if (dropped_old_hash) |old_hash| {
+        if (target_line < lines.items.len) {
+            const next_line = lines.items[target_line];
+            if (next_line.len >= 40) {
+                // Replace the first 40 chars (old hash) with the dropped entry's old hash
+                const new_line = try std.fmt.allocPrint(allocator, "{s}{s}", .{ old_hash, next_line[40..] });
+                // We can't free the old line since it's a slice of content
+                lines.items[target_line] = new_line;
+            }
+        }
+    }
 
     if (lines.items.len == 0) {
         std.fs.cwd().deleteFile(reflog_path) catch {};

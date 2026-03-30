@@ -6508,13 +6508,32 @@ pub fn resolveRevision(git_path: []const u8, rev: []const u8, platform_impl: *co
             const inner = rev[at_pos + 2 .. at_pos + close_off];
             const suffix = rev[at_pos + close_off + 1 ..];
 
-            // Determine the full ref name
+            // Determine the full ref name using git's ref resolution order
             const full_ref = if (refname.len == 0 or std.mem.eql(u8, refname, "HEAD"))
                 try allocator.dupe(u8, "HEAD")
             else if (std.mem.startsWith(u8, refname, "refs/"))
                 try allocator.dupe(u8, refname)
-            else
-                try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{refname});
+            else blk: {
+                // Try refs/<refname> first (for stash, bisect, etc.)
+                const as_ref = try std.fmt.allocPrint(allocator, "refs/{s}", .{refname});
+                const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, as_ref });
+                defer allocator.free(ref_path);
+                if (platform_impl.fs.readFile(allocator, ref_path)) |content| {
+                    allocator.free(content);
+                    break :blk as_ref;
+                } else |_| {
+                    // Also check reflog
+                    const reflog_path = try std.fmt.allocPrint(allocator, "{s}/logs/{s}", .{ git_path, as_ref });
+                    defer allocator.free(reflog_path);
+                    if (platform_impl.fs.readFile(allocator, reflog_path)) |content| {
+                        allocator.free(content);
+                        break :blk as_ref;
+                    } else |_| {
+                        allocator.free(as_ref);
+                    }
+                }
+                break :blk try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{refname});
+            };
             defer allocator.free(full_ref);
 
             // Parse the inner value
