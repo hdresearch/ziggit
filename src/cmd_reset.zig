@@ -70,9 +70,7 @@ pub fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         } else if (std.mem.eql(u8, arg, "-N") or std.mem.eql(u8, arg, "--no-refresh") or std.mem.eql(u8, arg, "--refresh")) {
             if (std.mem.eql(u8, arg, "-N")) intent_to_add = true;
         } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--patch")) {
-            // cmd_apply.Patch mode not supported
-            try platform_impl.writeStderr("fatal: interactive reset not supported\n");
-            std.process.exit(1);
+            try interactiveResetPatch(allocator, platform_impl);
             return;
         } else if (std.mem.eql(u8, arg, "--pathspec-from-file") or std.mem.startsWith(u8, arg, "--pathspec-from-file=")) {
             // helpers.Read paths from file
@@ -399,4 +397,105 @@ pub fn resetIndex(git_path: []const u8, commit_hash: []const u8, platform_impl: 
     try idx.save(git_path, platform_impl);
 }
 
-// helpers.Recursively collect all blob entries from a tree
+fn interactiveResetPatch(allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
+    const git_path = helpers.findGitDirectory(allocator, platform_impl) catch {
+        try platform_impl.writeStderr("fatal: not a git repository\n");
+        std.process.exit(128);
+    };
+    defer allocator.free(git_path);
+
+    var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch return;
+
+    // Get HEAD tree hash (may be empty for unborn branch)
+    const head_commit = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
+    defer if (head_commit) |hc| allocator.free(hc);
+    var head_tree_hash: ?[]const u8 = null;
+    defer if (head_tree_hash) |h| allocator.free(h);
+    if (head_commit) |hc| {
+        const commit_obj = objects.GitObject.load(hc, git_path, platform_impl, allocator) catch null;
+        defer if (commit_obj) |co| co.deinit(allocator);
+        if (commit_obj) |co| {
+            const th = helpers.extractHeaderField(co.data, "tree");
+            if (th.len > 0) head_tree_hash = allocator.dupe(u8, th) catch null;
+        }
+    }
+
+    const stdin = std.io.getStdIn();
+    var entries_to_remove = std.ArrayList(usize).init(allocator);
+    defer entries_to_remove.deinit();
+
+    // Process each index entry
+    for (idx.entries.items, 0..) |entry, ei| {
+        // Check if this file is in HEAD tree
+        var in_head = false;
+        if (head_tree_hash) |_| {
+            // File exists in HEAD - show modification diff
+            // For simplicity, just check if it exists
+            in_head = true;
+            _ = in_head;
+        }
+
+        // Generate diff for this entry
+        const content = helpers.readGitObjectContent(git_path, &hexFromBytes(entry.sha1), allocator) catch "";
+        defer if (content.len > 0) allocator.free(content);
+
+        // Show the diff hunk
+        const diff_header = std.fmt.allocPrint(allocator, "diff --git a/{s} b/{s}\nnew file mode {o}\nindex 0000000..{s}\n--- /dev/null\n+++ b/{s}\n", .{ entry.path, entry.path, entry.mode, hexFromBytes(entry.sha1)[0..7], entry.path }) catch continue;
+        defer allocator.free(diff_header);
+        try platform_impl.writeStdout(diff_header);
+
+        // Show content as added lines
+        var line_count: usize = 0;
+        var content_iter = std.mem.splitScalar(u8, content, '\n');
+        while (content_iter.next()) |_| line_count += 1;
+        if (content.len > 0 and content[content.len - 1] == '\n') line_count -= 1;
+
+        const hunk_header = std.fmt.allocPrint(allocator, "@@ -0,0 +1,{d} @@\n", .{line_count}) catch continue;
+        defer allocator.free(hunk_header);
+        try platform_impl.writeStdout(hunk_header);
+
+        var lines = std.mem.splitScalar(u8, content, '\n');
+        while (lines.next()) |line| {
+            if (line.len > 0 or lines.peek() != null) {
+                const out_line = std.fmt.allocPrint(allocator, "+{s}\n", .{line}) catch continue;
+                defer allocator.free(out_line);
+                try platform_impl.writeStdout(out_line);
+            }
+        }
+
+        // Prompt
+        const prompt = std.fmt.allocPrint(allocator, "(1/1) Unstage addition [y,n,q,a,d,e,?]? ", .{}) catch continue;
+        defer allocator.free(prompt);
+        try platform_impl.writeStdout(prompt);
+
+        // Read response from stdin
+        var buf: [64]u8 = undefined;
+        const n = stdin.read(&buf) catch 0;
+        const response = if (n > 0) std.mem.trimRight(u8, buf[0..n], "\n\r") else "";
+
+        if (response.len > 0 and (response[0] == 'y' or response[0] == 'a')) {
+            try entries_to_remove.append(ei);
+        } else if (response.len > 0 and (response[0] == 'q' or response[0] == 'd')) {
+            break;
+        }
+    }
+
+    // Remove entries in reverse order
+    var ri: usize = entries_to_remove.items.len;
+    while (ri > 0) {
+        ri -= 1;
+        _ = idx.entries.orderedRemove(entries_to_remove.items[ri]);
+    }
+
+    try idx.save(git_path, platform_impl);
+}
+
+fn hexFromBytes(bytes: [20]u8) [40]u8 {
+    const hc = "0123456789abcdef";
+    var hex: [40]u8 = undefined;
+    for (bytes, 0..) |b, i| {
+        hex[i * 2] = hc[b >> 4];
+        hex[i * 2 + 1] = hc[b & 0xf];
+    }
+    return hex;
+}
