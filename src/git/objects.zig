@@ -2,6 +2,43 @@ const zlib_compat = @import("zlib_compat.zig");
 const std = @import("std");
 const crypto = std.crypto;
 
+// Dynamic C zlib for reliable compression (Zig's flate can hang on some inputs)
+var zlib_lib: ?std.DynLib = null;
+var zlib_compress_fn: ?*const fn ([*]u8, *c_ulong, [*]const u8, c_ulong) callconv(.c) c_int = null;
+var zlib_compress_bound_fn: ?*const fn (c_ulong) callconv(.c) c_ulong = null;
+var zlib_init_attempted: bool = false;
+
+fn initCZlib() void {
+    if (zlib_init_attempted) return;
+    zlib_init_attempted = true;
+    var lib = std.DynLib.open("libz.so.1") catch {
+        var lib2 = std.DynLib.open("libz.so") catch return;
+        zlib_lib = lib2;
+        zlib_compress_fn = lib2.lookup(*const fn ([*]u8, *c_ulong, [*]const u8, c_ulong) callconv(.c) c_int, "compress");
+        zlib_compress_bound_fn = lib2.lookup(*const fn (c_ulong) callconv(.c) c_ulong, "compressBound");
+        return;
+    };
+    zlib_lib = lib;
+    zlib_compress_fn = lib.lookup(*const fn ([*]u8, *c_ulong, [*]const u8, c_ulong) callconv(.c) c_int, "compress");
+    zlib_compress_bound_fn = lib.lookup(*const fn (c_ulong) callconv(.c) c_ulong, "compressBound");
+}
+
+/// Compress data using C zlib (more reliable than Zig flate)
+fn cCompressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    initCZlib();
+    const compress_fn = zlib_compress_fn orelse return error.CompressionFailed;
+    const bound_fn = zlib_compress_bound_fn orelse return error.CompressionFailed;
+    const bound = bound_fn(@intCast(input.len));
+    const dest = try allocator.alloc(u8, @intCast(bound));
+    errdefer allocator.free(dest);
+    var dest_len: c_ulong = @intCast(dest.len);
+    const ret = compress_fn(dest.ptr, &dest_len, input.ptr, @intCast(input.len));
+    if (ret != 0) return error.CompressionFailed;
+    const result = try allocator.dupe(u8, dest[0..@intCast(dest_len)]);
+    allocator.free(dest);
+    return result;
+}
+
 // Simple pack file cache to avoid repeated file I/O
 const CachedPackFile = struct {
     idx_path: []const u8,
@@ -212,13 +249,12 @@ pub const GitObject = struct {
         const content = try std.mem.concat(allocator, u8, &[_][]const u8{ header, self.data });
         defer allocator.free(content);
 
-        // Compress the content using zlib for git compatibility (skip on WASM for stability)
+        // Compress the content using C zlib for git compatibility (skip on WASM for stability)
         const final_content = if (@import("builtin").target.os.tag == .wasi or @import("builtin").target.os.tag == .freestanding) blk: {
             // For WASM builds, store uncompressed to avoid memory issues
-            // This is a temporary workaround - repositories work but may be slightly larger
             break :blk try allocator.dupe(u8, content);
         } else blk: {
-            break :blk try zlib_compat.compressSlice(allocator, content);
+            break :blk try cCompressSlice(allocator, content);
         };
         defer allocator.free(final_content);
         
