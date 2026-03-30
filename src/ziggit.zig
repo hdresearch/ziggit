@@ -3473,20 +3473,55 @@ fn copyDirectory(source: []const u8, dest: []const u8) !void {
 
             switch (entry.kind) {
                 .file => {
-                    const source_file = try std.fs.openFileAbsolute(source_path, .{});
-                    defer source_file.close();
-
-                    const dest_file = try std.fs.createFileAbsolute(dest_path, .{ .truncate = true });
-                    defer dest_file.close();
-
-                    const content = try source_file.readToEndAlloc(allocator, 100 * 1024 * 1024);
-                    defer allocator.free(content);
-
-                    try dest_file.writeAll(content);
+                    try copyFileZeroCopy(source_path, dest_path);
                 },
                 .directory => try copyDirectory(source_path, dest_path),
                 else => {},
             }
         }
     } else |err| return err;
+}
+
+/// Zero-copy file copy using copy_file_range or sendfile syscall
+fn copyFileZeroCopy(source_path: []const u8, dest_path: []const u8) !void {
+    const source_file = try std.fs.openFileAbsolute(source_path, .{});
+    defer source_file.close();
+
+    const stat = try source_file.stat();
+    const file_size = stat.size;
+
+    const dest_file = try std.fs.createFileAbsolute(dest_path, .{ .truncate = true });
+    defer dest_file.close();
+
+    if (file_size == 0) return;
+
+    // Use copy_file_range for zero-copy kernel-space copy
+    var remaining: u64 = file_size;
+    while (remaining > 0) {
+        const copied = std.os.linux.copy_file_range(source_file.handle, null, dest_file.handle, null, remaining, 0);
+        switch (std.os.linux.E.init(copied)) {
+            .SUCCESS => {
+                const n: u64 = @intCast(copied);
+                if (n == 0) break;
+                remaining -= n;
+            },
+            else => {
+                // Fallback to sendfile
+                var sf_remaining = remaining;
+                while (sf_remaining > 0) {
+                    const chunk: usize = @min(sf_remaining, 0x7ffff000);
+                    const sent = std.os.linux.sendfile(dest_file.handle, source_file.handle, null, chunk);
+                    switch (std.os.linux.E.init(sent)) {
+                        .SUCCESS => {
+                            const s: u64 = @intCast(sent);
+                            if (s == 0) break;
+                            sf_remaining -= s;
+                        },
+                        else => return error.CopyFailed,
+                    }
+                }
+                return;
+            },
+        }
+    }
 }

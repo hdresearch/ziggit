@@ -22,6 +22,14 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    // Expose ziggit as a library module for downstream consumers (e.g., bun fork)
+    _ = b.addModule("ziggit", .{
+        .root_source_file = b.path("src/ziggit.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     // Install shell helper scripts needed by git test suite
     const shell_scripts = [_][]const u8{
         "git-sh-setup",
