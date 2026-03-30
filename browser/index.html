@@ -123,6 +123,7 @@
         const ptr = instance.exports.ziggit_alloc(128);
         const len = instance.exports.ziggit_version(ptr, 128);
         const ver = new TextDecoder().decode(new Uint8Array(mem.buffer, ptr, len));
+        instance.exports.ziggit_free(ptr, 128);
         const numExports = Object.keys(instance.exports).filter(k => typeof instance.exports[k] === 'function').length;
         document.getElementById('wasm-version').textContent = `${ver} (${numExports} exports, WASM active)`;
         console.log('WASM loaded:', ver, '— exports:', Object.keys(instance.exports).filter(k => typeof instance.exports[k] === 'function'));
@@ -172,11 +173,13 @@
       const e = wasmInstance.exports;
       const ptr = e.ziggit_alloc(data.length);
       if (!ptr) return null;
-      new Uint8Array(e.memory.buffer, ptr, data.length).set(data);
       const hashPtr = e.ziggit_alloc(20);
+      if (!hashPtr) { e.ziggit_free(ptr, data.length); return null; }
+      // Write data after all allocations (memory may have grown)
+      new Uint8Array(e.memory.buffer, ptr, data.length).set(data);
       e.ziggit_sha1(ptr, data.length, hashPtr);
-      const hashBytes = new Uint8Array(e.memory.buffer, hashPtr, 20);
-      const hex = bytesToHex(hashBytes);
+      // Read result (sha1 doesn't allocate, buffer is stable)
+      const hex = bytesToHex(new Uint8Array(e.memory.buffer, hashPtr, 20));
       e.ziggit_free(ptr, data.length);
       e.ziggit_free(hashPtr, 20);
       return hex;
@@ -264,11 +267,45 @@
       //   CMF (1 byte) + FLG (1 byte) + [DICTID (4 bytes if FLG.FDICT)] + deflate data + ADLER32 (4 bytes)
       // We MUST use raw mode because pack objects have trailing data (next object)
       // and pako's zlib mode errors with Z_DATA_ERROR on trailing bytes.
-      //
-      // In raw mode: we strip the zlib header ourselves, inflate the raw deflate,
-      // and account for the 4-byte ADLER32 checksum.
 
-      // Parse zlib header
+      // Try WASM decompression first (faster, handles byte tracking natively)
+      if (wasmInstance) {
+        try {
+          const e = wasmInstance.exports;
+          const inputLen = data.length - offset;
+          const inputPtr = e.ziggit_alloc(inputLen);
+          if (inputPtr) {
+            // Allocate all output pointers before writing data (memory may grow)
+            const outPtrPtr = e.ziggit_alloc(4);
+            const outLenPtr = e.ziggit_alloc(4);
+            const consumedPtr = e.ziggit_alloc(4);
+            // Now write input data (after all allocations, buffer is stable)
+            new Uint8Array(e.memory.buffer, inputPtr, inputLen).set(data.subarray(offset));
+            const rc = e.ziggit_zlib_decompress(inputPtr, inputLen, outPtrPtr, outLenPtr, consumedPtr);
+            if (rc === 0) {
+              // Re-read memory.buffer after WASM call (may have grown)
+              const buf = e.memory.buffer;
+              const view = new DataView(buf);
+              const resultPtr = view.getUint32(outPtrPtr, true);
+              const resultLen = view.getUint32(outLenPtr, true);
+              const consumed = view.getUint32(consumedPtr, true);
+              const result = new Uint8Array(buf, resultPtr, resultLen).slice();
+              e.ziggit_free(inputPtr, inputLen);
+              e.ziggit_free(outPtrPtr, 4);
+              e.ziggit_free(outLenPtr, 4);
+              e.ziggit_free(consumedPtr, 4);
+              e.ziggit_free(resultPtr, resultLen);
+              return { result, bytesRead: consumed };
+            }
+            e.ziggit_free(inputPtr, inputLen);
+            e.ziggit_free(outPtrPtr, 4);
+            e.ziggit_free(outLenPtr, 4);
+            e.ziggit_free(consumedPtr, 4);
+          }
+        } catch (e) { /* fall through to pako */ }
+      }
+
+      // Fallback: pako in raw mode
       if (offset + 2 > data.length) throw new Error('inflate: not enough data at offset ' + offset);
       const cmf = data[offset];
       const flg = data[offset + 1];
