@@ -795,9 +795,16 @@
           nameClass = 'blob-link';
           onclick = `showFile('${e.hash}', '${safeName}')`;
         }
-        // Show size for blobs
-        const sizeStr = e.type === 'blob' && objectDb[e.hash]
-          ? formatSize(objectDb[e.hash].data.length) : (e.type === 'commit' ? 'submodule' : '');
+        // Show size for blobs, entry count for trees
+        let sizeStr = '';
+        if (e.type === 'blob' && objectDb[e.hash]) {
+          sizeStr = formatSize(objectDb[e.hash].data.length);
+        } else if (e.type === 'tree' && objectDb[e.hash]) {
+          const subEntries = parseTree(objectDb[e.hash].data);
+          sizeStr = subEntries.length + ' items';
+        } else if (e.type === 'commit') {
+          sizeStr = 'submodule';
+        }
         tr.innerHTML =
           `<td class="info">${e.mode}</td>` +
           `<td class="info">${e.type}</td>` +
