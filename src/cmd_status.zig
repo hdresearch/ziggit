@@ -142,12 +142,12 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             defer allocator.free(config_path_track);
             const cfg = platform_impl.fs.readFile(allocator, config_path_track) catch break :upstream_display;
             defer allocator.free(cfg);
-            const track_key = try std.fmt.allocPrint(allocator, "branch \"{s}\".remote", .{current_branch});
+            const track_key = try std.fmt.allocPrint(allocator, "branch.{s}.remote", .{current_branch});
             defer allocator.free(track_key);
             const remote_val = (helpers.parseConfigValue(cfg, track_key, allocator) catch null) orelse break :upstream_display;
             defer allocator.free(remote_val);
 
-            const merge_key = try std.fmt.allocPrint(allocator, "branch \"{s}\".merge", .{current_branch});
+            const merge_key = try std.fmt.allocPrint(allocator, "branch.{s}.merge", .{current_branch});
             defer allocator.free(merge_key);
             const merge_val = (helpers.parseConfigValue(cfg, merge_key, allocator) catch null) orelse break :upstream_display;
             defer allocator.free(merge_val);
@@ -177,22 +177,22 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
 
             // helpers.Compare commits: count ahead/behind
             if (std.mem.eql(u8, current_commit.?, upstream_hash)) {
-                const up_msg = try std.fmt.allocPrint(allocator, "Your branch is up to date with '{s}'.\n\n", .{upstream_display_name});
+                const up_msg = try std.fmt.allocPrint(allocator, "Your branch is up to date with '{s}'.\n", .{upstream_display_name});
                 defer allocator.free(up_msg);
                 try platform_impl.writeStdout(up_msg);
             } else {
                 const ahead_count = helpers.countUnreachable(git_path, current_commit.?, upstream_hash, allocator, platform_impl);
                 const behind_count = helpers.countUnreachable(git_path, upstream_hash, current_commit.?, allocator, platform_impl);
                 if (ahead_count > 0 and behind_count > 0) {
-                    const up_msg = try std.fmt.allocPrint(allocator, "Your branch and '{s}' have diverged,\nand have {d} and {d} different commits each, respectively.\n  (use \"git pull\" if you want to integrate the remote branch with yours)\n\n", .{upstream_display_name, ahead_count, behind_count});
+                    const up_msg = try std.fmt.allocPrint(allocator, "Your branch and '{s}' have diverged,\nand have {d} and {d} different commits each, respectively.\n  (use \"git pull\" if you want to integrate the remote branch with yours)\n", .{upstream_display_name, ahead_count, behind_count});
                     defer allocator.free(up_msg);
                     try platform_impl.writeStdout(up_msg);
                 } else if (ahead_count > 0) {
-                    const up_msg = try std.fmt.allocPrint(allocator, "Your branch is ahead of '{s}' by {d} commit{s}.\n  (use \"git push\" to publish your local commits)\n\n", .{upstream_display_name, ahead_count, if (ahead_count > 1) "s" else ""});
+                    const up_msg = try std.fmt.allocPrint(allocator, "Your branch is ahead of '{s}' by {d} commit{s}.\n  (use \"git push\" to publish your local commits)\n", .{upstream_display_name, ahead_count, if (ahead_count > 1) "s" else ""});
                     defer allocator.free(up_msg);
                     try platform_impl.writeStdout(up_msg);
                 } else if (behind_count > 0) {
-                    const up_msg = try std.fmt.allocPrint(allocator, "Your branch is behind '{s}' by {d} commit{s}, and can be fast-forwarded.\n  (use \"git pull\" to update your local branch)\n\n", .{upstream_display_name, behind_count, if (behind_count > 1) "s" else ""});
+                    const up_msg = try std.fmt.allocPrint(allocator, "Your branch is behind '{s}' by {d} commit{s}, and can be fast-forwarded.\n  (use \"git pull\" to update your local branch)\n", .{upstream_display_name, behind_count, if (behind_count > 1) "s" else ""});
                     defer allocator.free(up_msg);
                     try platform_impl.writeStdout(up_msg);
                 }
@@ -490,6 +490,15 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         helpers.findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.array_list.Managed([]u8).init(allocator)
     else
         std.array_list.Managed([]u8).init(allocator);
+
+    // Sort untracked files alphabetically
+    if (untracked_files.items.len > 1) {
+        std.mem.sort([]u8, untracked_files.items, {}, struct {
+            fn lessThan(_: void, a: []u8, b: []u8) bool {
+                return std.mem.order(u8, a, b) == .lt;
+            }
+        }.lessThan);
+    }
     defer {
         for (untracked_files.items) |file| {
             allocator.free(file);
