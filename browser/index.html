@@ -160,7 +160,7 @@
     // --- Build want request ---
     function buildWantRequest(hash) {
       // want line with capabilities
-      const wantLine = `want ${hash} side-band-64k ofs-delta no-progress include-tag agent=ziggit-browser\n`;
+      const wantLine = `want ${hash} side-band-64k ofs-delta no-progress include-tag thin-pack agent=ziggit-browser\n`;
       const pktWant = (wantLine.length + 4).toString(16).padStart(4, '0') + wantLine;
       return pktWant + '00000009done\n';
     }
@@ -463,7 +463,7 @@
         let refsText, baseUrl;
         for (const suffix of ['.git', '']) {
           const tryUrl = repoUrl + suffix;
-          const refsUrl = corsProxy + tryUrl + '/info/refs?service=git-upload-pack';
+          const refsUrl = corsProxy + encodeURIComponent(tryUrl + '/info/refs?service=git-upload-pack');
           try {
             const refsResp = await fetch(refsUrl);
             if (refsResp.ok) {
@@ -488,7 +488,7 @@
         // 2. Request pack
         const packBody = buildWantRequest(headHash);
         console.log('Pack request:', packBody);
-        const packResp = await fetch(corsProxy + baseUrl + '/git-upload-pack', {
+        const packResp = await fetch(corsProxy + encodeURIComponent(baseUrl + '/git-upload-pack'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-git-upload-pack-request' },
           body: packBody
