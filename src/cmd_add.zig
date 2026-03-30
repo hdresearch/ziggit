@@ -332,8 +332,9 @@ fn emitCrlfWarning(allocator: std.mem.Allocator, relative_path: []const u8, full
         .no_text => {},
         .unspecified => {
             // No text attribute - only autocrlf=true generates warnings
+            // Don't warn for files with lone CR (inconsistent endings)
             if (autocrlf_val) |ac| {
-                if (std.mem.eql(u8, ac, "true") and is_text and hasBareLf(content)) {
+                if (std.mem.eql(u8, ac, "true") and is_text and hasBareLf(content) and !hasLoneCr(content)) {
                     const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', LF will be replaced by CRLF the next time Git touches it\n", .{relative_path});
                     defer allocator.free(msg);
                     platform_impl.writeStderr(msg) catch {};
@@ -384,6 +385,14 @@ fn hasCrlf(content: []const u8) bool {
 fn hasBareLf(content: []const u8) bool {
     for (content, 0..) |c, i| {
         if (c == '\n' and (i == 0 or content[i - 1] != '\r')) return true;
+    }
+    return false;
+}
+
+/// Check if content has lone CR (CR not followed by LF).
+fn hasLoneCr(content: []const u8) bool {
+    for (content, 0..) |c, i| {
+        if (c == '\r' and (i + 1 >= content.len or content[i + 1] != '\n')) return true;
     }
     return false;
 }
