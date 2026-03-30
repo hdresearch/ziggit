@@ -123,6 +123,22 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         } else |_| {}
     }
 
+    // Check advice.statusHints config
+    var show_hints = true;
+    {
+        const config_path_hints = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+        defer allocator.free(config_path_hints);
+        if (platform_impl.fs.readFile(allocator, config_path_hints)) |cfg| {
+            defer allocator.free(cfg);
+            if (helpers.parseConfigValue(cfg, "advice.statushints", allocator) catch null) |val| {
+                defer allocator.free(val);
+                if (std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "0")) {
+                    show_hints = false;
+                }
+            }
+        } else |_| {}
+    }
+
     // helpers.Get current branch
     const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch try allocator.dupe(u8, "master");
     defer allocator.free(current_branch);
@@ -184,17 +200,20 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                 const ahead_count = helpers.countUnreachable(git_path, current_commit.?, upstream_hash, allocator, platform_impl);
                 const behind_count = helpers.countUnreachable(git_path, upstream_hash, current_commit.?, allocator, platform_impl);
                 if (ahead_count > 0 and behind_count > 0) {
-                    const up_msg = try std.fmt.allocPrint(allocator, "Your branch and '{s}' have diverged,\nand have {d} and {d} different commits each, respectively.\n  (use \"git pull\" if you want to integrate the remote branch with yours)\n", .{upstream_display_name, ahead_count, behind_count});
+                    const up_msg = try std.fmt.allocPrint(allocator, "Your branch and '{s}' have diverged,\nand have {d} and {d} different commits each, respectively.\n", .{upstream_display_name, ahead_count, behind_count});
                     defer allocator.free(up_msg);
                     try platform_impl.writeStdout(up_msg);
+                    if (show_hints) try platform_impl.writeStdout("  (use \"git pull\" if you want to integrate the remote branch with yours)\n");
                 } else if (ahead_count > 0) {
-                    const up_msg = try std.fmt.allocPrint(allocator, "Your branch is ahead of '{s}' by {d} commit{s}.\n  (use \"git push\" to publish your local commits)\n", .{upstream_display_name, ahead_count, if (ahead_count > 1) "s" else ""});
+                    const up_msg = try std.fmt.allocPrint(allocator, "Your branch is ahead of '{s}' by {d} commit{s}.\n", .{upstream_display_name, ahead_count, if (ahead_count > 1) "s" else ""});
                     defer allocator.free(up_msg);
                     try platform_impl.writeStdout(up_msg);
+                    if (show_hints) try platform_impl.writeStdout("  (use \"git push\" to publish your local commits)\n");
                 } else if (behind_count > 0) {
-                    const up_msg = try std.fmt.allocPrint(allocator, "Your branch is behind '{s}' by {d} commit{s}, and can be fast-forwarded.\n  (use \"git pull\" to update your local branch)\n", .{upstream_display_name, behind_count, if (behind_count > 1) "s" else ""});
+                    const up_msg = try std.fmt.allocPrint(allocator, "Your branch is behind '{s}' by {d} commit{s}, and can be fast-forwarded.\n", .{upstream_display_name, behind_count, if (behind_count > 1) "s" else ""});
                     defer allocator.free(up_msg);
                     try platform_impl.writeStdout(up_msg);
+                    if (show_hints) try platform_impl.writeStdout("  (use \"git pull\" to update your local branch)\n");
                 }
             }
         }
@@ -416,9 +435,9 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         } else {
             try platform_impl.writeStdout("\nChanges to be committed:\n");
             if (current_commit == null) {
-                try platform_impl.writeStdout("  (use \"git rm --cached <file>...\" to unstage)\n");
+                if (show_hints) try platform_impl.writeStdout("  (use \"git rm --cached <file>...\" to unstage)\n");
             } else {
-                try platform_impl.writeStdout("  (use \"git restore --staged <file>...\" to unstage)\n");
+                if (show_hints) try platform_impl.writeStdout("  (use \"git restore --staged <file>...\" to unstage)\n");
             }
             
             for (staged_files.items) |entry| {
@@ -450,8 +469,8 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             }
         } else {
             try platform_impl.writeStdout("\nChanges not staged for commit:\n");
-            try platform_impl.writeStdout("  (use \"git add <file>...\" to update what will be committed)\n");
-            try platform_impl.writeStdout("  (use \"git restore <file>...\" to discard changes in working directory)\n");
+            if (show_hints) try platform_impl.writeStdout("  (use \"git add <file>...\" to update what will be committed)\n");
+            if (show_hints) try platform_impl.writeStdout("  (use \"git restore <file>...\" to discard changes in working directory)\n");
             
             for (modified_files.items) |entry| {
                 const msg = try std.fmt.allocPrint(allocator, "\tmodified:   {s}\n", .{entry.path});
@@ -470,8 +489,8 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         } else {
             if (modified_files.items.len == 0) {
                 try platform_impl.writeStdout("\nChanges not staged for commit:\n");
-                try platform_impl.writeStdout("  (use \"git add <file>...\" to update what will be committed)\n");
-                try platform_impl.writeStdout("  (use \"git restore <file>...\" to discard changes in working directory)\n");
+                if (show_hints) try platform_impl.writeStdout("  (use \"git add <file>...\" to update what will be committed)\n");
+                if (show_hints) try platform_impl.writeStdout("  (use \"git restore <file>...\" to discard changes in working directory)\n");
             }
             
             for (deleted_files.items) |entry| {
@@ -510,7 +529,7 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             }
         } else {
             try platform_impl.writeStdout("\nUntracked files:\n");
-            try platform_impl.writeStdout("  (use \"git add <file>...\" to include in what will be committed)\n");
+            if (show_hints) try platform_impl.writeStdout("  (use \"git add <file>...\" to include in what will be committed)\n");
             
             for (untracked_files.items) |file| {
                 const msg = try std.fmt.allocPrint(allocator, "\t{s}\n", .{file});
