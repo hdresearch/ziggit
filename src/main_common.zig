@@ -249,6 +249,20 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 std.process.exit(129);
             }
             command_index += 1;
+        } else if (std.mem.eql(u8, arg, "--exec-path")) {
+            // --exec-path with separate value
+            if (command_index + 1 < all_original_args.items.len) {
+                command_index += 1;
+                const ep = all_original_args.items[command_index];
+                const ep_z = allocator.dupeZ(u8, ep) catch "";
+                if (ep_z.len > 0) _ = setenv("GIT_EXEC_PATH", ep_z.ptr, 1);
+            }
+            command_index += 1;
+        } else if (std.mem.startsWith(u8, arg, "--exec-path=")) {
+            const ep = arg["--exec-path=".len..];
+            const ep_z = allocator.dupeZ(u8, ep) catch "";
+            if (ep_z.len > 0) _ = setenv("GIT_EXEC_PATH", ep_z.ptr, 1);
+            command_index += 1;
         } else if (std.mem.startsWith(u8, arg, "--git-dir=") or
                    std.mem.startsWith(u8, arg, "--work-tree=") or
                    std.mem.startsWith(u8, arg, "--ref-format=") or 
