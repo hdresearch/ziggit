@@ -173,6 +173,9 @@ pub fn nativeCmdCheckAttr(allocator: std.mem.Allocator, args: *platform_mod.ArgI
     // 3. Root .gitattributes - highest precedence among repo-level rules
     if (!cached) {
         try loadAttrFile(allocator, repo_root, "", platform_impl, &attr_rules);
+    } else {
+        // --cached: still load from worktree for now (TODO: load from index)
+        try loadAttrFile(allocator, repo_root, "", platform_impl, &attr_rules);
     }
 
     // Emit warning if negative patterns were seen
@@ -340,6 +343,50 @@ pub fn loadAttrFile(allocator: std.mem.Allocator, repo_root: []const u8, subdir:
     try parseAttrContent(allocator, content, subdir, rules);
 }
 
+
+pub fn loadAttrFilesFromIndex(allocator: std.mem.Allocator, git_dir: []const u8, platform_impl: *const platform_mod.Platform, rules: *std.array_list.Managed(AttrRule)) !void {
+    var idx = index_mod.Index.load(git_dir, platform_impl, allocator) catch return;
+    defer idx.deinit();
+
+    // Collect all .gitattributes entries, sorted by depth (shallowest first)
+    var attr_entries = std.array_list.Managed(struct { path: []const u8, sha1: [20]u8, depth: usize }).init(allocator);
+    defer attr_entries.deinit();
+
+    for (idx.entries.items) |entry| {
+        if (std.mem.endsWith(u8, entry.path, "/.gitattributes") or std.mem.eql(u8, entry.path, ".gitattributes")) {
+            const depth = std.mem.count(u8, entry.path, "/");
+            attr_entries.append(.{ .path = entry.path, .sha1 = entry.sha1, .depth = depth }) catch continue;
+        }
+    }
+
+    // Sort by depth so root .gitattributes is processed first
+    std.sort.block(@TypeOf(attr_entries.items[0]), attr_entries.items, {}, struct {
+        fn lessThan(_: void, a: @TypeOf(attr_entries.items[0]), b: @TypeOf(attr_entries.items[0])) bool {
+            return a.depth < b.depth;
+        }
+    }.lessThan);
+
+    const objects_dir = std.fmt.allocPrint(allocator, "{s}/objects", .{git_dir}) catch return;
+    defer allocator.free(objects_dir);
+
+    for (attr_entries.items) |ae| {
+        // Get the prefix (directory containing .gitattributes)
+        const prefix = if (std.mem.eql(u8, ae.path, ".gitattributes"))
+            @as([]const u8, "")
+        else if (std.mem.lastIndexOfScalar(u8, ae.path, '/')) |idx2|
+            ae.path[0..idx2]
+        else
+            @as([]const u8, "");
+
+        // Read blob content
+        var hash_hex: [40]u8 = undefined;
+        _ = std.fmt.bufPrint(&hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&ae.sha1)}) catch continue;
+        var obj = objects.GitObject.load(&hash_hex, git_dir, platform_impl, allocator) catch continue;
+        defer obj.deinit(allocator);
+
+        parseAttrContent(allocator, obj.data, prefix, rules) catch continue;
+    }
+}
 
 // Flag to track if negative patterns were seen during parsing
 pub var saw_negative_pattern: bool = false;
@@ -516,27 +563,29 @@ pub fn parseAttrContent(allocator: std.mem.Allocator, content: []const u8, prefi
 
 
 pub fn attrPatternMatches(pattern: []const u8, path: []const u8, case_insensitive: bool) bool {
-    // For simple literal patterns (no glob chars), do direct matching
-    // This avoids the GitignoreEntry trimming issue with spaces
+    const has_slash = std.mem.indexOf(u8, pattern, "/") != null;
     const has_glob = std.mem.indexOfAny(u8, pattern, "*?[") != null;
-    if (!has_glob and std.mem.indexOf(u8, pattern, "/") == null) {
-        // Simple basename match: match against the last path component
+
+    if (!has_slash) {
+        // No slash in pattern: match against the basename only
         const basename = if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx| path[idx + 1 ..] else path;
-        if (case_insensitive) {
-            return std.ascii.eqlIgnoreCase(pattern, basename);
+        if (!has_glob) {
+            // Simple literal match
+            if (case_insensitive) return std.ascii.eqlIgnoreCase(pattern, basename);
+            return std.mem.eql(u8, pattern, basename);
         }
-        return std.mem.eql(u8, pattern, basename);
+        // Glob match against basename only (** without / context acts like *)
+        return globMatchBasename(pattern, basename, case_insensitive);
     }
-    if (!has_glob and std.mem.indexOf(u8, pattern, "/") != null) {
-        // Pattern with slash: match the full path
-        if (case_insensitive) {
-            return std.ascii.eqlIgnoreCase(pattern, path);
-        }
+
+    // Pattern has slash: match against full path
+    if (!has_glob) {
+        if (case_insensitive) return std.ascii.eqlIgnoreCase(pattern, path);
         return std.mem.eql(u8, pattern, path);
     }
-    // Use the gitignore glob matching for patterns with wildcards
+
+    // Glob pattern with slashes - use full path matching
     if (case_insensitive) {
-        // Lowercase both pattern and path for case-insensitive matching
         var lower_pattern_buf: [1024]u8 = undefined;
         var lower_path_buf: [1024]u8 = undefined;
         if (pattern.len <= lower_pattern_buf.len and path.len <= lower_path_buf.len) {
@@ -546,20 +595,63 @@ pub fn attrPatternMatches(pattern: []const u8, path: []const u8, case_insensitiv
             for (path, 0..) |c, i| {
                 lower_path_buf[i] = std.ascii.toLower(c);
             }
-            const lower_pattern = lower_pattern_buf[0..pattern.len];
-            const lower_path = lower_path_buf[0..path.len];
-            if (gitignore_mod.GitignoreEntry.init(lower_pattern, std.heap.page_allocator)) |entry| {
+            if (gitignore_mod.GitignoreEntry.init(lower_pattern_buf[0..pattern.len], std.heap.page_allocator)) |entry| {
                 defer entry.deinit(std.heap.page_allocator);
-                return entry.matches(lower_path, false);
-            } else |_| {
-                return false;
-            }
+                return entry.matches(lower_path_buf[0..path.len], false);
+            } else |_| return false;
         }
     }
     if (gitignore_mod.GitignoreEntry.init(pattern, std.heap.page_allocator)) |entry| {
         defer entry.deinit(std.heap.page_allocator);
         return entry.matches(path, false);
-    } else |_| {
+    } else |_| return false;
+}
+
+/// Glob match a pattern against text (basename only, ** acts like *)
+fn globMatchBasename(pattern: []const u8, text: []const u8, case_insensitive: bool) bool {
+    var pi: usize = 0;
+    var ti: usize = 0;
+    var star_pi: ?usize = null;
+    var star_ti: usize = 0;
+
+    while (ti < text.len or pi < pattern.len) {
+        if (pi < pattern.len) {
+            const pc = pattern[pi];
+            if (pc == '*') {
+                // Skip consecutive *'s (** without / acts like *)
+                star_pi = pi;
+                star_ti = ti;
+                while (pi < pattern.len and pattern[pi] == '*') pi += 1;
+                continue;
+            } else if (pc == '?' and ti < text.len) {
+                pi += 1;
+                ti += 1;
+                continue;
+            } else if (ti < text.len) {
+                const tc = text[ti];
+                const matches = if (case_insensitive)
+                    std.ascii.toLower(pc) == std.ascii.toLower(tc)
+                else
+                    pc == tc;
+                if (matches) {
+                    pi += 1;
+                    ti += 1;
+                    continue;
+                }
+            }
+        }
+
+        if (star_pi) |_| {
+            star_ti += 1;
+            if (star_ti <= text.len) {
+                pi = star_pi.?;
+                while (pi < pattern.len and pattern[pi] == '*') pi += 1;
+                ti = star_ti;
+                continue;
+            }
+        }
+
         return false;
     }
+    return true;
 }
