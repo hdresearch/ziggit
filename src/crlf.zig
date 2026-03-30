@@ -124,12 +124,13 @@ fn getCheckoutEolAction(eol_attr: EolAttr, autocrlf: ?[]const u8, eol_config: ?[
         .unspecified => {},
     }
 
-    // core.autocrlf=true overrides core.eol
+    // core.autocrlf=true overrides core.eol, input prevents CRLF on checkout
     if (autocrlf) |ac| {
         if (std.mem.eql(u8, ac, "true")) return .lf_to_crlf;
+        if (std.mem.eql(u8, ac, "input")) return .none; // input means never CRLF on checkout
     }
 
-    // Check core.eol config (only when autocrlf is not true)
+    // Check core.eol config (only when autocrlf is not true/input)
     if (eol_config) |ec| {
         if (std.mem.eql(u8, ec, "crlf")) return .lf_to_crlf;
         if (std.mem.eql(u8, ec, "lf")) return .none;
