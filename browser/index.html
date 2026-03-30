@@ -1086,6 +1086,27 @@
       const tbody = document.querySelector('#log-table tbody');
       tbody.innerHTML = '';
 
+      // Try WASM walk_commits for faster log (uses loaded pack directly)
+      if (wasmInstance && wasmInstance.exports.ziggit_walk_commits) {
+        try {
+          const commits = wasmWalkCommits(headHash, 50);
+          if (commits && commits.length > 0) {
+            for (const c of commits) {
+              const authorShort = (c.author || '').replace(/<[^>]+>.*/, '').trim();
+              const msgShort = (c.message || '').slice(0, 80);
+              const tr = document.createElement('tr');
+              tr.innerHTML =
+                `<td><span class="hash" onclick="inspectCommit('${c.hash}')">${c.hash.slice(0, 8)}</span></td>` +
+                `<td>${escHtml(authorShort)}</td>` +
+                `<td>${escHtml(msgShort)}</td>`;
+              tbody.appendChild(tr);
+            }
+            return;
+          }
+        } catch (e) { console.warn('WASM walk_commits fallback:', e); }
+      }
+
+      // JS fallback
       let hash = headHash;
       let count = 0;
       while (hash && count < 50) {
@@ -1105,6 +1126,22 @@
         hash = c.parents[0] || null;
         count++;
       }
+    }
+
+    function wasmWalkCommits(headHash, maxCount) {
+      const e = wasmInstance.exports;
+      const hp = e.ziggit_alloc(40);
+      const op = e.ziggit_alloc(4), ol = e.ziggit_alloc(4);
+      if (!hp || !op || !ol) return null;
+      new Uint8Array(e.memory.buffer, hp, 40).set(new TextEncoder().encode(headHash));
+      const rc = e.ziggit_walk_commits(hp, 40, maxCount, op, ol);
+      e.ziggit_free(hp, 40);
+      if (rc !== 0) { e.ziggit_free(op, 4); e.ziggit_free(ol, 4); return null; }
+      const v = new DataView(e.memory.buffer);
+      const jp = v.getUint32(op, true), jl = v.getUint32(ol, true);
+      const json = new TextDecoder().decode(new Uint8Array(e.memory.buffer, jp, jl));
+      e.ziggit_free(op, 4); e.ziggit_free(ol, 4); e.ziggit_free(jp, jl);
+      try { return JSON.parse(json); } catch (_) { return null; }
     }
 
     function showTree(treeHash, path) {
