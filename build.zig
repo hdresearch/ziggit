@@ -18,7 +18,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.linkLibC();
-    exe.linkSystemLibrary("z");
 
     b.installArtifact(exe);
 
