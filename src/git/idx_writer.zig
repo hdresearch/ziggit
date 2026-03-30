@@ -71,8 +71,10 @@ fn decompressToList(input: []const u8, output: *std.array_list.Managed(u8)) !usi
 
 /// Generate idx data from in-memory pack data. Returns owned slice.
 pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) ![]u8 {
-    const trace_timing = std.posix.getenv("ZIGGIT_TRACE_TIMING") != null;
-    var phase_timer = std.time.Timer.start() catch null;
+    const is_freestanding = comptime @import("builtin").os.tag == .freestanding;
+    const trace_timing = if (is_freestanding) false else (std.posix.getenv("ZIGGIT_TRACE_TIMING") != null);
+    const PhaseTimer = if (is_freestanding) ?void else ?std.time.Timer;
+    var phase_timer: PhaseTimer = if (is_freestanding) null else (std.time.Timer.start() catch null);
 
     if (pack_data.len < 32) return error.PackFileTooSmall;
     if (!std.mem.eql(u8, pack_data[0..4], "PACK")) return error.InvalidPackSignature;
@@ -563,13 +565,15 @@ fn applyDelta(allocator: std.mem.Allocator, base: []const u8, delta: []const u8)
 
 fn readDeltaVarint(data: []const u8, pos_ptr: *usize) usize {
     var value: usize = 0;
-    var shift: u6 = 0;
+    const ShiftT = std.math.Log2Int(usize);
+    var shift: ShiftT = 0;
+    const max_shift: ShiftT = @bitSizeOf(usize) - 7;
     while (pos_ptr.* < data.len) {
         const b = data[pos_ptr.*];
         pos_ptr.* += 1;
         value |= @as(usize, b & 0x7F) << shift;
         if (b & 0x80 == 0) break;
-        if (shift < 60) shift += 7 else break;
+        if (shift < max_shift) shift += 7 else break;
     }
     return value;
 }
