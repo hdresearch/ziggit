@@ -76,7 +76,7 @@ pub fn nativeCmdStash(allocator: std.mem.Allocator, args: *platform_mod.ArgItera
     } else if (std.mem.eql(u8, effective_subcmd, "show")) {
         try stashShow(allocator, git_path, sub_args, platform_impl);
     } else if (std.mem.eql(u8, effective_subcmd, "push") or std.mem.eql(u8, effective_subcmd, "save")) {
-        try stashPush(allocator, git_path, sub_args, effective_subcmd, platform_impl);
+        try stashPush(allocator, git_path, sub_args, effective_subcmd, is_subcommand, platform_impl);
     } else if (std.mem.eql(u8, effective_subcmd, "pop")) {
         try stashApply(allocator, git_path, sub_args, true, platform_impl);
     } else if (std.mem.eql(u8, effective_subcmd, "apply")) {
@@ -545,6 +545,7 @@ fn stashPush(
     git_path: []const u8,
     sub_args: []const []const u8,
     subcmd: []const u8,
+    explicit_push: bool,
     platform_impl: *const platform_mod.Platform,
 ) !void {
     var message: ?[]const u8 = null;
@@ -600,6 +601,14 @@ fn stashPush(
             try platform_impl.writeStderr(err_msg);
             std.process.exit(129);
         } else {
+            // Check if this looks like a misplaced subcommand
+            // (implicit push mode + subcommand name as arg)
+            if (isStashSubcommand(arg) and !explicit_push) {
+                const err_msg2 = try std.fmt.allocPrint(allocator, "error: subcommand wasn't specified; 'push' can't be assumed due to unexpected token '{s}'\n", .{arg});
+                defer allocator.free(err_msg2);
+                try platform_impl.writeStderr(err_msg2);
+                std.process.exit(1);
+            }
             // For "save" subcommand, remaining args are the message
             if (std.mem.eql(u8, subcmd, "save")) {
                 var msg_parts = std.ArrayList(u8).init(allocator);
@@ -895,6 +904,10 @@ fn stashShow(
         } else if (std.mem.eql(u8, arg, "--")) {
             // ignore
         } else if (!std.mem.startsWith(u8, arg, "-")) {
+            if (stash_ref != null) {
+                try platform_impl.writeStderr("error: Too many revisions specified: stash\n");
+                std.process.exit(1);
+            }
             stash_ref = arg;
         }
     }
@@ -1084,12 +1097,18 @@ fn stashApply(
     var restore_index = false;
     var quiet = false;
 
+    var ref_count: usize = 0;
     for (sub_args) |arg| {
         if (std.mem.eql(u8, arg, "--index")) {
             restore_index = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             quiet = true;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
+            ref_count += 1;
+            if (ref_count > 1) {
+                try platform_impl.writeStderr("error: Too many revisions specified: stash\n");
+                std.process.exit(1);
+            }
             stash_ref = arg;
         }
     }
@@ -1537,17 +1556,32 @@ fn stashDrop(
     var quiet = false;
     var stash_ref: []const u8 = "stash@{0}";
 
+    var ref_count: usize = 0;
     for (sub_args) |arg| {
         if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             quiet = true;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            const err_msg = try std.fmt.allocPrint(allocator, "error: unknown option: {s}\n", .{arg});
+            defer allocator.free(err_msg);
+            try platform_impl.writeStderr(err_msg);
+            std.process.exit(1);
         } else if (std.mem.startsWith(u8, arg, "stash@{")) {
+            ref_count += 1;
+            if (ref_count > 1) {
+                try platform_impl.writeStderr("error: Too many revisions specified: stash\n");
+                std.process.exit(1);
+            }
             stash_ref = arg;
-        } else if (!std.mem.startsWith(u8, arg, "-")) {
+        } else {
+            ref_count += 1;
+            if (ref_count > 1) {
+                try platform_impl.writeStderr("error: Too many revisions specified: stash\n");
+                std.process.exit(1);
+            }
             // Accept plain numbers, reject other strings
             if (isDigitString(arg)) {
                 stash_ref = arg;
             } else {
-                // Try to validate as a stash-like ref
                 const msg = try std.fmt.allocPrint(allocator, "error: '{s}' is not a stash-like commit\n", .{arg});
                 defer allocator.free(msg);
                 try platform_impl.writeStderr(msg);
@@ -1656,8 +1690,8 @@ fn stashBranch(
     platform_impl: *const platform_mod.Platform,
 ) !void {
     if (sub_args.len < 1) {
-        try platform_impl.writeStderr("usage: git stash branch <branchname> [<stash>]\n");
-        std.process.exit(129);
+        try platform_impl.writeStderr("error: No branch name specified\n");
+        std.process.exit(1);
     }
 
     const branch_name = sub_args[0];
@@ -1758,7 +1792,8 @@ fn stashCreate(
     ) catch {
         std.process.exit(1);
     } orelse {
-        std.process.exit(1);
+        // No changes - exit 0 with no output for 'create'
+        return;
     };
     defer allocator.free(stash_hash);
 
