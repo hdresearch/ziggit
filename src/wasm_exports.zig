@@ -1,6 +1,7 @@
 const zlib_compat = @import("git/zlib_compat.zig");
 const stream_utils = @import("git/stream_utils.zig");
 const DeltaCache = @import("git/delta_cache.zig").DeltaCache;
+const idx_writer = @import("git/idx_writer.zig");
 const gitignore = @import("git/gitignore.zig");
 const validation = @import("git/validation.zig");
 const diff = @import("git/diff.zig");
@@ -1081,7 +1082,14 @@ fn findOffsetInIdx(idx_data: []const u8, target_hash: [20]u8) ?usize {
 }
 
 /// Generate a v2 pack index from raw pack data (pure in-memory).
+/// Delegates to idx_writer.generateIdxFromData which uses a proper 2-pass
+/// approach with LRU cache for robust delta resolution.
 fn generateIdxFromPackData(allocator: std.mem.Allocator, pack_data: []const u8) ![]u8 {
+    return idx_writer.generateIdxFromData(allocator, pack_data);
+}
+
+/// Legacy implementation kept as fallback reference.
+fn generateIdxFromPackDataLegacy(allocator: std.mem.Allocator, pack_data: []const u8) ![]u8 {
     if (pack_data.len < 32) return error.PackFileTooSmall;
     if (!std.mem.eql(u8, pack_data[0..4], "PACK")) return error.InvalidPackSignature;
 

@@ -260,33 +260,38 @@
     }
 
     function smartInflate(data, offset) {
-      // Git pack uses zlib format (2-byte header + deflate + 4-byte adler32).
-      // Use pako raw inflate, manually handling the zlib wrapper for precise
-      // byte tracking so we know exactly how many bytes were consumed.
+      // Git pack uses zlib format:
+      //   CMF (1 byte) + FLG (1 byte) + [DICTID (4 bytes if FLG.FDICT)] + deflate data + ADLER32 (4 bytes)
+      // We MUST use raw mode because pack objects have trailing data (next object)
+      // and pako's zlib mode errors with Z_DATA_ERROR on trailing bytes.
+      //
+      // In raw mode: we strip the zlib header ourselves, inflate the raw deflate,
+      // and account for the 4-byte ADLER32 checksum.
+
+      // Parse zlib header
+      if (offset + 2 > data.length) throw new Error('inflate: not enough data at offset ' + offset);
       const cmf = data[offset];
       const flg = data[offset + 1];
-      const headerSize = 2 + ((flg & 0x20) ? 4 : 0); // FDICT adds 4 bytes
+      // Validate zlib header: (CMF*256 + FLG) must be a multiple of 31
+      if ((cmf * 256 + flg) % 31 !== 0) {
+        throw new Error('inflate: invalid zlib header at offset ' + offset + ' (cmf=' + cmf + ' flg=' + flg + ')');
+      }
+      const hasDict = (flg & 0x20) !== 0;
+      const headerSize = 2 + (hasDict ? 4 : 0);
       const rawData = data.subarray(offset + headerSize);
 
-      // Try pako inflate with raw mode (strips zlib header ourselves)
       try {
         const inf = new pako.Inflate({ raw: true });
         inf.push(rawData, true);
         if (inf.err === 0 && inf.result instanceof Uint8Array && inf.strm) {
+          // bytesRead = zlib header + raw deflate bytes consumed + ADLER32 (4 bytes)
           return { result: inf.result, bytesRead: headerSize + inf.strm.total_in + 4 };
         }
-      } catch (e) { /* fall through */ }
-
-      // Second attempt: use pako.inflate with full zlib handling
-      try {
-        const inf = new pako.Inflate();
-        inf.push(data.subarray(offset), true);
-        if (inf.err === 0 && inf.result instanceof Uint8Array && inf.strm) {
-          return { result: inf.result, bytesRead: headerSize + inf.strm.total_in + 4 };
-        }
-      } catch (e) { /* fall through */ }
-
-      throw new Error('inflate error at offset ' + offset);
+        throw new Error('inflate failed: pako error ' + inf.err + ' ' + (inf.msg || ''));
+      } catch (e) {
+        if (e.message && e.message.startsWith('inflate')) throw e;
+        throw new Error('inflate error at offset ' + offset + ': ' + e.message);
+      }
     }
 
     const TYPE_NAMES = { 1: 'commit', 2: 'tree', 3: 'blob', 4: 'tag' };
@@ -679,6 +684,14 @@
 
         if (payload.length === 0) continue;
 
+        // Check if this is a non-sideband line (e.g. NAK, ACK)
+        // NAK/ACK lines don't have a channel byte - they're plain text pkt-lines
+        const payloadStr = new TextDecoder().decode(payload);
+        if (payloadStr.startsWith('NAK') || payloadStr.startsWith('ACK')) {
+          console.log('git:', payloadStr.trim());
+          continue;
+        }
+
         const channel = payload[0];
         if (channel === 1) {
           // Pack data
@@ -693,7 +706,7 @@
           const msg = new TextDecoder().decode(payload.slice(1));
           console.error('git error:', msg);
         }
-        // NAK line etc - just skip
+        // Other non-sideband lines - just skip
       }
 
       if (!foundPack || chunks.length === 0) return null;
