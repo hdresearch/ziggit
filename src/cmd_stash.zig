@@ -1131,7 +1131,7 @@ fn stashApply(
         applyUntrackedFiles(allocator, git_path, repo_root, ut_hash, platform_impl) catch {};
     }
 
-    // 3-way merge: base=stash^1 tree, ours=current HEAD tree, theirs=stash tree
+    // Get base tree (stash parent), current tree, and stash tree
     const base_tree = helpers.getCommitTree(git_path, info.parent_hash, allocator, platform_impl) catch {
         try platform_impl.writeStderr("error: could not resolve stash base tree\n");
         std.process.exit(1);
@@ -1144,39 +1144,150 @@ fn stashApply(
     };
     defer allocator.free(current_tree);
 
-    const had_conflicts = helpers.mergeTreesWithConflicts(git_path, base_tree, current_tree, info.stash_tree, allocator, platform_impl) catch false;
+    // Collect file hashes from all three trees
+    var base_map = std.StringHashMap([]const u8).init(allocator);
+    defer freeStringMap(&base_map, allocator);
+    var current_map = std.StringHashMap([]const u8).init(allocator);
+    defer freeStringMap(&current_map, allocator);
+    var stash_map = std.StringHashMap([]const u8).init(allocator);
+    defer freeStringMap(&stash_map, allocator);
 
-    // If --index, restore index state
+    collectTreeFilesRecursive(allocator, git_path, base_tree, "", &base_map, platform_impl) catch {};
+    collectTreeFilesRecursive(allocator, git_path, current_tree, "", &current_map, platform_impl) catch {};
+    collectTreeFilesRecursive(allocator, git_path, info.stash_tree, "", &stash_map, platform_impl) catch {};
+
+    // For stash apply: apply the diff (base -> stash) on top of current
+    var had_conflicts = false;
+
+    // Load current index
+    var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch index_mod.Index.init(allocator);
+    defer idx.deinit();
+
+    // Collect all unique paths
+    var all_paths = std.StringHashMap(void).init(allocator);
+    defer {
+        var it = all_paths.iterator();
+        while (it.next()) |e| allocator.free(e.key_ptr.*);
+        all_paths.deinit();
+    }
+    {
+        var it = base_map.iterator();
+        while (it.next()) |e| {
+            if (!all_paths.contains(e.key_ptr.*)) try all_paths.put(try allocator.dupe(u8, e.key_ptr.*), {});
+        }
+    }
+    {
+        var it = stash_map.iterator();
+        while (it.next()) |e| {
+            if (!all_paths.contains(e.key_ptr.*)) try all_paths.put(try allocator.dupe(u8, e.key_ptr.*), {});
+        }
+    }
+
+    var path_iter = all_paths.iterator();
+    while (path_iter.next()) |path_entry| {
+        const path = path_entry.key_ptr.*;
+        const base_hash = base_map.get(path);
+        const stash_hash_for_file = stash_map.get(path);
+        const current_hash_for_file = current_map.get(path);
+
+        // If file didn't change between base and stash, skip
+        if (base_hash != null and stash_hash_for_file != null and std.mem.eql(u8, base_hash.?, stash_hash_for_file.?)) continue;
+        if (base_hash == null and stash_hash_for_file == null) continue;
+
+        const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, path });
+        defer allocator.free(file_path);
+
+        if (stash_hash_for_file == null) {
+            // File was deleted in stash
+            if (current_hash_for_file != null and base_hash != null and std.mem.eql(u8, current_hash_for_file.?, base_hash.?)) {
+                // Current matches base, safe to delete
+                std.fs.cwd().deleteFile(file_path) catch {};
+                removeIndexEntry(&idx, path);
+            } else if (current_hash_for_file != null) {
+                // Current was modified, conflict
+                had_conflicts = true;
+            } else {
+                // Already deleted in current, no action
+            }
+        } else if (base_hash == null) {
+            // File was added in stash
+            if (current_hash_for_file == null) {
+                // Not in current either, just add it
+                if (std.fs.path.dirname(file_path)) |parent| std.fs.cwd().makePath(parent) catch {};
+                const content = helpers.readBlobContent(allocator, git_path, stash_hash_for_file.?, platform_impl) catch continue;
+                defer allocator.free(content);
+                platform_impl.fs.writeFile(file_path, content) catch {};
+                updateIndexEntryFromHash(&idx, path, stash_hash_for_file.?, allocator) catch {};
+            } else if (std.mem.eql(u8, current_hash_for_file.?, stash_hash_for_file.?)) {
+                // Same content, no action needed
+            } else {
+                // Both added different content - conflict
+                had_conflicts = true;
+            }
+        } else {
+            // File was modified in stash
+            if (current_hash_for_file == null) {
+                // Deleted in current but modified in stash
+                had_conflicts = true;
+            } else if (std.mem.eql(u8, current_hash_for_file.?, base_hash.?)) {
+                // Current matches base, safe to take stash version
+                if (std.fs.path.dirname(file_path)) |parent| std.fs.cwd().makePath(parent) catch {};
+                const content = helpers.readBlobContent(allocator, git_path, stash_hash_for_file.?, platform_impl) catch continue;
+                defer allocator.free(content);
+                platform_impl.fs.writeFile(file_path, content) catch {};
+                updateIndexEntryFromHash(&idx, path, stash_hash_for_file.?, allocator) catch {};
+            } else if (std.mem.eql(u8, current_hash_for_file.?, stash_hash_for_file.?)) {
+                // Current already has stash content, no action
+            } else {
+                // Both modified differently - try content merge
+                const base_content = helpers.readBlobContent(allocator, git_path, base_hash.?, platform_impl) catch continue;
+                defer allocator.free(base_content);
+                const current_content = readWorkingFile(allocator, file_path) catch continue;
+                defer allocator.free(current_content);
+                const stash_content = helpers.readBlobContent(allocator, git_path, stash_hash_for_file.?, platform_impl) catch continue;
+                defer allocator.free(stash_content);
+
+                if (helpers.threeWayContentMerge(base_content, current_content, stash_content, allocator) catch null) |merged| {
+                    defer allocator.free(merged);
+                    platform_impl.fs.writeFile(file_path, merged) catch {};
+                } else {
+                    // Write conflict markers
+                    const conflict_content = try std.fmt.allocPrint(allocator, "<<<<<<< Updated upstream\n{s}=======\n{s}>>>>>>> Stashed changes\n", .{ current_content, stash_content });
+                    defer allocator.free(conflict_content);
+                    platform_impl.fs.writeFile(file_path, conflict_content) catch {};
+                    had_conflicts = true;
+                }
+            }
+        }
+    }
+
+    // If --index, restore index state from stash^2
     if (restore_index) {
         if (info.index_commit) |ic| {
             const idx_tree = helpers.getCommitTree(git_path, ic, allocator, platform_impl) catch null;
             if (idx_tree) |it| {
                 defer allocator.free(it);
-                helpers.updateIndexFromTree(git_path, it, allocator, platform_impl) catch {};
+                // Collect index tree files
+                var idx_map = std.StringHashMap([]const u8).init(allocator);
+                defer freeStringMap(&idx_map, allocator);
+                collectTreeFilesRecursive(allocator, git_path, it, "", &idx_map, platform_impl) catch {};
+
+                // Update index entries for files that differ between base and index commit
+                var idx_iter = idx_map.iterator();
+                while (idx_iter.next()) |e| {
+                    const ipath = e.key_ptr.*;
+                    const ihash = e.value_ptr.*;
+                    const bh = base_map.get(ipath);
+                    if (bh == null or !std.mem.eql(u8, bh.?, ihash)) {
+                        updateIndexEntryFromHash(&idx, ipath, ihash, allocator) catch {};
+                    }
+                }
             }
         }
     }
 
-    // Checkout merged files to working directory
-    if (!had_conflicts) {
-        var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch index_mod.Index.init(allocator);
-        defer idx.deinit();
-
-        for (idx.entries.items) |entry| {
-            if ((entry.flags >> 12) & 0x3 != 0) continue;
-            var hash_hex: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&entry.sha1)}) catch continue;
-            const blob_content = helpers.readBlobContent(allocator, git_path, &hash_hex, platform_impl) catch continue;
-            defer allocator.free(blob_content);
-
-            const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path });
-            defer allocator.free(full_path);
-            if (std.fs.path.dirname(full_path)) |parent| {
-                std.fs.cwd().makePath(parent) catch {};
-            }
-            platform_impl.fs.writeFile(full_path, blob_content) catch {};
-        }
-    }
+    // Save updated index
+    idx.save(git_path, platform_impl) catch {};
 
     // If pop, drop the stash entry (only if no conflicts)
     if (is_pop and !had_conflicts) {
@@ -1221,6 +1332,107 @@ fn getStashDropIndex(stash_ref: []const u8) u32 {
         return std.fmt.parseInt(u32, stash_ref, 10) catch 0;
     }
     return 0;
+}
+
+fn freeStringMap(map: *std.StringHashMap([]const u8), allocator: std.mem.Allocator) void {
+    var it = map.iterator();
+    while (it.next()) |e| {
+        allocator.free(e.key_ptr.*);
+        allocator.free(e.value_ptr.*);
+    }
+    map.deinit();
+}
+
+fn collectTreeFilesRecursive(
+    allocator: std.mem.Allocator,
+    git_path: []const u8,
+    tree_hash: []const u8,
+    prefix: []const u8,
+    map: *std.StringHashMap([]const u8),
+    platform_impl: *const platform_mod.Platform,
+) !void {
+    const tree_obj = try objects.GitObject.load(tree_hash, git_path, platform_impl, allocator);
+    defer tree_obj.deinit(allocator);
+    if (tree_obj.type != .tree) return;
+
+    var pos: usize = 0;
+    while (pos < tree_obj.data.len) {
+        const space_pos = std.mem.indexOfScalarPos(u8, tree_obj.data, pos, ' ') orelse break;
+        const mode_str = tree_obj.data[pos..space_pos];
+        const null_pos = std.mem.indexOfScalarPos(u8, tree_obj.data, space_pos + 1, 0) orelse break;
+        const name = tree_obj.data[space_pos + 1 .. null_pos];
+        if (null_pos + 21 > tree_obj.data.len) break;
+        const hash_bytes = tree_obj.data[null_pos + 1 .. null_pos + 21];
+        var hash_hex: [40]u8 = undefined;
+        _ = std.fmt.bufPrint(&hash_hex, "{}", .{std.fmt.fmtSliceHexLower(hash_bytes)}) catch break;
+        pos = null_pos + 21;
+
+        const full_name = if (prefix.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, name })
+        else
+            try allocator.dupe(u8, name);
+
+        if (std.mem.eql(u8, mode_str, "40000")) {
+            // Recurse into subdirectory
+            try collectTreeFilesRecursive(allocator, git_path, &hash_hex, full_name, map, platform_impl);
+            allocator.free(full_name);
+        } else {
+            const hash_copy = try allocator.dupe(u8, &hash_hex);
+            map.put(full_name, hash_copy) catch {
+                allocator.free(full_name);
+                allocator.free(hash_copy);
+            };
+        }
+    }
+}
+
+fn removeIndexEntry(idx: *index_mod.Index, path: []const u8) void {
+    var i: usize = 0;
+    while (i < idx.entries.items.len) {
+        if (std.mem.eql(u8, idx.entries.items[i].path, path)) {
+            _ = idx.entries.orderedRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn updateIndexEntryFromHash(idx: *index_mod.Index, path: []const u8, hash_hex: []const u8, allocator: std.mem.Allocator) !void {
+    var hash_bytes: [20]u8 = undefined;
+    for (0..20) |i| {
+        hash_bytes[i] = std.fmt.parseInt(u8, hash_hex[i * 2 .. i * 2 + 2], 16) catch 0;
+    }
+    // Find existing entry and update
+    for (idx.entries.items) |*entry| {
+        if (std.mem.eql(u8, entry.path, path)) {
+            entry.sha1 = hash_bytes;
+            return;
+        }
+    }
+    // Add new entry
+    const entry = index_mod.IndexEntry{
+        .ctime_sec = 0,
+        .ctime_nsec = 0,
+        .mtime_sec = 0,
+        .mtime_nsec = 0,
+        .dev = 0,
+        .ino = 0,
+        .mode = 0o100644,
+        .uid = 0,
+        .gid = 0,
+        .size = 0,
+        .sha1 = hash_bytes,
+        .flags = if (path.len >= 0xFFF) 0xFFF else @truncate(path.len),
+        .extended_flags = null,
+        .path = try allocator.dupe(u8, path),
+    };
+    try idx.entries.append(entry);
+}
+
+fn readWorkingFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+    return try file.readToEndAlloc(allocator, 100 * 1024 * 1024);
 }
 
 fn applyUntrackedFiles(
