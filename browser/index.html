@@ -121,7 +121,7 @@
     function status(msg, isError) {
       const el = document.getElementById('status');
       el.style.color = isError ? '#f85149' : '#f0883e';
-      if (!isError && msg && msg !== 'Ready! Click folders to expand, files to view.') {
+      if (!isError && msg && !msg.startsWith('Ready!') && !msg.startsWith('Viewing')) {
         el.innerHTML = '<span class="spinner"></span>' + escHtml(msg);
       } else {
         el.textContent = msg;
@@ -573,11 +573,15 @@
           }
         }
 
+        // Count tags
+        const tags = Object.keys(refs).filter(r => r.startsWith('refs/tags/')).map(r => r.replace('refs/tags/', ''));
+        const tagInfo = tags.length > 0 ? ` &nbsp; <strong>Tags:</strong> ${tags.length}` : '';
+
         document.getElementById('repo-details').innerHTML =
           `<strong>Branch:</strong> ${escHtml(branchName)} &nbsp; ` +
           `<strong>HEAD:</strong> <span class="hash">${headHash}</span> &nbsp; ` +
           `<strong>Objects:</strong> ${Object.keys(objectDb).length} &nbsp; ` +
-          `<strong>Downloaded:</strong> ${dlSize}`;
+          `<strong>Downloaded:</strong> ${dlSize}` + tagInfo;
 
         // Show commit log
         showLog(headHash);
@@ -794,15 +798,28 @@
     function showFile(blobHash, name) {
       const obj = objectDb[blobHash];
       if (!obj) { status('Blob not found: ' + blobHash, true); return; }
-      document.getElementById('file-panel').style.display = 'block';
+      const panel = document.getElementById('file-panel');
+      panel.style.display = 'block';
       document.getElementById('file-name').textContent = name + ' (' + formatSize(obj.data.length) + ')';
+      const contentEl = document.getElementById('file-content');
       if (isBinary(obj.data)) {
-        document.getElementById('file-content').textContent = `[Binary file, ${formatSize(obj.data.length)}]`;
+        // Check if it's an image
+        const ext = name.split('.').pop().toLowerCase();
+        if (['png','jpg','jpeg','gif','webp','svg','ico','bmp'].includes(ext)) {
+          const mime = ext === 'svg' ? 'image/svg+xml' : `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+          const blob = new Blob([obj.data], { type: mime });
+          const url = URL.createObjectURL(blob);
+          contentEl.innerHTML = `<img src="${url}" style="max-width:100%;max-height:400px;" alt="${escHtml(name)}">`;
+        } else {
+          contentEl.textContent = `[Binary file, ${formatSize(obj.data.length)}]`;
+        }
       } else {
         const text = new TextDecoder('utf-8', { fatal: false }).decode(obj.data);
-        document.getElementById('file-content').textContent =
+        contentEl.textContent =
           text.length > 200000 ? text.slice(0, 200000) + '\n... (truncated)' : text;
       }
+      // Scroll file panel into view
+      panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
 
     function inspectCommit(hash) {
