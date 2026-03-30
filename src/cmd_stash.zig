@@ -1114,6 +1114,45 @@ fn stashShow(
         }
     }
 
+    // Read stash.showPatch and stash.showStat from config if no explicit flags
+    var has_explicit_format = false;
+    for (sub_args) |arg| {
+        if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--patch") or
+            std.mem.eql(u8, arg, "--stat") or std.mem.eql(u8, arg, "--numstat") or
+            std.mem.eql(u8, arg, "--patience") or std.mem.eql(u8, arg, "--histogram") or
+            std.mem.eql(u8, arg, "--minimal") or std.mem.eql(u8, arg, "--diff-algorithm=patience") or
+            std.mem.eql(u8, arg, "--no-patch") or std.mem.eql(u8, arg, "--shortstat"))
+        {
+            has_explicit_format = true;
+            break;
+        }
+    }
+    if (!has_explicit_format) {
+        const config_path_stash = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch "";
+        defer if (config_path_stash.len > 0) allocator.free(config_path_stash);
+        if (config_path_stash.len > 0) {
+            if (platform_impl.fs.readFile(allocator, config_path_stash)) |cfg| {
+                defer allocator.free(cfg);
+                if (helpers.parseConfigValue(cfg, "stash.showpatch", allocator) catch null) |val| {
+                    defer allocator.free(val);
+                    if (std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "yes") or std.mem.eql(u8, val, "1")) {
+                        show_patch = true;
+                    } else if (std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "0")) {
+                        show_patch = false;
+                    }
+                }
+                if (helpers.parseConfigValue(cfg, "stash.showstat", allocator) catch null) |val| {
+                    defer allocator.free(val);
+                    if (std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "0")) {
+                        show_stat = false;
+                    } else if (std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "yes") or std.mem.eql(u8, val, "1")) {
+                        show_stat = true;
+                    }
+                }
+            } else |_| {}
+        }
+    }
+
     // Check for --numstat
     var numstat = false;
     for (sub_args) |arg| {
