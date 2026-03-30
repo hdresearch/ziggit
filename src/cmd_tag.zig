@@ -22,6 +22,37 @@ const build_options = @import("build_options");
 const version_mod = @import("version.zig");
 const wildmatch_mod = @import("wildmatch.zig");
 
+fn globMatchIgnoreCase(str: []const u8, pattern: []const u8) bool {
+    var si: usize = 0;
+    var pi: usize = 0;
+    var star_pi: ?usize = null;
+    var star_si: usize = 0;
+
+    while (si < str.len) {
+        if (pi < pattern.len and (pattern[pi] == '?' or std.ascii.toLower(pattern[pi]) == std.ascii.toLower(str[si]))) {
+            si += 1;
+            pi += 1;
+        } else if (pi < pattern.len and pattern[pi] == '*') {
+            star_pi = pi;
+            star_si = si;
+            pi += 1;
+        } else if (star_pi) |sp| {
+            pi = sp + 1;
+            star_si += 1;
+            si = star_si;
+        } else {
+            return false;
+        }
+    }
+    while (pi < pattern.len and pattern[pi] == '*') pi += 1;
+    return pi == pattern.len;
+}
+
+fn matchPattern(name: []const u8, pat: []const u8, icase: bool) bool {
+    if (icase) return globMatchIgnoreCase(name, pat);
+    return helpers.globMatch(name, pat);
+}
+
 pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     if (@import("builtin").target.os.tag == .freestanding) {
         try platform_impl.writeStderr("tag: not supported in freestanding mode\n");
@@ -287,7 +318,7 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             if (has_patterns) {
                 var matched = false;
                 for (patterns) |pat| {
-                    if (helpers.globMatch(entry.name, pat)) { matched = true; break; }
+                    if (matchPattern(entry.name, pat, ignore_case)) { matched = true; break; }
                 }
                 if (!matched) continue;
             }
@@ -309,7 +340,7 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                         if (has_patterns) {
                             var matched = false;
                             for (patterns) |pat| {
-                                if (helpers.globMatch(tag_short, pat)) { matched = true; break; }
+                                if (matchPattern(tag_short, pat, ignore_case)) { matched = true; break; }
                             }
                             if (!matched) continue;
                         }
