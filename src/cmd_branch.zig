@@ -477,18 +477,23 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             defer allocator.free(old_reflog_path);
             const new_reflog_path = try std.fmt.allocPrint(allocator, "{s}/logs/refs/heads/{s}", .{ git_path, new_name });
             defer allocator.free(new_reflog_path);
-            // Create parent directories for new reflog
-            if (std.fs.path.dirname(new_reflog_path)) |parent_dir| {
-                std.fs.cwd().makePath(parent_dir) catch {};
+            // Read old reflog, delete it first (to handle d/f conflicts like m -> m/m),
+            // then create new reflog
+            const reflog_content = std.fs.cwd().readFileAlloc(allocator, old_reflog_path, 10 * 1024 * 1024) catch null;
+            defer if (reflog_content) |rc| allocator.free(rc);
+            if (reflog_content != null) {
+                std.fs.cwd().deleteFile(old_reflog_path) catch {};
+                // Clean up empty parent dir from old reflog (for n/n -> n rename)
+                if (std.fs.path.dirname(old_reflog_path)) |rlp| {
+                    std.fs.cwd().deleteDir(rlp) catch {};
+                }
             }
-            std.fs.cwd().rename(old_reflog_path, new_reflog_path) catch {
-                // If rename fails, try copy + delete
-                if (std.fs.cwd().readFileAlloc(allocator, old_reflog_path, 10 * 1024 * 1024)) |content| {
-                    defer allocator.free(content);
-                    std.fs.cwd().writeFile(.{ .sub_path = new_reflog_path, .data = content }) catch {};
-                    std.fs.cwd().deleteFile(old_reflog_path) catch {};
-                } else |_| {}
-            };
+            if (reflog_content) |content| {
+                if (std.fs.path.dirname(new_reflog_path)) |nlp| {
+                    std.fs.cwd().makePath(nlp) catch {};
+                }
+                std.fs.cwd().writeFile(.{ .sub_path = new_reflog_path, .data = content }) catch {};
+            }
             // Clean up empty parent dirs for old reflog
             var parent = std.fs.path.dirname(old_name);
             while (parent) |dir| {
