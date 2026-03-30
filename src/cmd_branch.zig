@@ -930,8 +930,30 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         };
         // Set up tracking
         if (start_point) |sp| {
-            const tracking_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{sp});
-            defer allocator.free(tracking_ref);
+            // Determine remote and merge ref from start_point
+            var remote_name: []const u8 = ".";
+            var merge_ref: []const u8 = undefined;
+            var free_merge_ref = false;
+            // Check if start_point is a remote tracking branch (e.g., origin/main)
+            if (std.mem.indexOf(u8, sp, "/")) |slash| {
+                const potential_remote = sp[0..slash];
+                const potential_branch = sp[slash + 1 ..];
+                // Check if this remote exists
+                const remote_check = try std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}", .{ git_path, potential_remote });
+                defer allocator.free(remote_check);
+                if (std.fs.cwd().access(remote_check, .{})) |_| {
+                    remote_name = potential_remote;
+                    merge_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{potential_branch});
+                    free_merge_ref = true;
+                } else |_| {
+                    merge_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{sp});
+                    free_merge_ref = true;
+                }
+            } else {
+                merge_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{sp});
+                free_merge_ref = true;
+            }
+            defer if (free_merge_ref) allocator.free(merge_ref);
             // Write tracking config
             const config_path2 = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
             defer allocator.free(config_path2);
@@ -940,7 +962,7 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             var new_config = std.array_list.Managed(u8).init(allocator);
             defer new_config.deinit();
             new_config.appendSlice(existing_config) catch {};
-            const tracking_section = try std.fmt.allocPrint(allocator, "[branch \"{s}\"]\n\tremote = .\n\tmerge = {s}\n", .{branch_name, tracking_ref});
+            const tracking_section = try std.fmt.allocPrint(allocator, "[branch \"{s}\"]\n\tremote = {s}\n\tmerge = {s}\n", .{ branch_name, remote_name, merge_ref });
             defer allocator.free(tracking_section);
             new_config.appendSlice(tracking_section) catch {};
             std.fs.cwd().writeFile(.{ .sub_path = config_path2, .data = new_config.items }) catch {};
