@@ -1662,6 +1662,76 @@ export fn ziggit_crc32(data_ptr: [*]const u8, data_len: u32) u32 {
     return std.hash.crc.Crc32IsoHdlc.hash(data_ptr[0..data_len]);
 }
 
+/// Get pack statistics as JSON from the loaded pack.
+/// Returns bytes written to out_ptr, or negative on error.
+/// Format: {"version":N,"objects":N,"commits":N,"trees":N,"blobs":N,"tags":N,"ofs_deltas":N,"ref_deltas":N}
+export fn ziggit_pack_stats(out_ptr: [*]u8, out_cap: u32) i32 {
+    const pack_data = global_pack_data orelse return -1;
+    if (pack_data.len < 12) return -2;
+    if (!std.mem.eql(u8, pack_data[0..4], "PACK")) return -3;
+
+    const version = std.mem.readInt(u32, pack_data[4..8], .big);
+    const num_objects = std.mem.readInt(u32, pack_data[8..12], .big);
+
+    // Count object types by scanning pack headers
+    var commits: u32 = 0;
+    var trees: u32 = 0;
+    var blobs: u32 = 0;
+    var tags: u32 = 0;
+    var ofs_deltas: u32 = 0;
+    var ref_deltas: u32 = 0;
+
+    const allocator = getAllocator();
+    var pos: usize = 12;
+    var obj_idx: u32 = 0;
+    const content_end = if (pack_data.len >= 20) pack_data.len - 20 else pack_data.len;
+
+    while (obj_idx < num_objects and pos < content_end) {
+        const first_byte = pack_data[pos];
+        pos += 1;
+        const pack_type_num: u3 = @intCast((first_byte >> 4) & 7);
+        var cur_byte = first_byte;
+        while (cur_byte & 0x80 != 0 and pos < content_end) {
+            cur_byte = pack_data[pos];
+            pos += 1;
+        }
+
+        switch (pack_type_num) {
+            1 => commits += 1,
+            2 => trees += 1,
+            3 => blobs += 1,
+            4 => tags += 1,
+            6 => {
+                ofs_deltas += 1;
+                // Skip OFS offset
+                var ob = pack_data[pos];
+                pos += 1;
+                while (ob & 0x80 != 0 and pos < content_end) {
+                    ob = pack_data[pos];
+                    pos += 1;
+                }
+            },
+            7 => {
+                ref_deltas += 1;
+                pos += 20; // Skip SHA-1
+            },
+            else => {},
+        }
+
+        // Skip compressed data
+        const decomp_result = zlib_compat.decompressSliceWithConsumed(allocator, pack_data[pos..content_end]) catch break;
+        allocator.free(decomp_result.data);
+        pos += decomp_result.consumed;
+        obj_idx += 1;
+    }
+
+    var buf: [512]u8 = undefined;
+    const json = std.fmt.bufPrint(&buf, "{{\"version\":{d},\"objects\":{d},\"commits\":{d},\"trees\":{d},\"blobs\":{d},\"tags\":{d},\"ofs_deltas\":{d},\"ref_deltas\":{d}}}", .{ version, num_objects, commits, trees, blobs, tags, ofs_deltas, ref_deltas }) catch return -4;
+    if (json.len > out_cap) return -5;
+    @memcpy(out_ptr[0..json.len], json);
+    return @intCast(json.len);
+}
+
 /// Compress data using zlib. Returns 0 on success, negative on error.
 /// Note: Compression may fail on freestanding (known limitation).
 export fn ziggit_zlib_compress(input_ptr: [*]const u8, input_len: u32, out_ptr: *u32, out_len: *u32) i32 {
@@ -1886,6 +1956,162 @@ export fn ziggit_parse_tag(data_ptr: [*]const u8, data_len: u32, out_ptr: *u32, 
     out_ptr.* = @intFromPtr(owned.ptr);
     out_len.* = @intCast(owned.len);
     return 0;
+}
+
+/// Compare two tree objects and return changed files as JSON.
+/// Format: [{"path":"file.txt","status":"A"|"D"|"M","old_hash":"...","new_hash":"..."},...]  
+/// Returns 0 on success, negative on error.
+export fn ziggit_diff_trees(old_tree_ptr: [*]const u8, old_tree_len: u32, new_tree_ptr: [*]const u8, new_tree_len: u32, out_ptr: *u32, out_len: *u32) i32 {
+    if (old_tree_len < 40 or new_tree_len < 40) return -1;
+    const allocator = getAllocator();
+    const pack_data = global_pack_data orelse return -2;
+    const idx_data = global_idx_data orelse return -3;
+
+    var json = std.array_list.Managed(u8).init(allocator);
+    defer json.deinit();
+    json.appendSlice("[") catch return -4;
+
+    var first = true;
+    diffTreesRecursive(pack_data, idx_data, old_tree_ptr[0..40], new_tree_ptr[0..40], "", allocator, &json, &first, 0) catch return -5;
+
+    json.appendSlice("]") catch return -4;
+    const owned = json.toOwnedSlice() catch return -6;
+    out_ptr.* = @intFromPtr(owned.ptr);
+    out_len.* = @intCast(owned.len);
+    return 0;
+}
+
+fn diffTreesRecursive(
+    pack_data: []const u8,
+    idx_data: []const u8,
+    old_hex: []const u8,
+    new_hex: []const u8,
+    prefix: []const u8,
+    allocator: std.mem.Allocator,
+    json: *std.array_list.Managed(u8),
+    first: *bool,
+    depth: u32,
+) !void {
+    if (depth > 20) return;
+    if (std.mem.eql(u8, old_hex, new_hex)) return; // Trees identical
+
+    // Parse both trees into entry lists
+    const old_entries = try parseTreeEntries(pack_data, idx_data, old_hex, allocator);
+    defer {
+        for (old_entries.items) |e| { allocator.free(e.mode); allocator.free(e.name); }
+        old_entries.deinit();
+    }
+    const new_entries = try parseTreeEntries(pack_data, idx_data, new_hex, allocator);
+    defer {
+        for (new_entries.items) |e| { allocator.free(e.mode); allocator.free(e.name); }
+        new_entries.deinit();
+    }
+
+    // Merge-compare sorted entries
+    var oi: usize = 0;
+    var ni: usize = 0;
+    while (oi < old_entries.items.len or ni < new_entries.items.len) {
+        const old_entry = if (oi < old_entries.items.len) &old_entries.items[oi] else null;
+        const new_entry = if (ni < new_entries.items.len) &new_entries.items[ni] else null;
+
+        const cmp = if (old_entry != null and new_entry != null)
+            std.mem.order(u8, old_entry.?.name, new_entry.?.name)
+        else if (old_entry != null)
+            std.math.Order.lt
+        else
+            std.math.Order.gt;
+
+        const full_path_name = if (old_entry) |e| e.name else new_entry.?.name;
+        const full_path = if (prefix.len > 0)
+            std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, full_path_name }) catch continue
+        else
+            allocator.dupe(u8, full_path_name) catch continue;
+        defer allocator.free(full_path);
+
+        switch (cmp) {
+            .lt => {
+                // Deleted
+                emitDiffEntry(json, full_path, "D", &old_entry.?.hash, null, first) catch {};
+                oi += 1;
+            },
+            .gt => {
+                // Added
+                emitDiffEntry(json, full_path, "A", null, &new_entry.?.hash, first) catch {};
+                ni += 1;
+            },
+            .eq => {
+                if (!std.mem.eql(u8, &old_entry.?.hash, &new_entry.?.hash)) {
+                    const is_old_tree = std.mem.eql(u8, old_entry.?.mode, "40000") or std.mem.eql(u8, old_entry.?.mode, "040000");
+                    const is_new_tree = std.mem.eql(u8, new_entry.?.mode, "40000") or std.mem.eql(u8, new_entry.?.mode, "040000");
+                    if (is_old_tree and is_new_tree) {
+                        diffTreesRecursive(pack_data, idx_data, &old_entry.?.hash, &new_entry.?.hash, full_path, allocator, json, first, depth + 1) catch {};
+                    } else {
+                        emitDiffEntry(json, full_path, "M", &old_entry.?.hash, &new_entry.?.hash, first) catch {};
+                    }
+                }
+                oi += 1;
+                ni += 1;
+            },
+        }
+    }
+}
+
+const TreeDiffEntry = struct { mode: []const u8, name: []const u8, hash: [40]u8 };
+
+fn parseTreeEntries(pack_data: []const u8, idx_data: []const u8, tree_hex: []const u8, allocator: std.mem.Allocator) !std.array_list.Managed(TreeDiffEntry) {
+    const Entry = TreeDiffEntry;
+    var entries = std.array_list.Managed(Entry).init(allocator);
+    errdefer {
+        for (entries.items) |e| { allocator.free(e.mode); allocator.free(e.name); }
+        entries.deinit();
+    }
+
+    var hash_bytes: [20]u8 = undefined;
+    for (0..20) |i| {
+        hash_bytes[i] = std.fmt.parseInt(u8, tree_hex[i * 2 .. i * 2 + 2], 16) catch return entries;
+    }
+
+    const offset = findOffsetInIdx(idx_data, hash_bytes) orelse return entries;
+    const obj = readPackedObjectFromData(pack_data, offset, allocator) catch return entries;
+    defer obj.deinit(allocator);
+    if (obj.obj_type != .tree) return entries;
+
+    var pos: usize = 0;
+    while (pos < obj.data.len) {
+        const space = std.mem.indexOfScalarPos(u8, obj.data, pos, ' ') orelse break;
+        const null_pos = std.mem.indexOfScalarPos(u8, obj.data, space + 1, 0) orelse break;
+        if (null_pos + 21 > obj.data.len) break;
+        const entry_hash = obj.data[null_pos + 1 .. null_pos + 21];
+        const hex = std.fmt.bytesToHex(entry_hash[0..20].*, .lower);
+        try entries.append(.{
+            .mode = try allocator.dupe(u8, obj.data[pos..space]),
+            .name = try allocator.dupe(u8, obj.data[space + 1 .. null_pos]),
+            .hash = hex,
+        });
+        pos = null_pos + 21;
+    }
+    return entries;
+}
+
+fn emitDiffEntry(json: *std.array_list.Managed(u8), path: []const u8, status: []const u8, old_hash: ?*const [40]u8, new_hash: ?*const [40]u8, first: *bool) !void {
+    if (!first.*) try json.appendSlice(",");
+    first.* = false;
+    try json.appendSlice("{\"path\":\"");
+    try appendJsonEscaped(json, path);
+    try json.appendSlice("\",\"status\":\"");
+    try json.appendSlice(status);
+    try json.appendSlice("\"");
+    if (old_hash) |h| {
+        try json.appendSlice(",\"old_hash\":\"");
+        try json.appendSlice(h);
+        try json.appendSlice("\"");
+    }
+    if (new_hash) |h| {
+        try json.appendSlice(",\"new_hash\":\"");
+        try json.appendSlice(h);
+        try json.appendSlice("\"");
+    }
+    try json.appendSlice("}");
 }
 
 /// Parse a commit object and return fields as JSON.
