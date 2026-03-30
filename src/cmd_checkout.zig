@@ -22,6 +22,8 @@ const zlib_compat_mod = helpers.zlib_compat_mod;
 const build_options = @import("build_options");
 const version_mod = @import("version.zig");
 const wildmatch_mod = @import("wildmatch.zig");
+const crlf_mod = @import("crlf.zig");
+const check_attr = @import("cmd_check_attr.zig");
 
 pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     if (@import("builtin").target.os.tag == .freestanding) {
@@ -326,6 +328,17 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
         var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch return;
         defer idx.deinit();
         const repo_root = std.fs.path.dirname(git_path) orelse ".";
+
+        // Load CRLF conversion settings
+        var attr_rules = crlf_mod.loadAttrRules(allocator, repo_root, git_path, platform_impl) catch std.ArrayList(check_attr.AttrRule).init(allocator);
+        defer {
+            for (attr_rules.items) |*rule| rule.deinit(allocator);
+            attr_rules.deinit();
+        }
+        const autocrlf_val = helpers.getConfigValueByKey(git_path, "core.autocrlf", allocator);
+        defer if (autocrlf_val) |v| allocator.free(v);
+        const eol_config_val = helpers.getConfigValueByKey(git_path, "core.eol", allocator);
+        defer if (eol_config_val) |v| allocator.free(v);
         
         while (args.next()) |path| {
             for (idx.entries.items) |entry| {
@@ -340,7 +353,10 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                     defer blob.deinit(allocator);
                     const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path });
                     defer allocator.free(full_path);
-                    platform_impl.fs.writeFile(full_path, blob.data) catch {};
+                    // Apply CRLF conversion
+                    const converted = crlf_mod.applyCheckoutConversion(allocator, blob.data, entry.path, attr_rules.items, autocrlf_val, eol_config_val) catch blob.data;
+                    defer if (converted.ptr != blob.data.ptr) allocator.free(converted);
+                    platform_impl.fs.writeFile(full_path, converted) catch {};
                 }
             }
         }
@@ -960,6 +976,19 @@ pub fn cmdRestore(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     // helpers.Restore files from index to working tree
     var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch return;
     defer idx.deinit();
+
+    const repo_root_r = std.fs.path.dirname(git_path) orelse ".";
+
+    // Load CRLF conversion settings
+    var attr_rules_r = crlf_mod.loadAttrRules(allocator, repo_root_r, git_path, platform_impl) catch std.ArrayList(check_attr.AttrRule).init(allocator);
+    defer {
+        for (attr_rules_r.items) |*rule| rule.deinit(allocator);
+        attr_rules_r.deinit();
+    }
+    const autocrlf_r = helpers.getConfigValueByKey(git_path, "core.autocrlf", allocator);
+    defer if (autocrlf_r) |v| allocator.free(v);
+    const eol_r = helpers.getConfigValueByKey(git_path, "core.eol", allocator);
+    defer if (eol_r) |v| allocator.free(v);
     
     for (paths.items) |path| {
         for (idx.entries.items) |entry| {
@@ -972,10 +1001,12 @@ pub fn cmdRestore(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                 }
                 const blob = objects.GitObject.load(&hash_hex, git_path, platform_impl, allocator) catch continue;
                 defer blob.deinit(allocator);
-                const repo_root = std.fs.path.dirname(git_path) orelse ".";
-                const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path });
+                const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root_r, entry.path });
                 defer allocator.free(full_path);
-                platform_impl.fs.writeFile(full_path, blob.data) catch {};
+                // Apply CRLF conversion
+                const converted_r = crlf_mod.applyCheckoutConversion(allocator, blob.data, entry.path, attr_rules_r.items, autocrlf_r, eol_r) catch blob.data;
+                defer if (converted_r.ptr != blob.data.ptr) allocator.free(converted_r);
+                platform_impl.fs.writeFile(full_path, converted_r) catch {};
                 break;
             }
         }
