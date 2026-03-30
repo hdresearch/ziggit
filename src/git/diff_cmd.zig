@@ -2072,21 +2072,36 @@ fn doDiffNoIndex(allocator: std.mem.Allocator, opts: *const DiffOpts, positional
     const stat_a = std.fs.cwd().statFile(path_a) catch null;
     const stat_b = std.fs.cwd().statFile(path_b) catch null;
 
+    var has_diff = false;
     if (stat_a != null and stat_a.?.kind == .directory and
         stat_b != null and stat_b.?.kind == .directory)
     {
         // Compare directories
         try diffDirectories(allocator, path_a, path_b, opts, pi);
+        has_diff = true; // conservative: assume dirs differ
     } else if (stat_a != null and stat_b != null) {
-        // Compare two files
+        // Compare two files - check if they differ
+        const content_a = std.fs.cwd().readFileAlloc(allocator, path_a, 10 * 1024 * 1024) catch "";
+        defer if (content_a.len > 0) allocator.free(content_a);
+        const content_b = std.fs.cwd().readFileAlloc(allocator, path_b, 10 * 1024 * 1024) catch "";
+        defer if (content_b.len > 0) allocator.free(content_b);
+        if (!std.mem.eql(u8, content_a, content_b)) {
+            has_diff = true;
+        }
         try diffTwoFiles(allocator, path_a, path_b, opts, pi);
     } else {
         // One might be /dev/null or missing
+        has_diff = true;
         if (stat_b != null) {
             try diffNewFile(allocator, path_b, opts, pi);
         } else if (stat_a != null) {
             // Deleted file
         }
+    }
+
+    // git diff --no-index always exits 1 if there are differences
+    if (has_diff) {
+        std.process.exit(1);
     }
 }
 
