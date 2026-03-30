@@ -29,6 +29,7 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
 
     var oneline = false;
     var format_string: ?[]const u8 = null;
+
     var format_is_separator = false; // true for "format:", false for "tformat:" / "--format="
     var max_count: ?u32 = null;
     var committish: ?[]const u8 = null;
@@ -603,6 +604,7 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             try platform_impl.writeStdout("\n");
 
             // Display notes if any
+
             if (displayNote(git_path, cur_hash, allocator, platform_impl)) |note_content| {
                 defer allocator.free(note_content);
                 try platform_impl.writeStdout("Notes:\n");
