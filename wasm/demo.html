@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>ziggit – Browser Git Demo</title>
+  <style>
+    body { font-family: monospace; background: #1e1e2e; color: #cdd6f4; margin: 2em; }
+    h1 { color: #89b4fa; }
+    #output { background: #11111b; padding: 1em; border-radius: 8px; white-space: pre-wrap; min-height: 200px; max-height: 500px; overflow-y: auto; }
+    #cmd { width: 60%; padding: 0.5em; font-family: monospace; background: #313244; color: #cdd6f4; border: 1px solid #585b70; border-radius: 4px; }
+    button { padding: 0.5em 1em; background: #89b4fa; color: #1e1e2e; border: none; border-radius: 4px; cursor: pointer; font-family: monospace; }
+    button:hover { background: #74c7ec; }
+    .prompt { color: #a6e3a1; }
+  </style>
+</head>
+<body>
+  <h1>🦎 ziggit – Browser Demo</h1>
+  <p>A pure-Zig git implementation running in WebAssembly.</p>
+  <div>
+    <span class="prompt">$ ziggit </span>
+    <input id="cmd" type="text" value="--version" placeholder="command args...">
+    <button onclick="runCommand()">Run</button>
+  </div>
+  <pre id="output">Loading WASM module...</pre>
+  <script src="demo.js"></script>
+</body>
+</html>
