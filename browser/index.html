@@ -754,7 +754,12 @@
           headers: { 'Content-Type': 'application/x-git-upload-pack-request' },
           body: packBody
         });
-        if (!packResp.ok) throw new Error('Failed to fetch pack: HTTP ' + packResp.status + ' ' + packResp.statusText);
+        if (!packResp.ok) {
+          const errBody = await packResp.text().catch(() => '');
+          throw new Error('Failed to fetch pack: HTTP ' + packResp.status + ' ' + packResp.statusText + 
+            (packResp.status === 403 ? '\nThe CORS proxy may not support POST requests. Try a different proxy.' : '') +
+            (errBody ? '\n' + errBody.slice(0, 200) : ''));
+        }
 
         const packBuffer = await packResp.arrayBuffer();
         const packBytes = new Uint8Array(packBuffer);
@@ -791,7 +796,15 @@
 
         console.log('Pack data size:', packData.length);
 
-        // 4. Parse pack
+        // 4. Parse pack (try WASM-accelerated loading first)
+        let wasmPackLoaded = false;
+        if (wasmInstance && packData.length < 50 * 1024 * 1024) {
+          try {
+            wasmPackLoaded = await parsePackWasm(packData);
+          } catch (e) {
+            console.warn('WASM pack load failed, falling back to JS:', e);
+          }
+        }
         await parsePack(packData);
 
         // 5. Display results
