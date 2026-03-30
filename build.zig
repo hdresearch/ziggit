@@ -103,6 +103,7 @@ pub fn build(b: *std.Build) void {
         "ziggit_validate_sha1",
         "ziggit_validate_ref",
         "ziggit_validate_path",
+        "ziggit_diff",
     };
 
     const wasm_step = b.step("wasm", "Build WASM module for browser");
