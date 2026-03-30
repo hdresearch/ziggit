@@ -268,6 +268,7 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     defer allocator.free(git_path);
 
     var annotated = false;
+    var explicit_annotate = false;
     var message: ?[]const u8 = null;
     var message_from_m = false;
     var message_from_f = false;
@@ -296,6 +297,7 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var omit_empty = false;
     var edit_mode = false;
     var sign_mode = false;
+    var explicit_no_sign = false;
     var sign_key: ?[]const u8 = null;
     var column_mode: ?[]const u8 = null;
     var no_column = false;
@@ -304,6 +306,7 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--annotate")) {
             annotated = true;
+            explicit_annotate = true;
         } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--delete")) {
             delete_mode = true;
         } else if (std.mem.eql(u8, arg, "-l") or std.mem.eql(u8, arg, "--list")) {
@@ -357,6 +360,7 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             sign_key = args.next();
         } else if (std.mem.eql(u8, arg, "--no-sign")) {
             sign_mode = false;
+            explicit_no_sign = true;
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verify")) {
             verify_mode = true;
         } else if (std.mem.eql(u8, arg, "-n")) {
@@ -694,8 +698,25 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             try platform_impl.writeStderr(emsg);
             std.process.exit(1);
         }
-        try platform_impl.writeStderr("error: no signature found\n");
-        std.process.exit(1);
+        // Check for PGP signature
+        if (std.mem.indexOf(u8, tag_obj.data, "-----BEGIN PGP SIGNATURE-----")) |sig_start| {
+            // Extract the signed content and signature
+            const signed_content = tag_obj.data[0..sig_start];
+            const signature = tag_obj.data[sig_start..];
+            // Verify using gpg
+            const verify_result = verifyGpgSignature(allocator, signed_content, signature);
+            if (verify_result) |_| {
+                // Output tag info
+                try platform_impl.writeStdout(tag_obj.data[0..sig_start]);
+                return;
+            } else |_| {
+                try platform_impl.writeStderr("error: could not verify GPG signature\n");
+                std.process.exit(1);
+            }
+        } else {
+            try platform_impl.writeStderr("error: no signature found\n");
+            std.process.exit(1);
+        }
     }
 
     if (annotated and tag_name == null and !list_mode) {
@@ -1196,21 +1217,8 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         std.fs.cwd().makePath(parent) catch {};
     }
 
-    // Check for sign mode - requires gpg
+    // Check for sign mode
     if (sign_mode) {
-        // Check if gpg.format is configured
-        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
-        defer allocator.free(config_path);
-
-        // Try to create a signed tag using gpg
-        // For now, we need to actually invoke gpg to sign
-        // First create the tag content, then sign it
-
-        if (message == null and !edit_mode) {
-            // -s without -m means we need to open an editor
-            // For now, use empty message
-            message = "";
-        }
         annotated = true;
     }
 
@@ -1220,11 +1228,13 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         defer allocator.free(config_path2);
         if (std.fs.cwd().readFileAlloc(allocator, config_path2, 1024 * 1024)) |config_data| {
             defer allocator.free(config_data);
-            if (getConfigValue(config_data, "tag", "gpgsign")) |val| {
-                if (std.mem.eql(u8, val, "true")) sign_mode = true;
-            }
-            if (getConfigValue(config_data, "tag", "forcesignannotated")) |val| {
-                if (std.mem.eql(u8, val, "true")) sign_mode = true;
+            if (!explicit_no_sign) {
+                if (getConfigValue(config_data, "tag", "gpgsign")) |val| {
+                    if (std.mem.eql(u8, val, "true") and !explicit_annotate) sign_mode = true;
+                }
+                if (getConfigValue(config_data, "tag", "forcesignannotated")) |val| {
+                    if (std.mem.eql(u8, val, "true") and !explicit_annotate) sign_mode = true;
+                }
             }
         } else |_| {}
     }
@@ -1246,7 +1256,7 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 std.posix.getenv("EDITOR") orelse "vi";
 
             // Run editor
-            const editor_cmd = try std.fmt.allocPrint(allocator, "{s} {s}", .{ editor, tag_editmsg_path });
+            const editor_cmd = try std.fmt.allocPrint(allocator, "{s} \"{s}\"", .{ editor, tag_editmsg_path });
             defer allocator.free(editor_cmd);
 
             var child = std.process.Child.init(&[_][]const u8{ "sh", "-c", editor_cmd }, allocator);
@@ -1302,7 +1312,7 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 std.posix.getenv("VISUAL") orelse
                 std.posix.getenv("EDITOR") orelse "vi";
 
-            const editor_cmd = try std.fmt.allocPrint(allocator, "{s} {s}", .{ editor, tag_editmsg_path });
+            const editor_cmd = try std.fmt.allocPrint(allocator, "{s} \"{s}\"", .{ editor, tag_editmsg_path });
             defer allocator.free(editor_cmd);
 
             var child = std.process.Child.init(&[_][]const u8{ "sh", "-c", editor_cmd }, allocator);
@@ -1668,6 +1678,34 @@ fn formatDate(days_since_epoch: u64) DateParts {
 
 fn isLeapYear(year: u32) bool {
     return (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0);
+}
+
+fn verifyGpgSignature(allocator: std.mem.Allocator, content: []const u8, signature: []const u8) !void {
+    // Write signature to temp file
+    const sig_path = "/tmp/ziggit-verify-sig";
+    const content_path = "/tmp/ziggit-verify-content";
+    {
+        const f = try std.fs.cwd().createFile(sig_path, .{});
+        defer f.close();
+        try f.writeAll(signature);
+    }
+    {
+        const f = try std.fs.cwd().createFile(content_path, .{});
+        defer f.close();
+        try f.writeAll(content);
+    }
+    defer std.fs.cwd().deleteFile(sig_path) catch {};
+    defer std.fs.cwd().deleteFile(content_path) catch {};
+
+    var child = std.process.Child.init(&[_][]const u8{ "gpg", "--status-fd=1", "--keyid-format", "long", "--verify", sig_path, content_path }, allocator);
+    child.stdin_behavior = .Close;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+    try child.spawn();
+    _ = child.stdout.?.readToEndAlloc(allocator, 1024 * 1024) catch {};
+    _ = child.stderr.?.readToEndAlloc(allocator, 1024 * 1024) catch {};
+    const term = try child.wait();
+    if (term.Exited != 0) return error.GpgVerifyFailed;
 }
 
 fn signWithGpg(allocator: std.mem.Allocator, content: []const u8, sign_key: ?[]const u8) ![]u8 {
