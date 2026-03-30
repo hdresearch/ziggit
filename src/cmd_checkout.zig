@@ -145,6 +145,19 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
 
         // helpers.Get optional start point - resolve it to a hash
         const start_point_arg = args.next();
+        // --track without start point on detached HEAD should fail
+        if (want_track and start_point_arg == null) {
+            const head_path_check = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+            defer allocator.free(head_path_check);
+            if (platform_impl.fs.readFile(allocator, head_path_check)) |hd| {
+                defer allocator.free(hd);
+                const tr = std.mem.trim(u8, hd, " \t\r\n");
+                if (!std.mem.startsWith(u8, tr, "ref: refs/heads/")) {
+                    try platform_impl.writeStderr("fatal: Could not find remote branch '' to use as base for new branch.\n");
+                    std.process.exit(128);
+                }
+            } else |_| {}
+        }
         // Check for extra args (e.g., git checkout -b name start extra)
         if (start_point_arg != null) {
             if (args.next()) |extra| {
