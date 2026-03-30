@@ -647,6 +647,7 @@ fn stashPush(
         if (!quiet) {
             try platform_impl.writeStdout("No local changes to save\n");
         }
+        if (quiet) return;
         std.process.exit(1);
     };
     defer allocator.free(stash_hash);
@@ -682,6 +683,23 @@ fn stashPush(
         const head_tree = helpers.getCommitTree(git_path, head_hash, allocator, platform_impl) catch null;
         if (head_tree) |ht| {
             defer allocator.free(ht);
+
+            // Collect HEAD tree files to know what should exist
+            var head_files = std.StringHashMap([]const u8).init(allocator);
+            defer freeStringMap(&head_files, allocator);
+            collectTreeFilesRecursive(allocator, git_path, ht, "", &head_files, platform_impl) catch {};
+
+            // Remove files from working tree that are in old index but not in HEAD
+            var old_idx = index_mod.Index.load(git_path, platform_impl, allocator) catch index_mod.Index.init(allocator);
+            defer old_idx.deinit();
+            for (old_idx.entries.items) |entry| {
+                if (!head_files.contains(entry.path)) {
+                    const rm_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path }) catch continue;
+                    defer allocator.free(rm_path);
+                    std.fs.cwd().deleteFile(rm_path) catch {};
+                }
+            }
+
             // First checkout files to working tree
             const tree_obj = objects.GitObject.load(ht, git_path, platform_impl, allocator) catch null;
             if (tree_obj) |to| {
