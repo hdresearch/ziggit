@@ -134,7 +134,14 @@
           host_http_get: noopRet, host_http_post: noopRet,
         };
         const resp = await fetch('ziggit.wasm');
-        const { instance } = await WebAssembly.instantiateStreaming(resp, { env });
+        let instance;
+        try {
+          ({ instance } = await WebAssembly.instantiateStreaming(resp, { env }));
+        } catch (streamErr) {
+          // Fallback for servers that don't set application/wasm MIME type
+          const buf = await (await fetch('ziggit.wasm')).arrayBuffer();
+          ({ instance } = await WebAssembly.instantiate(buf, { env }));
+        }
         wasmInstance = instance;
         const mem = instance.exports.memory;
         const ptr = instance.exports.ziggit_alloc(128);
