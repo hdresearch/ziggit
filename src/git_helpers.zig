@@ -1117,7 +1117,7 @@ pub fn findGitDirectory(allocator: std.mem.Allocator, platform_impl: *const plat
 
         // First check for .git subdirectory (normal repository) or valid gitdir link
         const git_path = try std.fmt.allocPrint(allocator, "{s}/.git", .{dir_to_check});
-        std.debug.print("  checking: {s}\n", .{git_path});
+
         const git_is_valid = blk: {
             // Check if it's a directory
             if (std.fs.cwd().openDir(git_path, .{})) |d| {
