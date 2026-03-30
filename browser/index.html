@@ -52,6 +52,10 @@
     .line-numbers .code { white-space: pre-wrap; word-break: break-all; flex: 1; overflow-x: auto; }
     .submodule-link { color: #d2a8ff; cursor: default; }
     .submodule-link::before { content: '📦 '; }
+    #commit-panel { max-height: 350px; overflow-y: auto; }
+    .change-added { color: #7ee787; }
+    .change-deleted { color: #f85149; }
+    .change-modified { color: #d29922; }
   </style>
 </head>
 <body>
@@ -610,11 +614,14 @@
         const tags = Object.keys(refs).filter(r => r.startsWith('refs/tags/')).map(r => r.replace('refs/tags/', ''));
         const tagInfo = tags.length > 0 ? ` &nbsp; <strong>Tags:</strong> ${tags.length}` : '';
 
+        const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+
         document.getElementById('repo-details').innerHTML =
           `<strong>Branch:</strong> ${escHtml(branchName)} &nbsp; ` +
-          `<strong>HEAD:</strong> <span class="hash">${headHash}</span> &nbsp; ` +
+          `<strong>HEAD:</strong> <span class="hash" onclick="inspectCommit('${headHash}')">${headHash.slice(0,12)}</span> &nbsp; ` +
           `<strong>Objects:</strong> ${Object.keys(objectDb).length} &nbsp; ` +
-          `<strong>Downloaded:</strong> ${dlSize}` + tagInfo;
+          `<strong>Downloaded:</strong> ${dlSize} &nbsp; ` +
+          `<span class="timing">Cloned in ${elapsed}s</span>` + tagInfo;
 
         // Show commit log
         showLog(headHash);
@@ -624,7 +631,6 @@
         if (parsed.tree) showTree(parsed.tree, '/');
 
         showProgress(-1);
-        const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
         status(`Ready! ${Object.keys(objectDb).length} objects cloned in ${elapsed}s. Click folders to browse.`);
       } catch (e) {
         showProgress(-1);
