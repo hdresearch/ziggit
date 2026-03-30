@@ -159,33 +159,19 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *pm.ArgIterator, platform_imp
             if (std.mem.eql(u8, val, "true")) opts.suppress_blank_empty = true;
         }
 
-        // Also read from config file
+        // Also read from config file using proper GitConfig parser
         if (git_path_for_config) |gp| {
+            const config_mod = @import("config.zig");
+            var config = config_mod.GitConfig.init(allocator);
+            defer config.deinit();
             const config_path = std.fs.path.join(allocator, &.{ gp, "config" }) catch null;
             if (config_path) |cp| {
                 defer allocator.free(cp);
-                const cfg_content = std.fs.cwd().readFileAlloc(allocator, cp, 1024 * 1024) catch null;
-                if (cfg_content) |cc| {
-                    defer allocator.free(cc);
-                    // Simple parsing for diff.suppressBlankEmpty
-                    var in_diff = false;
-                    var cfg_lines = std.mem.splitScalar(u8, cc, '\n');
-                    while (cfg_lines.next()) |line| {
-                        const trimmed = std.mem.trim(u8, line, " \t\r");
-                        if (trimmed.len > 0 and trimmed[0] == '[') {
-                            in_diff = std.ascii.startsWithIgnoreCase(trimmed, "[diff");
-                        }
-                        if (in_diff) {
-                            if (std.ascii.startsWithIgnoreCase(trimmed, "suppressblankempty") or std.ascii.startsWithIgnoreCase(trimmed, "suppressBlankEmpty")) {
-                                if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
-                                    const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t");
-                                    if (std.mem.eql(u8, val, "true")) opts.suppress_blank_empty = true
-                                    else if (std.mem.eql(u8, val, "false")) opts.suppress_blank_empty = false;
-                                }
-                            }
-                        }
-                    }
-                }
+                config.parseFromFile(cp) catch {};
+            }
+            if (config.get("diff", null, "suppressBlankEmpty") orelse config.get("diff", null, "suppressblankempty")) |val| {
+                if (std.mem.eql(u8, val, "true")) opts.suppress_blank_empty = true
+                else if (std.mem.eql(u8, val, "false")) opts.suppress_blank_empty = false;
             }
         }
     }
