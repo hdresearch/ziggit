@@ -117,23 +117,23 @@ pub fn getCommitAction(text_attr: TextAttr, _: EolAttr, autocrlf: ?[]const u8, c
 }
 
 fn getCheckoutEolAction(eol_attr: EolAttr, autocrlf: ?[]const u8, eol_config: ?[]const u8) EolAction {
-    // Explicit eol attribute takes priority
+    // Explicit eol attribute takes highest priority
     switch (eol_attr) {
         .crlf => return .lf_to_crlf,
         .lf => return .none, // LF → LF = no conversion needed (content is stored as LF)
         .unspecified => {},
     }
 
-    // Check core.eol config
+    // core.autocrlf=true overrides core.eol
+    if (autocrlf) |ac| {
+        if (std.mem.eql(u8, ac, "true")) return .lf_to_crlf;
+    }
+
+    // Check core.eol config (only when autocrlf is not true)
     if (eol_config) |ec| {
         if (std.mem.eql(u8, ec, "crlf")) return .lf_to_crlf;
         if (std.mem.eql(u8, ec, "lf")) return .none;
         // "native" - on Linux, native is LF so no conversion
-    }
-
-    // Check core.autocrlf
-    if (autocrlf) |ac| {
-        if (std.mem.eql(u8, ac, "true")) return .lf_to_crlf;
     }
 
     // Default: no conversion (native LF on Linux)
