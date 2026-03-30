@@ -1388,13 +1388,23 @@ fn stashApply(
         }
     }
 
-    // Validate stash ref format for pop/apply
-    const is_valid_stash_ref = std.mem.startsWith(u8, stash_ref, "stash") or isDigitString(stash_ref) or (stash_ref.len == 40 and isHexString(stash_ref));
-    if (!is_valid_stash_ref) {
-        const msg = try std.fmt.allocPrint(allocator, "error: '{s}' is not a stash-like commit\n", .{stash_ref});
-        defer allocator.free(msg);
-        try platform_impl.writeStderr(msg);
-        std.process.exit(1);
+    // Validate stash ref format for pop/drop: must be a stash reference, not a raw hash
+    if (is_pop) {
+        const is_stash_style_ref = std.mem.startsWith(u8, stash_ref, "stash") or isDigitString(stash_ref);
+        if (!is_stash_style_ref) {
+            const msg = try std.fmt.allocPrint(allocator, "error: '{s}' is not a stash reference\n", .{stash_ref});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(1);
+        }
+    } else {
+        const is_valid_stash_ref = std.mem.startsWith(u8, stash_ref, "stash") or isDigitString(stash_ref) or (stash_ref.len == 40 and isHexString(stash_ref));
+        if (!is_valid_stash_ref) {
+            const msg = try std.fmt.allocPrint(allocator, "error: '{s}' is not a stash-like commit\n", .{stash_ref});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            std.process.exit(1);
+        }
     }
 
     const stash_hash = resolveStashRef(allocator, git_path, stash_ref, platform_impl) catch {
