@@ -1692,3 +1692,180 @@ fn matchDriverToExt(driver_name: []const u8, ext: []const u8) bool {
     }
     return false;
 }
+
+// ========== Git config parser ==========
+
+/// Parse a git config file and return entries as JSON.
+/// content_ptr/content_len: text content of .git/config
+/// out_ptr/out_len: pointers to write result JSON
+/// Format: [{"section":"core","key":"bare","value":"false"},...]  
+/// Returns 0 on success, negative on error.
+export fn ziggit_parse_config(content_ptr: [*]const u8, content_len: u32, out_ptr: *u32, out_len: *u32) i32 {
+    const allocator = getAllocator();
+    const content = content_ptr[0..content_len];
+
+    var json = std.array_list.Managed(u8).init(allocator);
+    defer json.deinit();
+    json.appendSlice("[") catch return -1;
+
+    var first = true;
+    var current_section: []const u8 = "";
+    var current_subsection: ?[]const u8 = null;
+    var lines_iter = std.mem.splitScalar(u8, content, '\n');
+
+    while (lines_iter.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0 or line[0] == '#' or line[0] == ';') continue;
+
+        if (line[0] == '[') {
+            // Section header: [section] or [section "subsection"]
+            const end = std.mem.indexOfScalar(u8, line, ']') orelse continue;
+            const header = line[1..end];
+            if (std.mem.indexOf(u8, header, " \"")) |quote_start| {
+                current_section = std.mem.trim(u8, header[0..quote_start], " \t");
+                const rest = header[quote_start + 2 ..];
+                if (std.mem.indexOfScalar(u8, rest, '"')) |qe| {
+                    current_subsection = rest[0..qe];
+                } else {
+                    current_subsection = rest;
+                }
+            } else {
+                current_section = header;
+                current_subsection = null;
+            }
+            continue;
+        }
+
+        // Key = value
+        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        const key = std.mem.trim(u8, line[0..eq], " \t");
+        const value = std.mem.trim(u8, line[eq + 1 ..], " \t");
+
+        if (!first) json.appendSlice(",") catch return -1;
+        first = false;
+
+        json.appendSlice("{\"section\":\"") catch return -1;
+        appendJsonEscaped(&json, current_section) catch return -1;
+        json.appendSlice("\"") catch return -1;
+        if (current_subsection) |sub| {
+            json.appendSlice(",\"subsection\":\"") catch return -1;
+            appendJsonEscaped(&json, sub) catch return -1;
+            json.appendSlice("\"") catch return -1;
+        }
+        json.appendSlice(",\"key\":\"") catch return -1;
+        appendJsonEscaped(&json, key) catch return -1;
+        json.appendSlice("\",\"value\":\"") catch return -1;
+        appendJsonEscaped(&json, value) catch return -1;
+        json.appendSlice("\"}") catch return -1;
+    }
+
+    json.appendSlice("]") catch return -1;
+    const owned = json.toOwnedSlice() catch return -2;
+    out_ptr.* = @intFromPtr(owned.ptr);
+    out_len.* = @intCast(owned.len);
+    return 0;
+}
+
+/// Verify pack file integrity by checking SHA-1 checksum.
+/// pack_ptr/pack_len: raw pack data
+/// Returns 0 if valid, 1 if invalid, negative on error.
+export fn ziggit_verify_pack(pack_ptr: [*]const u8, pack_len: u32) i32 {
+    if (pack_len < 32) return -1;
+    const data = pack_ptr[0..pack_len];
+
+    // Check PACK signature
+    if (!std.mem.eql(u8, data[0..4], "PACK")) return -2;
+
+    // Check version
+    const version = std.mem.readInt(u32, data[4..8], .big);
+    if (version < 2 or version > 3) return -3;
+
+    // Verify SHA-1 checksum
+    const content_end = pack_len - 20;
+    var hasher = std.crypto.hash.Sha1.init(.{});
+    hasher.update(data[0..content_end]);
+    var computed: [20]u8 = undefined;
+    hasher.final(&computed);
+
+    if (std.mem.eql(u8, &computed, data[content_end..pack_len])) return 0;
+    return 1; // checksum mismatch
+}
+
+/// Parse a commit object and return fields as JSON.
+/// data_ptr/data_len: raw commit object data (uncompressed)
+/// out_ptr/out_len: pointers to write result JSON
+/// Returns 0 on success, negative on error.
+export fn ziggit_parse_commit(data_ptr: [*]const u8, data_len: u32, out_ptr: *u32, out_len: *u32) i32 {
+    const allocator = getAllocator();
+    const data = data_ptr[0..data_len];
+
+    var json = std.array_list.Managed(u8).init(allocator);
+    defer json.deinit();
+    json.appendSlice("{") catch return -1;
+
+    var tree: ?[]const u8 = null;
+    var author: ?[]const u8 = null;
+    var committer: ?[]const u8 = null;
+    var message_start: usize = data.len;
+
+    var parents = std.array_list.Managed([]const u8).init(allocator);
+    defer parents.deinit();
+
+    var line_iter = std.mem.splitScalar(u8, data, '\n');
+    var pos: usize = 0;
+    while (line_iter.next()) |line| {
+        pos += line.len + 1;
+        if (line.len == 0) {
+            message_start = pos;
+            break;
+        }
+        if (std.mem.startsWith(u8, line, "tree ") and line.len >= 45) {
+            tree = line[5..45];
+        } else if (std.mem.startsWith(u8, line, "parent ") and line.len >= 47) {
+            parents.append(line[7..47]) catch {};
+        } else if (std.mem.startsWith(u8, line, "author ")) {
+            author = line[7..];
+        } else if (std.mem.startsWith(u8, line, "committer ")) {
+            committer = line[10..];
+        }
+    }
+
+    if (tree) |t| {
+        json.appendSlice("\"tree\":\"") catch return -1;
+        json.appendSlice(t) catch return -1;
+        json.appendSlice("\"") catch return -1;
+    }
+
+    json.appendSlice(",\"parents\":[") catch return -1;
+    for (parents.items, 0..) |p, i| {
+        if (i > 0) json.appendSlice(",") catch return -1;
+        json.appendSlice("\"") catch return -1;
+        json.appendSlice(p) catch return -1;
+        json.appendSlice("\"") catch return -1;
+    }
+    json.appendSlice("]") catch return -1;
+
+    if (author) |a| {
+        json.appendSlice(",\"author\":\"") catch return -1;
+        appendJsonEscaped(&json, a) catch return -1;
+        json.appendSlice("\"") catch return -1;
+    }
+    if (committer) |c| {
+        json.appendSlice(",\"committer\":\"") catch return -1;
+        appendJsonEscaped(&json, c) catch return -1;
+        json.appendSlice("\"") catch return -1;
+    }
+
+    if (message_start < data.len) {
+        const msg = std.mem.trimRight(u8, data[message_start..], "\n\r ");
+        json.appendSlice(",\"message\":\"") catch return -1;
+        appendJsonEscaped(&json, msg) catch return -1;
+        json.appendSlice("\"") catch return -1;
+    }
+
+    json.appendSlice("}") catch return -1;
+    const owned = json.toOwnedSlice() catch return -2;
+    out_ptr.* = @intFromPtr(owned.ptr);
+    out_len.* = @intCast(owned.len);
+    return 0;
+}
