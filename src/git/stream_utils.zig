@@ -1,9 +1,5 @@
 const std = @import("std");
 const zlib = std.compress.zlib;
-const builtin = @import("builtin");
-
-const use_c_zlib = builtin.target.os.tag != .wasi and builtin.target.cpu.arch != .wasm32 and builtin.target.cpu.arch != .wasm64;
-const c_zlib = if (use_c_zlib) @cImport({ @cInclude("zlib.h"); }) else struct {};
 
 /// Result of streaming decompress+hash operation.
 pub const DecompressHashResult = struct {
@@ -106,25 +102,6 @@ pub fn decompressInto(
     compressed_data: []const u8,
     output: *std.ArrayList(u8),
 ) !struct { decompressed_size: usize, bytes_consumed: usize } {
-    if (use_c_zlib) {
-        var stream: c_zlib.z_stream = std.mem.zeroes(c_zlib.z_stream);
-        stream.next_in = @constCast(compressed_data.ptr);
-        stream.avail_in = @intCast(@min(compressed_data.len, std.math.maxInt(c_uint)));
-        if (c_zlib.inflateInit(&stream) != c_zlib.Z_OK) return error.ZlibDecompressError;
-        defer _ = c_zlib.inflateEnd(&stream);
-        var buf: [65536]u8 = undefined;
-        var total: usize = 0;
-        while (true) {
-            stream.next_out = &buf;
-            stream.avail_out = buf.len;
-            const ret = c_zlib.inflate(&stream, c_zlib.Z_NO_FLUSH);
-            const produced = buf.len - stream.avail_out;
-            if (produced > 0) { try output.appendSlice(buf[0..produced]); total += produced; }
-            if (ret == c_zlib.Z_STREAM_END) break;
-            if (ret != c_zlib.Z_OK) return error.ZlibDecompressError;
-        }
-        return .{ .decompressed_size = total, .bytes_consumed = @intCast(stream.total_in) };
-    }
     var fbs = std.io.fixedBufferStream(compressed_data);
     var dcp = zlib.decompressor(fbs.reader());
     var chunk_buf: [16384]u8 = undefined;
@@ -143,15 +120,6 @@ pub fn decompressIntoBuf(
     compressed_data: []const u8,
     buf: []u8,
 ) !struct { decompressed_size: usize, bytes_consumed: usize } {
-    if (use_c_zlib) {
-        var dest_len: c_ulong = @intCast(buf.len);
-        var src_len: c_ulong = @intCast(@min(compressed_data.len, std.math.maxInt(c_ulong)));
-        const ret = c_zlib.uncompress2(buf.ptr, &dest_len, compressed_data.ptr, &src_len);
-        if (ret == c_zlib.Z_OK) {
-            return .{ .decompressed_size = @intCast(dest_len), .bytes_consumed = @intCast(src_len) };
-        }
-        return error.ZlibDecompressError;
-    }
     var fbs = std.io.fixedBufferStream(compressed_data);
     var dcp = zlib.decompressor(fbs.reader());
     const n = dcp.reader().readAll(buf) catch return error.ZlibDecompressError;

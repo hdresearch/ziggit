@@ -69,9 +69,6 @@ fn skipZlibPure(compressed: []const u8) !usize {
 
 /// Decompress zlib data into an ArrayList, returning consumed bytes.
 fn decompressToList(input: []const u8, output: *std.ArrayList(u8)) !usize {
-    if (use_c_zlib) {
-        return decompressToListNative(input, output);
-    }
     var fbs = std.io.fixedBufferStream(input);
     var dcp = zlib.decompressor(fbs.reader());
     var buf: [16384]u8 = undefined;
@@ -81,25 +78,6 @@ fn decompressToList(input: []const u8, output: *std.ArrayList(u8)) !usize {
         try output.appendSlice(buf[0..n]);
     }
     return fbs.pos - dcp.unreadBytes();
-}
-
-fn decompressToListNative(input: []const u8, output: *std.ArrayList(u8)) !usize {
-    var stream: c_zlib.z_stream = std.mem.zeroes(c_zlib.z_stream);
-    stream.next_in = @constCast(input.ptr);
-    stream.avail_in = @intCast(@min(input.len, std.math.maxInt(c_uint)));
-    if (c_zlib.inflateInit(&stream) != c_zlib.Z_OK) return error.ZlibDecompressError;
-    defer _ = c_zlib.inflateEnd(&stream);
-    var buf: [65536]u8 = undefined;
-    while (true) {
-        stream.next_out = &buf;
-        stream.avail_out = buf.len;
-        const ret = c_zlib.inflate(&stream, c_zlib.Z_NO_FLUSH);
-        const produced = buf.len - stream.avail_out;
-        if (produced > 0) try output.appendSlice(buf[0..produced]);
-        if (ret == c_zlib.Z_STREAM_END) break;
-        if (ret != c_zlib.Z_OK) return error.ZlibDecompressError;
-    }
-    return @intCast(stream.total_in);
 }
 
 /// Generate idx data from in-memory pack data. Returns owned slice.
