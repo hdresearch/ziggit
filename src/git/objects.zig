@@ -281,6 +281,143 @@ fn objectCacheInsert(hash_str: []const u8, obj: GitObject, allocator: std.mem.Al
     if (object_cache_alloc == null) object_cache_alloc = allocator;
 }
 
+/// Bulk-preload all commit objects from pack files into the cache.
+/// This is much faster than loading them one-by-one because:
+/// 1. Single sequential read of the pack file
+/// 2. No per-object idx lookup
+/// 3. Better CPU cache utilization
+pub fn preloadCommitsFromPacks(git_dir: []const u8, platform_impl: anytype, allocator: std.mem.Allocator) void {
+    const pack_dir_path = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir}) catch return;
+    defer allocator.free(pack_dir_path);
+
+    var pack_dir = std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true }) catch return;
+    defer pack_dir.close();
+
+    var it = pack_dir.iterate();
+    while (it.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".pack")) continue;
+
+        const pack_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir_path, entry.name }) catch continue;
+        defer allocator.free(pack_path);
+
+        // Also need the idx for OID mapping
+        const idx_name = std.fmt.allocPrint(allocator, "{s}.idx", .{entry.name[0 .. entry.name.len - 5]}) catch continue;
+        defer allocator.free(idx_name);
+        const idx_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir_path, idx_name }) catch continue;
+        defer allocator.free(idx_path);
+
+        const pack_data = getCachedPack(pack_path) orelse blk: {
+            const data = platform_impl.fs.readFile(allocator, pack_path) catch continue;
+            addToCache(allocator, "", "", pack_path, data);
+            break :blk data;
+        };
+
+        const idx_data = getCachedIdx(idx_path) orelse blk: {
+            const data = platform_impl.fs.readFile(allocator, idx_path) catch continue;
+            addToCache(allocator, idx_path, data, "", "");
+            break :blk data;
+        };
+
+        preloadCommitsFromSinglePack(pack_data, idx_data, allocator);
+    }
+}
+
+fn preloadCommitsFromSinglePack(pack_data: []const u8, idx_data: []const u8, allocator: std.mem.Allocator) void {
+    if (pack_data.len < 12 or !std.mem.eql(u8, pack_data[0..4], "PACK")) return;
+    const obj_count = std.mem.readInt(u32, pack_data[8..12], .big);
+    const content_end = pack_data.len - 20;
+
+    // Parse idx to build offset→OID mapping
+    if (idx_data.len < 8) return;
+    const idx_magic = std.mem.readInt(u32, @ptrCast(idx_data[0..4]), .big);
+    if (idx_magic != 0xff744f63) return; // only v2
+    const idx_version = std.mem.readInt(u32, @ptrCast(idx_data[4..8]), .big);
+    if (idx_version != 2) return;
+    const fanout_start: usize = 8;
+    const total_objects = std.mem.readInt(u32, @ptrCast(idx_data[fanout_start + 255 * 4 .. fanout_start + 255 * 4 + 4]), .big);
+    const sha1_table_start = fanout_start + 256 * 4;
+    const crc_table_start = sha1_table_start + @as(usize, total_objects) * 20;
+    const offset_table_start = crc_table_start + @as(usize, total_objects) * 4;
+
+    // Build offset→idx mapping for all objects
+    const OffsetEntry = struct { offset: u64, idx: u32 };
+    var offset_entries = allocator.alloc(OffsetEntry, total_objects) catch return;
+    defer allocator.free(offset_entries);
+
+    for (0..total_objects) |i| {
+        const off_pos = offset_table_start + i * 4;
+        if (off_pos + 4 > idx_data.len) break;
+        var offset: u64 = std.mem.readInt(u32, @ptrCast(idx_data[off_pos .. off_pos + 4]), .big);
+        if (offset & 0x80000000 != 0) {
+            const large_idx: usize = @intCast(offset & 0x7FFFFFFF);
+            const large_off_table = offset_table_start + total_objects * 4;
+            const large_pos = large_off_table + large_idx * 8;
+            if (large_pos + 8 <= idx_data.len) {
+                offset = std.mem.readInt(u64, @ptrCast(idx_data[large_pos .. large_pos + 8]), .big);
+            }
+        }
+        offset_entries[i] = .{ .offset = offset, .idx = @intCast(i) };
+    }
+
+    // Sort by offset for sequential pack reading
+    std.mem.sort(OffsetEntry, offset_entries, {}, struct {
+        fn cmp(_: void, a: OffsetEntry, b: OffsetEntry) bool {
+            return a.offset < b.offset;
+        }
+    }.cmp);
+
+    // Scan pack sequentially
+    _ = obj_count;
+    for (offset_entries) |oe| {
+        var pos: usize = @intCast(oe.offset);
+        if (pos >= content_end) continue;
+
+        const first_byte = pack_data[pos];
+        pos += 1;
+        const pack_type_num = (first_byte >> 4) & 7;
+        if (pack_type_num != 1) continue; // Only commits (type 1)
+
+        // Read variable-length size
+        var size: usize = @intCast(first_byte & 15);
+        var shift: u5 = 4;
+        var cur = first_byte;
+        while (cur & 0x80 != 0 and pos < content_end) {
+            cur = pack_data[pos];
+            pos += 1;
+            size |= @as(usize, cur & 0x7f) << shift;
+            if (shift < 25) shift += 7 else break;
+        }
+
+        if (pos >= content_end) continue;
+
+        // Decompress
+        const data = cDecompressSlice(allocator, pack_data[pos..], size) orelse
+            (zlib_compat.decompressSlice(allocator, pack_data[pos..]) catch continue);
+
+        // Get OID from idx
+        const sha1_off = sha1_table_start + @as(usize, oe.idx) * 20;
+        if (sha1_off + 20 > idx_data.len) {
+            allocator.free(data);
+            continue;
+        }
+        const oid = idx_data[sha1_off .. sha1_off + 20];
+
+        // Insert into cache
+        const bucket = objectCacheHash(oid[0..20].*);
+        if (object_cache_vals[bucket]) |old| {
+            if (std.mem.eql(u8, &object_cache_keys[bucket], oid)) {
+                allocator.free(data); // Already cached
+                continue;
+            }
+            if (object_cache_alloc) |a| a.free(old.data);
+        }
+        object_cache_keys[bucket] = oid[0..20].*;
+        object_cache_vals[bucket] = .{ .obj_type = .commit, .data = data };
+        if (object_cache_alloc == null) object_cache_alloc = allocator;
+    }
+}
+
 pub const ObjectType = enum {
     blob,
     tree,
