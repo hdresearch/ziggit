@@ -23,6 +23,15 @@ const build_options = @import("build_options");
 const version_mod = @import("version.zig");
 const wildmatch_mod = @import("wildmatch.zig");
 
+fn isTrailerLine(line: []const u8) bool {
+    // A trailer line matches "Key: value" or "Key #value" pattern
+    // Key must start with a letter and contain no whitespace before the separator
+    for (line, 0..) |c, i| {
+        if (c == ':' and i > 0 and i + 1 < line.len and line[i + 1] == ' ') return true;
+        if (c == ' ' or c == '\t') return false;
+    }
+    return false;
+}
 pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     if (@import("builtin").target.os.tag == .freestanding) {
         try platform_impl.writeStderr("commit: not supported in freestanding mode\n");

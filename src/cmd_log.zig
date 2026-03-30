@@ -464,9 +464,12 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         }
         const parent_hashes = parent_hashes_buf[0..parent_count];
         
-        // Build message only when needed (not for oneline without filters)
+        // Build message from commit data
         var message = std.array_list.Managed(u8).init(allocator);
         defer message.deinit();
+        if (message_start < commit_data.len) {
+            try message.appendSlice(commit_data[message_start..]);
+        }
 
         // Re-encode message if --encoding is specified and differs from commit encoding
         var reencoded_msg: ?[]u8 = null;
@@ -597,7 +600,7 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         if (invert_grep) {
             if (should_show) {
                 // Add parents to queue and continue without displaying
-                for (parent_hashes.items) |ph| {
+                for (parent_hashes) |ph| {
                     if (!visited.contains(ph)) {
                         const ts = helpers.getCommitTimestamp(ph, git_path, platform_impl, allocator);
                         try queue.append(.{ .hash = try allocator.dupe(u8, ph), .timestamp = ts });
@@ -609,7 +612,7 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         } else {
             if (!should_show) {
                 // Add parents to queue and continue without displaying
-                for (parent_hashes.items) |ph| {
+                for (parent_hashes) |ph| {
                     if (!visited.contains(ph)) {
                         const ts = helpers.getCommitTimestamp(ph, git_path, platform_impl, allocator);
                         try queue.append(.{ .hash = try allocator.dupe(u8, ph), .timestamp = ts });
@@ -632,27 +635,28 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         } else if (oneline) {
             const short_hash = cur_hash[0..@min(7, cur_hash.len)];
             const first_line = blk: {
-                var msg_lines = std.mem.splitSequence(u8, std.mem.trimRight(u8, message.items, "\n"), "\n");
-                if (msg_lines.next()) |line| {
-                    break :blk line;
-                } else {
-                    break :blk "";
-                }
+                const msg_slice = if (message_start < commit_data.len) commit_data[message_start..] else "";
+                const nl = std.mem.indexOfScalar(u8, msg_slice, '\n') orelse msg_slice.len;
+                break :blk msg_slice[0..nl];
             };
-            const oneline_output = try std.fmt.allocPrint(allocator, "{s} {s}\n", .{ short_hash, first_line });
-            defer allocator.free(oneline_output);
-            try platform_impl.writeStdout(oneline_output);
+            // Use output buffer to avoid allocPrint
+            output_buf.clearRetainingCapacity();
+            try output_buf.appendSlice(short_hash);
+            try output_buf.append(' ');
+            try output_buf.appendSlice(first_line);
+            try output_buf.append('\n');
+            try platform_impl.writeStdout(output_buf.items);
         } else {
             const commit_header = try std.fmt.allocPrint(allocator, "commit {s}\n", .{cur_hash});
             defer allocator.free(commit_header);
             try platform_impl.writeStdout(commit_header);
 
             // helpers.Show helpers.Merge line for merge commits (commits with 2+ parents)
-            if (parent_hashes.items.len > 1) {
+            if (parent_hashes.len > 1) {
                 var merge_line = std.array_list.Managed(u8).init(allocator);
                 defer merge_line.deinit();
                 try merge_line.appendSlice("Merge:");
-                for (parent_hashes.items) |ph| {
+                for (parent_hashes) |ph| {
                     try merge_line.appendSlice(" ");
                     try merge_line.appendSlice(ph[0..@min(7, ph.len)]);
                 }
@@ -712,14 +716,17 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         count += 1;
 
         // helpers.Add all parents to the queue
-        for (parent_hashes.items) |parent| {
+        for (parent_hashes) |parent| {
             if (!visited.contains(parent)) {
                 try visited.put(try allocator.dupe(u8, parent), {});
+                // Load parent to get timestamp (object cache will hold it for display pass)
                 const pts = helpers.getCommitTimestamp(parent, git_path, platform_impl, allocator);
                 try queue.append(.{ .hash = try allocator.dupe(u8, parent), .timestamp = pts });
             }
         }
     }
+    // Flush any remaining output
+    _ = &output_buf;
 }
 
 fn getNotesRef(git_path: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) []const u8 {

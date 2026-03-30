@@ -307,7 +307,7 @@ pub fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         }
         var total_count: usize = 0;
         while (count_stack.items.len > 0) {
-            const current = count_stack.pop();
+            const current = count_stack.pop() orelse break;
             if (count_visited.contains(current)) {
                 allocator.free(current);
                 continue;
@@ -379,7 +379,7 @@ pub fn cmdRevList(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     }
 
     while (queue.items.len > 0) {
-        const current = queue.pop();
+        const current = queue.pop() orelse break;
 
         if (visited.contains(current)) {
             allocator.free(current);
