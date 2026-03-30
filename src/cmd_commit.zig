@@ -237,9 +237,27 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     }
 
     // helpers.Check for empty or whitespace-only message (to match git behavior)
+    // Also treats messages that are only git trailers (Signed-off-by, etc.) as empty
     if (message) |msg| {
         const trimmed = std.mem.trim(u8, msg, " \t\n\r");
         if (trimmed.len == 0) {
+            try platform_impl.writeStderr("Aborting commit due to empty commit message.\n");
+            std.process.exit(1);
+        }
+        // Check if message is only trailers (git considers this as empty)
+        var has_non_trailer = false;
+        var line_iter = std.mem.splitScalar(u8, trimmed, '\n');
+        while (line_iter.next()) |line| {
+            const tline = std.mem.trim(u8, line, " \t\r");
+            if (tline.len == 0) continue;
+            // Skip comment lines
+            if (tline[0] == '#') continue;
+            // Check if line is a known trailer pattern (Key: value)
+            if (isTrailerLine(tline)) continue;
+            has_non_trailer = true;
+            break;
+        }
+        if (!has_non_trailer) {
             try platform_impl.writeStderr("Aborting commit due to empty commit message.\n");
             std.process.exit(1);
         }
