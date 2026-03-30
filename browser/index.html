@@ -117,8 +117,8 @@
 
     // --- Build want request ---
     function buildWantRequest(hash) {
-      // want line with minimal capabilities
-      const wantLine = `want ${hash} multi_ack_detailed no-done side-band-64k thin-pack ofs-delta agent=ziggit-browser\n`;
+      // want line with capabilities
+      const wantLine = `want ${hash} side-band-64k ofs-delta agent=ziggit-browser\n`;
       const pktWant = (wantLine.length + 4).toString(16).padStart(4, '0') + wantLine;
       return pktWant + '00000009done\n';
     }
@@ -164,120 +164,22 @@
       return { value, offset };
     }
 
-    function inflateAt(data, offset) {
-      // Use pako to inflate, returns { result, bytesRead }
-      const inflator = new pako.Inflate();
-      // We need to figure out how many bytes were consumed
-      // pako doesn't directly tell us, so we try with increasing chunks
-      // Actually, pako.inflate with the raw stream can work
-      // Let's use a Z_SYNC_FLUSH approach
-      let end = offset + 2; // minimum zlib data
-      while (end <= data.length) {
-        try {
-          const chunk = data.slice(offset, end);
-          const result = pako.inflate(chunk);
-          return { result, bytesRead: end - offset };
-        } catch (e) {
-          if (e.message && (e.message.includes('unexpected end') || e.message.includes('buffer error') || e.message.includes('invalid'))) {
-            end = Math.min(end + Math.max(1, Math.floor((end - offset) * 0.5)), data.length + 1);
-            if (end > data.length + 1) break;
-            continue;
-          }
-          // Try with full remaining data
-          try {
-            const result = pako.inflate(data.slice(offset));
-            // Need to figure out bytes consumed - use Inflate with onEnd
-            const inf = new pako.Inflate();
-            inf.push(data.slice(offset), true);
-            if (inf.err) throw new Error(inf.msg);
-            return { result: inf.result, bytesRead: data.length - offset };
-          } catch (e2) {
-            throw e;
-          }
-        }
-      }
-      // Last resort: try the entire remaining buffer
-      const result = pako.inflate(data.slice(offset));
-      return { result, bytesRead: data.length - offset };
-    }
-
-    // Better inflate that tracks consumed bytes using raw deflate
-    function inflateObject(data, offset) {
-      // zlib format: 2 byte header + deflate data + 4 byte checksum
-      // Use pako.Inflate in raw mode to control streaming
-      const inf = new pako.Inflate();
-
-      // Try binary search for the right slice length
-      let lo = offset + 8;
-      let hi = data.length;
-      let lastGood = null;
-      let lastGoodLen = hi;
-
-      // First try with all remaining data
-      try {
-        const result = pako.inflate(data.slice(offset));
-        // Now find exact consumed bytes via binary search
-        // Start with a reasonable guess
-        let tryLen = Math.min(result.length * 2 + 20, data.length - offset);
-        while (tryLen <= data.length - offset) {
-          try {
-            const r = pako.inflate(data.slice(offset, offset + tryLen));
-            if (r.length === result.length) {
-              // Try smaller
-              let lo2 = 8, hi2 = tryLen;
-              while (lo2 < hi2) {
-                const mid = (lo2 + hi2) >> 1;
-                try {
-                  const r2 = pako.inflate(data.slice(offset, offset + mid));
-                  if (r2.length === result.length) hi2 = mid;
-                  else lo2 = mid + 1;
-                } catch { lo2 = mid + 1; }
-              }
-              return { result, bytesRead: lo2 };
-            }
-          } catch { }
-          tryLen = Math.min(tryLen * 2, data.length - offset);
-          if (tryLen === data.length - offset) break;
-        }
-        return { result, bytesRead: data.length - offset };
-      } catch (e) {
-        throw new Error('inflate failed at offset ' + offset + ': ' + e.message);
-      }
-    }
-
-    // Simpler approach: use pako.Inflate in streaming mode to find consumed bytes
     function smartInflate(data, offset) {
-      // Use the inflateRaw with wbits trick won't work easily.
-      // Instead: use a Inflate instance and push data in small chunks
+      // Use pako.Inflate to decompress, tracking exact bytes consumed via total_in
       const inf = new pako.Inflate();
-      const chunkSize = 4096;
-      let pos = offset;
-      let done = false;
+      // Push all remaining data; pako will consume only the zlib stream
+      inf.push(data.slice(offset));
 
-      while (pos < data.length && !done) {
-        const end = Math.min(pos + chunkSize, data.length);
-        const chunk = data.slice(pos, end);
-        const isLast = (end >= data.length);
-        inf.push(chunk, isLast);
-        pos = end;
-
-        if (inf.err && inf.err !== 0) {
-          // Z_BUF_ERROR (code -5) or Z_DATA_ERROR can mean we've hit extra data
-          // pako uses err codes: 0=ok, 1=stream_end
-          break;
-        }
-        if (inf.ended) {
-          done = true;
-          break;
+      // Check for errors (but Z_STREAM_END and Z_BUF_ERROR after complete decompression are OK)
+      if (inf.err && inf.err !== 0) {
+        // If we got data, it's probably just trailing bytes causing error
+        if (!inf.result || inf.result.length === 0) {
+          throw new Error('inflate error at offset ' + offset + ': ' + inf.msg + ' (err=' + inf.err + ')');
         }
       }
 
-      if (inf.err && inf.err !== 0 && !inf.result) {
-        throw new Error('inflate error: ' + inf.msg);
-      }
-
-      // inf.strm.total_in tells us how many bytes were consumed
-      const bytesRead = inf.strm ? inf.strm.total_in : (pos - offset);
+      // total_in tells us exactly how many compressed bytes were consumed
+      const bytesRead = inf.strm ? inf.strm.total_in : (data.length - offset);
       return { result: inf.result, bytesRead };
     }
 
@@ -505,22 +407,25 @@
       document.getElementById('file-panel').style.display = 'none';
 
       try {
-        // 1. Fetch refs
+        // 1. Fetch refs - try with .git suffix first, then without
         status('Fetching refs...');
-        const gitUrl = repoUrl + '.git';
-        const refsUrl = corsProxy + encodeURIComponent(gitUrl + '/info/refs?service=git-upload-pack');
-        const refsResp = await fetch(refsUrl);
-        if (!refsResp.ok) {
-          // Try without .git
-          const refsUrl2 = corsProxy + encodeURIComponent(repoUrl + '/info/refs?service=git-upload-pack');
-          const refsResp2 = await fetch(refsUrl2);
-          if (!refsResp2.ok) throw new Error('Failed to fetch refs: ' + refsResp.status);
-          var refsText = await refsResp2.text();
-          var baseUrl = repoUrl;
-        } else {
-          var refsText = await refsResp.text();
-          var baseUrl = gitUrl;
+        let refsText, baseUrl;
+        for (const suffix of ['.git', '']) {
+          const tryUrl = repoUrl + suffix;
+          const refsUrl = corsProxy + encodeURIComponent(tryUrl + '/info/refs?service=git-upload-pack');
+          try {
+            const refsResp = await fetch(refsUrl);
+            if (refsResp.ok) {
+              const text = await refsResp.text();
+              if (text.includes('service=git-upload-pack') || text.match(/[0-9a-f]{40}/)) {
+                refsText = text;
+                baseUrl = tryUrl;
+                break;
+              }
+            }
+          } catch (e) { console.log('Fetch failed for', tryUrl, e); }
         }
+        if (!refsText) throw new Error('Failed to fetch refs. Check URL and CORS proxy.');
 
         const refs = parsePktLineRefs(refsText);
         console.log('Refs:', refs);
@@ -543,20 +448,17 @@
         const packBytes = new Uint8Array(packBuffer);
         console.log('Pack response size:', packBytes.length);
 
-        // 3. Find PACK signature (skip sideband framing / NAK)
-        // With side-band-64k, data comes in pkt-line frames with channel byte
-        // Let's extract pack data from sideband
-        let packData;
-        const packStart = findPackStart(packBytes);
-        if (packStart >= 0) {
-          // Check if it's sideband encoded
-          // Try to extract from sideband first
-          packData = extractFromSideband(packBytes);
-          if (!packData) {
+        // 3. Extract pack data
+        // Try sideband extraction first (we requested side-band-64k)
+        let packData = extractFromSideband(packBytes);
+        if (!packData) {
+          // Fall back to finding raw PACK signature
+          const packStart = findPackStart(packBytes);
+          if (packStart >= 0) {
             packData = packBytes.slice(packStart);
+          } else {
+            throw new Error('PACK signature not found in response');
           }
-        } else {
-          throw new Error('PACK signature not found in response');
         }
 
         console.log('Pack data size:', packData.length);
