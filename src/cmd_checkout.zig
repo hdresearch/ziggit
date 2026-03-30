@@ -645,9 +645,21 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
             }
             
             if (!quiet) {
-                const det_msg = try std.fmt.allocPrint(allocator, "Note: switching to '{s}'.\nHEAD is now at {s}\n", .{ target, actual_target[0..7] });
-                defer allocator.free(det_msg);
-                try platform_impl.writeStderr(det_msg);
+                // Check advice.detachedHead config
+                var show_advice = true;
+                if (helpers.getConfigValueByKey(git_path, "advice.detachedHead", allocator)) |val| {
+                    defer allocator.free(val);
+                    if (std.ascii.eqlIgnoreCase(val, "false")) show_advice = false;
+                }
+                if (show_advice) {
+                    const det_msg = try std.fmt.allocPrint(allocator, "Note: switching to '{s}'.\nHEAD is now at {s}\n", .{ target, actual_target[0..7] });
+                    defer allocator.free(det_msg);
+                    try platform_impl.writeStderr(det_msg);
+                } else {
+                    const det_msg = try std.fmt.allocPrint(allocator, "HEAD is now at {s}\n", .{ actual_target[0..7] });
+                    defer allocator.free(det_msg);
+                    try platform_impl.writeStderr(det_msg);
+                }
             }
             return;
         }
