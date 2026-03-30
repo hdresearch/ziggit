@@ -42,6 +42,7 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
 
     // Pre-scan for modifier flags and validate mode conflicts
     var verbose = false;
+    var force_flag = false;
     var abbrev_len: ?usize = null;
     var mode_count: u32 = 0;
     var has_delete = false;
@@ -50,6 +51,7 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     var has_list = false;
     for (all_args.items) |a| {
         if (std.mem.eql(u8, a, "-v") or std.mem.eql(u8, a, "--verbose")) verbose = true;
+        if (std.mem.eql(u8, a, "-f") or std.mem.eql(u8, a, "--force")) force_flag = true;
         if (std.mem.eql(u8, a, "--no-abbrev") or std.mem.eql(u8, a, "--abbrev=0")) abbrev_len = 40;
         if (std.mem.startsWith(u8, a, "--abbrev=")) {
             if (std.fmt.parseInt(usize, a["--abbrev=".len..], 10)) |n| {
@@ -71,6 +73,7 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         var i: usize = 0;
         while (i < all_args.items.len) {
             if (std.mem.eql(u8, all_args.items[i], "-v") or std.mem.eql(u8, all_args.items[i], "--verbose") or
+                std.mem.eql(u8, all_args.items[i], "-f") or std.mem.eql(u8, all_args.items[i], "--force") or
                 std.mem.eql(u8, all_args.items[i], "--no-abbrev") or std.mem.eql(u8, all_args.items[i], "--abbrev") or
                 std.mem.startsWith(u8, all_args.items[i], "--abbrev="))
             {
@@ -426,7 +429,7 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         }
 
         // Check if target branch already exists (for -m, not -M)
-        if (!std.mem.eql(u8, old_name, new_name) and std.mem.eql(u8, first_arg.?, "-m")) {
+        if (!std.mem.eql(u8, old_name, new_name) and std.mem.eql(u8, first_arg.?, "-m") and !force_flag) {
             const target_ref = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, new_name });
             defer allocator.free(target_ref);
             // Only fail if target has a valid hash (not a broken symref)
