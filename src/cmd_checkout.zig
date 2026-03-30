@@ -115,10 +115,23 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
 
     // helpers.Check if this is a -b flag (create new branch)
     if (std.mem.eql(u8, effective_first_arg, "-b")) {
-        const branch_name = args.next() orelse {
+        const raw_branch_name = args.next() orelse {
             try platform_impl.writeStderr("fatal: option '-b' requires a value\n");
             std.process.exit(128);
+            unreachable;
         };
+        // Resolve @{-N} to actual branch name
+        var resolved_branch_name: ?[]u8 = null;
+        defer if (resolved_branch_name) |rbn| allocator.free(rbn);
+        if (std.mem.startsWith(u8, raw_branch_name, "@{-")) {
+            if (std.mem.indexOf(u8, raw_branch_name, "}")) |close| {
+                const n_str = raw_branch_name[3..close];
+                if (std.fmt.parseInt(u32, n_str, 10)) |n| {
+                    resolved_branch_name = helpers.resolvePreviousBranch(git_path, n, allocator, platform_impl) catch null;
+                } else |_| {}
+            }
+        }
+        const branch_name = if (resolved_branch_name) |rbn| @as([]const u8, rbn) else raw_branch_name;
 
         // Check for HEAD.lock
         {
@@ -318,9 +331,30 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
 
         // helpers.Checkout the tree of the new branch head
         if (start_point != null) {
-            const commit_hash_B = refs.resolveRef(git_path, try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name}), platform_impl, allocator) catch null;
-            if (commit_hash_B) |ch| {
+            const branch_ref_B = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name});
+            defer allocator.free(branch_ref_B);
+            const commit_hash_B_opt = (refs.resolveRef(git_path, branch_ref_B, platform_impl, allocator) catch null) orelse null;
+            if (commit_hash_B_opt) |ch| {
                 defer allocator.free(ch);
+                // Check for dirty working tree that conflicts with target
+                {
+                    var dirty_files_B = std.array_list.Managed([]const u8).init(allocator);
+                    defer {
+                        for (dirty_files_B.items) |df| allocator.free(df);
+                        dirty_files_B.deinit();
+                    }
+                    checkDirtyWorkingTree(allocator, git_path, ch, platform_impl, &dirty_files_B) catch {};
+                    if (dirty_files_B.items.len > 0) {
+                        try platform_impl.writeStderr("error: Your local changes to the following files would be overwritten by checkout:\n");
+                        for (dirty_files_B.items) |df| {
+                            const dmsg = try std.fmt.allocPrint(allocator, "\t{s}\n", .{df});
+                            defer allocator.free(dmsg);
+                            try platform_impl.writeStderr(dmsg);
+                        }
+                        try platform_impl.writeStderr("Please commit your changes or stash them before you switch branches.\nAborting\n");
+                        std.process.exit(1);
+                    }
+                }
                 helpers.checkoutCommitTree(git_path, ch, allocator, platform_impl) catch {};
             }
         }
