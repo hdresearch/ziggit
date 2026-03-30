@@ -1,4 +1,8 @@
 const std = @import("std");
+const userdiff = @import("userdiff.zig");
+
+/// Funcname matcher function type
+pub const FuncnameMatcher = *const fn ([]const u8) bool;
 
 fn writeDiffHeader(writer: anytype, file_path: []const u8, old_hash: []const u8, new_hash: []const u8, old_content: []const u8, new_content: []const u8) !void {
     writer.print("diff --git a/{s} b/{s}\n", .{ file_path, file_path }) catch {};
@@ -112,10 +116,10 @@ const Edit = struct {
 };
 
 fn writeHunkHeader(writer: anytype, old_start: usize, old_count: usize, new_start: usize, new_count: usize) !void {
-    try writeHunkHeaderWithContext(writer, old_start, old_count, new_start, new_count, null);
+    try writeHunkHeaderWithContext(writer, old_start, old_count, new_start, new_count, null, null);
 }
 
-fn writeHunkHeaderWithContext(writer: anytype, old_start: usize, old_count: usize, new_start: usize, new_count: usize, old_lines: ?[]const []const u8) !void {
+fn writeHunkHeaderWithContext(writer: anytype, old_start: usize, old_count: usize, new_start: usize, new_count: usize, old_lines: ?[]const []const u8, funcname_matcher: ?FuncnameMatcher) !void {
     // Git format: omit count when it's 1, show 0 explicitly
     // When count is 0, start should be 0 too (git convention)
     const actual_old_start = if (old_count == 0) 0 else old_start;
@@ -128,9 +132,8 @@ fn writeHunkHeaderWithContext(writer: anytype, old_start: usize, old_count: usiz
     if (new_count != 1) try writer.print(",{}", .{new_count});
     try writer.writeAll(" @@");
 
-    // Find function context line: search backwards from hunk start for a line
-    // that starts with a letter, $, or _ (default funcname pattern)
-    // Search from the line BEFORE the hunk start (1-indexed old_start -> 0-indexed old_start-2)
+    // Find function context line: search backwards from hunk start
+    const matcher = funcname_matcher orelse &userdiff.matchDefault;
     if (old_lines) |lines| {
         if (actual_old_start >= 2) {
             const search_start = actual_old_start - 2; // 0-indexed line before hunk
@@ -139,7 +142,7 @@ fn writeHunkHeaderWithContext(writer: anytype, old_start: usize, old_count: usiz
                 i -= 1;
                 if (i < lines.len) {
                     const line = lines[i];
-                    if (line.len > 0 and isFuncnameByte(line[0])) {
+                    if (matcher(line)) {
                         // Truncate to 80 bytes like git (on UTF-8 boundary)
                         var byte_pos: usize = 0;
                         while (byte_pos < line.len and byte_pos < 80) {
@@ -161,9 +164,7 @@ fn writeHunkHeaderWithContext(writer: anytype, old_start: usize, old_count: usiz
     try writer.writeAll("\n");
 }
 
-fn isFuncnameByte(c: u8) bool {
-    return std.ascii.isAlphabetic(c) or c == '$' or c == '_';
-}
+// isFuncnameByte is now in userdiff.zig as matchDefault
 
 pub fn generateUnifiedDiff(old_content: []const u8, new_content: []const u8, file_path: []const u8, allocator: std.mem.Allocator) ![]u8 {
     return generateUnifiedDiffWithHashes(old_content, new_content, file_path, "0000000", "1111111", allocator);
@@ -224,7 +225,7 @@ pub fn generateUnifiedDiffWithHashes(old_content: []const u8, new_content: []con
     
     // Hunks
     for (hunks.items) |hunk| {
-        try writeHunkHeaderWithContext(writer, hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count, old_lines.items);
+        try writeHunkHeaderWithContext(writer, hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count, old_lines.items, null);
         
         for (hunk.lines.items) |line| {
             const prefix = switch (line.type) {
@@ -288,7 +289,7 @@ pub fn generateUnifiedDiffWithHashesAndContext(old_content: []const u8, new_cont
     try writeDiffHeader(writer, file_path, old_hash, new_hash, old_content, new_content);
     
     for (hunks.items) |hunk| {
-        try writeHunkHeaderWithContext(writer, hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count, old_lines.items);
+        try writeHunkHeaderWithContext(writer, hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count, old_lines.items, null);
         
         for (hunk.lines.items) |line| {
             const prefix = switch (line.type) {
@@ -611,7 +612,7 @@ pub fn generateUnifiedDiffWithOptions(
     
     // Hunks
     for (hunks.items) |hunk| {
-        try writeHunkHeaderWithContext(writer, hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count, old_lines.items);
+        try writeHunkHeaderWithContext(writer, hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count, old_lines.items, null);
         
         for (hunk.lines.items) |line| {
             const prefix = switch (line.type) {
