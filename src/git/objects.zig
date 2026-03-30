@@ -24,7 +24,7 @@ fn initCZlib() void {
 }
 
 /// Compress data using C zlib (more reliable than Zig flate)
-fn cCompressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+pub fn cCompressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     initCZlib();
     const compress_fn = zlib_compress_fn orelse return error.CompressionFailed;
     const bound_fn = zlib_compress_bound_fn orelse return error.CompressionFailed;
