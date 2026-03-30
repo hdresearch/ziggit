@@ -176,6 +176,17 @@ pub fn cmdRm(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
                     }
                 },
             };
+            // Clean up empty parent directories (like real git)
+            const repo_root = std.fs.path.dirname(git_path) orelse ".";
+            var parent = std.fs.path.dirname(path);
+            while (parent) |dir| {
+                if (dir.len == 0 or std.mem.eql(u8, dir, ".")) break;
+                const dir_full = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, dir }) catch break;
+                defer allocator.free(dir_full);
+                // Try to remove - will fail if not empty
+                std.fs.cwd().deleteDir(dir_full) catch break;
+                parent = std.fs.path.dirname(dir);
+            }
         }
     }
 
