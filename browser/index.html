@@ -51,7 +51,7 @@
     <span class="info">CORS proxy prefix</span>
   </div>
   <div class="row">
-    <input type="text" id="url" value="https://github.com/nicolo-ribaudo/tc39-proposal-structs" placeholder="Repository URL">
+    <input type="text" id="url" value="https://github.com/nicolo-ribaudo/tc39-proposal-structs" placeholder="Repository URL" onkeydown="if(event.key==='Enter')doClone()">
     <button id="cloneBtn" onclick="doClone()">Clone</button>
     <span id="status"></span>
   </div>
@@ -70,7 +70,7 @@
     <div id="tree-panel" class="panel" style="display:none">
       <h2>Files</h2>
       <div id="tree-breadcrumb" class="breadcrumb"></div>
-      <table id="tree-table"><thead><tr><th>Mode</th><th>Type</th><th>Name</th><th>Hash</th></tr></thead><tbody></tbody></table>
+      <table id="tree-table"><thead><tr><th>Mode</th><th>Type</th><th>Name</th><th>Size</th><th>Hash</th></tr></thead><tbody></tbody></table>
     </div>
   </div>
 
@@ -669,11 +669,31 @@
       const panel = document.getElementById('tree-panel');
       panel.style.display = 'block';
 
-      // Breadcrumb
+      // Breadcrumb with navigable path segments
       const bc = document.getElementById('tree-breadcrumb');
       const parts = path.split('/').filter(Boolean);
       let bcHtml = `<a onclick="showTreeFromCommit()">root</a>`;
-      if (parts.length > 0) bcHtml += ' / ' + parts.map(p => escHtml(p)).join(' / ');
+      // Walk from root tree to build navigable breadcrumb
+      if (parts.length > 0 && currentCommit && objectDb[currentCommit]) {
+        let walkHash = parseCommit(objectDb[currentCommit].data).tree;
+        for (let pi = 0; pi < parts.length; pi++) {
+          if (pi < parts.length - 1 && walkHash && objectDb[walkHash]) {
+            // Find this segment's subtree hash for navigation
+            const segEntries = parseTree(objectDb[walkHash].data);
+            const child = segEntries.find(e => e.name === parts[pi] && e.type === 'tree');
+            if (child) {
+              const segPath = '/' + parts.slice(0, pi + 1).join('/') + '/';
+              bcHtml += ` / <a onclick="showTree('${child.hash}', '${segPath}')">${escHtml(parts[pi])}</a>`;
+              walkHash = child.hash;
+            } else {
+              bcHtml += ` / ${escHtml(parts[pi])}`;
+              walkHash = null;
+            }
+          } else {
+            bcHtml += ` / ${escHtml(parts[pi])}`;
+          }
+        }
+      }
       bc.innerHTML = bcHtml;
 
       const tbody = document.querySelector('#tree-table tbody');
@@ -689,13 +709,18 @@
       entries.forEach(e => {
         const tr = document.createElement('tr');
         const nameClass = e.type === 'tree' ? 'tree-link' : 'blob-link';
+        const safeName = e.name.replace(/'/g, "\\'").replace(/"/g, '&quot;');
         const onclick = e.type === 'tree'
-          ? `showTree('${e.hash}', '${path}${e.name}/')`
-          : `showFile('${e.hash}', '${escHtml(e.name)}')`;
+          ? `showTree('${e.hash}', '${path}${safeName}/')`
+          : `showFile('${e.hash}', '${safeName}')`;
+        // Show size for blobs
+        const sizeStr = e.type === 'blob' && objectDb[e.hash]
+          ? formatSize(objectDb[e.hash].data.length) : '';
         tr.innerHTML =
           `<td class="info">${e.mode}</td>` +
           `<td class="info">${e.type}</td>` +
           `<td><span class="${nameClass}" onclick="${onclick}">${escHtml(e.name)}</span></td>` +
+          `<td class="info">${sizeStr}</td>` +
           `<td><span class="hash" title="${e.hash}">${e.hash.slice(0, 8)}</span></td>`;
         tbody.appendChild(tr);
       });
@@ -709,17 +734,32 @@
       if (c.tree) showTree(c.tree, '/');
     }
 
+    function formatSize(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    function isBinary(data) {
+      // Check first 8KB for null bytes
+      const check = Math.min(data.length, 8192);
+      for (let i = 0; i < check; i++) {
+        if (data[i] === 0) return true;
+      }
+      return false;
+    }
+
     function showFile(blobHash, name) {
       const obj = objectDb[blobHash];
       if (!obj) { status('Blob not found: ' + blobHash, true); return; }
       document.getElementById('file-panel').style.display = 'block';
-      document.getElementById('file-name').textContent = name;
-      try {
+      document.getElementById('file-name').textContent = name + ' (' + formatSize(obj.data.length) + ')';
+      if (isBinary(obj.data)) {
+        document.getElementById('file-content').textContent = `[Binary file, ${formatSize(obj.data.length)}]`;
+      } else {
         const text = new TextDecoder('utf-8', { fatal: false }).decode(obj.data);
         document.getElementById('file-content').textContent =
           text.length > 200000 ? text.slice(0, 200000) + '\n... (truncated)' : text;
-      } catch {
-        document.getElementById('file-content').textContent = `[Binary file, ${obj.data.length} bytes]`;
       }
     }
 
