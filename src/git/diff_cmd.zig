@@ -4601,6 +4601,9 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
             std.mem.startsWith(u8, arg, "--decorate-refs=") or std.mem.startsWith(u8, arg, "--decorate-refs-exclude="))
         {
             // Accept silently
+        } else if (std.mem.startsWith(u8, arg, "^") and arg.len > 1) {
+            // ^ref means exclude commits reachable from ref
+            try committish_list.append(arg);
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             try committish_list.append(arg);
         }
@@ -4702,17 +4705,45 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
         start_hashes.deinit();
     }
 
+    // Separate include and exclude refs
+    var exclude_hashes = std.ArrayList([]const u8).init(allocator);
+    defer {
+        for (exclude_hashes.items) |h| allocator.free(h);
+        exclude_hashes.deinit();
+    }
     if (committish_list.items.len > 0) {
         for (committish_list.items) |c| {
-            const h = git_helpers_mod.resolveRevision(git_path, c, pi, allocator) catch {
-                const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\n", .{c});
-                defer allocator.free(msg);
-                try pi.writeStderr(msg);
-                std.process.exit(128);
-            };
-            try start_hashes.append(h);
+            if (std.mem.startsWith(u8, c, "^") and c.len > 1) {
+                // Exclude ref
+                const h = git_helpers_mod.resolveRevision(git_path, c[1..], pi, allocator) catch continue;
+                try exclude_hashes.append(h);
+            } else if (std.mem.indexOf(u8, c, "..")) |dot_pos| {
+                // A..B range: exclude A, include B
+                if (dot_pos > 0) {
+                    const h = git_helpers_mod.resolveRevision(git_path, c[0..dot_pos], pi, allocator) catch continue;
+                    try exclude_hashes.append(h);
+                }
+                if (dot_pos + 2 < c.len) {
+                    const h = git_helpers_mod.resolveRevision(git_path, c[dot_pos + 2..], pi, allocator) catch {
+                        const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\n", .{c});
+                        defer allocator.free(msg);
+                        try pi.writeStderr(msg);
+                        std.process.exit(128);
+                    };
+                    try start_hashes.append(h);
+                }
+            } else {
+                const h = git_helpers_mod.resolveRevision(git_path, c, pi, allocator) catch {
+                    const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\n", .{c});
+                    defer allocator.free(msg);
+                    try pi.writeStderr(msg);
+                    std.process.exit(128);
+                };
+                try start_hashes.append(h);
+            }
         }
-    } else {
+    }
+    if (start_hashes.items.len == 0) {
         const head = refs.getCurrentCommit(git_path, pi, allocator) catch null;
         if (head == null) {
             try pi.writeStderr("fatal: your current branch does not have any commits yet\n");
@@ -4971,6 +5002,31 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
         var viter = visited.iterator();
         while (viter.next()) |e| allocator.free(e.key_ptr.*);
         visited.deinit();
+    }
+
+    // Pre-mark excluded commits and their ancestors as visited
+    // This prevents them from being shown in the output
+    if (exclude_hashes.items.len > 0) {
+        var exc_queue_list = std.ArrayList([]const u8).init(allocator);
+        defer exc_queue_list.deinit();
+        for (exclude_hashes.items) |eh| {
+            try exc_queue_list.append(try allocator.dupe(u8, eh));
+        }
+        while (exc_queue_list.items.len > 0) {
+            if (exc_queue_list.items.len == 0) break;
+            const eh = exc_queue_list.orderedRemove(exc_queue_list.items.len - 1);
+            if (visited.contains(eh)) { allocator.free(eh); continue; }
+            try visited.put(eh, {});
+            const eobj = objects.GitObject.load(eh, git_path, pi, allocator) catch continue;
+            defer eobj.deinit(allocator);
+            var eit = std.mem.splitSequence(u8, eobj.data, "\n");
+            while (eit.next()) |eline| {
+                if (eline.len == 0) break;
+                if (std.mem.startsWith(u8, eline, "parent ")) {
+                    try exc_queue_list.append(try allocator.dupe(u8, eline["parent ".len..]));
+                }
+            }
+        }
     }
 
     var insert_order: u32 = 0;
