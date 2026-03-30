@@ -42,7 +42,7 @@
 </head>
 <body>
   <h1>⚡ ziggit</h1>
-  <p class="subtitle">A pure Zig git implementation — clone &amp; browse repos in the browser</p>
+  <p class="subtitle">A pure Zig git implementation — clone &amp; browse repos in the browser &bull; <span id="wasm-version" class="info">loading wasm...</span></p>
 
   <div class="row">
     <input type="text" id="corsProxy" placeholder="CORS proxy URL" value="https://corsproxy.io/?">
@@ -78,6 +78,31 @@
   </div>
 
   <script>
+    // Load WASM module for version display
+    (async function() {
+      try {
+        const noopFn = () => {};
+        const noopRet = () => 0;
+        const env = {
+          host_write_stdout: noopFn, host_write_stderr: noopFn,
+          host_write_file: noopRet, host_read_file: noopRet,
+          host_file_exists: noopRet, host_make_dir: noopRet,
+          host_delete_file: noopRet, host_get_cwd: noopRet,
+          host_http_get: noopRet, host_http_post: noopRet,
+        };
+        const resp = await fetch('ziggit.wasm');
+        const { instance } = await WebAssembly.instantiateStreaming(resp, { env });
+        const mem = instance.exports.memory;
+        const ptr = instance.exports.ziggit_alloc(128);
+        const len = instance.exports.ziggit_version(ptr, 128);
+        const ver = new TextDecoder().decode(new Uint8Array(mem.buffer, ptr, len));
+        document.getElementById('wasm-version').textContent = ver;
+      } catch (e) {
+        document.getElementById('wasm-version').textContent = 'wasm not loaded';
+        console.warn('WASM load failed:', e);
+      }
+    })();
+
     // Object database: sha1 hex -> { type: string, data: Uint8Array }
     const objectDb = {};
     let currentCommit = null;
