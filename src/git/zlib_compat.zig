@@ -49,15 +49,19 @@ pub fn compress(reader: anytype, writer: anytype, options: anytype) !void {
     defer aw.deinit();
 
     // Compress with zlib container
-    if (comptime @import("builtin").os.tag == .freestanding) {
-        // Compression has known issues on wasm32-freestanding (infinite loop in flate).
-        return error.CompressionFailed;
-    }
     const comp_buf_size_local = flate.max_window_len * 2 + 512 * 1024;
-    var comp_buf: [comp_buf_size_local]u8 = undefined;
-    var comp: Compress = .init(&aw.writer, &comp_buf, .{ .container = .zlib });
-    _ = comp.writer.writeAll(input_buf.items) catch return error.CompressionFailed;
-    comp.end() catch return error.CompressionFailed;
+    if (comptime @import("builtin").os.tag == .freestanding) {
+        const comp_buf = getTempAllocator().alloc(u8, comp_buf_size_local) catch return error.CompressionFailed;
+        defer getTempAllocator().free(comp_buf);
+        var comp: Compress = .init(&aw.writer, comp_buf, .{ .container = .zlib });
+        _ = comp.writer.writeAll(input_buf.items) catch return error.CompressionFailed;
+        comp.end() catch return error.CompressionFailed;
+    } else {
+        var comp_buf: [comp_buf_size_local]u8 = undefined;
+        var comp: Compress = .init(&aw.writer, &comp_buf, .{ .container = .zlib });
+        _ = comp.writer.writeAll(input_buf.items) catch return error.CompressionFailed;
+        comp.end() catch return error.CompressionFailed;
+    }
 
     // Write compressed output to the generic writer
     writer.writeAll(aw.written()) catch return error.CompressionFailed;
@@ -131,19 +135,22 @@ pub fn Compressor(comptime WriterType: type) type {
         }
 
         pub fn finish(self: *Self) !void {
-            if (comptime @import("builtin").os.tag == .freestanding) {
-                // Compression has known issues on wasm32-freestanding (infinite loop in flate).
-                // Store uncompressed as a fallback.
-                return error.CompressionFailed;
-            }
             var aw: Io.Writer.Allocating = .init(getTempAllocator());
             defer aw.deinit();
 
             const comp_buf_size = flate.max_window_len * 2 + 512 * 1024;
-            var comp_buf: [comp_buf_size]u8 = undefined;
-            var comp: Compress = .init(&aw.writer, &comp_buf, .{ .container = .zlib });
-            _ = comp.writer.writeAll(self.buffer.items) catch return error.CompressionFailed;
-            comp.end() catch return error.CompressionFailed;
+            if (comptime @import("builtin").os.tag == .freestanding) {
+                const comp_buf = getTempAllocator().alloc(u8, comp_buf_size) catch return error.CompressionFailed;
+                defer getTempAllocator().free(comp_buf);
+                var comp: Compress = .init(&aw.writer, comp_buf, .{ .container = .zlib });
+                _ = comp.writer.writeAll(self.buffer.items) catch return error.CompressionFailed;
+                comp.end() catch return error.CompressionFailed;
+            } else {
+                var comp_buf: [comp_buf_size]u8 = undefined;
+                var comp: Compress = .init(&aw.writer, &comp_buf, .{ .container = .zlib });
+                _ = comp.writer.writeAll(self.buffer.items) catch return error.CompressionFailed;
+                comp.end() catch return error.CompressionFailed;
+            }
 
             self.inner_writer.writeAll(aw.written()) catch return error.CompressionFailed;
         }
@@ -166,18 +173,23 @@ pub fn compressorWriter(writer: anytype, options: anytype) !Compressor(@TypeOf(w
 }
 
 pub fn compressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    if (comptime @import("builtin").os.tag == .freestanding) {
-        // Compression has known issues on wasm32-freestanding (infinite loop in flate).
-        return error.CompressionFailed;
-    }
     var aw: Io.Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
 
     const comp_buf_size = flate.max_window_len * 2 + 512 * 1024;
-    var comp_buf: [comp_buf_size]u8 = undefined;
-    var comp: Compress = .init(&aw.writer, &comp_buf, .{ .container = .zlib });
-    _ = comp.writer.writeAll(input) catch return error.CompressionFailed;
-    comp.end() catch return error.CompressionFailed;
+    // Use heap allocation on freestanding (WASM stack is too small for 655KB)
+    if (comptime @import("builtin").os.tag == .freestanding) {
+        const comp_buf = allocator.alloc(u8, comp_buf_size) catch return error.CompressionFailed;
+        defer allocator.free(comp_buf);
+        var comp: Compress = .init(&aw.writer, comp_buf, .{ .container = .zlib });
+        _ = comp.writer.writeAll(input) catch return error.CompressionFailed;
+        comp.end() catch return error.CompressionFailed;
+    } else {
+        var comp_buf: [comp_buf_size]u8 = undefined;
+        var comp: Compress = .init(&aw.writer, &comp_buf, .{ .container = .zlib });
+        _ = comp.writer.writeAll(input) catch return error.CompressionFailed;
+        comp.end() catch return error.CompressionFailed;
+    }
 
     return aw.toOwnedSlice();
 }
