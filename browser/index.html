@@ -75,10 +75,9 @@
     <input type="text" id="url" value="https://github.com/nicolo-ribaudo/jest-light-runner" placeholder="Repository URL" onkeydown="if(event.key==='Enter')doClone()">
     <select id="repoPreset" onchange="if(this.value){document.getElementById('url').value=this.value;this.selectedIndex=0}" style="background:#161b22;border:1px solid #30363d;color:#c9d1d9;padding:4px 8px;border-radius:4px;font-family:inherit;font-size:0.85em">
       <option value="">Example repos...</option>
-      <option value="https://github.com/nicolo-ribaudo/jest-light-runner">jest-light-runner (small)</option>
-      <option value="https://github.com/nicolo-ribaudo/tc39-proposal-json-parse-with-source">json-parse-with-source</option>
-      <option value="https://github.com/nicolo-ribaudo/hermes-parser-visualizer">hermes-parser-visualizer</option>
-      <option value="https://github.com/nicolo-ribaudo/semver">semver</option>
+      <option value="https://github.com/nicolo-ribaudo/jest-light-runner">jest-light-runner (~500 objects)</option>
+      <option value="https://github.com/sindresorhus/ky">sindresorhus/ky (~2K objects)</option>
+      <option value="https://github.com/expressjs/express">expressjs/express (~10K objects)</option>
     </select>
     <button id="cloneBtn" onclick="doClone()">Clone</button>
     <span id="status"></span>
