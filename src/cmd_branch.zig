@@ -437,7 +437,15 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         const new_hash = refs.resolveRef(git_path, std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name}) catch "", platform_impl, allocator) catch null;
         defer if (new_hash) |h| allocator.free(h);
         if (new_hash) |nh| {
-            helpers.writeReflogEntry(git_path, std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name}) catch "", "0000000000000000000000000000000000000000", nh, "branch: Created from HEAD", allocator, platform_impl) catch {};
+            // Determine source name (branch name or start point) for reflog message
+            const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch null;
+            defer if (current_branch) |cb| allocator.free(cb);
+            const source_name = if (start_point) |sp| sp else if (current_branch) |cb| (if (std.mem.startsWith(u8, cb, "refs/heads/")) cb["refs/heads/".len..] else cb) else "HEAD";
+            const reflog_msg_b = std.fmt.allocPrint(allocator, "branch: Created from {s}", .{source_name}) catch "branch: Created from HEAD";
+            defer if (reflog_msg_b.len > 0) allocator.free(@constCast(reflog_msg_b));
+            const ref_name_b = std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name}) catch "";
+            defer if (ref_name_b.len > 0) allocator.free(@constCast(ref_name_b));
+            helpers.writeReflogEntry(git_path, ref_name_b, "0000000000000000000000000000000000000000", nh, reflog_msg_b, allocator, platform_impl) catch {};
         }
     } else if (std.mem.eql(u8, first_arg.?, "--copy")) {
         const copy_src = fake_args.next() orelse {
