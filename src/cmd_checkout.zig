@@ -151,6 +151,18 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
         }
         defer if (resolved_start) |r| allocator.free(@constCast(r));
 
+        // Check if branch already exists (checkout -b fails if branch exists)
+        {
+            const existing_ref = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, branch_name });
+            defer allocator.free(existing_ref);
+            if (std.fs.accessAbsolute(existing_ref, .{})) |_| {
+                const emsg = try std.fmt.allocPrint(allocator, "fatal: a branch named '{s}' already exists\n", .{branch_name});
+                defer allocator.free(emsg);
+                try platform_impl.writeStderr(emsg);
+                std.process.exit(128);
+            } else |_| {}
+        }
+
         // helpers.Create new branch at start point (or current helpers.HEAD)
         refs.createBranch(git_path, branch_name, resolved_start orelse start_point_arg, platform_impl, allocator) catch |err| switch (err) {
             error.NoCommitsYet, error.RefNotFound, error.FileNotFound => {
@@ -205,9 +217,32 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
 
         // helpers.If start_point was specified, checkout the tree of that commit
         if (start_point_arg != null) {
-            const commit_hash = refs.resolveRef(git_path, try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name}), platform_impl, allocator) catch null;
-            if (commit_hash) |ch| {
+            const branch_ref_str = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name});
+            defer allocator.free(branch_ref_str);
+            const commit_hash_opt = (refs.resolveRef(git_path, branch_ref_str, platform_impl, allocator) catch null) orelse null;
+            if (commit_hash_opt) |ch| {
                 defer allocator.free(ch);
+                // Check for dirty working tree that conflicts with target
+                {
+                    var dirty_files_b = std.array_list.Managed([]const u8).init(allocator);
+                    defer {
+                        for (dirty_files_b.items) |df| allocator.free(df);
+                        dirty_files_b.deinit();
+                    }
+                    checkDirtyWorkingTree(allocator, git_path, ch, platform_impl, &dirty_files_b) catch {};
+                    if (dirty_files_b.items.len > 0) {
+                        try platform_impl.writeStderr("error: Your local changes to the following files would be overwritten by checkout:\n");
+                        for (dirty_files_b.items) |df| {
+                            const dmsg = try std.fmt.allocPrint(allocator, "\t{s}\n", .{df});
+                            defer allocator.free(dmsg);
+                            try platform_impl.writeStderr(dmsg);
+                        }
+                        try platform_impl.writeStderr("Please commit your changes or stash them before you switch branches.\nAborting\n");
+                        // Undo: delete the branch we just created
+                        refs.deleteBranch(git_path, branch_name, platform_impl, allocator) catch {};
+                        std.process.exit(1);
+                    }
+                }
                 helpers.checkoutCommitTree(git_path, ch, allocator, platform_impl) catch {};
             }
         }
@@ -695,7 +730,32 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
             }
         }
 
-        repo.checkout(actual_target) catch |err| {
+        // If actual_target is a branch name, try to resolve it via refs (handles symbolic refs)
+        var resolved_checkout_target: ?[]u8 = null;
+        defer if (resolved_checkout_target) |rct| allocator.free(rct);
+        if (!helpers.isValidHexString(actual_target) or actual_target.len != 40) {
+            // Try refs/heads/<name> first (handles symbolic refs)
+            const branch_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{actual_target});
+            defer allocator.free(branch_ref);
+            if ((refs.resolveRef(git_path, branch_ref, platform_impl, allocator) catch null) orelse null) |hash| {
+                resolved_checkout_target = hash;
+            }
+            // If that didn't work, try refs/tags/<name>
+            if (resolved_checkout_target == null) {
+                const tag_ref = try std.fmt.allocPrint(allocator, "refs/tags/{s}", .{actual_target});
+                defer allocator.free(tag_ref);
+                if ((refs.resolveRef(git_path, tag_ref, platform_impl, allocator) catch null) orelse null) |hash| {
+                    resolved_checkout_target = hash;
+                }
+            }
+            // Try resolveRevision as a last resort
+            if (resolved_checkout_target == null) {
+                resolved_checkout_target = helpers.resolveRevision(git_path, actual_target, platform_impl, allocator) catch null;
+            }
+        }
+        const checkout_target = resolved_checkout_target orelse actual_target;
+
+        repo.checkout(checkout_target) catch |err| {
             switch (err) {
                 error.CommitNotFound => {
                     const msg = try std.fmt.allocPrint(allocator, "error: pathspec '{s}' did not match any file(s) known to git\n", .{target});
@@ -729,6 +789,21 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                 },
             }
         };
+
+        // If we resolved the target to a hash but it was a branch name,
+        // ensure HEAD points to the branch as a symbolic ref
+        if (resolved_checkout_target != null and !detach) {
+            // Check if refs/heads/<target> exists
+            const branch_ref_check = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, actual_target });
+            defer allocator.free(branch_ref_check);
+            if (std.fs.accessAbsolute(branch_ref_check, .{})) |_| {
+                const head_path_fix = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+                defer allocator.free(head_path_fix);
+                const symbolic_ref = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{actual_target});
+                defer allocator.free(symbolic_ref);
+                platform_impl.fs.writeFile(head_path_fix, symbolic_ref) catch {};
+            } else |_| {}
+        }
         
         // helpers.Write reflog entry for checkout
         {
@@ -780,6 +855,64 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
     }
 }
 
+
+/// Check if working tree has dirty files that would be overwritten by checking out a target commit.
+fn checkDirtyWorkingTree(
+    allocator: std.mem.Allocator,
+    git_path: []const u8,
+    target_commit_hash: []const u8,
+    platform_impl: *const platform_mod.Platform,
+    dirty_files: *std.array_list.Managed([]const u8),
+) !void {
+    const objects_mod = @import("git/objects.zig");
+    var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch index_mod.Index.init(allocator);
+    defer idx.deinit();
+
+    // Get target tree
+    const target_tree_hash: ?[]u8 = blk: {
+        const commit_obj = objects_mod.GitObject.load(target_commit_hash, git_path, platform_impl, allocator) catch break :blk null;
+        defer commit_obj.deinit(allocator);
+        break :blk helpers.parseCommitTreeHash(commit_obj.data, allocator) catch null;
+    };
+    defer if (target_tree_hash) |th| allocator.free(th);
+
+    // Build target tree blobs
+    var target_blobs = std.StringHashMap([]const u8).init(allocator);
+    defer {
+        var vit = target_blobs.valueIterator();
+        while (vit.next()) |v| allocator.free(v.*);
+        var kit = target_blobs.keyIterator();
+        while (kit.next()) |k| allocator.free(k.*);
+        target_blobs.deinit();
+    }
+    if (target_tree_hash) |th| {
+        helpers.collectTreeBlobs(allocator, th, "", git_path, platform_impl, &target_blobs) catch {};
+    }
+
+    const repo_root = if (std.mem.endsWith(u8, git_path, "/.git")) git_path[0 .. git_path.len - 5] else git_path;
+
+    for (idx.entries.items) |entry| {
+        const target_hash = target_blobs.get(entry.path);
+        var entry_hash_hex: [40]u8 = undefined;
+        _ = std.fmt.bufPrint(&entry_hash_hex, "{x}", .{&entry.sha1}) catch continue;
+        if (target_hash) |th| {
+            if (std.mem.eql(u8, &entry_hash_hex, th)) continue;
+        } else {
+            continue; // File will be deleted, no conflict if we just check modifications
+        }
+
+        // File differs between index and target — check if working tree also differs from index
+        const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path }) catch continue;
+        defer allocator.free(full_path);
+        const wt_content = platform_impl.fs.readFile(allocator, full_path) catch continue;
+        defer allocator.free(wt_content);
+        const wt_hash = helpers.hashBlobContent(wt_content, allocator) catch continue;
+        defer allocator.free(wt_hash);
+        if (!std.mem.eql(u8, wt_hash, &entry_hash_hex)) {
+            dirty_files.append(allocator.dupe(u8, entry.path) catch continue) catch {};
+        }
+    }
+}
 
 pub fn cmdSwitch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     if (@import("builtin").target.os.tag == .freestanding) {
