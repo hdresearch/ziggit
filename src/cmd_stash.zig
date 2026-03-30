@@ -592,7 +592,7 @@ fn stashPush(
             try platform_impl.writeStderr("error: stash --patch is not supported in ziggit\n");
             std.process.exit(1);
         } else if (std.mem.eql(u8, arg, "-S") or std.mem.eql(u8, arg, "--staged")) {
-            // TODO: implement --staged
+            // staged_only mode is handled below
         } else if (std.mem.eql(u8, arg, "--intent-to-add")) {
             // handled silently
         } else if (std.mem.startsWith(u8, arg, "-") and arg.len > 1) {
