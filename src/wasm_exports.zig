@@ -2558,3 +2558,161 @@ export fn ziggit_count_lines(data_ptr: [*]const u8, data_len: u32) u32 {
     if (data[data.len - 1] != '\n') count += 1;
     return count;
 }
+
+// ========== Object creation exports ==========
+
+/// Create a blob object header+data and return its SHA-1 hash.
+/// data_ptr/data_len: blob content
+/// hash_out: 40-byte buffer for hex hash output
+/// Returns 0 on success, negative on error.
+export fn ziggit_hash_object(type_ptr: [*]const u8, type_len: u32, data_ptr: [*]const u8, data_len: u32, hash_out: [*]u8) i32 {
+    const type_str = type_ptr[0..type_len];
+    const data = data_ptr[0..data_len];
+    const sha1 = stream_utils.hashGitObject(type_str, data);
+    const hex = std.fmt.bytesToHex(&sha1, .lower);
+    @memcpy(hash_out[0..40], &hex);
+    return 0;
+}
+
+/// Decode a percent-encoded URL component. Useful for browser URL handling.
+/// Returns decoded string length, or negative on error.
+export fn ziggit_url_decode(input_ptr: [*]const u8, input_len: u32, out_ptr: [*]u8, out_cap: u32) i32 {
+    const input = input_ptr[0..input_len];
+    var out_pos: u32 = 0;
+    var i: u32 = 0;
+    while (i < input_len and out_pos < out_cap) {
+        if (input[i] == '%' and i + 2 < input_len) {
+            const hi = std.fmt.charToDigit(input[i + 1], 16) catch {
+                out_ptr[out_pos] = input[i];
+                out_pos += 1;
+                i += 1;
+                continue;
+            };
+            const lo = std.fmt.charToDigit(input[i + 2], 16) catch {
+                out_ptr[out_pos] = input[i];
+                out_pos += 1;
+                i += 1;
+                continue;
+            };
+            out_ptr[out_pos] = (hi << 4) | lo;
+            out_pos += 1;
+            i += 3;
+        } else if (input[i] == '+') {
+            out_ptr[out_pos] = ' ';
+            out_pos += 1;
+            i += 1;
+        } else {
+            out_ptr[out_pos] = input[i];
+            out_pos += 1;
+            i += 1;
+        }
+    }
+    return @intCast(out_pos);
+}
+
+/// Walk commit history and return JSON array of commits.
+/// start_hash_ptr: 40 hex chars of starting commit
+/// max_count: maximum commits to walk
+/// out_ptr/out_len: pointers to write result JSON
+/// Format: [{"hash":"...","tree":"...","parents":["..."],"author":"...","message":"..."},...]
+/// Returns 0 on success, negative on error.
+export fn ziggit_walk_commits(start_hash_ptr: [*]const u8, start_hash_len: u32, max_count: u32, out_ptr: *u32, out_len: *u32) i32 {
+    if (start_hash_len < 40) return -1;
+    const allocator = getAllocator();
+    const pack_data = global_pack_data orelse return -2;
+    const idx_data = global_idx_data orelse return -3;
+
+    var json = std.array_list.Managed(u8).init(allocator);
+    defer json.deinit();
+    json.appendSlice("[") catch return -4;
+
+    var current_hex: [40]u8 = undefined;
+    @memcpy(&current_hex, start_hash_ptr[0..40]);
+    var count: u32 = 0;
+    var first = true;
+
+    while (count < max_count) : (count += 1) {
+        var hash_bytes: [20]u8 = undefined;
+        for (0..20) |i| {
+            hash_bytes[i] = std.fmt.parseInt(u8, current_hex[i * 2 .. i * 2 + 2], 16) catch return -5;
+        }
+
+        const offset = findOffsetInIdx(idx_data, hash_bytes) orelse break;
+        const obj = readPackedObjectFromData(pack_data, offset, allocator) catch break;
+        defer obj.deinit(allocator);
+        if (obj.obj_type != .commit) break;
+
+        if (!first) json.appendSlice(",") catch return -4;
+        first = false;
+
+        // Parse commit
+        json.appendSlice("{\"hash\":\"") catch return -4;
+        json.appendSlice(&current_hex) catch return -4;
+        json.appendSlice("\"") catch return -4;
+
+        var next_parent: ?[40]u8 = null;
+        var line_iter = std.mem.splitScalar(u8, obj.data, '\n');
+        var in_headers = true;
+        var parent_count: u32 = 0;
+
+        while (line_iter.next()) |line| {
+            if (in_headers) {
+                if (line.len == 0) {
+                    in_headers = false;
+                    continue;
+                }
+                if (std.mem.startsWith(u8, line, "tree ") and line.len >= 45) {
+                    json.appendSlice(",\"tree\":\"") catch return -4;
+                    json.appendSlice(line[5..45]) catch return -4;
+                    json.appendSlice("\"") catch return -4;
+                } else if (std.mem.startsWith(u8, line, "parent ") and line.len >= 47) {
+                    if (parent_count == 0) {
+                        json.appendSlice(",\"parents\":[\"") catch return -4;
+                    } else {
+                        json.appendSlice(",\"") catch return -4;
+                    }
+                    json.appendSlice(line[7..47]) catch return -4;
+                    json.appendSlice("\"") catch return -4;
+                    if (parent_count == 0) {
+                        var ph: [40]u8 = undefined;
+                        @memcpy(&ph, line[7..47]);
+                        next_parent = ph;
+                    }
+                    parent_count += 1;
+                } else if (std.mem.startsWith(u8, line, "author ")) {
+                    // Close parents array before author
+                    if (parent_count > 0) {
+                        json.appendSlice("]") catch return -4;
+                        parent_count = 0; // Mark as closed
+                    } else {
+                        json.appendSlice(",\"parents\":[]") catch return -4;
+                    }
+                    json.appendSlice(",\"author\":\"") catch return -4;
+                    appendJsonEscaped(&json, line[7..]) catch return -4;
+                    json.appendSlice("\"") catch return -4;
+                }
+            } else {
+                // First line of message
+                json.appendSlice(",\"message\":\"") catch return -4;
+                appendJsonEscaped(&json, line) catch return -4;
+                json.appendSlice("\"") catch return -4;
+                break; // Only first line
+            }
+        }
+        // Ensure parents array is closed if no author line was found
+        if (parent_count > 0) {
+            json.appendSlice("]") catch return -4;
+        }
+        json.appendSlice("}") catch return -4;
+
+        if (next_parent) |np| {
+            @memcpy(&current_hex, &np);
+        } else break;
+    }
+
+    json.appendSlice("]") catch return -4;
+    const owned = json.toOwnedSlice() catch return -5;
+    out_ptr.* = @intFromPtr(owned.ptr);
+    out_len.* = @intCast(owned.len);
+    return 0;
+}
