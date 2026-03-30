@@ -440,7 +440,7 @@ fn showCommitDiffOnly(git_object: objects.GitObject, git_path: []const u8, platf
 }
 
 pub fn showBlobObject(git_object: objects.GitObject, platform_impl: *const platform_mod.Platform) !void {
-    // helpers.For blob helpers.objects, just output the raw content
+    // For blob objects, just output the raw content
     try platform_impl.writeStdout(git_object.data);
 }
 

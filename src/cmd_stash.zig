@@ -1183,6 +1183,41 @@ fn stashApply(
         }
     }
 
+    // Pre-check: detect if working tree has local changes that conflict with stash
+    {
+        var check_iter = all_paths.iterator();
+        while (check_iter.next()) |check_entry| {
+            const check_path = check_entry.key_ptr.*;
+            const bh = base_map.get(check_path);
+            const sh = stash_map.get(check_path);
+            const ch = current_map.get(check_path);
+
+            // Only care about files that stash modifies
+            if (bh != null and sh != null and std.mem.eql(u8, bh.?, sh.?)) continue;
+            if (bh == null and sh == null) continue;
+
+            // If stash modifies this file and it exists in current, check working tree
+            if (sh != null and ch != null) {
+                const check_file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, check_path });
+                defer allocator.free(check_file_path);
+                const wt_content = readWorkingFile(allocator, check_file_path) catch continue;
+                defer allocator.free(wt_content);
+                const head_content = helpers.readBlobContent(allocator, git_path, ch.?, platform_impl) catch continue;
+                defer allocator.free(head_content);
+                if (!std.mem.eql(u8, wt_content, head_content)) {
+                    // Working tree has local changes that would be overwritten
+                    try platform_impl.writeStderr("error: Your local changes to the following files would be overwritten by merge:\n");
+                    const err_msg = try std.fmt.allocPrint(allocator, "\t{s}\n", .{check_path});
+                    defer allocator.free(err_msg);
+                    try platform_impl.writeStderr(err_msg);
+                    try platform_impl.writeStderr("Please commit your changes or stash them before you merge.\n");
+                    try platform_impl.writeStderr("Aborting\n");
+                    std.process.exit(1);
+                }
+            }
+        }
+    }
+
     var path_iter = all_paths.iterator();
     while (path_iter.next()) |path_entry| {
         const path = path_entry.key_ptr.*;
@@ -1217,7 +1252,7 @@ fn stashApply(
                 const content = helpers.readBlobContent(allocator, git_path, stash_hash_for_file.?, platform_impl) catch continue;
                 defer allocator.free(content);
                 platform_impl.fs.writeFile(file_path, content) catch {};
-                updateIndexEntryFromHash(&idx, path, stash_hash_for_file.?, allocator) catch {};
+                if (restore_index) updateIndexEntryFromHash(&idx, path, stash_hash_for_file.?, allocator) catch {};
             } else if (std.mem.eql(u8, current_hash_for_file.?, stash_hash_for_file.?)) {
                 // Same content, no action needed
             } else {
@@ -1235,7 +1270,6 @@ fn stashApply(
                 const content = helpers.readBlobContent(allocator, git_path, stash_hash_for_file.?, platform_impl) catch continue;
                 defer allocator.free(content);
                 platform_impl.fs.writeFile(file_path, content) catch {};
-                updateIndexEntryFromHash(&idx, path, stash_hash_for_file.?, allocator) catch {};
             } else if (std.mem.eql(u8, current_hash_for_file.?, stash_hash_for_file.?)) {
                 // Current already has stash content, no action
             } else {
