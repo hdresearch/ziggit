@@ -1368,8 +1368,9 @@ fn stashApply(
         }
     }
 
-    // Validate stash ref format for pop/apply - must be stash ref, not raw hash
-    if (!std.mem.startsWith(u8, stash_ref, "stash") and !isDigitString(stash_ref)) {
+    // Validate stash ref format for pop/apply
+    const is_valid_stash_ref = std.mem.startsWith(u8, stash_ref, "stash") or isDigitString(stash_ref) or (stash_ref.len == 40 and isHexString(stash_ref));
+    if (!is_valid_stash_ref) {
         const msg = try std.fmt.allocPrint(allocator, "error: '{s}' is not a stash-like commit\n", .{stash_ref});
         defer allocator.free(msg);
         try platform_impl.writeStderr(msg);
@@ -1621,6 +1622,13 @@ fn stashApply(
         defer allocator.free(msg);
         try platform_impl.writeStdout(msg);
     }
+}
+
+fn isHexString(s: []const u8) bool {
+    for (s) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return s.len > 0;
 }
 
 fn isDigitString(s: []const u8) bool {
