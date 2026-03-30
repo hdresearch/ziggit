@@ -3,6 +3,7 @@ const stream_utils = @import("git/stream_utils.zig");
 const DeltaCache = @import("git/delta_cache.zig").DeltaCache;
 const gitignore = @import("git/gitignore.zig");
 const validation = @import("git/validation.zig");
+const diff = @import("git/diff.zig");
 /// WASM exports for browser integration
 /// Provides a C-ABI compatible interface to ziggit's git operations.
 /// All strings are passed as (ptr, len) pairs. Errors return negative values.
@@ -1487,5 +1488,26 @@ export fn ziggit_validate_ref(ref_ptr: [*]const u8, ref_len: u32) i32 {
 /// Returns 0 if safe, 1 if unsafe.
 export fn ziggit_validate_path(path_ptr: [*]const u8, path_len: u32) i32 {
     validation.validatePathSecurity(path_ptr[0..path_len]) catch return 1;
+    return 0;
+}
+
+// ========== Diff exports ==========
+
+/// Generate unified diff between two texts.
+/// old_ptr/old_len: old content
+/// new_ptr/new_len: new content
+/// path_ptr/path_len: file path for header
+/// out_ptr/out_len: pointers to write result data pointer and length
+/// Returns 0 on success, negative on error.
+export fn ziggit_diff(old_ptr: [*]const u8, old_len: u32, new_ptr: [*]const u8, new_len: u32, path_ptr: [*]const u8, path_len: u32, out_ptr: *u32, out_len: *u32) i32 {
+    const allocator = getAllocator();
+    const result = diff.generateUnifiedDiff(
+        old_ptr[0..old_len],
+        new_ptr[0..new_len],
+        path_ptr[0..path_len],
+        allocator,
+    ) catch return -1;
+    out_ptr.* = @intFromPtr(result.ptr);
+    out_len.* = @intCast(result.len);
     return 0;
 }
