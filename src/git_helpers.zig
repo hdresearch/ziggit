@@ -1380,7 +1380,13 @@ pub fn outputFormattedCommit(format: []const u8, commit_hash: []const u8, alloca
                 try output.appendSlice(subject);
                 i += 2;
             } else if (c == 'b') {
-                try output.appendSlice(std.mem.trimRight(u8, body.items, "\n"));
+                // Body: strip leading blank lines, ensure trailing newline
+                var trimmed_body = std.mem.trimLeft(u8, body.items, "\n");
+                trimmed_body = std.mem.trimRight(u8, trimmed_body, "\n");
+                if (trimmed_body.len > 0) {
+                    try output.appendSlice(trimmed_body);
+                    try output.append('\n');
+                }
                 i += 2;
             } else if (c == 'B') {
                 const trimmed_raw = std.mem.trimRight(u8, raw_message, "\n");
@@ -1573,7 +1579,12 @@ pub fn outputFormattedCommitWithReflog(format: []const u8, commit_hash: []const 
                 try output.append('\n');
                 i += 2;
             } else if (c == 'b') {
-                try output.appendSlice(std.mem.trimRight(u8, body_buf.items, "\n"));
+                var tb = std.mem.trimLeft(u8, body_buf.items, "\n");
+                tb = std.mem.trimRight(u8, tb, "\n");
+                if (tb.len > 0) {
+                    try output.appendSlice(tb);
+                    try output.append('\n');
+                }
                 i += 2;
             } else if (c == 'n') {
                 try output.append('\n');
