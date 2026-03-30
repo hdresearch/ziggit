@@ -34,6 +34,8 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     var show_branch = false;
     var short_format = false;
     var show_untracked = true; // default: show untracked files
+    var untracked_explicit = false;
+    var untracked_all = false; // false = normal (collapse dirs), true = all (show individual files)
     var status_args = std.array_list.Managed([]const u8).init(allocator);
     defer status_args.deinit();
     while (args.next()) |arg| {
@@ -59,10 +61,17 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             if (std.mem.eql(u8, arg, "-sb") or std.mem.eql(u8, arg, "-bs")) {
                 show_branch = true;
             }
-        } else if (std.mem.eql(u8, arg, "-uno") or std.mem.eql(u8, arg, "-ufalse") or std.mem.eql(u8, arg, "--untracked-files=no") or std.mem.eql(u8, arg, "--untracked-files=false") or std.mem.eql(u8, arg, "-u") or std.mem.eql(u8, arg, "--no-untracked-files")) {
+        } else if (std.mem.eql(u8, arg, "-uno") or std.mem.eql(u8, arg, "-ufalse") or std.mem.eql(u8, arg, "--untracked-files=no") or std.mem.eql(u8, arg, "--untracked-files=false") or std.mem.eql(u8, arg, "--no-untracked-files")) {
             show_untracked = false;
-        } else if (std.mem.eql(u8, arg, "-unormal") or std.mem.eql(u8, arg, "-utrue") or std.mem.eql(u8, arg, "--untracked-files=normal") or std.mem.eql(u8, arg, "--untracked-files=true") or std.mem.eql(u8, arg, "--untracked-files") or std.mem.eql(u8, arg, "-uall") or std.mem.eql(u8, arg, "--untracked-files=all")) {
+            untracked_explicit = true;
+        } else if (std.mem.eql(u8, arg, "-uall") or std.mem.eql(u8, arg, "--untracked-files=all")) {
             show_untracked = true;
+            untracked_all = true;
+            untracked_explicit = true;
+        } else if (std.mem.eql(u8, arg, "-unormal") or std.mem.eql(u8, arg, "-utrue") or std.mem.eql(u8, arg, "--untracked-files=normal") or std.mem.eql(u8, arg, "--untracked-files=true") or std.mem.eql(u8, arg, "--untracked-files") or std.mem.eql(u8, arg, "-u")) {
+            show_untracked = true;
+            untracked_explicit = true;
+            untracked_all = false;
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try platform_impl.writeStdout("usage: git status [<options>] [--] [<pathspec>...]\n\n");
             try platform_impl.writeStdout("    -s, --short           show status concisely\n");
@@ -109,7 +118,7 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     };
 
     // helpers.Check config for status.showUntrackedFiles (if not overridden by command line)
-    if (show_untracked) {
+    if (!untracked_explicit) {
         const config_path_for_ut = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
         defer allocator.free(config_path_for_ut);
         if (platform_impl.fs.readFile(allocator, config_path_for_ut)) |cfg| {
@@ -118,6 +127,10 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                 defer allocator.free(val);
                 if (std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "0")) {
                     show_untracked = false;
+                } else if (std.mem.eql(u8, val, "all")) {
+                    untracked_all = true;
+                } else if (std.mem.eql(u8, val, "normal")) {
+                    untracked_all = false;
                 }
             }
         } else |_| {}
@@ -511,6 +524,54 @@ pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         helpers.findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.array_list.Managed([]u8).init(allocator)
     else
         std.array_list.Managed([]u8).init(allocator);
+
+    // In normal mode (not -uall), collapse untracked directories
+    if (!untracked_all and untracked_files.items.len > 0) {
+        // Build a set of tracked directories (directories containing tracked files)
+        var tracked_dirs = std.StringHashMap(void).init(allocator);
+        defer tracked_dirs.deinit();
+        {
+            const idx = &index;
+            for (idx.entries.items) |entry| {
+                // Add all parent directories of tracked files
+                var path = entry.path;
+                while (std.mem.lastIndexOfScalar(u8, path, '/')) |sep| {
+                    const dir = path[0..sep];
+                    tracked_dirs.put(dir, {}) catch break;
+                    path = dir;
+                }
+            }
+        }
+
+        var collapsed = std.array_list.Managed([]u8).init(allocator);
+        var seen_dirs = std.StringHashMap(void).init(allocator);
+        defer seen_dirs.deinit();
+
+        for (untracked_files.items) |file| {
+            // Find the top-level directory component
+            if (std.mem.indexOfScalar(u8, file, '/')) |sep| {
+                const top_dir = file[0..sep];
+                // If this top-level dir has no tracked files, collapse
+                if (!tracked_dirs.contains(top_dir)) {
+                    if (!seen_dirs.contains(top_dir)) {
+                        seen_dirs.put(top_dir, {}) catch {};
+                        const dir_entry = std.fmt.allocPrint(allocator, "{s}/", .{top_dir}) catch continue;
+                        collapsed.append(dir_entry) catch {
+                            allocator.free(dir_entry);
+                            continue;
+                        };
+                    }
+                    allocator.free(file);
+                    continue;
+                }
+            }
+            collapsed.append(file) catch {
+                allocator.free(file);
+            };
+        }
+        untracked_files.deinit();
+        untracked_files = collapsed;
+    }
 
     // Sort untracked files alphabetically
     if (untracked_files.items.len > 1) {
