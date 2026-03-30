@@ -448,6 +448,11 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             }
         } else if (std.mem.eql(u8, arg, "--no-color")) {
             color_mode = "never";
+        } else if (std.mem.eql(u8, arg, "--no-with") or std.mem.eql(u8, arg, "--no-without")) {
+            const emsg = try std.fmt.allocPrint(allocator, "error: unknown option `{s}'\n", .{arg[2..]});
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
+            std.process.exit(1);
         } else if (std.mem.startsWith(u8, arg, "--with")) {
             list_mode = true;
             if (std.mem.indexOfScalar(u8, arg, '=') == null) {
@@ -521,6 +526,10 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         try platform_impl.writeStderr("error: -l and -v are incompatible\n");
         std.process.exit(1);
     }
+    if (list_mode and (annotated or message != null or message_from_m or message_from_f or force)) {
+        try platform_impl.writeStderr("error: -l and creation options are incompatible\n");
+        std.process.exit(1);
+    }
     if (delete_mode and verify_mode) {
         try platform_impl.writeStderr("error: -d and -v are incompatible\n");
         std.process.exit(1);
@@ -529,28 +538,83 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         try platform_impl.writeStderr("error: -v and creation options are incompatible\n");
         std.process.exit(1);
     }
+    if (verify_mode and sign_mode) {
+        try platform_impl.writeStderr("error: -v and -s are incompatible\n");
+        std.process.exit(1);
+    }
+    if (n_lines != null and verify_mode) {
+        try platform_impl.writeStderr("error: -n and -v are incompatible\n");
+        std.process.exit(1);
+    }
+    if (n_lines != null and column_mode != null) {
+        try platform_impl.writeStderr("error: --column and -n are incompatible\n");
+        std.process.exit(1);
+    }
 
     // If --contains/--no-contains/--merged/--no-merged/--points-at used without explicit -l, it's list mode
     if (contains_val != null or no_contains_val != null or merged_val != null or no_merged_val != null or points_at_vals.items.len > 0) {
         list_mode = true;
     }
 
-    // Validate --contains/--no-contains values
+    // Validate --contains/--no-contains values resolve to commits
     if (contains_val) |cv| {
-        _ = helpers.resolveRevision(git_path, cv, platform_impl, allocator) catch {
+        const resolved_cv = helpers.resolveRevision(git_path, cv, platform_impl, allocator) catch {
             const emsg = try std.fmt.allocPrint(allocator, "error: malformed object name '{s}'\n", .{cv});
             defer allocator.free(emsg);
             try platform_impl.writeStderr(emsg);
             std.process.exit(1);
         };
+        defer allocator.free(resolved_cv);
+        // Resolve through tags to check if it's a commit
+        const commit_cv = resolveTagToCommit(allocator, git_path, resolved_cv, platform_impl) catch {
+            const emsg = try std.fmt.allocPrint(allocator, "error: object {s} is not a commit\n", .{cv});
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
+            std.process.exit(1);
+        };
+        defer allocator.free(commit_cv);
+        if (!isCommitObject(allocator, git_path, commit_cv, platform_impl)) {
+            const obj_cv = objects.GitObject.load(commit_cv, git_path, platform_impl, allocator) catch {
+                const emsg = try std.fmt.allocPrint(allocator, "error: object {s} is not a commit\n", .{cv});
+                defer allocator.free(emsg);
+                try platform_impl.writeStderr(emsg);
+                std.process.exit(1);
+            };
+            defer obj_cv.deinit(allocator);
+            const emsg = try std.fmt.allocPrint(allocator, "error: object {s} is a {s}, not a commit\n", .{ resolved_cv, obj_cv.type.toString() });
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
+            std.process.exit(1);
+        }
     }
     if (no_contains_val) |ncv| {
-        _ = helpers.resolveRevision(git_path, ncv, platform_impl, allocator) catch {
+        const resolved_ncv = helpers.resolveRevision(git_path, ncv, platform_impl, allocator) catch {
             const emsg = try std.fmt.allocPrint(allocator, "error: malformed object name '{s}'\n", .{ncv});
             defer allocator.free(emsg);
             try platform_impl.writeStderr(emsg);
             std.process.exit(1);
         };
+        defer allocator.free(resolved_ncv);
+        const commit_ncv = resolveTagToCommit(allocator, git_path, resolved_ncv, platform_impl) catch {
+            const emsg = try std.fmt.allocPrint(allocator, "error: object {s} is not a commit\n", .{ncv});
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
+            std.process.exit(1);
+        };
+        defer allocator.free(commit_ncv);
+        if (!isCommitObject(allocator, git_path, commit_ncv, platform_impl)) {
+            const obj_ncv = objects.GitObject.load(commit_ncv, git_path, platform_impl, allocator) catch {
+                const emsg = try std.fmt.allocPrint(allocator, "error: object {s} is not a commit\n", .{ncv});
+                defer allocator.free(emsg);
+                try platform_impl.writeStderr(emsg);
+                std.process.exit(1);
+            };
+            defer obj_ncv.deinit(allocator);
+            const emsg = try std.fmt.allocPrint(allocator, "error: object {s} is a {s}, not a commit\n", .{ resolved_ncv, obj_ncv.type.toString() });
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
+            std.process.exit(1);
+        }
     }
 
     // Handle delete mode
@@ -746,18 +810,36 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                     // (--points-at finds tags whose ref directly points to the given object)
                 }
                 if (!matched_pt) {
-                    // Also check if tag points at (via annotation) the target
-                    const tag_target = resolveTagToCommit(allocator, git_path, tag_direct, platform_impl) catch {
-                        allocator.free(tag_list.items[i]);
-                        _ = tag_list.orderedRemove(i);
-                        continue;
-                    };
-                    defer allocator.free(tag_target);
-                    for (resolved_points.items) |rp| {
-                        if (std.mem.eql(u8, tag_target, rp)) {
-                            matched_pt = true;
-                            break;
+                    // For annotated tags, check each level of tag object indirection
+                    var check_hash = try allocator.dupe(u8, tag_direct);
+                    defer allocator.free(check_hash);
+                    var depth: usize = 0;
+                    while (depth < 20) : (depth += 1) {
+                        const obj = objects.GitObject.load(check_hash, git_path, platform_impl, allocator) catch break;
+                        defer obj.deinit(allocator);
+                        if (obj.type == .tag) {
+                            if (std.mem.startsWith(u8, obj.data, "object ") and obj.data.len >= 47) {
+                                const inner = obj.data[7..47];
+                                for (resolved_points.items) |rp| {
+                                    if (std.mem.eql(u8, inner, rp)) {
+                                        matched_pt = true;
+                                        break;
+                                    }
+                                }
+                                if (matched_pt) break;
+                                allocator.free(check_hash);
+                                check_hash = try allocator.dupe(u8, inner);
+                                continue;
+                            }
                         }
+                        // Not a tag object, check commit/tree/blob hash
+                        for (resolved_points.items) |rp| {
+                            if (std.mem.eql(u8, check_hash, rp)) {
+                                matched_pt = true;
+                                break;
+                            }
+                        }
+                        break;
                     }
                 }
                 if (!matched_pt) {
@@ -848,8 +930,9 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 defer allocator.free(tag_commit);
 
                 if (!isCommitObject(allocator, git_path, tag_commit, platform_impl)) {
-                    // Non-commit objects don't contain the commit
-                    i += 1;
+                    // Non-commit objects are skipped for --no-contains
+                    allocator.free(tag_list.items[i]);
+                    _ = tag_list.orderedRemove(i);
                     continue;
                 }
 
@@ -1383,7 +1466,8 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         if (target_is_tag) {
             const advice_config = getConfigBool(allocator, git_path, "advice", "nestedTag", platform_impl);
             if (advice_config != false) {
-                const advice = try std.fmt.allocPrint(allocator, "hint: You have created a nested tag. The object referred to by your new tag is\nhint: already a tag. If you meant to tag the object that it points to, use:\nhint: \nhint: \tgit tag -f {s} {s}^{{}}\nhint: Disable this message with \"git config advice.nestedTag false\"\n", .{ tag_name.?, tag_name.? });
+                const target_name = target_ref orelse tag_name.?;
+                const advice = try std.fmt.allocPrint(allocator, "hint: You have created a nested tag. The object referred to by your new tag is\nhint: already a tag. If you meant to tag the object that it points to, use:\nhint: \nhint: \tgit tag -f {s} {s}^{{}}\nhint: Disable this message with \"git config advice.nestedTag false\"\n", .{ tag_name.?, target_name });
                 defer allocator.free(advice);
                 try platform_impl.writeStderr(advice);
             }
