@@ -7,6 +7,7 @@ const validation = @import("git/validation.zig");
 const diff = @import("git/diff.zig");
 const blame = @import("git/blame.zig");
 const userdiff = @import("git/userdiff.zig");
+const smart_http = @import("git/smart_http.zig");
 /// WASM exports for browser integration
 /// Provides a C-ABI compatible interface to ziggit's git operations.
 /// All strings are passed as (ptr, len) pairs. Errors return negative values.
@@ -2292,6 +2293,124 @@ export fn ziggit_parse_commit(data_ptr: [*]const u8, data_len: u32, out_ptr: *u3
 
     json.appendSlice("}") catch return -1;
     const owned = json.toOwnedSlice() catch return -2;
+    out_ptr.* = @intFromPtr(owned.ptr);
+    out_len.* = @intCast(owned.len);
+    return 0;
+}
+
+// ========== Smart HTTP protocol exports ==========
+
+/// Parse a git smart HTTP ref discovery response.
+/// data_ptr/data_len: raw response bytes from /info/refs?service=git-upload-pack
+/// out_ptr/out_len: pointers to write result JSON
+/// Format: {"refs":[{"hash":"abc...","name":"refs/heads/main"},...]}
+/// Returns 0 on success, negative on error.
+export fn ziggit_parse_refs(data_ptr: [*]const u8, data_len: u32, out_ptr: *u32, out_len: *u32) i32 {
+    const allocator = getAllocator();
+    var discovery = smart_http.parseRefDiscoveryResponse(allocator, data_ptr[0..data_len]) catch return -1;
+    defer discovery.deinit();
+
+    var json = std.array_list.Managed(u8).init(allocator);
+    defer json.deinit();
+    json.appendSlice("{\"refs\":[") catch return -2;
+
+    for (discovery.refs, 0..) |ref, i| {
+        if (i > 0) json.appendSlice(",") catch return -2;
+        json.appendSlice("{\"hash\":\"") catch return -2;
+        json.appendSlice(&ref.hash) catch return -2;
+        json.appendSlice("\",\"name\":\"") catch return -2;
+        appendJsonEscaped(&json, ref.name) catch return -2;
+        json.appendSlice("\"}") catch return -2;
+    }
+
+    json.appendSlice("]}") catch return -2;
+
+    const owned = json.toOwnedSlice() catch return -3;
+    out_ptr.* = @intFromPtr(owned.ptr);
+    out_len.* = @intCast(owned.len);
+    return 0;
+}
+
+/// Build a git upload-pack want request body.
+/// want_hash_ptr: 40 hex chars of the wanted commit
+/// out_ptr/out_len: pointers to write result bytes
+/// Returns 0 on success, negative on error.
+export fn ziggit_build_want_request(want_hash_ptr: [*]const u8, want_hash_len: u32, out_ptr: *u32, out_len: *u32) i32 {
+    if (want_hash_len < 40) return -1;
+    const allocator = getAllocator();
+    var want: smart_http.Oid = undefined;
+    @memcpy(&want, want_hash_ptr[0..40]);
+    const wants = [_]smart_http.Oid{want};
+    const haves = [_]smart_http.Oid{};
+    const request = smart_http.buildUploadPackRequest(allocator, &wants, &haves) catch return -2;
+    out_ptr.* = @intFromPtr(request.ptr);
+    out_len.* = @intCast(request.len);
+    return 0;
+}
+
+/// Extract PACK data from a git smart HTTP upload-pack response (sideband format).
+/// data_ptr/data_len: raw response bytes
+/// out_ptr/out_len: pointers to write extracted PACK data
+/// Returns 0 on success, negative on error.
+export fn ziggit_extract_pack_data(data_ptr: [*]const u8, data_len: u32, out_ptr: *u32, out_len: *u32) i32 {
+    const allocator = getAllocator();
+    const pack_data = smart_http.parseFetchPackResponse(allocator, data_ptr[0..data_len]) catch return -1;
+    out_ptr.* = @intFromPtr(pack_data.ptr);
+    out_len.* = @intCast(pack_data.len);
+    return 0;
+}
+
+/// Full WASM-native pack extraction: parse all objects from loaded pack.
+/// Returns JSON array with hash/type/ptr/size for each object in the pack.
+/// JS can read object data directly from WASM memory using ptr+size.
+/// Format: [{"hash":"abc...","type":"commit","ptr":N,"size":N},...]  
+/// Returns 0 on success, negative on error.
+export fn ziggit_extract_all_objects(out_ptr: *u32, out_len: *u32) i32 {
+    const allocator = getAllocator();
+    const pack_data = global_pack_data orelse return -1;
+    const idx_data = global_idx_data orelse return -2;
+
+    if (idx_data.len < 8 + 256 * 4) return -3;
+    const total_objects = std.mem.readInt(u32, idx_data[8 + 255 * 4 ..][0..4], .big);
+    const sha1_table_start: usize = 8 + 256 * 4;
+    const crc_table_start = sha1_table_start + @as(usize, total_objects) * 20;
+    const offset_table_start = crc_table_start + @as(usize, total_objects) * 4;
+
+    var json = std.array_list.Managed(u8).init(allocator);
+    defer json.deinit();
+    json.appendSlice("[") catch return -4;
+
+    var count: u32 = 0;
+    while (count < total_objects) : (count += 1) {
+        const sha_offset = sha1_table_start + @as(usize, count) * 20;
+        if (sha_offset + 20 > idx_data.len) break;
+        const obj_hash = idx_data[sha_offset .. sha_offset + 20];
+        const hex = std.fmt.bytesToHex(obj_hash[0..20].*, .lower);
+
+        const off_offset = offset_table_start + @as(usize, count) * 4;
+        if (off_offset + 4 > idx_data.len) break;
+        const offset_val = std.mem.readInt(u32, idx_data[off_offset..][0..4], .big);
+
+        const obj = readPackedObjectFromData(pack_data, offset_val, allocator) catch continue;
+
+        const type_str: []const u8 = switch (obj.obj_type) {
+            .commit => "commit",
+            .tree => "tree",
+            .blob => "blob",
+            .tag => "tag",
+        };
+
+        // Store object data in WASM memory for JS to read
+        const data_ptr_val = @intFromPtr(obj.data.ptr);
+        const data_len_val = obj.data.len;
+        // Don't deinit - JS owns the data and will free via ziggit_free
+
+        if (count > 0) json.appendSlice(",") catch return -4;
+        json.writer().print("{{\"hash\":\"{s}\",\"type\":\"{s}\",\"ptr\":{d},\"size\":{d}}}", .{ &hex, type_str, data_ptr_val, data_len_val }) catch return -4;
+    }
+
+    json.appendSlice("]") catch return -4;
+    const owned = json.toOwnedSlice() catch return -5;
     out_ptr.* = @intFromPtr(owned.ptr);
     out_len.* = @intCast(owned.len);
     return 0;
