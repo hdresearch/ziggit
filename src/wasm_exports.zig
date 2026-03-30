@@ -1158,15 +1158,25 @@ fn generateIdxFromPackData(allocator: std.mem.Allocator, pack_data: []const u8) 
             }
         }
 
-        // Decompress
+        // Decompress using decompressor to track consumed bytes accurately
         decompressed.clearRetainingCapacity();
         const compressed_start = pos;
         var fbs = std.io.fixedBufferStream(pack_data[pos..content_end]);
-        zlib_compat.decompress(fbs.reader(), decompressed.writer()) catch {
-            obj_idx += 1;
-            continue;
-        };
-        pos = compressed_start + @as(usize, @intCast(fbs.pos));
+        var dcp = std.compress.zlib.decompressor(fbs.reader());
+        {
+            var ok = true;
+            while (ok) {
+                var dbuf: [16384]u8 = undefined;
+                const n = dcp.read(&dbuf) catch { ok = false; break; };
+                if (n == 0) break;
+                decompressed.appendSlice(dbuf[0..n]) catch { ok = false; break; };
+            }
+            if (!ok and decompressed.items.len == 0) {
+                obj_idx += 1;
+                continue;
+            }
+        }
+        pos = compressed_start + fbs.pos - dcp.unreadBytes();
 
         const crc = std.hash.crc.Crc32IsoHdlc.hash(pack_data[obj_start..pos]);
 
