@@ -5316,7 +5316,6 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
 
     // Show mode: just show the specified commits (don't walk history for non-show)
     if (show_mode) {
-        try pi.writeStderr("SHOW-MODE-ENTERED\n");
         // Handle -N by walking parents from the first start hash
         if (lo.max_count != null and lo.max_count.? > 1 and start_hashes.items.len == 1) {
             var cur_h = try allocator.dupe(u8, start_hashes.items[0]);
