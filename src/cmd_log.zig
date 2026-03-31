@@ -242,7 +242,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     }
 
     // Fast path for log -N (small count, no filters, no graph, no reflog, default format)
-    if (max_count != null and max_count.? <= 10 and !walk_reflog and !show_graph and
+    if (max_count != null and max_count.? <= 200 and !walk_reflog and !show_graph and
         format_string == null and exclude_refs.items.len == 0 and include_refs.items.len == 0 and
         author_filters.items.len == 0 and committer_filters.items.len == 0 and grep_filters.items.len == 0 and
         output_encoding == null)
@@ -660,7 +660,10 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     }
 
     // Preload commits for fast cache access during walk
-    objects.preloadCommitsFromPacks(git_path, platform_impl, allocator);
+    // Only preload all commits for unbounded walks — bounded walks (log -N) don't need it
+    if (max_count == null) {
+        objects.preloadCommitsFromPacks(git_path, platform_impl, allocator);
+    }
 
     // Open commit-graph for fast timestamp lookups
     const maybe_cg = commit_graph_mod.CommitGraph.open(git_path, allocator);

@@ -113,17 +113,6 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
             }
         }
 
-        // Initialize zlib once for streaming decompression
-        objects.initCZlib();
-        const inflate_init2_fn = objects.getInflateInit2Fn() orelse return;
-        const inflate_fn = objects.getInflateFn() orelse return;
-        const inflate_end_fn = objects.getInflateEndFn() orelse return;
-        const inflate_reset_fn = objects.getInflateResetFn() orelse return;
-
-        var zstream: objects.ZStream = std.mem.zeroes(objects.ZStream);
-        if (inflate_init2_fn(&zstream, 15, "1.2.13", @sizeOf(objects.ZStream)) != 0) return;
-        defer _ = inflate_end_fn(&zstream);
-
         // Walk commit-graph and process each commit inline
         const num_commits = cg.num_commits;
         const bitset_words = (num_commits + 63) / 64;
@@ -139,8 +128,6 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
             var stack = std.array_list.Managed(u32).init(allocator);
             try stack.ensureTotalCapacity(8192);
             defer stack.deinit();
-
-            var decomp_buf: [1024]u8 = undefined;
 
             if (cg.findCommit(start_commit)) |pos| {
                 try stack.append(pos);
@@ -159,16 +146,8 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
                     var found_author = false;
                     for (0..num_packs) |pi| {
                         if (objects.findOffsetInIdx(idx_data_arr[pi], oid_bytes.*)) |offset| {
-                            // Fast path: streaming inflate for non-delta commits
-                            if (inflateCommitAuthor(
-                                pack_data_arr[pi],
-                                offset,
-                                &decomp_buf,
-                                &zstream,
-                                inflate_fn,
-                                inflate_reset_fn,
-                                email,
-                            )) |author| {
+                            if (objects.readPackCommitHeaderDirect(pack_data_arr[pi], idx_data_arr[pi], offset)) |data| {
+                                const author = extractAuthor(data, email);
                                 if (author.len > 0) {
                                     if (author_map.getPtr(author)) |cnt| {
                                         cnt.* += 1;
@@ -176,19 +155,6 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
                                         author_map.put(allocator.dupe(u8, author) catch break, 1) catch {};
                                     }
                                     found_author = true;
-                                }
-                            } else {
-                                // Delta: use readPackCommitHeaderDirect (handles delta chains)
-                                if (objects.readPackCommitHeaderDirect(pack_data_arr[pi], idx_data_arr[pi], offset)) |data| {
-                                    const author = extractAuthor(data, email);
-                                    if (author.len > 0) {
-                                        if (author_map.getPtr(author)) |cnt| {
-                                            cnt.* += 1;
-                                        } else {
-                                            author_map.put(allocator.dupe(u8, author) catch break, 1) catch {};
-                                        }
-                                        found_author = true;
-                                    }
                                 }
                             }
                             break;
