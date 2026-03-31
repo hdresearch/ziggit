@@ -1726,6 +1726,16 @@ pub fn outputFormattedCommitFromDataWithDecor(format: []const u8, commit_hash: [
             } else if (c == 's') {
                 try out.appendSlice(subject);
                 i += 2;
+            } else if (c == 'f') {
+                // %f = sanitized subject (spaces→hyphens, special chars removed)
+                for (subject) |ch| {
+                    if (ch == ' ') {
+                        try out.append('-');
+                    } else if (std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_' or ch == '.') {
+                        try out.append(ch);
+                    }
+                }
+                i += 2;
             } else if (c == 'b') {
                 if (body_start < body_end) {
                     var trimmed = std.mem.trimLeft(u8, commit_data[body_start..body_end], "\n");

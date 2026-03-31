@@ -5316,6 +5316,42 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
 
     // Show mode: just show the specified commits (don't walk history for non-show)
     if (show_mode) {
+        // Handle -N by walking parents from the first start hash
+        if (lo.max_count != null and lo.max_count.? > 1 and start_hashes.items.len == 1) {
+            var cur_h = try allocator.dupe(u8, start_hashes.items[0]);
+            var n_shown: u32 = 0;
+            while (n_shown < lo.max_count.?) {
+                const wobj = objects.GitObject.load(cur_h, git_path, pi, allocator) catch break;
+                defer wobj.deinit(allocator);
+                if (wobj.type != .commit) break;
+
+                if (n_shown > 0) try pi.writeStdout("\n");
+                if (lo.format_string) |fmt| {
+                    if (lo.format_is_separator and n_shown > 0) try pi.writeStdout("\n");
+                    try writeFormattedCommit(fmt, cur_h, wobj.data, pi, allocator);
+                    if (!lo.format_is_separator) try pi.writeStdout("\n");
+                } else {
+                    try writeCommitHeader(cur_h, wobj.data, &lo, true, pi, allocator, git_path);
+                }
+                if (lo.show_patch) {
+                    const wparents = try getAllParents(wobj.data, allocator);
+                    defer wparents.deinit();
+                    const wp: ?[]const u8 = if (wparents.items.len > 0) wparents.items[0] else null;
+                    try writeDiffForCommit(cur_h, wobj.data, wp, &lo, git_path, pi, allocator);
+                }
+                n_shown += 1;
+
+                // Get first parent for next iteration
+                const nparents = try getAllParents(wobj.data, allocator);
+                defer nparents.deinit();
+                if (nparents.items.len == 0) break;
+                allocator.free(cur_h);
+                cur_h = try allocator.dupe(u8, nparents.items[0]);
+            }
+            allocator.free(cur_h);
+            return;
+        }
+
         for (start_hashes.items, 0..) |hash, idx| {
             const obj = objects.GitObject.load(hash, git_path, pi, allocator) catch {
                 const msg = try std.fmt.allocPrint(allocator, "fatal: bad object {s}\n", .{hash});
