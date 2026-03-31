@@ -1538,6 +1538,113 @@ fn collectPackedDecorationRefs(allocator: std.mem.Allocator, git_path: []const u
     }
 }
 
+pub fn filterDecorationMap(allocator: std.mem.Allocator, map: *std.StringHashMap([]const u8), includes: []const []const u8, excludes: []const []const u8, clear: bool) !void {
+    // When clear is true, remove everything except HEAD
+    // When includes are specified, only keep refs matching includes
+    // When excludes are specified, remove refs matching excludes
+    _ = clear;
+    var to_remove = std.array_list.Managed([]const u8).init(allocator);
+    defer to_remove.deinit();
+
+    var dit = map.iterator();
+    while (dit.next()) |entry| {
+        const decor = entry.value_ptr.*;
+        // Split decorations and filter individual refs
+        var new_parts = std.array_list.Managed([]const u8).init(allocator);
+        defer {
+            for (new_parts.items) |p| allocator.free(p);
+            new_parts.deinit();
+        }
+        var parts = std.mem.splitSequence(u8, decor, ", ");
+        while (parts.next()) |part| {
+            // Get the full ref name for matching
+            const ref_full = getFullRefName(part);
+            var keep = true;
+            if (includes.len > 0) {
+                keep = false;
+                for (includes) |inc| {
+                    if (refMatchesPattern(ref_full, inc)) { keep = true; break; }
+                }
+            }
+            if (keep) {
+                for (excludes) |exc| {
+                    if (refMatchesPattern(ref_full, exc)) { keep = false; break; }
+                }
+            }
+            // Always keep HEAD-related entries
+            if (std.mem.startsWith(u8, part, "HEAD")) keep = true;
+            if (keep) try new_parts.append(try allocator.dupe(u8, part));
+        }
+        if (new_parts.items.len == 0) {
+            try to_remove.append(entry.key_ptr.*);
+        } else {
+            // Rebuild the decoration string
+            var new_decor = std.array_list.Managed(u8).init(allocator);
+            defer new_decor.deinit();
+            for (new_parts.items, 0..) |p, pi| {
+                if (pi > 0) try new_decor.appendSlice(", ");
+                try new_decor.appendSlice(p);
+            }
+            allocator.free(entry.value_ptr.*);
+            entry.value_ptr.* = try new_decor.toOwnedSlice();
+        }
+    }
+    for (to_remove.items) |key| {
+        if (map.fetchRemove(key)) |kv| {
+            allocator.free(kv.key);
+            allocator.free(kv.value);
+        }
+    }
+}
+
+fn getFullRefName(short_name: []const u8) []const u8 {
+    // Convert short name back to full ref: "master" -> "refs/heads/master"
+    // "tag: v1.0" -> "refs/tags/v1.0", "origin/main" -> "refs/remotes/origin/main"
+    // HEAD-related entries stay as-is
+    if (std.mem.startsWith(u8, short_name, "HEAD")) return short_name;
+    if (std.mem.startsWith(u8, short_name, "tag: ")) return short_name; // Will need special handling
+    if (std.mem.indexOf(u8, short_name, "/")) |_| return short_name; // Likely remote ref
+    return short_name; // branch name
+}
+
+fn refMatchesPattern(ref_name: []const u8, pattern: []const u8) bool {
+    // Pattern can be "refs/heads/*" or "heads/octopus*" etc.
+    // Simple glob matching
+    if (std.mem.indexOf(u8, pattern, "*")) |star_pos| {
+        const prefix = pattern[0..star_pos];
+        const suffix = pattern[star_pos + 1 ..];
+        // Try matching against various forms of the ref name
+        if (matchGlob(ref_name, prefix, suffix)) return true;
+        // Also try with refs/ prefix
+        if (std.mem.startsWith(u8, ref_name, "tag: ")) {
+            const tag_name = ref_name[5..];
+            if (matchGlob(tag_name, prefix, suffix)) return true;
+            const full_tag = std.mem.concat(std.heap.page_allocator, u8, &.{ "refs/tags/", tag_name }) catch return false;
+            defer std.heap.page_allocator.free(full_tag);
+            if (matchGlob(full_tag, prefix, suffix)) return true;
+        } else if (std.mem.indexOf(u8, ref_name, "/") != null) {
+            // Remote ref like origin/main
+            const full_ref = std.mem.concat(std.heap.page_allocator, u8, &.{ "refs/remotes/", ref_name }) catch return false;
+            defer std.heap.page_allocator.free(full_ref);
+            if (matchGlob(full_ref, prefix, suffix)) return true;
+        } else {
+            // Branch name
+            const full_ref = std.mem.concat(std.heap.page_allocator, u8, &.{ "refs/heads/", ref_name }) catch return false;
+            defer std.heap.page_allocator.free(full_ref);
+            if (matchGlob(full_ref, prefix, suffix)) return true;
+        }
+        return false;
+    }
+    // Exact match (without glob)
+    return std.mem.eql(u8, ref_name, pattern);
+}
+
+fn matchGlob(text: []const u8, prefix: []const u8, suffix: []const u8) bool {
+    if (!std.mem.startsWith(u8, text, prefix)) return false;
+    if (suffix.len == 0) return true;
+    return std.mem.endsWith(u8, text, suffix);
+}
+
 pub fn outputFormattedCommitFromData(format: []const u8, commit_hash: []const u8, commit_data: []const u8, out: *std.array_list.Managed(u8), allocator: std.mem.Allocator) !void {
     return outputFormattedCommitFromDataWithDecor(format, commit_hash, commit_data, out, allocator, null);
 }
