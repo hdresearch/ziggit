@@ -2,55 +2,55 @@
 
 ## 1. CLI Performance: ziggit vs git
 
-**Platform**: macOS ARM64 (Apple Silicon), 7 runs each, median reported  
-**Test repo**: expressjs/express (6,135 commits, 423 files)  
-**Date**: 2026-03-28  
+**Platform**: macOS ARM64 (Apple Silicon), 10 runs each, median reported  
+**Test repo**: expressjs/express (6,135 commits, 423 files, commit-graph enabled)  
+**Date**: 2026-03-31  
 **Ziggit**: ReleaseFast build (6.9MB binary)  
 **Git**: v2.43.0
 
 | Operation | git (ms) | ziggit (ms) | Speedup | Winner |
 |---|---:|---:|---:|---|
-| `log --oneline -20` | 9.2 | 2.3 | **4.1×** | 🟢 ziggit |
-| `log --oneline -100` | 9.9 | 2.6 | **3.8×** | 🟢 ziggit |
-| `log --oneline` (all 6135) | 36.5 | 28.0 | **1.3×** | 🟢 ziggit |
-| `log --format=%H` | 32.4 | 124.4 | 0.26× | 🔴 git |
-| `shortlog -sn` | 9.8 | 22.3 | 0.44× | 🔴 git |
-| `rev-list --count HEAD` | 25.1 | 12.5 | **2.0×** | 🟢 ziggit |
-| `rev-list HEAD` | 31.5 | 24.2 | **1.3×** | 🟢 ziggit |
-| `diff HEAD~1 HEAD` | 9.3 | 2.7 | **3.4×** | 🟢 ziggit |
-| `diff HEAD~1 HEAD --stat` | 9.4 | 2.6 | **3.6×** | 🟢 ziggit |
-| `diff HEAD~1 HEAD --name-only` | 9.3 | 2.5 | **3.7×** | 🟢 ziggit |
-| `show HEAD --stat` | 9.6 | 2.5 | **3.8×** | 🟢 ziggit |
-| `show HEAD` | 9.2 | 2.6 | **3.5×** | 🟢 ziggit |
-| `status` | 10.7 | 3.7 | **2.9×** | 🟢 ziggit |
-| `status -s` | 9.9 | 3.5 | **2.8×** | 🟢 ziggit |
-| `status --porcelain` | 10.8 | 3.8 | **2.8×** | 🟢 ziggit |
-| `branch -a` | 9.4 | 2.1 | **4.5×** | 🟢 ziggit |
-| `branch --contains HEAD` | 9.5 | 2.1 | **4.5×** | 🟢 ziggit |
-| `tag -l` | 9.5 | 3.9 | **2.4×** | 🟢 ziggit |
-| `cat-file -p HEAD` | 9.5 | 2.3 | **4.2×** | 🟢 ziggit |
-| `cat-file -t HEAD` | 9.1 | 2.2 | **4.1×** | 🟢 ziggit |
-| `rev-parse HEAD` | 8.7 | 2.2 | **3.9×** | 🟢 ziggit |
-| `rev-parse --git-dir` | 9.1 | 2.2 | **4.2×** | 🟢 ziggit |
-| `rev-parse --show-toplevel` | 8.3 | 2.0 | **4.2×** | 🟢 ziggit |
-| `config --list` | 8.1 | 2.1 | **3.9×** | 🟢 ziggit |
-| `describe --tags --always` | 10.4 | 2.2 | **4.8×** | 🟢 ziggit |
-| `grep -r express` | 11.1 | 2.3 | **4.8×** | 🟢 ziggit |
-| `log --author=dougwilson` | 28.9 | 23.9 | **1.2×** | 🟢 ziggit |
-| `log --grep=fix` | 31.3 | 29.4 | 1.06× | 🟡 parity |
-| `stash list` | 8.1 | 2.0 | **4.1×** | 🟢 ziggit |
+| `log --oneline -20` | 9.9 | 2.3 | **4.2×** | 🟢 ziggit |
+| `log --oneline -100` | 10.3 | 2.7 | **3.8×** | 🟢 ziggit |
+| `log --oneline` (all 6135) | 35.9 | 13.5 | **2.7×** | 🟢 ziggit |
+| `log --format=%H` | 13.9 | 3.0 | **4.7×** | 🟢 ziggit |
+| `shortlog -sn HEAD` | 29.8 | 13.4 | **2.2×** | 🟢 ziggit |
+| `rev-list --count HEAD` | 10.2 | 2.5 | **4.0×** | 🟢 ziggit |
+| `rev-list HEAD` | 13.9 | 3.0 | **4.6×** | 🟢 ziggit |
+| `diff HEAD~1 HEAD` | 9.7 | 2.7 | **3.6×** | 🟢 ziggit |
+| `diff HEAD~1 HEAD --stat` | 8.7 | 2.3 | **3.8×** | 🟢 ziggit |
+| `diff HEAD~1 HEAD --name-only` | 9.0 | 2.3 | **3.9×** | 🟢 ziggit |
+| `show HEAD --stat` | 9.7 | 2.5 | **3.8×** | 🟢 ziggit |
+| `show HEAD` | 10.0 | 2.8 | **3.6×** | 🟢 ziggit |
+| `status` | 10.9 | 3.7 | **3.0×** | 🟢 ziggit |
+| `status -s` | 10.8 | 3.7 | **2.9×** | 🟢 ziggit |
+| `status --porcelain` | 10.7 | 3.7 | **2.9×** | 🟢 ziggit |
+| `branch -a` | 8.7 | 2.0 | **4.3×** | 🟢 ziggit |
+| `branch --contains HEAD` | 8.4 | 1.9 | **4.4×** | 🟢 ziggit |
+| `tag -l` | 8.8 | 3.4 | **2.6×** | 🟢 ziggit |
+| `cat-file -p HEAD` | 9.0 | 2.1 | **4.3×** | 🟢 ziggit |
+| `cat-file -t HEAD` | 8.8 | 2.1 | **4.1×** | 🟢 ziggit |
+| `rev-parse HEAD` | 8.6 | 2.2 | **4.0×** | 🟢 ziggit |
+| `rev-parse --git-dir` | 8.5 | 1.9 | **4.4×** | 🟢 ziggit |
+| `rev-parse --show-toplevel` | 8.7 | 2.1 | **4.1×** | 🟢 ziggit |
+| `config --list` | 9.8 | 2.4 | **4.0×** | 🟢 ziggit |
+| `describe --tags --always` | 11.6 | 2.6 | **4.4×** | 🟢 ziggit |
+| `grep -r express` | 12.4 | 2.5 | **5.0×** | 🟢 ziggit |
+| `log --author=dougwilson` | 31.2 | 25.7 | **1.2×** | 🟢 ziggit |
+| `log --grep=fix` | 33.2 | 30.3 | 1.1× | 🟡 parity |
+| `stash list` | 9.2 | 2.1 | **4.4×** | 🟢 ziggit |
 
 ### Summary
 
 | | Count | Percentage |
 |---|---:|---:|
-| **ziggit wins** | 26/29 | 90% |
-| **git wins** | 2/29 | 7% |
+| **ziggit wins** | 28/29 | 97% |
+| **git wins** | 0/29 | 0% |
 | **parity** | 1/29 | 3% |
 
-- **Average speedup** (where ziggit wins): **3.5×**
-- **Best**: `grep -r` and `describe` at **4.8×**
-- **Known losses**: `log --format=%H` (format string parsing overhead), `shortlog -sn` (pack decompression vs commit-graph)
+- **Zero regressions** — ziggit is faster or equal on every benchmarked operation
+- **Average speedup** (where ziggit wins): **3.7×**
+- **Best**: `grep -r` at **5.0×**, `log --format=%H` at **4.7×**, `rev-list HEAD` at **4.6×**
 
 ---
 
@@ -80,34 +80,27 @@
 
 ### Library-Level Micro-Benchmarks (ziggit in-process vs git CLI subprocess)
 
-| Repo | ziggit findCommit | git CLI findCommit | Speedup | ziggit full workflow | git CLI full workflow | Speedup |
-|---|---:|---:|---:|---:|---:|---:|
-| debug | 184μs | 1,303μs | 7.0× | 453μs | 13,296μs | **29.3×** |
-| chalk | 148μs | 1,209μs | 8.1× | 473μs | 14,539μs | **30.7×** |
-| node-semver | 158μs | 1,249μs | 7.9× | 490μs | 18,654μs | **38.0×** |
-| express | 162μs | 1,233μs | 7.6× | 505μs | 24,644μs | **48.8×** |
+| Repo | ziggit full workflow | git CLI full workflow | Speedup |
+|---|---:|---:|---:|
+| debug | 453μs | 13,296μs | **29×** |
+| chalk | 473μs | 14,539μs | **31×** |
+| node-semver | 490μs | 18,654μs | **38×** |
+| express | 505μs | 24,644μs | **49×** |
 
-**Library calls are 29–49× faster** than spawning git CLI for the full bun-install workflow (clone + find commit + checkout).
-
-### Variance
-
-Ziggit provides **3–9× more predictable** install times (lower coefficient of variation) due to eliminating subprocess spawn jitter.
+**Library calls are 29–49× faster** than spawning git CLI for the full bun-install workflow.
 
 ---
 
 ## 3. WebAssembly Binary
 
-| Metric | ziggit WASM | wasm-git |
-|---|---:|---:|
-| **Raw size** | **142 KB** | 288 KB |
-| **gzip** | **55 KB** | ~120 KB |
-| **brotli** | **46 KB** | ~100 KB |
-| **Exports** | 68 | ~20 |
-| **Size reduction** | — | **51% smaller** |
+| Metric | ziggit WASM | wasm-git | Comparison |
+|---|---:|---:|---|
+| **Raw size** | **142 KB** | 288 KB | **51% smaller** |
+| **gzip** | **55 KB** | ~120 KB | **54% smaller** |
+| **brotli** | **46 KB** | ~100 KB | **54% smaller** |
+| **Exports** | 68 | ~20 | **3.4× more** |
 
-68 exported functions covering: init, clone, add, commit, status, log, diff, show, branch, tag, checkout, stash, merge, grep, blame, config, refs, tree parsing, pack loading, object reading, and memory management.
-
-Browser demo served via single Express server with built-in CORS proxy — all git operations run in WASM with zero JS git fallbacks.
+68 exported functions: init, clone, add, commit, status, log, diff, show, branch, tag, checkout, stash, merge, grep, blame, config, refs, tree parsing, pack loading, object reading, memory management.
 
 ---
 
