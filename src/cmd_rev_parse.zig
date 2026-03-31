@@ -310,22 +310,31 @@ pub fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                 std.process.exit(128);
             };
             defer allocator.free(git_path);
-            const cwd = try platform_impl.fs.getCwd(allocator);
-            defer allocator.free(cwd);
-            if (std.mem.startsWith(u8, git_path, cwd) and git_path.len > cwd.len) {
-                const rel = git_path[cwd.len..];
-                const trimmed = if (rel.len > 0 and rel[0] == '/') rel[1..] else rel;
-                if (trimmed.len > 0) {
-                    const output = try std.fmt.allocPrint(allocator, "{s}\n", .{trimmed});
-                    defer allocator.free(output);
-                    try platform_impl.writeStdout(output);
-                } else {
-                    try platform_impl.writeStdout(".git\n");
-                }
-            } else {
-                const output = try std.fmt.allocPrint(allocator, "{s}\n", .{git_path});
+            if (path_format_absolute) {
+                // Always output absolute path
+                const abs = std.fs.cwd().realpathAlloc(allocator, git_path) catch try allocator.dupe(u8, git_path);
+                defer allocator.free(abs);
+                const output = try std.fmt.allocPrint(allocator, "{s}\n", .{abs});
                 defer allocator.free(output);
                 try platform_impl.writeStdout(output);
+            } else {
+                const cwd = try platform_impl.fs.getCwd(allocator);
+                defer allocator.free(cwd);
+                if (std.mem.startsWith(u8, git_path, cwd) and git_path.len > cwd.len) {
+                    const rel = git_path[cwd.len..];
+                    const trimmed = if (rel.len > 0 and rel[0] == '/') rel[1..] else rel;
+                    if (trimmed.len > 0) {
+                        const output = try std.fmt.allocPrint(allocator, "{s}\n", .{trimmed});
+                        defer allocator.free(output);
+                        try platform_impl.writeStdout(output);
+                    } else {
+                        try platform_impl.writeStdout(".git\n");
+                    }
+                } else {
+                    const output = try std.fmt.allocPrint(allocator, "{s}\n", .{git_path});
+                    defer allocator.free(output);
+                    try platform_impl.writeStdout(output);
+                }
             }
             continue;
         } else if (std.mem.eql(u8, arg, "--is-inside-work-tree")) {
