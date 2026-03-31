@@ -1218,11 +1218,14 @@ fn cleanMergeState(git_path: []const u8, allocator: Allocator) void {
 fn doUnbornMerge(git_path: []const u8, current_branch: []const u8, target_hash: []const u8, opts: *MergeOpts, allocator: Allocator, platform_impl: *const pm.Platform) void {
     _ = opts;
     // Fast-forward from empty to target
+    const zero_hash = "0000000000000000000000000000000000000000";
     refs.updateRef(git_path, current_branch, target_hash, platform_impl, allocator) catch {
         writeStderr(platform_impl, "fatal: unable to update ref\n");
         std.process.exit(128);
     };
     checkoutTree(git_path, target_hash, allocator, platform_impl);
+    // Write reflog entry for initial merge
+    writeReflogEntry(git_path, current_branch, zero_hash, target_hash, "initial pull", allocator, platform_impl);
     writeStdout(platform_impl, "Fast-forward\n");
 }
 
