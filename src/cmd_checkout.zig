@@ -608,6 +608,18 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                 defer allocator.free(head_content);
                 platform_impl.fs.writeFile(head_path, head_content) catch {};
                 
+                // Checkout the commit's tree to working directory
+                // Use read-tree to update the index, then checkout-index to update working tree
+                const read_tree = @import("cmd_read_tree.zig");
+                var rt_args = [_][]const u8{hash};
+                var rt_iter = platform_mod.ArgIterator{ .args = &rt_args, .allocator = allocator };
+                read_tree.cmdReadTree(allocator, &rt_iter, platform_impl) catch {};
+                // Now force-checkout all files from the index
+                const checkout_idx = @import("cmd_checkout_index.zig");
+                var ci_args = [_][]const u8{ "-a", "-f" };
+                var ci_iter = platform_mod.ArgIterator{ .args = &ci_args, .allocator = allocator };
+                checkout_idx.cmdCheckoutIndex(allocator, &ci_iter, platform_impl) catch {};
+
                 if (!quiet) {
                     const det_msg = try std.fmt.allocPrint(allocator, "HEAD is now at {s}...\n", .{hash[0..7]});
                     defer allocator.free(det_msg);

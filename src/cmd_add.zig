@@ -250,6 +250,12 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var had_ignored_file = false;
     for (collected_add_paths.items) |file_path| {
         has_files = true;
+
+        // Reject empty string pathspec
+        if (file_path.len == 0) {
+            try platform_impl.writeStderr("fatal: invalid pathspec '' given\n");
+            std.process.exit(128);
+        }
         
         // helpers.Handle special cases like "." for current directory
         if (std.mem.eql(u8, file_path, ".") and update_flag and !add_all_flag) {
