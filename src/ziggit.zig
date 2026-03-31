@@ -1278,6 +1278,15 @@ pub const Repository = struct {
         self._cached_index_entries_mtime = null;
     }
     
+    /// Extract tree at given commit to a target directory (no index written).
+    /// This is the fastest extraction path for library users who just need the files
+    /// (e.g., bun extracting git dependencies). Skips index writing entirely.
+    pub fn checkoutTo(self: *Repository, ref: []const u8, target_dir: []const u8) !void {
+        const commit_hash = try self.findCommit(ref);
+        const tree_hash = try self.getCommitTree(&commit_hash);
+        try self.checkoutTree(&tree_hash, target_dir);
+    }
+
     /// Update HEAD for a checkout — if ref is a branch, make HEAD a symbolic ref
     fn updateHeadForCheckout(self: *Repository, ref: []const u8, commit_hash: *const [40]u8) !void {
         var head_path_buf: [std.fs.max_path_bytes]u8 = undefined;
