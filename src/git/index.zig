@@ -660,16 +660,31 @@ pub const Index = struct {
             .ctime = if (real_stat) |s| s.ctime else 0,
         };
 
-        // Find existing entry or add new one
-        for (self.entries.items, 0..) |*entry, i| {
-            if (std.mem.eql(u8, entry.path, path)) {
-                // Update existing entry
-                entry.deinit(self.allocator);
-                var new_entry = IndexEntry.init(try self.allocator.dupe(u8, path), fake_stat, hash_bytes);
-                new_entry.extended_flags = entry.extended_flags; // Preserve extended flags
-                self.entries.items[i] = new_entry;
-                return;
+        // Remove ALL existing entries for this path (including higher-stage conflict entries)
+        // This is critical for resolving merge conflicts: `git add` on a conflicted file
+        // must collapse stages 1/2/3 into a single stage-0 entry.
+        {
+            var i: usize = 0;
+            var found_first = false;
+            while (i < self.entries.items.len) {
+                if (std.mem.eql(u8, self.entries.items[i].path, path)) {
+                    if (!found_first) {
+                        // Replace the first matching entry in-place
+                        self.entries.items[i].deinit(self.allocator);
+                        const new_entry = IndexEntry.init(try self.allocator.dupe(u8, path), fake_stat, hash_bytes);
+                        self.entries.items[i] = new_entry;
+                        found_first = true;
+                        i += 1;
+                    } else {
+                        // Remove duplicate entries (higher stages)
+                        self.entries.items[i].deinit(self.allocator);
+                        _ = self.entries.orderedRemove(i);
+                    }
+                } else {
+                    i += 1;
+                }
             }
+            if (found_first) return;
         }
 
         // Add new entry

@@ -37,7 +37,12 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
     var porcelain_explicit = false; // true when --porcelain was used (paths always repo-relative)
     var nul_terminate = false;
     var show_branch = false;
+    var no_branch_explicit = false;
     var short_format = false;
+    var no_short_explicit = false;
+    var show_stash = false;
+    var show_stash_explicit = false;
+    var show_ignored = false;
     var show_untracked = true; // default: show untracked files
     var untracked_explicit = false;
     var untracked_all = false; // false = normal (collapse dirs), true = all (show individual files)
@@ -63,12 +68,19 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             }
         } else if (std.mem.eql(u8, arg, "--branch") or std.mem.eql(u8, arg, "-b")) {
             show_branch = true;
+        } else if (std.mem.eql(u8, arg, "--no-branch")) {
+            show_branch = false;
+            no_branch_explicit = true;
         } else if (std.mem.eql(u8, arg, "--short") or std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "-sb") or std.mem.eql(u8, arg, "-bs")) {
             short_format = true;
             porcelain = true; // short format uses same output as porcelain
             if (std.mem.eql(u8, arg, "-sb") or std.mem.eql(u8, arg, "-bs")) {
                 show_branch = true;
             }
+        } else if (std.mem.eql(u8, arg, "--no-short")) {
+            short_format = false;
+            porcelain = false;
+            no_short_explicit = true;
         } else if (std.mem.eql(u8, arg, "-uno") or std.mem.eql(u8, arg, "-ufalse") or std.mem.eql(u8, arg, "--untracked-files=no") or std.mem.eql(u8, arg, "--untracked-files=false") or std.mem.eql(u8, arg, "--no-untracked-files")) {
             show_untracked = false;
             untracked_explicit = true;
@@ -100,7 +112,13 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
             // Verbose mode - accept as no-op (shows diff in commit template)
         } else if (std.mem.eql(u8, arg, "--ignored")) {
-            // helpers.Show ignored files - accept as no-op for now
+            show_ignored = true;
+        } else if (std.mem.eql(u8, arg, "--show-stash")) {
+            show_stash = true;
+            show_stash_explicit = true;
+        } else if (std.mem.eql(u8, arg, "--no-show-stash")) {
+            show_stash = false;
+            show_stash_explicit = true;
         } else if (std.mem.eql(u8, arg, "--renames") or std.mem.eql(u8, arg, "--no-renames") or
             std.mem.eql(u8, arg, "--find-renames"))
         {
@@ -164,7 +182,7 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
         defer allocator.free(config_path_sb);
         if (platform_impl.fs.readFile(allocator, config_path_sb)) |cfg| {
             defer allocator.free(cfg);
-            if (!short_format and !porcelain) {
+            if (!short_format and !porcelain and !no_short_explicit) {
                 // Check status.short config
                 const short_val = if (helpers.getConfigOverride("status.short")) |v| v else
                     (helpers.parseConfigValue(cfg, "status.short", allocator) catch null) orelse null;
@@ -173,17 +191,25 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
                         short_format = true;
                         porcelain = true;
                     }
-                    if (!std.mem.eql(u8, val, "true") and !std.mem.eql(u8, val, "yes") and !std.mem.eql(u8, val, "1"))
-                    {} else {}
                 }
             }
-            if (!show_branch) {
-                // Check status.branch config
+            if (!show_branch and !no_branch_explicit and !porcelain_explicit) {
+                // Check status.branch config (suppressed by --no-branch and --porcelain)
                 const branch_val = if (helpers.getConfigOverride("status.branch")) |v| v else
                     (helpers.parseConfigValue(cfg, "status.branch", allocator) catch null) orelse null;
                 if (branch_val) |val| {
                     if (std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "yes") or std.mem.eql(u8, val, "1")) {
                         show_branch = true;
+                    }
+                }
+            }
+            if (!show_stash_explicit) {
+                // Check status.showStash config
+                const stash_val = if (helpers.getConfigOverride("status.showStash")) |v| v else
+                    (helpers.parseConfigValue(cfg, "status.showstash", allocator) catch null) orelse null;
+                if (stash_val) |val| {
+                    if (std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "yes") or std.mem.eql(u8, val, "1")) {
+                        show_stash = true;
                     }
                 }
             }
@@ -255,10 +281,24 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
     const current_commit = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
     defer if (current_commit) |hash| allocator.free(hash);
     
+    // Detect detached HEAD
+    const is_detached = std.mem.eql(u8, current_branch, "HEAD");
+
     if (!porcelain) {
-        const branch_msg = try std.fmt.allocPrint(allocator, "On branch {s}\n", .{current_branch});
-        defer allocator.free(branch_msg);
-        try writeWithCommentPrefix(platform_impl, branch_msg, comment_prefix);
+        if (is_detached) {
+            if (current_commit) |hash| {
+                const short_hash = if (hash.len >= 7) hash[0..7] else hash;
+                const branch_msg = try std.fmt.allocPrint(allocator, "HEAD detached at {s}\n", .{short_hash});
+                defer allocator.free(branch_msg);
+                try writeWithCommentPrefix(platform_impl, branch_msg, comment_prefix);
+            } else {
+                try writeWithCommentPrefix(platform_impl, "HEAD detached at (unknown)\n", comment_prefix);
+            }
+        } else {
+            const branch_msg = try std.fmt.allocPrint(allocator, "On branch {s}\n", .{current_branch});
+            defer allocator.free(branch_msg);
+            try writeWithCommentPrefix(platform_impl, branch_msg, comment_prefix);
+        }
 
         // Display upstream tracking info natively
         if (current_commit != null) upstream_display: {
@@ -728,6 +768,50 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
         }
     }
 
+    // Collect and output ignored files if --ignored
+    if (show_ignored) {
+        var ignored_list = findIgnoredFiles(allocator, repo_root, &index, &gitignore) catch std.array_list.Managed([]u8).init(allocator);
+        defer {
+            for (ignored_list.items) |f| allocator.free(f);
+            ignored_list.deinit();
+        }
+
+        // Sort ignored files
+        if (ignored_list.items.len > 1) {
+            std.mem.sort([]u8, ignored_list.items, {}, struct {
+                fn lessThan(_: void, a: []u8, b: []u8) bool {
+                    return std.mem.order(u8, a, b) == .lt;
+                }
+            }.lessThan);
+        }
+
+        if (ignored_list.items.len > 0) {
+            if (porcelain) {
+                for (ignored_list.items) |file| {
+                    const qp = try quotePath(allocator, file);
+                    defer allocator.free(qp);
+                    try porcelain_lines.append(try std.fmt.allocPrint(allocator, "!! {s}", .{qp}));
+                }
+            } else {
+                // Don't add leading \n if untracked section already added a trailing blank line
+                if (untracked_files.items.len > 0) {
+                    try writeWithCommentPrefix(platform_impl, "Ignored files:\n", comment_prefix);
+                } else {
+                    try writeWithCommentPrefix(platform_impl, "\nIgnored files:\n", comment_prefix);
+                }
+                if (show_hints) try writeWithCommentPrefix(platform_impl, "  (use \"git add -f <file>...\" to include in what will be committed)\n", comment_prefix);
+                for (ignored_list.items) |file| {
+                    const rel_path = try makeRelativePath(allocator, file, prefix);
+                    defer allocator.free(rel_path);
+                    const msg = try std.fmt.allocPrint(allocator, "\t{s}\n", .{rel_path});
+                    defer allocator.free(msg);
+                    try writeWithCommentPrefix(platform_impl, msg, comment_prefix);
+                }
+                try writeWithCommentPrefix(platform_impl, "\n", comment_prefix);
+            }
+        }
+    }
+
     // helpers.Output sorted porcelain lines
     if (porcelain and porcelain_lines.items.len > 0) {
         // Sort: tracked entries in path order first, then untracked in path order
@@ -736,10 +820,15 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
                 if (s.len > 0 and s[0] == '"') return s[1..];
                 return s;
             }
+            fn category(s: []const u8) u2 {
+                if (s.len >= 2 and s[0] == '!' and s[1] == '!') return 2; // ignored last
+                if (s.len >= 2 and s[0] == '?' and s[1] == '?') return 1; // untracked middle
+                return 0; // tracked first
+            }
             fn lessThan(_: void, a: []u8, b: []u8) bool {
-                const a_untracked = a.len >= 2 and a[0] == '?' and a[1] == '?';
-                const b_untracked = b.len >= 2 and b[0] == '?' and b[1] == '?';
-                if (a_untracked != b_untracked) return !a_untracked; // tracked before untracked
+                const a_cat = category(a);
+                const b_cat = category(b);
+                if (a_cat != b_cat) return a_cat < b_cat;
                 const a_path = stripQuote(if (a.len > 3) a[3..] else a);
                 const b_path = stripQuote(if (b.len > 3) b[3..] else b);
                 return std.mem.order(u8, a_path, b_path) == .lt;
@@ -783,6 +872,30 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
                 try writeWithCommentPrefix(platform_impl, "\nUntracked files not listed\n", comment_prefix);
             }
         }
+    }
+
+    // Show stash info (only in non-porcelain mode, after summary)
+    if (!porcelain and show_stash) {
+        // Count stash entries by reading refs/stash reflog
+        const stash_log_path = try std.fmt.allocPrint(allocator, "{s}/logs/refs/stash", .{git_path});
+        defer allocator.free(stash_log_path);
+        if (platform_impl.fs.readFile(allocator, stash_log_path)) |stash_log| {
+            defer allocator.free(stash_log);
+            var stash_count: usize = 0;
+            var stash_lines = std.mem.splitScalar(u8, stash_log, '\n');
+            while (stash_lines.next()) |line| {
+                if (line.len > 0) stash_count += 1;
+            }
+            if (stash_count > 0) {
+                if (stash_count == 1) {
+                    try platform_impl.writeStdout("Your stash currently has 1 entry\n");
+                } else {
+                    const stash_msg = try std.fmt.allocPrint(allocator, "Your stash currently has {d} entries\n", .{stash_count});
+                    defer allocator.free(stash_msg);
+                    try platform_impl.writeStdout(stash_msg);
+                }
+            }
+        } else |_| {}
     }
 }
 
@@ -887,6 +1000,73 @@ fn makeRelativePath(alloc: std.mem.Allocator, path: []const u8, cwd_prefix: []co
     }
     try result.appendSlice(path);
     return try result.toOwnedSlice();
+}
+
+fn findIgnoredFiles(
+    allocator: std.mem.Allocator,
+    repo_root: []const u8,
+    index: *const index_mod.Index,
+    gitignore: *const gitignore_mod.GitIgnore,
+) !std.array_list.Managed([]u8) {
+    var ignored_files = std.array_list.Managed([]u8).init(allocator);
+    errdefer {
+        for (ignored_files.items) |f| allocator.free(f);
+        ignored_files.deinit();
+    }
+
+    var tracked_files = std.StringHashMap(void).init(allocator);
+    defer tracked_files.deinit();
+    for (index.entries.items) |entry| {
+        try tracked_files.put(entry.path, {});
+    }
+
+    try scanForIgnored(allocator, repo_root, "", &ignored_files, &tracked_files, gitignore);
+    return ignored_files;
+}
+
+fn scanForIgnored(
+    allocator: std.mem.Allocator,
+    repo_root: []const u8,
+    relative_path: []const u8,
+    ignored_files: *std.array_list.Managed([]u8),
+    tracked_files: *const std.StringHashMap(void),
+    gitignore: *const gitignore_mod.GitIgnore,
+) !void {
+    const full_path = if (relative_path.len == 0)
+        try allocator.dupe(u8, repo_root)
+    else
+        try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, relative_path });
+    defer allocator.free(full_path);
+
+    var dir = std.fs.cwd().openDir(full_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+
+    var iterator = dir.iterate();
+    while (iterator.next() catch null) |entry| {
+        if (std.mem.eql(u8, entry.name, ".git")) continue;
+
+        const entry_rel = if (relative_path.len == 0)
+            try allocator.dupe(u8, entry.name)
+        else
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ relative_path, entry.name });
+        defer allocator.free(entry_rel);
+
+        if (gitignore.isIgnored(entry_rel)) {
+            // This is an ignored file/dir - add it
+            if (!tracked_files.contains(entry_rel)) {
+                try ignored_files.append(try allocator.dupe(u8, entry_rel));
+            }
+            // Don't recurse into ignored directories
+            continue;
+        }
+
+        switch (entry.kind) {
+            .directory => {
+                try scanForIgnored(allocator, repo_root, entry_rel, ignored_files, tracked_files, gitignore);
+            },
+            else => {},
+        }
+    }
 }
 
 // helpers.Resolve a git alias by looking up alias.<name> in config files.
