@@ -36,6 +36,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     var oneline = false;
     var show_graph = false;
     var format_string: ?[]const u8 = null;
+    var line_prefix: []const u8 = "";
 
     var format_is_separator = false; // true for "format:", false for "tformat:" / "--format="
     var max_count: ?u32 = null;
@@ -46,6 +47,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     defer include_refs.deinit();
     var walk_reflog = false;
     var no_walk = false;
+    var no_walk_unsorted = false;
     var pretty_alias: ?[]const u8 = null; // unresolved pretty.<name> alias
     var author_filters = std.array_list.Managed([]const u8).init(allocator);
     defer author_filters.deinit();
@@ -129,6 +131,12 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         } else if (std.mem.eql(u8, arg, "-E") or std.mem.eql(u8, arg, "--extended-regexp")) {
             fixed_strings = false; // use regex mode
             fixed_strings_explicit = true;
+        } else if (std.mem.eql(u8, arg, "-G") or std.mem.eql(u8, arg, "--basic-regexp")) {
+            fixed_strings = false; // use regex mode (basic)
+            fixed_strings_explicit = true;
+        } else if (std.mem.eql(u8, arg, "-P") or std.mem.eql(u8, arg, "--perl-regexp")) {
+            fixed_strings = false; // use regex mode (perl-compatible)
+            fixed_strings_explicit = true;
         } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--regexp-ignore-case")) {
             ignore_case = true;
         } else if (std.mem.eql(u8, arg, "--grep-reflog")) {
@@ -145,7 +153,9 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             diff_filter = arg["--diff-filter=".len..];
         } else if (std.mem.eql(u8, arg, "--diff-filter")) {
             diff_filter = args.next();
-        } else if (std.mem.startsWith(u8, arg, "--diff-algorithm=") or std.mem.startsWith(u8, arg, "--inter-hunk-context=") or std.mem.startsWith(u8, arg, "--src-prefix=") or std.mem.startsWith(u8, arg, "--dst-prefix=") or std.mem.startsWith(u8, arg, "--stat=") or std.mem.startsWith(u8, arg, "--line-prefix=")) {
+        } else if (std.mem.startsWith(u8, arg, "--line-prefix=")) {
+            line_prefix = arg["--line-prefix=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--diff-algorithm=") or std.mem.startsWith(u8, arg, "--inter-hunk-context=") or std.mem.startsWith(u8, arg, "--src-prefix=") or std.mem.startsWith(u8, arg, "--dst-prefix=") or std.mem.startsWith(u8, arg, "--stat=")) {
             // Accept diff-related options with = form
         } else if (std.mem.eql(u8, arg, "--diff-algorithm")) {
             // Accept diff-related options with separate value
@@ -154,10 +164,15 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             no_renames = true;
         } else if (std.mem.eql(u8, arg, "--find-renames") or std.mem.eql(u8, arg, "--find-copies") or std.mem.eql(u8, arg, "--find-copies-harder") or std.mem.eql(u8, arg, "--name-only") or std.mem.eql(u8, arg, "--name-status") or std.mem.eql(u8, arg, "--stat") or std.mem.eql(u8, arg, "--numstat") or std.mem.eql(u8, arg, "--shortstat") or std.mem.eql(u8, arg, "--dirstat") or std.mem.eql(u8, arg, "--summary") or std.mem.eql(u8, arg, "--raw") or std.mem.eql(u8, arg, "--no-stat") or std.mem.eql(u8, arg, "--patch") or std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--no-patch") or std.mem.eql(u8, arg, "-s")) {
             // Accept diff-related flags
-        } else if (std.mem.eql(u8, arg, "--no-walk") or std.mem.startsWith(u8, arg, "--no-walk=")) {
+        } else if (std.mem.eql(u8, arg, "--no-walk") or std.mem.eql(u8, arg, "--no-walk=sorted")) {
             no_walk = true;
+            no_walk_unsorted = false;
+        } else if (std.mem.eql(u8, arg, "--no-walk=unsorted")) {
+            no_walk = true;
+            no_walk_unsorted = true;
         } else if (std.mem.eql(u8, arg, "--do-walk")) {
             no_walk = false;
+            no_walk_unsorted = false;
         } else if (std.mem.eql(u8, arg, "--")) {
             // Everything after -- is a path, ignore for now
             break;
@@ -1021,18 +1036,34 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     };
 
     // Seed the queue with the start commit (and any additional include refs)
-    const start_ts = getTs.get(start_commit, maybe_cg, git_path, platform_impl, allocator);
-    try queue.append(.{ .hash = try allocator.dupe(u8, start_commit), .timestamp = start_ts });
-    try visited.put(try allocator.dupe(u8, start_commit), {});
-    // Add additional include refs
-    for (include_refs.items) |inc_ref| {
-        const inc_hash = helpers.resolveCommittish(git_path, inc_ref, platform_impl, allocator) catch continue;
-        if (!visited.contains(inc_hash)) {
-            const inc_ts = getTs.get(inc_hash, maybe_cg, git_path, platform_impl, allocator);
-            try queue.append(.{ .hash = try allocator.dupe(u8, inc_hash), .timestamp = inc_ts });
-            try visited.put(try allocator.dupe(u8, inc_hash), {});
+    // For --no-walk=unsorted, add commits in command-line order (include_refs first, then start_commit)
+    if (no_walk_unsorted) {
+        for (include_refs.items) |inc_ref| {
+            const inc_hash = helpers.resolveCommittish(git_path, inc_ref, platform_impl, allocator) catch continue;
+            if (!visited.contains(inc_hash)) {
+                const inc_ts = getTs.get(inc_hash, maybe_cg, git_path, platform_impl, allocator);
+                try queue.append(.{ .hash = try allocator.dupe(u8, inc_hash), .timestamp = inc_ts });
+                try visited.put(try allocator.dupe(u8, inc_hash), {});
+            }
+            allocator.free(inc_hash);
         }
-        allocator.free(inc_hash);
+        const start_ts = getTs.get(start_commit, maybe_cg, git_path, platform_impl, allocator);
+        try queue.append(.{ .hash = try allocator.dupe(u8, start_commit), .timestamp = start_ts });
+        try visited.put(try allocator.dupe(u8, start_commit), {});
+    } else {
+        const start_ts = getTs.get(start_commit, maybe_cg, git_path, platform_impl, allocator);
+        try queue.append(.{ .hash = try allocator.dupe(u8, start_commit), .timestamp = start_ts });
+        try visited.put(try allocator.dupe(u8, start_commit), {});
+        // Add additional include refs
+        for (include_refs.items) |inc_ref| {
+            const inc_hash = helpers.resolveCommittish(git_path, inc_ref, platform_impl, allocator) catch continue;
+            if (!visited.contains(inc_hash)) {
+                const inc_ts = getTs.get(inc_hash, maybe_cg, git_path, platform_impl, allocator);
+                try queue.append(.{ .hash = try allocator.dupe(u8, inc_hash), .timestamp = inc_ts });
+                try visited.put(try allocator.dupe(u8, inc_hash), {});
+            }
+            allocator.free(inc_hash);
+        }
     }
 
     // Pre-allocate output buffer for batched writes
@@ -1041,18 +1072,26 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     try output_buf.ensureTotalCapacity(64 * 1024); // 64KB initial buffer
 
     var count: u32 = 0;
-    while (queue.items.len > 0 and (max_count == null or count < max_count.?)) {
-        // helpers.Find the entry with the highest timestamp (most recent commit)
-        var best_idx: usize = 0;
-        for (queue.items, 0..) |entry, i| {
-            if (entry.timestamp > queue.items[best_idx].timestamp) {
-                best_idx = i;
+    // For --no-walk=unsorted, process in FIFO order
+    var unsorted_idx: usize = 0;
+    while ((if (no_walk_unsorted) (unsorted_idx < queue.items.len) else (queue.items.len > 0)) and (max_count == null or count < max_count.?)) {
+        const current = if (no_walk_unsorted) blk: {
+            const entry = queue.items[unsorted_idx];
+            unsorted_idx += 1;
+            break :blk entry;
+        } else blk: {
+            // helpers.Find the entry with the highest timestamp (most recent commit)
+            var best_idx: usize = 0;
+            for (queue.items, 0..) |entry, i| {
+                if (entry.timestamp > queue.items[best_idx].timestamp) {
+                    best_idx = i;
+                }
             }
-        }
-        // Use swapRemove instead of orderedRemove for O(1) removal
-        const current = queue.swapRemove(best_idx);
+            // Use swapRemove instead of orderedRemove for O(1) removal
+            break :blk queue.swapRemove(best_idx);
+        };
         const cur_hash = current.hash;
-        defer allocator.free(@constCast(cur_hash));
+        defer if (!no_walk_unsorted) allocator.free(@constCast(cur_hash));
 
         // Skip excluded commits (from ^ref arguments)
         if (excluded.contains(cur_hash)) continue;
@@ -1345,11 +1384,29 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             if (format_is_separator and count > 0) {
                 try platform_impl.writeStdout("\n");
             }
+            if (line_prefix.len > 0) try platform_impl.writeStdout(line_prefix);
             if (show_graph) try platform_impl.writeStdout("* ");
             // Use pre-loaded commit data to avoid re-loading object and re-finding git dir
             output_buf.clearRetainingCapacity();
             try helpers.outputFormattedCommitFromData(fmt, cur_hash, commit_data, &output_buf, allocator);
-            try platform_impl.writeStdout(output_buf.items);
+            // Apply line_prefix to each line in multi-line output
+            if (line_prefix.len > 0 and std.mem.indexOfScalar(u8, output_buf.items, '\n') != null) {
+                var prefixed = std.array_list.Managed(u8).init(allocator);
+                defer prefixed.deinit();
+                var lines_it = std.mem.splitScalar(u8, output_buf.items, '\n');
+                var first = true;
+                while (lines_it.next()) |line| {
+                    if (!first) {
+                        try prefixed.append('\n');
+                        if (line.len > 0 or lines_it.peek() != null) try prefixed.appendSlice(line_prefix);
+                    }
+                    try prefixed.appendSlice(line);
+                    first = false;
+                }
+                try platform_impl.writeStdout(prefixed.items);
+            } else {
+                try platform_impl.writeStdout(output_buf.items);
+            }
             if (!format_is_separator) {
                 try platform_impl.writeStdout("\n");
             }
@@ -1362,6 +1419,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             };
             // Use output buffer to avoid allocPrint
             output_buf.clearRetainingCapacity();
+            if (line_prefix.len > 0) try output_buf.appendSlice(line_prefix);
             if (show_graph) try output_buf.appendSlice("* ");
             try output_buf.appendSlice(short_hash);
             try output_buf.append(' ');
@@ -1369,6 +1427,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             try output_buf.append('\n');
             try platform_impl.writeStdout(output_buf.items);
         } else {
+            if (line_prefix.len > 0) try platform_impl.writeStdout(line_prefix);
             if (show_graph) try platform_impl.writeStdout("* ");
             const commit_header = try std.fmt.allocPrint(allocator, "commit {s}\n", .{cur_hash});
             defer allocator.free(commit_header);
