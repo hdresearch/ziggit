@@ -57,6 +57,7 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var dry_run = false;
     var intent_to_add = false;
     var refresh_flag = false;
+    var chmod_mode: ?enum { plus_x, minus_x } = null;
     var collected_add_paths = std.array_list.Managed([]const u8).init(allocator);
     defer collected_add_paths.deinit();
     while (args.next()) |raw_arg| {
@@ -75,6 +76,10 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             intent_to_add = true;
         } else if (std.mem.eql(u8, raw_arg, "--refresh")) {
             refresh_flag = true;
+        } else if (std.mem.eql(u8, raw_arg, "--chmod=+x")) {
+            chmod_mode = .plus_x;
+        } else if (std.mem.eql(u8, raw_arg, "--chmod=-x")) {
+            chmod_mode = .minus_x;
         } else if (raw_arg.len > 0 and raw_arg[0] == '-') {
             // helpers.Skip other flags
         } else {
@@ -415,7 +420,7 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                         }
                     }
                     // helpers.Add directory recursively
-                    try addDirectoryRecursively(allocator, repo_root_for_rel, relative_file_path, &index, git_path, platform_impl);
+                    try addDirectoryRecursivelyEx(allocator, repo_root_for_rel, relative_file_path, &index, git_path, platform_impl, force_flag);
                     has_directory_add = true;
                 }
             } else {
@@ -463,6 +468,30 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 _ = index.entries.orderedRemove(i);
             } else {
                 i += 1;
+            }
+        }
+    }
+
+    // Apply --chmod if specified
+    if (chmod_mode) |cm| {
+        const target_mode: u32 = if (cm == .plus_x) 0o100755 else 0o100644;
+        for (index.entries.items) |*entry| {
+            // Only change regular files, not symlinks or submodules
+            if (entry.mode == 0o100644 or entry.mode == 0o100755) {
+                // If specific paths given, only change those
+                if (collected_add_paths.items.len > 0) {
+                    for (collected_add_paths.items) |p| {
+                        const check_p = if (std.mem.eql(u8, p, ".")) "" else p;
+                        if (check_p.len == 0 or std.mem.eql(u8, entry.path, check_p) or
+                            std.mem.startsWith(u8, entry.path, check_p))
+                        {
+                            entry.mode = target_mode;
+                            break;
+                        }
+                    }
+                } else {
+                    entry.mode = target_mode;
+                }
             }
         }
     }
@@ -813,6 +842,10 @@ fn addSubmoduleEntry(allocator: std.mem.Allocator, relative_path: []const u8, su
 }
 
 pub fn addDirectoryRecursively(allocator: std.mem.Allocator, repo_root: []const u8, relative_dir: []const u8, index: *index_mod.Index, git_path: []const u8, platform_impl: *const platform_mod.Platform) !void {
+    return addDirectoryRecursivelyEx(allocator, repo_root, relative_dir, index, git_path, platform_impl, false);
+}
+
+pub fn addDirectoryRecursivelyEx(allocator: std.mem.Allocator, repo_root: []const u8, relative_dir: []const u8, index: *index_mod.Index, git_path: []const u8, platform_impl: *const platform_mod.Platform, force: bool) !void {
     const full_dir_path = if (relative_dir.len == 0)
         try allocator.dupe(u8, repo_root)
     else
@@ -847,8 +880,10 @@ pub fn addDirectoryRecursively(allocator: std.mem.Allocator, repo_root: []const 
         defer allocator.free(entry_relative_path);
 
         // Check gitignore for this entry (applies to both files and directories)
-        const gi_ptr: *const gitignore_mod.GitIgnore = &gitignore;
-        if (gitignore.isIgnored(entry_relative_path) or isParentDirIgnored(gi_ptr, entry_relative_path)) continue;
+        if (!force) {
+            const gi_ptr: *const gitignore_mod.GitIgnore = &gitignore;
+            if (gitignore.isIgnored(entry_relative_path) or isParentDirIgnored(gi_ptr, entry_relative_path)) continue;
+        }
         
         const entry_full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ full_dir_path, entry.name });
         defer allocator.free(entry_full_path);
@@ -868,7 +903,7 @@ pub fn addDirectoryRecursively(allocator: std.mem.Allocator, repo_root: []const 
             },
             .directory => {
                 // helpers.Recursively add subdirectory
-                addDirectoryRecursively(allocator, repo_root, entry_relative_path, index, git_path, platform_impl) catch continue;
+                addDirectoryRecursivelyEx(allocator, repo_root, entry_relative_path, index, git_path, platform_impl, force) catch continue;
             },
             else => continue, // helpers.Skip other types
         }
