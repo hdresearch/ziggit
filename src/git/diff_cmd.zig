@@ -5224,8 +5224,56 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
 
             if (excluded_set.contains(cur.hash)) continue;
 
-            const sobj = objects.GitObject.load(cur.hash, git_path, pi, allocator) catch continue;
+            var sobj = objects.GitObject.load(cur.hash, git_path, pi, allocator) catch continue;
             defer sobj.deinit(allocator);
+
+            // Peel tags to commits
+            if (sobj.type == .tag) {
+                // Show tag header, then peel to commit
+                var tag_obj_hash2: ?[]const u8 = null;
+                var tag_name_val2: ?[]const u8 = null;
+                var tagger_val2: ?[]const u8 = null;
+                var tag_msg_start2: usize = sobj.data.len;
+                {
+                    var tp: usize = 0;
+                    while (tp < sobj.data.len) {
+                        const tnl2 = std.mem.indexOfScalarPos(u8, sobj.data, tp, '\n') orelse sobj.data.len;
+                        const tl = sobj.data[tp..tnl2];
+                        if (tl.len == 0) { tag_msg_start2 = tnl2 + 1; break; }
+                        if (std.mem.startsWith(u8, tl, "object ")) tag_obj_hash2 = tl["object ".len..];
+                        if (std.mem.startsWith(u8, tl, "tag ")) tag_name_val2 = tl["tag ".len..];
+                        if (std.mem.startsWith(u8, tl, "tagger ")) tagger_val2 = tl["tagger ".len..];
+                        tp = tnl2 + 1;
+                    }
+                }
+                if (show_count > 0) try pi.writeStdout("\n");
+                if (tag_name_val2) |tn2| {
+                    const th2 = try std.fmt.allocPrint(allocator, "tag {s}\n", .{tn2});
+                    defer allocator.free(th2);
+                    try pi.writeStdout(th2);
+                }
+                if (tagger_val2) |tv2| {
+                    if (std.mem.indexOf(u8, tv2, ">")) |gt2| {
+                        const tout2 = try std.fmt.allocPrint(allocator, "Tagger: {s}\n", .{tv2[0 .. gt2 + 1]});
+                        defer allocator.free(tout2);
+                        try pi.writeStdout(tout2);
+                    }
+                }
+                try pi.writeStdout("\n");
+                if (tag_msg_start2 < sobj.data.len) {
+                    try pi.writeStdout(std.mem.trimRight(u8, sobj.data[tag_msg_start2..], "\n"));
+                    try pi.writeStdout("\n");
+                }
+                // Peel: add the referenced commit to queue
+                if (tag_obj_hash2) |toh2| {
+                    if (!show_visited.contains(toh2)) {
+                        try show_visited.put(try allocator.dupe(u8, toh2), {});
+                        try show_q.append(.{ .hash = try allocator.dupe(u8, toh2), .ts = git_helpers_mod.getCommitTimestamp(toh2, git_path, pi, allocator) });
+                    }
+                }
+                show_count += 1;
+                continue;
+            }
             if (sobj.type != .commit) continue;
 
             // Apply --grep filtering
