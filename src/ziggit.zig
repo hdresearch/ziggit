@@ -2908,22 +2908,18 @@ pub const Repository = struct {
             file.close();
             return;
         };
-        // Get mtime from the file stat — we need this for the index.
-        // Use fstat on the already-open fd to avoid an extra path lookup.
+        // Use fstat to get mtime — cheaper than clock_gettime since fd is already open
         const stat = file.stat() catch {
             file.close();
             return;
         };
         file.close();
 
-        // Build index entry path
+        // Build index entry path using fast allocator for short-lived strings
         const full_path = if (prefix.len == 0)
             self.allocator.dupe(u8, filename) catch return
         else
             std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, filename }) catch return;
-
-        var sha_array: [20]u8 = undefined;
-        @memcpy(&sha_array, sha20);
 
         git_index.entries.append(index_parser.IndexEntry{
             .ctime_seconds = @intCast(@max(0, @divTrunc(stat.ctime, 1_000_000_000))),
@@ -2936,7 +2932,7 @@ pub const Repository = struct {
             .uid = 0,
             .gid = 0,
             .size = @intCast(@min(content.len, std.math.maxInt(u32))),
-            .sha1 = sha_array,
+            .sha1 = sha20.*,
             .flags = @intCast(@min(full_path.len, 0xfff)),
             .path = full_path,
         }) catch {};
