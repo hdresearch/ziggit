@@ -748,6 +748,257 @@ pub fn decompressPackObjectInPlace(pack_data: []const u8, offset: usize) ?struct
     return .{ .data = bulk_decompress_buf.?[0..@intCast(dest_len)], .obj_type = pack_type_num };
 }
 
+/// Fast pack object reader with delta resolution. Uses two reusable buffers
+/// to avoid per-object allocation. Returns decompressed data valid until next call.
+/// Handles OFS_DELTA chains (the common case in well-packed repos).
+var fast_buf_a: ?[]u8 = null;
+var fast_buf_b: ?[]u8 = null;
+var fast_buf_a_cap: usize = 0;
+var fast_buf_b_cap: usize = 0;
+
+fn ensureFastBufA(min_size: usize) ?[]u8 {
+    if (fast_buf_a) |buf| {
+        if (buf.len >= min_size) return buf[0..min_size];
+        std.heap.page_allocator.free(buf);
+    }
+    const alloc_size = std.mem.alignForward(usize, @max(min_size, 16384), 4096);
+    const buf = std.heap.page_allocator.alloc(u8, alloc_size) catch return null;
+    fast_buf_a = buf;
+    fast_buf_a_cap = alloc_size;
+    return buf[0..min_size];
+}
+
+fn ensureFastBufB(min_size: usize) ?[]u8 {
+    if (fast_buf_b) |buf| {
+        if (buf.len >= min_size) return buf[0..min_size];
+        std.heap.page_allocator.free(buf);
+    }
+    const alloc_size = std.mem.alignForward(usize, @max(min_size, 16384), 4096);
+    const buf = std.heap.page_allocator.alloc(u8, alloc_size) catch return null;
+    fast_buf_b = buf;
+    fast_buf_b_cap = alloc_size;
+    return buf[0..min_size];
+}
+
+/// Parse pack object header at offset, returning type, size, and position after header.
+fn parsePackHeader(pack_data: []const u8, offset: usize) ?struct { obj_type: u3, size: usize, data_pos: usize } {
+    const content_end = if (pack_data.len > 20) pack_data.len - 20 else return null;
+    var pos = offset;
+    if (pos >= content_end) return null;
+
+    const first_byte = pack_data[pos];
+    pos += 1;
+    const pack_type_num: u3 = @truncate((first_byte >> 4) & 7);
+
+    var size: usize = @intCast(first_byte & 15);
+    const ShiftType = std.math.Log2Int(usize);
+    const max_shift: ShiftType = @bitSizeOf(usize) - 4;
+    var shift: ShiftType = 4;
+    var cur = first_byte;
+    while (cur & 0x80 != 0 and pos < content_end) {
+        cur = pack_data[pos];
+        pos += 1;
+        size |= @as(usize, cur & 0x7f) << shift;
+        if (shift < max_shift) shift += 7 else break;
+    }
+
+    return .{ .obj_type = pack_type_num, .size = size, .data_pos = pos };
+}
+
+/// Read OFS_DELTA base offset encoding.
+fn readOfsDeltaOffset(pack_data: []const u8, pos_ptr: *usize) ?usize {
+    var pos = pos_ptr.*;
+    if (pos >= pack_data.len) return null;
+    var base_offset_delta: usize = 0;
+    var first = true;
+    while (pos < pack_data.len) {
+        const b = pack_data[pos];
+        pos += 1;
+        if (first) {
+            base_offset_delta = @intCast(b & 0x7F);
+            first = false;
+        } else {
+            base_offset_delta = (base_offset_delta + 1) << 7;
+            base_offset_delta += @intCast(b & 0x7F);
+        }
+        if (b & 0x80 == 0) break;
+    }
+    pos_ptr.* = pos;
+    return base_offset_delta;
+}
+
+/// Decompress into a specific buffer using zlib uncompress.
+fn decompressInto(buf: []u8, input: []const u8) ?[]u8 {
+    initCZlib();
+    const uncompress_fn = zlib_uncompress_fn orelse return null;
+    var dest_len: c_ulong = @intCast(buf.len);
+    const ret = uncompress_fn(buf.ptr, &dest_len, input.ptr, @intCast(input.len));
+    if (ret != 0) return null;
+    return buf[0..@intCast(dest_len)];
+}
+
+/// Persistent inflate stream for partial decompression.
+/// Avoids inflateInit/inflateEnd overhead per call by using inflateReset.
+var persistent_stream: ?ZStream = null;
+var persistent_stream_ready: bool = false;
+var zlib_inflate_reset_fn: ?*const fn (*ZStream) callconv(.c) c_int = null;
+var inflate_reset_looked_up: bool = false;
+
+fn ensurePersistentStream() bool {
+    if (persistent_stream_ready) return true;
+    initCZlib();
+    const init_fn = zlib_inflate_init2_fn orelse return false;
+    if (!inflate_reset_looked_up) {
+        inflate_reset_looked_up = true;
+        if (comptime !is_freestanding) {
+            if (zlib_lib) |*lib| {
+                zlib_inflate_reset_fn = lib.lookup(*const fn (*ZStream) callconv(.c) c_int, "inflateReset");
+            }
+        }
+    }
+    persistent_stream = std.mem.zeroes(ZStream);
+    if (init_fn(&persistent_stream.?, 15, "1.2.13", @sizeOf(ZStream)) != 0) return false;
+    persistent_stream_ready = true;
+    return true;
+}
+
+/// Decompress only the first N bytes from compressed data using a reusable inflate stream.
+/// Much faster than creating a new inflate context per call.
+fn decompressPartial(input: []const u8, out_buf: []u8) ?[]u8 {
+    if (!ensurePersistentStream()) return null;
+    const inflate_fn = zlib_inflate_fn orelse return null;
+    const reset_fn = zlib_inflate_reset_fn orelse return null;
+
+    var stream = &persistent_stream.?;
+
+    // Reset for new decompression
+    _ = reset_fn(stream);
+
+    stream.next_in = input.ptr;
+    stream.avail_in = @intCast(@min(input.len, std.math.maxInt(c_uint)));
+    stream.next_out = out_buf.ptr;
+    stream.avail_out = @intCast(out_buf.len);
+
+    const Z_NO_FLUSH = 0;
+    const Z_STREAM_END = 1;
+    const Z_OK = 0;
+    const ret = inflate_fn(stream, Z_NO_FLUSH);
+    const produced = @as(usize, @intCast(stream.total_out));
+
+    if (ret == Z_OK or ret == Z_STREAM_END) {
+        return out_buf[0..produced];
+    }
+    return null;
+}
+
+pub const PackResult = struct { data: []const u8, obj_type: u3 };
+
+/// Fast direct pack object read with delta resolution.
+/// Takes pre-loaded pack_data and idx_data (mmap'd), avoids all allocation.
+/// Returns decompressed object data (valid until next call) and object type.
+pub fn readPackObjectDirect(pack_data: []const u8, idx_data: []const u8, oid_bytes: [20]u8) ?PackResult {
+    const offset = findOffsetInIdx(idx_data, oid_bytes) orelse return null;
+    return readPackObjectAtOffsetFast(pack_data, idx_data, offset);
+}
+
+/// Fast partial read: decompress only enough to get commit headers (author line).
+/// For non-delta objects, uses partial decompression (very fast).
+/// For delta objects, falls through to full resolution.
+var partial_out_buf: [512]u8 = undefined;
+pub fn readPackCommitHeaderDirect(pack_data: []const u8, idx_data: []const u8, oid_bytes: [20]u8) ?[]const u8 {
+    const offset = findOffsetInIdx(idx_data, oid_bytes) orelse return null;
+    const hdr = parsePackHeader(pack_data, offset) orelse return null;
+
+    // Non-delta: partial decompress just the first 512 bytes
+    if (hdr.obj_type == 1) { // commit
+        if (decompressPartial(pack_data[hdr.data_pos..], &partial_out_buf)) |data| {
+            return data;
+        }
+    }
+
+    // Delta or decompression issue: fall through to full resolution
+    const result = readPackObjectAtOffsetFast(pack_data, idx_data, offset) orelse return null;
+    return result.data;
+}
+
+fn readPackObjectAtOffsetFast(pack_data: []const u8, idx_data: []const u8, offset: usize) ?PackResult {
+    // Walk the delta chain to find the base object, collecting offsets
+    var chain: [64]struct { offset: usize, data_pos: usize } = undefined;
+    var chain_len: usize = 0;
+    var cur_offset = offset;
+    var base_type: u3 = 1; // commit
+    var base_size: usize = 0;
+    var base_data_pos: usize = 0;
+
+    while (chain_len < 64) {
+        const hdr = parsePackHeader(pack_data, cur_offset) orelse return null;
+        if (hdr.obj_type == 6) { // OFS_DELTA
+            var pos = hdr.data_pos;
+            const delta_off = readOfsDeltaOffset(pack_data, &pos) orelse return null;
+            if (delta_off > cur_offset) return null;
+            chain[chain_len] = .{ .offset = cur_offset, .data_pos = pos };
+            chain_len += 1;
+            cur_offset = cur_offset - delta_off;
+        } else if (hdr.obj_type == 7) { // REF_DELTA
+            if (hdr.data_pos + 20 > pack_data.len) return null;
+            const ref_oid = pack_data[hdr.data_pos..][0..20];
+            chain[chain_len] = .{ .offset = cur_offset, .data_pos = hdr.data_pos + 20 };
+            chain_len += 1;
+            // Look up base in same pack
+            const base_off = findOffsetInIdx(idx_data, ref_oid.*) orelse return null;
+            cur_offset = base_off;
+        } else {
+            // Base object found
+            base_type = hdr.obj_type;
+            base_size = hdr.size;
+            base_data_pos = hdr.data_pos;
+            break;
+        }
+    } else return null; // Chain too deep
+
+    // Decompress base object
+    if (base_size > 16 * 1024 * 1024) return null; // Safety limit
+    const base_buf = ensureFastBufA(base_size) orelse return null;
+    const base_data = decompressInto(base_buf, pack_data[base_data_pos..]) orelse return null;
+
+    if (chain_len == 0) {
+        // No deltas, return base directly
+        return .{ .data = base_data, .obj_type = base_type };
+    }
+
+    // Apply delta chain in reverse order
+    // We alternate between buf_a and buf_b
+    var current_data: []const u8 = base_data;
+    var use_a = false; // base is in A, so next result goes in B
+
+    var i = chain_len;
+    while (i > 0) {
+        i -= 1;
+        const entry = chain[i];
+        // Decompress delta data into bulk_decompress_buf
+        _ = ensureBulkBuf(65536) orelse return null;
+        const delta_buf_slice = bulk_decompress_buf.?[0..bulk_decompress_buf_cap];
+        const delta_data = decompressInto(delta_buf_slice, pack_data[entry.data_pos..]) orelse return null;
+
+        // Get result size from delta
+        const result_size = deltaResultSize(delta_data) catch return null;
+        if (result_size > 16 * 1024 * 1024) return null;
+
+        // Allocate result in the other buffer
+        const result_buf = if (use_a)
+            ensureFastBufA(result_size) orelse return null
+        else
+            ensureFastBufB(result_size) orelse return null;
+
+        // Apply delta
+        _ = applyDeltaInto(current_data, delta_data, result_buf) catch return null;
+        current_data = result_buf;
+        use_a = !use_a;
+    }
+
+    return .{ .data = current_data, .obj_type = base_type };
+}
+
 pub const ObjectType = enum {
     blob,
     tree,
