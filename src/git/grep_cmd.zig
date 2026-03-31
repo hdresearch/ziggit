@@ -1767,7 +1767,27 @@ fn matchPattern(line: []const u8, pattern: []const u8, opts: *GrepOptions, eff_p
     if (eff_pt == .fixed) {
         return matchFixed(line, pattern, opts);
     }
+    // Optimization: if the pattern has no regex special characters,
+    // use fast fixed-string matching instead of compiling a regex.
+    if (isPlainString(pattern, eff_pt == .extended)) {
+        return matchFixed(line, pattern, opts);
+    }
     return matchRegex(line, pattern, opts, eff_pt == .extended, allocator);
+}
+
+/// Check if a pattern is a plain string with no regex special characters.
+/// This allows using fast fixed-string matching instead of regex compilation.
+fn isPlainString(pattern: []const u8, extended: bool) bool {
+    for (pattern) |c| {
+        switch (c) {
+            // Characters special in both BRE and ERE
+            '.', '[', ']', '^', '$', '\\', '*' => return false,
+            // Characters special in ERE only
+            '(', ')', '{', '}', '|', '+', '?' => if (extended) return false,
+            else => {},
+        }
+    }
+    return true;
 }
 
 fn matchFixed(line: []const u8, pattern: []const u8, opts: *GrepOptions) bool {
