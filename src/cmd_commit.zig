@@ -356,7 +356,14 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             // helpers.No helpers.HEAD - has changes if index is not empty
             if (index.entries.items.len == 0) has_changes = false;
         }
-        if (!has_changes and !amend) {
+        // Allow merge commits even if tree is unchanged (e.g., resolved to one side)
+        const merge_head_check_path = try std.fmt.allocPrint(allocator, "{s}/MERGE_HEAD", .{git_path});
+        defer allocator.free(merge_head_check_path);
+        const has_merge_head = if (platform_impl.fs.readFile(allocator, merge_head_check_path)) |mhd| blk: {
+            allocator.free(mhd);
+            break :blk true;
+        } else |_| false;
+        if (!has_changes and !amend and !has_merge_head) {
             const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch "master";
             defer allocator.free(current_branch);
             const branch_msg = try std.fmt.allocPrint(allocator, "On branch {s}\n", .{current_branch});
