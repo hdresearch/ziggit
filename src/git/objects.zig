@@ -343,7 +343,7 @@ var cached_packs: [8]?CachedPackFile = .{null} ** 8;
 var cached_pack_count: usize = 0;
 var cache_initialized: bool = false;
 
-fn getCachedIdx(idx_path: []const u8) ?[]const u8 {
+pub fn getCachedIdx(idx_path: []const u8) ?[]const u8 {
     for (cached_packs[0..cached_pack_count]) |maybe_entry| {
         if (maybe_entry) |entry| {
             if (std.mem.eql(u8, entry.idx_path, idx_path)) {
@@ -354,7 +354,7 @@ fn getCachedIdx(idx_path: []const u8) ?[]const u8 {
     return null;
 }
 
-fn getCachedPack(pack_path: []const u8) ?[]const u8 {
+pub fn getCachedPack(pack_path: []const u8) ?[]const u8 {
     for (cached_packs[0..cached_pack_count]) |maybe_entry| {
         if (maybe_entry) |entry| {
             if (std.mem.eql(u8, entry.pack_path, pack_path)) {
@@ -366,7 +366,7 @@ fn getCachedPack(pack_path: []const u8) ?[]const u8 {
 }
 
 /// Memory-map a file, returning the mapped slice. Falls back to readFile on failure.
-fn mmapFile(path: []const u8) ?[]const u8 {
+pub fn mmapFile(path: []const u8) ?[]const u8 {
     if (comptime (@import("builtin").target.os.tag == .freestanding or @import("builtin").target.os.tag == .wasi)) return null;
     const file = std.fs.cwd().openFile(path, .{}) catch return null;
     defer file.close();
@@ -380,7 +380,7 @@ fn addToCache(allocator: std.mem.Allocator, idx_path: []const u8, idx_data: []co
     addToCacheEx(allocator, idx_path, idx_data, false, pack_path, pack_data, false);
 }
 
-fn addToCacheEx(allocator: std.mem.Allocator, idx_path: []const u8, idx_data: []const u8, idx_is_mmap: bool, pack_path: []const u8, pack_data: []const u8, pack_is_mmap: bool) void {
+pub fn addToCacheEx(allocator: std.mem.Allocator, idx_path: []const u8, idx_data: []const u8, idx_is_mmap: bool, pack_path: []const u8, pack_data: []const u8, pack_is_mmap: bool) void {
     // Don't cache huge packs (>500MB)
     if (pack_data.len > 500 * 1024 * 1024) return;
     if (cached_pack_count >= 8) return; // Cache is full
@@ -566,13 +566,22 @@ pub fn preloadCommitsFromPacks(git_dir: []const u8, platform_impl: anytype, allo
         const idx_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir_path, idx_name }) catch continue;
         defer allocator.free(idx_path);
 
+        // Try mmap first for zero-copy access, fall back to readFile
         const pack_data = getCachedPack(pack_path) orelse blk: {
+            if (mmapFile(pack_path)) |mmap_data| {
+                addToCacheEx(allocator, "", "", false, pack_path, mmap_data, true);
+                break :blk mmap_data;
+            }
             const data = platform_impl.fs.readFile(allocator, pack_path) catch continue;
             addToCache(allocator, "", "", pack_path, data);
             break :blk data;
         };
 
         const idx_data = getCachedIdx(idx_path) orelse blk: {
+            if (mmapFile(idx_path)) |mmap_data| {
+                addToCacheEx(allocator, idx_path, mmap_data, true, "", "", false);
+                break :blk mmap_data;
+            }
             const data = platform_impl.fs.readFile(allocator, idx_path) catch continue;
             addToCache(allocator, idx_path, data, "", "");
             break :blk data;
@@ -584,10 +593,9 @@ pub fn preloadCommitsFromPacks(git_dir: []const u8, platform_impl: anytype, allo
 
 fn preloadCommitsFromSinglePack(pack_data: []const u8, idx_data: []const u8, allocator: std.mem.Allocator) void {
     if (pack_data.len < 12 or !std.mem.eql(u8, pack_data[0..4], "PACK")) return;
-    const obj_count = std.mem.readInt(u32, pack_data[8..12], .big);
     const content_end = pack_data.len - 20;
 
-    // Parse idx to build offset→OID mapping
+    // Parse idx header
     if (idx_data.len < 8) return;
     const idx_magic = std.mem.readInt(u32, @ptrCast(idx_data[0..4]), .big);
     if (idx_magic != 0xff744f63) return; // only v2
@@ -604,6 +612,7 @@ fn preloadCommitsFromSinglePack(pack_data: []const u8, idx_data: []const u8, all
     var offset_entries = allocator.alloc(OffsetEntry, total_objects) catch return;
     defer allocator.free(offset_entries);
 
+    var commit_count: usize = 0;
     for (0..total_objects) |i| {
         const off_pos = offset_table_start + i * 4;
         if (off_pos + 4 > idx_data.len) break;
@@ -616,31 +625,35 @@ fn preloadCommitsFromSinglePack(pack_data: []const u8, idx_data: []const u8, all
                 offset = std.mem.readInt(u64, @ptrCast(idx_data[large_pos .. large_pos + 8]), .big);
             }
         }
-        offset_entries[i] = .{ .offset = offset, .idx = @intCast(i) };
+        // Pre-filter: check if this is a commit (type 1) by reading pack header
+        const pos_usize: usize = @intCast(offset);
+        if (pos_usize < content_end) {
+            const first_byte = pack_data[pos_usize];
+            const pack_type_num = (first_byte >> 4) & 7;
+            if (pack_type_num == 1) { // commit
+                offset_entries[commit_count] = .{ .offset = offset, .idx = @intCast(i) };
+                commit_count += 1;
+            }
+        }
     }
 
-    // Sort by offset for sequential pack reading
-    std.mem.sort(OffsetEntry, offset_entries, {}, struct {
+    // Sort only commit entries by offset for sequential pack reading
+    std.mem.sort(OffsetEntry, offset_entries[0..commit_count], {}, struct {
         fn cmp(_: void, a: OffsetEntry, b: OffsetEntry) bool {
             return a.offset < b.offset;
         }
     }.cmp);
 
-    // Scan pack sequentially
-    _ = obj_count;
-    for (offset_entries) |oe| {
+    // Decompress commits sequentially
+    for (offset_entries[0..commit_count]) |oe| {
         var pos: usize = @intCast(oe.offset);
         if (pos >= content_end) continue;
 
-        const first_byte = pack_data[pos];
+        // Skip header to get to compressed data
+        var cur = pack_data[pos];
+        var size: usize = @intCast(cur & 15);
         pos += 1;
-        const pack_type_num = (first_byte >> 4) & 7;
-        if (pack_type_num != 1) continue; // Only commits (type 1)
-
-        // Read variable-length size
-        var size: usize = @intCast(first_byte & 15);
         var shift: u5 = 4;
-        var cur = first_byte;
         while (cur & 0x80 != 0 and pos < content_end) {
             cur = pack_data[pos];
             pos += 1;
@@ -675,6 +688,64 @@ fn preloadCommitsFromSinglePack(pack_data: []const u8, idx_data: []const u8, all
         object_cache_vals[bucket] = .{ .obj_type = .commit, .data = data };
         if (object_cache_alloc == null) object_cache_alloc = allocator;
     }
+}
+
+/// Fast extraction of commit data from pack for bulk operations.
+/// Decompresses directly into a reusable buffer to avoid per-object allocation.
+/// Returns the decompressed commit content (valid until next call).
+var bulk_decompress_buf: ?[]u8 = null;
+var bulk_decompress_buf_cap: usize = 0;
+
+fn ensureBulkBuf(min_size: usize) ?[*]u8 {
+    if (bulk_decompress_buf) |buf| {
+        if (buf.len >= min_size) return buf.ptr;
+        std.heap.page_allocator.free(buf);
+    }
+    const alloc_size = std.mem.alignForward(usize, @max(min_size, 8192), 4096);
+    const buf = std.heap.page_allocator.alloc(u8, alloc_size) catch return null;
+    bulk_decompress_buf = buf;
+    bulk_decompress_buf_cap = alloc_size;
+    return buf.ptr;
+}
+
+/// Decompress a pack object at given offset into the reusable bulk buffer.
+/// Returns a slice into the bulk buffer (valid until next call to this function).
+pub fn decompressPackObjectInPlace(pack_data: []const u8, offset: usize) ?struct { data: []const u8, obj_type: u3 } {
+    const content_end = if (pack_data.len > 20) pack_data.len - 20 else return null;
+    var pos = offset;
+    if (pos >= content_end) return null;
+
+    const first_byte = pack_data[pos];
+    pos += 1;
+    const pack_type_num: u3 = @truncate((first_byte >> 4) & 7);
+
+    // Read variable-length size
+    var size: usize = @intCast(first_byte & 15);
+    var shift: u5 = 4;
+    var cur = first_byte;
+    while (cur & 0x80 != 0 and pos < content_end) {
+        cur = pack_data[pos];
+        pos += 1;
+        size |= @as(usize, cur & 0x7f) << shift;
+        if (shift < 25) shift += 7 else break;
+    }
+
+    if (pos >= content_end) return null;
+    if (size > 1024 * 1024) return null; // Safety limit
+
+    // For delta types, we can't handle them in-place
+    if (pack_type_num == 6 or pack_type_num == 7) return null;
+
+    initCZlib();
+    const uncompress_fn = zlib_uncompress_fn orelse return null;
+
+    const buf_ptr = ensureBulkBuf(size) orelse return null;
+    var dest_len: c_ulong = @intCast(bulk_decompress_buf_cap);
+    const remaining = pack_data[pos..];
+    const ret = uncompress_fn(buf_ptr, &dest_len, remaining.ptr, @intCast(remaining.len));
+    if (ret != 0) return null;
+
+    return .{ .data = bulk_decompress_buf.?[0..@intCast(dest_len)], .obj_type = pack_type_num };
 }
 
 pub const ObjectType = enum {

@@ -68,11 +68,49 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
         author_map.deinit();
     }
 
-    // Preload all commits from packs into cache for fast access during walk
-    objects.preloadCommitsFromPacks(git_path, platform_impl, allocator);
+    // Try fast pack-based author extraction (avoids per-object allocation)
+    // First, ensure pack data is cached/mmap'd
+    const pack_dir_path = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_path}) catch null;
+    defer if (pack_dir_path) |p| allocator.free(p);
 
-    // Try commit-graph fast path
+    // Try commit-graph fast path with direct pack decompression
     if (commit_graph_mod.CommitGraph.open(git_path, allocator)) |cg| {
+        // Build a mapping from commit-graph OID to pack offset for fast access
+        // First, get cached pack/idx data
+        var pack_data_ref: ?[]const u8 = null;
+        var idx_data_ref: ?[]const u8 = null;
+        if (pack_dir_path) |pdp| {
+            var pack_dir = std.fs.cwd().openDir(pdp, .{ .iterate = true }) catch null;
+            if (pack_dir) |*pd| {
+                defer pd.close();
+                var pit = pd.iterate();
+                while (pit.next() catch null) |pentry| {
+                    if (pentry.kind != .file) continue;
+                    if (!std.mem.endsWith(u8, pentry.name, ".idx")) continue;
+                    const idx_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pdp, pentry.name }) catch continue;
+                    defer allocator.free(idx_path);
+                    const pp = std.fmt.allocPrint(allocator, "{s}/{s}.pack", .{ pdp, pentry.name[0 .. pentry.name.len - 4] }) catch continue;
+                    defer allocator.free(pp);
+                    // Get or cache idx and pack data
+                    idx_data_ref = objects.getCachedIdx(idx_path) orelse blk: {
+                        if (objects.mmapFile(idx_path)) |mapped| {
+                            objects.addToCacheEx(allocator, idx_path, mapped, true, "", "", false);
+                            break :blk @as([]const u8, mapped);
+                        }
+                        break :blk null;
+                    };
+                    pack_data_ref = objects.getCachedPack(pp) orelse blk: {
+                        if (objects.mmapFile(pp)) |mapped| {
+                            objects.addToCacheEx(allocator, "", "", false, pp, mapped, true);
+                            break :blk @as([]const u8, mapped);
+                        }
+                        break :blk null;
+                    };
+                    if (pack_data_ref != null and idx_data_ref != null) break;
+                }
+            }
+        }
+
         var visited = std.AutoHashMap(u32, void).init(allocator);
         defer visited.deinit();
         var stack = std.array_list.Managed(u32).init(allocator);
@@ -87,16 +125,31 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
                 if (visited.contains(cur)) continue;
                 try visited.put(cur, {});
 
-                // Get author from object - try zero-copy borrow first
+                // Get author: try direct pack decompression (zero-alloc), then cache, then full load
                 var hash_hex: [40]u8 = undefined;
                 cg.getOidHex(cur, &hash_hex);
-                const obj_data: ?[]const u8 = blk: {
+
+                const author_data: ?[]const u8 = blk: {
+                    // Try zero-copy cache borrow first
                     if (objects.objectCacheBorrow(&hash_hex)) |borrowed| {
                         break :blk borrowed.data;
                     }
+                    // Try direct pack decompression into reusable buffer
+                    if (pack_data_ref != null and idx_data_ref != null) {
+                        var oid_bytes: [20]u8 = undefined;
+                        _ = std.fmt.hexToBytes(&oid_bytes, &hash_hex) catch break :blk null;
+                        if (objects.findOffsetInIdx(idx_data_ref.?, oid_bytes)) |offset| {
+                            if (objects.decompressPackObjectInPlace(pack_data_ref.?, offset)) |result| {
+                                if (result.obj_type == 1) { // commit
+                                    break :blk result.data;
+                                }
+                            }
+                        }
+                    }
                     break :blk null;
                 };
-                if (obj_data) |data| {
+
+                if (author_data) |data| {
                     const author = extractAuthor(data, email);
                     if (author.len > 0) {
                         if (author_map.getPtr(author)) |cnt| {
@@ -105,17 +158,20 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
                             try author_map.put(try allocator.dupe(u8, author), 1);
                         }
                     }
-                } else if (objects.GitObject.load(&hash_hex, git_path, platform_impl, allocator)) |obj| {
-                    defer obj.deinit(allocator);
-                    const author = extractAuthor(obj.data, email);
-                    if (author.len > 0) {
-                        if (author_map.getPtr(author)) |cnt| {
-                            cnt.* += 1;
-                        } else {
-                            try author_map.put(try allocator.dupe(u8, author), 1);
+                } else {
+                    // Fallback to full object load
+                    if (objects.GitObject.load(&hash_hex, git_path, platform_impl, allocator)) |obj| {
+                        defer obj.deinit(allocator);
+                        const author = extractAuthor(obj.data, email);
+                        if (author.len > 0) {
+                            if (author_map.getPtr(author)) |cnt| {
+                                cnt.* += 1;
+                            } else {
+                                try author_map.put(try allocator.dupe(u8, author), 1);
+                            }
                         }
-                    }
-                } else |_| {}
+                    } else |_| {}
+                }
 
                 // Add parents
                 const cd = cg.getCommitData(cur);
