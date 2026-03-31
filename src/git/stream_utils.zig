@@ -111,20 +111,16 @@ pub fn decompressInto(
     return .{ .decompressed_size = res.data.len, .bytes_consumed = res.consumed };
 }
 
-/// Decompress zlib data into a pre-sized buffer (no allocation).
-/// Uses C zlib when available (faster).
+/// Decompress zlib data into a pre-sized buffer (zero allocation with C zlib).
 pub fn decompressIntoBuf(
     compressed_data: []const u8,
     buf: []u8,
 ) !struct { decompressed_size: usize, bytes_consumed: usize } {
-    // Try C zlib inflate (faster)
-    if (objects_mod.cDecompressWithConsumed(std.heap.page_allocator, compressed_data, buf.len)) |res| {
-        const n = @min(res.data.len, buf.len);
-        @memcpy(buf[0..n], res.data[0..n]);
-        std.heap.page_allocator.free(res.data);
-        return .{ .decompressed_size = n, .bytes_consumed = res.consumed };
+    // Try C zlib inflate directly into buffer (zero allocation!)
+    if (objects_mod.cInflateIntoBuf(compressed_data, buf)) |res| {
+        return .{ .decompressed_size = res.produced, .bytes_consumed = res.consumed };
     }
-    // Fallback to Zig flate
+    // Fallback to Zig flate (allocates temp buffer)
     const tmp_alloc = getTempAllocator();
     const res = zlib_compat.decompressSliceWithConsumed(tmp_alloc, compressed_data) catch return error.ZlibDecompressError;
     defer tmp_alloc.free(res.data);
@@ -146,17 +142,14 @@ pub fn decompressHashIntoBuf(
     const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ git_type, object_size }) catch unreachable;
     sha_hasher.update(header);
 
-    // Try C zlib inflate (faster)
-    if (objects_mod.cDecompressWithConsumed(std.heap.page_allocator, compressed_data, object_size)) |res| {
-        const total = @min(res.data.len, buf.len);
-        @memcpy(buf[0..total], res.data[0..total]);
-        sha_hasher.update(buf[0..total]);
+    // Try C zlib inflate directly into buffer (zero allocation!)
+    if (objects_mod.cInflateIntoBuf(compressed_data, buf)) |res| {
+        sha_hasher.update(buf[0..res.produced]);
         var result_sha1: [20]u8 = undefined;
         sha_hasher.final(&result_sha1);
-        std.heap.page_allocator.free(res.data);
-        return .{ .sha1 = result_sha1, .decompressed_size = total, .bytes_consumed = res.consumed };
+        return .{ .sha1 = result_sha1, .decompressed_size = res.produced, .bytes_consumed = res.consumed };
     }
-    // Fallback to Zig flate
+    // Fallback to Zig flate (allocates temp buffer)
     const tmp_alloc = getTempAllocator();
     const res = zlib_compat.decompressSliceWithConsumed(tmp_alloc, compressed_data) catch return error.ZlibDecompressError;
     defer tmp_alloc.free(res.data);
