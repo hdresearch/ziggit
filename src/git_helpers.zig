@@ -1370,7 +1370,6 @@ pub fn expandHashOnlyFormat(format: []const u8, commit_hash: []const u8, out: *s
 
 /// Output a formatted commit using pre-loaded commit data (avoids re-loading object and re-finding git dir)
 pub fn buildDecorationMap(allocator: std.mem.Allocator, git_path: []const u8, platform_impl: *const platform_mod.Platform, map: *std.StringHashMap([]const u8)) !void {
-    _ = platform_impl;
     // Read HEAD
     const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
     defer allocator.free(head_path);
@@ -1411,6 +1410,56 @@ pub fn buildDecorationMap(allocator: std.mem.Allocator, git_path: []const u8, pl
     }
     // Packed refs
     collectPackedDecorationRefs(allocator, git_path, map) catch {};
+
+    // Peel annotated tag entries: if a map key is a tag object, re-map to the commit hash
+    {
+        var to_remap = std.array_list.Managed(struct { old_key: []const u8, new_key: [40]u8, value: []const u8 }).init(allocator);
+        defer to_remap.deinit();
+        var mit = map.iterator();
+        while (mit.next()) |entry| {
+            var cur_hash: []const u8 = entry.key_ptr.*;
+            var peeled_buf: [40]u8 = undefined;
+            var did_peel = false;
+            var depth: u8 = 0;
+            while (depth < 10) : (depth += 1) {
+                const pobj = objects.GitObject.load(cur_hash, git_path, platform_impl, allocator) catch break;
+                defer pobj.deinit(allocator);
+                if (pobj.type != .tag) break;
+                var tp: usize = 0;
+                var found = false;
+                while (tp < pobj.data.len) {
+                    const tnl = std.mem.indexOfScalarPos(u8, pobj.data, tp, '\n') orelse pobj.data.len;
+                    const tl = pobj.data[tp..tnl];
+                    if (tl.len == 0) break;
+                    if (std.mem.startsWith(u8, tl, "object ") and tl.len >= 47) {
+                        @memcpy(&peeled_buf, tl[7..47]);
+                        cur_hash = &peeled_buf;
+                        did_peel = true;
+                        found = true;
+                        break;
+                    }
+                    tp = tnl + 1;
+                }
+                if (!found) break;
+            }
+            if (did_peel) {
+                to_remap.append(.{ .old_key = entry.key_ptr.*, .new_key = peeled_buf, .value = entry.value_ptr.* }) catch {};
+            }
+        }
+        for (to_remap.items) |r| {
+            _ = map.remove(r.old_key);
+            allocator.free(@constCast(r.old_key));
+            const gop = map.getOrPut(allocator.dupe(u8, &r.new_key) catch continue) catch continue;
+            if (gop.found_existing) {
+                const old = gop.value_ptr.*;
+                gop.value_ptr.* = std.fmt.allocPrint(allocator, "{s}, {s}", .{ old, r.value }) catch continue;
+                allocator.free(old);
+                allocator.free(@constCast(r.value));
+            } else {
+                gop.value_ptr.* = r.value;
+            }
+        }
+    }
 
     // Add HEAD -> branch decoration
     if (head_hash) |hh| {
