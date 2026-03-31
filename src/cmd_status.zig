@@ -34,6 +34,7 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
 
     // helpers.Check for flags
     var porcelain = false;
+    var porcelain_explicit = false; // true when --porcelain was used (paths always repo-relative)
     var nul_terminate = false;
     var show_branch = false;
     var short_format = false;
@@ -45,12 +46,15 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--porcelain") or std.mem.eql(u8, arg, "--porcelain=v1")) {
             porcelain = true;
+            porcelain_explicit = true;
         } else if (std.mem.startsWith(u8, arg, "--porcelain=")) {
             const version = arg["--porcelain=".len..];
             if (std.mem.eql(u8, version, "v1") or std.mem.eql(u8, version, "1")) {
                 porcelain = true;
+                porcelain_explicit = true;
             } else if (std.mem.eql(u8, version, "v2") or std.mem.eql(u8, version, "2")) {
                 porcelain = true;
+                porcelain_explicit = true;
             } else {
                 const msg = try std.fmt.allocPrint(allocator, "fatal: unsupported porcelain version '{s}'\n", .{version});
                 defer allocator.free(msg);
@@ -90,6 +94,7 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             break;
         } else if (std.mem.eql(u8, arg, "-z")) {
             nul_terminate = true;
+            porcelain = true;
         } else if (std.mem.eql(u8, arg, "--column") or std.mem.startsWith(u8, arg, "--column=")) {
             // Column display - accept as no-op
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
@@ -120,6 +125,38 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
         try platform_impl.writeStderr("fatal: unable to determine repository root\n");
         std.process.exit(128);
     };
+
+    // Compute the prefix (subdirectory path relative to repo root)
+    // This is used to show paths relative to cwd in long-format output
+    const cwd = try platform_impl.fs.getCwd(allocator);
+    defer allocator.free(cwd);
+    
+    // Check status.relativePaths config (default: true)
+    var relative_paths = true;
+    {
+        if (helpers.getConfigOverride("status.relativePaths")) |val| {
+            if (std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "0")) {
+                relative_paths = false;
+            }
+        } else {
+            const config_path_rp = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+            defer allocator.free(config_path_rp);
+            if (platform_impl.fs.readFile(allocator, config_path_rp)) |cfg| {
+                defer allocator.free(cfg);
+                if (helpers.parseConfigValue(cfg, "status.relativepaths", allocator) catch null) |val| {
+                    defer allocator.free(val);
+                    if (std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "0")) {
+                        relative_paths = false;
+                    }
+                }
+            } else |_| {}
+        }
+    }
+    
+    const prefix: []const u8 = if (relative_paths and cwd.len > repo_root.len and std.mem.startsWith(u8, cwd, repo_root) and cwd[repo_root.len] == '/')
+        cwd[repo_root.len + 1 ..]
+    else
+        "";
 
     // helpers.Check config for status.showUntrackedFiles (if not overridden by command line)
     if (!untracked_explicit) {
@@ -492,11 +529,15 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
                     false;
                     
                 if (is_new) {
-                    const msg = try std.fmt.allocPrint(allocator, "\tnew file:   {s}\n", .{entry.path});
+                    const rel_path = try makeRelativePath(allocator, entry.path, prefix);
+                    defer allocator.free(rel_path);
+                    const msg = try std.fmt.allocPrint(allocator, "\tnew file:   {s}\n", .{rel_path});
                     defer allocator.free(msg);
                     try platform_impl.writeStdout(msg);
                 } else {
-                    const msg = try std.fmt.allocPrint(allocator, "\tmodified:   {s}\n", .{entry.path});
+                    const rel_path = try makeRelativePath(allocator, entry.path, prefix);
+                    defer allocator.free(rel_path);
+                    const msg = try std.fmt.allocPrint(allocator, "\tmodified:   {s}\n", .{rel_path});
                     defer allocator.free(msg);
                     try platform_impl.writeStdout(msg);
                 }
@@ -516,7 +557,9 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             if (show_hints) try platform_impl.writeStdout("  (use \"git restore <file>...\" to discard changes in working directory)\n");
             
             for (modified_files.items) |entry| {
-                const msg = try std.fmt.allocPrint(allocator, "\tmodified:   {s}\n", .{entry.path});
+                const rel_path = try makeRelativePath(allocator, entry.path, prefix);
+                defer allocator.free(rel_path);
+                const msg = try std.fmt.allocPrint(allocator, "\tmodified:   {s}\n", .{rel_path});
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
             }
@@ -537,7 +580,9 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             }
             
             for (deleted_files.items) |entry| {
-                const msg = try std.fmt.allocPrint(allocator, "\tdeleted:    {s}\n", .{entry.path});
+                const rel_path = try makeRelativePath(allocator, entry.path, prefix);
+                defer allocator.free(rel_path);
+                const msg = try std.fmt.allocPrint(allocator, "\tdeleted:    {s}\n", .{rel_path});
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
             }
@@ -631,7 +676,9 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             if (show_hints) try platform_impl.writeStdout("  (use \"git add <file>...\" to include in what will be committed)\n");
             
             for (untracked_files.items) |file| {
-                const msg = try std.fmt.allocPrint(allocator, "\t{s}\n", .{file});
+                const rel_path = try makeRelativePath(allocator, file, prefix);
+                defer allocator.free(rel_path);
+                const msg = try std.fmt.allocPrint(allocator, "\t{s}\n", .{rel_path});
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
             }
@@ -653,8 +700,19 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             }
         }.lessThan);
         const line_end: []const u8 = if (nul_terminate) "\x00" else "\n";
+        const use_rel = !porcelain_explicit and prefix.len > 0;
         for (porcelain_lines.items) |line| {
-            try platform_impl.writeStdout(line);
+            if (use_rel and line.len > 3) {
+                // Convert repo-relative path to cwd-relative for display
+                const status_prefix = line[0..3];
+                const repo_path = line[3..];
+                const display_path = try makeRelativePath(allocator, repo_path, prefix);
+                defer allocator.free(display_path);
+                try platform_impl.writeStdout(status_prefix);
+                try platform_impl.writeStdout(display_path);
+            } else {
+                try platform_impl.writeStdout(line);
+            }
             try platform_impl.writeStdout(line_end);
         }
     }
@@ -680,6 +738,38 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             }
         }
     }
+}
+
+/// Given a file path relative to repo root and the cwd prefix (also relative to repo root),
+/// compute the display path relative to cwd.
+/// E.g., prefix="dir1", path="dir1/modified" -> "modified"
+///        prefix="dir1", path="dir2/added"    -> "../dir2/added"
+///        prefix="",     path="dir1/modified" -> "dir1/modified"
+fn makeRelativePath(alloc: std.mem.Allocator, path: []const u8, cwd_prefix: []const u8) ![]u8 {
+    if (cwd_prefix.len == 0) return try alloc.dupe(u8, path);
+    
+    // Split both paths into components
+    // If path starts with prefix, strip it
+    if (std.mem.startsWith(u8, path, cwd_prefix)) {
+        if (path.len == cwd_prefix.len) return try alloc.dupe(u8, ".");
+        if (path[cwd_prefix.len] == '/') return try alloc.dupe(u8, path[cwd_prefix.len + 1 ..]);
+    }
+    
+    // Count how many directory levels in cwd_prefix
+    var up_count: usize = 1;
+    for (cwd_prefix) |c| {
+        if (c == '/') up_count += 1;
+    }
+    
+    // Build "../" * up_count + path
+    var result = std.array_list.Managed(u8).init(alloc);
+    errdefer result.deinit();
+    var i: usize = 0;
+    while (i < up_count) : (i += 1) {
+        try result.appendSlice("../");
+    }
+    try result.appendSlice(path);
+    return try result.toOwnedSlice();
 }
 
 // helpers.Resolve a git alias by looking up alias.<name> in config files.
