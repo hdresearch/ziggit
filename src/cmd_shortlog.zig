@@ -5,7 +5,11 @@ const objects = helpers.objects;
 const refs = helpers.refs;
 const commit_graph_mod = @import("git/commit_graph.zig");
 
-pub fn cmdShortlog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    const allocator = if (comptime @import("builtin").target.os.tag != .freestanding and @import("builtin").target.os.tag != .wasi)
+        std.heap.c_allocator
+    else
+        passed_allocator;
     if (@import("builtin").target.os.tag == .freestanding) {
         try platform_impl.writeStderr("shortlog: not supported in freestanding mode\n");
         return;
@@ -55,8 +59,6 @@ pub fn cmdShortlog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
     }
     defer allocator.free(start_commit);
 
-    std.debug.print("shortlog: start={s}, summary={}, numbered={}\n", .{start_commit, summary, numbered});
-
     // Count commits per author
     const AuthorCount = struct { name: []const u8, count: u32 };
     var author_map = std.StringHashMap(u32).init(allocator);
@@ -68,8 +70,6 @@ pub fn cmdShortlog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
 
     // Try commit-graph fast path
     if (commit_graph_mod.CommitGraph.open(git_path, allocator)) |cg| {
-        // Bulk preload commits for author extraction
-        objects.preloadCommitsFromPacks(git_path, platform_impl, allocator);
         
         var visited = std.AutoHashMap(u32, void).init(allocator);
         defer visited.deinit();
@@ -79,7 +79,9 @@ pub fn cmdShortlog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
         if (cg.findCommit(start_commit)) |pos| {
             try stack.append(pos);
             while (stack.items.len > 0) {
-                const cur = stack.pop() orelse break;
+                const last = stack.items.len - 1;
+                const cur = stack.items[last];
+                stack.items.len = last;
                 if (visited.contains(cur)) continue;
                 try visited.put(cur, {});
 
@@ -124,7 +126,9 @@ pub fn cmdShortlog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
         try stack.append(try allocator.dupe(u8, start_commit));
 
         while (stack.items.len > 0) {
-            const cur = stack.pop() orelse break;
+            const last2 = stack.items.len - 1;
+            const cur = stack.items[last2];
+            stack.items.len = last2;
             if (visited.contains(cur)) { allocator.free(cur); continue; }
             try visited.put(cur, {});
 
