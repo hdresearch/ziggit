@@ -727,29 +727,40 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
         };
         defer repo.close();
         
-        // helpers.Get current branch name before checkout for reflog
-        var old_branch_name: ?[]u8 = null;
-        defer if (old_branch_name) |obn| allocator.free(obn);
-        var old_head_hash: ?[]u8 = null;
-        defer if (old_head_hash) |ohh| allocator.free(ohh);
+        // helpers.Get current branch name before checkout for reflog — stack buffers
+        var old_branch_name_buf: [256]u8 = undefined;
+        var old_branch_name: ?[]const u8 = null;
+        var old_head_hash_buf: [40]u8 = undefined;
+        var old_head_hash: ?[]const u8 = null;
         {
-            const head_path2 = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
-            defer allocator.free(head_path2);
-            if (platform_impl.fs.readFile(allocator, head_path2)) |head_data| {
-                defer allocator.free(head_data);
-                const trimmed = std.mem.trim(u8, head_data, " \t\r\n");
-                if (std.mem.startsWith(u8, trimmed, "ref: refs/heads/")) {
-                    old_branch_name = try allocator.dupe(u8, trimmed["ref: refs/heads/".len..]);
-                    // helpers.Resolve to hash
-                    const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, trimmed["ref: ".len..] });
-                    defer allocator.free(ref_path);
-                    if (platform_impl.fs.readFile(allocator, ref_path)) |hash_data| {
-                        defer allocator.free(hash_data);
-                        old_head_hash = try allocator.dupe(u8, std.mem.trim(u8, hash_data, " \t\r\n"));
-                    } else |_| {}
-                } else if (trimmed.len >= 40) {
-                    old_head_hash = try allocator.dupe(u8, trimmed[0..40]);
-                }
+            var hp_buf: [std.fs.max_path_bytes]u8 = undefined;
+            if (std.fmt.bufPrint(&hp_buf, "{s}/HEAD", .{git_path})) |head_path2| {
+                if (platform_impl.fs.readFile(allocator, head_path2)) |head_data| {
+                    defer allocator.free(head_data);
+                    const trimmed = std.mem.trim(u8, head_data, " \t\r\n");
+                    if (std.mem.startsWith(u8, trimmed, "ref: refs/heads/")) {
+                        const branch = trimmed["ref: refs/heads/".len..];
+                        if (branch.len <= old_branch_name_buf.len) {
+                            @memcpy(old_branch_name_buf[0..branch.len], branch);
+                            old_branch_name = old_branch_name_buf[0..branch.len];
+                        }
+                        // helpers.Resolve to hash
+                        var rp_buf: [std.fs.max_path_bytes]u8 = undefined;
+                        if (std.fmt.bufPrint(&rp_buf, "{s}/{s}", .{ git_path, trimmed["ref: ".len..] })) |ref_path| {
+                            if (platform_impl.fs.readFile(allocator, ref_path)) |hash_data| {
+                                defer allocator.free(hash_data);
+                                const h = std.mem.trim(u8, hash_data, " \t\r\n");
+                                if (h.len >= 40) {
+                                    @memcpy(&old_head_hash_buf, h[0..40]);
+                                    old_head_hash = &old_head_hash_buf;
+                                }
+                            } else |_| {}
+                        } else |_| {}
+                    } else if (trimmed.len >= 40) {
+                        @memcpy(&old_head_hash_buf, trimmed[0..40]);
+                        old_head_hash = &old_head_hash_buf;
+                    }
+                } else |_| {}
             } else |_| {}
         }
 
