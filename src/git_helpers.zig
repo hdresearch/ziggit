@@ -1528,8 +1528,9 @@ pub fn outputFormattedCommitFromData(format: []const u8, commit_hash: []const u8
                     var rest_buf = std.array_list.Managed(u8).init(out.allocator);
                     defer rest_buf.deinit();
                     try outputFormattedCommitFromData(format[rest_start..], commit_hash, commit_data, &rest_buf, out.allocator);
-                    if (wrap_width > 0 and rest_buf.items.len > 0) {
-                        const wrapped = try wrapText(out.allocator, rest_buf.items, wrap_width, wrap_indent1, wrap_indent2);
+                    if (rest_buf.items.len > 0 and (wrap_width > 0 or wrap_indent1 > 0 or wrap_indent2 > 0)) {
+                        const effective_width = if (wrap_width == 0) @as(usize, 65536) else wrap_width;
+                        const wrapped = try wrapText(out.allocator, rest_buf.items, effective_width, wrap_indent1, wrap_indent2);
                         defer out.allocator.free(wrapped);
                         try out.appendSlice(wrapped);
                     } else {
@@ -7536,8 +7537,9 @@ pub fn formatCommitLine(allocator: std.mem.Allocator, fmt: []const u8, hash: []c
                             // Collect the rest of the formatted text (after %w()) and wrap it
                             const rest_formatted = formatCommitLine(allocator, fmt[i..], hash, data) catch "";
                             defer if (rest_formatted.len > 0) allocator.free(rest_formatted);
-                            if (wrap_width > 0 and rest_formatted.len > 0) {
-                                const wrapped = wrapText(allocator, rest_formatted, wrap_width, wrap_indent1, wrap_indent2) catch rest_formatted;
+                            if (rest_formatted.len > 0 and (wrap_width > 0 or wrap_indent1 > 0 or wrap_indent2 > 0)) {
+                                const eff_width = if (wrap_width == 0) @as(usize, 65536) else wrap_width;
+                                const wrapped = wrapText(allocator, rest_formatted, eff_width, wrap_indent1, wrap_indent2) catch rest_formatted;
                                 defer if (wrapped.ptr != rest_formatted.ptr) allocator.free(wrapped);
                                 try result.appendSlice(wrapped);
                             } else {

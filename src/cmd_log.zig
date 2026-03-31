@@ -55,6 +55,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     defer grep_filters.deinit();
     var all_match = false;
     var fixed_strings = false;
+    var fixed_strings_explicit = false;
     var grep_reflog = false;
     var invert_grep = false;
     var ignore_case = false;
@@ -124,8 +125,10 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             all_match = true;
         } else if (std.mem.eql(u8, arg, "-F") or std.mem.eql(u8, arg, "--fixed-strings")) {
             fixed_strings = true;
+            fixed_strings_explicit = true;
         } else if (std.mem.eql(u8, arg, "-E") or std.mem.eql(u8, arg, "--extended-regexp")) {
             fixed_strings = false; // use regex mode
+            fixed_strings_explicit = true;
         } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--regexp-ignore-case")) {
             ignore_case = true;
         } else if (std.mem.eql(u8, arg, "--grep-reflog")) {
@@ -189,6 +192,16 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         std.process.exit(128);
     };
     defer allocator.free(git_path);
+
+    // Read grep.patternType from config (overridden by -F/-E/-P flags)
+    if (!fixed_strings_explicit) {
+        if (helpers.getConfigValueByKey(git_path, "grep.patterntype", allocator)) |pt_val| {
+            if (std.ascii.eqlIgnoreCase(pt_val, "fixed")) {
+                fixed_strings = true;
+            }
+            allocator.free(pt_val);
+        }
+    }
 
     // Resolve pretty.<alias> from config if needed
     if (pretty_alias) |alias_name| {
