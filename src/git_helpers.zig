@@ -1370,6 +1370,10 @@ pub fn expandHashOnlyFormat(format: []const u8, commit_hash: []const u8, out: *s
 
 /// Output a formatted commit using pre-loaded commit data (avoids re-loading object and re-finding git dir)
 pub fn outputFormattedCommitFromData(format: []const u8, commit_hash: []const u8, commit_data: []const u8, out: *std.array_list.Managed(u8), allocator: std.mem.Allocator) !void {
+    return outputFormattedCommitFromDataWithDecor(format, commit_hash, commit_data, out, allocator, null);
+}
+
+pub fn outputFormattedCommitFromDataWithDecor(format: []const u8, commit_hash: []const u8, commit_data: []const u8, out: *std.array_list.Managed(u8), allocator: std.mem.Allocator, decorations: ?*const std.StringHashMap([]const u8)) !void {
     // Parse commit fields from pre-loaded data
     var tree_hash: []const u8 = "";
     var parent_hashes_buf: [16][]const u8 = undefined;
@@ -1494,8 +1498,22 @@ pub fn outputFormattedCommitFromData(format: []const u8, commit_hash: []const u8
                 }
                 i += 3;
             } else if (c == 'd') {
+                // %d = decorations with wrapping: " (ref1, ref2)"
+                if (decorations) |decor_map| {
+                    if (decor_map.get(commit_hash)) |decor_str| {
+                        try out.appendSlice(" (");
+                        try out.appendSlice(decor_str);
+                        try out.append(')');
+                    }
+                }
                 i += 2;
             } else if (c == 'D') {
+                // %D = decorations without wrapping
+                if (decorations) |decor_map| {
+                    if (decor_map.get(commit_hash)) |decor_str| {
+                        try out.appendSlice(decor_str);
+                    }
+                }
                 i += 2;
             } else if (c == 'G' and i + 2 < format.len) {
                 i += 3;
@@ -1527,7 +1545,7 @@ pub fn outputFormattedCommitFromData(format: []const u8, commit_hash: []const u8
                     const rest_start = close_pos + 1;
                     var rest_buf = std.array_list.Managed(u8).init(out.allocator);
                     defer rest_buf.deinit();
-                    try outputFormattedCommitFromData(format[rest_start..], commit_hash, commit_data, &rest_buf, out.allocator);
+                    try outputFormattedCommitFromDataWithDecor(format[rest_start..], commit_hash, commit_data, &rest_buf, out.allocator, decorations);
                     if (rest_buf.items.len > 0 and (wrap_width > 0 or wrap_indent1 > 0 or wrap_indent2 > 0)) {
                         const effective_width = if (wrap_width == 0) @as(usize, 76) else wrap_width;
                         const wrapped = try wrapText(out.allocator, rest_buf.items, effective_width, wrap_indent1, wrap_indent2);
