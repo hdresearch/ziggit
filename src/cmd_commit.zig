@@ -35,6 +35,16 @@ const build_options = @import("build_options");
 const version_mod = @import("version.zig");
 const wildmatch_mod = @import("wildmatch.zig");
 
+/// Extract "Name <email>" portion from a git author/committer string
+/// (strips trailing timestamp like " 1234567890 +0000")
+fn extractNameEmail(info: []const u8) []const u8 {
+    // Find the last '>' which ends the email
+    if (std.mem.lastIndexOfScalar(u8, info, '>')) |gt| {
+        return info[0 .. gt + 1];
+    }
+    return info;
+}
+
 pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     if (@import("builtin").target.os.tag == .freestanding) {
         try platform_impl.writeStderr("commit: not supported in freestanding mode\n");
@@ -664,6 +674,17 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             const success_msg = try std.fmt.allocPrint(allocator, "[{s} {s}] {s}\n", .{ current_branch, short_hash, std.mem.trimRight(u8, message.?, "\n") });
             defer allocator.free(success_msg);
             try platform_impl.writeStdout(success_msg);
+        }
+        // Show author if different from committer (like git does)
+        {
+            // Extract name <email> portion (before timestamp)
+            const author_ne = extractNameEmail(author_info);
+            const committer_ne = extractNameEmail(committer_info);
+            if (!std.mem.eql(u8, author_ne, committer_ne)) {
+                const author_line = try std.fmt.allocPrint(allocator, " Author: {s}\n", .{author_ne});
+                defer allocator.free(author_line);
+                try platform_impl.writeStdout(author_line);
+            }
         }
         
         // helpers.Add diffstat summary: count files changed

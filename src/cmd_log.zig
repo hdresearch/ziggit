@@ -727,7 +727,10 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         };
 
         if (invert_grep) {
-            if (should_show) {
+            // --invert-grep without --grep is a NOOP
+            if (grep_filters.items.len == 0) {
+                // no grep filter, so invert-grep doesn't change anything
+            } else if (should_show) {
                 // Add parents to queue and continue without displaying
                 for (parent_hashes) |ph| {
                     if (!visited.contains(ph)) {
