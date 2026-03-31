@@ -432,6 +432,27 @@ fn objectCacheLookup(hash_str: []const u8, allocator: std.mem.Allocator) ?GitObj
     return null;
 }
 
+/// Zero-copy cache lookup: returns a reference to cached data (NOT owned by caller).
+/// The returned data pointer is valid as long as the entry remains in cache.
+/// Caller must NOT free the returned data.
+pub const BorrowedObject = struct {
+    obj_type: ObjectType,
+    data: []const u8, // NOT owned - do not free
+};
+
+pub fn objectCacheBorrow(hash_str: []const u8) ?BorrowedObject {
+    if (hash_str.len != 40) return null;
+    var key: [20]u8 = undefined;
+    _ = std.fmt.hexToBytes(&key, hash_str) catch return null;
+    const bucket = objectCacheHash(key);
+    if (object_cache_vals[bucket]) |entry| {
+        if (std.mem.eql(u8, &object_cache_keys[bucket], &key)) {
+            return BorrowedObject{ .obj_type = entry.obj_type, .data = entry.data };
+        }
+    }
+    return null;
+}
+
 fn objectCacheInsert(hash_str: []const u8, obj: GitObject, allocator: std.mem.Allocator) void {
     if (hash_str.len != 40) return;
     // Only cache commits (the hot path for log/rev-list)

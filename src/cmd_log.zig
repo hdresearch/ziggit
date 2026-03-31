@@ -350,8 +350,11 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     const has_filters = author_filters.items.len > 0 or committer_filters.items.len > 0 or grep_filters.items.len > 0;
     if (oneline and !has_filters and exclude_refs.items.len == 0 and include_refs.items.len == 0 and format_string == null and output_encoding == null) {
         if (commit_graph_mod.CommitGraph.open(git_path, allocator)) |cg| {
-            // NOTE: preloadCommitsFromPacks removed — with commit-graph + object cache,
-            // lazy loading per-commit is faster than eager bulk decompression.
+            // Preload commits for faster cache hits during traversal
+            // Only preload for full log or large counts (preloading ALL commits is wasteful for -20)
+            if (max_count == null or max_count.? > 200) {
+                objects.preloadCommitsFromPacks(git_path, platform_impl, allocator);
+            }
             // Fast path: use commit-graph for traversal, only load objects for message
             var cg_queue = std.array_list.Managed(struct { pos: u32, hash_hex: [40]u8, timestamp: i64 }).init(allocator);
             defer cg_queue.deinit();
@@ -383,14 +386,18 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
 
                     // Load object to get commit message first line
                     const hash_slice = current.hash_hex[0..40];
-                    const commit_obj = objects.GitObject.load(hash_slice, git_path, platform_impl, allocator) catch {
-                        // If object can't be loaded, skip
-                        continue;
+                    // Try zero-copy borrow from cache first, fall back to full load
+                    var _fallback_obj: ?objects.GitObject = null;
+                    const cdata: []const u8 = blk: {
+                        if (objects.objectCacheBorrow(hash_slice)) |borrowed| {
+                            break :blk borrowed.data;
+                        }
+                        _fallback_obj = objects.GitObject.load(hash_slice, git_path, platform_impl, allocator) catch {
+                            continue;
+                        };
+                        break :blk _fallback_obj.?.data;
                     };
-                    defer commit_obj.deinit(allocator);
-
-                    // Extract first line of message
-                    const cdata = commit_obj.data;
+                    defer if (_fallback_obj) |obj| obj.deinit(allocator);
                     var first_msg_line: []const u8 = "";
                     {
                         // Skip headers to find message
