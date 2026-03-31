@@ -355,12 +355,44 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     const has_filters = author_filters.items.len > 0 or committer_filters.items.len > 0 or grep_filters.items.len > 0;
     if (oneline and !has_filters and exclude_refs.items.len == 0 and include_refs.items.len == 0 and format_string == null and output_encoding == null and !show_graph) {
         if (commit_graph_mod.CommitGraph.open(git_path, allocator)) |cg| {
-            // Preload commits for faster cache hits during traversal
-            // Only preload for full log or large counts (preloading ALL commits is wasteful for -20)
-            if (max_count == null or max_count.? > 200) {
-                objects.preloadCommitsFromPacks(git_path, platform_impl, allocator);
+            // Setup direct pack access for zero-alloc decompression
+            var pack_data_ref: ?[]const u8 = null;
+            var idx_data_ref: ?[]const u8 = null;
+            {
+                const pdp = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_path}) catch null;
+                defer if (pdp) |p| allocator.free(p);
+                if (pdp) |pack_dir_path| {
+                    var pack_dir = std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true }) catch null;
+                    if (pack_dir) |*pd| {
+                        defer pd.close();
+                        var pit = pd.iterate();
+                        while (pit.next() catch null) |pentry| {
+                            if (pentry.kind != .file or !std.mem.endsWith(u8, pentry.name, ".idx")) continue;
+                            const idx_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir_path, pentry.name }) catch continue;
+                            defer allocator.free(idx_path);
+                            const pp = std.fmt.allocPrint(allocator, "{s}/{s}.pack", .{ pack_dir_path, pentry.name[0 .. pentry.name.len - 4] }) catch continue;
+                            defer allocator.free(pp);
+                            idx_data_ref = objects.getCachedIdx(idx_path) orelse blk: {
+                                if (objects.mmapFile(idx_path)) |mapped| {
+                                    objects.addToCacheEx(allocator, idx_path, mapped, true, "", "", false);
+                                    break :blk @as([]const u8, mapped);
+                                }
+                                break :blk null;
+                            };
+                            pack_data_ref = objects.getCachedPack(pp) orelse blk: {
+                                if (objects.mmapFile(pp)) |mapped| {
+                                    objects.addToCacheEx(allocator, "", "", false, pp, mapped, true);
+                                    break :blk @as([]const u8, mapped);
+                                }
+                                break :blk null;
+                            };
+                            if (pack_data_ref != null and idx_data_ref != null) break;
+                        }
+                    }
+                }
             }
-            // Fast path: use commit-graph for traversal, only load objects for message
+
+            // Fast path: use commit-graph for traversal, zero-alloc decompression for message
             var cg_queue = std.array_list.Managed(struct { pos: u32, hash_hex: [40]u8, timestamp: i64 }).init(allocator);
             defer cg_queue.deinit();
 
@@ -388,29 +420,42 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
                     }
                     const current = cg_queue.swapRemove(best);
                     const entry_data = cg.getCommitData(current.pos);
+                    _ = entry_data;
 
-                    // Load object to get commit message first line
                     const hash_slice = current.hash_hex[0..40];
-                    // Try zero-copy borrow from cache first, fall back to full load
+
+                    // Try zero-alloc decompression, then cache borrow, then full load
                     var _fallback_obj: ?objects.GitObject = null;
                     const cdata: []const u8 = blk: {
+                        // Try direct pack decompression (no allocation)
+                        if (pack_data_ref != null and idx_data_ref != null) {
+                            var oid_bytes: [20]u8 = undefined;
+                            _ = std.fmt.hexToBytes(&oid_bytes, hash_slice) catch break :blk &[_]u8{};
+                            if (objects.findOffsetInIdx(idx_data_ref.?, oid_bytes)) |offset| {
+                                if (objects.decompressPackObjectInPlace(pack_data_ref.?, offset)) |result| {
+                                    if (result.obj_type == 1) break :blk result.data;
+                                }
+                            }
+                        }
+                        // Cache borrow
                         if (objects.objectCacheBorrow(hash_slice)) |borrowed| {
                             break :blk borrowed.data;
                         }
+                        // Full load
                         _fallback_obj = objects.GitObject.load(hash_slice, git_path, platform_impl, allocator) catch {
                             continue;
                         };
                         break :blk _fallback_obj.?.data;
                     };
                     defer if (_fallback_obj) |obj| obj.deinit(allocator);
+
+                    // Extract first line of message
                     var first_msg_line: []const u8 = "";
                     {
-                        // Skip headers to find message
                         var pos: usize = 0;
                         while (pos < cdata.len) {
                             const nl = std.mem.indexOfScalarPos(u8, cdata, pos, '\n') orelse cdata.len;
                             if (nl == pos) {
-                                // Empty line - message starts after
                                 const msg_start = pos + 1;
                                 if (msg_start < cdata.len) {
                                     const msg_end = std.mem.indexOfScalarPos(u8, cdata, msg_start, '\n') orelse cdata.len;
@@ -437,22 +482,23 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
                     cg_count += 1;
 
                     // Add parents from commit-graph
-                    if (entry_data.parent1 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT) {
-                        if (!cg_visited.contains(entry_data.parent1)) {
-                            try cg_visited.put(entry_data.parent1, {});
-                            const pd = cg.getCommitData(entry_data.parent1);
+                    const parent_data = cg.getCommitData(current.pos);
+                    if (parent_data.parent1 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT) {
+                        if (!cg_visited.contains(parent_data.parent1)) {
+                            try cg_visited.put(parent_data.parent1, {});
+                            const pd = cg.getCommitData(parent_data.parent1);
                             var phex: [40]u8 = undefined;
-                            cg.getOidHex(entry_data.parent1, &phex);
-                            try cg_queue.append(.{ .pos = entry_data.parent1, .hash_hex = phex, .timestamp = pd.commit_time });
+                            cg.getOidHex(parent_data.parent1, &phex);
+                            try cg_queue.append(.{ .pos = parent_data.parent1, .hash_hex = phex, .timestamp = pd.commit_time });
                         }
                     }
-                    if (entry_data.parent2 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT and entry_data.parent2 & commit_graph_mod.CommitGraph.GRAPH_EXTRA_EDGES == 0) {
-                        if (!cg_visited.contains(entry_data.parent2)) {
-                            try cg_visited.put(entry_data.parent2, {});
-                            const pd = cg.getCommitData(entry_data.parent2);
+                    if (parent_data.parent2 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT and parent_data.parent2 & commit_graph_mod.CommitGraph.GRAPH_EXTRA_EDGES == 0) {
+                        if (!cg_visited.contains(parent_data.parent2)) {
+                            try cg_visited.put(parent_data.parent2, {});
+                            const pd = cg.getCommitData(parent_data.parent2);
                             var phex: [40]u8 = undefined;
-                            cg.getOidHex(entry_data.parent2, &phex);
-                            try cg_queue.append(.{ .pos = entry_data.parent2, .hash_hex = phex, .timestamp = pd.commit_time });
+                            cg.getOidHex(parent_data.parent2, &phex);
+                            try cg_queue.append(.{ .pos = parent_data.parent2, .hash_hex = phex, .timestamp = pd.commit_time });
                         }
                     }
                 }
