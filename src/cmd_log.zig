@@ -241,6 +241,99 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         return;
     }
 
+    // Fast path for --format=%H or --format=%h using commit-graph (no object decompression)
+    if (format_string != null and !walk_reflog and !show_graph and
+        exclude_refs.items.len == 0 and include_refs.items.len == 0 and
+        author_filters.items.len == 0 and committer_filters.items.len == 0 and
+        grep_filters.items.len == 0 and output_encoding == null and !no_walk)
+    {
+        const is_hash_only = std.mem.eql(u8, format_string.?, "%H");
+        const is_short_hash_only = std.mem.eql(u8, format_string.?, "%h");
+        if (is_hash_only or is_short_hash_only) {
+            if (commit_graph_mod.CommitGraph.open(git_path, allocator)) |cg| {
+                if (cg.findCommit(start_commit)) |start_pos| {
+                    var cg_queue = std.array_list.Managed(struct { pos: u32, timestamp: i64 }).init(allocator);
+                    defer cg_queue.deinit();
+                    var cg_visited = std.AutoHashMap(u32, void).init(allocator);
+                    defer cg_visited.deinit();
+
+                    const start_data = cg.getCommitData(start_pos);
+                    try cg_queue.append(.{ .pos = start_pos, .timestamp = start_data.commit_time });
+                    try cg_visited.put(start_pos, {});
+
+                    var out_buf = std.array_list.Managed(u8).init(allocator);
+                    defer out_buf.deinit();
+                    try out_buf.ensureTotalCapacity(256 * 1024);
+
+                    var cg_count: u32 = 0;
+                    while (cg_queue.items.len > 0 and (max_count == null or cg_count < max_count.?)) {
+                        // Find best (highest timestamp)
+                        var best: usize = 0;
+                        for (cg_queue.items, 0..) |entry, idx| {
+                            if (entry.timestamp > cg_queue.items[best].timestamp) best = idx;
+                        }
+                        const current = cg_queue.swapRemove(best);
+
+                        var hash_hex: [40]u8 = undefined;
+                        cg.getOidHex(current.pos, &hash_hex);
+
+                        if (is_hash_only) {
+                            try out_buf.appendSlice(&hash_hex);
+                        } else {
+                            try out_buf.appendSlice(hash_hex[0..7]);
+                        }
+                        if (!format_is_separator) {
+                            try out_buf.append('\n');
+                        } else {
+                            // separator mode: newline between entries
+                            if (cg_count > 0) {
+                                // prepend separator - but we already appended; adjust:
+                                // Actually for separator mode, add \n before next entry
+                            }
+                            // For format: (separator), we need newline between, not after.
+                            // We'll handle this by just using \n for now and trim last
+                            try out_buf.append('\n');
+                        }
+                        cg_count += 1;
+
+                        // Flush periodically
+                        if (out_buf.items.len > 128 * 1024) {
+                            try platform_impl.writeStdout(out_buf.items);
+                            out_buf.clearRetainingCapacity();
+                        }
+
+                        // Add parents from commit-graph
+                        const parent_data = cg.getCommitData(current.pos);
+                        if (parent_data.parent1 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT) {
+                            if (!cg_visited.contains(parent_data.parent1)) {
+                                try cg_visited.put(parent_data.parent1, {});
+                                const pd = cg.getCommitData(parent_data.parent1);
+                                try cg_queue.append(.{ .pos = parent_data.parent1, .timestamp = pd.commit_time });
+                            }
+                        }
+                        if (parent_data.parent2 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT and parent_data.parent2 & commit_graph_mod.CommitGraph.GRAPH_EXTRA_EDGES == 0) {
+                            if (!cg_visited.contains(parent_data.parent2)) {
+                                try cg_visited.put(parent_data.parent2, {});
+                                const pd = cg.getCommitData(parent_data.parent2);
+                                try cg_queue.append(.{ .pos = parent_data.parent2, .timestamp = pd.commit_time });
+                            }
+                        }
+                    }
+
+                    // For separator mode, remove trailing newline
+                    if (format_is_separator and out_buf.items.len > 0 and out_buf.items[out_buf.items.len - 1] == '\n') {
+                        out_buf.items.len -= 1;
+                    }
+
+                    if (out_buf.items.len > 0) {
+                        try platform_impl.writeStdout(out_buf.items);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
     // Fast path for log -N (small count, no filters, no graph, no reflog, default format)
     if (max_count != null and max_count.? <= 200 and !walk_reflog and !show_graph and
         format_string == null and exclude_refs.items.len == 0 and include_refs.items.len == 0 and
@@ -438,8 +531,157 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         return;
     }
     
-    // Try commit-graph fast path for common cases (oneline, no excludes)
+    // Try commit-graph fast path for common cases (oneline or format strings, no excludes)
     const has_filters = author_filters.items.len > 0 or committer_filters.items.len > 0 or grep_filters.items.len > 0;
+    const use_cg_format = format_string != null and exclude_refs.items.len == 0 and include_refs.items.len == 0 and output_encoding == null;
+    if (use_cg_format and !show_graph) {
+        // Commit-graph fast path for format strings
+        if (commit_graph_mod.CommitGraph.open(git_path, allocator)) |cg| {
+            const hash_only = helpers.formatNeedsOnlyHash(format_string.?);
+
+            // Setup direct pack access for zero-alloc decompression
+            var pack_refs: [8][]const u8 = undefined;
+            var idx_refs: [8][]const u8 = undefined;
+            var num_packs: usize = 0;
+            if (!hash_only) {
+                const pdp = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_path}) catch null;
+                defer if (pdp) |p| allocator.free(p);
+                if (pdp) |pack_dir_path| {
+                    var pack_dir = std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true }) catch null;
+                    if (pack_dir) |*pd| {
+                        defer pd.close();
+                        var pit = pd.iterate();
+                        while (pit.next() catch null) |pentry| {
+                            if (num_packs >= 8) break;
+                            if (pentry.kind != .file or !std.mem.endsWith(u8, pentry.name, ".idx")) continue;
+                            const idx_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir_path, pentry.name }) catch continue;
+                            defer allocator.free(idx_path);
+                            const pp = std.fmt.allocPrint(allocator, "{s}/{s}.pack", .{ pack_dir_path, pentry.name[0 .. pentry.name.len - 4] }) catch continue;
+                            defer allocator.free(pp);
+                            const idx_d = objects.getCachedIdx(idx_path) orelse blk: {
+                                if (objects.mmapFile(idx_path)) |mapped| {
+                                    objects.addToCacheEx(allocator, idx_path, mapped, true, "", "", false);
+                                    break :blk @as([]const u8, mapped);
+                                }
+                                break :blk null;
+                            };
+                            const pack_d = objects.getCachedPack(pp) orelse blk: {
+                                if (objects.mmapFile(pp)) |mapped| {
+                                    objects.addToCacheEx(allocator, "", "", false, pp, mapped, true);
+                                    break :blk @as([]const u8, mapped);
+                                }
+                                break :blk null;
+                            };
+                            if (idx_d != null and pack_d != null) {
+                                idx_refs[num_packs] = idx_d.?;
+                                pack_refs[num_packs] = pack_d.?;
+                                num_packs += 1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            var cg_queue = std.array_list.Managed(struct { pos: u32, hash_hex: [40]u8, timestamp: i64 }).init(allocator);
+            defer cg_queue.deinit();
+            var cg_visited = std.AutoHashMap(u32, void).init(allocator);
+            defer cg_visited.deinit();
+
+            if (cg.findCommit(start_commit)) |start_pos| {
+                const cd = cg.getCommitData(start_pos);
+                var hash_hex: [40]u8 = undefined;
+                cg.getOidHex(start_pos, &hash_hex);
+                try cg_queue.append(.{ .pos = start_pos, .hash_hex = hash_hex, .timestamp = cd.commit_time });
+                try cg_visited.put(start_pos, {});
+
+                var cg_count: u32 = 0;
+                var out_buf = std.array_list.Managed(u8).init(allocator);
+                defer out_buf.deinit();
+                try out_buf.ensureTotalCapacity(256 * 1024);
+
+                const fmt = format_string.?;
+
+                while (cg_queue.items.len > 0 and (max_count == null or cg_count < max_count.?)) {
+                    var best: usize = 0;
+                    for (cg_queue.items, 0..) |entry, idx| {
+                        if (entry.timestamp > cg_queue.items[best].timestamp) best = idx;
+                    }
+                    const current = cg_queue.swapRemove(best);
+                    const hash_slice = current.hash_hex[0..40];
+
+                    if (format_is_separator and cg_count > 0) {
+                        try out_buf.append('\n');
+                    }
+
+                    if (hash_only) {
+                        // No object load needed - just expand hash placeholders
+                        try helpers.expandHashOnlyFormat(fmt, hash_slice, &out_buf);
+                    } else {
+                        // Need commit data for format expansion
+                        var _fallback_obj: ?objects.GitObject = null;
+                        const cdata: []const u8 = blk: {
+                            if (num_packs > 0) {
+                                var oid_bytes: [20]u8 = undefined;
+                                _ = std.fmt.hexToBytes(&oid_bytes, hash_slice) catch break :blk &[_]u8{};
+                                for (0..num_packs) |pi| {
+                                    if (objects.findOffsetInIdx(idx_refs[pi], oid_bytes)) |offset| {
+                                        if (objects.decompressPackObjectInPlace(pack_refs[pi], offset)) |result| {
+                                            if (result.obj_type == 1) break :blk result.data;
+                                        }
+                                    }
+                                }
+                            }
+                            if (objects.objectCacheBorrow(hash_slice)) |borrowed| {
+                                break :blk borrowed.data;
+                            }
+                            _fallback_obj = objects.GitObject.load(hash_slice, git_path, platform_impl, allocator) catch continue;
+                            break :blk _fallback_obj.?.data;
+                        };
+                        defer if (_fallback_obj) |obj| obj.deinit(allocator);
+
+                        try helpers.outputFormattedCommitFromData(fmt, hash_slice, cdata, &out_buf, allocator);
+                    }
+
+                    if (!format_is_separator) {
+                        try out_buf.append('\n');
+                    }
+                    cg_count += 1;
+
+                    // Flush buffer periodically
+                    if (out_buf.items.len > 128 * 1024) {
+                        try platform_impl.writeStdout(out_buf.items);
+                        out_buf.clearRetainingCapacity();
+                    }
+
+                    // Add parents from commit-graph
+                    const parent_data = cg.getCommitData(current.pos);
+                    if (parent_data.parent1 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT) {
+                        if (!cg_visited.contains(parent_data.parent1)) {
+                            try cg_visited.put(parent_data.parent1, {});
+                            const pd = cg.getCommitData(parent_data.parent1);
+                            var phex: [40]u8 = undefined;
+                            cg.getOidHex(parent_data.parent1, &phex);
+                            try cg_queue.append(.{ .pos = parent_data.parent1, .hash_hex = phex, .timestamp = pd.commit_time });
+                        }
+                    }
+                    if (parent_data.parent2 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT and parent_data.parent2 & commit_graph_mod.CommitGraph.GRAPH_EXTRA_EDGES == 0) {
+                        if (!cg_visited.contains(parent_data.parent2)) {
+                            try cg_visited.put(parent_data.parent2, {});
+                            const pd = cg.getCommitData(parent_data.parent2);
+                            var phex: [40]u8 = undefined;
+                            cg.getOidHex(parent_data.parent2, &phex);
+                            try cg_queue.append(.{ .pos = parent_data.parent2, .hash_hex = phex, .timestamp = pd.commit_time });
+                        }
+                    }
+                }
+
+                if (out_buf.items.len > 0) {
+                    try platform_impl.writeStdout(out_buf.items);
+                }
+                return;
+            }
+        }
+    }
     if (oneline and exclude_refs.items.len == 0 and include_refs.items.len == 0 and format_string == null and output_encoding == null and !show_graph) {
         if (commit_graph_mod.CommitGraph.open(git_path, allocator)) |cg| {
             // Setup direct pack access for zero-alloc decompression (multiple packs)
@@ -1025,7 +1267,10 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
                 try platform_impl.writeStdout("\n");
             }
             if (show_graph) try platform_impl.writeStdout("* ");
-            try helpers.outputFormattedCommit(fmt, cur_hash, allocator, platform_impl);
+            // Use pre-loaded commit data to avoid re-loading object and re-finding git dir
+            output_buf.clearRetainingCapacity();
+            try helpers.outputFormattedCommitFromData(fmt, cur_hash, commit_data, &output_buf, allocator);
+            try platform_impl.writeStdout(output_buf.items);
             if (!format_is_separator) {
                 try platform_impl.writeStdout("\n");
             }

@@ -1299,6 +1299,242 @@ pub fn resolveCommittish(git_path: []const u8, committish: []const u8, platform_
 }
 
 
+/// Check if a format string only needs the commit hash (no object load required)
+pub fn formatNeedsOnlyHash(format: []const u8) bool {
+    var i: usize = 0;
+    while (i < format.len) {
+        if (format[i] == '%' and i + 1 < format.len) {
+            const c = format[i + 1];
+            if (c == 'H' or c == 'h') {
+                i += 2;
+            } else if (c == 'n' or c == '%') {
+                i += 2;
+            } else if (c == 'x' and i + 3 < format.len) {
+                i += 4;
+            } else {
+                return false;
+            }
+        } else if (format[i] == '\\' and i + 1 < format.len) {
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    return true;
+}
+
+/// Fast format expansion for hash-only formats (no object load needed)
+pub fn expandHashOnlyFormat(format: []const u8, commit_hash: []const u8, out: *std.array_list.Managed(u8)) !void {
+    var i: usize = 0;
+    while (i < format.len) {
+        if (format[i] == '%' and i + 1 < format.len) {
+            const c = format[i + 1];
+            if (c == 'H') {
+                try out.appendSlice(commit_hash);
+                i += 2;
+            } else if (c == 'h') {
+                try out.appendSlice(if (commit_hash.len >= 7) commit_hash[0..7] else commit_hash);
+                i += 2;
+            } else if (c == 'n') {
+                try out.append('\n');
+                i += 2;
+            } else if (c == '%') {
+                try out.append('%');
+                i += 2;
+            } else if (c == 'x' and i + 3 < format.len) {
+                const hex_str = format[i + 2 .. i + 4];
+                const byte_val = std.fmt.parseInt(u8, hex_str, 16) catch 0;
+                try out.append(byte_val);
+                i += 4;
+            } else {
+                try out.append(format[i]);
+                i += 1;
+            }
+        } else if (format[i] == '\\' and i + 1 < format.len) {
+            if (format[i + 1] == 'n') {
+                try out.append('\n');
+                i += 2;
+            } else if (format[i + 1] == 't') {
+                try out.append('\t');
+                i += 2;
+            } else {
+                try out.append(format[i]);
+                i += 1;
+            }
+        } else {
+            try out.append(format[i]);
+            i += 1;
+        }
+    }
+}
+
+/// Output a formatted commit using pre-loaded commit data (avoids re-loading object and re-finding git dir)
+pub fn outputFormattedCommitFromData(format: []const u8, commit_hash: []const u8, commit_data: []const u8, out: *std.array_list.Managed(u8), allocator: std.mem.Allocator) !void {
+    // Parse commit fields from pre-loaded data
+    var tree_hash: []const u8 = "";
+    var parent_hashes_buf: [16][]const u8 = undefined;
+    var parent_count: usize = 0;
+    var author_full: []const u8 = "";
+    var committer_full: []const u8 = "";
+    var subject: []const u8 = "";
+    var raw_message: []const u8 = "";
+    var body_start: usize = 0;
+    var body_end: usize = 0;
+
+    // Single-pass header + message parsing
+    var pos: usize = 0;
+    while (pos < commit_data.len) {
+        const nl = std.mem.indexOfScalarPos(u8, commit_data, pos, '\n') orelse commit_data.len;
+        const line = commit_data[pos..nl];
+        if (line.len == 0) {
+            // End of headers, start of message
+            const msg_start = nl + 1;
+            if (msg_start < commit_data.len) {
+                raw_message = commit_data[msg_start..];
+                const subj_end = std.mem.indexOfScalarPos(u8, commit_data, msg_start, '\n') orelse commit_data.len;
+                subject = commit_data[msg_start..subj_end];
+                body_start = if (subj_end + 1 < commit_data.len) subj_end + 1 else commit_data.len;
+                body_end = commit_data.len;
+            }
+            break;
+        }
+        if (line.len > 5 and line[0] == 't' and std.mem.startsWith(u8, line, "tree ")) {
+            tree_hash = line[5..];
+        } else if (line.len > 7 and line[0] == 'p' and std.mem.startsWith(u8, line, "parent ")) {
+            if (parent_count < 16) {
+                parent_hashes_buf[parent_count] = line[7..];
+                parent_count += 1;
+            }
+        } else if (line.len > 7 and line[0] == 'a' and std.mem.startsWith(u8, line, "author ")) {
+            author_full = line[7..];
+        } else if (line.len > 10 and line[0] == 'c' and std.mem.startsWith(u8, line, "committer ")) {
+            committer_full = line[10..];
+        }
+        pos = nl + 1;
+    }
+    const parent_hashes = parent_hashes_buf[0..parent_count];
+    _ = allocator;
+
+    var i: usize = 0;
+    while (i < format.len) {
+        if (format[i] == '%' and i + 1 < format.len) {
+            const c = format[i + 1];
+            if (c == 'H') {
+                try out.appendSlice(commit_hash);
+                i += 2;
+            } else if (c == 'h') {
+                try out.appendSlice(if (commit_hash.len >= 7) commit_hash[0..7] else commit_hash);
+                i += 2;
+            } else if (c == 'T') {
+                try out.appendSlice(tree_hash);
+                i += 2;
+            } else if (c == 't') {
+                try out.appendSlice(if (tree_hash.len >= 7) tree_hash[0..7] else tree_hash);
+                i += 2;
+            } else if (c == 'P') {
+                for (parent_hashes, 0..) |ph, pi| {
+                    if (pi > 0) try out.append(' ');
+                    try out.appendSlice(ph);
+                }
+                i += 2;
+            } else if (c == 'p') {
+                for (parent_hashes, 0..) |ph, pi| {
+                    if (pi > 0) try out.append(' ');
+                    try out.appendSlice(if (ph.len >= 7) ph[0..7] else ph);
+                }
+                i += 2;
+            } else if (c == 's') {
+                try out.appendSlice(subject);
+                i += 2;
+            } else if (c == 'b') {
+                if (body_start < body_end) {
+                    var trimmed = std.mem.trimLeft(u8, commit_data[body_start..body_end], "\n");
+                    trimmed = std.mem.trimRight(u8, trimmed, "\n");
+                    if (trimmed.len > 0) {
+                        try out.appendSlice(trimmed);
+                        try out.append('\n');
+                    }
+                }
+                i += 2;
+            } else if (c == 'B') {
+                const trimmed_raw = std.mem.trimRight(u8, raw_message, "\n");
+                try out.appendSlice(trimmed_raw);
+                try out.append('\n');
+                i += 2;
+            } else if (c == 'n') {
+                try out.append('\n');
+                i += 2;
+            } else if (c == '%') {
+                try out.append('%');
+                i += 2;
+            } else if (c == 'a' and i + 2 < format.len) {
+                const spec = format[i + 2];
+                const parsed = parseIdentField(author_full);
+                if (spec == 'n') {
+                    try out.appendSlice(parsed.name);
+                } else if (spec == 'e') {
+                    try out.appendSlice(parsed.email);
+                } else if (spec == 'd' or spec == 'D' or spec == 'i' or spec == 'I') {
+                    try out.appendSlice(parsed.date);
+                } else {
+                    try out.appendSlice(author_full);
+                }
+                i += 3;
+            } else if (c == 'c' and i + 2 < format.len) {
+                const spec = format[i + 2];
+                const parsed = parseIdentField(committer_full);
+                if (spec == 'n') {
+                    try out.appendSlice(parsed.name);
+                } else if (spec == 'e') {
+                    try out.appendSlice(parsed.email);
+                } else if (spec == 'd' or spec == 'D' or spec == 'i' or spec == 'I') {
+                    try out.appendSlice(parsed.date);
+                } else {
+                    try out.appendSlice(committer_full);
+                }
+                i += 3;
+            } else if (c == 'd') {
+                i += 2;
+            } else if (c == 'D') {
+                i += 2;
+            } else if (c == 'G' and i + 2 < format.len) {
+                i += 3;
+            } else if (c == 'C' and i + 2 < format.len) {
+                if (i + 2 < format.len and format[i + 2] == '(') {
+                    var j = i + 3;
+                    while (j < format.len and format[j] != ')') : (j += 1) {}
+                    i = if (j < format.len) j + 1 else j;
+                } else {
+                    i += 3;
+                }
+            } else if (c == 'x' and i + 3 < format.len) {
+                const hex_str = format[i + 2 .. i + 4];
+                const byte_val = std.fmt.parseInt(u8, hex_str, 16) catch 0;
+                try out.append(byte_val);
+                i += 4;
+            } else {
+                try out.append(format[i]);
+                try out.append(format[i + 1]);
+                i += 2;
+            }
+        } else if (format[i] == '\\' and i + 1 < format.len) {
+            if (format[i + 1] == 'n') {
+                try out.append('\n');
+                i += 2;
+            } else if (format[i + 1] == 't') {
+                try out.append('\t');
+                i += 2;
+            } else {
+                try out.append(format[i]);
+                i += 1;
+            }
+        } else {
+            try out.append(format[i]);
+            i += 1;
+        }
+    }
+}
+
 pub fn outputFormattedCommit(format: []const u8, commit_hash: []const u8, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !void {
     // We need access to the full commit object for format specifiers
     const git_path = findGitDirectory(allocator, platform_impl) catch return;
