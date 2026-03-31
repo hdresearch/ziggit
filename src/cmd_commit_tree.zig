@@ -140,14 +140,21 @@ pub fn cmdCommitTree(allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     };
     defer allocator.free(resolved_tree);
 
-    const commit_obj = try objects.createCommitObject(
-        resolved_tree,
-        parents.items,
-        author,
-        committer,
-        final_message,
-        allocator,
-    );
+    // Build raw commit content to preserve message exactly as given
+    // (git commit-tree does NOT add trailing newline if input lacks one)
+    var content = std.array_list.Managed(u8).init(allocator);
+    defer content.deinit();
+    try content.writer().print("tree {s}\n", .{resolved_tree});
+    for (parents.items) |parent| {
+        try content.writer().print("parent {s}\n", .{parent});
+    }
+    try content.writer().print("author {s}\n", .{author});
+    try content.writer().print("committer {s}\n", .{committer});
+    try content.appendSlice("\n");
+    try content.appendSlice(final_message);
+
+    const commit_data = try content.toOwnedSlice();
+    const commit_obj = objects.GitObject.init(.commit, commit_data);
     defer commit_obj.deinit(allocator);
 
     const hash = commit_obj.store(git_dir, platform_impl, allocator) catch {

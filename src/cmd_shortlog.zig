@@ -60,15 +60,18 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
     }
     defer allocator.free(start_commit);
 
-    const debug_timing = true;
+    const debug_timing = false;
     var t0: i128 = 0;
     if (debug_timing) t0 = std.time.nanoTimestamp();
 
-    const AuthorCount = struct { name: []const u8, count: u32 };
-    var author_map = std.StringHashMap(u32).init(allocator);
+    var author_map = std.StringHashMap(AuthorEntry).init(allocator);
     defer {
         var it = author_map.iterator();
-        while (it.next()) |entry| allocator.free(@constCast(entry.key_ptr.*));
+        while (it.next()) |entry| {
+            allocator.free(@constCast(entry.key_ptr.*));
+            for (entry.value_ptr.subjects.items) |s| allocator.free(@constCast(s));
+            entry.value_ptr.subjects.deinit(allocator);
+        }
         author_map.deinit();
     }
 
@@ -215,32 +218,25 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
                 const pack_data = pack_data_arr[entry.pack_idx];
                 const idx_data = idx_data_arr[entry.pack_idx];
 
-                if (objects.readPackCommitHeaderPartial(pack_data, idx_data, entry.pack_offset)) |data| {
-                    const author = extractAuthor(data, email);
-                    if (author.len > 0) {
-                        if (author_map.getPtr(author)) |cnt| {
-                            cnt.* += 1;
-                        } else {
-                            author_map.put(allocator.dupe(u8, author) catch continue, 1) catch {};
-                        }
-                        continue;
-                    }
-                }
+                var commit_data: ?[]const u8 = null;
+                var obj_holder: ?objects.GitObject = null;
 
-                // Fallback: full object load (loose objects)
-                var hash_hex: [40]u8 = undefined;
-                cg.getOidHex(entry.cg_pos, &hash_hex);
-                if (objects.GitObject.load(&hash_hex, git_path, platform_impl, allocator)) |obj| {
-                    defer obj.deinit(allocator);
-                    const author = extractAuthor(obj.data, email);
-                    if (author.len > 0) {
-                        if (author_map.getPtr(author)) |cnt| {
-                            cnt.* += 1;
-                        } else {
-                            author_map.put(allocator.dupe(u8, author) catch continue, 1) catch {};
-                        }
-                    }
-                } else |_| {}
+                if (objects.readPackCommitHeaderPartial(pack_data, idx_data, entry.pack_offset)) |data| {
+                    commit_data = data;
+                }
+                if (commit_data == null) {
+                    var hash_hex: [40]u8 = undefined;
+                    cg.getOidHex(entry.cg_pos, &hash_hex);
+                    if (objects.GitObject.load(&hash_hex, git_path, platform_impl, allocator)) |obj| {
+                        obj_holder = obj;
+                        commit_data = obj.data;
+                    } else |_| {}
+                }
+                defer if (obj_holder) |obj| obj.deinit(allocator);
+
+                if (commit_data) |data| {
+                    addToAuthorMap(allocator, &author_map, data, email);
+                }
             }
         }
     if (debug_timing) {
@@ -273,14 +269,7 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
             defer obj.deinit(allocator);
             if (obj.type != .commit) continue;
 
-            const author = extractAuthor(obj.data, email);
-            if (author.len > 0) {
-                if (author_map.getPtr(author)) |cnt| {
-                    cnt.* += 1;
-                } else {
-                    try author_map.put(try allocator.dupe(u8, author), 1);
-                }
-            }
+            addToAuthorMap(allocator, &author_map, obj.data, email);
 
             var lines = std.mem.splitScalar(u8, obj.data, '\n');
             while (lines.next()) |line| {
@@ -293,48 +282,60 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
     }
 
     // Collect and sort results
-    var results = std.array_list.Managed(AuthorCount).init(allocator);
+    const AuthorResult = struct { name: []const u8, count: u32, subjects: []const []const u8 };
+    var results = std.array_list.Managed(AuthorResult).init(allocator);
     try results.ensureTotalCapacity(author_map.count());
     defer results.deinit();
     var map_it = author_map.iterator();
     while (map_it.next()) |entry| {
-        results.appendAssumeCapacity(.{ .name = entry.key_ptr.*, .count = entry.value_ptr.* });
+        results.appendAssumeCapacity(.{ .name = entry.key_ptr.*, .count = entry.value_ptr.count, .subjects = entry.value_ptr.subjects.items });
     }
 
     if (numbered) {
-        std.mem.sort(AuthorCount, results.items, {}, struct {
-            fn cmp(_: void, a: AuthorCount, b: AuthorCount) bool {
+        std.mem.sort(AuthorResult, results.items, {}, struct {
+            fn cmp(_: void, a: AuthorResult, b: AuthorResult) bool {
                 if (a.count != b.count) return a.count > b.count;
                 return std.mem.lessThan(u8, a.name, b.name);
             }
         }.cmp);
     } else {
-        std.mem.sort(AuthorCount, results.items, {}, struct {
-            fn cmp(_: void, a: AuthorCount, b: AuthorCount) bool {
+        std.mem.sort(AuthorResult, results.items, {}, struct {
+            fn cmp(_: void, a: AuthorResult, b: AuthorResult) bool {
                 return std.mem.lessThan(u8, a.name, b.name);
             }
         }.cmp);
     }
 
+    // Reverse subjects within each author to get chronological order
+    for (results.items) |*entry| {
+        std.mem.reverse([]const u8, @constCast(entry.subjects));
+    }
+
     // Output with pre-allocated buffer
     var out_buf = std.array_list.Managed(u8).init(allocator);
-    try out_buf.ensureTotalCapacity(results.items.len * 40);
+    try out_buf.ensureTotalCapacity(results.items.len * 80);
     defer out_buf.deinit();
     for (results.items) |entry| {
         if (summary) {
             var buf: [12]u8 = undefined;
             const num_str = std.fmt.bufPrint(&buf, "{d}", .{entry.count}) catch continue;
             var i: usize = 0;
-            while (i + num_str.len < 6) : (i += 1) out_buf.appendAssumeCapacity(' ');
-            out_buf.appendSliceAssumeCapacity(num_str);
-            out_buf.appendAssumeCapacity('\t');
-            out_buf.appendSliceAssumeCapacity(entry.name);
-            out_buf.appendAssumeCapacity('\n');
+            while (i + num_str.len < 6) : (i += 1) try out_buf.append(' ');
+            try out_buf.appendSlice(num_str);
+            try out_buf.append('\t');
+            try out_buf.appendSlice(entry.name);
+            try out_buf.append('\n');
         } else {
-            out_buf.appendSliceAssumeCapacity(entry.name);
+            try out_buf.appendSlice(entry.name);
             var buf: [16]u8 = undefined;
             const cnt_str = std.fmt.bufPrint(&buf, " ({d}):\n", .{entry.count}) catch continue;
-            out_buf.appendSliceAssumeCapacity(cnt_str);
+            try out_buf.appendSlice(cnt_str);
+            for (entry.subjects) |subj| {
+                try out_buf.appendSlice("      ");
+                try out_buf.appendSlice(subj);
+                try out_buf.append('\n');
+            }
+            try out_buf.append('\n');
         }
     }
     if (out_buf.items.len > 0) {
@@ -373,3 +374,36 @@ fn extractAuthor(data: []const u8, include_email: bool) []const u8 {
     }
     return "";
 }
+
+fn extractSubject(data: []const u8) []const u8 {
+    if (std.mem.indexOf(u8, data, "\n\n")) |sep| {
+        const msg = data[sep + 2 ..];
+        // Subject is the first line of the message
+        if (std.mem.indexOfScalar(u8, msg, '\n')) |nl| {
+            return msg[0..nl];
+        }
+        return msg;
+    }
+    return "";
+}
+
+fn addToAuthorMap(allocator: std.mem.Allocator, author_map: *std.StringHashMap(AuthorEntry), data: []const u8, include_email: bool) void {
+    const author = extractAuthor(data, include_email);
+    if (author.len == 0) return;
+    const subject = extractSubject(data);
+
+    if (author_map.getPtr(author)) |entry| {
+        entry.count += 1;
+        if (subject.len > 0) {
+            entry.subjects.append(allocator, allocator.dupe(u8, subject) catch return) catch {};
+        }
+    } else {
+        var subjects = std.ArrayListUnmanaged([]const u8){};
+        if (subject.len > 0) {
+            subjects.append(allocator, allocator.dupe(u8, subject) catch return) catch {};
+        }
+        author_map.put(allocator.dupe(u8, author) catch return, .{ .name = author, .count = 1, .subjects = subjects }) catch {};
+    }
+}
+
+const AuthorEntry = struct { name: []const u8, count: u32, subjects: std.ArrayListUnmanaged([]const u8) };
