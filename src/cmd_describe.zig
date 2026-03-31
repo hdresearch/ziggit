@@ -340,45 +340,62 @@ pub fn findTagInHistory(git_path: []const u8, start_hash: []const u8, tag_map: *
 
 
 pub fn findTagInHistoryWithDistance(git_path: []const u8, start_hash: []const u8, tag_map: *const std.StringHashMap([]u8), include_lightweight: bool, allocator: std.mem.Allocator, platform_impl: *const platform_mod.Platform) !?helpers.TagWithDistance {
-    // helpers.BFS to find closest tagged ancestor
-    var queue = std.array_list.Managed(struct { hash: []u8, depth: u32 }).init(allocator);
+    _ = include_lightweight;
+
+    // Build reverse map: commit_hash -> tag_name
+    var commit_to_tag = std.StringHashMap([]const u8).init(allocator);
+    defer commit_to_tag.deinit();
+    {
+        var tag_iter = tag_map.iterator();
+        while (tag_iter.next()) |entry| {
+            try commit_to_tag.put(entry.value_ptr.*, entry.key_ptr.*);
+        }
+    }
+
+    // BFS from start_hash to find all reachable tags and their commits
+    // Then compute distance as |commits reachable from HEAD but not from tag|
+    var queue = std.array_list.Managed([]u8).init(allocator);
     defer {
-        for (queue.items) |item| allocator.free(item.hash);
+        for (queue.items) |item| allocator.free(item);
         queue.deinit();
     }
-    var visited = std.StringHashMap(void).init(allocator);
+    var visited = std.StringHashMap(u32).init(allocator); // hash -> depth
     defer {
         var it = visited.iterator();
         while (it.next()) |entry| allocator.free(entry.key_ptr.*);
         visited.deinit();
     }
 
-    try queue.append(.{ .hash = try allocator.dupe(u8, start_hash), .depth = 0 });
+    // Collect all reachable commits with their BFS depth
+    try queue.append(try allocator.dupe(u8, start_hash));
+    try visited.put(try allocator.dupe(u8, start_hash), 0);
 
-    while (queue.items.len > 0) {
-        const item = queue.orderedRemove(0);
-        defer allocator.free(item.hash);
+    // Found tags: tag_name -> tag_commit_hash
+    var found_tags = std.array_list.Managed(struct { name: []const u8, commit: []const u8, depth: u32 }).init(allocator);
+    defer found_tags.deinit();
 
-        if (visited.contains(item.hash)) continue;
-        try visited.put(try allocator.dupe(u8, item.hash), {});
+    var depth: u32 = 0;
+    var level_end: usize = 1;
+    var idx: usize = 0;
 
-        // helpers.Check if any tag points to this commit
-        var tag_iter = tag_map.iterator();
-        while (tag_iter.next()) |entry| {
-            if (std.mem.eql(u8, entry.value_ptr.*, item.hash)) {
-                _ = include_lightweight; // TODO: filter by annotated vs lightweight
-                return helpers.TagWithDistance{
-                    .tag_name = try allocator.dupe(u8, entry.key_ptr.*),
-                    .distance = item.depth,
-                };
-            }
+    while (idx < queue.items.len) {
+        if (idx >= level_end) {
+            depth += 1;
+            level_end = queue.items.len;
+        }
+        if (depth > 2000) break;
+
+        const current = queue.items[idx];
+        idx += 1;
+
+        // Check if this commit has a tag
+        if (commit_to_tag.get(current)) |tag_name| {
+            try found_tags.append(.{ .name = tag_name, .commit = current, .depth = depth });
+            // Continue walking past tags to find ALL reachable tags
         }
 
-        // Don't search too deep
-        if (item.depth > 1000) continue;
-
-        // helpers.Add parents
-        const obj = objects.GitObject.load(item.hash, git_path, platform_impl, allocator) catch continue;
+        // Load commit and add parents
+        const obj = objects.GitObject.load(current, git_path, platform_impl, allocator) catch continue;
         defer obj.deinit(allocator);
         if (obj.type != .commit) continue;
 
@@ -388,11 +405,74 @@ pub fn findTagInHistoryWithDistance(git_path: []const u8, start_hash: []const u8
             if (std.mem.startsWith(u8, line, "parent ")) {
                 const parent_hash = line["parent ".len..];
                 if (!visited.contains(parent_hash)) {
-                    try queue.append(.{ .hash = try allocator.dupe(u8, parent_hash), .depth = item.depth + 1 });
+                    const ph = try allocator.dupe(u8, parent_hash);
+                    try queue.append(ph);
+                    try visited.put(try allocator.dupe(u8, parent_hash), depth + 1);
                 }
             }
         }
     }
 
-    return null;
+    if (found_tags.items.len == 0) return null;
+
+    // For each found tag, compute the proper distance:
+    // distance = number of commits reachable from HEAD but not from the tag
+    // This is equivalent to |rev-list tag..HEAD|
+    var best_tag: ?helpers.TagWithDistance = null;
+
+    for (found_tags.items) |ft| {
+        // Compute commits reachable from tag
+        var tag_reachable = std.StringHashMap(void).init(allocator);
+        defer {
+            var trit = tag_reachable.iterator();
+            while (trit.next()) |e| allocator.free(e.key_ptr.*);
+            tag_reachable.deinit();
+        }
+        var tq = std.array_list.Managed([]u8).init(allocator);
+        defer {
+            for (tq.items) |item| allocator.free(item);
+            tq.deinit();
+        }
+        try tq.append(try allocator.dupe(u8, ft.commit));
+        while (tq.items.len > 0) {
+            const h = tq.pop() orelse break;
+            defer allocator.free(h);
+            if (tag_reachable.contains(h)) continue;
+            try tag_reachable.put(try allocator.dupe(u8, h), {});
+            const tobj = objects.GitObject.load(h, git_path, platform_impl, allocator) catch continue;
+            defer tobj.deinit(allocator);
+            if (tobj.type != .commit) continue;
+            var tlines = std.mem.splitScalar(u8, tobj.data, '\n');
+            while (tlines.next()) |tline| {
+                if (tline.len == 0) break;
+                if (std.mem.startsWith(u8, tline, "parent ")) {
+                    const ph = tline["parent ".len..];
+                    if (!tag_reachable.contains(ph)) {
+                        try tq.append(try allocator.dupe(u8, ph));
+                    }
+                }
+            }
+        }
+
+        // Count commits in HEAD's history not in tag's history
+        var distance: u32 = 0;
+        var vit = visited.iterator();
+        while (vit.next()) |ve| {
+            if (!tag_reachable.contains(ve.key_ptr.*)) {
+                distance += 1;
+            }
+        }
+
+        if (best_tag == null or distance < best_tag.?.distance or
+            (distance == best_tag.?.distance and std.mem.order(u8, ft.name, best_tag.?.tag_name) == .lt))
+        {
+            if (best_tag) |old| allocator.free(old.tag_name);
+            best_tag = helpers.TagWithDistance{
+                .tag_name = try allocator.dupe(u8, ft.name),
+                .distance = distance,
+            };
+        }
+    }
+
+    return best_tag;
 }
