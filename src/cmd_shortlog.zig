@@ -6,8 +6,6 @@ const refs = helpers.refs;
 const commit_graph_mod = @import("git/commit_graph.zig");
 const builtin = @import("builtin");
 
-const debug_timing = true;
-
 pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     const allocator = if (comptime builtin.target.os.tag != .freestanding and builtin.target.os.tag != .wasi)
         std.heap.c_allocator
@@ -75,10 +73,7 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
 
     // Try commit-graph fast path
     if (commit_graph_mod.CommitGraph.open(git_path, allocator)) |cg| {
-        // Preload all non-delta commit objects into cache (sequential pack read)
-        objects.preloadCommitsFromPacks(git_path, platform_impl, allocator);
-
-        // Setup direct pack access for delta objects not in cache
+        // Setup direct pack access (no preload — inline inflate is faster for shortlog)
         const pack_dir_path = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_path}) catch null;
         defer if (pack_dir_path) |p| allocator.free(p);
 
@@ -121,7 +116,7 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
             }
         }
 
-        // Walk commit-graph: collect all reachable commit positions
+        // Single-pass: walk commit-graph and process each commit inline
         const num_commits = cg.num_commits;
         const bitset_words = (num_commits + 63) / 64;
         const visited_bits = allocator.alloc(u64, bitset_words) catch null;
@@ -129,64 +124,95 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
 
         if (visited_bits) |bits| {
             @memset(bits, 0);
-
             author_map.ensureTotalCapacity(@intCast(@min(num_commits, 1024))) catch {};
 
-            // Walk commit-graph, extract authors from cache + pack fallback
-            var stack = std.array_list.Managed(u32).init(allocator);
-            try stack.ensureTotalCapacity(4096);
-            defer stack.deinit();
+            // Initialize persistent zlib stream for fast per-commit inflate
+            objects.initCZlib();
+            const inflate_fn = objects.getInflateFn();
+            const reset_fn = objects.getInflateResetFn();
+            const init2_fn = objects.getInflateInit2Fn();
+            const end_fn = objects.getInflateEndFn();
 
-            if (cg.findCommit(start_commit)) |pos| {
-                try stack.append(pos);
-                while (stack.items.len > 0) {
-                    const cur = stack.items[stack.items.len - 1];
-                    stack.items.len -= 1;
+            if (inflate_fn != null and reset_fn != null and init2_fn != null and end_fn != null) {
+                var zstream: objects.ZStream = std.mem.zeroes(objects.ZStream);
+                if (init2_fn.?(&zstream, -15, "1.2.13", @sizeOf(objects.ZStream)) == 0) {
+                    defer _ = end_fn.?(&zstream);
 
-                    const word_idx = cur / 64;
-                    const bit_mask = @as(u64, 1) << @truncate(cur % 64);
-                    if (bits[word_idx] & bit_mask != 0) continue;
-                    bits[word_idx] |= bit_mask;
+                    var mini_buf: [256]u8 = undefined;
 
-                    // Get commit data from cache (filled by preload) or pack
-                    var hash_hex: [40]u8 = undefined;
-                    cg.getOidHex(cur, &hash_hex);
+                    var stack = std.array_list.Managed(u32).init(allocator);
+                    try stack.ensureTotalCapacity(4096);
+                    defer stack.deinit();
 
-                    var commit_data: ?[]const u8 = null;
-                    var obj_holder: ?objects.GitObject = null;
+                    if (cg.findCommit(start_commit)) |pos| {
+                        try stack.append(pos);
+                        while (stack.items.len > 0) {
+                            const cur = stack.items[stack.items.len - 1];
+                            stack.items.len -= 1;
 
-                    if (objects.objectCacheBorrow(&hash_hex)) |borrowed| {
-                        commit_data = borrowed.data;
-                    }
-                    if (commit_data == null) {
-                        const oid_bytes = cg.getOidBytes(cur);
-                        for (0..num_packs) |pi| {
-                            if (objects.findOffsetInIdx(idx_data_arr[pi], oid_bytes.*)) |offset| {
-                                if (objects.readPackCommitHeaderPartial(pack_data_arr[pi], idx_data_arr[pi], offset)) |data| {
-                                    commit_data = data;
+                            const word_idx = cur / 64;
+                            const bit_mask = @as(u64, 1) << @truncate(cur % 64);
+                            if (bits[word_idx] & bit_mask != 0) continue;
+                            bits[word_idx] |= bit_mask;
+
+                            // Process: get OID, find in pack, mini-inflate for author
+                            const oid_bytes = cg.getOidBytes(cur);
+                            var found = false;
+                            for (0..num_packs) |pi| {
+                                if (objects.findOffsetInIdx(idx_data_arr[pi], oid_bytes.*)) |offset| {
+                                    const pack_data = pack_data_arr[pi];
+                                    if (offset < pack_data.len) {
+                                        // Parse pack header inline
+                                        var p = offset;
+                                        const first_byte = pack_data[p];
+                                        const obj_type: u3 = @truncate((first_byte >> 4) & 0x7);
+                                        p += 1;
+                                        var shift_byte = first_byte;
+                                        while (shift_byte & 0x80 != 0 and p < pack_data.len) {
+                                            shift_byte = pack_data[p];
+                                            p += 1;
+                                        }
+
+                                        if (obj_type == 1) {
+                                            // Non-delta commit: mini-inflate (256 bytes)
+                                            _ = reset_fn.?(&zstream);
+                                            const remaining = pack_data[p..];
+                                            zstream.next_in = remaining.ptr;
+                                            zstream.avail_in = @intCast(@min(remaining.len, 512));
+                                            zstream.next_out = &mini_buf;
+                                            zstream.avail_out = 256;
+                                            zstream.total_out = 0;
+                                            const ret = inflate_fn.?(&zstream, 0);
+                                            if (ret == 0 or ret == 1) {
+                                                const produced: usize = @intCast(zstream.total_out);
+                                                if (produced > 0) {
+                                                    addToAuthorMap(allocator, &author_map, mini_buf[0..produced], email, summary);
+                                                    found = true;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Delta or failed: fallback to readPackCommitHeaderPartial
+                                    if (!found) {
+                                        if (objects.readPackCommitHeaderPartial(pack_data_arr[pi], idx_data_arr[pi], offset)) |data| {
+                                            addToAuthorMap(allocator, &author_map, data, email, summary);
+                                            found = true;
+                                        }
+                                    }
+                                    break;
                                 }
-                                break;
+                            }
+
+                            // Add parents
+                            const cd = cg.getCommitData(cur);
+                            if (cd.parent1 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT) {
+                                stack.append(cd.parent1) catch {};
+                            }
+                            if (cd.parent2 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT and cd.parent2 & commit_graph_mod.CommitGraph.GRAPH_EXTRA_EDGES == 0) {
+                                stack.append(cd.parent2) catch {};
                             }
                         }
-                    }
-                    if (commit_data == null) {
-                        if (objects.GitObject.load(&hash_hex, git_path, platform_impl, allocator)) |obj| {
-                            obj_holder = obj;
-                            commit_data = obj.data;
-                        } else |_| {}
-                    }
-                    defer if (obj_holder) |obj| obj.deinit(allocator);
-
-                    if (commit_data) |data| {
-                        addToAuthorMap(allocator, &author_map, data, email, summary);
-                    }
-
-                    const cd = cg.getCommitData(cur);
-                    if (cd.parent1 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT) {
-                        stack.append(cd.parent1) catch {};
-                    }
-                    if (cd.parent2 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT and cd.parent2 & commit_graph_mod.CommitGraph.GRAPH_EXTRA_EDGES == 0) {
-                        stack.append(cd.parent2) catch {};
                     }
                 }
             }
@@ -254,12 +280,10 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
         }.cmp);
     }
 
-    // Reverse subjects within each author to get chronological order
     for (results.items) |*entry| {
         std.mem.reverse([]const u8, @constCast(entry.subjects));
     }
 
-    // Output with pre-allocated buffer
     var out_buf = std.array_list.Managed(u8).init(allocator);
     try out_buf.ensureTotalCapacity(results.items.len * 80);
     defer out_buf.deinit();
@@ -292,7 +316,6 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
 }
 
 fn extractAuthor(data: []const u8, include_email: bool) []const u8 {
-    // Fast scan for "author " at line start
     var pos: usize = 0;
     while (pos + 7 < data.len) {
         if (data[pos] == 'a' and std.mem.eql(u8, data[pos..][0..7], "author ")) {
@@ -314,10 +337,8 @@ fn extractAuthor(data: []const u8, include_email: bool) []const u8 {
             }
             return author_line;
         }
-        // Skip to next line
         while (pos < data.len and data[pos] != '\n') : (pos += 1) {}
         pos += 1;
-        // Empty line = end of headers
         if (pos < data.len and data[pos] == '\n') break;
     }
     return "";
@@ -326,7 +347,6 @@ fn extractAuthor(data: []const u8, include_email: bool) []const u8 {
 fn extractSubject(data: []const u8) []const u8 {
     if (std.mem.indexOf(u8, data, "\n\n")) |sep| {
         const msg = data[sep + 2 ..];
-        // Subject is the first line of the message
         if (std.mem.indexOfScalar(u8, msg, '\n')) |nl| {
             return msg[0..nl];
         }
