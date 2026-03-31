@@ -19,7 +19,15 @@ pub const ArgIterator = struct {
     args: [][]const u8,
     index: usize = 0,
     allocator: std.mem.Allocator,
-    
+
+    pub fn initFromSlice(slice: []const []const u8) ArgIterator {
+        return .{
+            .args = @constCast(slice),
+            .index = 0,
+            .allocator = undefined,
+        };
+    }
+
     pub fn next(self: *ArgIterator) ?[]const u8 {
         if (self.index >= self.args.len) return null;
         const arg = self.args[self.index];

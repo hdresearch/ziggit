@@ -48,6 +48,8 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     var walk_reflog = false;
     var no_walk = false;
     var no_walk_unsorted = false;
+    var reverse = false;
+    var show_linear_break = false;
     var pretty_alias: ?[]const u8 = null; // unresolved pretty.<name> alias
     var author_filters = std.array_list.Managed([]const u8).init(allocator);
     defer author_filters.deinit();
@@ -147,6 +149,10 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             show_graph = true;
         } else if (std.mem.eql(u8, arg, "--no-graph")) {
             show_graph = false;
+        } else if (std.mem.eql(u8, arg, "--reverse")) {
+            reverse = true;
+        } else if (std.mem.eql(u8, arg, "--show-linear-break") or std.mem.startsWith(u8, arg, "--show-linear-break=")) {
+            show_linear_break = true;
         } else if (std.mem.startsWith(u8, arg, "--encoding=")) {
             output_encoding = arg["--encoding=".len..];
         } else if (std.mem.startsWith(u8, arg, "--diff-filter=")) {
@@ -199,6 +205,26 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     if (grep_reflog and !walk_reflog) {
         try platform_impl.writeStderr("fatal: --grep-reflog can only be used under -g\n");
         std.process.exit(1);
+    }
+
+    // Conflicting option checks with --graph
+    if (show_graph) {
+        if (reverse) {
+            try platform_impl.writeStderr("fatal: options '--reverse' and '--graph' cannot be used together\n");
+            std.process.exit(128);
+        }
+        if (show_linear_break) {
+            try platform_impl.writeStderr("fatal: options '--show-linear-break' and '--graph' cannot be used together\n");
+            std.process.exit(128);
+        }
+        if (no_walk) {
+            try platform_impl.writeStderr("fatal: options '--no-walk' and '--graph' cannot be used together\n");
+            std.process.exit(128);
+        }
+        if (walk_reflog) {
+            try platform_impl.writeStderr("fatal: options '--walk-reflogs' and '--graph' cannot be used together\n");
+            std.process.exit(128);
+        }
     }
 
     // helpers.Find .git directory

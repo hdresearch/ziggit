@@ -55,6 +55,8 @@ pub fn cmdShow(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgItera
             name_only = true;
         } else if (std.mem.eql(u8, arg, "--stat")) {
             stat_only = true;
+        } else if (std.mem.eql(u8, arg, "--oneline")) {
+            pretty_format = "oneline";
         } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--no-patch")) {
             suppress_diff = true;
             no_patch = true;
