@@ -160,10 +160,13 @@ pub fn applyCleanFilter(
     const filter_name = getFilterName(allocator, relative_path, git_path, platform_impl) orelse return null;
     defer allocator.free(filter_name);
 
-    const clean_cmd = getCleanCommand(allocator, git_path, filter_name) orelse return null;
-    defer allocator.free(clean_cmd);
+    if (getCleanCommand(allocator, git_path, filter_name)) |clean_cmd| {
+        defer allocator.free(clean_cmd);
+        return runFilter(allocator, clean_cmd, content);
+    }
 
-    return runFilter(allocator, clean_cmd, content);
+    // No single-shot clean command; try long-running process protocol
+    return runProcessFilterOneShot(allocator, git_path, filter_name, "clean", relative_path, content);
 }
 
 /// Apply the smudge filter for a file being checked out.
@@ -178,10 +181,36 @@ pub fn applySmudgeFilter(
     const filter_name = getFilterName(allocator, relative_path, git_path, platform_impl) orelse return null;
     defer allocator.free(filter_name);
 
-    const smudge_cmd = getSmudgeCommand(allocator, git_path, filter_name) orelse return null;
-    defer allocator.free(smudge_cmd);
+    if (getSmudgeCommand(allocator, git_path, filter_name)) |smudge_cmd| {
+        defer allocator.free(smudge_cmd);
+        return runFilter(allocator, smudge_cmd, content);
+    }
 
-    return runFilter(allocator, smudge_cmd, content);
+    // No single-shot smudge command; try long-running process protocol
+    return runProcessFilterOneShot(allocator, git_path, filter_name, "smudge", relative_path, content);
+}
+
+/// One-shot use of the long-running filter process protocol.
+/// Spawns a process, does handshake, filters one blob, and tears down.
+fn runProcessFilterOneShot(
+    allocator: std.mem.Allocator,
+    git_path: []const u8,
+    filter_name: []const u8,
+    operation: []const u8,
+    relative_path: []const u8,
+    content: []const u8,
+) ?[]u8 {
+    const process_cmd = getProcessCommand(allocator, git_path, filter_name) orelse return null;
+    defer allocator.free(process_cmd);
+
+    var proc = FilterProcess.init(allocator, process_cmd) catch return null;
+    defer proc.deinit();
+
+    const is_clean = std.mem.eql(u8, operation, "clean");
+    if (is_clean and !proc.capabilities.clean) return null;
+    if (!is_clean and !proc.capabilities.smudge) return null;
+
+    return proc.filterBlob(operation, relative_path, content) catch null;
 }
 
 // =============================================================================
