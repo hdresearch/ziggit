@@ -343,44 +343,134 @@ pub fn cmdRevList(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIt
         }
     }
 
-    // Fast path for --count: simple DFS, no sorting needed
+    // Fast path for --count: zero-alloc DFS using binary hashes
     if (do_count and !topo_order and skip_count == 0 and format_str == null and !show_objects and !show_parents and !show_children and !graph) {
-        var count_visited = std.StringHashMap(void).init(allocator);
-        defer {
-            var vit = count_visited.iterator();
-            while (vit.next()) |entry| allocator.free(@constCast(entry.key_ptr.*));
-            count_visited.deinit();
+        // Setup direct pack access for zero-alloc decompression
+        var pack_refs: [8][]const u8 = undefined;
+        var idx_refs_arr: [8][]const u8 = undefined;
+        var num_packs: usize = 0;
+        {
+            const pdp = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_path}) catch null;
+            defer if (pdp) |p| allocator.free(p);
+            if (pdp) |pack_dir_path| {
+                var pack_dir = std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true }) catch null;
+                if (pack_dir) |*pd| {
+                    defer pd.close();
+                    var pit = pd.iterate();
+                    while (pit.next() catch null) |pentry| {
+                        if (num_packs >= 8) break;
+                        if (pentry.kind != .file or !std.mem.endsWith(u8, pentry.name, ".idx")) continue;
+                        const idx_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir_path, pentry.name }) catch continue;
+                        defer allocator.free(idx_path);
+                        const pp = std.fmt.allocPrint(allocator, "{s}/{s}.pack", .{ pack_dir_path, pentry.name[0 .. pentry.name.len - 4] }) catch continue;
+                        defer allocator.free(pp);
+                        const idx_d = objects.getCachedIdx(idx_path) orelse blk: {
+                            if (objects.mmapFile(idx_path)) |mapped| {
+                                objects.addToCacheEx(allocator, idx_path, mapped, true, "", "", false);
+                                break :blk @as([]const u8, mapped);
+                            }
+                            break :blk null;
+                        };
+                        const pack_d = objects.getCachedPack(pp) orelse blk: {
+                            if (objects.mmapFile(pp)) |mapped| {
+                                objects.addToCacheEx(allocator, "", "", false, pp, mapped, true);
+                                break :blk @as([]const u8, mapped);
+                            }
+                            break :blk null;
+                        };
+                        if (idx_d != null and pack_d != null) {
+                            idx_refs_arr[num_packs] = idx_d.?;
+                            pack_refs[num_packs] = pack_d.?;
+                            num_packs += 1;
+                        }
+                    }
+                }
+            }
         }
-        var count_stack = std.array_list.Managed([]u8).init(allocator);
-        defer {
-            for (count_stack.items) |h| allocator.free(h);
-            count_stack.deinit();
-        }
+
+        // Use binary [20]u8 keys for visited set (avoid hex string allocations)
+        var count_visited = std.AutoHashMap([20]u8, void).init(allocator);
+        defer count_visited.deinit();
+
+        // Stack of binary OIDs
+        var count_stack = std.array_list.Managed([20]u8).init(allocator);
+        defer count_stack.deinit();
+
         for (include_hashes.items) |h| {
-            try count_stack.append(try allocator.dupe(u8, h));
+            var oid: [20]u8 = undefined;
+            _ = std.fmt.hexToBytes(&oid, h) catch continue;
+            try count_stack.append(oid);
         }
+
+        // Convert exclude hashes to binary
+        var exclude_bin = std.AutoHashMap([20]u8, void).init(allocator);
+        defer exclude_bin.deinit();
+        {
+            var eit = exclude_hashes.iterator();
+            while (eit.next()) |entry| {
+                var oid: [20]u8 = undefined;
+                _ = std.fmt.hexToBytes(&oid, entry.key_ptr.*) catch continue;
+                try exclude_bin.put(oid, {});
+            }
+        }
+
         var total_count: usize = 0;
         while (count_stack.items.len > 0) {
             const current = count_stack.pop() orelse break;
-            if (count_visited.contains(current)) {
-                allocator.free(current);
-                continue;
-            }
-            if (exclude_hashes.contains(current)) {
-                allocator.free(current);
-                continue;
-            }
+            if (count_visited.contains(current)) continue;
+            if (exclude_bin.contains(current)) continue;
             try count_visited.put(current, {});
-            const obj = objects.GitObject.load(current, git_path, platform_impl, allocator) catch continue;
-            defer obj.deinit(allocator);
-            if (obj.type != .commit) continue;
-            total_count += 1;
-            // Parse only parent lines from header
-            var lines_iter = std.mem.splitScalar(u8, obj.data, '\n');
-            while (lines_iter.next()) |line| {
-                if (line.len == 0) break;
-                if (std.mem.startsWith(u8, line, "parent ") and line.len >= 47) {
-                    try count_stack.append(try allocator.dupe(u8, line[7..47]));
+
+            // Try zero-alloc decompression first
+            var got_data = false;
+            for (0..num_packs) |pi| {
+                if (objects.findOffsetInIdx(idx_refs_arr[pi], current)) |offset| {
+                    if (objects.decompressPackObjectInPlace(pack_refs[pi], offset)) |result| {
+                        if (result.obj_type == 1) { // commit
+                            total_count += 1;
+                            // Parse parent lines directly
+                            var pos_p: usize = 0;
+                            while (pos_p < result.data.len) {
+                                const nl = std.mem.indexOfScalarPos(u8, result.data, pos_p, '\n') orelse result.data.len;
+                                const line = result.data[pos_p..nl];
+                                if (line.len == 0) break;
+                                if (line.len >= 47 and line[0] == 'p' and std.mem.eql(u8, line[0..7], "parent ")) {
+                                    var parent_oid: [20]u8 = undefined;
+                                    _ = std.fmt.hexToBytes(&parent_oid, line[7..47]) catch {
+                                        pos_p = nl + 1;
+                                        continue;
+                                    };
+                                    try count_stack.append(parent_oid);
+                                }
+                                pos_p = nl + 1;
+                            }
+                            got_data = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Fallback to full load
+            if (!got_data) {
+                var hex_buf: [40]u8 = undefined;
+                const hex_chars = "0123456789abcdef";
+                for (current, 0..) |byte, bi| {
+                    hex_buf[bi * 2] = hex_chars[byte >> 4];
+                    hex_buf[bi * 2 + 1] = hex_chars[byte & 0xf];
+                }
+                const obj = objects.GitObject.load(&hex_buf, git_path, platform_impl, allocator) catch continue;
+                defer obj.deinit(allocator);
+                if (obj.type != .commit) continue;
+                total_count += 1;
+                var lines_iter = std.mem.splitScalar(u8, obj.data, '\n');
+                while (lines_iter.next()) |line| {
+                    if (line.len == 0) break;
+                    if (std.mem.startsWith(u8, line, "parent ") and line.len >= 47) {
+                        var parent_oid: [20]u8 = undefined;
+                        _ = std.fmt.hexToBytes(&parent_oid, line[7..47]) catch continue;
+                        try count_stack.append(parent_oid);
+                    }
                 }
             }
         }
