@@ -287,6 +287,39 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         // helpers.Get current helpers.HEAD commit
         const current_commit = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
         if (current_commit == null) {
+            // Check if HEAD points to a ref with a broken/short hash
+            const head_path = std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path}) catch {
+                try platform_impl.writeStderr("fatal: your current branch does not have any commits yet\n");
+                std.process.exit(128);
+            };
+            defer allocator.free(head_path);
+            const head_content = std.fs.cwd().readFileAlloc(allocator, head_path, 4096) catch {
+                try platform_impl.writeStderr("fatal: your current branch does not have any commits yet\n");
+                std.process.exit(128);
+            };
+            defer allocator.free(head_content);
+            const trimmed_head = std.mem.trimRight(u8, head_content, "\n\r ");
+            if (std.mem.startsWith(u8, trimmed_head, "ref: ")) {
+                // Symbolic ref - check if the target ref file exists and has content
+                const ref_target = trimmed_head[5..];
+                const ref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, ref_target }) catch {
+                    try platform_impl.writeStderr("fatal: your current branch does not have any commits yet\n");
+                    std.process.exit(128);
+                };
+                defer allocator.free(ref_path);
+                if (std.fs.cwd().readFileAlloc(allocator, ref_path, 256)) |ref_content| {
+                    defer allocator.free(ref_content);
+                    const ref_trimmed = std.mem.trimRight(u8, ref_content, "\n\r ");
+                    if (ref_trimmed.len > 0 and ref_trimmed.len != 40) {
+                        try platform_impl.writeStderr("fatal: your current branch appears to be broken\n");
+                        std.process.exit(128);
+                    }
+                } else |_| {}
+            } else if (trimmed_head.len > 0 and trimmed_head.len != 40) {
+                // Direct hash in HEAD but invalid length
+                try platform_impl.writeStderr("fatal: your current branch appears to be broken\n");
+                std.process.exit(128);
+            }
             try platform_impl.writeStderr("fatal: your current branch does not have any commits yet\n");
             std.process.exit(128);
         }
