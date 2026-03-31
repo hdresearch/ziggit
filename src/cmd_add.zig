@@ -99,7 +99,9 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                     allocator.dupe(u8, orig_entry.path) catch continue;
                 defer allocator.free(fp_dr);
                 const exists_dr = blk_dr: {
-                    std.fs.cwd().access(fp_dr, .{}) catch break :blk_dr false;
+                    // Use lstat (no symlink follow) to check existence
+                    const fp_z = std.posix.toPosixPath(fp_dr) catch break :blk_dr false;
+                    _ = std.posix.fstatat(std.posix.AT.FDCWD, &fp_z, std.posix.AT.SYMLINK_NOFOLLOW) catch break :blk_dr false;
                     break :blk_dr true;
                 };
                 if (exists_dr) {
