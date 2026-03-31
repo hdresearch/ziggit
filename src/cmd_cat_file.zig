@@ -274,9 +274,14 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     };
     defer allocator.free(git_path);
 
-    if (batch_mode or batch_check) {
+    if (batch_mode or batch_check or batch_command) {
+        // Batch modes take no positional arguments
+        if (object_ref != null) {
+            try platform_impl.writeStderr("fatal: batch modes take no arguments\n");
+            std.process.exit(129);
+        }
         // Batch mode: read object names from stdin
-        try catFileBatch(allocator, git_path, batch_mode, batch_format, platform_impl, batch_command);
+        try catFileBatch(allocator, git_path, batch_mode or batch_command, batch_format, platform_impl, batch_command);
         return;
     }
 
