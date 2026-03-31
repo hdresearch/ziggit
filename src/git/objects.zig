@@ -1009,6 +1009,100 @@ pub fn readPackObjectDirect(pack_data: []const u8, idx_data: []const u8, oid_byt
 /// For delta objects, falls through to full resolution.
 /// Can be called with OID bytes (looks up in idx) or with a pre-resolved offset.
 var partial_out_buf: [1024]u8 = undefined;
+
+/// Fast partial pack object resolution: resolves delta chains but only produces
+/// the first `max_bytes` of the result. Much faster than full resolution for
+/// extracting commit headers.
+var partial_delta_buf_a: [512]u8 = undefined;
+var partial_delta_buf_b: [512]u8 = undefined;
+var partial_delta_decomp: [4096]u8 = undefined;
+pub fn readPackCommitHeaderPartial(pack_data: []const u8, idx_data: []const u8, offset: usize) ?[]const u8 {
+    const hdr = parsePackHeader(pack_data, offset) orelse return null;
+
+    // Non-delta: partial decompress using persistent stream (avoids inflateInit/End per call)
+    if (hdr.obj_type == 1) { // commit
+        if (decompressPartial(pack_data[hdr.data_pos..], &partial_out_buf)) |data| {
+            return data;
+        }
+        return null;
+    }
+
+    // Delta: walk chain, collect offsets
+    var chain: [64]struct { offset: usize, data_pos: usize } = undefined;
+    var chain_len: usize = 0;
+    var cur_offset = offset;
+    var base_data_pos: usize = 0;
+
+    // First entry is already parsed
+    if (hdr.obj_type == 6) { // OFS_DELTA
+        var pos = hdr.data_pos;
+        const delta_off = readOfsDeltaOffset(pack_data, &pos) orelse return null;
+        if (delta_off > cur_offset) return null;
+        chain[0] = .{ .offset = cur_offset, .data_pos = pos };
+        chain_len = 1;
+        cur_offset = cur_offset - delta_off;
+    } else if (hdr.obj_type == 7) { // REF_DELTA
+        if (hdr.data_pos + 20 > pack_data.len) return null;
+        const ref_oid = pack_data[hdr.data_pos..][0..20];
+        chain[0] = .{ .offset = cur_offset, .data_pos = hdr.data_pos + 20 };
+        chain_len = 1;
+        cur_offset = findOffsetInIdx(idx_data, ref_oid.*) orelse return null;
+    } else {
+        return null; // Not a commit type we handle
+    }
+
+    // Continue walking delta chain
+    while (chain_len < 64) {
+        const h = parsePackHeader(pack_data, cur_offset) orelse return null;
+        if (h.obj_type == 6) {
+            var pos = h.data_pos;
+            const delta_off = readOfsDeltaOffset(pack_data, &pos) orelse return null;
+            if (delta_off > cur_offset) return null;
+            chain[chain_len] = .{ .offset = cur_offset, .data_pos = pos };
+            chain_len += 1;
+            cur_offset = cur_offset - delta_off;
+        } else if (h.obj_type == 7) {
+            if (h.data_pos + 20 > pack_data.len) return null;
+            const ref_oid = pack_data[h.data_pos..][0..20];
+            chain[chain_len] = .{ .offset = cur_offset, .data_pos = h.data_pos + 20 };
+            chain_len += 1;
+            cur_offset = findOffsetInIdx(idx_data, ref_oid.*) orelse return null;
+        } else {
+            base_data_pos = h.data_pos;
+            break;
+        }
+    } else return null;
+
+    // Decompress base object partially (only first 512 bytes)
+    const base_data = decompressPartial(pack_data[base_data_pos..], &partial_delta_buf_a) orelse
+        return readPackCommitHeaderDirect(pack_data, idx_data, offset); // fallback
+
+    // Apply delta chain in reverse, but only produce first 512 bytes
+    var current_data: []const u8 = base_data;
+    var use_a = false;
+
+    var i = chain_len;
+    while (i > 0) {
+        i -= 1;
+        const entry = chain[i];
+        // Decompress delta instructions
+        const delta_data = decompressPartial(pack_data[entry.data_pos..], &partial_delta_decomp) orelse
+            return readPackCommitHeaderDirect(pack_data, idx_data, offset); // fallback
+
+        const result_buf = if (use_a) &partial_delta_buf_a else &partial_delta_buf_b;
+        const produced = applyDeltaPartial(current_data, delta_data, result_buf, 512) catch
+            return readPackCommitHeaderDirect(pack_data, idx_data, offset); // fallback
+
+        if (produced == 0)
+            return readPackCommitHeaderDirect(pack_data, idx_data, offset);
+
+        current_data = result_buf[0..produced];
+        use_a = !use_a;
+    }
+
+    return current_data;
+}
+
 pub fn readPackCommitHeaderDirect(pack_data: []const u8, idx_data: []const u8, offset: usize) ?[]const u8 {
     const hdr = parsePackHeader(pack_data, offset) orelse return null;
 
@@ -2223,6 +2317,55 @@ pub fn deltaResultSize(delta_data: []const u8) !usize {
     _ = readVarint(delta_data, &pos); // skip base_size
     if (pos >= delta_data.len) return error.InvalidDelta;
     return readVarint(delta_data, &pos);
+}
+
+/// Apply delta but only produce the first `max_bytes` of the result.
+/// Returns the number of bytes actually produced (may be less than max_bytes).
+pub fn applyDeltaPartial(base_data: []const u8, delta_data: []const u8, result: []u8, max_bytes: usize) !usize {
+    if (delta_data.len < 2) return error.InvalidDelta;
+
+    var pos: usize = 0;
+    _ = readVarint(delta_data, &pos); // skip base_size
+    if (pos >= delta_data.len) return error.InvalidDelta;
+    const result_size = readVarint(delta_data, &pos);
+    _ = result_size;
+
+    const limit = @min(max_bytes, result.len);
+    var rp: usize = 0;
+
+    while (pos < delta_data.len and rp < limit) {
+        const cmd = delta_data[pos];
+        pos += 1;
+
+        if (cmd & 0x80 != 0) {
+            var co: usize = 0;
+            var cs: usize = 0;
+            if (cmd & 0x01 != 0) { if (pos >= delta_data.len) break; co = delta_data[pos]; pos += 1; }
+            if (cmd & 0x02 != 0) { if (pos >= delta_data.len) break; co |= @as(usize, delta_data[pos]) << 8; pos += 1; }
+            if (cmd & 0x04 != 0) { if (pos >= delta_data.len) break; co |= @as(usize, delta_data[pos]) << 16; pos += 1; }
+            if (cmd & 0x08 != 0) { if (pos >= delta_data.len) break; co |= @as(usize, delta_data[pos]) << 24; pos += 1; }
+            if (cmd & 0x10 != 0) { if (pos >= delta_data.len) break; cs = delta_data[pos]; pos += 1; }
+            if (cmd & 0x20 != 0) { if (pos >= delta_data.len) break; cs |= @as(usize, delta_data[pos]) << 8; pos += 1; }
+            if (cmd & 0x40 != 0) { if (pos >= delta_data.len) break; cs |= @as(usize, delta_data[pos]) << 16; pos += 1; }
+            if (cs == 0) cs = 0x10000;
+
+            if (co + cs > base_data.len) break;
+            const to_copy = @min(cs, limit - rp);
+            @memcpy(result[rp..][0..to_copy], base_data[co..][0..to_copy]);
+            rp += to_copy;
+        } else if (cmd > 0) {
+            const n: usize = @intCast(cmd);
+            if (pos + n > delta_data.len) break;
+            const to_copy = @min(n, limit - rp);
+            @memcpy(result[rp..][0..to_copy], delta_data[pos..][0..to_copy]);
+            rp += to_copy;
+            pos += n;
+        } else {
+            break;
+        }
+    }
+
+    return rp;
 }
 
 /// Apply delta writing into a reusable ArrayList. Clears the list first but
