@@ -1747,17 +1747,18 @@ pub const Repository = struct {
         const git_dir = try allocator.dupe(u8, target);
         errdefer allocator.free(git_dir);
 
-        // Create required directories
-        const dirs = [_][]const u8{ "objects", "objects/pack", "refs", "refs/heads", "refs/tags" };
-        for (dirs) |d| {
-            const dir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ target, d });
-            defer allocator.free(dir_path);
-            std.fs.cwd().makePath(dir_path) catch {};
+        // Create required directories using stack buffers
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        {
+            const leaf_dirs = [_][]const u8{ "objects/pack", "refs/heads", "refs/tags" };
+            for (leaf_dirs) |d| {
+                const dir_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ target, d }) catch continue;
+                std.fs.cwd().makePath(dir_path) catch {};
+            }
         }
 
         // Write HEAD
-        const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{target});
-        defer allocator.free(head_path);
+        const head_path = std.fmt.bufPrint(&path_buf, "{s}/HEAD", .{target}) catch return error.PathTooLong;
         {
             const f = try std.fs.cwd().createFile(head_path, .{});
             defer f.close();
@@ -1765,9 +1766,9 @@ pub const Repository = struct {
         }
 
         // Write config for bare repo
-        const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{target});
-        defer allocator.free(config_path);
         {
+            var config_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const config_path = std.fmt.bufPrint(&config_buf, "{s}/config", .{target}) catch return error.PathTooLong;
             const f = try std.fs.cwd().createFile(config_path, .{});
             defer f.close();
             try f.writeAll("[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n[remote \"origin\"]\n\turl = ");
@@ -1801,8 +1802,7 @@ pub const Repository = struct {
         // Write refs using packed-refs file (single file instead of thousands of individual files)
         var head_ref: ?[]const u8 = null;
         {
-            const packed_refs_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{target});
-            defer allocator.free(packed_refs_path);
+            const packed_refs_path = std.fmt.bufPrint(&path_buf, "{s}/packed-refs", .{target}) catch return error.PathTooLong;
             var packed_refs = std.array_list.Managed(u8).init(allocator);
             defer packed_refs.deinit();
             try packed_refs.appendSlice("# pack-refs with: peeled fully-peeled sorted \n");
