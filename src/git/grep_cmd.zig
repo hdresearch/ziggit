@@ -1110,6 +1110,35 @@ fn grepTreeIsh(allocator: Allocator, opts: *GrepOptions, git_dir: []const u8, re
     };
     defer allocator.free(commit_hash);
 
+    // Ensure pack files are cached/mmap'd for fast access
+    {
+        const pack_dir_path = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir}) catch null;
+        if (pack_dir_path) |pdp| {
+            defer allocator.free(pdp);
+            var pack_dir = std.fs.cwd().openDir(pdp, .{ .iterate = true }) catch null;
+            if (pack_dir) |*pd| {
+                defer pd.close();
+                var it = pd.iterate();
+                while (it.next() catch null) |entry| {
+                    if (entry.kind != .file) continue;
+                    if (!std.mem.endsWith(u8, entry.name, ".pack")) continue;
+                    const pp = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pdp, entry.name }) catch continue;
+                    defer allocator.free(pp);
+                    if (objects.getCachedPack(pp) == null) {
+                        if (objects.mmapFile(pp)) |mmap_data| {
+                            const in = std.fmt.allocPrint(allocator, "{s}.idx", .{entry.name[0 .. entry.name.len - 5]}) catch continue;
+                            defer allocator.free(in);
+                            const ip = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pdp, in }) catch continue;
+                            defer allocator.free(ip);
+                            const idx_mmap = objects.mmapFile(ip);
+                            objects.addToCacheEx(allocator, if (idx_mmap != null) ip else "", if (idx_mmap) |id| id else "", idx_mmap != null, pp, mmap_data, true);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Get tree hash from commit
     const obj = objects.GitObject.load(commit_hash, git_dir, platform_impl, allocator) catch {
         try platform_impl.writeStderr("fatal: unable to read tree\n");
