@@ -56,7 +56,7 @@ fn getDecompressBuf(min_size: usize) ?[*]u8 {
 /// Uses a reusable scratch buffer to avoid allocation overhead, then copies
 /// the result to the caller's allocator.
 /// Returns decompressed data or null if C zlib is unavailable.
-fn cDecompressSlice(allocator: std.mem.Allocator, input: []const u8, size_hint: usize) ?[]u8 {
+pub fn cDecompressSlice(allocator: std.mem.Allocator, input: []const u8, size_hint: usize) ?[]u8 {
     initCZlib();
     const uncompress_fn = zlib_uncompress_fn orelse return null;
     

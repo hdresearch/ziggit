@@ -1,4 +1,5 @@
 const zlib_compat = @import("git/zlib_compat.zig");
+const objects_mod = @import("git/objects.zig");
 // src/ziggit.zig - Public Zig API for ziggit
 // This is the API that bun would import directly - pure Zig, no C exports
 const std = @import("std");
@@ -37,7 +38,9 @@ pub const Repository = struct {
 
     // PACK CACHE: Avoid re-reading pack/idx files from disk for every object lookup
     _cached_pack_data: ?[]u8 = null,
+    _cached_pack_mmap: ?[]align(std.heap.page_size_min) u8 = null,
     _cached_idx_data: ?[]u8 = null,
+    _cached_idx_mmap: ?[]align(std.heap.page_size_min) u8 = null,
     _cached_pack_path: ?[]u8 = null,
 
     // DIR HANDLE CACHE: Keep git_dir fd open to use openat() instead of full path resolution
@@ -122,8 +125,16 @@ pub const Repository = struct {
             }
             self.allocator.free(entries);
         }
-        if (self._cached_pack_data) |d| self.allocator.free(d);
-        if (self._cached_idx_data) |d| self.allocator.free(d);
+        if (self._cached_pack_mmap) |m| {
+            std.posix.munmap(m);
+        } else if (self._cached_pack_data) |d| {
+            self.allocator.free(d);
+        }
+        if (self._cached_idx_mmap) |m| {
+            std.posix.munmap(m);
+        } else if (self._cached_idx_data) |d| {
+            self.allocator.free(d);
+        }
         if (self._cached_pack_path) |p| self.allocator.free(p);
         self.allocator.free(self.path);
         self.allocator.free(self.git_dir);
@@ -2322,8 +2333,10 @@ pub const Repository = struct {
             const compressed = try obj_file.readToEndAlloc(self.allocator, 100 * 1024 * 1024);
             defer self.allocator.free(compressed);
 
-            return zlib_compat.decompressSlice(self.allocator, compressed) catch
-                return error.CorruptObject;
+            // Try C zlib first (faster), fall back to Zig flate
+            return objects_mod.cDecompressSlice(self.allocator, compressed, 0) orelse
+                (zlib_compat.decompressSlice(self.allocator, compressed) catch
+                return error.CorruptObject);
         } else |_| {}
 
         // Fall back to pack files
@@ -2331,13 +2344,13 @@ pub const Repository = struct {
     }
 
     /// Read an object from pack files. Returns raw content with header.
-    /// OPTIMIZED: Caches pack and idx data to avoid re-reading from disk.
+    /// OPTIMIZED: Uses mmap for zero-copy pack/idx access.
     fn readObjectFromPacks(self: *Repository, hash_hex: *const [40]u8) ObjectReadError![]u8 {
         // Convert hex to bytes for idx lookup
         var target_hash: [20]u8 = undefined;
         _ = std.fmt.hexToBytes(&target_hash, hash_hex) catch return error.ObjectNotFound;
 
-        // Fast path: use cached pack/idx data
+        // Fast path: use cached pack/idx data (mmap or heap)
         if (self._cached_pack_data != null and self._cached_idx_data != null) {
             const offset = lookupIdxForOffsetFromData(self._cached_idx_data.?, &target_hash) catch
                 return error.ObjectNotFound;
@@ -2357,48 +2370,61 @@ pub const Repository = struct {
             if (entry.kind != .file) continue;
             if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
 
-            // Load and cache idx data
-            var idx_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const idx_path = std.fmt.bufPrint(&idx_path_buf, "{s}/{s}", .{ pack_dir_path, entry.name }) catch continue;
-
-            const idx_data = blk: {
-                const f = std.fs.openFileAbsolute(idx_path, .{}) catch continue;
-                defer f.close();
-                break :blk f.readToEndAlloc(self.allocator, 100 * 1024 * 1024) catch continue;
+            // Load idx via mmap (zero-copy)
+            const idx_file = pack_dir.openFile(entry.name, .{}) catch continue;
+            const idx_stat = idx_file.stat() catch { idx_file.close(); continue; };
+            if (idx_stat.size < 1028) { idx_file.close(); continue; }
+            const idx_mmap = std.posix.mmap(null, idx_stat.size, std.posix.PROT.READ, .{ .TYPE = .PRIVATE }, idx_file.handle, 0) catch {
+                idx_file.close();
+                continue;
             };
+            idx_file.close();
+            const idx_data = idx_mmap[0..idx_stat.size];
 
             // Try lookup in this idx
             const offset = lookupIdxForOffsetFromData(idx_data, &target_hash) catch {
-                self.allocator.free(idx_data);
+                std.posix.munmap(idx_mmap);
                 continue;
             };
 
-            // Found! Load and cache the pack data too
-            var pack_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const pack_path = std.fmt.bufPrint(&pack_path_buf, "{s}/{s}.pack", .{ pack_dir_path, entry.name[0 .. entry.name.len - 4] }) catch {
-                self.allocator.free(idx_data);
+            // Found! Load pack via mmap too
+            var pack_name_buf: [256]u8 = undefined;
+            const pack_name = std.fmt.bufPrint(&pack_name_buf, "{s}.pack", .{entry.name[0 .. entry.name.len - 4]}) catch {
+                std.posix.munmap(idx_mmap);
                 continue;
             };
 
-            const pack_data = blk: {
-                const f = std.fs.openFileAbsolute(pack_path, .{}) catch {
-                    self.allocator.free(idx_data);
-                    continue;
-                };
-                defer f.close();
-                break :blk f.readToEndAlloc(self.allocator, 1024 * 1024 * 1024) catch {
-                    self.allocator.free(idx_data);
-                    continue;
-                };
+            const pack_file = pack_dir.openFile(pack_name, .{}) catch {
+                std.posix.munmap(idx_mmap);
+                continue;
             };
+            const pack_stat = pack_file.stat() catch { pack_file.close(); std.posix.munmap(idx_mmap); continue; };
+            const pack_mmap = std.posix.mmap(null, pack_stat.size, std.posix.PROT.READ, .{ .TYPE = .PRIVATE }, pack_file.handle, 0) catch {
+                pack_file.close();
+                std.posix.munmap(idx_mmap);
+                continue;
+            };
+            pack_file.close();
 
-            // Cache for future lookups
-            if (self._cached_pack_data) |old| self.allocator.free(old);
-            if (self._cached_idx_data) |old| self.allocator.free(old);
-            self._cached_pack_data = pack_data;
-            self._cached_idx_data = idx_data;
+            // Cache for future lookups - evict old cache
+            if (self._cached_pack_mmap) |old| {
+                std.posix.munmap(old);
+                self._cached_pack_mmap = null;
+            } else if (self._cached_pack_data) |old| {
+                self.allocator.free(old);
+            }
+            if (self._cached_idx_mmap) |old| {
+                std.posix.munmap(old);
+                self._cached_idx_mmap = null;
+            } else if (self._cached_idx_data) |old| {
+                self.allocator.free(old);
+            }
+            self._cached_pack_mmap = pack_mmap;
+            self._cached_pack_data = pack_mmap[0..pack_stat.size];
+            self._cached_idx_mmap = idx_mmap;
+            self._cached_idx_data = idx_mmap[0..idx_stat.size];
 
-            return self.readPackObjectFromData(pack_data, offset) catch continue;
+            return self.readPackObjectFromData(self._cached_pack_data.?, offset) catch continue;
         }
 
         return error.ObjectNotFound;
@@ -2512,8 +2538,9 @@ pub const Repository = struct {
             else => return error.InvalidPackObject,
         };
 
-        // Decompress the object data using C zlib directly (faster than streaming wrapper)
-        const decompressed = zlib_compat.decompressSlice(self.allocator, pack_data[pos..]) catch return error.CorruptObject;
+        // Decompress the object data — try C zlib first (much faster), fall back to Zig flate
+        const decompressed = objects_mod.cDecompressSlice(self.allocator, pack_data[pos..], @as(usize, @intCast(obj_size))) orelse
+            (zlib_compat.decompressSlice(self.allocator, pack_data[pos..]) catch return error.CorruptObject);
         defer self.allocator.free(decompressed);
 
         // Build "type size\0content" format using stack buffer for header
@@ -2547,8 +2574,9 @@ pub const Repository = struct {
         const base_obj = try self.readPackObjectFromData(pack_data, base_offset);
         defer self.allocator.free(base_obj);
 
-        // Decompress delta data using C zlib directly
-        const delta_data = zlib_compat.decompressSlice(self.allocator, pack_data[pos..]) catch return error.CorruptObject;
+        // Decompress delta data — try C zlib first (faster)
+        const delta_data = objects_mod.cDecompressSlice(self.allocator, pack_data[pos..], 0) orelse
+            (zlib_compat.decompressSlice(self.allocator, pack_data[pos..]) catch return error.CorruptObject);
         defer self.allocator.free(delta_data);
 
         // Apply delta to base
@@ -2569,8 +2597,9 @@ pub const Repository = struct {
         const base_obj = try self.readRawObject(&base_hash_hex);
         defer self.allocator.free(base_obj);
 
-        // Decompress delta data using C zlib directly
-        const delta_data = zlib_compat.decompressSlice(self.allocator, pack_data[pos..]) catch return error.CorruptObject;
+        // Decompress delta data — try C zlib first (faster)
+        const delta_data = objects_mod.cDecompressSlice(self.allocator, pack_data[pos..], 0) orelse
+            (zlib_compat.decompressSlice(self.allocator, pack_data[pos..]) catch return error.CorruptObject);
         defer self.allocator.free(delta_data);
 
         return self.applyDelta(base_obj, delta_data);
@@ -2685,30 +2714,36 @@ pub const Repository = struct {
     }
 
     fn checkoutTree(self: *Repository, tree_hash: *const [40]u8, target_path: []const u8) !void {
-        const raw = try self.readRawObject(tree_hash);
-        defer self.allocator.free(raw);
+        // Read tree content directly (skip header round-trip if possible)
+        const tree_content = self.readObjectContentFromPack(tree_hash) catch blk: {
+            const raw = try self.readRawObject(tree_hash);
+            const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse {
+                self.allocator.free(raw);
+                return error.InvalidTreeObject;
+            };
+            const content_len = raw.len - null_pos - 1;
+            std.mem.copyForwards(u8, raw[0..content_len], raw[null_pos + 1 ..]);
+            break :blk self.allocator.realloc(raw, content_len) catch raw[0..content_len];
+        };
+        defer self.allocator.free(tree_content);
 
-        // Parse tree object - skip "tree <size>\0" header
-        const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse return error.InvalidTreeObject;
-        const entries_start = null_pos + 1;
-
-        var pos = entries_start;
-        while (pos < raw.len) {
+        var pos: usize = 0;
+        while (pos < tree_content.len) {
             // Parse mode
-            const space_pos = std.mem.indexOfScalarPos(u8, raw, pos, ' ') orelse break;
-            const mode = raw[pos..space_pos];
+            const space_pos = std.mem.indexOfScalarPos(u8, tree_content, pos, ' ') orelse break;
+            const mode = tree_content[pos..space_pos];
 
             // Parse name
             const name_start = space_pos + 1;
-            const null_pos_name = std.mem.indexOfScalarPos(u8, raw, name_start, 0) orelse break;
-            const name = raw[name_start..null_pos_name];
+            const null_pos_name = std.mem.indexOfScalarPos(u8, tree_content, name_start, 0) orelse break;
+            const name = tree_content[name_start..null_pos_name];
 
             // Parse 20-byte SHA-1
             const sha_start = null_pos_name + 1;
-            if (sha_start + 20 > raw.len) break;
-            const sha_bytes = raw[sha_start .. sha_start + 20];
+            if (sha_start + 20 > tree_content.len) break;
+            const sha_bytes = tree_content[sha_start .. sha_start + 20];
 
-            // Convert SHA to hex
+            // Convert SHA to hex (stack buffer)
             var sha_hex: [40]u8 = undefined;
             _ = std.fmt.bufPrint(&sha_hex, "{x}", .{sha_bytes}) catch break;
 
@@ -2716,42 +2751,115 @@ pub const Repository = struct {
             if (std.mem.eql(u8, mode, "100644") or std.mem.eql(u8, mode, "100755")) {
                 try self.checkoutBlob(&sha_hex, target_path, name);
             } else if (std.mem.eql(u8, mode, "40000")) {
-                const subdir_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ target_path, name });
-                defer self.allocator.free(subdir_path);
+                // Use stack buffer for subdir path
+                var subdir_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const subdir_path = std.fmt.bufPrint(&subdir_buf, "{s}/{s}", .{ target_path, name }) catch {
+                    const p = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ target_path, name });
+                    defer self.allocator.free(p);
+                    std.fs.cwd().makePath(p) catch {};
+                    try self.checkoutTree(&sha_hex, p);
+                    pos = sha_start + 20;
+                    continue;
+                };
                 std.fs.cwd().makePath(subdir_path) catch {};
                 try self.checkoutTree(&sha_hex, subdir_path);
             } else if (std.mem.eql(u8, mode, "120000")) {
-                // Symlink entry — skip gracefully (symlinks not yet supported)
-                // TODO: create actual symlinks
+                // Symlink entry — skip gracefully
             } else if (std.mem.eql(u8, mode, "160000")) {
-                // Submodule entry — skip gracefully (can't checkout submodules)
+                // Submodule entry — skip gracefully
             }
-            // else: unknown mode — skip
 
             pos = sha_start + 20;
         }
     }
 
     fn checkoutBlob(self: *Repository, blob_hash: *const [40]u8, target_path: []const u8, filename: []const u8) !void {
-        const raw = try self.readRawObject(blob_hash);
-        defer self.allocator.free(raw);
+        // FAST PATH: Read object content directly from pack (skip header round-trip)
+        const content = self.readObjectContentFromPack(blob_hash) catch blk: {
+            // Fallback to full readRawObject path
+            const raw = try self.readRawObject(blob_hash);
+            // Parse blob object - skip "blob <size>\0" header
+            const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse {
+                self.allocator.free(raw);
+                return error.InvalidBlobObject;
+            };
+            // Shift content to beginning to avoid double alloc
+            const content_len = raw.len - null_pos - 1;
+            std.mem.copyForwards(u8, raw[0..content_len], raw[null_pos + 1 ..]);
+            break :blk self.allocator.realloc(raw, content_len) catch raw[0..content_len];
+        };
+        defer self.allocator.free(content);
 
-        // Parse blob object - skip "blob <size>\0" header
-        const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse return error.InvalidBlobObject;
-        const file_content = raw[null_pos + 1 ..];
-
-        // Write file to working directory
-        const file_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ target_path, filename });
-        defer self.allocator.free(file_path);
-
-        // Ensure parent directory exists
-        if (std.mem.lastIndexOfScalar(u8, file_path, '/')) |last_slash| {
-            std.fs.cwd().makePath(file_path[0..last_slash]) catch {};
-        }
+        // Write file to working directory using stack buffer for path
+        var file_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const file_path = std.fmt.bufPrint(&file_path_buf, "{s}/{s}", .{ target_path, filename }) catch {
+            const file_path_alloc = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ target_path, filename });
+            defer self.allocator.free(file_path_alloc);
+            const file = try std.fs.createFileAbsolute(file_path_alloc, .{ .truncate = true });
+            defer file.close();
+            try file.writeAll(content);
+            return;
+        };
 
         const file = try std.fs.createFileAbsolute(file_path, .{ .truncate = true });
         defer file.close();
-        try file.writeAll(file_content);
+        try file.writeAll(content);
+    }
+
+    /// Read just the content of a packed object (no "type size\0" header).
+    /// This is faster than readRawObject for checkout since we skip header construction.
+    fn readObjectContentFromPack(self: *Repository, hash_hex: *const [40]u8) ObjectReadError![]u8 {
+        var target_hash: [20]u8 = undefined;
+        _ = std.fmt.hexToBytes(&target_hash, hash_hex) catch return error.ObjectNotFound;
+
+        const pack_data = self._cached_pack_data orelse return error.ObjectNotFound;
+        const idx_data = self._cached_idx_data orelse return error.ObjectNotFound;
+
+        const offset = lookupIdxForOffsetFromData(idx_data, &target_hash) catch
+            return error.ObjectNotFound;
+
+        return self.readPackObjectContentOnly(pack_data, offset);
+    }
+
+    /// Decompress a pack object and return only its content (no header).
+    fn readPackObjectContentOnly(self: *Repository, pack_data: []const u8, offset: u64) ObjectReadError![]u8 {
+        if (offset >= pack_data.len) return error.InvalidPackOffset;
+
+        var pos = @as(usize, offset);
+        const first_byte = pack_data[pos];
+        const obj_type_raw = (first_byte >> 4) & 0x07;
+        var obj_size: u64 = first_byte & 0x0f;
+        var shift: u6 = 4;
+        pos += 1;
+
+        while (pack_data[pos - 1] & 0x80 != 0) {
+            if (pos >= pack_data.len) return error.InvalidPackObject;
+            obj_size |= @as(u64, @as(u64, pack_data[pos] & 0x7f)) << shift;
+            shift += 7;
+            pos += 1;
+        }
+
+        switch (obj_type_raw) {
+            1, 2, 3, 4 => {
+                // Regular object - decompress directly, return content only
+                return objects_mod.cDecompressSlice(self.allocator, pack_data[pos..], @as(usize, @intCast(obj_size))) orelse
+                    (zlib_compat.decompressSlice(self.allocator, pack_data[pos..]) catch return error.CorruptObject);
+            },
+            6 => {
+                // OFS_DELTA: delegate to full path (needs header for delta application)
+                const raw = try self.readOfsDeltaObject(pack_data, pos, obj_size, offset);
+                defer self.allocator.free(raw);
+                const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse return error.CorruptObject;
+                return self.allocator.dupe(u8, raw[null_pos + 1 ..]);
+            },
+            7 => {
+                const raw = try self.readRefDeltaObject(pack_data, pos, obj_size);
+                defer self.allocator.free(raw);
+                const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse return error.CorruptObject;
+                return self.allocator.dupe(u8, raw[null_pos + 1 ..]);
+            },
+            else => return error.InvalidPackObject,
+        }
     }
 
     fn updateIndexFromTree(self: *Repository, tree_hash: *const [40]u8) !void {
