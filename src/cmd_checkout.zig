@@ -1058,6 +1058,15 @@ fn checkDirtyWorkingTree(
         // File differs between index and target — check if working tree also differs from index
         const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path }) catch continue;
         defer allocator.free(full_path);
+        
+        // PERF: Fast path — if mtime+size match index, file is clean (skip expensive read+hash)
+        if (entry.mtime_sec != 0) {
+            const stat = std.fs.cwd().statFile(full_path) catch continue;
+            const file_mtime_s: u32 = @intCast(@max(0, @divTrunc(stat.mtime, 1_000_000_000)));
+            const file_size: u32 = @intCast(@min(stat.size, std.math.maxInt(u32)));
+            if (file_mtime_s == entry.mtime_sec and file_size == entry.size) continue;
+        }
+        
         const wt_content = platform_impl.fs.readFile(allocator, full_path) catch continue;
         defer allocator.free(wt_content);
         const wt_hash = helpers.hashBlobContent(wt_content, allocator) catch continue;
