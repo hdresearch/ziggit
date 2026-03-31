@@ -47,6 +47,8 @@ pub const Repository = struct {
 
     // DIR HANDLE CACHE: Keep git_dir fd open to use openat() instead of full path resolution
     _cached_git_dir_fd: ?std.posix.fd_t = null,
+    // PACKED-REFS CACHE: Avoid re-reading packed-refs for every ref lookup
+    _cached_packed_refs: ?[]const u8 = null,
 
     /// Open an existing repository at the specified path
     pub fn open(allocator: std.mem.Allocator, path: []const u8) !Repository {
@@ -138,6 +140,7 @@ pub const Repository = struct {
             self.allocator.free(d);
         }
         if (self._cached_pack_path) |p| self.allocator.free(p);
+        if (self._cached_packed_refs) |pr| self.allocator.free(pr);
         self.allocator.free(self.path);
         self.allocator.free(self.git_dir);
     }
@@ -3213,21 +3216,27 @@ pub const Repository = struct {
     /// Resolve a ref by scanning the packed-refs file.
     /// packed-refs format: "<hash> <refname>\n" per line, with comment lines starting with '#'.
     fn resolveRefFromPackedRefs(self: *const Repository, ref_name: []const u8) ![40]u8 {
-        const packed_file = blk: {
-            if (self._cached_git_dir_fd) |dir_fd| {
-                const dir = std.fs.Dir{ .fd = dir_fd };
-                break :blk dir.openFile("packed-refs", .{}) catch return error.RefNotFound;
-            }
-            var packed_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const packed_path = std.fmt.bufPrint(&packed_path_buf, "{s}/packed-refs", .{self.git_dir}) catch return error.RefNotFound;
-            break :blk std.fs.openFileAbsolute(packed_path, .{}) catch return error.RefNotFound;
+        // Use cached packed-refs content if available
+        const content = if (self._cached_packed_refs) |cached|
+            cached
+        else blk: {
+            const packed_file = blk2: {
+                if (self._cached_git_dir_fd) |dir_fd| {
+                    const dir = std.fs.Dir{ .fd = dir_fd };
+                    break :blk2 dir.openFile("packed-refs", .{}) catch return error.RefNotFound;
+                }
+                var packed_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const packed_path = std.fmt.bufPrint(&packed_path_buf, "{s}/packed-refs", .{self.git_dir}) catch return error.RefNotFound;
+                break :blk2 std.fs.openFileAbsolute(packed_path, .{}) catch return error.RefNotFound;
+            };
+            defer packed_file.close();
+            // Read and cache packed-refs (typically < 64KB)
+            const data = packed_file.readToEndAlloc(self.allocator, 4 * 1024 * 1024) catch return error.RefNotFound;
+            // Cache it (cast away const for mutable self)
+            const self_mut = @as(*Repository, @constCast(self));
+            self_mut._cached_packed_refs = data;
+            break :blk data;
         };
-        defer packed_file.close();
-
-        // packed-refs files are typically small (< 64KB even for large repos)
-        var buf: [65536]u8 = undefined;
-        const bytes_read = packed_file.readAll(&buf) catch return error.RefNotFound;
-        const content = buf[0..bytes_read];
 
         var remaining: []const u8 = content;
         while (remaining.len > 0) {
