@@ -27,6 +27,37 @@ const check_attr = @import("cmd_check_attr.zig");
 const hooks = @import("git/hooks.zig");
 const filter_driver = @import("git/filter_driver.zig");
 
+/// Apply smudge filters to all tracked files after a checkout operation.
+/// This handles LFS and other filter drivers configured in .gitattributes.
+fn applySmudgeFiltersPostCheckout(
+    allocator: std.mem.Allocator,
+    git_path: []const u8,
+    platform_impl: *const platform_mod.Platform,
+    process_cache: *std.StringHashMap(filter_driver.FilterProcess),
+) void {
+    const repo_root = if (std.mem.endsWith(u8, git_path, "/.git")) git_path[0 .. git_path.len - 5] else std.fs.path.dirname(git_path) orelse ".";
+    var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch return;
+    defer idx.deinit();
+    for (idx.entries.items) |entry| {
+        const filter_name = filter_driver.getFilterName(allocator, entry.path, git_path, platform_impl) orelse continue;
+        defer allocator.free(filter_name);
+        const smudge_cmd = filter_driver.getSmudgeCommand(allocator, git_path, filter_name);
+        defer if (smudge_cmd) |sc| allocator.free(sc);
+        const process_cmd = filter_driver.getProcessCommand(allocator, git_path, filter_name);
+        defer if (process_cmd) |pc| allocator.free(pc);
+        if (smudge_cmd == null and process_cmd == null) continue;
+        const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path }) catch continue;
+        defer allocator.free(full_path);
+        const raw_content = platform_impl.fs.readFile(allocator, full_path) catch continue;
+        defer allocator.free(raw_content);
+        const smudged = filter_driver.applySmudgeFilterWithProcess(allocator, entry.path, raw_content, git_path, platform_impl, process_cache);
+        defer if (smudged) |s| allocator.free(s);
+        if (smudged) |s| {
+            platform_impl.fs.writeFile(full_path, s) catch {};
+        }
+    }
+}
+
 pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     if (@import("builtin").target.os.tag == .freestanding) {
         try platform_impl.writeStderr("checkout: not supported in freestanding mode\n");
@@ -298,6 +329,7 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                     }
                 }
                 helpers.checkoutCommitTree(git_path, ch, allocator, platform_impl) catch {};
+                applySmudgeFiltersPostCheckout(allocator, git_path, platform_impl, &filter_process_cache);
             }
         }
 
@@ -397,6 +429,7 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                     }
                 }
                 helpers.checkoutCommitTree(git_path, ch, allocator, platform_impl) catch {};
+                applySmudgeFiltersPostCheckout(allocator, git_path, platform_impl, &filter_process_cache);
             }
         }
         
@@ -536,6 +569,7 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                         if (commit_hash_fb) |ch| {
                             defer allocator.free(ch);
                             helpers.checkoutCommitTree(git_path, ch, allocator, platform_impl) catch {};
+                            applySmudgeFiltersPostCheckout(allocator, git_path, platform_impl, &filter_process_cache);
                         }
                     }
                     const sm = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name_fb});
@@ -558,6 +592,7 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                         defer allocator.free(head_hash);
                         helpers.checkoutCommitTree(git_path, head_hash, allocator, platform_impl) catch {};
                     }
+                    applySmudgeFiltersPostCheckout(allocator, git_path, platform_impl, &filter_process_cache);
                     return;
                 } else {
                     try platform_impl.writeStderr("error: pathspec '' did not match any file(s) known to git\n");
@@ -731,6 +766,7 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
 
             // helpers.This is a detached helpers.HEAD checkout
             try helpers.checkoutCommitTree(git_path, actual_target, allocator, platform_impl);
+            applySmudgeFiltersPostCheckout(allocator, git_path, platform_impl, &filter_process_cache);
             
             // helpers.Write detached helpers.HEAD
             const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
@@ -1002,33 +1038,7 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
         // Apply smudge filters to checked-out files (LFS support)
         // repo.checkout() writes raw blob content; we need to re-process files
         // that have filter attributes configured.
-        apply_smudge: {
-            const repo_root_sm = if (std.mem.endsWith(u8, git_path, "/.git")) git_path[0 .. git_path.len - 5] else std.fs.path.dirname(git_path) orelse ".";
-            var idx_sm = index_mod.Index.load(git_path, platform_impl, allocator) catch break :apply_smudge;
-            defer idx_sm.deinit();
-            for (idx_sm.entries.items) |entry| {
-                const filter_name = filter_driver.getFilterName(allocator, entry.path, git_path, platform_impl) orelse continue;
-                defer allocator.free(filter_name);
-                // Only process if smudge (or process) command is configured
-                const smudge_cmd = filter_driver.getSmudgeCommand(allocator, git_path, filter_name);
-                defer if (smudge_cmd) |sc| allocator.free(sc);
-                const process_cmd = filter_driver.getProcessCommand(allocator, git_path, filter_name);
-                defer if (process_cmd) |pc| allocator.free(pc);
-                const has_smudge = smudge_cmd != null;
-                const has_process = process_cmd != null;
-                if (!has_smudge and !has_process) continue;
-                // Read current file content (raw blob written by repo.checkout)
-                const full_path_sm = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root_sm, entry.path }) catch continue;
-                defer allocator.free(full_path_sm);
-                const raw_content = platform_impl.fs.readFile(allocator, full_path_sm) catch continue;
-                defer allocator.free(raw_content);
-                const smudged = filter_driver.applySmudgeFilterWithProcess(allocator, entry.path, raw_content, git_path, platform_impl, &filter_process_cache);
-                defer if (smudged) |s| allocator.free(s);
-                if (smudged) |s| {
-                    platform_impl.fs.writeFile(full_path_sm, s) catch {};
-                }
-            }
-        }
+        applySmudgeFiltersPostCheckout(allocator, git_path, platform_impl, &filter_process_cache);
 
         // If we resolved the target to a hash but it was a branch name,
         // ensure HEAD points to the branch as a symbolic ref
@@ -1207,6 +1217,17 @@ pub fn cmdSwitch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         try platform_impl.writeStderr("switch: not supported in freestanding mode\n");
         return;
     }
+
+    // Long-running filter process cache for smudge filters (LFS performance)
+    var filter_process_cache = std.StringHashMap(filter_driver.FilterProcess).init(allocator);
+    defer {
+        var it = filter_process_cache.iterator();
+        while (it.next()) |kv| {
+            kv.value_ptr.deinit();
+            allocator.free(kv.key_ptr.*);
+        }
+        filter_process_cache.deinit();
+    }
     
     var create_branch: ?[]const u8 = null;
     var force_create: ?[]const u8 = null;
@@ -1325,6 +1346,7 @@ pub fn cmdSwitch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         };
         defer allocator.free(hash);
         try helpers.checkoutCommitTree(git_path, hash, allocator, platform_impl);
+        applySmudgeFiltersPostCheckout(allocator, git_path, platform_impl, &filter_process_cache);
         const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
         defer allocator.free(head_path);
         const head_content = try std.fmt.allocPrint(allocator, "{s}\n", .{hash});
@@ -1341,6 +1363,7 @@ pub fn cmdSwitch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             defer allocator.free(head_hash);
             helpers.checkoutCommitTree(git_path, head_hash, allocator, platform_impl) catch {};
         }
+        applySmudgeFiltersPostCheckout(allocator, git_path, platform_impl, &filter_process_cache);
         const msg = try std.fmt.allocPrint(allocator, "Switched to branch '{s}'\n", .{t});
         defer allocator.free(msg);
         try platform_impl.writeStderr(msg);
