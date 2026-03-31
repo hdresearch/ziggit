@@ -850,7 +850,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         }
         try cmd_init.cmdInit(allocator, &args_iter, &platform_impl, global_bare);
     } else if (std.mem.eql(u8, command, "status")) {
-        try cmd_status.cmdStatus(allocator, &args_iter, &platform_impl, all_original_args.items);
+        const status_alloc = if (comptime @import("builtin").target.os.tag != .freestanding and @import("builtin").target.os.tag != .wasi) std.heap.c_allocator else allocator;
+        try cmd_status.cmdStatus(status_alloc, &args_iter, &platform_impl, all_original_args.items);
     } else if (std.mem.eql(u8, command, "rev-list")) {
         try cmd_rev_list.cmdRevList(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "add")) {
@@ -880,9 +881,11 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "commit")) {
         try cmd_commit.cmdCommit(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "log")) {
-        try cmd_log.cmdLog(allocator, &args_iter, &platform_impl);
+        const log_alloc = if (comptime @import("builtin").target.os.tag != .freestanding and @import("builtin").target.os.tag != .wasi) std.heap.c_allocator else allocator;
+        try cmd_log.cmdLog(log_alloc, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "diff")) {
-        try diff_cmd_mod.cmdDiff(allocator, &args_iter, &platform_impl);
+        const diff_alloc = if (comptime @import("builtin").target.os.tag != .freestanding and @import("builtin").target.os.tag != .wasi) std.heap.c_allocator else allocator;
+        try diff_cmd_mod.cmdDiff(diff_alloc, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "branch")) {
         try cmd_branch.cmdBranch(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "merge")) {
@@ -898,7 +901,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "tag")) {
         try cmd_tag.cmdTag(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "show")) {
-        try diff_cmd_mod.cmdShow(allocator, &args_iter, &platform_impl);
+        const show_alloc = if (comptime @import("builtin").target.os.tag != .freestanding and @import("builtin").target.os.tag != .wasi) std.heap.c_allocator else allocator;
+        try diff_cmd_mod.cmdShow(show_alloc, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "shortlog")) {
         try cmd_shortlog.cmdShortlog(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "cat-file")) {
@@ -1146,7 +1150,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "blame") or std.mem.eql(u8, command, "annotate")) {
         try @import("git/blame_cmd.zig").cmdBlame(allocator, &args_iter, &platform_impl, std.mem.eql(u8, command, "annotate"));
     } else if (std.mem.eql(u8, command, "grep")) {
-        try @import("git/grep_cmd.zig").cmdGrep(allocator, &args_iter, &platform_impl);
+        const grep_alloc = if (comptime @import("builtin").target.os.tag != .freestanding and @import("builtin").target.os.tag != .wasi) std.heap.c_allocator else allocator;
+        try @import("git/grep_cmd.zig").cmdGrep(grep_alloc, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "ls-remote")) {
         try cmd_ls_remote.nativeCmdLsRemote(allocator, all_original_args.items, command_index, &platform_impl);
     } else if (std.mem.eql(u8, command, "last-modified")) {
