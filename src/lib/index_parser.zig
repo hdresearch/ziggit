@@ -93,31 +93,21 @@ pub const GitIndex = struct {
         const file = try std.fs.createFileAbsolute(index_path, .{ .truncate = true });
         defer file.close();
         
-        try file.writeAll("DIRC");
-        const version: u32 = 2;
-        const version_bytes = [_]u8{
-            @intCast((version >> 24) & 0xFF),
-            @intCast((version >> 16) & 0xFF),
-            @intCast((version >> 8) & 0xFF),
-            @intCast(version & 0xFF),
-        };
-        try file.writeAll(&version_bytes);
+        // Use buffered writer to batch small writes into large syscalls
+        var bw = std.io.bufferedWriter(file.writer());
+        const writer = bw.writer();
         
-        const entry_count: u32 = @intCast(self.entries.items.len);
-        const count_bytes = [_]u8{
-            @intCast((entry_count >> 24) & 0xFF),
-            @intCast((entry_count >> 16) & 0xFF),
-            @intCast((entry_count >> 8) & 0xFF),
-            @intCast(entry_count & 0xFF),
-        };
-        try file.writeAll(&count_bytes);
+        try writer.writeAll("DIRC");
+        try writer.writeInt(u32, 2, .big); // version
+        try writer.writeInt(u32, @intCast(self.entries.items.len), .big);
         
         for (self.entries.items) |entry| {
-            try writeIndexEntry(file, entry);
+            try writeIndexEntryBuffered(writer, entry);
         }
         
         const dummy_hash = [_]u8{0} ** 20;
-        try file.writeAll(&dummy_hash);
+        try writer.writeAll(&dummy_hash);
+        try bw.flush();
     }
 };
 
@@ -144,6 +134,31 @@ fn writeIndexEntry(file: std.fs.File, entry: IndexEntry) !void {
         const padding = [_]u8{0} ** 8;
         try file.writeAll(padding[0..padding_needed]);
     }
+}
+
+/// Write index entry using buffered writer (avoids per-field syscalls)
+fn writeIndexEntryBuffered(writer: anytype, entry: IndexEntry) !void {
+    // Write all fixed-size fields in a single batch
+    var buf: [62]u8 = undefined;
+    std.mem.writeInt(u32, buf[0..4], entry.ctime_seconds, .big);
+    std.mem.writeInt(u32, buf[4..8], entry.ctime_nanoseconds, .big);
+    std.mem.writeInt(u32, buf[8..12], entry.mtime_seconds, .big);
+    std.mem.writeInt(u32, buf[12..16], entry.mtime_nanoseconds, .big);
+    std.mem.writeInt(u32, buf[16..20], entry.dev, .big);
+    std.mem.writeInt(u32, buf[20..24], entry.ino, .big);
+    std.mem.writeInt(u32, buf[24..28], entry.mode, .big);
+    std.mem.writeInt(u32, buf[28..32], entry.uid, .big);
+    std.mem.writeInt(u32, buf[32..36], entry.gid, .big);
+    std.mem.writeInt(u32, buf[36..40], entry.size, .big);
+    @memcpy(buf[40..60], &entry.sha1);
+    std.mem.writeInt(u16, buf[60..62], entry.flags, .big);
+    try writer.writeAll(&buf);
+    try writer.writeAll(entry.path);
+    // Null terminator + padding
+    const entry_size = 62 + entry.path.len + 1;
+    const padding_needed = (8 - (entry_size % 8)) % 8;
+    const zeros = [_]u8{0} ** 8;
+    try writer.writeAll(zeros[0 .. 1 + padding_needed]); // 1 for null + padding
 }
 
 fn writeU32BigEndian(file: std.fs.File, value: u32) !void {
