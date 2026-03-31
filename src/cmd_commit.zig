@@ -45,6 +45,90 @@ fn extractNameEmail(info: []const u8) []const u8 {
     return info;
 }
 
+/// Strip trailing whitespace from each line, strip leading/trailing empty lines
+fn cleanupWhitespace(allocator: std.mem.Allocator, msg: []const u8) ![]const u8 {
+    var result = std.array_list.Managed(u8).init(allocator);
+    defer result.deinit();
+    var lines = std.mem.splitScalar(u8, msg, '\n');
+    // Collect all lines, trimming trailing whitespace
+    var all_lines = std.array_list.Managed([]const u8).init(allocator);
+    defer all_lines.deinit();
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trimRight(u8, line, " \t\r");
+        try all_lines.append(trimmed);
+    }
+    // Strip leading empty lines
+    var start: usize = 0;
+    while (start < all_lines.items.len and all_lines.items[start].len == 0) {
+        start += 1;
+    }
+    // Strip trailing empty lines
+    var end: usize = all_lines.items.len;
+    while (end > start and all_lines.items[end - 1].len == 0) {
+        end -= 1;
+    }
+    // Build result
+    var first = true;
+    for (all_lines.items[start..end]) |line| {
+        if (!first) try result.append('\n');
+        first = false;
+        try result.appendSlice(line);
+    }
+    try result.append('\n');
+    return try allocator.dupe(u8, result.items);
+}
+
+/// Strip comment lines (starting with #), trailing whitespace, leading/trailing empty lines
+fn cleanupStrip(allocator: std.mem.Allocator, msg: []const u8) ![]const u8 {
+    // Get comment char from config (default '#')
+    var comment_char: u8 = '#';
+    _ = &comment_char; // TODO: read core.commentChar
+    var all_lines = std.array_list.Managed([]const u8).init(allocator);
+    defer all_lines.deinit();
+    var lines = std.mem.splitScalar(u8, msg, '\n');
+    while (lines.next()) |line| {
+        const trimmed_left = std.mem.trimLeft(u8, line, " \t");
+        if (trimmed_left.len > 0 and trimmed_left[0] == comment_char) continue;
+        const trimmed = std.mem.trimRight(u8, line, " \t\r");
+        try all_lines.append(trimmed);
+    }
+    // Strip leading empty lines
+    var start: usize = 0;
+    while (start < all_lines.items.len and all_lines.items[start].len == 0) {
+        start += 1;
+    }
+    // Strip trailing empty lines
+    var end: usize = all_lines.items.len;
+    while (end > start and all_lines.items[end - 1].len == 0) {
+        end -= 1;
+    }
+    var result = std.array_list.Managed(u8).init(allocator);
+    defer result.deinit();
+    var first = true;
+    for (all_lines.items[start..end]) |line| {
+        if (!first) try result.append('\n');
+        first = false;
+        try result.appendSlice(line);
+    }
+    try result.append('\n');
+    return try allocator.dupe(u8, result.items);
+}
+
+/// Strip everything below scissors line, then strip comments
+fn cleanupScissors(allocator: std.mem.Allocator, msg: []const u8) ![]const u8 {
+    // Find scissors line: "# ------------------------ >8 ------------------------"
+    var truncated = msg;
+    if (std.mem.indexOf(u8, msg, "# ------------------------ >8 ------------------------")) |pos| {
+        // Find the start of this line
+        var line_start = pos;
+        while (line_start > 0 and msg[line_start - 1] != '\n') {
+            line_start -= 1;
+        }
+        truncated = msg[0..line_start];
+    }
+    return cleanupWhitespace(allocator, truncated);
+}
+
 pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     if (@import("builtin").target.os.tag == .freestanding) {
         try platform_impl.writeStderr("commit: not supported in freestanding mode\n");
@@ -322,9 +406,9 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         };
     }
 
-    // Check for empty or whitespace-only message
-    if (message) |msg| {
-        if (cleanup_mode != .verbatim) {
+    // Check for empty or whitespace-only message (skip in verbatim mode)
+    if (cleanup_mode != .verbatim) {
+        if (message) |msg| {
             const trimmed = std.mem.trim(u8, msg, " \t\n\r");
             if (trimmed.len == 0) {
                 try platform_impl.writeStderr("Aborting commit due to empty commit message.\n");
