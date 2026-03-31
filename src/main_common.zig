@@ -1137,6 +1137,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmd_checkout.cmdSwitch(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "restore")) {
         try cmd_checkout.cmdRestore(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "credential")) {
+        try @import("git/credential.zig").cmdCredential(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "worktree")) {
         try @import("cmd_worktree.zig").cmdWorktree(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "submodule")) {
@@ -1233,6 +1235,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmd_web_browse.cmdWebBrowse(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "fast-import")) {
         try cmd_fast_import.cmdFastImport(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "credential")) {
+        try @import("git/credential.zig").cmdCredential(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "fast-export")) {
         try cmd_fast_export.cmdFastExport(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "notes")) {

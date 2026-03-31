@@ -43,8 +43,10 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
     var object_ref: ?[]const u8 = null;
     var extra_args: u32 = 0;
     var buffer_mode = false;
-    var nul_terminated = false;
+    var nul_input = false;
+    var nul_output = false;
     var batch_command = false;
+    var first_positional: ?[]const u8 = null;
     // helpers.Track cmdmode order for conflict reporting
     var cmdmode_first: ?[]const u8 = null;
     var cmdmode_second: ?[]const u8 = null;
@@ -88,8 +90,11 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             buffer_mode = false;
         } else if (std.mem.eql(u8, arg, "--follow-symlinks")) {
             follow_symlinks = true;
-        } else if (std.mem.eql(u8, arg, "-z") or std.mem.eql(u8, arg, "-Z")) {
-            nul_terminated = true;
+        } else if (std.mem.eql(u8, arg, "-z")) {
+            nul_input = true;
+        } else if (std.mem.eql(u8, arg, "-Z")) {
+            nul_input = true;
+            nul_output = true;
         } else if (std.mem.eql(u8, arg, "--textconv")) {
             textconv = true;
             if (cmdmode_first == null) { cmdmode_first = "--textconv"; } else if (cmdmode_second == null) { cmdmode_second = "--textconv"; }
@@ -103,6 +108,9 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             if (object_ref != null) {
                 extra_args += 1;
+            }
+            if (first_positional == null) {
+                first_positional = arg;
             }
             object_ref = arg;
         }
@@ -194,7 +202,7 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             try platform_impl.writeStderr("fatal: --batch-all-objects requires a batch mode\n");
             std.process.exit(129);
         }
-        if (nul_terminated) {
+        if (nul_input or nul_output) {
             try platform_impl.writeStderr("fatal: -z requires a batch mode\n");
             std.process.exit(129);
         }
@@ -285,7 +293,7 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             try catFileBatchAllObjects(allocator, git_path, batch_mode or batch_command, batch_format, platform_impl);
         } else {
             // Batch mode: read object names from stdin
-            try catFileBatch(allocator, git_path, batch_mode or batch_command, batch_format, platform_impl, batch_command);
+            try catFileBatch(allocator, git_path, batch_mode or batch_command, batch_format, platform_impl, batch_command, nul_input, nul_output, buffer_mode);
         }
         return;
     }
@@ -434,36 +442,112 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             },
         }
     } else {
+        // Check if first positional is a type name (git cat-file <type> <object>)
+        if (extra_args > 0 and first_positional != null) {
+            const req_type = first_positional.?;
+            if (std.mem.eql(u8, req_type, "blob") or std.mem.eql(u8, req_type, "tree") or
+                std.mem.eql(u8, req_type, "commit") or std.mem.eql(u8, req_type, "tag"))
+            {
+                // Peel to requested type
+                var current_obj = git_object;
+                var need_free = false;
+                defer if (need_free) current_obj.deinit(allocator);
+                const max_depth: usize = 20;
+                var depth: usize = 0;
+                while (depth < max_depth) : (depth += 1) {
+                    const cur_type = switch (current_obj.type) {
+                        .blob => "blob",
+                        .tree => "tree",
+                        .commit => "commit",
+                        .tag => "tag",
+                    };
+                    if (std.mem.eql(u8, cur_type, req_type)) {
+                        try platform_impl.writeStdout(current_obj.data);
+                        return;
+                    }
+                    // Try to dereference
+                    if (current_obj.type == .tag) {
+                        // Parse "object <hash>" from tag data
+                        if (std.mem.startsWith(u8, current_obj.data, "object ")) {
+                            const nl = std.mem.indexOfScalar(u8, current_obj.data, '\n') orelse break;
+                            const target_hash = current_obj.data[7..nl];
+                            const next_obj = objects.GitObject.load(target_hash, git_path, platform_impl, allocator) catch break;
+                            if (need_free) current_obj.deinit(allocator);
+                            current_obj = next_obj;
+                            need_free = true;
+                            continue;
+                        }
+                    } else if (current_obj.type == .commit and std.mem.eql(u8, req_type, "tree")) {
+                        if (std.mem.startsWith(u8, current_obj.data, "tree ")) {
+                            const nl = std.mem.indexOfScalar(u8, current_obj.data, '\n') orelse break;
+                            const tree_hash = current_obj.data[5..nl];
+                            const next_obj = objects.GitObject.load(tree_hash, git_path, platform_impl, allocator) catch break;
+                            if (need_free) current_obj.deinit(allocator);
+                            current_obj = next_obj;
+                            need_free = true;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+                const msg = try std.fmt.allocPrint(allocator, "fatal: git cat-file {s}: bad file\n", .{object_ref.?});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(128);
+            }
+        }
         // Default: show raw object content
         try platform_impl.writeStdout(git_object.data);
     }
 }
 
 
-pub fn catFileBatch(allocator: std.mem.Allocator, git_path: []const u8, full_content: bool, custom_format: ?[]const u8, platform_impl: *const platform_mod.Platform, is_batch_command: bool) !void {
+pub fn catFileBatch(allocator: std.mem.Allocator, git_path: []const u8, full_content: bool, custom_format: ?[]const u8, platform_impl: *const platform_mod.Platform, is_batch_command: bool, nul_input: bool, nul_output: bool, buffer_mode_flag: bool) !void {
     const stdin_data = helpers.readStdin(allocator, 10 * 1024 * 1024) catch return;
     defer allocator.free(stdin_data);
-    
-    var lines = std.mem.splitScalar(u8, stdin_data, '\n');
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (trimmed.len == 0) continue;
 
-        // Split object name from rest (for %(rest) format)
-        var object_name = trimmed;
+    // Check GIT_TEST_CAT_FILE_NO_FLUSH_ON_EXIT
+    const no_flush_on_exit = if (std.posix.getenv("GIT_TEST_CAT_FILE_NO_FLUSH_ON_EXIT")) |v|
+        std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true")
+    else
+        false;
+
+    const separator: u8 = if (nul_input) 0 else '\n';
+    const out_sep: []const u8 = if (nul_output) "\x00" else "\n";
+
+    var out_buf = std.array_list.Managed(u8).init(allocator);
+    defer out_buf.deinit();
+
+    // Trim trailing separator to avoid processing an empty trailing line
+    var input = stdin_data;
+    if (input.len > 0 and input[input.len - 1] == separator) {
+        input = input[0 .. input.len - 1];
+    }
+    // If input is empty after trimming, nothing to process
+    if (input.len == 0 and !is_batch_command) return;
+
+    var lines = std.mem.splitScalar(u8, input, separator);
+    var had_flush = false;
+    while (lines.next()) |raw_line| {
+        // Don't trim for empty line detection - only trim CR
+        const line = std.mem.trimRight(u8, raw_line, "\r");
+
+        // For batch-command, parse command prefix
+        var object_name = line;
         var rest_text: []const u8 = "";
-        const has_rest_format = if (custom_format) |fmt| std.mem.indexOf(u8, fmt, "%(rest)") != null else false;
-        if (!is_batch_command and has_rest_format) {
-            // In regular batch/batch-check mode with %(rest), split on whitespace
-            if (std.mem.indexOfAny(u8, trimmed, " \t")) |ws_idx| {
-                object_name = trimmed[0..ws_idx];
-                rest_text = std.mem.trimLeft(u8, trimmed[ws_idx..], " \t");
-            }
-        }
-        var cmd_is_contents = full_content; // default behavior
+        var cmd_is_contents = full_content;
         var cmd_is_info = !full_content;
+
         if (is_batch_command) {
+            const trimmed = std.mem.trim(u8, line, " \t");
+            if (trimmed.len == 0) continue;
             if (std.mem.eql(u8, trimmed, "flush")) {
+                had_flush = true;
+                // Flush buffered output
+                if (out_buf.items.len > 0) {
+                    try platform_impl.writeStdout(out_buf.items);
+                    out_buf.clearRetainingCapacity();
+                }
                 continue;
             } else if (std.mem.startsWith(u8, trimmed, "contents ")) {
                 object_name = std.mem.trim(u8, trimmed["contents ".len..], " \t");
@@ -474,40 +558,65 @@ pub fn catFileBatch(allocator: std.mem.Allocator, git_path: []const u8, full_con
                 cmd_is_contents = false;
                 cmd_is_info = true;
             } else {
-                const msg = try std.fmt.allocPrint(allocator, "{s} missing\n", .{trimmed});
-                defer allocator.free(msg);
-                try platform_impl.writeStdout(msg);
+                // Unknown command in batch-command mode
+                try appendOutput(&out_buf, trimmed, allocator, " missing", out_sep);
                 continue;
             }
+        } else {
+            // Regular batch/batch-check: don't skip empty lines
+            // Split object name from rest (for %(rest) format)
+            const has_rest_format = if (custom_format) |fmt| std.mem.indexOf(u8, fmt, "%(rest)") != null else false;
+            if (has_rest_format) {
+                if (std.mem.indexOfAny(u8, line, " \t")) |ws_idx| {
+                    object_name = line[0..ws_idx];
+                    rest_text = std.mem.trimLeft(u8, line[ws_idx..], " \t");
+                }
+            }
         }
-        
-        // helpers.Resolve object
+
+        // Handle empty object name - output " missing" (with leading space for the empty name)
+        if (object_name.len == 0) {
+            try appendOutput(&out_buf, "", allocator, " missing", out_sep);
+            if (!buffer_mode_flag) {
+                try platform_impl.writeStdout(out_buf.items);
+                out_buf.clearRetainingCapacity();
+            }
+            continue;
+        }
+
+        // Resolve object
         var obj_hash: []u8 = undefined;
         if (helpers.isValidHashPrefix(object_name)) {
             obj_hash = helpers.resolveCommitHash(git_path, object_name, platform_impl, allocator) catch {
-                const msg = try std.fmt.allocPrint(allocator, "{s} missing\n", .{object_name});
-                defer allocator.free(msg);
-                try platform_impl.writeStdout(msg);
+                try appendOutput(&out_buf, object_name, allocator, " missing", out_sep);
+                if (!buffer_mode_flag and !is_batch_command) {
+                    try platform_impl.writeStdout(out_buf.items);
+                    out_buf.clearRetainingCapacity();
+                }
                 continue;
             };
         } else {
             obj_hash = helpers.resolveCommittish(git_path, object_name, platform_impl, allocator) catch {
-                const msg = try std.fmt.allocPrint(allocator, "{s} missing\n", .{object_name});
-                defer allocator.free(msg);
-                try platform_impl.writeStdout(msg);
+                try appendOutput(&out_buf, object_name, allocator, " missing", out_sep);
+                if (!buffer_mode_flag and !is_batch_command) {
+                    try platform_impl.writeStdout(out_buf.items);
+                    out_buf.clearRetainingCapacity();
+                }
                 continue;
             };
         }
         defer allocator.free(obj_hash);
-        
+
         const git_object = objects.GitObject.load(obj_hash, git_path, platform_impl, allocator) catch {
-            const msg = try std.fmt.allocPrint(allocator, "{s} missing\n", .{object_name});
-            defer allocator.free(msg);
-            try platform_impl.writeStdout(msg);
+            try appendOutput(&out_buf, object_name, allocator, " missing", out_sep);
+            if (!buffer_mode_flag and !is_batch_command) {
+                try platform_impl.writeStdout(out_buf.items);
+                out_buf.clearRetainingCapacity();
+            }
             continue;
         };
         defer git_object.deinit(allocator);
-        
+
         const type_str: []const u8 = switch (git_object.type) {
             .blob => "blob",
             .tree => "tree",
@@ -518,24 +627,48 @@ pub fn catFileBatch(allocator: std.mem.Allocator, git_path: []const u8, full_con
         if (custom_format) |fmt| {
             const formatted = try formatCatFileOutput(allocator, fmt, obj_hash, type_str, git_object.data.len, rest_text);
             defer allocator.free(formatted);
-            try platform_impl.writeStdout(formatted);
-            try platform_impl.writeStdout("\n");
+            try out_buf.appendSlice(formatted);
+            try out_buf.appendSlice(out_sep);
             if (cmd_is_contents) {
-                try platform_impl.writeStdout(git_object.data);
-                try platform_impl.writeStdout("\n");
+                try out_buf.appendSlice(git_object.data);
+                try out_buf.appendSlice(out_sep);
             }
         } else if (cmd_is_contents) {
-            const header = try std.fmt.allocPrint(allocator, "{s} {s} {d}\n", .{ obj_hash, type_str, git_object.data.len });
+            const header = try std.fmt.allocPrint(allocator, "{s} {s} {d}", .{ obj_hash, type_str, git_object.data.len });
             defer allocator.free(header);
-            try platform_impl.writeStdout(header);
-            try platform_impl.writeStdout(git_object.data);
-            try platform_impl.writeStdout("\n");
+            try out_buf.appendSlice(header);
+            try out_buf.appendSlice(out_sep);
+            try out_buf.appendSlice(git_object.data);
+            try out_buf.appendSlice(out_sep);
         } else {
-            const header = try std.fmt.allocPrint(allocator, "{s} {s} {d}\n", .{ obj_hash, type_str, git_object.data.len });
+            const header = try std.fmt.allocPrint(allocator, "{s} {s} {d}", .{ obj_hash, type_str, git_object.data.len });
             defer allocator.free(header);
-            try platform_impl.writeStdout(header);
+            try out_buf.appendSlice(header);
+            try out_buf.appendSlice(out_sep);
+        }
+
+        // Flush if not in buffer mode
+        if (!buffer_mode_flag and !is_batch_command) {
+            try platform_impl.writeStdout(out_buf.items);
+            out_buf.clearRetainingCapacity();
         }
     }
+
+    // Flush remaining output (unless buffer mode with no-flush-on-exit for batch-command)
+    if (out_buf.items.len > 0) {
+        if (is_batch_command and buffer_mode_flag and no_flush_on_exit and !had_flush) {
+            // Don't flush - simulates no flush on exit
+            return;
+        }
+        try platform_impl.writeStdout(out_buf.items);
+    }
+}
+
+fn appendOutput(out_buf: *std.array_list.Managed(u8), name: []const u8, allocator: std.mem.Allocator, suffix: []const u8, out_sep: []const u8) !void {
+    _ = allocator;
+    try out_buf.appendSlice(name);
+    try out_buf.appendSlice(suffix);
+    try out_buf.appendSlice(out_sep);
 }
 
 
@@ -564,6 +697,9 @@ pub fn formatCatFileOutput(allocator: std.mem.Allocator, fmt: []const u8, obj_ha
                 try result.appendSlice(s);
             } else if (std.mem.eql(u8, field, "objectsize:disk")) {
                 try result.append('0'); // placeholder
+            } else if (std.mem.eql(u8, field, "deltabase")) {
+                // For non-delta objects, output all zeros
+                try result.appendSlice("0000000000000000000000000000000000000000");
             } else if (std.mem.eql(u8, field, "rest")) {
                 try result.appendSlice(rest_text);
             }
@@ -848,6 +984,8 @@ fn formatBatchLine(fmt: []const u8, hash: []const u8, type_name: []const u8, siz
                 var buf: [20]u8 = undefined;
                 const s = std.fmt.bufPrint(&buf, "{d}", .{size}) catch "0";
                 try out.appendSlice(s);
+            } else if (std.mem.eql(u8, field, "deltabase")) {
+                try out.appendSlice("0000000000000000000000000000000000000000");
             } else if (std.mem.eql(u8, field, "rest")) {
                 try out.appendSlice(rest);
             }
