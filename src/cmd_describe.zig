@@ -352,46 +352,49 @@ pub fn findTagInHistoryWithDistance(git_path: []const u8, start_hash: []const u8
         }
     }
 
-    // BFS from start_hash to find all reachable tags and their commits
-    // Then compute distance as |commits reachable from HEAD but not from tag|
+    // BFS from start_hash, counting commits visited before finding a tag.
+    // For linear history, BFS depth = rev-list distance. We stop at the first
+    // tag found (shallowest BFS depth = closest tag) to avoid re-walking.
     var queue = std.array_list.Managed([]u8).init(allocator);
     defer {
         for (queue.items) |item| allocator.free(item);
         queue.deinit();
     }
-    var visited = std.StringHashMap(u32).init(allocator); // hash -> depth
+    var visited = std.StringHashMap(void).init(allocator);
     defer {
         var it = visited.iterator();
         while (it.next()) |entry| allocator.free(entry.key_ptr.*);
         visited.deinit();
     }
 
-    // Collect all reachable commits with their BFS depth
     try queue.append(try allocator.dupe(u8, start_hash));
-    try visited.put(try allocator.dupe(u8, start_hash), 0);
+    try visited.put(try allocator.dupe(u8, start_hash), {});
 
-    // Found tags: tag_name -> tag_commit_hash
-    var found_tags = std.array_list.Managed(struct { name: []const u8, commit: []const u8, depth: u32 }).init(allocator);
-    defer found_tags.deinit();
-
-    var depth: u32 = 0;
-    var level_end: usize = 1;
+    var best_tag: ?helpers.TagWithDistance = null;
+    var commits_before_tag: u32 = 0;
     var idx: usize = 0;
 
     while (idx < queue.items.len) {
-        if (idx >= level_end) {
-            depth += 1;
-            level_end = queue.items.len;
-        }
-        if (depth > 2000) break;
-
         const current = queue.items[idx];
         idx += 1;
 
         // Check if this commit has a tag
         if (commit_to_tag.get(current)) |tag_name| {
-            try found_tags.append(.{ .name = tag_name, .commit = current, .depth = depth });
-            // Continue walking past tags to find ALL reachable tags
+            // Distance = number of commits visited before this one (all visited minus
+            // the tag commit itself and any commits at same depth or deeper)
+            // For simple case: distance = idx - 1 (commits popped before this one)
+            const distance: u32 = @intCast(idx - 1);
+            if (best_tag == null or distance < best_tag.?.distance or
+                (distance == best_tag.?.distance and std.mem.order(u8, tag_name, best_tag.?.tag_name) == .lt))
+            {
+                if (best_tag) |old| allocator.free(old.tag_name);
+                best_tag = helpers.TagWithDistance{
+                    .tag_name = try allocator.dupe(u8, tag_name),
+                    .distance = distance,
+                };
+            }
+            // Stop BFS once we find the first tag - it's the closest
+            break;
         }
 
         // Load commit and add parents
@@ -407,74 +410,12 @@ pub fn findTagInHistoryWithDistance(git_path: []const u8, start_hash: []const u8
                 if (!visited.contains(parent_hash)) {
                     const ph = try allocator.dupe(u8, parent_hash);
                     try queue.append(ph);
-                    try visited.put(try allocator.dupe(u8, parent_hash), depth + 1);
-                }
-            }
-        }
-    }
-
-    if (found_tags.items.len == 0) return null;
-
-    // For each found tag, compute the proper distance:
-    // distance = number of commits reachable from HEAD but not from the tag
-    // This is equivalent to |rev-list tag..HEAD|
-    var best_tag: ?helpers.TagWithDistance = null;
-    var best_depth: u32 = std.math.maxInt(u32);
-
-    for (found_tags.items) |ft| {
-        // Compute commits reachable from tag
-        var tag_reachable = std.StringHashMap(void).init(allocator);
-        defer {
-            var trit = tag_reachable.iterator();
-            while (trit.next()) |e| allocator.free(e.key_ptr.*);
-            tag_reachable.deinit();
-        }
-        var tq = std.array_list.Managed([]u8).init(allocator);
-        defer {
-            for (tq.items) |item| allocator.free(item);
-            tq.deinit();
-        }
-        try tq.append(try allocator.dupe(u8, ft.commit));
-        while (tq.items.len > 0) {
-            const h = tq.pop() orelse break;
-            defer allocator.free(h);
-            if (tag_reachable.contains(h)) continue;
-            try tag_reachable.put(try allocator.dupe(u8, h), {});
-            const tobj = objects.GitObject.load(h, git_path, platform_impl, allocator) catch continue;
-            defer tobj.deinit(allocator);
-            if (tobj.type != .commit) continue;
-            var tlines = std.mem.splitScalar(u8, tobj.data, '\n');
-            while (tlines.next()) |tline| {
-                if (tline.len == 0) break;
-                if (std.mem.startsWith(u8, tline, "parent ")) {
-                    const ph = tline["parent ".len..];
-                    if (!tag_reachable.contains(ph)) {
-                        try tq.append(try allocator.dupe(u8, ph));
-                    }
+                    try visited.put(try allocator.dupe(u8, parent_hash), {});
                 }
             }
         }
 
-        // Count commits in HEAD's history not in tag's history
-        var distance: u32 = 0;
-        var vit = visited.iterator();
-        while (vit.next()) |ve| {
-            if (!tag_reachable.contains(ve.key_ptr.*)) {
-                distance += 1;
-            }
-        }
-
-        if (best_tag == null or distance < best_tag.?.distance or
-            (distance == best_tag.?.distance and ft.depth < best_depth) or
-            (distance == best_tag.?.distance and ft.depth == best_depth and std.mem.order(u8, ft.name, best_tag.?.tag_name) == .lt))
-        {
-            best_depth = ft.depth;
-            if (best_tag) |old| allocator.free(old.tag_name);
-            best_tag = helpers.TagWithDistance{
-                .tag_name = try allocator.dupe(u8, ft.name),
-                .distance = distance,
-            };
-        }
+        commits_before_tag += 1;
     }
 
     return best_tag;
