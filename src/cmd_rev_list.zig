@@ -486,6 +486,102 @@ pub fn cmdRevList(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIt
         return;
     }
 
+    // Commit-graph fast path: plain rev-list with no filters
+    if (!do_count and !topo_order and skip_count == 0 and format_str == null and
+        !show_objects and !show_parents and !show_children and !graph and
+        exclude_hashes.count() == 0 and include_hashes.items.len == 1)
+    {
+        if (commit_graph_mod.CommitGraph.open(git_path, allocator)) |cg| {
+            if (cg.findCommit(include_hashes.items[0])) |start_pos| {
+                const num_commits = cg.num_commits;
+                const bitset_words = (num_commits + 63) / 64;
+                const bits_mem = allocator.alloc(u64, bitset_words) catch null;
+                defer if (bits_mem) |b| allocator.free(b);
+
+                if (bits_mem) |visited_bits| {
+                    @memset(visited_bits, 0);
+
+                    const QEntry = struct { pos: u32, timestamp: i64 };
+                    var pq = std.array_list.Managed(QEntry).init(allocator);
+                    defer pq.deinit();
+                    try pq.ensureTotalCapacity(4096);
+
+                    var out_buf = std.array_list.Managed(u8).init(allocator);
+                    defer out_buf.deinit();
+                    try out_buf.ensureTotalCapacity(num_commits * 41);
+
+                    const start_cd = cg.getCommitData(start_pos);
+                    try pq.append(.{ .pos = start_pos, .timestamp = start_cd.commit_time });
+                    visited_bits[start_pos / 64] |= @as(u64, 1) << @truncate(start_pos % 64);
+
+                    var total: usize = 0;
+                    while (pq.items.len > 0) {
+                        var max_idx: usize = 0;
+                        for (pq.items[1..], 1..) |item, idx| {
+                            if (item.timestamp > pq.items[max_idx].timestamp) max_idx = idx;
+                        }
+                        const cur = pq.items[max_idx];
+                        pq.items[max_idx] = pq.items[pq.items.len - 1];
+                        pq.items.len -= 1;
+
+                        var hex: [40]u8 = undefined;
+                        cg.getOidHex(cur.pos, &hex);
+                        if (reverse) {
+                            try out_buf.appendSlice(&hex);
+                            try out_buf.append('\n');
+                        } else {
+                            try out_buf.appendSlice(&hex);
+                            try out_buf.append('\n');
+                        }
+                        total += 1;
+
+                        if (max_count) |mc| {
+                            if (mc >= 0 and total >= @as(usize, @intCast(mc))) break;
+                        }
+
+                        if (!reverse and out_buf.items.len > 128 * 1024) {
+                            try platform_impl.writeStdout(out_buf.items);
+                            out_buf.clearRetainingCapacity();
+                        }
+
+                        const cd = cg.getCommitData(cur.pos);
+                        if (cd.parent1 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT) {
+                            const word = cd.parent1 / 64;
+                            const mask = @as(u64, 1) << @truncate(cd.parent1 % 64);
+                            if (visited_bits[word] & mask == 0) {
+                                visited_bits[word] |= mask;
+                                const pd = cg.getCommitData(cd.parent1);
+                                try pq.append(.{ .pos = cd.parent1, .timestamp = pd.commit_time });
+                            }
+                        }
+                        if (cd.parent2 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT and cd.parent2 & commit_graph_mod.CommitGraph.GRAPH_EXTRA_EDGES == 0) {
+                            const word = cd.parent2 / 64;
+                            const mask = @as(u64, 1) << @truncate(cd.parent2 % 64);
+                            if (visited_bits[word] & mask == 0) {
+                                visited_bits[word] |= mask;
+                                const pd = cg.getCommitData(cd.parent2);
+                                try pq.append(.{ .pos = cd.parent2, .timestamp = pd.commit_time });
+                            }
+                        }
+                    }
+
+                    if (reverse) {
+                        var pos: usize = out_buf.items.len;
+                        while (pos > 0) {
+                            const line_end = pos;
+                            pos -= 1;
+                            while (pos > 0 and out_buf.items[pos - 1] != '\n') pos -= 1;
+                            try platform_impl.writeStdout(out_buf.items[pos..line_end]);
+                        }
+                    } else if (out_buf.items.len > 0) {
+                        try platform_impl.writeStdout(out_buf.items);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
     // helpers.Collect all reachable commits with timestamps for sorting
     var visited = std.StringHashMap(void).init(allocator);
     defer {
