@@ -224,6 +224,19 @@ pub fn cmdRevParse(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                 std.process.exit(128);
             };
             defer allocator.free(git_path);
+            // Check if cwd is inside the .git directory
+            {
+                const cwd_check = try platform_impl.fs.getCwd(allocator);
+                defer allocator.free(cwd_check);
+                const real_git = std.fs.cwd().realpathAlloc(allocator, git_path) catch try allocator.dupe(u8, git_path);
+                defer allocator.free(real_git);
+                const real_cwd = std.fs.cwd().realpathAlloc(allocator, cwd_check) catch try allocator.dupe(u8, cwd_check);
+                defer allocator.free(real_cwd);
+                if (std.mem.eql(u8, real_cwd, real_git) or (std.mem.startsWith(u8, real_cwd, real_git) and real_cwd.len > real_git.len and real_cwd[real_git.len] == '/')) {
+                    try platform_impl.writeStderr("fatal: this operation must be run in a work tree\n");
+                    std.process.exit(128);
+                }
+            }
             // helpers.Check if this is a bare repo
             const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
             defer allocator.free(config_path);
