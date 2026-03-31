@@ -614,14 +614,16 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
         else
             null;
         // Try resolving as remote tracking branch (e.g., origin/main -> refs/remotes/origin/main)
-        if (resolved_target == null) {
-            const remote_ref = std.fmt.allocPrint(allocator, "refs/remotes/{s}", .{target}) catch null;
-            defer if (remote_ref) |r| allocator.free(r);
-            if (remote_ref) |rr| {
+        // PERF: skip for simple targets like "HEAD" or full hashes
+        if (resolved_target == null and !std.mem.eql(u8, target, "HEAD") and
+            !(target.len == 40 and helpers.isValidHexString(target)))
+        {
+            var remote_ref_buf: [std.fs.max_path_bytes]u8 = undefined;
+            if (std.fmt.bufPrint(&remote_ref_buf, "refs/remotes/{s}", .{target})) |rr| {
                 if (refs.resolveRef(git_path, rr, platform_impl, allocator) catch null) |hash| {
                     resolved_target = hash;
                 }
-            }
+            } else |_| {}
         }
         defer if (resolved_target) |rt| allocator.free(rt);
         const actual_target = resolved_target orelse target;
@@ -847,20 +849,23 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
         // If actual_target is a branch name, try to resolve it via refs (handles symbolic refs)
         var resolved_checkout_target: ?[]u8 = null;
         defer if (resolved_checkout_target) |rct| allocator.free(rct);
-        if (!helpers.isValidHexString(actual_target) or actual_target.len != 40) {
-            // Try refs/heads/<name> first (handles symbolic refs)
-            const branch_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{actual_target});
-            defer allocator.free(branch_ref);
-            if ((refs.resolveRef(git_path, branch_ref, platform_impl, allocator) catch null) orelse null) |hash| {
-                resolved_checkout_target = hash;
-            }
-            // If that didn't work, try refs/tags/<name>
-            if (resolved_checkout_target == null) {
-                const tag_ref = try std.fmt.allocPrint(allocator, "refs/tags/{s}", .{actual_target});
-                defer allocator.free(tag_ref);
-                if ((refs.resolveRef(git_path, tag_ref, platform_impl, allocator) catch null) orelse null) |hash| {
+        if (!std.mem.eql(u8, actual_target, "HEAD") and
+            (!helpers.isValidHexString(actual_target) or actual_target.len != 40))
+        {
+            // Try refs/heads/<name> first (handles symbolic refs) — use stack buffer
+            var ref_buf: [std.fs.max_path_bytes]u8 = undefined;
+            if (std.fmt.bufPrint(&ref_buf, "refs/heads/{s}", .{actual_target})) |branch_ref| {
+                if ((refs.resolveRef(git_path, branch_ref, platform_impl, allocator) catch null) orelse null) |hash| {
                     resolved_checkout_target = hash;
                 }
+            } else |_| {}
+            // If that didn't work, try refs/tags/<name>
+            if (resolved_checkout_target == null) {
+                if (std.fmt.bufPrint(&ref_buf, "refs/tags/{s}", .{actual_target})) |tag_ref| {
+                    if ((refs.resolveRef(git_path, tag_ref, platform_impl, allocator) catch null) orelse null) |hash| {
+                        resolved_checkout_target = hash;
+                    }
+                } else |_| {}
             }
             // Try resolveRevision as a last resort
             if (resolved_checkout_target == null) {
