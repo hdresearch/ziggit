@@ -4334,6 +4334,148 @@ pub fn cmdWhatchanged(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
     return cmdLogInner(allocator, args, pi, false, true);
 }
 
+const RefEntry = struct { hash: []const u8, name: []const u8 };
+
+fn buildDecorationMap(allocator: std.mem.Allocator, git_path: []const u8, pi: *const pm.Platform, map: *std.StringHashMap([]const u8)) !void {
+    // Read HEAD
+    const head_hash = refs.getCurrentCommit(git_path, pi, allocator) catch null;
+    defer if (head_hash) |h| allocator.free(h);
+    // Read HEAD symbolic ref
+    const head_ref: ?[]u8 = blk: {
+        const hp = std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path}) catch break :blk null;
+        defer allocator.free(hp);
+        const hc = std.fs.cwd().readFileAlloc(allocator, hp, 256) catch break :blk null;
+        const ht = std.mem.trimRight(u8, hc, "\n\r ");
+        if (std.mem.startsWith(u8, ht, "ref: ")) {
+            const result = allocator.dupe(u8, ht[5..]) catch { allocator.free(hc); break :blk null; };
+            allocator.free(hc);
+            break :blk result;
+        }
+        allocator.free(hc);
+        break :blk null;
+    };
+    defer if (head_ref) |r| allocator.free(r);
+
+    // Collect all refs: branches, tags, remotes
+    var ref_list = std.array_list.Managed(RefEntry).init(allocator);
+    defer {
+        for (ref_list.items) |r| { allocator.free(r.hash); allocator.free(r.name); }
+        ref_list.deinit();
+    }
+    const ref_dirs = [_]struct { dir: []const u8, prefix: []const u8 }{
+        .{ .dir = "refs/heads", .prefix = "" },
+        .{ .dir = "refs/tags", .prefix = "tag: " },
+        .{ .dir = "refs/remotes", .prefix = "" },
+    };
+    for (ref_dirs) |rd| {
+        const dir_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, rd.dir }) catch continue;
+        defer allocator.free(dir_path);
+        collectRefsFromDir(allocator, dir_path, rd.dir, rd.prefix, &ref_list) catch {};
+    }
+    // Also read packed-refs
+    collectPackedRefs(allocator, git_path, &ref_list) catch {};
+
+    // Build hash -> decoration string map
+    for (ref_list.items) |r| {
+        const gop = map.getOrPut(try allocator.dupe(u8, r.hash)) catch continue;
+        if (gop.found_existing) {
+            // Append to existing decoration
+            const old = gop.value_ptr.*;
+            const new = std.fmt.allocPrint(allocator, "{s}, {s}", .{ old, r.name }) catch continue;
+            allocator.free(old);
+            gop.value_ptr.* = new;
+            allocator.free(gop.key_ptr.*);
+            gop.key_ptr.* = try allocator.dupe(u8, r.hash);
+        } else {
+            gop.value_ptr.* = try allocator.dupe(u8, r.name);
+        }
+    }
+
+    // Prepend HEAD -> branch to the HEAD commit's decoration
+    if (head_hash) |hh| {
+        const head_name = blk: {
+            if (head_ref) |hr| {
+                if (std.mem.startsWith(u8, hr, "refs/heads/")) {
+                    break :blk std.fmt.allocPrint(allocator, "HEAD -> {s}", .{hr["refs/heads/".len..]}) catch break :blk try allocator.dupe(u8, "HEAD");
+                }
+            }
+            break :blk try allocator.dupe(u8, "HEAD");
+        };
+        defer allocator.free(head_name);
+        const gop = map.getOrPut(try allocator.dupe(u8, hh)) catch return;
+        if (gop.found_existing) {
+            const old = gop.value_ptr.*;
+            const new = std.fmt.allocPrint(allocator, "{s}, {s}", .{ head_name, old }) catch return;
+            allocator.free(old);
+            gop.value_ptr.* = new;
+            allocator.free(gop.key_ptr.*);
+            gop.key_ptr.* = try allocator.dupe(u8, hh);
+        } else {
+            gop.value_ptr.* = try allocator.dupe(u8, head_name);
+        }
+    }
+}
+
+fn collectRefsFromDir(allocator: std.mem.Allocator, dir_path: []const u8, ref_prefix: []const u8, display_prefix: []const u8, ref_list: anytype) !void {
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind == .directory) {
+            const sub_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
+            defer allocator.free(sub_path);
+            const sub_prefix = std.fmt.allocPrint(allocator, "{s}/{s}", .{ ref_prefix, entry.name }) catch continue;
+            defer allocator.free(sub_prefix);
+            collectRefsFromDir(allocator, sub_path, sub_prefix, display_prefix, ref_list) catch {};
+        } else {
+            const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
+            defer allocator.free(full_path);
+            const content = std.fs.cwd().readFileAlloc(allocator, full_path, 256) catch continue;
+            defer allocator.free(content);
+            const hash = std.mem.trimRight(u8, content, "\n\r ");
+            if (hash.len < 40) continue;
+            const ref_name = std.fmt.allocPrint(allocator, "{s}/{s}", .{ ref_prefix, entry.name }) catch continue;
+            const short_name = blk: {
+                if (std.mem.startsWith(u8, ref_name, "refs/heads/")) {
+                    break :blk std.fmt.allocPrint(allocator, "{s}{s}", .{ display_prefix, ref_name["refs/heads/".len..] }) catch continue;
+                } else if (std.mem.startsWith(u8, ref_name, "refs/tags/")) {
+                    break :blk std.fmt.allocPrint(allocator, "{s}{s}", .{ display_prefix, ref_name["refs/tags/".len..] }) catch continue;
+                } else if (std.mem.startsWith(u8, ref_name, "refs/remotes/")) {
+                    break :blk std.fmt.allocPrint(allocator, "{s}{s}", .{ display_prefix, ref_name["refs/remotes/".len..] }) catch continue;
+                }
+                break :blk try allocator.dupe(u8, ref_name);
+            };
+            try ref_list.append(.{ .hash = try allocator.dupe(u8, hash[0..40]), .name = short_name });
+            allocator.free(ref_name);
+        }
+    }
+}
+
+fn collectPackedRefs(allocator: std.mem.Allocator, git_path: []const u8, ref_list: anytype) !void {
+    const packed_path = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_path});
+    defer allocator.free(packed_path);
+    const content = std.fs.cwd().readFileAlloc(allocator, packed_path, 10 * 1024 * 1024) catch return;
+    defer allocator.free(content);
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        if (line.len < 41 or line[0] == '#' or line[0] == '^') continue;
+        const hash = line[0..40];
+        if (line[40] != ' ') continue;
+        const ref_name = line[41..];
+        const short_name = blk: {
+            if (std.mem.startsWith(u8, ref_name, "refs/heads/")) {
+                break :blk try allocator.dupe(u8, ref_name["refs/heads/".len..]);
+            } else if (std.mem.startsWith(u8, ref_name, "refs/tags/")) {
+                break :blk std.fmt.allocPrint(allocator, "tag: {s}", .{ref_name["refs/tags/".len..]}) catch continue;
+            } else if (std.mem.startsWith(u8, ref_name, "refs/remotes/")) {
+                break :blk try allocator.dupe(u8, ref_name["refs/remotes/".len..]);
+            }
+            break :blk try allocator.dupe(u8, ref_name);
+        };
+        try ref_list.append(.{ .hash = try allocator.dupe(u8, hash), .name = short_name });
+    }
+}
+
 fn addRefsFromDir(allocator: std.mem.Allocator, dir_path: []const u8, start_hashes: *std.array_list.Managed([]u8), git_path: []const u8) !void {
     var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
     defer dir.close();
@@ -4861,6 +5003,20 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
         }
     }
 
+    // Build decoration map (hash -> "HEAD -> main, tag: v1.0, origin/main")
+    var decoration_map = std.StringHashMap([]const u8).init(allocator);
+    defer {
+        var dit = decoration_map.iterator();
+        while (dit.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.*);
+        }
+        decoration_map.deinit();
+    }
+    if (lo.format_string != null or lo.decorate != .no) {
+        try buildDecorationMap(allocator, git_path, pi, &decoration_map);
+    }
+
     // Validate --grep-reflog can only be used with -g
     if (lo.grep_reflog and !lo.walk_reflog) {
         try pi.writeStderr("fatal: --grep-reflog can only be used under -g\n");
@@ -5115,7 +5271,7 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
             if (!lo.oneline and show_count > 0) try pi.writeStdout("\n");
             if (lo.format_string) |fmt| {
                 if (lo.format_is_separator and show_count > 0) try pi.writeStdout("\n");
-                try writeFormattedCommit(fmt, cur.hash, sobj.data, pi, allocator);
+                try writeFormattedCommitWithDecorations(fmt, cur.hash, sobj.data, pi, allocator, &decoration_map);
                 if (!lo.format_is_separator) try pi.writeStdout("\n");
             } else if (lo.oneline) {
                 const short = cur.hash[0..@min(7, cur.hash.len)];
@@ -5266,7 +5422,7 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
                 if (lo.format_is_separator and idx > 0) {
                     try pi.writeStdout("\n");
                 }
-                try writeFormattedCommit(fmt, hash, obj.data, pi, allocator);
+                try writeFormattedCommitWithDecorations(fmt, hash, obj.data, pi, allocator, &decoration_map);
                 if (!lo.format_is_separator) {
                     try pi.writeStdout("\n");
                 }
@@ -5629,7 +5785,7 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
                     try pi.writeStdout("\n");
                 }
                 first = false;
-                try writeFormattedCommit(fmt, cur_hash, obj.data, pi, allocator);
+                try writeFormattedCommitWithDecorations(fmt, cur_hash, obj.data, pi, allocator, &decoration_map);
                 if (!lo.format_is_separator) {
                     try pi.writeStdout("\n");
                 }
