@@ -1,9 +1,11 @@
 const zlib_compat = @import("zlib_compat.zig");
 const std = @import("std");
+const builtin = @import("builtin");
 const crypto = std.crypto;
+const is_freestanding = builtin.os.tag == .freestanding;
 
-// Dynamic C zlib for reliable compression/decompression
-var zlib_lib: ?std.DynLib = null;
+// Dynamic C zlib for reliable compression/decompression (not available on WASM/freestanding)
+var zlib_lib: ?if (is_freestanding) void else std.DynLib = null;
 var zlib_compress_fn: ?*const fn ([*]u8, *c_ulong, [*]const u8, c_ulong) callconv(.c) c_int = null;
 var zlib_compress_bound_fn: ?*const fn (c_ulong) callconv(.c) c_ulong = null;
 var zlib_uncompress_fn: ?*const fn ([*]u8, *c_ulong, [*]const u8, c_ulong) callconv(.c) c_int = null;
@@ -31,6 +33,7 @@ const ZStream = extern struct {
 };
 
 fn initCZlib() void {
+    if (comptime is_freestanding) return; // No DynLib on WASM
     if (zlib_init_attempted) return;
     zlib_init_attempted = true;
 
