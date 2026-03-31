@@ -280,8 +280,13 @@ pub fn cmdCatFile(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             try platform_impl.writeStderr("fatal: batch modes take no arguments\n");
             std.process.exit(129);
         }
-        // Batch mode: read object names from stdin
-        try catFileBatch(allocator, git_path, batch_mode or batch_command, batch_format, platform_impl, batch_command);
+        if (batch_all) {
+            // --batch-all-objects: enumerate all objects
+            try catFileBatchAllObjects(allocator, git_path, batch_mode or batch_command, batch_format, platform_impl);
+        } else {
+            // Batch mode: read object names from stdin
+            try catFileBatch(allocator, git_path, batch_mode or batch_command, batch_format, platform_impl, batch_command);
+        }
         return;
     }
 
@@ -692,4 +697,165 @@ fn matchGlob(pattern: []const u8, name: []const u8) bool {
     }
     while (pi < pattern.len and pattern[pi] == '*') pi += 1;
     return pi >= pattern.len and ni >= name.len;
+}
+
+/// Enumerate all objects from pack files and loose objects, output in sorted hash order
+fn catFileBatchAllObjects(allocator: std.mem.Allocator, git_path: []const u8, full_content: bool, custom_format: ?[]const u8, platform_impl: *const platform_mod.Platform) !void {
+    // Collect all object hashes
+    var all_hashes = std.array_list.Managed([40]u8).init(allocator);
+    defer all_hashes.deinit();
+
+    // 1. Enumerate pack objects via idx files
+    const pack_dir_path = try std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_path});
+    defer allocator.free(pack_dir_path);
+
+    var pack_dir = std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true }) catch null;
+    if (pack_dir) |*pd| {
+        defer pd.close();
+        var pit = pd.iterate();
+        while (pit.next() catch null) |pentry| {
+            if (pentry.kind != .file or !std.mem.endsWith(u8, pentry.name, ".idx")) continue;
+            const idx_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir_path, pentry.name }) catch continue;
+            defer allocator.free(idx_path);
+
+            const idx_data = objects.getCachedIdx(idx_path) orelse blk: {
+                if (objects.mmapFile(idx_path)) |mapped| {
+                    objects.addToCacheEx(allocator, idx_path, mapped, true, "", "", false);
+                    break :blk @as([]const u8, mapped);
+                }
+                break :blk null;
+            };
+            if (idx_data == null) continue;
+            const idata = idx_data.?;
+
+            // Parse idx v2 header
+            if (idata.len < 8) continue;
+            const magic = std.mem.readInt(u32, @ptrCast(idata[0..4]), .big);
+            if (magic != 0xff744f63) continue;
+            const version = std.mem.readInt(u32, @ptrCast(idata[4..8]), .big);
+            if (version != 2) continue;
+
+            const fanout_start: usize = 8;
+            const total = std.mem.readInt(u32, @ptrCast(idata[fanout_start + 255 * 4 .. fanout_start + 255 * 4 + 4]), .big);
+            const sha1_table_start = fanout_start + 256 * 4;
+
+            // Read all SHA1s
+            var i: usize = 0;
+            while (i < total) : (i += 1) {
+                const off = sha1_table_start + i * 20;
+                if (off + 20 > idata.len) break;
+                var hex: [40]u8 = undefined;
+                for (0..20) |bi| {
+                    const hx = std.fmt.bytesToHex([1]u8{idata[off + bi]}, .lower);
+                    hex[bi * 2] = hx[0];
+                    hex[bi * 2 + 1] = hx[1];
+                }
+                try all_hashes.append(hex);
+            }
+        }
+    }
+
+    // 2. Enumerate loose objects
+    var fanout: usize = 0;
+    while (fanout < 256) : (fanout += 1) {
+        var hex_prefix: [2]u8 = undefined;
+        _ = std.fmt.bufPrint(&hex_prefix, "{x:0>2}", .{fanout}) catch continue;
+        const loose_dir_path = std.fmt.allocPrint(allocator, "{s}/objects/{s}", .{ git_path, hex_prefix }) catch continue;
+        defer allocator.free(loose_dir_path);
+
+        var loose_dir = std.fs.cwd().openDir(loose_dir_path, .{ .iterate = true }) catch continue;
+        defer loose_dir.close();
+        var lit = loose_dir.iterate();
+        while (lit.next() catch null) |lentry| {
+            if (lentry.kind != .file or lentry.name.len != 38) continue;
+            var hex: [40]u8 = undefined;
+            hex[0] = hex_prefix[0];
+            hex[1] = hex_prefix[1];
+            @memcpy(hex[2..40], lentry.name[0..38]);
+            try all_hashes.append(hex);
+        }
+    }
+
+    // Sort by hash for deterministic output
+    std.mem.sort([40]u8, all_hashes.items, {}, struct {
+        fn cmp(_: void, a: [40]u8, b: [40]u8) bool {
+            return std.mem.order(u8, &a, &b) == .lt;
+        }
+    }.cmp);
+
+    // Deduplicate
+    var out_buf = std.array_list.Managed(u8).init(allocator);
+    defer out_buf.deinit();
+    try out_buf.ensureTotalCapacity(all_hashes.items.len * 60);
+
+    var prev: ?[40]u8 = null;
+    for (all_hashes.items) |hash| {
+        if (prev) |p| {
+            if (std.mem.eql(u8, &p, &hash)) continue;
+        }
+        prev = hash;
+
+        const obj = objects.GitObject.load(&hash, git_path, platform_impl, allocator) catch continue;
+        defer obj.deinit(allocator);
+
+        const type_name = obj.type.toString();
+
+        if (custom_format) |fmt| {
+            try formatBatchLine(fmt, &hash, type_name, obj.data.len, "", &out_buf);
+        } else {
+            try out_buf.appendSlice(&hash);
+            try out_buf.append(' ');
+            try out_buf.appendSlice(type_name);
+            try out_buf.append(' ');
+            var size_buf: [20]u8 = undefined;
+            const size_str = std.fmt.bufPrint(&size_buf, "{d}", .{obj.data.len}) catch continue;
+            try out_buf.appendSlice(size_str);
+            try out_buf.append('\n');
+        }
+
+        if (full_content) {
+            try out_buf.appendSlice(obj.data);
+            try out_buf.append('\n');
+        }
+
+        // Flush periodically
+        if (out_buf.items.len > 128 * 1024) {
+            try platform_impl.writeStdout(out_buf.items);
+            out_buf.clearRetainingCapacity();
+        }
+    }
+
+    if (out_buf.items.len > 0) {
+        try platform_impl.writeStdout(out_buf.items);
+    }
+}
+
+fn formatBatchLine(fmt: []const u8, hash: []const u8, type_name: []const u8, size: usize, rest: []const u8, out: *std.array_list.Managed(u8)) !void {
+    var i: usize = 0;
+    while (i < fmt.len) {
+        if (fmt[i] == '%' and i + 1 < fmt.len and fmt[i + 1] == '(') {
+            const close = std.mem.indexOfScalarPos(u8, fmt, i + 2, ')') orelse {
+                try out.append(fmt[i]);
+                i += 1;
+                continue;
+            };
+            const field = fmt[i + 2 .. close];
+            if (std.mem.eql(u8, field, "objectname")) {
+                try out.appendSlice(hash);
+            } else if (std.mem.eql(u8, field, "objecttype")) {
+                try out.appendSlice(type_name);
+            } else if (std.mem.eql(u8, field, "objectsize")) {
+                var buf: [20]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, "{d}", .{size}) catch "0";
+                try out.appendSlice(s);
+            } else if (std.mem.eql(u8, field, "rest")) {
+                try out.appendSlice(rest);
+            }
+            i = close + 1;
+        } else {
+            try out.append(fmt[i]);
+            i += 1;
+        }
+    }
+    try out.append('\n');
 }
