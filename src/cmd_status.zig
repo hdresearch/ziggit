@@ -570,7 +570,11 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
 
         var collapsed = std.array_list.Managed([]u8).init(allocator);
         var seen_dirs = std.StringHashMap(void).init(allocator);
-        defer seen_dirs.deinit();
+        defer {
+            var kit = seen_dirs.keyIterator();
+            while (kit.next()) |key| allocator.free(@constCast(key.*));
+            seen_dirs.deinit();
+        }
 
         for (untracked_files.items) |file| {
             // Find the top-level directory component
@@ -579,7 +583,11 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
                 // If this top-level dir has no tracked files, collapse
                 if (!tracked_dirs.contains(top_dir)) {
                     if (!seen_dirs.contains(top_dir)) {
-                        seen_dirs.put(top_dir, {}) catch {};
+                        const key_copy = allocator.dupe(u8, top_dir) catch continue;
+                        seen_dirs.put(key_copy, {}) catch {
+                            allocator.free(key_copy);
+                            continue;
+                        };
                         const dir_entry = std.fmt.allocPrint(allocator, "{s}/", .{top_dir}) catch continue;
                         collapsed.append(dir_entry) catch {
                             allocator.free(dir_entry);
