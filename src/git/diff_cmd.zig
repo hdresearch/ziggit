@@ -4597,7 +4597,12 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
             if (std.mem.eql(u8, val, "auto")) {
                 if (std.posix.getenv("GIT_PAGER_IN_USE")) |_| lo.use_color = true;
             }
-        } else if (std.mem.eql(u8, arg, "--source") or std.mem.eql(u8, arg, "--quiet") or
+        } else if (std.mem.eql(u8, arg, "--quiet")) {
+            lo.show_patch = false;
+        } else if (std.mem.eql(u8, arg, "--graph")) {
+            try pi.writeStderr("fatal: options '--no-walk' and '--graph' cannot be used together\n");
+            std.process.exit(128);
+        } else if (std.mem.eql(u8, arg, "--source") or
             std.mem.eql(u8, arg, "--use-mailmap") or std.mem.eql(u8, arg, "--no-mailmap") or
             std.mem.eql(u8, arg, "--no-diff-merges") or
             std.mem.eql(u8, arg, "--expand-tabs") or std.mem.startsWith(u8, arg, "--expand-tabs=") or
