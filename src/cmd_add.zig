@@ -478,14 +478,13 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         }
     }
 
-    // Apply --chmod if specified
+    // Apply --chmod if specified (only when paths are given)
     if (chmod_mode) |cm| {
-        const target_mode: u32 = if (cm == .plus_x) 0o100755 else 0o100644;
-        for (index.entries.items) |*entry| {
-            // Only change regular files, not symlinks or submodules
-            if (entry.mode == 0o100644 or entry.mode == 0o100755) {
-                // If specific paths given, only change those
-                if (collected_add_paths.items.len > 0) {
+        if (collected_add_paths.items.len > 0) {
+            const target_mode: u32 = if (cm == .plus_x) 0o100755 else 0o100644;
+            for (index.entries.items) |*entry| {
+                // Only change regular files, not symlinks or submodules
+                if (entry.mode == 0o100644 or entry.mode == 0o100755) {
                     for (collected_add_paths.items) |p| {
                         const check_p = if (std.mem.eql(u8, p, ".")) "" else p;
                         if (check_p.len == 0 or std.mem.eql(u8, entry.path, check_p) or
@@ -495,8 +494,6 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                             break;
                         }
                     }
-                } else {
-                    entry.mode = target_mode;
                 }
             }
         }
