@@ -8,6 +8,7 @@ const config_mod = @import("config.zig");
 const diff_stats = @import("diff_stats.zig");
 const mc = @import("../main_common.zig");
 const config_helpers = @import("config_helpers.zig");
+const hooks = @import("../git/hooks.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -1258,6 +1259,9 @@ fn doFastForward(git_path: []const u8, current_hash: []const u8, target_hash: []
     const reflog_msg = std.fmt.allocPrint(allocator, "merge {s}: Fast-forward", .{merge_target_name}) catch "merge: Fast-forward";
     defer if (!std.mem.eql(u8, reflog_msg, "merge: Fast-forward")) allocator.free(reflog_msg);
     writeReflogEntry(git_path, current_branch, current_hash, target_hash, reflog_msg, allocator, platform_impl);
+
+    // Run post-merge hook (squash=0 for normal merge)
+    runPostMergeHook(git_path, false, allocator, platform_impl);
 }
 
 fn doSquashFastForward(git_path: []const u8, current_hash: []const u8, target_hash: []const u8, current_branch: []const u8, merge_target: []const u8, opts: *MergeOpts, allocator: Allocator, platform_impl: *const pm.Platform) void {
@@ -1394,6 +1398,9 @@ fn doOursStrategy(git_path: []const u8, current_hash: []const u8, target_hash: [
     }
 
     writeStdout(platform_impl, "Merge made by the 'ours' strategy.\n");
+
+    // Run post-merge hook (squash=0 for normal merge)
+    runPostMergeHook(git_path, false, allocator, platform_impl);
 }
 
 fn doThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_hash: []const u8, current_branch: []const u8, merge_target: []const u8, opts: *MergeOpts, allocator: Allocator, platform_impl: *const pm.Platform) void {
@@ -1499,6 +1506,9 @@ fn doThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_hash: 
             showDiffstatCompact(git_path, current_hash, nh, opts.compact_summary, allocator, platform_impl);
         }
     }
+
+    // Run post-merge hook (squash=0 for normal merge)
+    runPostMergeHook(git_path, false, allocator, platform_impl);
 }
 
 fn doOctopusMerge(git_path: []const u8, current_hash: []const u8, current_branch: []const u8, opts: *MergeOpts, target_hashes_orig: []const []const u8, allocator: Allocator, platform_impl: *const pm.Platform) void {
@@ -1787,6 +1797,9 @@ fn doOctopusMerge(git_path: []const u8, current_hash: []const u8, current_branch
         reflog_parts.appendSlice(": Merge made by the 'octopus' strategy.") catch {};
         writeReflogEntry(git_path, current_branch, current_hash, nc, reflog_parts.items, allocator, platform_impl);
     }
+
+    // Run post-merge hook (squash=0 for normal merge)
+    runPostMergeHook(git_path, false, allocator, platform_impl);
 }
 
 fn doMergeWithFetchHead(git_path: []const u8, opts: *MergeOpts, allocator: Allocator, platform_impl: *const pm.Platform) void {
@@ -3768,6 +3781,14 @@ fn getAuthorString(allocator: Allocator) ![]u8 {
 
     const ts = std.time.timestamp();
     return std.fmt.allocPrint(allocator, "{s} <{s}> {d} +0000", .{ name, email, ts });
+}
+
+/// Run the post-merge hook.
+/// squash: true if this was a squash merge (passes "1" as arg), false for normal merge (passes "0").
+fn runPostMergeHook(git_path: []const u8, squash: bool, allocator: Allocator, platform_impl: *const pm.Platform) void {
+    const squash_arg: []const u8 = if (squash) "1" else "0";
+    const hook_args = [_][]const u8{squash_arg};
+    _ = hooks.runHook(allocator, git_path, "post-merge", &hook_args, null, platform_impl) catch {};
 }
 
 fn getCommitterString(allocator: Allocator) ![]u8 {
