@@ -68,9 +68,11 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
         author_map.deinit();
     }
 
+    // Preload all commits from packs into cache for fast access during walk
+    objects.preloadCommitsFromPacks(git_path, platform_impl, allocator);
+
     // Try commit-graph fast path
     if (commit_graph_mod.CommitGraph.open(git_path, allocator)) |cg| {
-        
         var visited = std.AutoHashMap(u32, void).init(allocator);
         defer visited.deinit();
         var stack = std.array_list.Managed(u32).init(allocator);
@@ -85,10 +87,25 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
                 if (visited.contains(cur)) continue;
                 try visited.put(cur, {});
 
-                // Get author from object
+                // Get author from object - try zero-copy borrow first
                 var hash_hex: [40]u8 = undefined;
                 cg.getOidHex(cur, &hash_hex);
-                if (objects.GitObject.load(&hash_hex, git_path, platform_impl, allocator)) |obj| {
+                const obj_data: ?[]const u8 = blk: {
+                    if (objects.objectCacheBorrow(&hash_hex)) |borrowed| {
+                        break :blk borrowed.data;
+                    }
+                    break :blk null;
+                };
+                if (obj_data) |data| {
+                    const author = extractAuthor(data, email);
+                    if (author.len > 0) {
+                        if (author_map.getPtr(author)) |cnt| {
+                            cnt.* += 1;
+                        } else {
+                            try author_map.put(try allocator.dupe(u8, author), 1);
+                        }
+                    }
+                } else if (objects.GitObject.load(&hash_hex, git_path, platform_impl, allocator)) |obj| {
                     defer obj.deinit(allocator);
                     const author = extractAuthor(obj.data, email);
                     if (author.len > 0) {
