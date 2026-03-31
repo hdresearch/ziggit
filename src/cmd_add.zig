@@ -435,7 +435,7 @@ pub fn addSingleFileEx(allocator: std.mem.Allocator, relative_path: []const u8, 
         };
         defer gitignore.deinit();
         
-        if (gitignore.isIgnored(relative_path)) {
+        if (gitignore.isIgnored(relative_path) or isParentDirIgnored(&gitignore, relative_path)) {
             if (explicit) {
                 // Error out when explicitly adding ignored files
                 const msg = try std.fmt.allocPrint(allocator, "The following paths are ignored by one of your .gitignore files:\n{s}\nhint: Use -f if you really want to add them.\nhint: Turn this message off by running\nhint: \"git config advice.addIgnoredFile false\"\n", .{relative_path});
@@ -714,6 +714,15 @@ pub fn addDirectoryRecursively(allocator: std.mem.Allocator, repo_root: []const 
         try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, relative_dir });
     defer allocator.free(full_dir_path);
 
+    // Load gitignore for directory-level filtering
+    const gitignore_path = try std.fmt.allocPrint(allocator, "{s}/.gitignore", .{repo_root});
+    defer allocator.free(gitignore_path);
+    var gitignore = gitignore_mod.GitIgnore.loadFromFile(allocator, gitignore_path, platform_impl) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => gitignore_mod.GitIgnore.init(allocator),
+    };
+    defer gitignore.deinit();
+
     // helpers.Try to open directory
     var dir = std.fs.cwd().openDir(full_dir_path, .{ .iterate = true }) catch |err| switch (err) {
         error.NotDir, error.AccessDenied, error.FileNotFound => return,
@@ -731,6 +740,10 @@ pub fn addDirectoryRecursively(allocator: std.mem.Allocator, repo_root: []const 
         else
             try std.fmt.allocPrint(allocator, "{s}/{s}", .{ relative_dir, entry.name });
         defer allocator.free(entry_relative_path);
+
+        // Check gitignore for this entry (applies to both files and directories)
+        const gi_ptr: *const gitignore_mod.GitIgnore = &gitignore;
+        if (gitignore.isIgnored(entry_relative_path) or isParentDirIgnored(gi_ptr, entry_relative_path)) continue;
         
         const entry_full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ full_dir_path, entry.name });
         defer allocator.free(entry_full_path);
@@ -889,4 +902,15 @@ pub fn addCacheInfo(idx: *index_mod.Index, mode_str: []const u8, hash_str: []con
             return std.mem.lessThan(u8, a.path, b.path);
         }
     }.lessThan);
+}
+
+/// Check if any parent directory of a path is ignored by gitignore
+fn isParentDirIgnored(gitignore: *const gitignore_mod.GitIgnore, path: []const u8) bool {
+    var remaining: []const u8 = path;
+    while (std.mem.indexOfScalar(u8, remaining, '/')) |sep| {
+        const parent = path[0 .. @intFromPtr(remaining.ptr) - @intFromPtr(path.ptr) + sep];
+        if (gitignore.isIgnoredPath(parent, true)) return true;
+        remaining = remaining[sep + 1 ..];
+    }
+    return false;
 }

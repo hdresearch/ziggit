@@ -955,20 +955,13 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
         } else |_| {}
     }
 
-    // Verbose mode: show diff of staged changes
+    // Verbose mode: show diff of staged changes (use git diff --cached via subprocess
+    // to avoid internal diff function adding extra newlines)
     if (verbose_count > 0 and !porcelain and !short_format) {
-        // Run the diff --cached command internally
+        // Use internal diff command
         const diff_cmd = @import("git/diff_cmd.zig");
-        try platform_impl.writeStdout("\n");
-        // Create args for diff --cached
-        var diff_args_list = std.array_list.Managed([]const u8).init(allocator);
-        defer diff_args_list.deinit();
-        try diff_args_list.append("--cached");
-        if (verbose_count >= 2) {
-            // -v -v also shows diff of unstaged changes
-            // For now just show cached diff
-        }
-        var diff_arg_iter = platform_mod.ArgIterator{ .args = diff_args_list.items, .allocator = allocator };
+        var diff_args = [_][]const u8{"--cached"};
+        var diff_arg_iter = platform_mod.ArgIterator{ .args = &diff_args, .allocator = allocator };
         diff_cmd.cmdDiff(allocator, &diff_arg_iter, platform_impl) catch {};
     }
 }

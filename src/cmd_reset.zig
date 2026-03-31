@@ -255,6 +255,12 @@ pub fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     defer if (target_hash_or_null) |th| allocator.free(th);
 
     if (target_hash_or_null) |target_hash| {
+        // Path-based reset: only update index entries, don't move HEAD
+        if (reset_paths.items.len > 0) {
+            resetIndexPaths(git_path, target_hash, reset_paths.items, platform_impl, allocator) catch {};
+            return;
+        }
+
         // helpers.Get old helpers.HEAD hash for reflog
         const old_head_for_reflog = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
         defer if (old_head_for_reflog) |oh| allocator.free(oh);
@@ -353,6 +359,116 @@ pub fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     }
 }
 
+
+/// Reset specific paths in the index to match the given commit's tree.
+/// This is used for `git reset HEAD -- file1 file2` etc.
+fn resetIndexPaths(git_path: []const u8, commit_hash: []const u8, paths: []const []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+    // Load commit to get tree hash
+    const commit_obj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch return error.InvalidCommitObject;
+    defer commit_obj.deinit(allocator);
+
+    var tree_hash: ?[]const u8 = null;
+    var lines = std.mem.splitSequence(u8, commit_obj.data, "\n");
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "tree ")) {
+            tree_hash = line[5..];
+            break;
+        }
+    }
+    if (tree_hash == null) return error.InvalidCommitObject;
+
+    // Collect all tree entries from the target commit
+    var tree_entries = std.array_list.Managed(index_mod.IndexEntry).init(allocator);
+    defer {
+        for (tree_entries.items) |*entry| allocator.free(entry.path);
+        tree_entries.deinit();
+    }
+    try helpers.collectTreeEntries(git_path, tree_hash.?, "", platform_impl, allocator, &tree_entries);
+
+    // Build a map of path -> tree entry
+    var tree_map = std.StringHashMap(index_mod.IndexEntry).init(allocator);
+    defer tree_map.deinit();
+    for (tree_entries.items) |entry| {
+        tree_map.put(entry.path, entry) catch {};
+    }
+
+    // Load current index
+    var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch index_mod.Index.init(allocator);
+    defer idx.deinit();
+
+    // For each requested path, update or remove from index
+    for (paths) |path| {
+        // Check if this path matches any index entry or tree entry
+        // First remove existing entries for this path (could match as prefix for dirs)
+        var i: usize = 0;
+        while (i < idx.entries.items.len) {
+            if (std.mem.eql(u8, idx.entries.items[i].path, path) or
+                (std.mem.startsWith(u8, idx.entries.items[i].path, path) and
+                idx.entries.items[i].path.len > path.len and
+                idx.entries.items[i].path[path.len] == '/'))
+            {
+                allocator.free(idx.entries.items[i].path);
+                _ = idx.entries.orderedRemove(i);
+            } else {
+                i += 1;
+            }
+        }
+
+        // Now add entries from tree that match this path
+        if (tree_map.get(path)) |tree_entry| {
+            // Exact file match
+            idx.entries.append(.{
+                .mode = tree_entry.mode,
+                .path = allocator.dupe(u8, tree_entry.path) catch continue,
+                .sha1 = tree_entry.sha1,
+                .flags = tree_entry.flags,
+                .extended_flags = null,
+                .ctime_sec = 0,
+                .ctime_nsec = 0,
+                .mtime_sec = 0,
+                .mtime_nsec = 0,
+                .dev = 0,
+                .ino = 0,
+                .uid = 0,
+                .gid = 0,
+                .size = 0,
+            }) catch {};
+        } else {
+            // Check if it's a directory prefix - add all tree entries under it
+            const dir_prefix = std.fmt.allocPrint(allocator, "{s}/", .{path}) catch continue;
+            defer allocator.free(dir_prefix);
+            for (tree_entries.items) |tree_entry| {
+                if (std.mem.startsWith(u8, tree_entry.path, dir_prefix)) {
+                    idx.entries.append(.{
+                        .mode = tree_entry.mode,
+                        .path = allocator.dupe(u8, tree_entry.path) catch continue,
+                        .sha1 = tree_entry.sha1,
+                        .flags = tree_entry.flags,
+                        .extended_flags = null,
+                        .ctime_sec = 0,
+                        .ctime_nsec = 0,
+                        .mtime_sec = 0,
+                        .mtime_nsec = 0,
+                        .dev = 0,
+                        .ino = 0,
+                        .uid = 0,
+                        .gid = 0,
+                        .size = 0,
+                    }) catch {};
+                }
+            }
+        }
+    }
+
+    // Sort entries by path
+    std.mem.sort(index_mod.IndexEntry, idx.entries.items, {}, struct {
+        fn lessThan(_: void, a: index_mod.IndexEntry, b: index_mod.IndexEntry) bool {
+            return std.mem.order(u8, a.path, b.path) == .lt;
+        }
+    }.lessThan);
+
+    try idx.save(git_path, platform_impl);
+}
 
 pub fn resetIndex(git_path: []const u8, commit_hash: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
     // helpers.Load commit to get tree hash
