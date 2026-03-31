@@ -55,6 +55,7 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var update_flag = false;
     var force_flag = false;
     var dry_run = false;
+    var ignore_missing = false;
     var intent_to_add = false;
     var refresh_flag = false;
     var chmod_mode: ?enum { plus_x, minus_x } = null;
@@ -72,6 +73,8 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             force_flag = true;
         } else if (std.mem.eql(u8, raw_arg, "--dry-run") or std.mem.eql(u8, raw_arg, "-n")) {
             dry_run = true;
+        } else if (std.mem.eql(u8, raw_arg, "--ignore-missing")) {
+            ignore_missing = true;
         } else if (std.mem.eql(u8, raw_arg, "--intent-to-add") or std.mem.eql(u8, raw_arg, "-N")) {
             intent_to_add = true;
         } else if (std.mem.eql(u8, raw_arg, "--refresh")) {
@@ -231,15 +234,19 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                     };
                     defer gitignore_dr.deinit();
                     if (gitignore_dr.isIgnored(rel_path)) {
-                        const err_msg_dr = try std.fmt.allocPrint(allocator, "fatal: pathspec '{s}' did not match any files\n", .{file_path});
+                        // Gitignored files always error, even with --ignore-missing
+                        const err_msg_dr = try std.fmt.allocPrint(allocator, "The following paths are ignored by one of your .gitignore files:\n{s}\nhint: Use -f if you really want to add them.\nhint: Turn this message off by running\nhint: \"git config advice.addIgnoredFile false\"\n", .{file_path});
                         defer allocator.free(err_msg_dr);
                         try platform_impl.writeStderr(err_msg_dr);
                         std.process.exit(128);
                     }
                 }
-                const msg_dr = try std.fmt.allocPrint(allocator, "add '{s}'\n", .{rel_path});
-                defer allocator.free(msg_dr);
-                try platform_impl.writeStdout(msg_dr);
+                // Output add messages only with --ignore-missing (matches git behavior)
+                if (ignore_missing) {
+                    const msg_dr = try std.fmt.allocPrint(allocator, "add '{s}'\n", .{rel_path});
+                    defer allocator.free(msg_dr);
+                    try platform_impl.writeStdout(msg_dr);
+                }
             }
         }
         return;
