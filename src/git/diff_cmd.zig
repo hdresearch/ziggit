@@ -4375,9 +4375,37 @@ fn buildDecorationMap(allocator: std.mem.Allocator, git_path: []const u8, pi: *c
     // Also read packed-refs
     collectPackedRefs(allocator, git_path, &ref_list) catch {};
 
-    // Build hash -> decoration string map
+    // Build hash -> decoration string map (peel annotated tags to commits)
     for (ref_list.items) |r| {
-        const gop = map.getOrPut(try allocator.dupe(u8, r.hash)) catch continue;
+        // Peel tag objects to find the underlying commit hash
+        var peeled_buf: [40]u8 = undefined;
+        var use_hash: []const u8 = r.hash;
+        {
+            var cur_hash: []const u8 = r.hash;
+            var peel_depth: u8 = 0;
+            while (peel_depth < 10) : (peel_depth += 1) {
+                const pobj = objects.GitObject.load(cur_hash, git_path, pi, allocator) catch break;
+                defer pobj.deinit(allocator);
+                if (pobj.type != .tag) break;
+                var found = false;
+                var tp: usize = 0;
+                while (tp < pobj.data.len) {
+                    const tnl = std.mem.indexOfScalarPos(u8, pobj.data, tp, '\n') orelse pobj.data.len;
+                    const tl = pobj.data[tp..tnl];
+                    if (tl.len == 0) break;
+                    if (std.mem.startsWith(u8, tl, "object ") and tl.len >= 47) {
+                        @memcpy(&peeled_buf, tl[7..47]);
+                        cur_hash = &peeled_buf;
+                        use_hash = &peeled_buf;
+                        found = true;
+                        break;
+                    }
+                    tp = tnl + 1;
+                }
+                if (!found) break;
+            }
+        }
+        const gop = map.getOrPut(try allocator.dupe(u8, use_hash)) catch continue;
         if (gop.found_existing) {
             // Append to existing decoration
             const old = gop.value_ptr.*;
