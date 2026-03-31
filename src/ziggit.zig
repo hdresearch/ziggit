@@ -2834,6 +2834,11 @@ pub const Repository = struct {
         };
         defer fa.free(tree_content);
 
+        // PERF: Open target directory once and use openat() for all files in this tree.
+        // This avoids full path resolution for each file open.
+        var target_dir = std.fs.openDirAbsolute(target_path, .{}) catch null;
+        defer if (target_dir) |*d| d.close();
+
         var pos: usize = 0;
         while (pos < tree_content.len) {
             const space_pos = std.mem.indexOfScalarPos(u8, tree_content, pos, ' ') orelse break;
@@ -2848,8 +2853,15 @@ pub const Repository = struct {
             const sha20 = sha_bytes[0..20];
 
             if (std.mem.eql(u8, mode, "100644") or std.mem.eql(u8, mode, "100755")) {
-                // Checkout blob and add to index (use raw bytes to avoid hex conversion)
-                try self.checkoutBlobAndIndexRaw(sha20, target_path, name, prefix, mode, git_index);
+                // PERF: Use pre-opened dir fd for file creation when available
+                if (target_dir) |*dir| {
+                    self.checkoutBlobAndIndexRawDir(sha20, dir, name, prefix, mode, git_index) catch {
+                        // Fallback to absolute path
+                        self.checkoutBlobAndIndexRaw(sha20, target_path, name, prefix, mode, git_index) catch {};
+                    };
+                } else {
+                    try self.checkoutBlobAndIndexRaw(sha20, target_path, name, prefix, mode, git_index);
+                }
             } else if (std.mem.eql(u8, mode, "40000")) {
                 // Build paths
                 var subdir_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -2876,6 +2888,54 @@ pub const Repository = struct {
             }
             pos = sha_start + 20;
         }
+    }
+
+    /// Checkout a blob using a pre-opened directory fd (avoids full path resolution per file)
+    fn checkoutBlobAndIndexRawDir(self: *Repository, sha20: *const [20]u8, dir: *std.fs.Dir, filename: []const u8, prefix: []const u8, mode: []const u8, git_index: *index_parser.GitIndex) !void {
+        const fa = self._fast_alloc;
+        const content = self.readObjectContentFromPackBytes(sha20) catch blk: {
+            var sha_hex: [40]u8 = undefined;
+            _ = std.fmt.bufPrint(&sha_hex, "{x}", .{sha20}) catch return error.InvalidBlobObject;
+            const raw = self.readRawObject(&sha_hex) catch return error.InvalidBlobObject;
+            const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse {
+                fa.free(raw);
+                return error.InvalidBlobObject;
+            };
+            const content_len = raw.len - null_pos - 1;
+            std.mem.copyForwards(u8, raw[0..content_len], raw[null_pos + 1 ..]);
+            break :blk fa.realloc(raw, content_len) catch raw[0..content_len];
+        };
+        defer fa.free(content);
+
+        // Write file using dir fd (openat instead of full path resolution)
+        const file = dir.createFile(filename, .{ .truncate = true }) catch return error.InvalidBlobObject;
+        file.writeAll(content) catch {
+            file.close();
+            return error.InvalidBlobObject;
+        };
+        file.close();
+
+        // Build index entry path
+        const full_path = if (prefix.len == 0)
+            self.allocator.dupe(u8, filename) catch return error.InvalidBlobObject
+        else
+            std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, filename }) catch return error.InvalidBlobObject;
+
+        git_index.entries.append(index_parser.IndexEntry{
+            .ctime_seconds = 0,
+            .ctime_nanoseconds = 0,
+            .mtime_seconds = 0,
+            .mtime_nanoseconds = 0,
+            .dev = 0,
+            .ino = 0,
+            .mode = if (std.mem.eql(u8, mode, "100755")) 33261 else 33188,
+            .uid = 0,
+            .gid = 0,
+            .size = @intCast(@min(content.len, std.math.maxInt(u32))),
+            .sha1 = sha20.*,
+            .flags = @intCast(@min(full_path.len, 0xfff)),
+            .path = full_path,
+        }) catch {};
     }
 
     /// Checkout a blob and add it to the index using raw 20-byte SHA (avoids hex conversion)
