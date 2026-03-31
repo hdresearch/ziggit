@@ -68,17 +68,16 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
         author_map.deinit();
     }
 
-    // Try fast pack-based author extraction (avoids per-object allocation)
-    // First, ensure pack data is cached/mmap'd
-    const pack_dir_path = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_path}) catch null;
-    defer if (pack_dir_path) |p| allocator.free(p);
-
-    // Try commit-graph fast path with direct pack decompression
+    // Try commit-graph fast path
     if (commit_graph_mod.CommitGraph.open(git_path, allocator)) |cg| {
-        // Setup direct pack access (multiple packs)
-        var pack_refs: [8][]const u8 = undefined;
-        var idx_refs: [8][]const u8 = undefined;
+        // Setup direct pack access
+        const pack_dir_path = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_path}) catch null;
+        defer if (pack_dir_path) |p| allocator.free(p);
+
+        var pack_data_arr: [8][]const u8 = undefined;
+        var idx_data_arr: [8][]const u8 = undefined;
         var num_packs: usize = 0;
+
         if (pack_dir_path) |pdp| {
             var pack_dir = std.fs.cwd().openDir(pdp, .{ .iterate = true }) catch null;
             if (pack_dir) |*pd| {
@@ -106,88 +105,91 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
                         break :blk null;
                     };
                     if (idx_d != null and pack_d != null) {
-                        idx_refs[num_packs] = idx_d.?;
-                        pack_refs[num_packs] = pack_d.?;
+                        idx_data_arr[num_packs] = idx_d.?;
+                        pack_data_arr[num_packs] = pack_d.?;
                         num_packs += 1;
                     }
                 }
             }
         }
 
-        var visited = std.AutoHashMap(u32, void).init(allocator);
-        defer visited.deinit();
-        var stack = std.array_list.Managed(u32).init(allocator);
-        defer stack.deinit();
+        // Use a bitset for visited instead of hash map (positions are dense 0..num_commits)
+        const num_commits = cg.num_commits;
+        const bitset_words = (num_commits + 63) / 64;
+        const visited_bits = allocator.alloc(u64, bitset_words) catch null;
+        defer if (visited_bits) |b| allocator.free(b);
 
-        if (cg.findCommit(start_commit)) |pos| {
-            try stack.append(pos);
-            while (stack.items.len > 0) {
-                const last = stack.items.len - 1;
-                const cur = stack.items[last];
-                stack.items.len = last;
-                if (visited.contains(cur)) continue;
-                try visited.put(cur, {});
+        if (visited_bits) |bits| {
+            @memset(bits, 0);
 
-                // Get author: try direct pack decompression (zero-alloc), then cache, then full load
-                var hash_hex: [40]u8 = undefined;
-                cg.getOidHex(cur, &hash_hex);
+            var stack = std.array_list.Managed(u32).init(allocator);
+            defer stack.deinit();
+            stack.ensureTotalCapacity(4096) catch {};
 
-                const author_data: ?[]const u8 = blk: {
-                    // Try direct pack decompression (zero-alloc) across all packs
-                    if (num_packs > 0) {
-                        var oid_bytes: [20]u8 = undefined;
-                        _ = std.fmt.hexToBytes(&oid_bytes, &hash_hex) catch break :blk null;
+            if (cg.findCommit(start_commit)) |pos| {
+                stack.append(pos) catch {};
+
+                while (stack.items.len > 0) {
+                    const cur = stack.items[stack.items.len - 1];
+                    stack.items.len -= 1;
+
+                    // Bitset check
+                    const word_idx = cur / 64;
+                    const bit_mask = @as(u64, 1) << @truncate(cur % 64);
+                    if (bits[word_idx] & bit_mask != 0) continue;
+                    bits[word_idx] |= bit_mask;
+
+                    // Get author from pack data using fast direct reader
+                    const oid_bytes = cg.getOidBytes(cur);
+
+                    const author_data: ?[]const u8 = blk: {
                         for (0..num_packs) |pi| {
-                            if (objects.findOffsetInIdx(idx_refs[pi], oid_bytes)) |offset| {
-                                if (objects.decompressPackObjectInPlace(pack_refs[pi], offset)) |result| {
-                                    if (result.obj_type == 1) break :blk result.data;
-                                }
+                            if (objects.readPackCommitHeaderDirect(pack_data_arr[pi], idx_data_arr[pi], oid_bytes.*)) |data| {
+                                break :blk data;
                             }
                         }
-                    }
-                    // Try zero-copy cache borrow
-                    if (objects.objectCacheBorrow(&hash_hex)) |borrowed| {
-                        break :blk borrowed.data;
-                    }
-                    break :blk null;
-                };
+                        break :blk null;
+                    };
 
-                if (author_data) |data| {
-                    const author = extractAuthor(data, email);
-                    if (author.len > 0) {
-                        if (author_map.getPtr(author)) |cnt| {
-                            cnt.* += 1;
-                        } else {
-                            try author_map.put(try allocator.dupe(u8, author), 1);
-                        }
-                    }
-                } else {
-                    // Fallback to full object load
-                    if (objects.GitObject.load(&hash_hex, git_path, platform_impl, allocator)) |obj| {
-                        defer obj.deinit(allocator);
-                        const author = extractAuthor(obj.data, email);
+                    if (author_data) |data| {
+                        const author = extractAuthor(data, email);
                         if (author.len > 0) {
                             if (author_map.getPtr(author)) |cnt| {
                                 cnt.* += 1;
                             } else {
-                                try author_map.put(try allocator.dupe(u8, author), 1);
+                                author_map.put(allocator.dupe(u8, author) catch continue, 1) catch {};
                             }
                         }
-                    } else |_| {}
-                }
+                    } else {
+                        // Final fallback: full object load
+                        var hash_hex: [40]u8 = undefined;
+                        cg.getOidHex(cur, &hash_hex);
+                        if (objects.GitObject.load(&hash_hex, git_path, platform_impl, allocator)) |obj| {
+                            defer obj.deinit(allocator);
+                            const author = extractAuthor(obj.data, email);
+                            if (author.len > 0) {
+                                if (author_map.getPtr(author)) |cnt| {
+                                    cnt.* += 1;
+                                } else {
+                                    author_map.put(allocator.dupe(u8, author) catch continue, 1) catch {};
+                                }
+                            }
+                        } else |_| {}
+                    }
 
-                // Add parents
-                const cd = cg.getCommitData(cur);
-                if (cd.parent1 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT) {
-                    try stack.append(cd.parent1);
-                }
-                if (cd.parent2 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT and cd.parent2 & commit_graph_mod.CommitGraph.GRAPH_EXTRA_EDGES == 0) {
-                    try stack.append(cd.parent2);
+                    // Add parents from commit-graph (no parsing needed)
+                    const cd = cg.getCommitData(cur);
+                    if (cd.parent1 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT) {
+                        stack.append(cd.parent1) catch {};
+                    }
+                    if (cd.parent2 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT and cd.parent2 & commit_graph_mod.CommitGraph.GRAPH_EXTRA_EDGES == 0) {
+                        stack.append(cd.parent2) catch {};
+                    }
                 }
             }
         }
     } else {
-        // Fallback: regular object loading
+        // Fallback: regular object loading (no commit-graph)
         var visited = std.StringHashMap(void).init(allocator);
         defer {
             var it = visited.iterator();
@@ -202,9 +204,9 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
         try stack.append(try allocator.dupe(u8, start_commit));
 
         while (stack.items.len > 0) {
-            const last2 = stack.items.len - 1;
-            const cur = stack.items[last2];
-            stack.items.len = last2;
+            const last_idx = stack.items.len - 1;
+            const cur = stack.items[last_idx];
+            stack.items.len = last_idx;
             if (visited.contains(cur)) { allocator.free(cur); continue; }
             try visited.put(cur, {});
 
@@ -254,14 +256,14 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
         }.cmp);
     }
 
-    // Output
+    // Output using buffered writer
     var out_buf = std.array_list.Managed(u8).init(allocator);
     defer out_buf.deinit();
+    try out_buf.ensureTotalCapacity(results.items.len * 40);
     for (results.items) |entry| {
         if (summary) {
             var buf: [12]u8 = undefined;
             const num_str = std.fmt.bufPrint(&buf, "{d}", .{entry.count}) catch continue;
-            // Right-justify to 6 chars
             var i: usize = 0;
             while (i + num_str.len < 6) : (i += 1) try out_buf.append(' ');
             try out_buf.appendSlice(num_str);
@@ -281,27 +283,36 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
 }
 
 fn extractAuthor(data: []const u8, include_email: bool) []const u8 {
-    var lines = std.mem.splitScalar(u8, data, '\n');
-    while (lines.next()) |line| {
-        if (line.len == 0) break;
-        if (std.mem.startsWith(u8, line, "author ")) {
-            const author_data = line[7..];
+    // Fast scan: find "author " after "tree " and "parent " lines
+    // Commit format: tree <hash>\nparent <hash>\nauthor <name> <email> <timestamp>\n...
+    var pos: usize = 0;
+    while (pos + 7 < data.len) {
+        // Find next newline
+        if (data[pos] == 'a' and pos + 7 <= data.len and std.mem.eql(u8, data[pos..pos + 7], "author ")) {
+            const author_start = pos + 7;
+            // Find end of line
+            var end = author_start;
+            while (end < data.len and data[end] != '\n') : (end += 1) {}
+            const author_line = data[author_start..end];
             if (include_email) {
-                // Include up to and including >
-                if (std.mem.indexOf(u8, author_data, ">")) |gt| {
-                    return author_data[0 .. gt + 1];
+                if (std.mem.indexOf(u8, author_line, ">")) |gt| {
+                    return author_line[0 .. gt + 1];
                 }
             } else {
-                // Just the name (before <)
-                if (std.mem.indexOf(u8, author_data, " <")) |lt| {
-                    return author_data[0..lt];
+                if (std.mem.indexOf(u8, author_line, " <")) |lt| {
+                    return author_line[0..lt];
                 }
-                if (std.mem.indexOf(u8, author_data, ">")) |gt| {
-                    return author_data[0 .. gt + 1];
+                if (std.mem.indexOf(u8, author_line, ">")) |gt| {
+                    return author_line[0 .. gt + 1];
                 }
             }
-            return author_data;
+            return author_line;
         }
+        // Skip to next line
+        while (pos < data.len and data[pos] != '\n') : (pos += 1) {}
+        pos += 1; // skip \n
+        // Stop at blank line (end of headers)
+        if (pos < data.len and data[pos] == '\n') break;
     }
     return "";
 }

@@ -173,6 +173,12 @@ pub const CommitGraph = struct {
         };
     }
 
+    /// Get the binary OID for a commit at the given position (zero-copy).
+    pub fn getOidBytes(self: *const CommitGraph, pos: u32) *const [20]u8 {
+        const off = self.oid_lookup_offset + @as(usize, pos) * self.hash_len;
+        return self.data[off..][0..20];
+    }
+
     /// Get the OID (hex string) for a commit at the given position.
     pub fn getOidHex(self: *const CommitGraph, pos: u32, buf: *[40]u8) void {
         const off = self.oid_lookup_offset + @as(usize, pos) * self.hash_len;
