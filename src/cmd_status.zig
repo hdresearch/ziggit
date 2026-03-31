@@ -941,16 +941,19 @@ fn writePrefixed(platform_impl: anytype, text: []const u8, cp: []const u8) !void
         try platform_impl.writeStdout(text);
         return;
     }
+    const trimmed_cp = std.mem.trimRight(u8, cp, " ");
     // Process line by line
     var start: usize = 0;
     while (start < text.len) {
         if (std.mem.indexOfScalarPos(u8, text, start, '\n')) |nl| {
             if (nl == start) {
                 // Empty line - write prefix trimmed (no trailing space) + newline
-                // "# " -> "#"
-                const trimmed = std.mem.trimRight(u8, cp, " ");
-                try platform_impl.writeStdout(trimmed);
+                try platform_impl.writeStdout(trimmed_cp);
                 try platform_impl.writeStdout("\n");
+            } else if (text[start] == '\t') {
+                // Line starts with tab - use trimmed prefix (no space before tab)
+                try platform_impl.writeStdout(trimmed_cp);
+                try platform_impl.writeStdout(text[start .. nl + 1]);
             } else {
                 try platform_impl.writeStdout(cp);
                 try platform_impl.writeStdout(text[start .. nl + 1]);
@@ -959,7 +962,11 @@ fn writePrefixed(platform_impl: anytype, text: []const u8, cp: []const u8) !void
         } else {
             // No newline at end
             if (start < text.len) {
-                try platform_impl.writeStdout(cp);
+                if (text[start] == '\t') {
+                    try platform_impl.writeStdout(trimmed_cp);
+                } else {
+                    try platform_impl.writeStdout(cp);
+                }
                 try platform_impl.writeStdout(text[start..]);
             }
             break;
