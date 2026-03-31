@@ -55,6 +55,8 @@ pub fn cmdShortlog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
     }
     defer allocator.free(start_commit);
 
+    std.debug.print("shortlog: start={s}, summary={}, numbered={}\n", .{start_commit, summary, numbered});
+
     // Count commits per author
     const AuthorCount = struct { name: []const u8, count: u32 };
     var author_map = std.StringHashMap(u32).init(allocator);
