@@ -2608,6 +2608,8 @@ fn formatCommitForSquash(data: []const u8, hash: []const u8, buf: *std.array_lis
         buf.appendSlice(ml) catch {};
         buf.append('\n') catch {};
     }
+    // Trailing blank line after each commit entry (matching git log format)
+    buf.append('\n') catch {};
 }
 
 fn formatGitDate(ts_str: []const u8, tz_str: []const u8, allocator: Allocator) []u8 {
