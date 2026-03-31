@@ -297,8 +297,8 @@ pub const FilterProcess = struct {
     }
 
     fn handshake(self: *FilterProcess) !void {
-        const writer = self.child.stdin.?.writer();
-        const reader = self.child.stdout.?.reader();
+        const writer = &self.child.stdin.?;
+        const reader = &self.child.stdout.?;
 
         // Send client hello
         try PktLine.writePacket(writer, "git-filter-client\n");
@@ -356,8 +356,8 @@ pub const FilterProcess = struct {
         pathname: []const u8,
         content: []const u8,
     ) ![]u8 {
-        const writer = self.child.stdin.?.writer();
-        const reader = self.child.stdout.?.reader();
+        const writer = &self.child.stdin.?;
+        const reader = &self.child.stdout.?;
 
         // Send command and pathname
         const cmd_line = try std.fmt.allocPrint(self.allocator, "command={s}\n", .{operation});

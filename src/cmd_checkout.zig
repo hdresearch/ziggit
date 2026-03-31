@@ -33,6 +33,17 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
         return;
     }
 
+    // Long-running filter process cache for smudge filters (LFS performance)
+    var filter_process_cache = std.StringHashMap(filter_driver.FilterProcess).init(allocator);
+    defer {
+        var it = filter_process_cache.iterator();
+        while (it.next()) |kv| {
+            kv.value_ptr.deinit();
+            allocator.free(kv.key_ptr.*);
+        }
+        filter_process_cache.deinit();
+    }
+
     const first_arg = args.next() orelse {
         try platform_impl.writeStderr("error: pathspec '' did not match any file(s) known to git\n");
         std.process.exit(128);
@@ -418,8 +429,8 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                     if (std.fs.path.dirname(full_path)) |dir| {
                         std.fs.cwd().makePath(dir) catch {};
                     }
-                    // Apply smudge filter
-                    const smudged = filter_driver.applySmudgeFilter(allocator, entry.path, blob.data, git_path, platform_impl);
+                    // Apply smudge filter (with long-running process support for LFS)
+                    const smudged = filter_driver.applySmudgeFilterWithProcess(allocator, entry.path, blob.data, git_path, platform_impl, &filter_process_cache);
                     defer if (smudged) |s| allocator.free(s);
                     platform_impl.fs.writeFile(full_path, smudged orelse blob.data) catch {};
                 }
@@ -458,8 +469,8 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                     // Apply CRLF conversion
                     const converted = crlf_mod.applyCheckoutConversion(allocator, blob.data, entry.path, attr_rules.items, autocrlf_val, eol_config_val) catch blob.data;
                     defer if (converted.ptr != blob.data.ptr) allocator.free(converted);
-                    // Apply smudge filter
-                    const smudged = filter_driver.applySmudgeFilter(allocator, entry.path, converted, git_path, platform_impl);
+                    // Apply smudge filter (with long-running process support for LFS)
+                    const smudged = filter_driver.applySmudgeFilterWithProcess(allocator, entry.path, converted, git_path, platform_impl, &filter_process_cache);
                     defer if (smudged) |s| allocator.free(s);
                     platform_impl.fs.writeFile(full_path, smudged orelse converted) catch {};
                 }
@@ -647,7 +658,7 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                                 defer blob.deinit(allocator);
                                 if (blob.type == .blob) {
                                     // Apply smudge filter
-                                    const smudged = filter_driver.applySmudgeFilter(allocator, entry.path, blob.data, git_path, platform_impl);
+                                    const smudged = filter_driver.applySmudgeFilterWithProcess(allocator, entry.path, blob.data, git_path, platform_impl, &filter_process_cache);
                                     defer if (smudged) |s| allocator.free(s);
                                     std.fs.cwd().writeFile(.{ .sub_path = full_path, .data = smudged orelse blob.data }) catch {};
                                 }
@@ -1310,6 +1321,17 @@ pub fn cmdSwitch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
 
 
 pub fn cmdRestore(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    // Long-running filter process cache for smudge filters (LFS performance)
+    var filter_process_cache = std.StringHashMap(filter_driver.FilterProcess).init(allocator);
+    defer {
+        var it = filter_process_cache.iterator();
+        while (it.next()) |kv| {
+            kv.value_ptr.deinit();
+            allocator.free(kv.key_ptr.*);
+        }
+        filter_process_cache.deinit();
+    }
+
     // Basic restore command - restore working tree files
     var source: ?[]const u8 = null;
     var staged = false;
@@ -1386,7 +1408,7 @@ pub fn cmdRestore(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                 const converted_r = crlf_mod.applyCheckoutConversion(allocator, blob.data, entry.path, attr_rules_r.items, autocrlf_r, eol_r) catch blob.data;
                 defer if (converted_r.ptr != blob.data.ptr) allocator.free(converted_r);
                 // Apply smudge filter
-                const smudged_r = filter_driver.applySmudgeFilter(allocator, entry.path, converted_r, git_path, platform_impl);
+                const smudged_r = filter_driver.applySmudgeFilterWithProcess(allocator, entry.path, converted_r, git_path, platform_impl, &filter_process_cache);
                 defer if (smudged_r) |s| allocator.free(s);
                 platform_impl.fs.writeFile(full_path, smudged_r orelse converted_r) catch {};
                 break;
@@ -1397,6 +1419,17 @@ pub fn cmdRestore(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
 
 
 pub fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    // Long-running filter process cache for smudge filters (LFS performance)
+    var filter_process_cache = std.StringHashMap(filter_driver.FilterProcess).init(allocator);
+    defer {
+        var it = filter_process_cache.iterator();
+        while (it.next()) |kv| {
+            kv.value_ptr.deinit();
+            allocator.free(kv.key_ptr.*);
+        }
+        filter_process_cache.deinit();
+    }
+
     var force = false;
     var all = false;
     var update_stat = false;
@@ -1642,7 +1675,7 @@ pub fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             };
             defer file.close();
             // Apply smudge filter if configured
-            const smudged_co = filter_driver.applySmudgeFilter(allocator, entry_path, content, git_dir, platform_impl);
+            const smudged_co = filter_driver.applySmudgeFilterWithProcess(allocator, entry_path, content, git_dir, platform_impl, &filter_process_cache);
             defer if (smudged_co) |s| allocator.free(s);
             file.writeAll(smudged_co orelse content) catch continue;
 
