@@ -7,6 +7,7 @@ const platform_mod = @import("platform/platform.zig");
 const helpers = @import("git_helpers.zig");
 const cmd_reflog = @import("cmd_reflog.zig");
 const cmd_add = @import("cmd_add.zig");
+const hooks = @import("git/hooks.zig");
 
 fn isTrailerLine(line: []const u8) bool {
     if (std.mem.indexOf(u8, line, ": ")) |colon_pos| {
@@ -768,36 +769,41 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         message = try allocator.dupe(u8, trailer_buf.items);
     }
 
-    // Check for ignored hooks (non-executable hook files)
+    // Run pre-commit hook (or warn about non-executable hook)
     if (!no_verify) {
-        const hook_path = std.fmt.allocPrint(allocator, "{s}/hooks/pre-commit", .{git_path}) catch null;
-        defer if (hook_path) |p| allocator.free(p);
-        if (hook_path) |hp| {
-            if (std.fs.cwd().statFile(hp)) |stat| {
-                // File exists - check if executable
-                const mode = stat.mode;
-                const is_exec = (mode & 0o111) != 0;
-                if (!is_exec) {
-                    // Check advice.ignoredHook config
-                    var show_warning = true;
-                    const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch null;
-                    defer if (config_path) |cp| allocator.free(cp);
-                    if (config_path) |cp| {
-                        if (platform_impl.fs.readFile(allocator, cp)) |cfg| {
-                            defer allocator.free(cfg);
-                            if (std.mem.indexOf(u8, cfg, "ignoredHook = false") != null) {
-                                show_warning = false;
-                            }
-                        } else |_| {}
-                    }
-                    if (show_warning) {
-                        const hint1 = std.fmt.allocPrint(allocator, "hint: The '{s}' hook was ignored because it's not set as executable.\n", .{hp}) catch null;
-                        defer if (hint1) |h| allocator.free(h);
-                        if (hint1) |h| platform_impl.writeStderr(h) catch {};
-                        platform_impl.writeStderr("hint: You can disable this warning with `git config advice.ignoredHook false`.\n") catch {};
-                    }
+        const pre_commit_result = hooks.runHook(allocator, git_path, "pre-commit", &.{}, null, platform_impl) catch |err| {
+            const err_msg = std.fmt.allocPrint(allocator, "error: failed to run pre-commit hook: {}\n", .{err}) catch null;
+            defer if (err_msg) |m| allocator.free(m);
+            if (err_msg) |m| platform_impl.writeStderr(m) catch {};
+            std.process.exit(1);
+        };
+        if (pre_commit_result.skipped) {
+            // Hook doesn't exist or isn't executable - warn if file exists but not executable
+            hooks.warnIgnoredHook(allocator, git_path, "pre-commit", platform_impl);
+        } else if (pre_commit_result.exit_code != 0) {
+            std.process.exit(1);
+        }
+    }
+
+    // Run commit-msg hook: write message to temp file, pass path as arg
+    if (!no_verify) {
+        if (message) |msg| {
+            const commit_msg_file = std.fmt.allocPrint(allocator, "{s}/COMMIT_EDITMSG", .{git_path}) catch null;
+            defer if (commit_msg_file) |f| allocator.free(f);
+            if (commit_msg_file) |cmf| {
+                platform_impl.fs.writeFile(cmf, msg) catch {};
+                const cm_result = hooks.runHook(allocator, git_path, "commit-msg", &.{cmf}, null, platform_impl) catch hooks.HookResult{ .exit_code = 0, .skipped = true };
+                if (!cm_result.skipped and cm_result.exit_code != 0) {
+                    try platform_impl.writeStderr("Aborting commit due to commit-msg hook failure.\n");
+                    std.process.exit(1);
                 }
-            } else |_| {}
+                // Re-read the message in case the hook modified it
+                if (!cm_result.skipped) {
+                    if (platform_impl.fs.readFile(allocator, cmf)) |new_msg| {
+                        message = new_msg;
+                    } else |_| {}
+                }
+            }
         }
     }
 

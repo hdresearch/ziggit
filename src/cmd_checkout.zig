@@ -24,6 +24,7 @@ const version_mod = @import("version.zig");
 const wildmatch_mod = @import("wildmatch.zig");
 const crlf_mod = @import("crlf.zig");
 const check_attr = @import("cmd_check_attr.zig");
+const hooks = @import("git/hooks.zig");
 
 pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     if (@import("builtin").target.os.tag == .freestanding) {
@@ -1057,6 +1058,26 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
             }
+        }
+
+        // Run post-checkout hook: args are (old_HEAD, new_HEAD, branch_flag=1)
+        {
+            const old_h_hook = if (old_head_hash) |ohh| @as([]const u8, ohh) else "0000000000000000000000000000000000000000";
+            const new_h_hook = blk_new: {
+                if (refs.getCurrentCommit(git_path, platform_impl, allocator) catch null) |nh| {
+                    break :blk_new nh;
+                }
+                break :blk_new try allocator.dupe(u8, "0000000000000000000000000000000000000000");
+            };
+            defer allocator.free(new_h_hook);
+            _ = hooks.runHook(
+                allocator,
+                git_path,
+                "post-checkout",
+                &.{ old_h_hook, new_h_hook, "1" },
+                null,
+                platform_impl,
+            ) catch {};
         }
     }
 }
