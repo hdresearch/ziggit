@@ -241,6 +241,93 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         return;
     }
 
+    // Fast path for log -N (small count, no filters, no graph, no reflog, default format)
+    if (max_count != null and max_count.? <= 10 and !walk_reflog and !show_graph and
+        format_string == null and exclude_refs.items.len == 0 and include_refs.items.len == 0 and
+        author_filters.items.len == 0 and committer_filters.items.len == 0 and grep_filters.items.len == 0 and
+        output_encoding == null)
+    {
+        // Just load N commits sequentially following first-parent
+        var commit_hash = try allocator.dupe(u8, start_commit);
+        var count: u32 = 0;
+        var out_buf = std.array_list.Managed(u8).init(allocator);
+        defer out_buf.deinit();
+        try out_buf.ensureTotalCapacity(4096);
+
+        while (count < max_count.?) {
+            const obj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch break;
+            defer obj.deinit(allocator);
+            if (obj.type != .commit) break;
+
+            if (oneline) {
+                const short = if (commit_hash.len >= 7) commit_hash[0..7] else commit_hash;
+                try out_buf.appendSlice(short);
+                try out_buf.append(' ');
+                const msg = helpers.extractObjectMessage(obj.data);
+                const first_line_end = std.mem.indexOfScalar(u8, msg, '\n') orelse msg.len;
+                try out_buf.appendSlice(msg[0..first_line_end]);
+                try out_buf.append('\n');
+            } else {
+                // Default (medium) format
+                try out_buf.appendSlice("commit ");
+                try out_buf.appendSlice(commit_hash);
+                try out_buf.append('\n');
+                const author_field = helpers.extractHeaderField(obj.data, "author");
+                if (author_field.len > 0) {
+                    // Format: "Author: Name <email>"
+                    try out_buf.appendSlice("Author: ");
+                    // author_field is "Name <email> timestamp tz"
+                    // Find the > to get name+email
+                    if (std.mem.indexOf(u8, author_field, ">")) |gt| {
+                        try out_buf.appendSlice(author_field[0 .. gt + 1]);
+                    } else {
+                        try out_buf.appendSlice(author_field);
+                    }
+                    try out_buf.append('\n');
+                    // Format date
+                    try out_buf.appendSlice("Date:   ");
+                    const date_str = helpers.formatPersonDate(author_field, allocator);
+                    try out_buf.appendSlice(date_str);
+                    try out_buf.append('\n');
+                }
+                try out_buf.append('\n');
+                const cmsg = helpers.extractObjectMessage(obj.data);
+                var msg_iter = std.mem.splitScalar(u8, std.mem.trimRight(u8, cmsg, "\n"), '\n');
+                while (msg_iter.next()) |ml| {
+                    try out_buf.appendSlice("    ");
+                    try out_buf.appendSlice(ml);
+                    try out_buf.append('\n');
+                }
+                // Only add separator newline if there will be more commits
+                if (count + 1 < max_count.?) {
+                    try out_buf.append('\n');
+                }
+            }
+
+            count += 1;
+            if (count >= max_count.?) break;
+
+            // Get first parent
+            var next_hash: ?[]u8 = null;
+            var lines = std.mem.splitScalar(u8, obj.data, '\n');
+            while (lines.next()) |line| {
+                if (line.len == 0) break;
+                if (std.mem.startsWith(u8, line, "parent ") and line.len >= 47) {
+                    next_hash = try allocator.dupe(u8, line[7..47]);
+                    break;
+                }
+            }
+            allocator.free(commit_hash);
+            commit_hash = next_hash orelse break;
+        }
+        allocator.free(commit_hash);
+
+        if (out_buf.items.len > 0) {
+            try platform_impl.writeStdout(out_buf.items);
+        }
+        return;
+    }
+
     // Reflog walking mode (-g)
     if (walk_reflog) {
         // helpers.Determine which reflog to read
