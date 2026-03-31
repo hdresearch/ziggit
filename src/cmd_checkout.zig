@@ -912,46 +912,60 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
         // If we resolved the target to a hash but it was a branch name,
         // ensure HEAD points to the branch as a symbolic ref
         if (resolved_checkout_target != null and !detach) {
-            // Check if refs/heads/<target> exists
-            const branch_ref_check = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, actual_target });
-            defer allocator.free(branch_ref_check);
-            if (std.fs.accessAbsolute(branch_ref_check, .{})) |_| {
-                const head_path_fix = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
-                defer allocator.free(head_path_fix);
-                const symbolic_ref = try std.fmt.allocPrint(allocator, "ref: refs/heads/{s}\n", .{actual_target});
-                defer allocator.free(symbolic_ref);
-                platform_impl.fs.writeFile(head_path_fix, symbolic_ref) catch {};
+            // Check if refs/heads/<target> exists — use stack buffers
+            var brc_buf: [std.fs.max_path_bytes]u8 = undefined;
+            if (std.fmt.bufPrint(&brc_buf, "{s}/refs/heads/{s}", .{ git_path, actual_target })) |branch_ref_check| {
+                if (std.fs.accessAbsolute(branch_ref_check, .{})) |_| {
+                    var hpf_buf: [std.fs.max_path_bytes]u8 = undefined;
+                    if (std.fmt.bufPrint(&hpf_buf, "{s}/HEAD", .{git_path})) |head_path_fix| {
+                        var sr_buf: [512]u8 = undefined;
+                        if (std.fmt.bufPrint(&sr_buf, "ref: refs/heads/{s}\n", .{actual_target})) |symbolic_ref| {
+                            platform_impl.fs.writeFile(head_path_fix, symbolic_ref) catch {};
+                        } else |_| {}
+                    } else |_| {}
+                } else |_| {}
             } else |_| {}
         }
         
-        // helpers.Write reflog entry for checkout
+        // helpers.Write reflog entry for checkout — use stack buffers where possible
         {
-            var new_head_hash: ?[]u8 = null;
-            defer if (new_head_hash) |nhh| allocator.free(nhh);
+            var new_head_hash_buf: [40]u8 = undefined;
+            var new_head_hash: ?[]const u8 = null;
             {
-                const head_path3 = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
-                defer allocator.free(head_path3);
-                if (platform_impl.fs.readFile(allocator, head_path3)) |hd| {
-                    defer allocator.free(hd);
-                    const tr = std.mem.trim(u8, hd, " \t\r\n");
-                    if (std.mem.startsWith(u8, tr, "ref: ")) {
-                        const rp = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, tr["ref: ".len..] });
-                        defer allocator.free(rp);
-                        if (platform_impl.fs.readFile(allocator, rp)) |rd| {
-                            defer allocator.free(rd);
-                            new_head_hash = try allocator.dupe(u8, std.mem.trim(u8, rd, " \t\r\n"));
-                        } else |_| {}
-                    } else if (tr.len >= 40) {
-                        new_head_hash = try allocator.dupe(u8, tr[0..40]);
-                    }
+                var hp_buf: [std.fs.max_path_bytes]u8 = undefined;
+                if (std.fmt.bufPrint(&hp_buf, "{s}/HEAD", .{git_path})) |head_path3| {
+                    if (platform_impl.fs.readFile(allocator, head_path3)) |hd| {
+                        defer allocator.free(hd);
+                        const tr = std.mem.trim(u8, hd, " \t\r\n");
+                        if (std.mem.startsWith(u8, tr, "ref: ")) {
+                            var rp_buf: [std.fs.max_path_bytes]u8 = undefined;
+                            if (std.fmt.bufPrint(&rp_buf, "{s}/{s}", .{ git_path, tr["ref: ".len..] })) |rp| {
+                                if (platform_impl.fs.readFile(allocator, rp)) |rd| {
+                                    defer allocator.free(rd);
+                                    const trimmed_rd = std.mem.trim(u8, rd, " \t\r\n");
+                                    if (trimmed_rd.len >= 40) {
+                                        @memcpy(&new_head_hash_buf, trimmed_rd[0..40]);
+                                        new_head_hash = &new_head_hash_buf;
+                                    }
+                                } else |_| {}
+                            } else |_| {}
+                        } else if (tr.len >= 40) {
+                            @memcpy(&new_head_hash_buf, tr[0..40]);
+                            new_head_hash = &new_head_hash_buf;
+                        }
+                    } else |_| {}
                 } else |_| {}
             }
             const from_name = if (old_branch_name) |obn| obn else if (old_head_hash) |ohh| ohh else "HEAD";
-            const reflog_msg = try std.fmt.allocPrint(allocator, "checkout: moving from {s} to {s}", .{ from_name, target });
-            defer allocator.free(reflog_msg);
-            const oh = if (old_head_hash) |ohh| ohh else "0000000000000000000000000000000000000000";
-            const nh = if (new_head_hash) |nhh| nhh else "0000000000000000000000000000000000000000";
-            helpers.writeReflogEntry(git_path, "HEAD", oh, nh, reflog_msg, allocator, platform_impl) catch {};
+            var reflog_msg_buf: [512]u8 = undefined;
+            const reflog_msg = std.fmt.bufPrint(&reflog_msg_buf, "checkout: moving from {s} to {s}", .{ from_name, target }) catch
+                // If stack buf too small, just skip reflog (very rare for names > 500 chars)
+                "";
+            if (reflog_msg.len > 0) {
+                const oh = if (old_head_hash) |ohh| @as([]const u8, ohh) else "0000000000000000000000000000000000000000";
+                const nh = new_head_hash orelse "0000000000000000000000000000000000000000";
+                helpers.writeReflogEntry(git_path, "HEAD", oh, nh, reflog_msg, allocator, platform_impl) catch {};
+            }
         }
 
         if (!quiet) {
