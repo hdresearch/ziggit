@@ -2818,12 +2818,11 @@ pub const Repository = struct {
             if (sha_start + 20 > tree_content.len) break;
             const sha_bytes = tree_content[sha_start .. sha_start + 20];
 
-            var sha_hex: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&sha_hex, "{x}", .{sha_bytes}) catch break;
+            const sha20 = sha_bytes[0..20];
 
             if (std.mem.eql(u8, mode, "100644") or std.mem.eql(u8, mode, "100755")) {
-                // Checkout blob and add to index
-                try self.checkoutBlobAndIndex(&sha_hex, target_path, name, prefix, mode, sha_bytes, git_index);
+                // Checkout blob and add to index (use raw bytes to avoid hex conversion)
+                try self.checkoutBlobAndIndexRaw(sha20, target_path, name, prefix, mode, git_index);
             } else if (std.mem.eql(u8, mode, "40000")) {
                 // Build paths
                 var subdir_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -2841,17 +2840,24 @@ pub const Repository = struct {
                         pos = sha_start + 20;
                         continue;
                     };
+                // For tree recursion, we need hex for readRawObject fallback
+                var sha_hex: [40]u8 = undefined;
+                _ = std.fmt.bufPrint(&sha_hex, "{x}", .{sha20}) catch break;
                 try self.checkoutTreeAndIndex(&sha_hex, subdir_path, subprefix, git_index);
             }
             pos = sha_start + 20;
         }
     }
 
-    /// Checkout a blob and add it to the index in one step
-    fn checkoutBlobAndIndex(self: *Repository, blob_hash: *const [40]u8, target_path: []const u8, filename: []const u8, prefix: []const u8, mode: []const u8, sha_bytes: []const u8, git_index: *index_parser.GitIndex) !void {
+    /// Checkout a blob and add it to the index using raw 20-byte SHA (avoids hex conversion)
+    fn checkoutBlobAndIndexRaw(self: *Repository, sha20: *const [20]u8, target_path: []const u8, filename: []const u8, prefix: []const u8, mode: []const u8, git_index: *index_parser.GitIndex) !void {
         const fa = self._fast_alloc;
-        const content = self.readObjectContentFromPack(blob_hash) catch blk: {
-            const raw = self.readRawObject(blob_hash) catch return error.InvalidBlobObject;
+        // Try direct pack read with raw bytes first (skips hex conversion)
+        const content = self.readObjectContentFromPackBytes(sha20) catch blk: {
+            // Fallback: convert to hex and use full path
+            var sha_hex: [40]u8 = undefined;
+            _ = std.fmt.bufPrint(&sha_hex, "{x}", .{sha20}) catch return error.InvalidBlobObject;
+            const raw = self.readRawObject(&sha_hex) catch return error.InvalidBlobObject;
             const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse {
                 fa.free(raw);
                 return error.InvalidBlobObject;
@@ -2885,7 +2891,7 @@ pub const Repository = struct {
             std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, filename }) catch return;
 
         var sha_array: [20]u8 = undefined;
-        @memcpy(&sha_array, sha_bytes[0..20]);
+        @memcpy(&sha_array, sha20);
 
         git_index.entries.append(index_parser.IndexEntry{
             .ctime_seconds = @intCast(@max(0, @divTrunc(stat.ctime, 1_000_000_000))),
@@ -2943,11 +2949,15 @@ pub const Repository = struct {
     fn readObjectContentFromPack(self: *Repository, hash_hex: *const [40]u8) ObjectReadError![]u8 {
         var target_hash: [20]u8 = undefined;
         _ = std.fmt.hexToBytes(&target_hash, hash_hex) catch return error.ObjectNotFound;
+        return self.readObjectContentFromPackBytes(&target_hash);
+    }
 
+    /// Read content from pack using raw 20-byte SHA (avoids hex conversion)
+    fn readObjectContentFromPackBytes(self: *Repository, target_hash: *const [20]u8) ObjectReadError![]u8 {
         const pack_data = self._cached_pack_data orelse return error.ObjectNotFound;
         const idx_data = self._cached_idx_data orelse return error.ObjectNotFound;
 
-        const offset = lookupIdxForOffsetFromData(idx_data, &target_hash) catch
+        const offset = lookupIdxForOffsetFromData(idx_data, target_hash) catch
             return error.ObjectNotFound;
 
         return self.readPackObjectContentOnly(pack_data, offset);
