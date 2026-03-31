@@ -722,7 +722,21 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         }
         for (trailers.items) |trailer| {
             try trailer_buf.appendSlice("\n");
-            try trailer_buf.appendSlice(trailer);
+            // Normalize trailer: "Key=Value" or "Key:Value" -> "Key: Value"
+            const trimmed_trailer = std.mem.trimRight(u8, trailer, " \t");
+            if (std.mem.indexOfAny(u8, trimmed_trailer, "=:")) |sep_pos| {
+                const key = std.mem.trimRight(u8, trimmed_trailer[0..sep_pos], " \t");
+                const val_start = sep_pos + 1;
+                const val = if (val_start < trimmed_trailer.len)
+                    std.mem.trimLeft(u8, trimmed_trailer[val_start..], " \t")
+                else
+                    "";
+                try trailer_buf.appendSlice(key);
+                try trailer_buf.appendSlice(": ");
+                try trailer_buf.appendSlice(val);
+            } else {
+                try trailer_buf.appendSlice(trimmed_trailer);
+            }
         }
         try trailer_buf.appendSlice("\n");
         message = try allocator.dupe(u8, trailer_buf.items);

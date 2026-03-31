@@ -1224,8 +1224,10 @@ fn doUnbornMerge(git_path: []const u8, current_branch: []const u8, target_hash: 
         std.process.exit(128);
     };
     checkoutTree(git_path, target_hash, allocator, platform_impl);
-    // Write reflog entry for initial merge
-    writeReflogEntry(git_path, current_branch, zero_hash, target_hash, "initial pull", allocator, platform_impl);
+    // Write reflog entry for initial merge  
+    const full_ref = std.fmt.allocPrint(allocator, "refs/heads/{s}", .{current_branch}) catch return;
+    defer allocator.free(full_ref);
+    writeReflogEntry(git_path, full_ref, zero_hash, target_hash, "initial pull", allocator, platform_impl);
     writeStdout(platform_impl, "Fast-forward\n");
 }
 
