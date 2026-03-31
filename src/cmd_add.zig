@@ -216,6 +216,22 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 else
                     file_path;
 
+                // Check gitignore for dry-run
+                if (!force_flag) {
+                    const gitignore_path_dr = try std.fmt.allocPrint(allocator, "{s}/.gitignore", .{repo_root_dr2});
+                    defer allocator.free(gitignore_path_dr);
+                    var gitignore_dr = gitignore_mod.GitIgnore.loadFromFile(allocator, gitignore_path_dr, platform_impl) catch |err_gi| switch (err_gi) {
+                        error.OutOfMemory => return err_gi,
+                        else => gitignore_mod.GitIgnore.init(allocator),
+                    };
+                    defer gitignore_dr.deinit();
+                    if (gitignore_dr.isIgnored(rel_path)) {
+                        const err_msg_dr = try std.fmt.allocPrint(allocator, "fatal: pathspec '{s}' did not match any files\n", .{file_path});
+                        defer allocator.free(err_msg_dr);
+                        try platform_impl.writeStderr(err_msg_dr);
+                        std.process.exit(128);
+                    }
+                }
                 const msg_dr = try std.fmt.allocPrint(allocator, "add '{s}'\n", .{rel_path});
                 defer allocator.free(msg_dr);
                 try platform_impl.writeStdout(msg_dr);
