@@ -211,7 +211,7 @@ pub fn nativeCmdRevert(allocator: std.mem.Allocator, args: [][]const u8, command
                     } else {
                         refs.updateHEAD(git_path, oh2, platform_impl, allocator) catch {};
                     }
-                    cmd_reset.resetIndex(git_path, oh2, platform_impl, allocator) catch {};
+                    cmd_reset.resetIndex(git_path, oh2, platform_impl, allocator, true) catch {};
                     helpers.checkoutCommitTree(git_path, oh2, allocator, platform_impl) catch {};
                 }
             } else |_| {}

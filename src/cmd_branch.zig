@@ -539,6 +539,17 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             }
         }
 
+        // Add reflog entries for the rename
+        if (!std.mem.eql(u8, old_name, new_name)) {
+            const old_hash_trimmed = std.mem.trim(u8, old_hash, " \t\r\n");
+            const rename_msg = try std.fmt.allocPrint(allocator, "Branch: renamed refs/heads/{s} to refs/heads/{s}", .{ old_name, new_name });
+            defer allocator.free(rename_msg);
+            // Write reflog entry for the branch
+            helpers.writeReflogEntry(git_path, try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{new_name}), old_hash_trimmed, old_hash_trimmed, rename_msg, allocator, platform_impl) catch {};
+            // Write reflog entry for HEAD
+            helpers.writeReflogEntry(git_path, "HEAD", old_hash_trimmed, old_hash_trimmed, rename_msg, allocator, platform_impl) catch {};
+        }
+
         // Rename config section [branch "old"] to [branch "new"]
         if (!std.mem.eql(u8, old_name, new_name)) {
             const config_path_r = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
