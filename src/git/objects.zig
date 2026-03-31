@@ -15,7 +15,7 @@ var zlib_inflate_end_fn: ?*const fn (*ZStream) callconv(.c) c_int = null;
 var zlib_init_attempted: bool = false;
 
 /// Minimal z_stream struct for inflate API
-const ZStream = extern struct {
+pub const ZStream = extern struct {
     next_in: ?[*]const u8,
     avail_in: c_uint,
     total_in: c_ulong,
@@ -32,7 +32,7 @@ const ZStream = extern struct {
     reserved: c_ulong,
 };
 
-fn initCZlib() void {
+pub fn initCZlib() void {
     if (comptime is_freestanding) return; // No DynLib on WASM
     if (zlib_init_attempted) return;
     zlib_init_attempted = true;
@@ -117,6 +117,39 @@ fn getReusableInflateStream() ?*ZStream {
 /// Uses a reusable scratch buffer to avoid allocation overhead, then copies
 /// the result to the caller's allocator.
 /// Returns decompressed data or null if C zlib is unavailable.
+pub fn getUncompressFn() ?*const fn ([*]u8, *c_ulong, [*]const u8, c_ulong) callconv(.c) c_int {
+    initCZlib();
+    return zlib_uncompress_fn;
+}
+
+pub fn getInflateInit2Fn() ?*const fn (*ZStream, c_int, [*]const u8, c_int) callconv(.c) c_int {
+    initCZlib();
+    return zlib_inflate_init2_fn;
+}
+
+pub fn getInflateFn() ?*const fn (*ZStream, c_int) callconv(.c) c_int {
+    initCZlib();
+    return zlib_inflate_fn;
+}
+
+pub fn getInflateEndFn() ?*const fn (*ZStream) callconv(.c) c_int {
+    initCZlib();
+    return zlib_inflate_end_fn;
+}
+
+pub fn getInflateResetFn() ?*const fn (*ZStream) callconv(.c) c_int {
+    initCZlib();
+    if (!inflate_reset_looked_up) {
+        inflate_reset_looked_up = true;
+        if (comptime !is_freestanding) {
+            if (zlib_lib) |*lib| {
+                zlib_inflate_reset_fn = lib.lookup(*const fn (*ZStream) callconv(.c) c_int, "inflateReset");
+            }
+        }
+    }
+    return zlib_inflate_reset_fn;
+}
+
 pub fn cDecompressSlice(allocator: std.mem.Allocator, input: []const u8, size_hint: usize) ?[]u8 {
     initCZlib();
     
