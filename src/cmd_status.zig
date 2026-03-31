@@ -258,7 +258,7 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
     if (!porcelain) {
         const branch_msg = try std.fmt.allocPrint(allocator, "On branch {s}\n", .{current_branch});
         defer allocator.free(branch_msg);
-        try platform_impl.writeStdout(branch_msg);
+        try writeWithCommentPrefix(platform_impl, branch_msg, comment_prefix);
 
         // Display upstream tracking info natively
         if (current_commit != null) upstream_display: {
@@ -303,31 +303,31 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             if (std.mem.eql(u8, current_commit.?, upstream_hash)) {
                 const up_msg = try std.fmt.allocPrint(allocator, "Your branch is up to date with '{s}'.\n", .{upstream_display_name});
                 defer allocator.free(up_msg);
-                try platform_impl.writeStdout(up_msg);
+                try writeWithCommentPrefix(platform_impl, up_msg, comment_prefix);
             } else {
                 const ahead_count = helpers.countUnreachable(git_path, current_commit.?, upstream_hash, allocator, platform_impl);
                 const behind_count = helpers.countUnreachable(git_path, upstream_hash, current_commit.?, allocator, platform_impl);
                 if (ahead_count > 0 and behind_count > 0) {
                     const up_msg = try std.fmt.allocPrint(allocator, "Your branch and '{s}' have diverged,\nand have {d} and {d} different commits each, respectively.\n", .{upstream_display_name, ahead_count, behind_count});
                     defer allocator.free(up_msg);
-                    try platform_impl.writeStdout(up_msg);
-                    if (show_hints) try platform_impl.writeStdout("  (use \"git pull\" if you want to integrate the remote branch with yours)\n");
+                    try writeWithCommentPrefix(platform_impl, up_msg, comment_prefix);
+                    if (show_hints) try writeWithCommentPrefix(platform_impl, "  (use \"git pull\" if you want to integrate the remote branch with yours)\n", comment_prefix);
                 } else if (ahead_count > 0) {
                     const up_msg = try std.fmt.allocPrint(allocator, "Your branch is ahead of '{s}' by {d} commit{s}.\n", .{upstream_display_name, ahead_count, if (ahead_count > 1) "s" else ""});
                     defer allocator.free(up_msg);
-                    try platform_impl.writeStdout(up_msg);
-                    if (show_hints) try platform_impl.writeStdout("  (use \"git push\" to publish your local commits)\n");
+                    try writeWithCommentPrefix(platform_impl, up_msg, comment_prefix);
+                    if (show_hints) try writeWithCommentPrefix(platform_impl, "  (use \"git push\" to publish your local commits)\n", comment_prefix);
                 } else if (behind_count > 0) {
                     const up_msg = try std.fmt.allocPrint(allocator, "Your branch is behind '{s}' by {d} commit{s}, and can be fast-forwarded.\n", .{upstream_display_name, behind_count, if (behind_count > 1) "s" else ""});
                     defer allocator.free(up_msg);
-                    try platform_impl.writeStdout(up_msg);
-                    if (show_hints) try platform_impl.writeStdout("  (use \"git pull\" to update your local branch)\n");
+                    try writeWithCommentPrefix(platform_impl, up_msg, comment_prefix);
+                    if (show_hints) try writeWithCommentPrefix(platform_impl, "  (use \"git pull\" to update your local branch)\n", comment_prefix);
                 }
             }
         }
         
         if (current_commit == null) {
-            try platform_impl.writeStdout("\nNo commits yet\n");
+            try writeWithCommentPrefix(platform_impl, "\nNo commits yet\n", comment_prefix);
         }
     } else if (porcelain and show_branch) {
         // helpers.Check if helpers.HEAD is detached
@@ -549,11 +549,11 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
                 }
             }
         } else {
-            try platform_impl.writeStdout("\nChanges to be committed:\n");
+            try writeWithCommentPrefix(platform_impl, "\nChanges to be committed:\n", comment_prefix);
             if (current_commit == null) {
-                if (show_hints) try platform_impl.writeStdout("  (use \"git rm --cached <file>...\" to unstage)\n");
+                if (show_hints) try writeWithCommentPrefix(platform_impl, "  (use \"git rm --cached <file>...\" to unstage)\n", comment_prefix);
             } else {
-                if (show_hints) try platform_impl.writeStdout("  (use \"git restore --staged <file>...\" to unstage)\n");
+                if (show_hints) try writeWithCommentPrefix(platform_impl, "  (use \"git restore --staged <file>...\" to unstage)\n", comment_prefix);
             }
             
             for (staged_files.items) |entry| {
@@ -569,13 +569,13 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
                     defer allocator.free(rel_path);
                     const msg = try std.fmt.allocPrint(allocator, "\tnew file:   {s}\n", .{rel_path});
                     defer allocator.free(msg);
-                    try platform_impl.writeStdout(msg);
+                    try writeWithCommentPrefix(platform_impl, msg, comment_prefix);
                 } else {
                     const rel_path = try makeRelativePath(allocator, entry.path, prefix);
                     defer allocator.free(rel_path);
                     const msg = try std.fmt.allocPrint(allocator, "\tmodified:   {s}\n", .{rel_path});
                     defer allocator.free(msg);
-                    try platform_impl.writeStdout(msg);
+                    try writeWithCommentPrefix(platform_impl, msg, comment_prefix);
                 }
             }
         }
@@ -590,16 +590,16 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
                 try porcelain_lines.append(try std.fmt.allocPrint(allocator, " M {s}", .{qp}));
             }
         } else {
-            try platform_impl.writeStdout("\nChanges not staged for commit:\n");
-            if (show_hints) try platform_impl.writeStdout("  (use \"git add <file>...\" to update what will be committed)\n");
-            if (show_hints) try platform_impl.writeStdout("  (use \"git restore <file>...\" to discard changes in working directory)\n");
+            try writeWithCommentPrefix(platform_impl, "\nChanges not staged for commit:\n", comment_prefix);
+            if (show_hints) try writeWithCommentPrefix(platform_impl, "  (use \"git add <file>...\" to update what will be committed)\n", comment_prefix);
+            if (show_hints) try writeWithCommentPrefix(platform_impl, "  (use \"git restore <file>...\" to discard changes in working directory)\n", comment_prefix);
             
             for (modified_files.items) |entry| {
                 const rel_path = try makeRelativePath(allocator, entry.path, prefix);
                 defer allocator.free(rel_path);
                 const msg = try std.fmt.allocPrint(allocator, "\tmodified:   {s}\n", .{rel_path});
                 defer allocator.free(msg);
-                try platform_impl.writeStdout(msg);
+                try writeWithCommentPrefix(platform_impl, msg, comment_prefix);
             }
         }
     }
@@ -614,9 +614,9 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             }
         } else {
             if (modified_files.items.len == 0) {
-                try platform_impl.writeStdout("\nChanges not staged for commit:\n");
-                if (show_hints) try platform_impl.writeStdout("  (use \"git add <file>...\" to update what will be committed)\n");
-                if (show_hints) try platform_impl.writeStdout("  (use \"git restore <file>...\" to discard changes in working directory)\n");
+                try writeWithCommentPrefix(platform_impl, "\nChanges not staged for commit:\n", comment_prefix);
+                if (show_hints) try writeWithCommentPrefix(platform_impl, "  (use \"git add <file>...\" to update what will be committed)\n", comment_prefix);
+                if (show_hints) try writeWithCommentPrefix(platform_impl, "  (use \"git restore <file>...\" to discard changes in working directory)\n", comment_prefix);
             }
             
             for (deleted_files.items) |entry| {
@@ -624,7 +624,7 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
                 defer allocator.free(rel_path);
                 const msg = try std.fmt.allocPrint(allocator, "\tdeleted:    {s}\n", .{rel_path});
                 defer allocator.free(msg);
-                try platform_impl.writeStdout(msg);
+                try writeWithCommentPrefix(platform_impl, msg, comment_prefix);
             }
         }
     }
@@ -714,17 +714,17 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
                 try porcelain_lines.append(try std.fmt.allocPrint(allocator, "?? {s}", .{qp}));
             }
         } else {
-            try platform_impl.writeStdout("\nUntracked files:\n");
-            if (show_hints) try platform_impl.writeStdout("  (use \"git add <file>...\" to include in what will be committed)\n");
+            try writeWithCommentPrefix(platform_impl, "\nUntracked files:\n", comment_prefix);
+            if (show_hints) try writeWithCommentPrefix(platform_impl, "  (use \"git add <file>...\" to include in what will be committed)\n", comment_prefix);
             
             for (untracked_files.items) |file| {
                 const rel_path = try makeRelativePath(allocator, file, prefix);
                 defer allocator.free(rel_path);
                 const msg = try std.fmt.allocPrint(allocator, "\t{s}\n", .{rel_path});
                 defer allocator.free(msg);
-                try platform_impl.writeStdout(msg);
+                try writeWithCommentPrefix(platform_impl, msg, comment_prefix);
             }
-            try platform_impl.writeStdout("\n");
+            try writeWithCommentPrefix(platform_impl, "\n", comment_prefix);
         }
     }
 
@@ -767,21 +767,53 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
     if (!porcelain) {
         if (staged_files.items.len == 0 and modified_files.items.len == 0 and deleted_files.items.len == 0 and untracked_files.items.len == 0) {
             if (current_commit == null) {
-                try platform_impl.writeStdout("\nnothing to commit (create/copy files and use \"git add\" to track)\n");
+                try writeWithCommentPrefix(platform_impl, "\nnothing to commit (create/copy files and use \"git add\" to track)\n", comment_prefix);
             } else {
-                try platform_impl.writeStdout("\nnothing to commit, working tree clean\n");
+                try writeWithCommentPrefix(platform_impl, "\nnothing to commit, working tree clean\n", comment_prefix);
             }
         } else if (staged_files.items.len == 0 and modified_files.items.len == 0 and deleted_files.items.len == 0 and untracked_files.items.len > 0) {
-            try platform_impl.writeStdout("nothing added to commit but untracked files present (use \"git add\" to track)\n");
+            try writeWithCommentPrefix(platform_impl, "nothing added to commit but untracked files present (use \"git add\" to track)\n", comment_prefix);
         } else if (staged_files.items.len == 0 and (modified_files.items.len > 0 or deleted_files.items.len > 0)) {
-            try platform_impl.writeStdout("no changes added to commit (use \"git add\" and/or \"git commit -a\")\n");
+            try writeWithCommentPrefix(platform_impl, "no changes added to commit (use \"git add\" and/or \"git commit -a\")\n", comment_prefix);
         }
         if (!show_untracked) {
             if (show_hints) {
-                try platform_impl.writeStdout("\nUntracked files not listed (use -u option to show untracked files)\n");
+                try writeWithCommentPrefix(platform_impl, "\nUntracked files not listed (use -u option to show untracked files)\n", comment_prefix);
             } else {
-                try platform_impl.writeStdout("\nUntracked files not listed\n");
+                try writeWithCommentPrefix(platform_impl, "\nUntracked files not listed\n", comment_prefix);
             }
+        }
+    }
+}
+
+/// Write a string with comment prefix applied to each line.
+/// Empty lines become just the comment char (no trailing space).
+fn writeWithCommentPrefix(platform_impl: anytype, text: []const u8, prefix: []const u8) !void {
+    if (prefix.len == 0) {
+        try platform_impl.writeStdout(text);
+        return;
+    }
+    // We need to prefix each line
+    var start: usize = 0;
+    while (start < text.len) {
+        if (std.mem.indexOfScalarPos(u8, text, start, '\n')) |nl| {
+            if (nl == start) {
+                // Empty line: just comment char + newline
+                try platform_impl.writeStdout(prefix[0..1]); // just '#'
+                try platform_impl.writeStdout("\n");
+            } else {
+                try platform_impl.writeStdout(prefix);
+                try platform_impl.writeStdout(text[start..nl]);
+                try platform_impl.writeStdout("\n");
+            }
+            start = nl + 1;
+        } else {
+            // Last line without newline
+            if (start < text.len) {
+                try platform_impl.writeStdout(prefix);
+                try platform_impl.writeStdout(text[start..]);
+            }
+            break;
         }
     }
 }
