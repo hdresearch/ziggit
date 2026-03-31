@@ -735,9 +735,12 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
         {
             var hp_buf: [std.fs.max_path_bytes]u8 = undefined;
             if (std.fmt.bufPrint(&hp_buf, "{s}/HEAD", .{git_path})) |head_path2| {
-                if (platform_impl.fs.readFile(allocator, head_path2)) |head_data| {
-                    defer allocator.free(head_data);
-                    const trimmed = std.mem.trim(u8, head_data, " \t\r\n");
+                // Direct stack-buffer read (avoids GPA allocation)
+                var head_rd_buf: [256]u8 = undefined;
+                if (std.fs.openFileAbsolute(head_path2, .{})) |f| {
+                    defer f.close();
+                    const n = f.readAll(&head_rd_buf) catch 0;
+                    const trimmed = std.mem.trim(u8, head_rd_buf[0..n], " \t\r\n");
                     if (std.mem.startsWith(u8, trimmed, "ref: refs/heads/")) {
                         const branch = trimmed["ref: refs/heads/".len..];
                         if (branch.len <= old_branch_name_buf.len) {
@@ -747,9 +750,11 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                         // helpers.Resolve to hash
                         var rp_buf: [std.fs.max_path_bytes]u8 = undefined;
                         if (std.fmt.bufPrint(&rp_buf, "{s}/{s}", .{ git_path, trimmed["ref: ".len..] })) |ref_path| {
-                            if (platform_impl.fs.readFile(allocator, ref_path)) |hash_data| {
-                                defer allocator.free(hash_data);
-                                const h = std.mem.trim(u8, hash_data, " \t\r\n");
+                            var ref_rd_buf: [64]u8 = undefined;
+                            if (std.fs.openFileAbsolute(ref_path, .{})) |rf| {
+                                defer rf.close();
+                                const rn = rf.readAll(&ref_rd_buf) catch 0;
+                                const h = std.mem.trim(u8, ref_rd_buf[0..rn], " \t\r\n");
                                 if (h.len >= 40) {
                                     @memcpy(&old_head_hash_buf, h[0..40]);
                                     old_head_hash = &old_head_hash_buf;
@@ -945,15 +950,20 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
             {
                 var hp_buf: [std.fs.max_path_bytes]u8 = undefined;
                 if (std.fmt.bufPrint(&hp_buf, "{s}/HEAD", .{git_path})) |head_path3| {
-                    if (platform_impl.fs.readFile(allocator, head_path3)) |hd| {
-                        defer allocator.free(hd);
-                        const tr = std.mem.trim(u8, hd, " \t\r\n");
+                    // Direct file read into stack buffer (avoids heap alloc)
+                    var head_read_buf: [256]u8 = undefined;
+                    if (std.fs.openFileAbsolute(head_path3, .{})) |f| {
+                        defer f.close();
+                        const n = f.readAll(&head_read_buf) catch 0;
+                        const tr = std.mem.trim(u8, head_read_buf[0..n], " \t\r\n");
                         if (std.mem.startsWith(u8, tr, "ref: ")) {
                             var rp_buf: [std.fs.max_path_bytes]u8 = undefined;
                             if (std.fmt.bufPrint(&rp_buf, "{s}/{s}", .{ git_path, tr["ref: ".len..] })) |rp| {
-                                if (platform_impl.fs.readFile(allocator, rp)) |rd| {
-                                    defer allocator.free(rd);
-                                    const trimmed_rd = std.mem.trim(u8, rd, " \t\r\n");
+                                var ref_read_buf: [64]u8 = undefined;
+                                if (std.fs.openFileAbsolute(rp, .{})) |rf| {
+                                    defer rf.close();
+                                    const rn = rf.readAll(&ref_read_buf) catch 0;
+                                    const trimmed_rd = std.mem.trim(u8, ref_read_buf[0..rn], " \t\r\n");
                                     if (trimmed_rd.len >= 40) {
                                         @memcpy(&new_head_hash_buf, trimmed_rd[0..40]);
                                         new_head_hash = &new_head_hash_buf;
