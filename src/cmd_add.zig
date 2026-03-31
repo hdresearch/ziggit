@@ -222,6 +222,7 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
 
     // helpers.Process all file arguments
     var has_directory_add = false;
+    var had_ignored_file = false;
     for (collected_add_paths.items) |file_path| {
         has_files = true;
         
@@ -321,7 +322,7 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 std.fs.cwd().statFile(full_file_path) catch {
                     // helpers.If we can't stat it (e.g. broken symlink), try to add it
                     addSingleFileEx(allocator, relative_file_path, full_file_path, &index, git_path, platform_impl, repo_root_for_rel, force_flag, true) catch |e| {
-                        if (e == error.IgnoredFile) std.process.exit(1);
+                        if (e == error.IgnoredFile) { had_ignored_file = true; continue; }
                         return e;
                     };
                     continue;
@@ -376,6 +377,23 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                     }
                     has_directory_add = true;
                 } else {
+                    // Check if directory itself is ignored before recursing
+                    if (!force_flag and !is_dot_path) {
+                        const gi_path = try std.fmt.allocPrint(allocator, "{s}/.gitignore", .{repo_root_for_rel});
+                        defer allocator.free(gi_path);
+                        var gi = gitignore_mod.GitIgnore.loadFromFile(allocator, gi_path, platform_impl) catch |err| switch (err) {
+                            error.OutOfMemory => return err,
+                            else => gitignore_mod.GitIgnore.init(allocator),
+                        };
+                        defer gi.deinit();
+                        if (gi.isIgnored(relative_file_path) or isParentDirIgnored(&gi, relative_file_path)) {
+                            const msg = try std.fmt.allocPrint(allocator, "The following paths are ignored by one of your .gitignore files:\n{s}\nhint: Use -f if you really want to add them.\nhint: Turn this message off by running\nhint: \"git config advice.addIgnoredFile false\"\n", .{relative_file_path});
+                            defer allocator.free(msg);
+                            try platform_impl.writeStderr(msg);
+                            had_ignored_file = true;
+                            continue;
+                        }
+                    }
                     // helpers.Add directory recursively
                     try addDirectoryRecursively(allocator, repo_root_for_rel, relative_file_path, &index, git_path, platform_impl);
                     has_directory_add = true;
@@ -386,7 +404,7 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                     try addIntentToAddEntry(allocator, relative_file_path, full_file_path, &index, git_path, platform_impl);
                 } else {
                     addSingleFileEx(allocator, relative_file_path, full_file_path, &index, git_path, platform_impl, repo_root_for_rel, force_flag, true) catch |e| {
-                        if (e == error.IgnoredFile) std.process.exit(1);
+                        if (e == error.IgnoredFile) { had_ignored_file = true; continue; }
                         return e;
                     };
                 }
@@ -431,6 +449,11 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
 
     // helpers.Save index
     try index.save(git_path, platform_impl);
+
+    // If any files were ignored, exit with error after saving index
+    if (had_ignored_file) {
+        std.process.exit(1);
+    }
 }
 
 

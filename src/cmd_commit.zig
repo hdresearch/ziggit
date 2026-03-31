@@ -144,7 +144,11 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     var quiet = false;
     var signoff = false;
     var no_verify = false;
+    var no_edit = false;
+    var trailers = std.array_list.Managed([]const u8).init(allocator);
+    defer trailers.deinit();
     var cleanup_mode: enum { default, verbatim, whitespace, strip, scissors } = .default;
+    var cleanup_explicit = false;
     var author_override: ?[]const u8 = null;
     var msg_source: enum { none, m_flag, f_flag, c_flag } = .none;
     var commit_files = std.array_list.Managed([]const u8).init(allocator);
@@ -258,6 +262,7 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                 message = try allocator.dupe(u8, cobj.data[pos + 2 ..]);
             }
         } else if (std.mem.startsWith(u8, arg, "--cleanup=")) {
+            cleanup_explicit = true;
             const mode_str = arg["--cleanup=".len..];
             if (std.mem.eql(u8, mode_str, "verbatim")) {
                 cleanup_mode = .verbatim;
@@ -280,7 +285,13 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         } else if (std.mem.eql(u8, arg, "--signoff") or std.mem.eql(u8, arg, "-s")) {
             signoff = true;
         } else if (std.mem.eql(u8, arg, "--no-edit")) {
-            // helpers.No edit
+            no_edit = true;
+        } else if (std.mem.eql(u8, arg, "--trailer")) {
+            if (args.next()) |trailer_val| {
+                try trailers.append(trailer_val);
+            }
+        } else if (std.mem.startsWith(u8, arg, "--trailer=")) {
+            try trailers.append(arg["--trailer=".len..]);
         } else if (std.mem.eql(u8, arg, "--date")) {
             if (args.next()) |dv| {
                 const dv_z = try allocator.dupeZ(u8, dv);
@@ -385,6 +396,11 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     if (message == null) {
         try platform_impl.writeStderr("error: no commit message provided (use -m)\n");
         std.process.exit(1);
+    }
+
+    // Adjust default cleanup mode: --no-edit with message from file/merge uses whitespace cleanup
+    if (!cleanup_explicit and cleanup_mode == .default and no_edit and msg_source != .m_flag) {
+        cleanup_mode = .whitespace;
     }
 
     // Apply cleanup mode to the message
@@ -684,6 +700,32 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                 message = try std.fmt.allocPrint(allocator, "{s}\n\n{s}\n", .{trimmed_msg, signoff_line});
             }
         }
+    }
+
+    // Apply --trailer values
+    if (trailers.items.len > 0 and message != null) {
+        const old_msg_t = message.?;
+        const trimmed_msg_t = std.mem.trimRight(u8, old_msg_t, "\n");
+        // Check if message already ends with a trailer-like line
+        const has_trailer_t = blk_t: {
+            if (std.mem.lastIndexOf(u8, trimmed_msg_t, "\n")) |last_nl| {
+                const last_line = trimmed_msg_t[last_nl + 1..];
+                break :blk_t std.mem.indexOf(u8, last_line, ": ") != null;
+            }
+            break :blk_t false;
+        };
+        var trailer_buf = std.array_list.Managed(u8).init(allocator);
+        defer trailer_buf.deinit();
+        try trailer_buf.appendSlice(trimmed_msg_t);
+        if (!has_trailer_t) {
+            try trailer_buf.appendSlice("\n");
+        }
+        for (trailers.items) |trailer| {
+            try trailer_buf.appendSlice("\n");
+            try trailer_buf.appendSlice(trailer);
+        }
+        try trailer_buf.appendSlice("\n");
+        message = try allocator.dupe(u8, trailer_buf.items);
     }
 
     // Check for ignored hooks (non-executable hook files)
