@@ -128,7 +128,7 @@ pub fn nativeCmdCherryPick(allocator: std.mem.Allocator, args: [][]const u8, com
         };
         defer allocator.free(commit_hash);
 
-        const new_hash = cherryPickCommit(git_path, commit_hash, no_commit, allocator, platform_impl) catch |err| {
+        const new_hash = cherryPickCommit(git_path, commit_hash, no_commit, allocator, platform_impl, mainline_parent) catch |err| {
             if (err == error.MergeConflict) {
                 // Write CHERRY_PICK_HEAD
                 const cpp = try std.fmt.allocPrint(allocator, "{s}/CHERRY_PICK_HEAD", .{git_path});
