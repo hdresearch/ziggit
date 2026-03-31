@@ -22,11 +22,15 @@ const build_options = @import("build_options");
 const version_mod = @import("version.zig");
 const wildmatch_mod = @import("wildmatch.zig");
 
-pub fn cmdStatus(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform, _: [][]const u8) !void {
+pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform, _: [][]const u8) !void {
     if (@import("builtin").target.os.tag == .freestanding) {
         try platform_impl.writeStderr("status: not supported in freestanding mode\n");
         return;
     }
+    const allocator = if (comptime @import("builtin").target.os.tag != .freestanding and @import("builtin").target.os.tag != .wasi)
+        std.heap.c_allocator
+    else
+        passed_allocator;
 
     // helpers.Check for flags
     var porcelain = false;
