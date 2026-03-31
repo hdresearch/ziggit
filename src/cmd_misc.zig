@@ -182,6 +182,7 @@ pub fn nativeCmdRevert(allocator: std.mem.Allocator, args: [][]const u8, command
 
     var positionals = std.array_list.Managed([]const u8).init(allocator);
     defer positionals.deinit();
+    var mainline_parent: ?u32 = null;
 
     var iter_idx: usize = command_index + 1;
     while (iter_idx < args.len) : (iter_idx += 1) {
@@ -224,6 +225,13 @@ pub fn nativeCmdRevert(allocator: std.mem.Allocator, args: [][]const u8, command
             return;
         } else if (std.mem.eql(u8, arg, "--no-edit") or std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--no-commit")) {
             // accept
+        } else if (std.mem.eql(u8, arg, "-m") or std.mem.eql(u8, arg, "--mainline")) {
+            iter_idx += 1;
+            if (iter_idx < args.len) {
+                mainline_parent = std.fmt.parseInt(u32, args[iter_idx], 10) catch null;
+            }
+        } else if (std.mem.startsWith(u8, arg, "-m") and arg.len > 2) {
+            mainline_parent = std.fmt.parseInt(u32, arg[2..], 10) catch null;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             try positionals.append(arg);
         }
@@ -285,16 +293,19 @@ pub fn nativeCmdRevert(allocator: std.mem.Allocator, args: [][]const u8, command
         defer commit_obj.deinit(allocator);
 
         var ct: ?[]const u8 = null;
-        var pt2: ?[]const u8 = null;
+        var parents_list = std.array_list.Managed([]const u8).init(allocator);
+        defer parents_list.deinit();
         var li = std.mem.splitSequence(u8, commit_obj.data, "\n");
         while (li.next()) |line| {
             if (line.len == 0) break;
             if (std.mem.startsWith(u8, line, "tree ")) ct = line["tree ".len..];
-            if (std.mem.startsWith(u8, line, "parent ") and pt2 == null) pt2 = line["parent ".len..];
+            if (std.mem.startsWith(u8, line, "parent ")) try parents_list.append(line["parent ".len..]);
         }
 
         const commit_tree = ct orelse continue;
-        const parent_tree = pt2 orelse continue;
+        // Select parent based on -m option (1-based index)
+        const parent_idx: usize = if (mainline_parent) |mp| @as(usize, mp) - 1 else 0;
+        const parent_tree = if (parent_idx < parents_list.items.len) parents_list.items[parent_idx] else if (parents_list.items.len > 0) parents_list.items[0] else continue;
         const current_hash = (refs.getCurrentCommit(git_path, platform_impl, allocator) catch null) orelse continue;
         defer allocator.free(current_hash);
         const cur_obj = objects.GitObject.load(current_hash, git_path, platform_impl, allocator) catch continue;
