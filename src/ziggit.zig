@@ -71,8 +71,12 @@ pub const Repository = struct {
             allocator.free(abs_path);
             return error.NotAGitRepository;
         };
-        const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_dir});
-        defer allocator.free(head_path);
+        var head_path_buf2: [std.fs.max_path_bytes]u8 = undefined;
+        const head_path = std.fmt.bufPrint(&head_path_buf2, "{s}/HEAD", .{git_dir}) catch {
+            allocator.free(abs_path);
+            allocator.free(git_dir);
+            return error.NotAGitRepository;
+        };
         std.fs.accessAbsolute(head_path, .{}) catch {
             allocator.free(abs_path);
             allocator.free(git_dir);
@@ -3803,28 +3807,35 @@ fn parseTzOffsetValue(tz: []const u8) i32 {
 }
 
 fn findGitDir(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
-    // First check for .git subdirectory (normal repository)
-    const git_dir = try std.fmt.allocPrint(allocator, "{s}/.git", .{path});
+    // Use stack buffer for probing, only allocate the result
+    var probe_buf: [std.fs.max_path_bytes]u8 = undefined;
     
-    std.fs.accessAbsolute(git_dir, .{}) catch |err| switch (err) {
-        error.FileNotFound => {
+    // First check for .git subdirectory (normal repository)
+    const git_probe = std.fmt.bufPrint(&probe_buf, "{s}/.git", .{path}) catch {
+        // Path too long — fall back to heap
+        const git_dir = try std.fmt.allocPrint(allocator, "{s}/.git", .{path});
+        std.fs.accessAbsolute(git_dir, .{}) catch {
             allocator.free(git_dir);
+            return error.NotAGitRepository;
+        };
+        return git_dir;
+    };
+    
+    std.fs.accessAbsolute(git_probe, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
             // Check if path itself is a bare repository (has HEAD file directly)
-            const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{path});
-            defer allocator.free(head_path);
-            std.fs.accessAbsolute(head_path, .{}) catch {
+            const head_probe = std.fmt.bufPrint(&probe_buf, "{s}/HEAD", .{path}) catch
+                return error.NotAGitRepository;
+            std.fs.accessAbsolute(head_probe, .{}) catch {
                 return error.NotAGitRepository;
             };
             // Looks like a bare repo — the git dir is the path itself
             return try allocator.dupe(u8, path);
         },
-        else => {
-            allocator.free(git_dir);
-            return err;
-        },
+        else => return err,
     };
 
-    return git_dir;
+    return try allocator.dupe(u8, git_probe);
 }
 
 fn createGitRepository(allocator: std.mem.Allocator, repo_path: []const u8, git_dir: []const u8, bare: bool) !void {
