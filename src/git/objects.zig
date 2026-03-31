@@ -3343,13 +3343,18 @@ pub fn fixThinPack(pack_data: []const u8, git_dir: []const u8, platform_impl: an
             }
         }
         
-        // Skip compressed data by decompressing (to find the end)
+        // Skip compressed data — use fast C zlib skip (avoids output allocation)
         if (pos < content_end) {
-            var decompressed = std.array_list.Managed(u8).init(allocator);
-            defer decompressed.deinit();
-            var stream = std.io.fixedBufferStream(pack_data[pos..content_end]);
-            zlib_compat.decompress(stream.reader(), decompressed.writer()) catch {};
-            pos += @as(usize, @intCast(stream.pos));
+            if (cSkipZlib(pack_data[pos..content_end])) |consumed| {
+                pos += consumed;
+            } else {
+                // Fallback to streaming decompress
+                var decompressed = std.array_list.Managed(u8).init(allocator);
+                defer decompressed.deinit();
+                var stream = std.io.fixedBufferStream(pack_data[pos..content_end]);
+                zlib_compat.decompress(stream.reader(), decompressed.writer()) catch {};
+                pos += @as(usize, @intCast(stream.pos));
+            }
         }
         
         obj_idx += 1;
@@ -3645,18 +3650,27 @@ pub fn generatePackIndex(pack_data: []const u8, allocator: std.mem.Allocator) ![
             }
         }
         
-        // Decompress object data to find end of zlib stream and compute SHA-1
+        // Decompress object data using fast C zlib with consumed byte tracking
         const compressed_start = pos;
-        var decompressed = std.array_list.Managed(u8).init(allocator);
-        defer decompressed.deinit();
-        
-        var stream = std.io.fixedBufferStream(pack_data[pos..content_end]);
-        zlib_compat.decompress(stream.reader(), decompressed.writer()) catch {
-            // If decompression fails, skip this object
-            obj_idx += 1;
-            continue;
+        const decomp_result = cDecompressWithConsumed(allocator, pack_data[pos..content_end], size) orelse blk: {
+            // Fallback to streaming decompress
+            var decompressed_fb = std.array_list.Managed(u8).init(allocator);
+            var stream_fb = std.io.fixedBufferStream(pack_data[pos..content_end]);
+            zlib_compat.decompress(stream_fb.reader(), decompressed_fb.writer()) catch {
+                decompressed_fb.deinit();
+                obj_idx += 1;
+                continue;
+            };
+            const consumed_fb = @as(usize, @intCast(stream_fb.pos));
+            break :blk .{ .data = decompressed_fb.toOwnedSlice() catch {
+                decompressed_fb.deinit();
+                obj_idx += 1;
+                continue;
+            }, .consumed = consumed_fb };
         };
-        pos = compressed_start + @as(usize, @intCast(stream.pos));
+        const decompressed_data = decomp_result.data;
+        defer allocator.free(decompressed_data);
+        pos = compressed_start + decomp_result.consumed;
         
         // Compute CRC32 of the raw pack data for this object (from obj_start to pos)
         const crc = std.hash.crc.Crc32IsoHdlc.hash(pack_data[obj_start..pos]);
@@ -3665,7 +3679,7 @@ pub fn generatePackIndex(pack_data: []const u8, allocator: std.mem.Allocator) ![
         var obj_sha1: [20]u8 = undefined;
         
         if (pack_type_num >= 1 and pack_type_num <= 4) {
-            // Regular object: hash = SHA1("type size\0data")
+            // Regular object: hash = SHA1("type size\0data") — use stack buffer for header
             const type_str: []const u8 = switch (pack_type_num) {
                 1 => "commit",
                 2 => "tree",
@@ -3673,12 +3687,15 @@ pub fn generatePackIndex(pack_data: []const u8, allocator: std.mem.Allocator) ![
                 4 => "tag",
                 else => unreachable,
             };
-            const header = try std.fmt.allocPrint(allocator, "{s} {}\x00", .{ type_str, decompressed.items.len });
-            defer allocator.free(header);
+            var hdr_buf: [64]u8 = undefined;
+            const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ type_str, decompressed_data.len }) catch {
+                obj_idx += 1;
+                continue;
+            };
             
             var sha_hasher = std.crypto.hash.Sha1.init(.{});
             sha_hasher.update(header);
-            sha_hasher.update(decompressed.items);
+            sha_hasher.update(decompressed_data);
             sha_hasher.final(&obj_sha1);
         } else if (pack_type_num == 6) {
             // OFS_DELTA: resolve base, apply delta, hash result
@@ -3688,15 +3705,18 @@ pub fn generatePackIndex(pack_data: []const u8, allocator: std.mem.Allocator) ![
                     continue;
                 };
                 defer base_obj.deinit(allocator);
-                const result_data = applyDelta(base_obj.data, decompressed.items, allocator) catch {
+                const result_data = applyDelta(base_obj.data, decompressed_data, allocator) catch {
                     obj_idx += 1;
                     continue;
                 };
                 defer allocator.free(result_data);
                 
                 const type_str = base_obj.type.toString();
-                const header = try std.fmt.allocPrint(allocator, "{s} {}\x00", .{ type_str, result_data.len });
-                defer allocator.free(header);
+                var hdr_buf: [64]u8 = undefined;
+                const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ type_str, result_data.len }) catch {
+                    obj_idx += 1;
+                    continue;
+                };
                 var sha_hasher = std.crypto.hash.Sha1.init(.{});
                 sha_hasher.update(header);
                 sha_hasher.update(result_data);
@@ -3722,15 +3742,18 @@ pub fn generatePackIndex(pack_data: []const u8, allocator: std.mem.Allocator) ![
                         continue;
                     };
                     defer base_obj.deinit(allocator);
-                    const result_data = applyDelta(base_obj.data, decompressed.items, allocator) catch {
+                    const result_data = applyDelta(base_obj.data, decompressed_data, allocator) catch {
                         obj_idx += 1;
                         continue;
                     };
                     defer allocator.free(result_data);
                     
                     const type_str = base_obj.type.toString();
-                    const header = try std.fmt.allocPrint(allocator, "{s} {}\x00", .{ type_str, result_data.len });
-                    defer allocator.free(header);
+                    var hdr_buf: [64]u8 = undefined;
+                    const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ type_str, result_data.len }) catch {
+                        obj_idx += 1;
+                        continue;
+                    };
                     var sha_hasher = std.crypto.hash.Sha1.init(.{});
                     sha_hasher.update(header);
                     sha_hasher.update(result_data);
@@ -3764,21 +3787,32 @@ pub fn generatePackIndex(pack_data: []const u8, allocator: std.mem.Allocator) ![
         }
     }.lessThan);
     
-    // Build v2 idx file
+    // Build v2 idx file — pre-allocate to avoid repeated growth
+    const idx_size = 8 + 256 * 4 + @as(usize, entries.items.len) * (20 + 4 + 4) + 40;
     var idx = std.array_list.Managed(u8).init(allocator);
     defer idx.deinit();
+    try idx.ensureTotalCapacity(idx_size);
     
     // Magic + version
     try idx.writer().writeInt(u32, 0xff744f63, .big);
     try idx.writer().writeInt(u32, 2, .big);
     
-    // Fanout table (256 entries)
-    for (0..256) |i| {
-        var count: u32 = 0;
+    // Fanout table — O(n) single pass instead of O(256*n)
+    {
+        var fanout: [256]u32 = undefined;
+        @memset(&fanout, 0);
         for (entries.items) |entry| {
-            if (entry.sha1[0] <= @as(u8, @intCast(i))) count += 1;
+            fanout[entry.sha1[0]] += 1;
         }
-        try idx.writer().writeInt(u32, count, .big);
+        // Convert counts to cumulative sums
+        var cumulative: u32 = 0;
+        for (&fanout) |*f| {
+            cumulative += f.*;
+            f.* = cumulative;
+        }
+        for (fanout) |f| {
+            try idx.writer().writeInt(u32, f, .big);
+        }
     }
     
     // SHA-1 table
