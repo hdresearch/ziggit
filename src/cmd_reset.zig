@@ -7,6 +7,7 @@ const helpers = @import("git_helpers.zig");
 const cmd_reflog = @import("cmd_reflog.zig");
 const cmd_checkout = @import("cmd_checkout.zig");
 const cmd_apply = @import("cmd_apply.zig");
+const hooks = @import("git/hooks.zig");
 
 // Re-export commonly used types from helpers
 const objects = helpers.objects;
@@ -335,6 +336,13 @@ pub fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                 defer allocator.free(reset_msg);
                 platform_impl.writeStdout(reset_msg) catch {};
             }
+
+            // Run post-checkout hook after hard reset
+            // Args: previous HEAD, new HEAD, flag=1 (branch checkout)
+            const prev_short = if (old_head_for_reflog) |oh| (if (oh.len >= 40) oh[0..40] else oh) else "0000000000000000000000000000000000000000";
+            const new_short = if (target_hash.len >= 40) target_hash[0..40] else target_hash;
+            const hook_args = [_][]const u8{ prev_short, new_short, "1" };
+            _ = hooks.runHook(allocator, git_path, "post-checkout", &hook_args, null, platform_impl) catch {};
         }
     } else {
         // Unborn branch: reset clears the index (and working tree for --hard)
