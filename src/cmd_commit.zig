@@ -530,6 +530,7 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             try editmsg_buf.appendSlice(" Everything below it will be ignored.\n");
         } else if (cleanup_mode == .strip or cleanup_mode == .default) {
             // Add standard comment block (only when comments will be stripped)
+            try editmsg_buf.append('\n');
             try editmsg_buf.append(ed_comment_char);
             try editmsg_buf.appendSlice(" Please enter the commit message for your changes. Lines starting\n");
             try editmsg_buf.append(ed_comment_char);
