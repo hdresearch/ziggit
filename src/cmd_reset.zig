@@ -259,6 +259,15 @@ pub fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         const old_head_for_reflog = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
         defer if (old_head_for_reflog) |oh| allocator.free(oh);
 
+        // Save ORIG_HEAD before updating HEAD
+        if (old_head_for_reflog) |old_h| {
+            const orig_head_path = try std.fmt.allocPrint(allocator, "{s}/ORIG_HEAD", .{git_path});
+            defer allocator.free(orig_head_path);
+            const orig_content = try std.fmt.allocPrint(allocator, "{s}\n", .{old_h});
+            defer allocator.free(orig_content);
+            std.fs.cwd().writeFile(.{ .sub_path = orig_head_path, .data = orig_content }) catch {};
+        }
+
         // helpers.Update helpers.HEAD to point to the target commit
         try helpers.updateHead(git_path, target_hash, platform_impl, allocator);
 
