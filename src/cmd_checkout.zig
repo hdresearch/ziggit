@@ -999,6 +999,37 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
             }
         };
 
+        // Apply smudge filters to checked-out files (LFS support)
+        // repo.checkout() writes raw blob content; we need to re-process files
+        // that have filter attributes configured.
+        apply_smudge: {
+            const repo_root_sm = if (std.mem.endsWith(u8, git_path, "/.git")) git_path[0 .. git_path.len - 5] else std.fs.path.dirname(git_path) orelse ".";
+            var idx_sm = index_mod.Index.load(git_path, platform_impl, allocator) catch break :apply_smudge;
+            defer idx_sm.deinit();
+            for (idx_sm.entries.items) |entry| {
+                const filter_name = filter_driver.getFilterName(allocator, entry.path, git_path, platform_impl) orelse continue;
+                defer allocator.free(filter_name);
+                // Only process if smudge (or process) command is configured
+                const smudge_cmd = filter_driver.getSmudgeCommand(allocator, git_path, filter_name);
+                defer if (smudge_cmd) |sc| allocator.free(sc);
+                const process_cmd = filter_driver.getProcessCommand(allocator, git_path, filter_name);
+                defer if (process_cmd) |pc| allocator.free(pc);
+                const has_smudge = smudge_cmd != null;
+                const has_process = process_cmd != null;
+                if (!has_smudge and !has_process) continue;
+                // Read current file content (raw blob written by repo.checkout)
+                const full_path_sm = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root_sm, entry.path }) catch continue;
+                defer allocator.free(full_path_sm);
+                const raw_content = platform_impl.fs.readFile(allocator, full_path_sm) catch continue;
+                defer allocator.free(raw_content);
+                const smudged = filter_driver.applySmudgeFilterWithProcess(allocator, entry.path, raw_content, git_path, platform_impl, &filter_process_cache);
+                defer if (smudged) |s| allocator.free(s);
+                if (smudged) |s| {
+                    platform_impl.fs.writeFile(full_path_sm, s) catch {};
+                }
+            }
+        }
+
         // If we resolved the target to a hash but it was a branch name,
         // ensure HEAD points to the branch as a symbolic ref
         if (resolved_checkout_target != null and !detach) {
