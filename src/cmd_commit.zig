@@ -80,16 +80,13 @@ fn cleanupWhitespace(allocator: std.mem.Allocator, msg: []const u8) ![]const u8 
 }
 
 /// Strip comment lines (starting with #), trailing whitespace, leading/trailing empty lines
-fn cleanupStrip(allocator: std.mem.Allocator, msg: []const u8) ![]const u8 {
-    // Get comment char from config (default '#')
-    var comment_char: u8 = '#';
-    _ = &comment_char; // TODO: read core.commentChar
+fn cleanupStripWithChar(allocator: std.mem.Allocator, msg: []const u8, comment_char: u8) ![]const u8 {
     var all_lines = std.array_list.Managed([]const u8).init(allocator);
     defer all_lines.deinit();
     var lines = std.mem.splitScalar(u8, msg, '\n');
     while (lines.next()) |line| {
-        const trimmed_left = std.mem.trimLeft(u8, line, " \t");
-        if (trimmed_left.len > 0 and trimmed_left[0] == comment_char) continue;
+        // Strip lines starting with comment char
+        if (line.len > 0 and line[0] == comment_char) continue;
         const trimmed = std.mem.trimRight(u8, line, " \t\r");
         try all_lines.append(trimmed);
     }
@@ -115,17 +112,31 @@ fn cleanupStrip(allocator: std.mem.Allocator, msg: []const u8) ![]const u8 {
     return try allocator.dupe(u8, result.items);
 }
 
-/// Strip everything below scissors line, then strip comments
-fn cleanupScissors(allocator: std.mem.Allocator, msg: []const u8) ![]const u8 {
-    // Find scissors line: "# ------------------------ >8 ------------------------"
+/// Strip everything below scissors line (only when it starts at column 0), then apply whitespace cleanup (not comment stripping)
+fn cleanupScissors(allocator: std.mem.Allocator, msg: []const u8, comment_char: u8) ![]const u8 {
+    // Build the scissors marker: "{comment_char} ------------------------ >8 ------------------------"
+    var scissors_buf: [64]u8 = undefined;
+    const scissors_marker = blk: {
+        var i: usize = 0;
+        scissors_buf[i] = comment_char;
+        i += 1;
+        const rest = " ------------------------ >8 ------------------------";
+        @memcpy(scissors_buf[i .. i + rest.len], rest);
+        i += rest.len;
+        break :blk scissors_buf[0..i];
+    };
+    // Find scissors line that starts at column 0 (beginning of line)
     var truncated = msg;
-    if (std.mem.indexOf(u8, msg, "# ------------------------ >8 ------------------------")) |pos| {
-        // Find the start of this line
-        var line_start = pos;
-        while (line_start > 0 and msg[line_start - 1] != '\n') {
-            line_start -= 1;
-        }
-        truncated = msg[0..line_start];
+    var search_pos: usize = 0;
+    while (search_pos < msg.len) {
+        if (std.mem.indexOfPos(u8, msg, search_pos, scissors_marker)) |pos| {
+            // Check if this is at the start of a line
+            if (pos == 0 or msg[pos - 1] == '\n') {
+                truncated = msg[0..if (pos > 0 and msg[pos - 1] == '\n') pos else pos];
+                break;
+            }
+            search_pos = pos + 1;
+        } else break;
     }
     return cleanupWhitespace(allocator, truncated);
 }
@@ -140,12 +151,15 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     var message_parts = std.array_list.Managed([]const u8).init(allocator);
     defer message_parts.deinit();
     var allow_empty = false;
+    var allow_empty_message = false;
     var amend = false;
     var add_all = false;
     var quiet = false;
     var signoff = false;
     var no_verify = false;
     var no_edit = false;
+    var force_edit = false;
+    var status_option: enum { default, yes, no } = .default;
     var trailers = std.array_list.Managed([]const u8).init(allocator);
     defer trailers.deinit();
     var cleanup_mode: enum { default, verbatim, whitespace, strip, scissors } = .default;
@@ -285,6 +299,8 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             no_verify = true;
         } else if (std.mem.eql(u8, arg, "--signoff") or std.mem.eql(u8, arg, "-s")) {
             signoff = true;
+        } else if (std.mem.eql(u8, arg, "--edit") or std.mem.eql(u8, arg, "-e")) {
+            force_edit = true;
         } else if (std.mem.eql(u8, arg, "--no-edit")) {
             no_edit = true;
         } else if (std.mem.eql(u8, arg, "--trailer")) {
@@ -311,7 +327,7 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         } else if (std.mem.startsWith(u8, arg, "--author=")) {
             author_override = arg["--author=".len..];
         } else if (std.mem.eql(u8, arg, "--allow-empty-message")) {
-            allow_empty = true; // Close enough
+            allow_empty_message = true;
         } else if (std.mem.eql(u8, arg, "--")) {
             seen_dashdash = true;
             while (args.next()) |farg| try commit_files.append(farg);
@@ -340,8 +356,10 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                     std.process.exit(128);
                 };
             }
-        } else if (std.mem.eql(u8, arg, "--no-status") or std.mem.eql(u8, arg, "--status")) {
-            // Accept as no-op (affects editor display)
+        } else if (std.mem.eql(u8, arg, "--status")) {
+            status_option = .yes;
+        } else if (std.mem.eql(u8, arg, "--no-status")) {
+            status_option = .no;
         } else if (arg.len > 0 and arg[0] != '-') {
             // Positional argument - could be a file path
             try commit_files.append(arg);
@@ -420,15 +438,236 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         } else |_| {}
     }
 
-    if (message == null) {
+    // Determine if we need to launch an editor
+    const need_editor = (message == null and msg_source == .none) or force_edit;
+    if (need_editor and !no_edit) {
+        // Write COMMIT_EDITMSG and launch editor
+        const editmsg_path = try std.fmt.allocPrint(allocator, "{s}/COMMIT_EDITMSG", .{git_path});
+        defer allocator.free(editmsg_path);
+
+        // Determine comment char early for editor template
+        const ed_comment_char: u8 = ed_cc_blk: {
+            if (helpers.getConfigValueByKey(git_path, "core.commentchar", allocator)) |cc_val| {
+                defer allocator.free(cc_val);
+                if (std.mem.eql(u8, cc_val, "auto")) {
+                    const candidates = "#;@!$%^&|:";
+                    if (message) |msg| {
+                        for (candidates) |c| {
+                            var found = false;
+                            var li = std.mem.splitScalar(u8, msg, '\n');
+                            while (li.next()) |line| {
+                                if (line.len > 0 and line[0] == c) { found = true; break; }
+                            }
+                            if (!found) break :ed_cc_blk c;
+                        }
+                        // All candidates used up
+                        try platform_impl.writeStderr("error: unable to select a comment character that is not used\nin the current commit message\n");
+                        std.process.exit(1);
+                    }
+                    break :ed_cc_blk '#';
+                }
+                if (cc_val.len > 0) break :ed_cc_blk cc_val[0];
+            }
+            break :ed_cc_blk '#';
+        };
+
+        // Build COMMIT_EDITMSG content
+        var editmsg_buf = std.array_list.Managed(u8).init(allocator);
+        defer editmsg_buf.deinit();
+
+        // Add existing message if any
+        if (message) |msg| {
+            try editmsg_buf.appendSlice(msg);
+            if (msg.len > 0 and msg[msg.len - 1] != '\n') try editmsg_buf.append('\n');
+        } else {
+            try editmsg_buf.append('\n');
+        }
+
+        // Determine whether to show status
+        const show_status = switch (status_option) {
+            .yes => true,
+            .no => false,
+            .default => blk_st: {
+                // Check commit.status config
+                if (helpers.getConfigValueByKey(git_path, "commit.status", allocator)) |csv| {
+                    defer allocator.free(csv);
+                    if (std.ascii.eqlIgnoreCase(csv, "false") or std.ascii.eqlIgnoreCase(csv, "no")) {
+                        break :blk_st false;
+                    }
+                }
+                break :blk_st true;
+            },
+        };
+
+        // Add comment block based on cleanup mode
+        if (cleanup_mode == .scissors) {
+            // Scissors mode: add scissors line
+            try editmsg_buf.append(ed_comment_char);
+            try editmsg_buf.appendSlice(" ------------------------ >8 ------------------------\n");
+            try editmsg_buf.append(ed_comment_char);
+            try editmsg_buf.appendSlice(" Do not modify or remove the line above.\n");
+            try editmsg_buf.append(ed_comment_char);
+            try editmsg_buf.appendSlice(" Everything below it will be ignored.\n");
+        } else if (cleanup_mode != .verbatim) {
+            // Add standard comment block
+            try editmsg_buf.append(ed_comment_char);
+            try editmsg_buf.appendSlice(" Please enter the commit message for your changes. Lines starting\n");
+            try editmsg_buf.append(ed_comment_char);
+            try editmsg_buf.appendSlice(" with '");
+            try editmsg_buf.append(ed_comment_char);
+            try editmsg_buf.appendSlice("' will be ignored, and an empty message aborts the commit.\n");
+        }
+
+        // Add author/date/committer info as comments if needed
+        if (cleanup_mode != .verbatim) {
+            // Show author if different from committer
+            const ed_author = if (author_override) |ao| ao else std.posix.getenv("GIT_AUTHOR_NAME");
+            const ed_committer_name = std.posix.getenv("GIT_COMMITTER_NAME");
+            const ed_author_email = std.posix.getenv("GIT_AUTHOR_EMAIL");
+            const ed_committer_email = std.posix.getenv("GIT_COMMITTER_EMAIL");
+            const author_differs = blk_ad: {
+                if (ed_author != null and ed_committer_name != null) {
+                    if (!std.mem.eql(u8, ed_author.?, ed_committer_name.?)) break :blk_ad true;
+                }
+                if (ed_author_email != null and ed_committer_email != null) {
+                    if (!std.mem.eql(u8, ed_author_email.?, ed_committer_email.?)) break :blk_ad true;
+                }
+                break :blk_ad false;
+            };
+            if (author_differs) {
+                try editmsg_buf.append(ed_comment_char);
+                try editmsg_buf.appendSlice(" Author:    ");
+                if (ed_author) |a| try editmsg_buf.appendSlice(a);
+                try editmsg_buf.appendSlice(" <");
+                if (ed_author_email) |e| try editmsg_buf.appendSlice(e);
+                try editmsg_buf.appendSlice(">\n");
+            }
+            // Show date if GIT_AUTHOR_DATE is set
+            if (std.posix.getenv("GIT_AUTHOR_DATE")) |date_str| {
+                try editmsg_buf.append(ed_comment_char);
+                try editmsg_buf.appendSlice(" Date:      ");
+                // Try to format the date nicely
+                try editmsg_buf.appendSlice(date_str);
+                try editmsg_buf.append('\n');
+            }
+        }
+
+        // Add status info (Changes to be committed, etc.)
+        if (show_status and cleanup_mode != .verbatim) {
+            try editmsg_buf.append(ed_comment_char);
+            try editmsg_buf.append('\n');
+
+            // Get current branch
+            const ed_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch "master";
+            defer allocator.free(ed_branch);
+            try editmsg_buf.append(ed_comment_char);
+            try editmsg_buf.appendSlice(" On branch ");
+            try editmsg_buf.appendSlice(ed_branch);
+            try editmsg_buf.append('\n');
+
+            // Show staged changes
+            try editmsg_buf.append(ed_comment_char);
+            try editmsg_buf.appendSlice(" Changes to be committed:\n");
+        }
+
+        // Write COMMIT_EDITMSG
+        try platform_impl.fs.writeFile(editmsg_path, editmsg_buf.items);
+
+        // Launch editor
+        const editor = std.posix.getenv("GIT_EDITOR") orelse
+            std.posix.getenv("VISUAL") orelse
+            std.posix.getenv("EDITOR") orelse blk_ed: {
+                if (helpers.getConfigValueByKey(git_path, "core.editor", allocator)) |ed| {
+                    break :blk_ed @as([]const u8, ed);
+                }
+                break :blk_ed "vi";
+            };
+
+        // Build editor command and run via /bin/sh
+        const editor_cmd = try std.fmt.allocPrint(allocator, "{s} \"{s}\"", .{ editor, editmsg_path });
+        defer allocator.free(editor_cmd);
+
+        const editor_cmd_z = try allocator.dupeZ(u8, editor_cmd);
+        defer allocator.free(editor_cmd_z);
+
+        const sh_path: []const u8 = "/bin/sh";
+        const sh_z = try allocator.dupeZ(u8, sh_path);
+        defer allocator.free(sh_z);
+        const dash_c = try allocator.dupeZ(u8, "-c");
+        defer allocator.free(dash_c);
+        const argv_ptrs = [_][]const u8{ sh_path, "-c", editor_cmd };
+        var child = std.process.Child.init(&argv_ptrs, allocator);
+        child.stdin_behavior = .Inherit;
+        child.stdout_behavior = .Inherit;
+        child.stderr_behavior = .Inherit;
+        const term = child.spawnAndWait() catch |err| {
+            const err_msg = try std.fmt.allocPrint(allocator, "error: could not launch editor: {any}\n", .{err});
+            defer allocator.free(err_msg);
+            try platform_impl.writeStderr(err_msg);
+            std.process.exit(1);
+        };
+        const editor_exit_ok = switch (term) {
+            .Exited => |code| code == 0,
+            else => false,
+        };
+        if (!editor_exit_ok) {
+            try platform_impl.writeStderr("error: There was a problem with the editor.\n");
+            std.process.exit(1);
+        }
+
+        // Read back the edited message
+        message = platform_impl.fs.readFile(allocator, editmsg_path) catch {
+            try platform_impl.writeStderr("error: could not read COMMIT_EDITMSG\n");
+            std.process.exit(1);
+        };
+    } else if (message == null) {
         try platform_impl.writeStderr("error: no commit message provided (use -m)\n");
         std.process.exit(1);
+    }
+
+    // Write COMMIT_EDITMSG even when not using editor (for tests that check it)
+    if (!need_editor or no_edit) {
+        const editmsg_path2 = try std.fmt.allocPrint(allocator, "{s}/COMMIT_EDITMSG", .{git_path});
+        defer allocator.free(editmsg_path2);
+        if (message) |msg| {
+            platform_impl.fs.writeFile(editmsg_path2, msg) catch {};
+        }
     }
 
     // Adjust default cleanup mode: --no-edit with message from file/merge uses whitespace cleanup
     if (!cleanup_explicit and cleanup_mode == .default and no_edit and msg_source != .m_flag) {
         cleanup_mode = .whitespace;
     }
+
+    // Determine comment character from config
+    const comment_char: u8 = blk_cc: {
+        if (helpers.getConfigValueByKey(git_path, "core.commentchar", allocator)) |cc_val| {
+            defer allocator.free(cc_val);
+            if (std.mem.eql(u8, cc_val, "auto")) {
+                // Auto-detect: find a char not used at start of any line in the message
+                const candidates = "#;@!$%^&|:";
+                if (message) |msg| {
+                    for (candidates) |c| {
+                        var found = false;
+                        var lines_iter = std.mem.splitScalar(u8, msg, '\n');
+                        while (lines_iter.next()) |line| {
+                            if (line.len > 0 and line[0] == c) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) break :blk_cc c;
+                    }
+                    // All candidates used up
+                    try platform_impl.writeStderr("error: unable to select a comment character that is not used\nin the current commit message\n");
+                    std.process.exit(1);
+                }
+                break :blk_cc '#';
+            }
+            if (cc_val.len > 0) break :blk_cc cc_val[0];
+        }
+        break :blk_cc '#';
+    };
 
     // Apply cleanup mode to the message
     if (message) |msg| {
@@ -440,17 +679,17 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             },
             .strip, .default => blk: {
                 // Strip comments and trailing whitespace
-                break :blk cleanupStrip(allocator, msg) catch msg;
+                break :blk cleanupStripWithChar(allocator, msg, comment_char) catch msg;
             },
             .scissors => blk: {
-                // Strip everything below scissors line, then strip comments
-                break :blk cleanupScissors(allocator, msg) catch msg;
+                // Strip everything below scissors line
+                break :blk cleanupScissors(allocator, msg, comment_char) catch msg;
             },
         };
     }
 
-    // Check for empty or whitespace-only message (skip in verbatim mode)
-    if (cleanup_mode != .verbatim) {
+    // Check for empty or whitespace-only message (skip in verbatim mode and --allow-empty-message)
+    if (cleanup_mode != .verbatim and !allow_empty_message) {
         if (message) |msg| {
             const trimmed = std.mem.trim(u8, msg, " \t\n\r");
             if (trimmed.len == 0) {
