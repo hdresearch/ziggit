@@ -125,6 +125,33 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                     try platform_impl.writeStdout(msg_dr);
                 }
             }
+        } else {
+            // Dry-run for specific file paths
+            const repo_root_dr2 = if (helpers.global_git_dir_override != null or std.posix.getenv("GIT_DIR") != null)
+                try platform_impl.fs.getCwd(allocator)
+            else
+                try allocator.dupe(u8, std.fs.path.dirname(git_path) orelse ".");
+            defer allocator.free(repo_root_dr2);
+
+            for (collected_add_paths.items) |file_path| {
+                // Compute repo-relative path
+                const cwd_dr = try platform_impl.fs.getCwd(allocator);
+                defer allocator.free(cwd_dr);
+                const abs_path = if (std.fs.path.isAbsolute(file_path))
+                    try allocator.dupe(u8, file_path)
+                else
+                    try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd_dr, file_path });
+                defer allocator.free(abs_path);
+
+                const rel_path = if (repo_root_dr2.len > 0 and !std.mem.eql(u8, repo_root_dr2, ".") and std.mem.startsWith(u8, abs_path, repo_root_dr2))
+                    abs_path[repo_root_dr2.len + 1 ..]
+                else
+                    file_path;
+
+                const msg_dr = try std.fmt.allocPrint(allocator, "add '{s}'\n", .{rel_path});
+                defer allocator.free(msg_dr);
+                try platform_impl.writeStdout(msg_dr);
+            }
         }
         return;
     }
