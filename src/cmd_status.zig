@@ -367,8 +367,7 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
                 if (parent.len == 0) break;
                 const parent_full = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, parent }) catch break;
                 defer allocator.free(parent_full);
-                const parent_z = std.posix.toPosixPath(parent_full) catch break;
-                const lstat_result = std.posix.fstatat(std.posix.AT.FDCWD, &parent_z, std.posix.AT.SYMLINK_NOFOLLOW) catch break;
+                const lstat_result = std.posix.fstatat(std.posix.AT.FDCWD, parent_full, std.posix.AT.SYMLINK_NOFOLLOW) catch break;
                 if ((lstat_result.mode & std.posix.S.IFMT) == std.posix.S.IFLNK) break :file_exists_blk false;
                 path_to_check = parent;
             }
