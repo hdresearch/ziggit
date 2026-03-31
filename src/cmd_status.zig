@@ -968,7 +968,7 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             // -v -v also shows diff of unstaged changes
             // For now just show cached diff
         }
-        var diff_arg_iter = platform_mod.ArgIterator.initFromSlice(diff_args_list.items);
+        var diff_arg_iter = platform_mod.ArgIterator{ .args = diff_args_list.items, .allocator = allocator };
         diff_cmd.cmdDiff(allocator, &diff_arg_iter, platform_impl) catch {};
     }
 }

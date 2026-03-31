@@ -258,7 +258,10 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             else
                 std.fs.cwd().statFile(full_file_path) catch {
                     // helpers.If we can't stat it (e.g. broken symlink), try to add it
-                    try addSingleFile(allocator, relative_file_path, full_file_path, &index, git_path, platform_impl, repo_root_for_rel);
+                    addSingleFileEx(allocator, relative_file_path, full_file_path, &index, git_path, platform_impl, repo_root_for_rel, force_flag, true) catch |e| {
+                        if (e == error.IgnoredFile) std.process.exit(128);
+                        return e;
+                    };
                     continue;
                 };
 
@@ -320,7 +323,10 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 if (intent_to_add) {
                     try addIntentToAddEntry(allocator, relative_file_path, full_file_path, &index, git_path, platform_impl);
                 } else {
-                    try addSingleFile(allocator, relative_file_path, full_file_path, &index, git_path, platform_impl, repo_root_for_rel);
+                    addSingleFileEx(allocator, relative_file_path, full_file_path, &index, git_path, platform_impl, repo_root_for_rel, force_flag, true) catch |e| {
+                        if (e == error.IgnoredFile) std.process.exit(128);
+                        return e;
+                    };
                 }
             }
         }
@@ -414,19 +420,31 @@ fn addIntentToAddEntry(allocator: std.mem.Allocator, relative_path: []const u8, 
 }
 
 pub fn addSingleFile(allocator: std.mem.Allocator, relative_path: []const u8, full_path: []const u8, index: *index_mod.Index, git_path: []const u8, platform_impl: *const platform_mod.Platform, repo_root: []const u8) !void {
+    return addSingleFileEx(allocator, relative_path, full_path, index, git_path, platform_impl, repo_root, false, false);
+}
+
+pub fn addSingleFileEx(allocator: std.mem.Allocator, relative_path: []const u8, full_path: []const u8, index: *index_mod.Index, git_path: []const u8, platform_impl: *const platform_mod.Platform, repo_root: []const u8, force: bool, explicit: bool) !void {
     // helpers.Check if file is ignored
-    const gitignore_path = try std.fmt.allocPrint(allocator, "{s}/.gitignore", .{repo_root});
-    defer allocator.free(gitignore_path);
-    
-    var gitignore = gitignore_mod.GitIgnore.loadFromFile(allocator, gitignore_path, platform_impl) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => gitignore_mod.GitIgnore.init(allocator), // helpers.If there's any issue loading, just use empty gitignore
-    };
-    defer gitignore.deinit();
-    
-    if (gitignore.isIgnored(relative_path)) {
-        // helpers.Just skip ignored files instead of erroring
-        return;
+    if (!force) {
+        const gitignore_path = try std.fmt.allocPrint(allocator, "{s}/.gitignore", .{repo_root});
+        defer allocator.free(gitignore_path);
+        
+        var gitignore = gitignore_mod.GitIgnore.loadFromFile(allocator, gitignore_path, platform_impl) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => gitignore_mod.GitIgnore.init(allocator),
+        };
+        defer gitignore.deinit();
+        
+        if (gitignore.isIgnored(relative_path)) {
+            if (explicit) {
+                // Error out when explicitly adding ignored files
+                const msg = try std.fmt.allocPrint(allocator, "The following paths are ignored by one of your .gitignore files:\n{s}\nhint: Use -f if you really want to add them.\nhint: Turn this message off by running\nhint: \"git config advice.addIgnoredFile false\"\n", .{relative_path});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                return error.IgnoredFile;
+            }
+            return;
+        }
     }
 
     // Emit CRLF conversion warnings before adding
