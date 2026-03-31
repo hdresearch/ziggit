@@ -1414,18 +1414,46 @@ pub fn buildDecorationMap(allocator: std.mem.Allocator, git_path: []const u8, pl
 
     // Add HEAD -> branch decoration
     if (head_hash) |hh| {
+        const branch_name: ?[]const u8 = if (head_ref) |hr| blk: {
+            if (std.mem.startsWith(u8, hr, "refs/heads/")) break :blk hr["refs/heads/".len..];
+            break :blk null;
+        } else null;
         const head_name = blk: {
-            if (head_ref) |hr| {
-                if (std.mem.startsWith(u8, hr, "refs/heads/"))
-                    break :blk std.fmt.allocPrint(allocator, "HEAD -> {s}", .{hr["refs/heads/".len..]}) catch break :blk allocator.dupe(u8, "HEAD") catch return;
-            }
+            if (branch_name) |bn|
+                break :blk std.fmt.allocPrint(allocator, "HEAD -> {s}", .{bn}) catch break :blk allocator.dupe(u8, "HEAD") catch return;
             break :blk allocator.dupe(u8, "HEAD") catch return;
         };
         defer allocator.free(head_name);
         const gop = map.getOrPut(allocator.dupe(u8, hh) catch return) catch return;
         if (gop.found_existing) {
-            const old = gop.value_ptr.*;
-            gop.value_ptr.* = std.fmt.allocPrint(allocator, "{s}, {s}", .{ head_name, old }) catch return;
+            // Remove the branch name from existing decoration (HEAD -> branch already includes it)
+            var old = gop.value_ptr.*;
+            if (branch_name) |bn| {
+                // Remove "bn" or "bn, " or ", bn" from old string
+                const needle1 = std.fmt.allocPrint(allocator, "{s}, ", .{bn}) catch null;
+                defer if (needle1) |n| allocator.free(n);
+                const needle2 = std.fmt.allocPrint(allocator, ", {s}", .{bn}) catch null;
+                defer if (needle2) |n| allocator.free(n);
+                if (std.mem.eql(u8, old, bn)) {
+                    allocator.free(old);
+                    old = allocator.dupe(u8, "") catch return;
+                } else if (needle1) |n1| {
+                    if (std.mem.indexOf(u8, old, n1)) |pos| {
+                        const new_old = std.fmt.allocPrint(allocator, "{s}{s}", .{ old[0..pos], old[pos + n1.len..] }) catch old;
+                        if (new_old.ptr != old.ptr) { allocator.free(old); old = new_old; }
+                    } else if (needle2) |n2| {
+                        if (std.mem.indexOf(u8, old, n2)) |pos| {
+                            const new_old = std.fmt.allocPrint(allocator, "{s}{s}", .{ old[0..pos], old[pos + n2.len..] }) catch old;
+                            if (new_old.ptr != old.ptr) { allocator.free(old); old = new_old; }
+                        }
+                    }
+                }
+            }
+            if (old.len > 0) {
+                gop.value_ptr.* = std.fmt.allocPrint(allocator, "{s}, {s}", .{ head_name, old }) catch return;
+            } else {
+                gop.value_ptr.* = allocator.dupe(u8, head_name) catch return;
+            }
             allocator.free(old);
             allocator.free(gop.key_ptr.*);
             gop.key_ptr.* = allocator.dupe(u8, hh) catch return;
