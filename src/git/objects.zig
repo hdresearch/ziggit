@@ -415,9 +415,9 @@ pub fn cCompressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     var dest_len: c_ulong = @intCast(dest.len);
     const ret = compress_fn(dest.ptr, &dest_len, input.ptr, @intCast(input.len));
     if (ret != 0) return error.CompressionFailed;
-    const result = try allocator.dupe(u8, dest[0..@intCast(dest_len)]);
-    allocator.free(dest);
-    return result;
+    const actual_len = @as(usize, @intCast(dest_len));
+    // Shrink in place instead of alloc+copy+free
+    return allocator.realloc(dest, actual_len) catch dest[0..actual_len];
 }
 
 // ============================================================
