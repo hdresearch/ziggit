@@ -3452,14 +3452,18 @@ const ReflogInfo = struct {
 };
 
 fn writeFormattedCommit(format: []const u8, hash: []const u8, data: []const u8, pi: *const pm.Platform, allocator: std.mem.Allocator) !void {
-    return writeFormattedCommitInner(format, hash, data, pi, allocator, null);
+    return writeFormattedCommitInner(format, hash, data, pi, allocator, null, null);
+}
+
+fn writeFormattedCommitWithDecorations(format: []const u8, hash: []const u8, data: []const u8, pi: *const pm.Platform, allocator: std.mem.Allocator, decorations: ?*const std.StringHashMap([]const u8)) !void {
+    return writeFormattedCommitInner(format, hash, data, pi, allocator, null, decorations);
 }
 
 fn writeFormattedCommitWithReflog(format: []const u8, hash: []const u8, data: []const u8, pi: *const pm.Platform, allocator: std.mem.Allocator, reflog_info: *const ReflogInfo) !void {
-    return writeFormattedCommitInner(format, hash, data, pi, allocator, reflog_info);
+    return writeFormattedCommitInner(format, hash, data, pi, allocator, reflog_info, null);
 }
 
-fn writeFormattedCommitInner(format: []const u8, hash: []const u8, data: []const u8, pi: *const pm.Platform, allocator: std.mem.Allocator, reflog_info: ?*const ReflogInfo) !void {
+fn writeFormattedCommitInner(format: []const u8, hash: []const u8, data: []const u8, pi: *const pm.Platform, allocator: std.mem.Allocator, reflog_info: ?*const ReflogInfo, decorations: ?*const std.StringHashMap([]const u8)) !void {
     // Parse commit fields
     var tree_hash: []const u8 = "";
     var parent_hashes_list = std.array_list.Managed([]const u8).init(allocator);
@@ -3592,10 +3596,22 @@ fn writeFormattedCommitInner(format: []const u8, hash: []const u8, data: []const
                 }
                 i += 3;
             } else if (c == 'd') {
-                // %d = decorations (simplified - empty)
+                // %d = decorations with wrapping: " (ref1, ref2)"
+                if (decorations) |decor_map| {
+                    if (decor_map.get(hash)) |decor_str| {
+                        try output.appendSlice(" (");
+                        try output.appendSlice(decor_str);
+                        try output.append(')');
+                    }
+                }
                 i += 2;
             } else if (c == 'D') {
-                // %D = decorations without wrapping
+                // %D = decorations without wrapping parentheses
+                if (decorations) |decor_map| {
+                    if (decor_map.get(hash)) |decor_str| {
+                        try output.appendSlice(decor_str);
+                    }
+                }
                 i += 2;
             } else if (c == 'g' and i + 2 < format.len) {
                 const gc = format[i + 2];

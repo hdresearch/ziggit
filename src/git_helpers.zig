@@ -6969,9 +6969,9 @@ pub fn resolveRevision(git_path: []const u8, rev: []const u8, platform_impl: *co
         } else |_| {}
     }
 
-    // Try refs/heads/<rev>
+    // Try refs/tags/<rev> (git searches tags before heads)
     {
-        const ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, rev });
+        const ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags/{s}", .{ git_path, rev });
         defer allocator.free(ref_path);
         if (platform_impl.fs.readFile(allocator, ref_path)) |content| {
             defer allocator.free(content);
@@ -6980,9 +6980,9 @@ pub fn resolveRevision(git_path: []const u8, rev: []const u8, platform_impl: *co
         } else |_| {}
     }
 
-    // Try refs/tags/<rev>
+    // Try refs/heads/<rev>
     {
-        const ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/tags/{s}", .{ git_path, rev });
+        const ref_path = try std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, rev });
         defer allocator.free(ref_path);
         if (platform_impl.fs.readFile(allocator, ref_path)) |content| {
             defer allocator.free(content);
@@ -7039,7 +7039,7 @@ pub fn resolveRevision(git_path: []const u8, rev: []const u8, platform_impl: *co
         if (platform_impl.fs.readFile(allocator, packed_refs_path)) |packed_content| {
             defer allocator.free(packed_content);
             // Try different ref prefixes in packed-refs
-            const prefixes = [_][]const u8{ "refs/heads/", "refs/tags/", "refs/remotes/", "refs/", "" };
+            const prefixes = [_][]const u8{ "refs/", "refs/tags/", "refs/heads/", "refs/remotes/", "" };
             for (prefixes) |prefix| {
                 const full_ref = try std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, rev });
                 defer allocator.free(full_ref);
