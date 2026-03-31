@@ -70,6 +70,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     var diff_filter: ?[]const u8 = null;
     var no_renames = false;
     var has_rev_input = false; // true if --branches/--tags/--remotes/--all/--stdin/committish given
+    var ignore_missing = false;
 
     // helpers.Parse arguments
     while (args.next()) |arg| {
@@ -183,9 +184,12 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             // Accept --default=<rev> (used as fallback when no rev given)
         } else if (std.mem.eql(u8, arg, "--default")) {
             _ = args.next(); // consume value
-        } else if (std.mem.startsWith(u8, arg, "--branches") or std.mem.startsWith(u8, arg, "--tags=") or std.mem.startsWith(u8, arg, "--remotes=") or std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "--ignore-missing") or std.mem.eql(u8, arg, "--stdin")) {
+        } else if (std.mem.startsWith(u8, arg, "--branches") or std.mem.startsWith(u8, arg, "--tags=") or std.mem.startsWith(u8, arg, "--remotes=") or std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "--stdin")) {
             has_rev_input = true;
             // Accept but don't fully implement yet
+        } else if (std.mem.eql(u8, arg, "--ignore-missing")) {
+            has_rev_input = true;
+            ignore_missing = true;
         } else if (std.mem.eql(u8, arg, "--exclude-promisor-objects")) {
             // Accept but ignore (no partial clone support)
         } else if (std.mem.eql(u8, arg, "--no-renames")) {
@@ -304,6 +308,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     if (committish) |commit_ref| {
         // helpers.Try to resolve committish (branch, tag, or commit hash)
         start_commit = helpers.resolveCommittish(git_path, commit_ref, platform_impl, allocator) catch {
+            if (ignore_missing) return; // Silently skip missing object
             const msg = try std.fmt.allocPrint(allocator, "fatal: ambiguous argument '{s}': unknown revision or path not in the working tree.\n", .{commit_ref});
             defer allocator.free(msg);
             try platform_impl.writeStderr(msg);
