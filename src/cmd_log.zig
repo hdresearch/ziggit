@@ -71,6 +71,11 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     var no_renames = false;
     var has_rev_input = false; // true if --branches/--tags/--remotes/--all/--stdin/committish given
     var ignore_missing = false;
+    var decorate_refs_include = std.array_list.Managed([]const u8).init(allocator);
+    defer decorate_refs_include.deinit();
+    var decorate_refs_exclude = std.array_list.Managed([]const u8).init(allocator);
+    defer decorate_refs_exclude.deinit();
+    var clear_decorations = false;
 
     // helpers.Parse arguments
     while (args.next()) |arg| {
@@ -192,6 +197,14 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             ignore_missing = true;
         } else if (std.mem.eql(u8, arg, "--exclude-promisor-objects")) {
             // Accept but ignore (no partial clone support)
+        } else if (std.mem.startsWith(u8, arg, "--decorate-refs=")) {
+            try decorate_refs_include.append(arg["--decorate-refs=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "--decorate-refs-exclude=")) {
+            try decorate_refs_exclude.append(arg["--decorate-refs-exclude=".len..]);
+        } else if (std.mem.eql(u8, arg, "--clear-decorations")) {
+            clear_decorations = true;
+            decorate_refs_include.clearRetainingCapacity();
+            decorate_refs_exclude.clearRetainingCapacity();
         } else if (std.mem.eql(u8, arg, "--no-renames")) {
             no_renames = true;
         } else if (std.mem.eql(u8, arg, "--find-renames") or std.mem.eql(u8, arg, "--find-copies") or std.mem.eql(u8, arg, "--find-copies-harder") or std.mem.eql(u8, arg, "--name-only") or std.mem.eql(u8, arg, "--name-status") or std.mem.eql(u8, arg, "--stat") or std.mem.eql(u8, arg, "--numstat") or std.mem.eql(u8, arg, "--shortstat") or std.mem.eql(u8, arg, "--dirstat") or std.mem.eql(u8, arg, "--summary") or std.mem.eql(u8, arg, "--raw") or std.mem.eql(u8, arg, "--no-stat") or std.mem.eql(u8, arg, "--patch") or std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--no-patch") or std.mem.eql(u8, arg, "-s")) {
@@ -1191,6 +1204,10 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         }
         if (needs_decor) {
             helpers.buildDecorationMap(allocator, git_path, platform_impl, &decoration_map) catch {};
+            // Apply --decorate-refs / --decorate-refs-exclude / --clear-decorations filtering
+            if (clear_decorations or decorate_refs_include.items.len > 0 or decorate_refs_exclude.items.len > 0) {
+                helpers.filterDecorationMap(allocator, &decoration_map, decorate_refs_include.items, decorate_refs_exclude.items, clear_decorations) catch {};
+            }
         }
     }
 
