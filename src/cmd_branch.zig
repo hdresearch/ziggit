@@ -83,6 +83,18 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             }
         }
     }
+    // Read core.abbrev from config if not explicitly set via --abbrev
+    if (abbrev_len == null) {
+        if (helpers.getConfigValueByKey(git_path, "core.abbrev", allocator)) |abbrev_val| {
+            defer allocator.free(abbrev_val);
+            if (std.mem.eql(u8, abbrev_val, "no")) {
+                abbrev_len = 40;
+            } else if (std.fmt.parseInt(usize, abbrev_val, 10)) |n| {
+                abbrev_len = if (n < 4) 4 else n;
+            } else |_| {}
+        }
+    }
+
     // Reconstruct arg iterator from remaining args
     var arg_idx: usize = 0;
     const ArgIter = struct {
@@ -366,6 +378,28 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                 defer allocator.free(success_msg);
                 try platform_impl.writeStdout(success_msg);
             } else {
+                // Read branch target before deleting (for the "was ..." message)
+                const was_info: []const u8 = blk_was: {
+                    const ref_path = std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, branch_name }) catch break :blk_was try allocator.dupe(u8, "");
+                    defer allocator.free(ref_path);
+                    const content = std.fs.cwd().readFileAlloc(allocator, ref_path, 4096) catch break :blk_was try allocator.dupe(u8, "");
+                    const trimmed = std.mem.trimRight(u8, content, "\r\n");
+                    if (std.mem.startsWith(u8, trimmed, "ref: ")) {
+                        // Symref - show the target ref
+                        const result = try allocator.dupe(u8, trimmed[5..]);
+                        allocator.free(content);
+                        break :blk_was result;
+                    } else if (trimmed.len >= 7) {
+                        // Normal ref - show short hash
+                        const result = try allocator.dupe(u8, trimmed[0..7]);
+                        allocator.free(content);
+                        break :blk_was result;
+                    }
+                    allocator.free(content);
+                    break :blk_was try allocator.dupe(u8, "");
+                };
+                defer allocator.free(was_info);
+
                 refs.deleteBranch(git_path, branch_name, platform_impl, allocator) catch |err| switch (err) {
                     error.FileNotFound => {
                         const msg = try std.fmt.allocPrint(allocator, "error: branch '{s}' not found.\n", .{branch_name});
@@ -392,7 +426,10 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                         }
                     }
                 }
-                const success_msg = try std.fmt.allocPrint(allocator, "Deleted branch {s}.\n", .{branch_name});
+                const success_msg = if (was_info.len > 0)
+                    try std.fmt.allocPrint(allocator, "Deleted branch {s} (was {s}).\n", .{ branch_name, was_info })
+                else
+                    try std.fmt.allocPrint(allocator, "Deleted branch {s}.\n", .{branch_name});
                 defer allocator.free(success_msg);
                 try platform_impl.writeStdout(success_msg);
             }
