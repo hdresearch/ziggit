@@ -6,6 +6,7 @@ const platform_mod = @import("platform/platform.zig");
 const helpers = @import("git_helpers.zig");
 const crlf_mod = @import("crlf.zig");
 const check_attr = @import("cmd_check_attr.zig");
+const filter_driver = @import("git/filter_driver.zig");
 
 // Re-export commonly used types from helpers
 const objects = helpers.objects;
@@ -597,8 +598,20 @@ pub fn addSingleFileEx(allocator: std.mem.Allocator, relative_path: []const u8, 
     emitCrlfWarning(allocator, relative_path, full_path, git_path, platform_impl, is_new_file) catch {};
 
     // Apply CRLF→LF normalization for text files
-    const filtered = applyCrlfNormalization(allocator, relative_path, full_path, git_path, platform_impl);
+    var filtered = applyCrlfNormalization(allocator, relative_path, full_path, git_path, platform_impl);
     defer if (filtered) |f| allocator.free(f);
+
+    // Apply clean filter from .gitattributes (filter=<name>)
+    {
+        const content_for_filter = if (filtered) |f| f else platform_impl.fs.readFile(allocator, full_path) catch null;
+        defer if (filtered == null) { if (content_for_filter) |c| allocator.free(c); };
+        if (content_for_filter) |content| {
+            if (filter_driver.applyCleanFilter(allocator, relative_path, content, git_path, platform_impl)) |clean_out| {
+                if (filtered) |f| allocator.free(f);
+                filtered = clean_out;
+            }
+        }
+    }
 
     // helpers.Add to index
     index.addFiltered(relative_path, full_path, platform_impl, git_path, filtered) catch |err| switch (err) {
