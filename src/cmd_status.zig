@@ -43,6 +43,7 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
     var show_stash = false;
     var show_stash_explicit = false;
     var show_ignored = false;
+    var ignore_submodules: enum { none, untracked, dirty, all } = .none;
     var show_untracked = true; // default: show untracked files
     var untracked_explicit = false;
     var untracked_all = false; // false = normal (collapse dirs), true = all (show individual files)
@@ -125,6 +126,14 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             // Rename detection - accept as no-op
         } else if (std.mem.eql(u8, arg, "--ahead-behind") or std.mem.eql(u8, arg, "--no-ahead-behind")) {
             // Ahead/behind display - accept as no-op
+        } else if (std.mem.eql(u8, arg, "--ignore-submodules") or std.mem.eql(u8, arg, "--ignore-submodules=all")) {
+            ignore_submodules = .all;
+        } else if (std.mem.eql(u8, arg, "--ignore-submodules=dirty")) {
+            ignore_submodules = .dirty;
+        } else if (std.mem.eql(u8, arg, "--ignore-submodules=untracked")) {
+            ignore_submodules = .untracked;
+        } else if (std.mem.eql(u8, arg, "--ignore-submodules=none")) {
+            ignore_submodules = .none;
         } else if (arg.len > 0 and arg[0] != '-') {
             try status_args.append(arg);
         }
@@ -486,6 +495,23 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
         if (!file_exists) {
             // File is in index but not in working directory - it's deleted
             try deleted_files.append(entry);
+        } else if (entry.mode == 0o160000) {
+            // Submodule (gitlink) - skip working tree modification check
+            // Just check if it's different from HEAD
+            if (current_commit == null) {
+                try staged_files.append(entry);
+            } else {
+                const is_different_from_head = blk: {
+                    if (head_tree_map.get(entry.path)) |tree_sha1| {
+                        break :blk !std.mem.eql(u8, &tree_sha1, &entry.sha1);
+                    }
+                    // Not in HEAD tree - it's new (staged)
+                    break :blk true;
+                };
+                if (is_different_from_head) {
+                    try staged_files.append(entry);
+                }
+            }
         } else {
             const working_modified = blk: {
                 // OPTIMIZATION: Fast path using mtime/size before computing SHA-1
@@ -669,11 +695,41 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
         }
     }
 
+    // Build a set of submodule paths (gitlink entries with mode 160000)
+    var submodule_paths = std.StringHashMap(void).init(allocator);
+    defer submodule_paths.deinit();
+    for (index.entries.items) |entry| {
+        if (entry.mode == 0o160000) {
+            submodule_paths.put(entry.path, {}) catch {};
+        }
+    }
+
     // helpers.Find untracked files
     var untracked_files = if (show_untracked)
         helpers.findUntrackedFiles(allocator, repo_root, &index, &gitignore, platform_impl) catch std.array_list.Managed([]u8).init(allocator)
     else
         std.array_list.Managed([]u8).init(allocator);
+
+    // Filter out submodule paths from untracked files
+    if (submodule_paths.count() > 0 and untracked_files.items.len > 0) {
+        var filtered = std.array_list.Managed([]u8).init(allocator);
+        for (untracked_files.items) |file| {
+            // Check if this is a submodule directory (e.g., "sm/" -> check "sm")
+            const check_path = if (file.len > 0 and file[file.len - 1] == '/')
+                file[0 .. file.len - 1]
+            else
+                file;
+            if (submodule_paths.contains(check_path)) {
+                allocator.free(file);
+            } else {
+                filtered.append(file) catch {
+                    allocator.free(file);
+                };
+            }
+        }
+        untracked_files.deinit();
+        untracked_files = filtered;
+    }
 
     // In normal mode (not -uall), collapse untracked directories
     if (!untracked_all and untracked_files.items.len > 0) {
