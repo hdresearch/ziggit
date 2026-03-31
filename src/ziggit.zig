@@ -162,13 +162,9 @@ pub const Repository = struct {
         // Pre-warm index metadata cache for status operations
         self.warmupIndexMetadata() catch {};
         
-        // Pre-warm tags directory cache (NoTagsFound is expected for repos without tags)
-        const tag_result = self.describeTags(self.allocator) catch |err| switch (err) {
-            error.NoTagsFound => return, // Normal — repo has no tags
-            else => return,
-        };
-        // Free the result since we're just warming cache
-        self.allocator.free(tag_result);
+        // Skip describeTags warmup — it's expensive (directory scan + pack reads)
+        // and not needed for the common checkout/findCommit paths.
+        // Tags will be cached lazily on first access.
     }
     
     /// Pre-warm index file metadata to speed up first status check
@@ -1268,8 +1264,8 @@ pub const Repository = struct {
     
     /// Update HEAD for a checkout — if ref is a branch, make HEAD a symbolic ref
     fn updateHeadForCheckout(self: *Repository, ref: []const u8, commit_hash: *const [40]u8) !void {
-        const head_path = try std.fmt.allocPrint(self.allocator, "{s}/HEAD", .{self.git_dir});
-        defer self.allocator.free(head_path);
+        var head_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const head_path = std.fmt.bufPrint(&head_path_buf, "{s}/HEAD", .{self.git_dir}) catch return;
         
         // Check if ref is a branch name
         var ref_path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -2791,12 +2787,20 @@ pub const Repository = struct {
         }
     }
 
-    /// Combined checkout + index building in a single tree walk.
-    /// This avoids reading every tree object twice (once for checkout, once for index).
+    /// Combined checkout + index building in a single tree walk (hex version for root call).
     fn checkoutTreeAndIndex(self: *Repository, tree_hash: *const [40]u8, target_path: []const u8, prefix: []const u8, git_index: *index_parser.GitIndex) !void {
+        var hash_bytes: [20]u8 = undefined;
+        _ = std.fmt.hexToBytes(&hash_bytes, tree_hash) catch return error.InvalidTreeObject;
+        return self.checkoutTreeAndIndexRaw(&hash_bytes, target_path, prefix, git_index);
+    }
+
+    /// Combined checkout + index building using raw 20-byte SHA (avoids hex conversion in recursion).
+    fn checkoutTreeAndIndexRaw(self: *Repository, tree_hash_bytes: *const [20]u8, target_path: []const u8, prefix: []const u8, git_index: *index_parser.GitIndex) !void {
         const fa = self._fast_alloc;
-        const tree_content = self.readObjectContentFromPack(tree_hash) catch blk: {
-            const raw = try self.readRawObject(tree_hash);
+        const tree_content = self.readObjectContentFromPackBytes(tree_hash_bytes) catch blk: {
+            var sha_hex: [40]u8 = undefined;
+            _ = std.fmt.bufPrint(&sha_hex, "{x}", .{tree_hash_bytes}) catch return error.InvalidTreeObject;
+            const raw = self.readRawObject(&sha_hex) catch return error.InvalidTreeObject;
             const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse {
                 fa.free(raw);
                 return error.InvalidTreeObject;
@@ -2840,10 +2844,8 @@ pub const Repository = struct {
                         pos = sha_start + 20;
                         continue;
                     };
-                // For tree recursion, we need hex for readRawObject fallback
-                var sha_hex: [40]u8 = undefined;
-                _ = std.fmt.bufPrint(&sha_hex, "{x}", .{sha20}) catch break;
-                try self.checkoutTreeAndIndex(&sha_hex, subdir_path, subprefix, git_index);
+                // Recurse with raw bytes (avoids hex conversion)
+                try self.checkoutTreeAndIndexRaw(sha20, subdir_path, subprefix, git_index);
             }
             pos = sha_start + 20;
         }
