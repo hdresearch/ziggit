@@ -7,7 +7,28 @@ var zlib_lib: ?std.DynLib = null;
 var zlib_compress_fn: ?*const fn ([*]u8, *c_ulong, [*]const u8, c_ulong) callconv(.c) c_int = null;
 var zlib_compress_bound_fn: ?*const fn (c_ulong) callconv(.c) c_ulong = null;
 var zlib_uncompress_fn: ?*const fn ([*]u8, *c_ulong, [*]const u8, c_ulong) callconv(.c) c_int = null;
+var zlib_inflate_init2_fn: ?*const fn (*ZStream, c_int, [*]const u8, c_int) callconv(.c) c_int = null;
+var zlib_inflate_fn: ?*const fn (*ZStream, c_int) callconv(.c) c_int = null;
+var zlib_inflate_end_fn: ?*const fn (*ZStream) callconv(.c) c_int = null;
 var zlib_init_attempted: bool = false;
+
+/// Minimal z_stream struct for inflate API
+const ZStream = extern struct {
+    next_in: ?[*]const u8,
+    avail_in: c_uint,
+    total_in: c_ulong,
+    next_out: ?[*]u8,
+    avail_out: c_uint,
+    total_out: c_ulong,
+    msg: ?[*]const u8,
+    internal_state: ?*anyopaque,
+    zalloc: ?*anyopaque,
+    zfree: ?*anyopaque,
+    @"opaque": ?*anyopaque,
+    data_type: c_int,
+    adler: c_ulong,
+    reserved: c_ulong,
+};
 
 fn initCZlib() void {
     if (zlib_init_attempted) return;
@@ -26,6 +47,12 @@ fn initCZlib() void {
         zlib_compress_fn = lib.lookup(*const fn ([*]u8, *c_ulong, [*]const u8, c_ulong) callconv(.c) c_int, "compress");
         zlib_compress_bound_fn = lib.lookup(*const fn (c_ulong) callconv(.c) c_ulong, "compressBound");
         zlib_uncompress_fn = lib.lookup(*const fn ([*]u8, *c_ulong, [*]const u8, c_ulong) callconv(.c) c_int, "uncompress");
+        zlib_inflate_init2_fn = blk: {
+            const raw = lib.lookup(*anyopaque, "inflateInit2_") orelse break :blk null;
+            break :blk @ptrCast(@alignCast(raw));
+        };
+        zlib_inflate_fn = lib.lookup(*const fn (*ZStream, c_int) callconv(.c) c_int, "inflate");
+        zlib_inflate_end_fn = lib.lookup(*const fn (*ZStream) callconv(.c) c_int, "inflateEnd");
         return;
     }
 }
@@ -93,6 +120,117 @@ pub fn cDecompressSlice(allocator: std.mem.Allocator, input: []const u8, size_hi
         }
     }
     return null;
+}
+
+/// Decompress using C zlib's inflate API, returning both data and consumed bytes.
+/// This is essential for pack index generation where we need to know exactly how
+/// many compressed bytes each object consumed.
+pub fn cDecompressWithConsumed(allocator: std.mem.Allocator, input: []const u8, size_hint: usize) ?struct { data: []u8, consumed: usize } {
+    initCZlib();
+    const init_fn = zlib_inflate_init2_fn orelse return null;
+    const inflate_fn = zlib_inflate_fn orelse return null;
+    const end_fn = zlib_inflate_end_fn orelse return null;
+
+    var stream: ZStream = std.mem.zeroes(ZStream);
+    // inflateInit2_ with windowBits=15 (zlib format)
+    if (init_fn(&stream, 15, "1.2.13", @sizeOf(ZStream)) != 0) return null;
+
+    stream.next_in = input.ptr;
+    stream.avail_in = @intCast(@min(input.len, std.math.maxInt(c_uint)));
+
+    const out_size = if (size_hint > 0) size_hint else @max(input.len * 4, 4096);
+    const out_buf = allocator.alloc(u8, out_size) catch {
+        _ = end_fn(&stream);
+        return null;
+    };
+
+    stream.next_out = out_buf.ptr;
+    stream.avail_out = @intCast(@min(out_buf.len, std.math.maxInt(c_uint)));
+
+    const Z_FINISH = 4;
+    const Z_STREAM_END = 1;
+    const ret = inflate_fn(&stream, Z_FINISH);
+
+    if (ret == Z_STREAM_END) {
+        const consumed = @as(usize, @intCast(stream.total_in));
+        const produced = @as(usize, @intCast(stream.total_out));
+        _ = end_fn(&stream);
+        // Resize output to actual size
+        if (produced < out_buf.len) {
+            const result = allocator.realloc(out_buf, produced) catch out_buf[0..produced];
+            return .{ .data = result, .consumed = consumed };
+        }
+        return .{ .data = out_buf, .consumed = consumed };
+    }
+
+    // Buffer too small or error - try with larger buffer
+    _ = end_fn(&stream);
+    allocator.free(out_buf);
+
+    // Retry with progressively larger buffers
+    var needed = out_size * 2;
+    var attempts: u8 = 0;
+    while (attempts < 8) : (attempts += 1) {
+        var stream2: ZStream = std.mem.zeroes(ZStream);
+        if (init_fn(&stream2, 15, "1.2.13", @sizeOf(ZStream)) != 0) return null;
+        stream2.next_in = input.ptr;
+        stream2.avail_in = @intCast(@min(input.len, std.math.maxInt(c_uint)));
+        const buf2 = allocator.alloc(u8, needed) catch {
+            _ = end_fn(&stream2);
+            return null;
+        };
+        stream2.next_out = buf2.ptr;
+        stream2.avail_out = @intCast(@min(buf2.len, std.math.maxInt(c_uint)));
+        const ret2 = inflate_fn(&stream2, Z_FINISH);
+        if (ret2 == Z_STREAM_END) {
+            const consumed = @as(usize, @intCast(stream2.total_in));
+            const produced = @as(usize, @intCast(stream2.total_out));
+            _ = end_fn(&stream2);
+            if (produced < buf2.len) {
+                const result = allocator.realloc(buf2, produced) catch buf2[0..produced];
+                return .{ .data = result, .consumed = consumed };
+            }
+            return .{ .data = buf2, .consumed = consumed };
+        }
+        _ = end_fn(&stream2);
+        allocator.free(buf2);
+        needed *= 2;
+    }
+    return null;
+}
+
+/// Skip zlib data using C inflate, returning only consumed bytes (no output allocation).
+pub fn cSkipZlib(input: []const u8) ?usize {
+    initCZlib();
+    const init_fn = zlib_inflate_init2_fn orelse return null;
+    const inflate_fn = zlib_inflate_fn orelse return null;
+    const end_fn = zlib_inflate_end_fn orelse return null;
+
+    var stream: ZStream = std.mem.zeroes(ZStream);
+    if (init_fn(&stream, 15, "1.2.13", @sizeOf(ZStream)) != 0) return null;
+
+    stream.next_in = input.ptr;
+    stream.avail_in = @intCast(@min(input.len, std.math.maxInt(c_uint)));
+
+    // Use a fixed discard buffer — we don't care about the output
+    var discard_buf: [65536]u8 = undefined;
+    const Z_NO_FLUSH = 0;
+    const Z_STREAM_END = 1;
+
+    while (true) {
+        stream.next_out = &discard_buf;
+        stream.avail_out = discard_buf.len;
+        const ret = inflate_fn(&stream, Z_NO_FLUSH);
+        if (ret == Z_STREAM_END) {
+            const consumed = @as(usize, @intCast(stream.total_in));
+            _ = end_fn(&stream);
+            return consumed;
+        }
+        if (ret != 0) { // Z_OK = 0
+            _ = end_fn(&stream);
+            return null;
+        }
+    }
 }
 
 /// Compress data using C zlib (more reliable than Zig flate)
