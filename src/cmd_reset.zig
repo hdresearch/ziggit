@@ -396,11 +396,7 @@ fn resetIndexPaths(git_path: []const u8, commit_hash: []const u8, paths: []const
     var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch index_mod.Index.init(allocator);
     defer idx.deinit();
 
-<<<<<<< HEAD
-    // Build map of old index entries for stat preservation
-=======
     // Build map of old entries for stat preservation
->>>>>>> cd32534 (fix(add,reset): --refresh support, gitignore dir filtering, fix reset old_entries — 10ms (git: 10ms, parity))
     var old_entries = std.StringHashMap(index_mod.IndexEntry).init(allocator);
     defer old_entries.deinit();
     for (idx.entries.items) |entry| {

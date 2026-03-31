@@ -4975,7 +4975,9 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
             defer ewq.deinit();
             try ewq.append(try allocator.dupe(u8, eh));
             while (ewq.items.len > 0) {
-                const ewh = ewq.pop();
+                if (ewq.items.len == 0) break;
+                const ewh = ewq.items[ewq.items.len - 1];
+                ewq.items.len -= 1;
                 if (excluded_set.contains(ewh)) { allocator.free(@constCast(ewh)); continue; }
                 try excluded_set.put(ewh, {});
                 const eobj = objects.GitObject.load(ewh, git_path, pi, allocator) catch continue;
@@ -5012,7 +5014,7 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
 
         var show_count: u32 = 0;
         while (show_q.items.len > 0) {
-            if (lo.max_count) |mc| { if (show_count >= mc) break; }
+            if (lo.max_count) |smc| { if (show_count >= smc) break; }
 
             var best_i: usize = 0;
             for (show_q.items, 0..) |sq, si| {
@@ -5093,7 +5095,7 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
             }
             if (obj.type == .tag) {
                 // Parse and display tag object properly
-                var tlines = std.mem.splitSequence(u8, obj.data, "\n");
+                const tlines = std.mem.splitSequence(u8, obj.data, "\n");
                 var tag_obj_hash: ?[]const u8 = null;
                 var tag_name_val: ?[]const u8 = null;
                 var tagger_val: ?[]const u8 = null;
