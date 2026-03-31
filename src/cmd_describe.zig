@@ -419,6 +419,7 @@ pub fn findTagInHistoryWithDistance(git_path: []const u8, start_hash: []const u8
     // distance = number of commits reachable from HEAD but not from the tag
     // This is equivalent to |rev-list tag..HEAD|
     var best_tag: ?helpers.TagWithDistance = null;
+    var best_depth: u32 = std.math.maxInt(u32);
 
     for (found_tags.items) |ft| {
         // Compute commits reachable from tag
@@ -464,8 +465,10 @@ pub fn findTagInHistoryWithDistance(git_path: []const u8, start_hash: []const u8
         }
 
         if (best_tag == null or distance < best_tag.?.distance or
-            (distance == best_tag.?.distance and std.mem.order(u8, ft.name, best_tag.?.tag_name) == .lt))
+            (distance == best_tag.?.distance and ft.depth < best_depth) or
+            (distance == best_tag.?.distance and ft.depth == best_depth and std.mem.order(u8, ft.name, best_tag.?.tag_name) == .lt))
         {
+            best_depth = ft.depth;
             if (best_tag) |old| allocator.free(old.tag_name);
             best_tag = helpers.TagWithDistance{
                 .tag_name = try allocator.dupe(u8, ft.name),
