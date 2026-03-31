@@ -49,6 +49,7 @@ pub fn nativeCmdCherryPick(allocator: std.mem.Allocator, args: [][]const u8, com
     defer positionals.deinit();
     var no_commit = false;
     var allow_empty = false;
+    var mainline_parent: ?u32 = null;
 
     var i: usize = command_index + 1;
     while (i < args.len) : (i += 1) {
@@ -69,6 +70,35 @@ pub fn nativeCmdCherryPick(allocator: std.mem.Allocator, args: [][]const u8, com
                 allow_empty = true;
             }
             // accept but ignore most
+        } else if (std.mem.eql(u8, arg, "-m") or std.mem.eql(u8, arg, "--mainline")) {
+            i += 1;
+            if (i >= args.len) {
+                try platform_impl.writeStderr("error: option '-m' requires a value\n");
+                std.process.exit(129);
+            }
+            const val = args[i];
+            const num = std.fmt.parseInt(i32, val, 10) catch {
+                const msg = try std.fmt.allocPrint(allocator, "error: switch `m' expects a numerical value\n", .{});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(129);
+            };
+            if (num < 1) {
+                try platform_impl.writeStderr("error: switch `m' expects a numerical value\n");
+                std.process.exit(129);
+            }
+            mainline_parent = @intCast(num);
+        } else if (std.mem.startsWith(u8, arg, "-m") and arg.len > 2) {
+            const val = arg[2..];
+            const num = std.fmt.parseInt(i32, val, 10) catch {
+                try platform_impl.writeStderr("error: switch `m' expects a numerical value\n");
+                std.process.exit(129);
+            };
+            if (num < 1) {
+                try platform_impl.writeStderr("error: switch `m' expects a numerical value\n");
+                std.process.exit(129);
+            }
+            mainline_parent = @intCast(num);
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             try positionals.append(arg);
         }
@@ -158,7 +188,8 @@ fn handleAbort(git_path: []const u8, allocator: std.mem.Allocator, platform_impl
     cleanupSequencerState(git_path, allocator, platform_impl);
 }
 
-fn cherryPickCommit(git_path: []const u8, commit_hash: []const u8, no_commit: bool, allocator: std.mem.Allocator, platform_impl: *const Platform) ![]u8 {
+fn cherryPickCommit(git_path: []const u8, commit_hash: []const u8, no_commit: bool, allocator: std.mem.Allocator, platform_impl: *const Platform, mainline_parent_opt: ?u32) ![]u8 {
+    const mainline_parent = mainline_parent_opt;
     _ = no_commit;
     const commit_obj = try objects.GitObject.load(commit_hash, git_path, platform_impl, allocator);
     defer commit_obj.deinit(allocator);
@@ -166,6 +197,8 @@ fn cherryPickCommit(git_path: []const u8, commit_hash: []const u8, no_commit: bo
 
     var tree_hash: ?[]const u8 = null;
     var parent_hash: ?[]const u8 = null;
+    var parent_hashes = std.array_list.Managed([]const u8).init(allocator);
+    defer parent_hashes.deinit();
     var author_line: ?[]const u8 = null;
     var lines_iter = std.mem.splitSequence(u8, commit_obj.data, "\n");
     var header_end: usize = 0;
@@ -177,9 +210,32 @@ fn cherryPickCommit(git_path: []const u8, commit_hash: []const u8, no_commit: bo
             break;
         }
         if (std.mem.startsWith(u8, line, "tree ")) tree_hash = line["tree ".len..];
-        if (std.mem.startsWith(u8, line, "parent ") and parent_hash == null) parent_hash = line["parent ".len..];
+        if (std.mem.startsWith(u8, line, "parent ")) {
+            try parent_hashes.append(line["parent ".len..]);
+        }
         if (std.mem.startsWith(u8, line, "author ")) author_line = line["author ".len..];
         pos += line.len + 1;
+    }
+
+    // Handle merge commits: if commit has multiple parents, -m is required
+    if (parent_hashes.items.len > 1 and mainline_parent == null) {
+        const err_msg = try std.fmt.allocPrint(allocator, "error: commit {s} is a merge but no -m option was given.\n", .{commit_hash});
+        defer allocator.free(err_msg);
+        try platform_impl.writeStderr(err_msg);
+        std.process.exit(1);
+    }
+
+    // Select parent based on -m option or default to first
+    if (mainline_parent) |mp| {
+        if (mp > parent_hashes.items.len) {
+            const err_msg = try std.fmt.allocPrint(allocator, "error: commit {s} does not have parent {d}\n", .{ commit_hash, mp });
+            defer allocator.free(err_msg);
+            try platform_impl.writeStderr(err_msg);
+            std.process.exit(1);
+        }
+        parent_hash = parent_hashes.items[mp - 1];
+    } else if (parent_hashes.items.len > 0) {
+        parent_hash = parent_hashes.items[0];
     }
 
     const commit_tree = tree_hash orelse return error.InvalidCommit;
