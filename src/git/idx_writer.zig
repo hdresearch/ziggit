@@ -1,4 +1,5 @@
 const zlib_compat = @import("zlib_compat.zig");
+const objects_mod = @import("objects.zig");
 const std = @import("std");
 const stream_utils = @import("stream_utils.zig");
 const DeltaCache = @import("delta_cache.zig").DeltaCache;
@@ -45,8 +46,16 @@ pub fn generateIdx(allocator: std.mem.Allocator, pack_path: []const u8) !void {
 }
 
 /// Decompress zlib data from a slice, returning decompressed data and number of
-/// compressed bytes consumed.
+/// compressed bytes consumed. Uses C zlib when available (faster).
 fn decompressWithConsumed(input: []const u8, out_buf: []u8) !DecompResult {
+    // Try C zlib inflate (faster, returns exact consumed bytes)
+    if (objects_mod.cDecompressWithConsumed(std.heap.page_allocator, input, out_buf.len)) |result| {
+        const n = @min(result.data.len, out_buf.len);
+        @memcpy(out_buf[0..n], result.data[0..n]);
+        std.heap.page_allocator.free(result.data);
+        return .{ .decompressed_size = n, .consumed = result.consumed };
+    }
+    // Fallback to Zig flate
     const result = zlib_compat.decompressSliceWithConsumed(std.heap.page_allocator, input) catch return error.ZlibDecompressError;
     defer std.heap.page_allocator.free(result.data);
     const n = @min(result.data.len, out_buf.len);
@@ -55,7 +64,11 @@ fn decompressWithConsumed(input: []const u8, out_buf: []u8) !DecompResult {
 }
 
 /// Decompress zlib data, returning only the number of compressed bytes consumed (skip the output).
+/// Uses C zlib's inflate API which is much faster than decompressing to a buffer.
 fn skipZlibPure(compressed: []const u8) !usize {
+    // Try C zlib skip (no output allocation needed)
+    if (objects_mod.cSkipZlib(compressed)) |consumed| return consumed;
+    // Fallback to Zig flate
     const result = zlib_compat.decompressSliceWithConsumed(std.heap.page_allocator, compressed) catch return error.ZlibDecompressError;
     std.heap.page_allocator.free(result.data);
     return result.consumed;
@@ -63,6 +76,13 @@ fn skipZlibPure(compressed: []const u8) !usize {
 
 /// Decompress zlib data into an ArrayList, returning consumed bytes.
 fn decompressToList(input: []const u8, output: *std.array_list.Managed(u8)) !usize {
+    // Try C zlib with consumed info
+    if (objects_mod.cDecompressWithConsumed(output.allocator, input, 0)) |result| {
+        try output.appendSlice(result.data);
+        output.allocator.free(result.data);
+        return result.consumed;
+    }
+    // Fallback to Zig flate
     const result = zlib_compat.decompressSliceWithConsumed(std.heap.page_allocator, input) catch return error.ZlibDecompressError;
     defer std.heap.page_allocator.free(result.data);
     try output.appendSlice(result.data);
