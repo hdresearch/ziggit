@@ -48,7 +48,11 @@ pub fn generateIdx(allocator: std.mem.Allocator, pack_path: []const u8) !void {
 /// Decompress zlib data from a slice, returning decompressed data and number of
 /// compressed bytes consumed. Uses C zlib when available (faster).
 fn decompressWithConsumed(input: []const u8, out_buf: []u8) !DecompResult {
-    // Try C zlib inflate (faster, returns exact consumed bytes)
+    // FAST PATH: decompress directly into out_buf (zero allocation)
+    if (objects_mod.cDecompressInto(input, out_buf)) |result| {
+        return .{ .decompressed_size = result.decompressed_size, .consumed = result.consumed };
+    }
+    // FALLBACK: C zlib inflate with allocation
     if (objects_mod.cDecompressWithConsumed(std.heap.page_allocator, input, out_buf.len)) |result| {
         const n = @min(result.data.len, out_buf.len);
         @memcpy(out_buf[0..n], result.data[0..n]);
