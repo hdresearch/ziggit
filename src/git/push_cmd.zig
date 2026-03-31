@@ -4,6 +4,7 @@ const platform_mod = @import("../platform/platform.zig");
 const refs = @import("refs.zig");
 const objects = @import("objects.zig");
 const fetch_cmd = @import("fetch_cmd.zig");
+const hooks = @import("../git/hooks.zig");
 
 fn readFileContent(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024);
@@ -440,6 +441,17 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                 }
             }
         } else |_| {}
+    }
+
+    // Run pre-push hook: args are remote name and URL, refs on stdin
+    // stdin format: <local ref> <local sha1> <remote ref> <remote sha1>\n
+    {
+        const hook_args = [_][]const u8{ remote, remote_url };
+        const hook_result = hooks.runHook(allocator, git_path, "pre-push", &hook_args, null, platform_impl) catch hooks.HookResult{ .exit_code = 0, .skipped = true };
+        if (!hook_result.skipped and hook_result.exit_code != 0) {
+            try platform_impl.writeStderr("error: failed to push some refs (pre-push hook declined)\n");
+            std.process.exit(1);
+        }
     }
 
     // Copy objects first
