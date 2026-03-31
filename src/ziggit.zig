@@ -49,7 +49,25 @@ pub const Repository = struct {
     _cached_git_dir_fd: ?std.posix.fd_t = null,
 
     /// Open an existing repository at the specified path
+    /// Tune glibc malloc: increase mmap threshold to avoid mmap/munmap for allocations < 1MB.
+    /// This dramatically reduces syscalls during checkout of medium-sized files.
+    var _malloc_tuned: bool = false;
+    fn tuneMalloc() void {
+        if (_malloc_tuned) return;
+        _malloc_tuned = true;
+        if (comptime @import("builtin").os.tag == .linux) {
+            // M_MMAP_THRESHOLD = -3, set to 1MB
+            const mallopt_fn = std.DynLib.open("libc.so.6") catch return;
+            _ = mallopt_fn; // just trigger the load
+            // Use direct extern since libc is linked
+            const mallopt = @extern(*const fn (c_int, c_int) callconv(.c) c_int, .{ .name = "mallopt" });
+            _ = mallopt(-3, 1024 * 1024); // M_MMAP_THRESHOLD = 1MB
+            _ = mallopt(-4, 1024 * 1024); // M_TRIM_THRESHOLD = 1MB
+        }
+    }
+
     pub fn open(allocator: std.mem.Allocator, path: []const u8) !Repository {
+        tuneMalloc();
         const abs_path = if (std.fs.path.isAbsolute(path))
             try allocator.dupe(u8, path)
         else blk: {
