@@ -435,6 +435,22 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         } else |_| {}
     }
 
+    // Read commit.cleanup config if no explicit --cleanup was given
+    if (!cleanup_explicit) {
+        if (helpers.getConfigValueByKey(git_path, "commit.cleanup", allocator)) |cleanup_cfg| {
+            defer allocator.free(cleanup_cfg);
+            if (std.ascii.eqlIgnoreCase(cleanup_cfg, "verbatim")) {
+                cleanup_mode = .verbatim;
+            } else if (std.ascii.eqlIgnoreCase(cleanup_cfg, "whitespace")) {
+                cleanup_mode = .whitespace;
+            } else if (std.ascii.eqlIgnoreCase(cleanup_cfg, "strip")) {
+                cleanup_mode = .strip;
+            } else if (std.ascii.eqlIgnoreCase(cleanup_cfg, "scissors")) {
+                cleanup_mode = .scissors;
+            }
+        }
+    }
+
     // Determine if we need to launch an editor
     // -t/--template sets initial content for editor but still requires editor
     const need_editor = (message == null and msg_source == .none) or force_edit or template_message != null;
@@ -567,8 +583,28 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             if (std.posix.getenv("GIT_AUTHOR_DATE")) |date_str| {
                 try editmsg_buf.append(ed_comment_char);
                 try editmsg_buf.appendSlice(" Date:      ");
-                // Try to format the date nicely
-                try editmsg_buf.appendSlice(date_str);
+                // Try to format the date nicely - parse to epoch+tz then format
+                if (helpers.parseDateToGitFormat(date_str, allocator)) |git_date| {
+                    defer allocator.free(git_date);
+                    if (std.mem.indexOfScalar(u8, git_date, ' ')) |sp| {
+                        const epoch_str = git_date[0..sp];
+                        const tz_str = std.mem.trim(u8, git_date[sp + 1 ..], " ");
+                        if (std.fmt.parseInt(i64, epoch_str, 10)) |epoch| {
+                            if (helpers.formatGitDate(epoch, tz_str, allocator)) |formatted| {
+                                defer allocator.free(formatted);
+                                try editmsg_buf.appendSlice(formatted);
+                            } else |_| {
+                                try editmsg_buf.appendSlice(date_str);
+                            }
+                        } else |_| {
+                            try editmsg_buf.appendSlice(date_str);
+                        }
+                    } else {
+                        try editmsg_buf.appendSlice(date_str);
+                    }
+                } else |_| {
+                    try editmsg_buf.appendSlice(date_str);
+                }
                 try editmsg_buf.append('\n');
             }
         }
@@ -652,22 +688,6 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         defer allocator.free(editmsg_path2);
         if (message) |msg| {
             platform_impl.fs.writeFile(editmsg_path2, msg) catch {};
-        }
-    }
-
-    // Read commit.cleanup config if no explicit --cleanup was given
-    if (!cleanup_explicit) {
-        if (helpers.getConfigValueByKey(git_path, "commit.cleanup", allocator)) |cleanup_cfg| {
-            defer allocator.free(cleanup_cfg);
-            if (std.ascii.eqlIgnoreCase(cleanup_cfg, "verbatim")) {
-                cleanup_mode = .verbatim;
-            } else if (std.ascii.eqlIgnoreCase(cleanup_cfg, "whitespace")) {
-                cleanup_mode = .whitespace;
-            } else if (std.ascii.eqlIgnoreCase(cleanup_cfg, "strip")) {
-                cleanup_mode = .strip;
-            } else if (std.ascii.eqlIgnoreCase(cleanup_cfg, "scissors")) {
-                cleanup_mode = .scissors;
-            }
         }
     }
 
