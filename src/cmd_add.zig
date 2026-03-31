@@ -56,6 +56,7 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     var force_flag = false;
     var dry_run = false;
     var intent_to_add = false;
+    var refresh_flag = false;
     var collected_add_paths = std.array_list.Managed([]const u8).init(allocator);
     defer collected_add_paths.deinit();
     while (args.next()) |raw_arg| {
@@ -72,6 +73,8 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             dry_run = true;
         } else if (std.mem.eql(u8, raw_arg, "--intent-to-add") or std.mem.eql(u8, raw_arg, "-N")) {
             intent_to_add = true;
+        } else if (std.mem.eql(u8, raw_arg, "--refresh")) {
+            refresh_flag = true;
         } else if (raw_arg.len > 0 and raw_arg[0] == '-') {
             // helpers.Skip other flags
         } else {
