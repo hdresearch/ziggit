@@ -199,6 +199,41 @@ pub fn cDecompressWithConsumed(allocator: std.mem.Allocator, input: []const u8, 
     return null;
 }
 
+/// Decompress directly into a caller-provided buffer (zero allocation).
+/// Returns decompressed size and consumed input bytes.
+pub fn cDecompressInto(input: []const u8, out_buf: []u8) ?DecompressIntoResult {
+    initCZlib();
+    const init_fn = zlib_inflate_init2_fn orelse return null;
+    const inflate_fn = zlib_inflate_fn orelse return null;
+    const end_fn = zlib_inflate_end_fn orelse return null;
+
+    var stream: ZStream = std.mem.zeroes(ZStream);
+    if (init_fn(&stream, 15, "1.2.13", @sizeOf(ZStream)) != 0) return null;
+
+    stream.next_in = input.ptr;
+    stream.avail_in = @intCast(@min(input.len, std.math.maxInt(c_uint)));
+    stream.next_out = out_buf.ptr;
+    stream.avail_out = @intCast(@min(out_buf.len, std.math.maxInt(c_uint)));
+
+    const Z_FINISH = 4;
+    const Z_STREAM_END = 1;
+    const ret = inflate_fn(&stream, Z_FINISH);
+    _ = end_fn(&stream);
+
+    if (ret == Z_STREAM_END) {
+        return .{
+            .decompressed_size = @intCast(stream.total_out),
+            .consumed = @intCast(stream.total_in),
+        };
+    }
+    return null;
+}
+
+pub const DecompressIntoResult = struct {
+    decompressed_size: usize,
+    consumed: usize,
+};
+
 /// Skip zlib data using C inflate, returning only consumed bytes (no output allocation).
 pub fn cSkipZlib(input: []const u8) ?usize {
     initCZlib();
