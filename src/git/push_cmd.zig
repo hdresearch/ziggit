@@ -446,8 +446,60 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     // Run pre-push hook: args are remote name and URL, refs on stdin
     // stdin format: <local ref> <local sha1> <remote ref> <remote sha1>\n
     {
+        // Build stdin data from refspecs
+        var stdin_buf = std.array_list.Managed(u8).init(allocator);
+        defer stdin_buf.deinit();
+        const zero_hash = "0000000000000000000000000000000000000000";
+
+        // Resolve refspecs to build ref info for the hook
+        var effective_refspecs = std.array_list.Managed([]const u8).init(allocator);
+        defer effective_refspecs.deinit();
+
+        if (refspecs_list.items.len > 0) {
+            for (refspecs_list.items) |rs| try effective_refspecs.append(rs);
+        } else if (!push_all and !push_tags and !push_mirror) {
+            // Default push: current branch
+            if (refs.getCurrentBranch(git_path, platform_impl, allocator)) |branch| {
+                const rs = std.fmt.allocPrint(allocator, "refs/heads/{s}:refs/heads/{s}", .{ branch, branch }) catch null;
+                allocator.free(branch);
+                if (rs) |r| try effective_refspecs.append(r);
+            } else |_| {}
+        }
+
+        for (effective_refspecs.items) |rs_raw| {
+            var rs = rs_raw;
+            if (rs.len > 0 and rs[0] == '+') rs = rs[1..];
+            if (rs.len > 0 and rs[0] == ':') continue; // delete ref
+
+            var local_ref: []const u8 = rs;
+            var remote_ref: []const u8 = rs;
+            if (std.mem.indexOf(u8, rs, ":")) |colon| {
+                local_ref = rs[0..colon];
+                remote_ref = rs[colon + 1 ..];
+            }
+
+            // Resolve local ref to hash
+            const local_hash = (refs.resolveRef(git_path, local_ref, platform_impl, allocator) catch null) orelse continue;
+            defer allocator.free(local_hash);
+
+            // Resolve remote ref to hash (may not exist)
+            const remote_hash = (refs.resolveRef(remote_git_dir, remote_ref, platform_impl, allocator) catch null) orelse
+                try allocator.dupe(u8, zero_hash);
+            defer allocator.free(remote_hash);
+
+            stdin_buf.appendSlice(local_ref) catch {};
+            stdin_buf.append(' ') catch {};
+            stdin_buf.appendSlice(local_hash) catch {};
+            stdin_buf.append(' ') catch {};
+            stdin_buf.appendSlice(remote_ref) catch {};
+            stdin_buf.append(' ') catch {};
+            stdin_buf.appendSlice(remote_hash) catch {};
+            stdin_buf.append('\n') catch {};
+        }
+
+        const stdin_data: ?[]const u8 = if (stdin_buf.items.len > 0) stdin_buf.items else null;
         const hook_args = [_][]const u8{ remote, remote_url };
-        const hook_result = hooks.runHook(allocator, git_path, "pre-push", &hook_args, null, platform_impl) catch hooks.HookResult{ .exit_code = 0, .skipped = true };
+        const hook_result = hooks.runHook(allocator, git_path, "pre-push", &hook_args, stdin_data, platform_impl) catch hooks.HookResult{ .exit_code = 0, .skipped = true };
         if (!hook_result.skipped and hook_result.exit_code != 0) {
             try platform_impl.writeStderr("error: failed to push some refs (pre-push hook declined)\n");
             std.process.exit(1);
