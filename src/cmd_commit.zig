@@ -60,6 +60,7 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     var quiet = false;
     var signoff = false;
     var no_verify = false;
+    var cleanup_mode: enum { default, verbatim, whitespace, strip, scissors } = .default;
     var author_override: ?[]const u8 = null;
     var msg_source: enum { none, m_flag, f_flag, c_flag } = .none;
     var commit_files = std.array_list.Managed([]const u8).init(allocator);
@@ -172,11 +173,24 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             if (std.mem.indexOf(u8, cobj.data, "\n\n")) |pos| {
                 message = try allocator.dupe(u8, cobj.data[pos + 2 ..]);
             }
-        } else if (std.mem.eql(u8, arg, "--cleanup=verbatim") or std.mem.eql(u8, arg, "--cleanup=whitespace") or
-            std.mem.eql(u8, arg, "--cleanup=strip") or std.mem.eql(u8, arg, "--cleanup=scissors") or
-            std.mem.startsWith(u8, arg, "--cleanup="))
-        {
-            // Accept cleanup modes (ignore for now)
+        } else if (std.mem.startsWith(u8, arg, "--cleanup=")) {
+            const mode_str = arg["--cleanup=".len..];
+            if (std.mem.eql(u8, mode_str, "verbatim")) {
+                cleanup_mode = .verbatim;
+            } else if (std.mem.eql(u8, mode_str, "whitespace")) {
+                cleanup_mode = .whitespace;
+            } else if (std.mem.eql(u8, mode_str, "strip")) {
+                cleanup_mode = .strip;
+            } else if (std.mem.eql(u8, mode_str, "scissors")) {
+                cleanup_mode = .scissors;
+            } else if (std.mem.eql(u8, mode_str, "default")) {
+                cleanup_mode = .default;
+            } else {
+                const err_msg = try std.fmt.allocPrint(allocator, "fatal: Invalid cleanup mode {s}\n", .{mode_str});
+                defer allocator.free(err_msg);
+                try platform_impl.writeStderr(err_msg);
+                std.process.exit(128);
+            }
         } else if (std.mem.eql(u8, arg, "--no-verify") or std.mem.eql(u8, arg, "-n")) {
             no_verify = true;
         } else if (std.mem.eql(u8, arg, "--signoff") or std.mem.eql(u8, arg, "-s")) {
@@ -289,30 +303,33 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         std.process.exit(1);
     }
 
-    // helpers.Check for empty or whitespace-only message (to match git behavior)
-    // Also treats messages that are only git trailers (Signed-off-by, etc.) as empty
+    // Apply cleanup mode to the message
     if (message) |msg| {
-        const trimmed = std.mem.trim(u8, msg, " \t\n\r");
-        if (trimmed.len == 0) {
-            try platform_impl.writeStderr("Aborting commit due to empty commit message.\n");
-            std.process.exit(1);
-        }
-        // Check if message is only trailers (git considers this as empty)
-        var has_non_trailer = false;
-        var line_iter = std.mem.splitScalar(u8, trimmed, '\n');
-        while (line_iter.next()) |line| {
-            const tline = std.mem.trim(u8, line, " \t\r");
-            if (tline.len == 0) continue;
-            // Skip comment lines
-            if (tline[0] == '#') continue;
-            // Check if line is a known trailer pattern (Key: value)
-            if (isTrailerLine(tline)) continue;
-            has_non_trailer = true;
-            break;
-        }
-        if (!has_non_trailer) {
-            try platform_impl.writeStderr("Aborting commit due to empty commit message.\n");
-            std.process.exit(1);
+        message = switch (cleanup_mode) {
+            .verbatim => msg, // No cleanup
+            .whitespace => blk: {
+                // Strip trailing whitespace from each line and trailing empty lines
+                break :blk cleanupWhitespace(allocator, msg) catch msg;
+            },
+            .strip, .default => blk: {
+                // Strip comments and trailing whitespace
+                break :blk cleanupStrip(allocator, msg) catch msg;
+            },
+            .scissors => blk: {
+                // Strip everything below scissors line, then strip comments
+                break :blk cleanupScissors(allocator, msg) catch msg;
+            },
+        };
+    }
+
+    // Check for empty or whitespace-only message
+    if (message) |msg| {
+        if (cleanup_mode != .verbatim) {
+            const trimmed = std.mem.trim(u8, msg, " \t\n\r");
+            if (trimmed.len == 0) {
+                try platform_impl.writeStderr("Aborting commit due to empty commit message.\n");
+                std.process.exit(1);
+            }
         }
     }
 
