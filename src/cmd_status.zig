@@ -961,7 +961,7 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
         if (verbose_count >= 2) {
             // -v -v: show both staged and unstaged diffs with headers
             try platform_impl.writeStdout("Changes to be committed:\n");
-            var cached_args = [_][]const u8{ "--cached", "-c", "diff.mnemonicprefix=true" };
+            const cached_args = [_][]const u8{ "--cached", "-c", "diff.mnemonicprefix=true" };
             // Actually, just pass --cached; mnemonic prefix is handled by config
             var cached_args2 = [_][]const u8{"--cached"};
             var cached_iter = platform_mod.ArgIterator{ .args = &cached_args2, .allocator = allocator };

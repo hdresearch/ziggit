@@ -86,6 +86,44 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         try collected_add_paths.append(".");
     }
 
+    // Handle --refresh mode: update stat info for tracked files without adding new ones
+    if (refresh_flag) {
+        var refresh_index = index_mod.Index.load(git_path, platform_impl, allocator) catch |err| switch (err) {
+            error.FileNotFound => index_mod.Index.init(allocator),
+            else => return err,
+        };
+        defer refresh_index.deinit();
+        const repo_root_refresh = if (helpers.global_git_dir_override != null or std.posix.getenv("GIT_DIR") != null)
+            cwd
+        else
+            std.fs.path.dirname(git_path) orelse ".";
+        for (index.entries.items) |*entry| {
+            // If pathspecs given, only refresh matching entries
+            if (collected_add_paths.items.len > 0) {
+                var matches = false;
+                for (collected_add_paths.items) |p| {
+                    if (std.mem.eql(u8, p, ".") or std.mem.eql(u8, p, entry.path) or
+                        std.mem.startsWith(u8, entry.path, p))
+                    {
+                        matches = true;
+                        break;
+                    }
+                }
+                if (!matches) continue;
+            }
+            const full_path_r = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root_refresh, entry.path });
+            defer allocator.free(full_path_r);
+            const stat_result = std.fs.cwd().statFile(full_path_r) catch continue;
+            entry.mtime_sec = @intCast(@divFloor(stat_result.mtime, 1_000_000_000));
+            entry.mtime_nsec = @intCast(@mod(stat_result.mtime, 1_000_000_000));
+            entry.ctime_sec = @intCast(@divFloor(stat_result.ctime, 1_000_000_000));
+            entry.ctime_nsec = @intCast(@mod(stat_result.ctime, 1_000_000_000));
+            entry.size = @intCast(stat_result.size);
+        }
+        try refresh_index.save(git_path, platform_impl);
+        return;
+    }
+
     // Handle dry-run mode early: just report what would change without modifying anything
     if (dry_run) {
         if (update_flag or add_all_flag) {
