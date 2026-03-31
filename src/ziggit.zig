@@ -51,8 +51,11 @@ pub const Repository = struct {
     _cached_packed_refs: ?[]const u8 = null,
     // PACK-ONLY FLAG: When true, skip loose object lookups (all objects are in packs)
     _pack_only: bool = false,
-    // Pre-allocated scratch memory for delta resolution (avoids mmap/munmap per object)
-    _scratch_mem: ?[]u8 = null,
+    // Delta base cache: caches recently decompressed base objects for delta chains
+    // Key: pack offset, Value: raw decompressed object with header
+    _delta_cache_offsets: [16]u64 = [_]u64{0} ** 16,
+    _delta_cache_data: [16]?[]u8 = [_]?[]u8{null} ** 16,
+    _delta_cache_next: u4 = 0,
 
     /// Open an existing repository at the specified path
     pub fn open(allocator: std.mem.Allocator, path: []const u8) !Repository {
@@ -144,7 +147,9 @@ pub const Repository = struct {
         }
         if (self._cached_pack_path) |p| self.allocator.free(p);
         if (self._cached_packed_refs) |pr| self.allocator.free(pr);
-        if (self._scratch_mem) |sm| std.heap.page_allocator.free(sm);
+        for (&self._delta_cache_data) |*entry| {
+            if (entry.*) |data| self._fast_alloc.free(data);
+        }
         self.allocator.free(self.path);
         self.allocator.free(self.git_dir);
     }
@@ -2530,6 +2535,12 @@ pub const Repository = struct {
     /// Read a single object from already-loaded pack data at the given offset.
     /// This avoids re-reading the pack file for delta chain resolution.
     fn readPackObjectFromData(self: *Repository, pack_data: []const u8, offset: u64) ObjectReadError![]u8 {
+        // Check delta base cache first
+        for (self._delta_cache_offsets, 0..) |cached_off, i| {
+            if (cached_off == offset and self._delta_cache_data[i] != null) {
+                return self._fast_alloc.dupe(u8, self._delta_cache_data[i].?) catch return error.ObjectNotFound;
+            }
+        }
         if (offset >= pack_data.len) return error.InvalidPackOffset;
 
         var pos = @as(usize, offset);
@@ -2570,6 +2581,15 @@ pub const Repository = struct {
         var result = try fa.alloc(u8, header.len + decompressed.len);
         @memcpy(result[0..header.len], header);
         @memcpy(result[header.len..], decompressed);
+
+        // Cache for delta base resolution (small objects only, < 256KB)
+        if (result.len < 256 * 1024) {
+            const idx = self._delta_cache_next;
+            if (self._delta_cache_data[idx]) |old| fa.free(old);
+            self._delta_cache_data[idx] = fa.dupe(u8, result) catch null;
+            self._delta_cache_offsets[idx] = offset;
+            self._delta_cache_next +%= 1;
+        }
 
         return result;
     }
