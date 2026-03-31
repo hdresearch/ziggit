@@ -482,9 +482,15 @@ pub fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
             @memset(pathspec_matched.?, false);
         }
 
-        const terminator_cached: []const u8 = if (z_terminator) "\x00" else "\n";
+        const terminator_byte: u8 = if (z_terminator) 0 else '\n';
         var last_dedup_path: ?[]u8 = null;
         defer if (last_dedup_path) |lp| allocator.free(lp);
+
+        // Use buffered output to reduce syscalls
+        var output_buf = std.array_list.Managed(u8).init(allocator);
+        defer output_buf.deinit();
+        try output_buf.ensureTotalCapacity(4096);
+
         for (index.entries.items) |entry| {
             if (effective_pathspecs.len > 0) {
                 var matches = false;
@@ -512,19 +518,34 @@ pub fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                 if (stage_check == 0) continue;
             }
             if (stage) {
-                const hash_str = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
-                defer allocator.free(hash_str);
                 const stage_num = (entry.flags >> 12) & 0x3;
-                const quoted = if (z_terminator) try allocator.dupe(u8, entry.path) else try helpers.cQuotePath(allocator, entry.path, true);
-                defer allocator.free(quoted);
                 const tag_prefix: []const u8 = if (tag_flag) blk_tag: {
                     const has_skip_wt = if (entry.extended_flags) |ef| (ef & 0x4000 != 0) else (entry.flags & 0x4000 != 0);
                     const is_assume_unchanged = (entry.flags & 0x8000) != 0;
                     if (has_skip_wt) break :blk_tag "S " else if (verbose_flag and is_assume_unchanged) break :blk_tag "h " else break :blk_tag "H ";
                 } else "";
-                const output = try std.fmt.allocPrint(allocator, "{s}{o} {s} {d}\t{s}{s}", .{ tag_prefix, entry.mode, hash_str, stage_num, quoted, terminator_cached });
-                defer allocator.free(output);
-                try platform_impl.writeStdout(output);
+                try output_buf.appendSlice(tag_prefix);
+                // Write mode as octal
+                var mode_buf: [16]u8 = undefined;
+                const mode_str = std.fmt.bufPrint(&mode_buf, "{o}", .{entry.mode}) catch unreachable;
+                try output_buf.appendSlice(mode_str);
+                try output_buf.append(' ');
+                // Write hash as hex
+                var hash_buf: [40]u8 = undefined;
+                const hash_str = std.fmt.bufPrint(&hash_buf, "{x}", .{&entry.sha1}) catch unreachable;
+                try output_buf.appendSlice(hash_str);
+                try output_buf.append(' ');
+                // Write stage
+                var stage_buf: [4]u8 = undefined;
+                const stage_str = std.fmt.bufPrint(&stage_buf, "{d}", .{stage_num}) catch unreachable;
+                try output_buf.appendSlice(stage_str);
+                try output_buf.append('\t');
+                if (z_terminator) {
+                    try output_buf.appendSlice(entry.path);
+                } else {
+                    try appendCQuotePath(&output_buf, entry.path, true);
+                }
+                try output_buf.append(terminator_byte);
             } else {
                 // Deduplicate: skip if same path as previous entry
                 if (deduplicate_flag) {
@@ -534,17 +555,30 @@ pub fn cmdLsFiles(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                     if (last_dedup_path) |lp| allocator.free(lp);
                     last_dedup_path = try allocator.dupe(u8, entry.path);
                 }
-                const quoted = if (z_terminator) try allocator.dupe(u8, entry.path) else try helpers.cQuotePath(allocator, entry.path, true);
-                defer allocator.free(quoted);
                 const tag_prefix: []const u8 = if (tag_flag) blk_tag2: {
                     const has_skip_wt = if (entry.extended_flags) |ef| (ef & 0x4000 != 0) else (entry.flags & 0x4000 != 0);
                     const is_assume_unchanged2 = (entry.flags & 0x8000) != 0;
                     if (has_skip_wt) break :blk_tag2 "S " else if (verbose_flag and is_assume_unchanged2) break :blk_tag2 "h " else break :blk_tag2 "H ";
                 } else "";
-                const output = try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ tag_prefix, quoted, terminator_cached });
-                defer allocator.free(output);
-                try platform_impl.writeStdout(output);
+                try output_buf.appendSlice(tag_prefix);
+                if (z_terminator) {
+                    try output_buf.appendSlice(entry.path);
+                } else {
+                    try appendCQuotePath(&output_buf, entry.path, true);
+                }
+                try output_buf.append(terminator_byte);
             }
+
+            // Flush buffer periodically to avoid excessive memory use
+            if (output_buf.items.len >= 8192) {
+                try platform_impl.writeStdout(output_buf.items);
+                output_buf.clearRetainingCapacity();
+            }
+        }
+
+        // Flush remaining output
+        if (output_buf.items.len > 0) {
+            try platform_impl.writeStdout(output_buf.items);
         }
 
         if (error_unmatch) {
@@ -843,6 +877,45 @@ fn getEolInfoWorktree(allocator: std.mem.Allocator, entry: anytype, repo_root: [
     const content = platform_impl.fs.readFile(allocator, full_path) catch return "";
     defer allocator.free(content);
     return detectEolInfo(content);
+}
+
+/// Append a C-quoted path directly to an ArrayList, avoiding allocation.
+fn appendCQuotePath(buf: *std.array_list.Managed(u8), path: []const u8, quote_high_bytes: bool) !void {
+    // Check if quoting is needed
+    var needs_quoting = false;
+    for (path) |c| {
+        if (c < 0x20 or c == '\\' or c == '"') {
+            needs_quoting = true;
+            break;
+        }
+        if (quote_high_bytes and c >= 0x80) {
+            needs_quoting = true;
+            break;
+        }
+    }
+    if (!needs_quoting) {
+        try buf.appendSlice(path);
+        return;
+    }
+    try buf.append('"');
+    for (path) |c| {
+        switch (c) {
+            '\t' => try buf.appendSlice("\\t"),
+            '\n' => try buf.appendSlice("\\n"),
+            '\\' => try buf.appendSlice("\\\\"),
+            '"' => try buf.appendSlice("\\\""),
+            else => {
+                if (c < 0x20 or (quote_high_bytes and c >= 0x80)) {
+                    var oct_buf: [4]u8 = undefined;
+                    _ = std.fmt.bufPrint(&oct_buf, "\\{o:0>3}", .{c}) catch unreachable;
+                    try buf.appendSlice(&oct_buf);
+                } else {
+                    try buf.append(c);
+                }
+            },
+        }
+    }
+    try buf.append('"');
 }
 
 pub fn formatLsFilesEntry(allocator: std.mem.Allocator, fmt: []const u8, entry: anytype, git_path: []const u8, platform_impl: anytype, cwd_prefix: ?[]const u8) ![]u8 {
