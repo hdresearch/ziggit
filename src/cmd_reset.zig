@@ -49,6 +49,7 @@ pub fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     var seen_separator = false;
     var quiet = false;
     var intent_to_add = false;
+    var no_refresh = false;
 
     while (args.next()) |arg| {
         if (seen_separator) {
@@ -67,8 +68,12 @@ pub fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             reset_mode = .merge_mode;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             quiet = true;
-        } else if (std.mem.eql(u8, arg, "-N") or std.mem.eql(u8, arg, "--no-refresh") or std.mem.eql(u8, arg, "--refresh")) {
-            if (std.mem.eql(u8, arg, "-N")) intent_to_add = true;
+        } else if (std.mem.eql(u8, arg, "--no-refresh")) {
+            no_refresh = true;
+        } else if (std.mem.eql(u8, arg, "--refresh")) {
+            no_refresh = false;
+        } else if (std.mem.eql(u8, arg, "-N")) {
+            intent_to_add = true;
         } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--patch")) {
             try interactiveResetPatch(allocator, platform_impl);
             return;
@@ -304,14 +309,14 @@ pub fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             },
             .mixed => {
                 // helpers.Update helpers.HEAD and index, leave working tree unchanged
-                resetIndex(git_path, target_hash, platform_impl, allocator) catch {};
+                resetIndex(git_path, target_hash, platform_impl, allocator, !no_refresh) catch {};
             },
             .hard, .merge_mode => {
                 // helpers.Clear old tracked files first (using helpers.OLD index), then checkout target tree
                 const repo_root_for_clear = std.fs.path.dirname(git_path) orelse ".";
                 helpers.clearWorkingDirectory(repo_root_for_clear, allocator, platform_impl) catch {};
                 // helpers.Now update index to match target commit
-                resetIndex(git_path, target_hash, platform_impl, allocator) catch {};
+                resetIndex(git_path, target_hash, platform_impl, allocator, true) catch {};
                 // helpers.Checkout the target tree into working directory
                 helpers.checkoutCommitTree(git_path, target_hash, allocator, platform_impl) catch {};
             },
@@ -483,7 +488,7 @@ fn resetIndexPaths(git_path: []const u8, commit_hash: []const u8, paths: []const
     try idx.save(git_path, platform_impl);
 }
 
-pub fn resetIndex(git_path: []const u8, commit_hash: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
+pub fn resetIndex(git_path: []const u8, commit_hash: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, refresh: bool) !void {
     // helpers.Load commit to get tree hash
     const commit_obj = objects.GitObject.load(commit_hash, git_path, platform_impl, allocator) catch return error.InvalidCommitObject;
     defer commit_obj.deinit(allocator);
@@ -528,14 +533,16 @@ pub fn resetIndex(git_path: []const u8, commit_hash: []const u8, platform_impl: 
         var file_size: u32 = 0;
         const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path }) catch null;
         defer if (full_path) |fp| allocator.free(fp);
-        if (full_path) |fp| {
-            if (std.fs.cwd().statFile(fp)) |stat_result| {
-                mtime_sec = @intCast(@divFloor(stat_result.mtime, 1_000_000_000));
-                mtime_nsec = @intCast(@mod(stat_result.mtime, 1_000_000_000));
-                ctime_sec = @intCast(@divFloor(stat_result.ctime, 1_000_000_000));
-                ctime_nsec = @intCast(@mod(stat_result.ctime, 1_000_000_000));
-                file_size = @intCast(stat_result.size);
-            } else |_| {}
+        if (refresh) {
+            if (full_path) |fp| {
+                if (std.fs.cwd().statFile(fp)) |stat_result| {
+                    mtime_sec = @intCast(@divFloor(stat_result.mtime, 1_000_000_000));
+                    mtime_nsec = @intCast(@mod(stat_result.mtime, 1_000_000_000));
+                    ctime_sec = @intCast(@divFloor(stat_result.ctime, 1_000_000_000));
+                    ctime_nsec = @intCast(@mod(stat_result.ctime, 1_000_000_000));
+                    file_size = @intCast(stat_result.size);
+                } else |_| {}
+            }
         }
         try idx.entries.append(.{
             .mode = entry.mode,

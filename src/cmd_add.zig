@@ -321,7 +321,7 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                 std.fs.cwd().statFile(full_file_path) catch {
                     // helpers.If we can't stat it (e.g. broken symlink), try to add it
                     addSingleFileEx(allocator, relative_file_path, full_file_path, &index, git_path, platform_impl, repo_root_for_rel, force_flag, true) catch |e| {
-                        if (e == error.IgnoredFile) std.process.exit(128);
+                        if (e == error.IgnoredFile) std.process.exit(1);
                         return e;
                     };
                     continue;
@@ -386,7 +386,7 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                     try addIntentToAddEntry(allocator, relative_file_path, full_file_path, &index, git_path, platform_impl);
                 } else {
                     addSingleFileEx(allocator, relative_file_path, full_file_path, &index, git_path, platform_impl, repo_root_for_rel, force_flag, true) catch |e| {
-                        if (e == error.IgnoredFile) std.process.exit(128);
+                        if (e == error.IgnoredFile) std.process.exit(1);
                         return e;
                     };
                 }
