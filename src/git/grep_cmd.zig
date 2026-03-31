@@ -1121,17 +1121,33 @@ fn grepTreeIsh(allocator: Allocator, opts: *GrepOptions, git_dir: []const u8, re
                 var it = pd.iterate();
                 while (it.next() catch null) |entry| {
                     if (entry.kind != .file) continue;
-                    if (!std.mem.endsWith(u8, entry.name, ".pack")) continue;
-                    const pp = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pdp, entry.name }) catch continue;
+                    if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
+                    const idx_name = entry.name;
+                    const pack_name_base = idx_name[0 .. idx_name.len - 4];
+                    const pp = std.fmt.allocPrint(allocator, "{s}/{s}.pack", .{ pdp, pack_name_base }) catch continue;
                     defer allocator.free(pp);
-                    if (objects.getCachedPack(pp) == null) {
+                    const ip = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pdp, idx_name }) catch continue;
+                    defer allocator.free(ip);
+
+                    const pack_d = objects.getCachedPack(pp) orelse blk: {
                         if (objects.mmapFile(pp)) |mmap_data| {
-                            const in = std.fmt.allocPrint(allocator, "{s}.idx", .{entry.name[0 .. entry.name.len - 5]}) catch continue;
-                            defer allocator.free(in);
-                            const ip = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pdp, in }) catch continue;
-                            defer allocator.free(ip);
-                            const idx_mmap = objects.mmapFile(ip);
-                            objects.addToCacheEx(allocator, if (idx_mmap != null) ip else "", if (idx_mmap) |id| id else "", idx_mmap != null, pp, mmap_data, true);
+                            objects.addToCacheEx(allocator, "", "", false, pp, mmap_data, true);
+                            break :blk @as([]const u8, mmap_data);
+                        }
+                        break :blk null;
+                    };
+                    const idx_d = objects.getCachedIdx(ip) orelse blk: {
+                        if (objects.mmapFile(ip)) |mmap_data| {
+                            objects.addToCacheEx(allocator, ip, mmap_data, true, "", "", false);
+                            break :blk @as([]const u8, mmap_data);
+                        }
+                        break :blk null;
+                    };
+                    // Store first pack for fast direct access
+                    if (pack_d != null and idx_d != null) {
+                        if (pack_data_global.len == 0) {
+                            pack_data_global = pack_d.?;
+                            idx_data_global = idx_d.?;
                         }
                     }
                 }
@@ -1168,60 +1184,16 @@ fn grepTreeIsh(allocator: Allocator, opts: *GrepOptions, git_dir: []const u8, re
     };
     defer allocator.free(tree_hash);
 
-    // Walk tree recursively and grep each blob
-    var found_match = false;
-    var prev_file_had_output = false;
-
-    // Collect all files from tree
-    var files = std.array_list.Managed(TreeFile).init(allocator);
-    defer {
-        for (files.items) |f| {
-            allocator.free(f.path);
-            allocator.free(f.hash);
-        }
-        files.deinit();
-    }
-
-    try walkTree(allocator, git_dir, tree_hash, "", &files, platform_impl);
-
-    // Sort files
-    std.mem.sort(TreeFile, files.items, {}, struct {
-        fn lessThan(_: void, a: TreeFile, b: TreeFile) bool {
-            return std.mem.order(u8, a.path, b.path) == .lt;
-        }
-    }.lessThan);
-
     // Format tree-ish prefix
     const tree_prefix = try std.fmt.allocPrint(allocator, "{s}:", .{tree_ish});
     defer allocator.free(tree_prefix);
     opts.tree_prefix_display = tree_prefix;
 
-    for (files.items) |file| {
-        if (!matchesPathspecs(file.path, opts.pathspecs.items, prefix)) continue;
-        if (!matchesMaxDepth(file.path, opts.max_depth, opts.pathspecs.items, prefix)) continue;
-
-        const display_path = getDisplayPath(file.path, prefix, opts.full_name, allocator);
-        defer allocator.free(display_path);
-
-        // Read blob content
-        const blob_obj = objects.GitObject.load(file.hash, git_dir, platform_impl, allocator) catch continue;
-        defer blob_obj.deinit(allocator);
-
-        const matched = try grepContent(allocator, opts, display_path, blob_obj.data, tree_prefix, platform_impl, prev_file_had_output);
-        if (matched) {
-            found_match = true;
-            prev_file_had_output = true;
-        } else {
-            if (opts.files_without_match) {
-                const quoted = quotePathIfNeeded(display_path, allocator, opts.null_separator);
-                defer allocator.free(quoted);
-                const out = std.fmt.allocPrint(allocator, "{s}{s}\n", .{ tree_prefix, quoted }) catch continue;
-                defer allocator.free(out);
-                platform_impl.writeStdout(out) catch {};
-                found_match = true;
-            }
-        }
-    }
+    // Walk tree recursively and grep each blob inline (avoids collect+sort overhead)
+    // Git trees are already sorted, so DFS walk produces sorted output.
+    var found_match = false;
+    var prev_file_had_output = false;
+    try walkTreeAndGrep(allocator, git_dir, tree_hash, "", opts, prefix, &found_match, &prev_file_had_output, tree_prefix, platform_impl);
 
     if (!found_match) {
         std.process.exit(1);
@@ -1232,6 +1204,112 @@ const TreeFile = struct {
     path: []const u8,
     hash: []const u8,
 };
+
+/// Walk tree and grep blobs inline (no intermediate collection)
+fn walkTreeAndGrep(
+    allocator: Allocator,
+    git_dir: []const u8,
+    tree_hash: []const u8,
+    path_prefix: []const u8,
+    opts: *GrepOptions,
+    prefix: []const u8,
+    found_match: *bool,
+    prev_file_had_output: *bool,
+    tree_prefix: []const u8,
+    platform_impl: *const platform_mod.Platform,
+) error{OutOfMemory}!void {
+    // Load tree object (need allocated copy since recursive calls will overwrite shared buffers)
+    const tree_obj = objects.GitObject.load(tree_hash, git_dir, platform_impl, allocator) catch return;
+    defer tree_obj.deinit(allocator);
+    if (tree_obj.type != .tree) return;
+    try walkTreeDataAndGrep(allocator, git_dir, tree_obj.data, path_prefix, opts, prefix, found_match, prev_file_had_output, tree_prefix, platform_impl);
+}
+
+fn walkTreeDataAndGrep(
+    allocator: Allocator,
+    git_dir: []const u8,
+    data: []const u8,
+    path_prefix: []const u8,
+    opts: *GrepOptions,
+    prefix: []const u8,
+    found_match: *bool,
+    prev_file_had_output: *bool,
+    tree_prefix: []const u8,
+    platform_impl: *const platform_mod.Platform,
+) error{OutOfMemory}!void {
+    var pos: usize = 0;
+    while (pos < data.len) {
+        const space_pos = std.mem.indexOfScalarPos(u8, data, pos, ' ') orelse break;
+        const mode = data[pos..space_pos];
+        pos = space_pos + 1;
+        const null_pos = std.mem.indexOfScalarPos(u8, data, pos, 0) orelse break;
+        const name = data[pos..null_pos];
+        pos = null_pos + 1;
+        if (pos + 20 > data.len) break;
+        const hash_bytes = data[pos .. pos + 20];
+        pos += 20;
+
+        var hash_hex: [40]u8 = undefined;
+        _ = std.fmt.bufPrint(&hash_hex, "{x}", .{hash_bytes}) catch continue;
+
+        const full_path = if (path_prefix.len > 0)
+            std.fmt.allocPrint(allocator, "{s}/{s}", .{ path_prefix, name }) catch continue
+        else
+            allocator.dupe(u8, name) catch continue;
+        defer allocator.free(full_path);
+
+        if (std.mem.eql(u8, mode, "40000") or std.mem.eql(u8, mode, "040000")) {
+            try walkTreeAndGrep(allocator, git_dir, &hash_hex, full_path, opts, prefix, found_match, prev_file_had_output, tree_prefix, platform_impl);
+        } else if (std.mem.eql(u8, mode, "160000")) {
+            // submodule - skip
+        } else {
+            if (!matchesPathspecs(full_path, opts.pathspecs.items, prefix)) continue;
+            if (!matchesMaxDepth(full_path, opts.max_depth, opts.pathspecs.items, prefix)) continue;
+
+            const display_path = getDisplayPath(full_path, prefix, opts.full_name, allocator);
+            defer allocator.free(display_path);
+
+            // Try fast pack-based blob loading (avoids allocation)
+            const blob_data: ?[]const u8 = blk: {
+                if (pack_data_global.len > 0) {
+                    var oid_bytes: [20]u8 = undefined;
+                    _ = std.fmt.hexToBytes(&oid_bytes, &hash_hex) catch break :blk null;
+                    if (objects.readPackObjectDirect(pack_data_global, idx_data_global, oid_bytes)) |result| {
+                        if (result.obj_type == 3) break :blk result.data; // type 3 = blob
+                    }
+                }
+                break :blk null;
+            };
+
+            var blob_obj_fallback: ?objects.GitObject = null;
+            defer if (blob_obj_fallback) |obj| obj.deinit(allocator);
+
+            const content = blob_data orelse blk: {
+                blob_obj_fallback = objects.GitObject.load(&hash_hex, git_dir, platform_impl, allocator) catch continue;
+                break :blk blob_obj_fallback.?.data;
+            };
+
+            const matched = grepContent(allocator, opts, display_path, content, tree_prefix, platform_impl, prev_file_had_output.*) catch continue;
+            if (matched) {
+                found_match.* = true;
+                prev_file_had_output.* = true;
+            } else {
+                if (opts.files_without_match) {
+                    const quoted = quotePathIfNeeded(display_path, allocator, opts.null_separator);
+                    defer allocator.free(quoted);
+                    const out = std.fmt.allocPrint(allocator, "{s}{s}\n", .{ tree_prefix, quoted }) catch continue;
+                    defer allocator.free(out);
+                    platform_impl.writeStdout(out) catch {};
+                    found_match.* = true;
+                }
+            }
+        }
+    }
+}
+
+// Global pack data references for fast pack access in walkTreeAndGrep
+var pack_data_global: []const u8 = &.{};
+var idx_data_global: []const u8 = &.{};
 
 fn walkTree(allocator: Allocator, git_dir: []const u8, tree_hash: []const u8, path_prefix: []const u8, files: *std.array_list.Managed(TreeFile), platform_impl: *const platform_mod.Platform) !void {
     const tree_obj = objects.GitObject.load(tree_hash, git_dir, platform_impl, allocator) catch return;
