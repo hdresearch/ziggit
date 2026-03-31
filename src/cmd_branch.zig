@@ -380,25 +380,25 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             } else {
                 // Read branch target before deleting (for the "was ..." message)
                 const was_info: []const u8 = blk_was: {
-                    const ref_path = std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, branch_name }) catch break :blk_was try allocator.dupe(u8, "");
+                    const ref_path = std.fmt.allocPrint(allocator, "{s}/refs/heads/{s}", .{ git_path, branch_name }) catch break :blk_was allocator.dupe(u8, "") catch "";
                     defer allocator.free(ref_path);
-                    const content = std.fs.cwd().readFileAlloc(allocator, ref_path, 4096) catch break :blk_was try allocator.dupe(u8, "");
+                    const content = platform_impl.fs.readFile(allocator, ref_path) catch break :blk_was allocator.dupe(u8, "") catch "";
                     const trimmed = std.mem.trimRight(u8, content, "\r\n");
                     if (std.mem.startsWith(u8, trimmed, "ref: ")) {
                         // Symref - show the target ref
-                        const result = try allocator.dupe(u8, trimmed[5..]);
+                        const result = allocator.dupe(u8, trimmed[5..]) catch "";
                         allocator.free(content);
                         break :blk_was result;
                     } else if (trimmed.len >= 7) {
                         // Normal ref - show short hash
-                        const result = try allocator.dupe(u8, trimmed[0..7]);
+                        const result = allocator.dupe(u8, trimmed[0..7]) catch "";
                         allocator.free(content);
                         break :blk_was result;
                     }
                     allocator.free(content);
-                    break :blk_was try allocator.dupe(u8, "");
+                    break :blk_was allocator.dupe(u8, "") catch "";
                 };
-                defer allocator.free(was_info);
+                defer if (was_info.len > 0) allocator.free(was_info);
 
                 refs.deleteBranch(git_path, branch_name, platform_impl, allocator) catch |err| switch (err) {
                     error.FileNotFound => {
