@@ -5056,24 +5056,58 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
             defer sobj.deinit(allocator);
             if (sobj.type != .commit) continue;
 
-            // Add parents
-            var slines = std.mem.splitSequence(u8, sobj.data, "\n");
-            while (slines.next()) |sline| {
-                if (sline.len == 0) break;
-                if (std.mem.startsWith(u8, sline, "parent ")) {
-                    const sph = sline["parent ".len..];
-                    if (!show_visited.contains(sph) and !excluded_set.contains(sph)) {
-                        try show_visited.put(try allocator.dupe(u8, sph), {});
-                        try show_q.append(.{ .hash = try allocator.dupe(u8, sph), .ts = git_helpers_mod.getCommitTimestamp(sph, git_path, pi, allocator) });
+            // Apply --grep filtering
+            if (lo.grep_filters.items.len > 0) {
+                const gm = extractMessage(sobj.data);
+                var gok = false;
+                for (lo.grep_filters.items) |gf| {
+                    if (logFilterMatch(gm, gf, lo.fixed_strings)) { gok = true; break; }
+                }
+                const gskip = if (lo.invert_grep) gok else !gok;
+                if (gskip) {
+                    // Still add parents for walking
+                    var glines = std.mem.splitSequence(u8, sobj.data, "\n");
+                    while (glines.next()) |gline| {
+                        if (gline.len == 0) break;
+                        if (std.mem.startsWith(u8, gline, "parent ")) {
+                            const gph = gline["parent ".len..];
+                            if (!show_visited.contains(gph) and !excluded_set.contains(gph)) {
+                                try show_visited.put(try allocator.dupe(u8, gph), {});
+                                try show_q.append(.{ .hash = try allocator.dupe(u8, gph), .ts = git_helpers_mod.getCommitTimestamp(gph, git_path, pi, allocator) });
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            // Add parents only when walking a range (have exclude refs)
+            if (exclude_hashes.items.len > 0) {
+                var slines = std.mem.splitSequence(u8, sobj.data, "\n");
+                while (slines.next()) |sline| {
+                    if (sline.len == 0) break;
+                    if (std.mem.startsWith(u8, sline, "parent ")) {
+                        const sph = sline["parent ".len..];
+                        if (!show_visited.contains(sph) and !excluded_set.contains(sph)) {
+                            try show_visited.put(try allocator.dupe(u8, sph), {});
+                            try show_q.append(.{ .hash = try allocator.dupe(u8, sph), .ts = git_helpers_mod.getCommitTimestamp(sph, git_path, pi, allocator) });
+                        }
                     }
                 }
             }
 
-            if (show_count > 0) try pi.writeStdout("\n");
+            if (!lo.oneline and show_count > 0) try pi.writeStdout("\n");
             if (lo.format_string) |fmt| {
                 if (lo.format_is_separator and show_count > 0) try pi.writeStdout("\n");
                 try writeFormattedCommit(fmt, cur.hash, sobj.data, pi, allocator);
                 if (!lo.format_is_separator) try pi.writeStdout("\n");
+            } else if (lo.oneline) {
+                const short = cur.hash[0..@min(7, cur.hash.len)];
+                const m = extractMessage(sobj.data);
+                const first_line = if (std.mem.indexOf(u8, m, "\n")) |nl| m[0..nl] else std.mem.trimRight(u8, m, "\n");
+                const out = try std.fmt.allocPrint(allocator, "{s} {s}\n", .{ short, first_line });
+                defer allocator.free(out);
+                try pi.writeStdout(out);
             } else {
                 try writeCommitHeader(cur.hash, sobj.data, &lo, true, pi, allocator, git_path);
             }
@@ -5104,6 +5138,7 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
                 continue;
             }
             if (obj.type == .tree) {
+                if (idx > 0) try pi.writeStdout("\n");
                 const display_name = if (idx < start_ref_names.items.len) start_ref_names.items[idx] else hash;
                 const hdr = try std.fmt.allocPrint(allocator, "tree {s}\n\n", .{display_name});
                 defer allocator.free(hdr);
@@ -5726,6 +5761,9 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
     var suffix: []const u8 = ".patch";
     var numbered_files = false;
     var signoff = false;
+    var fp_grep_pattern: ?[]const u8 = null;
+    var fp_fixed_strings = false;
+    var fp_fixed_strings_explicit = false;
 
     // Check for config format.subjectprefix
     if (git_helpers_mod.getConfigOverride("format.subjectprefix")) |val| {
@@ -5772,6 +5810,14 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
             numbered_files = true;
         } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--signoff")) {
             signoff = true;
+        } else if (std.mem.startsWith(u8, arg, "--grep=")) {
+            fp_grep_pattern = arg["--grep=".len..];
+        } else if (std.mem.eql(u8, arg, "-F") or std.mem.eql(u8, arg, "--fixed-strings")) {
+            fp_fixed_strings = true;
+            fp_fixed_strings_explicit = true;
+        } else if (std.mem.eql(u8, arg, "-G") or std.mem.eql(u8, arg, "--basic-regexp") or std.mem.eql(u8, arg, "-E") or std.mem.eql(u8, arg, "--extended-regexp")) {
+            fp_fixed_strings = false;
+            fp_fixed_strings_explicit = true;
         } else if (std.mem.startsWith(u8, arg, "--subject-prefix=")) {
             subject_prefix = arg["--subject-prefix=".len..];
         } else if (std.mem.startsWith(u8, arg, "--start-number=")) {
@@ -5890,6 +5936,40 @@ pub fn cmdFormatPatch(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *
                 }
             }
         }
+    }
+
+    // Read grep.patternType from config for format-patch
+    if (!fp_fixed_strings_explicit) {
+        if (git_helpers_mod.getConfigValueByKey(git_path, "grep.patterntype", allocator)) |pt_val| {
+            if (std.ascii.eqlIgnoreCase(pt_val, "fixed")) {
+                fp_fixed_strings = true;
+            }
+            allocator.free(pt_val);
+        }
+    }
+
+    // Apply --grep filtering to format-patch commits
+    if (fp_grep_pattern) |gp| {
+        var filtered = std.array_list.Managed([]const u8).init(allocator);
+        for (commit_list.items) |h| {
+            const fobj = objects.GitObject.load(h, git_path, pi, allocator) catch {
+                allocator.free(@constCast(h));
+                continue;
+            };
+            defer fobj.deinit(allocator);
+            const fmsg = extractMessage(fobj.data);
+            const matched = if (fp_fixed_strings)
+                std.mem.indexOf(u8, fmsg, gp) != null
+            else
+                logFilterMatch(fmsg, gp, false);
+            if (matched) {
+                try filtered.append(h);
+            } else {
+                allocator.free(@constCast(h));
+            }
+        }
+        commit_list.deinit();
+        commit_list = filtered;
     }
 
     // Sort commits by date (oldest first) for format-patch ordering
