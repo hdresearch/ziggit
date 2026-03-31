@@ -1524,10 +1524,17 @@ fn collectPackedDecorationRefs(allocator: std.mem.Allocator, git_path: []const u
             if (std.mem.startsWith(u8, rn, "refs/remotes/")) break :blk allocator.dupe(u8, rn["refs/remotes/".len..]) catch continue;
             break :blk allocator.dupe(u8, rn) catch continue;
         };
-        // Only add if not already present from loose refs
-        if (map.contains(hash)) { allocator.free(short); continue; }
         const gop = map.getOrPut(allocator.dupe(u8, hash) catch { allocator.free(short); continue; }) catch { allocator.free(short); continue; };
-        gop.value_ptr.* = short;
+        if (gop.found_existing) {
+            const old = gop.value_ptr.*;
+            gop.value_ptr.* = std.fmt.allocPrint(allocator, "{s}, {s}", .{ old, short }) catch { allocator.free(short); continue; };
+            allocator.free(old);
+            allocator.free(gop.key_ptr.*);
+            gop.key_ptr.* = allocator.dupe(u8, hash) catch { allocator.free(short); continue; };
+            allocator.free(short);
+        } else {
+            gop.value_ptr.* = short;
+        }
     }
 }
 
