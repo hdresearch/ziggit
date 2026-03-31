@@ -89,11 +89,24 @@ var reuse_zstream_ready: bool = false;
 
 fn getReusableInflateStream() ?*ZStream {
     initCZlib();
-    const init_fn = zlib_inflate_init2_fn orelse return null;
-    const end_fn = zlib_inflate_end_fn orelse return null;
     if (reuse_zstream_ready) {
-        // Reset existing stream (cheaper than full init/end cycle)
+        // Use inflateReset (much cheaper than end+init cycle)
         if (reuse_zstream != null) {
+            // Try inflateReset first, fall back to end+init
+            if (!inflate_reset_looked_up) {
+                inflate_reset_looked_up = true;
+                if (comptime !is_freestanding) {
+                    if (zlib_lib) |*lib| {
+                        zlib_inflate_reset_fn = lib.lookup(*const fn (*ZStream) callconv(.c) c_int, "inflateReset");
+                    }
+                }
+            }
+            if (zlib_inflate_reset_fn) |reset_fn| {
+                if (reset_fn(&reuse_zstream.?) == 0) return &reuse_zstream.?;
+            }
+            // Fallback: end + init
+            const end_fn = zlib_inflate_end_fn orelse return null;
+            const init_fn = zlib_inflate_init2_fn orelse return null;
             _ = end_fn(&reuse_zstream.?);
             reuse_zstream = std.mem.zeroes(ZStream);
             if (init_fn(&reuse_zstream.?, 15, "1.2.13", @sizeOf(ZStream)) != 0) {
@@ -104,6 +117,7 @@ fn getReusableInflateStream() ?*ZStream {
         }
         return null;
     }
+    const init_fn = zlib_inflate_init2_fn orelse return null;
     reuse_zstream = std.mem.zeroes(ZStream);
     if (init_fn(&reuse_zstream.?, 15, "1.2.13", @sizeOf(ZStream)) != 0) {
         reuse_zstream = null;
