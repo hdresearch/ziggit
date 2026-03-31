@@ -400,6 +400,35 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                 };
                 defer if (was_info.len > 0) allocator.free(was_info);
 
+                // For -d (not -D), check if branch is fully merged into HEAD
+                if (std.mem.eql(u8, first_arg.?, "-d")) {
+                    const head_hash = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
+                    defer if (head_hash) |hh| allocator.free(hh);
+                    const branch_hash_str = blk_bh: {
+                        const br = std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch_name}) catch break :blk_bh null;
+                        defer allocator.free(br);
+                        break :blk_bh (refs.resolveRef(git_path, br, platform_impl, allocator) catch null) orelse null;
+                    };
+                    defer if (branch_hash_str) |bh| allocator.free(bh);
+                    if (head_hash == null) {
+                        // Orphan HEAD - branch is not merged
+                        const msg2 = try std.fmt.allocPrint(allocator, "error: the branch '{s}' is not fully merged.\n", .{branch_name});
+                        defer allocator.free(msg2);
+                        try platform_impl.writeStderr(msg2);
+                        std.process.exit(1);
+                    } else if (branch_hash_str) |bh| {
+                        if (!std.mem.eql(u8, bh, head_hash.?)) {
+                            const is_ancestor = helpers.isAncestor(git_path, bh, head_hash.?, allocator, platform_impl) catch false;
+                            if (!is_ancestor) {
+                                const msg2 = try std.fmt.allocPrint(allocator, "error: the branch '{s}' is not fully merged.\n", .{branch_name});
+                                defer allocator.free(msg2);
+                                try platform_impl.writeStderr(msg2);
+                                std.process.exit(1);
+                            }
+                        }
+                    }
+                }
+
                 refs.deleteBranch(git_path, branch_name, platform_impl, allocator) catch |err| switch (err) {
                     error.FileNotFound => {
                         const msg = try std.fmt.allocPrint(allocator, "error: branch '{s}' not found.\n", .{branch_name});
