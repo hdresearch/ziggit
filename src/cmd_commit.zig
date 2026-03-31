@@ -483,6 +483,27 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             try editmsg_buf.append('\n');
         }
 
+        // Add signoff line to the template if -s was given
+        if (signoff) signoff_in_template: {
+            const committer_info_for_sob = helpers.getCommitterString(allocator) catch break :signoff_in_template;
+            defer allocator.free(committer_info_for_sob);
+            const committer_name_email_sob = blk_sob: {
+                if (std.mem.lastIndexOf(u8, committer_info_for_sob, ">")) |gt_pos| {
+                    break :blk_sob committer_info_for_sob[0..gt_pos + 1];
+                }
+                break :blk_sob committer_info_for_sob;
+            };
+            const sob_line = try std.fmt.allocPrint(allocator, "Signed-off-by: {s}", .{committer_name_email_sob});
+            defer allocator.free(sob_line);
+            // Check if signoff is already in the message
+            const already_has = if (message) |msg| std.mem.indexOf(u8, msg, sob_line) != null else false;
+            if (!already_has) {
+                try editmsg_buf.append('\n');
+                try editmsg_buf.appendSlice(sob_line);
+                try editmsg_buf.append('\n');
+            }
+        }
+
         // Determine whether to show status
         const show_status = switch (status_option) {
             .yes => true,
@@ -947,8 +968,10 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         };
         const signoff_line = try std.fmt.allocPrint(allocator, "Signed-off-by: {s}", .{committer_name_email});
         defer allocator.free(signoff_line);
-        // helpers.Only add if not already present
-        if (message != null and std.mem.indexOf(u8, message.?, signoff_line) == null) {
+        // If message is null, treat as empty for signoff purposes
+        if (message == null) {
+            message = try std.fmt.allocPrint(allocator, "\n\n{s}\n", .{signoff_line});
+        } else if (std.mem.indexOf(u8, message.?, signoff_line) == null) {
             const old_msg = message.?;
             const trimmed_msg = std.mem.trimRight(u8, old_msg, "\n");
             // helpers.Check if message already ends with a trailer (like another Signed-off-by)
@@ -1030,7 +1053,10 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             const commit_msg_file = std.fmt.allocPrint(allocator, "{s}/COMMIT_EDITMSG", .{git_path}) catch null;
             defer if (commit_msg_file) |f| allocator.free(f);
             if (commit_msg_file) |cmf| {
-                platform_impl.fs.writeFile(cmf, msg) catch {};
+                // Only write cleaned message for non-editor path; editor path already has COMMIT_EDITMSG
+                if (!need_editor or no_edit) {
+                    platform_impl.fs.writeFile(cmf, msg) catch {};
+                }
                 const cm_result = hooks.runHook(allocator, git_path, "commit-msg", &.{cmf}, null, platform_impl) catch hooks.HookResult{ .exit_code = 0, .skipped = true };
                 if (!cm_result.skipped and cm_result.exit_code != 0) {
                     try platform_impl.writeStderr("Aborting commit due to commit-msg hook failure.\n");
