@@ -3097,20 +3097,127 @@ pub const Repository = struct {
                     (zlib_compat.decompressSlice(fa, pack_data[pos..]) catch return error.CorruptObject);
             },
             6 => {
-                // OFS_DELTA: delegate to full path (needs header for delta application)
-                const fa = self._fast_alloc;
-                const raw = try self.readOfsDeltaObject(pack_data, pos, obj_size, offset);
-                defer fa.free(raw);
-                const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse return error.CorruptObject;
-                return fa.dupe(u8, raw[null_pos + 1 ..]);
+                // OFS_DELTA: resolve delta chain returning content only (no header construction)
+                return self.resolveOfsDeltaContentOnly(pack_data, pos, obj_size, offset);
             },
             7 => {
-                const fa = self._fast_alloc;
-                const raw = try self.readRefDeltaObject(pack_data, pos, obj_size);
-                defer fa.free(raw);
-                const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse return error.CorruptObject;
-                return fa.dupe(u8, raw[null_pos + 1 ..]);
+                // REF_DELTA: resolve returning content only
+                return self.resolveRefDeltaContentOnly(pack_data, pos, obj_size);
             },
+            else => return error.InvalidPackObject,
+        }
+    }
+
+    /// Resolve OFS_DELTA returning only content (no "type size\0" header).
+    /// This avoids building/stripping headers at every level of the delta chain,
+    /// saving 1-2 allocations + copies per delta object during checkout.
+    fn resolveOfsDeltaContentOnly(self: *Repository, pack_data: []const u8, start_pos: usize, delta_size: u64, current_offset: u64) ObjectReadError![]u8 {
+        const fa = self._fast_alloc;
+        var pos = start_pos;
+
+        // Read negative offset
+        var byte = pack_data[pos];
+        var neg_offset: u64 = byte & 0x7f;
+        pos += 1;
+        while (byte & 0x80 != 0) {
+            if (pos >= pack_data.len) return error.InvalidPackObject;
+            byte = pack_data[pos];
+            neg_offset = ((neg_offset + 1) << 7) | (byte & 0x7f);
+            pos += 1;
+        }
+        const base_offset = current_offset - neg_offset;
+
+        // Resolve base object as content-only (recursive)
+        const base_content = try self.resolvePackContentOnly(pack_data, base_offset);
+        defer fa.free(base_content);
+
+        // Decompress delta data
+        const delta_sz = @as(usize, @intCast(delta_size));
+        const delta_data = objects_mod.cDecompressSlice(fa, pack_data[pos..], delta_sz) orelse
+            objects_mod.cDecompressSlice(fa, pack_data[pos..], 0) orelse
+            (zlib_compat.decompressSlice(fa, pack_data[pos..]) catch return error.CorruptObject);
+        defer fa.free(delta_data);
+
+        // Apply delta directly to content (no header)
+        const result_size = objects_mod.deltaResultSize(delta_data) catch return error.CorruptObject;
+        const result = fa.alloc(u8, result_size) catch return error.ObjectNotFound;
+        _ = objects_mod.applyDeltaInto(base_content, delta_data, result) catch {
+            fa.free(result);
+            return error.CorruptObject;
+        };
+        return result;
+    }
+
+    /// Resolve REF_DELTA returning only content (no header).
+    fn resolveRefDeltaContentOnly(self: *Repository, pack_data: []const u8, start_pos: usize, delta_size: u64) ObjectReadError![]u8 {
+        const fa = self._fast_alloc;
+        var pos = start_pos;
+        if (pos + 20 > pack_data.len) return error.InvalidPackObject;
+        const base_hash_bytes = pack_data[pos..pos + 20];
+        pos += 20;
+
+        // Try to get base content from pack directly
+        const base_content = blk: {
+            if (self._cached_idx_data) |idx_data| {
+                const base_offset = lookupIdxForOffsetFromData(idx_data, base_hash_bytes[0..20]) catch break :blk @as(?[]u8, null);
+                break :blk self.resolvePackContentOnly(pack_data, base_offset) catch null;
+            }
+            break :blk @as(?[]u8, null);
+        } orelse fallback: {
+            // Fallback: read via full path (may read from different pack or loose)
+            var base_hash_hex: [40]u8 = undefined;
+            _ = std.fmt.bufPrint(&base_hash_hex, "{x}", .{base_hash_bytes}) catch return error.InvalidPackObject;
+            const raw = try self.readRawObject(&base_hash_hex);
+            defer fa.free(raw);
+            const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse return error.CorruptObject;
+            break :fallback fa.dupe(u8, raw[null_pos + 1 ..]) catch return error.ObjectNotFound;
+        };
+        defer fa.free(base_content);
+
+        // Decompress delta data
+        const delta_sz = @as(usize, @intCast(delta_size));
+        const delta_data = objects_mod.cDecompressSlice(fa, pack_data[pos..], delta_sz) orelse
+            objects_mod.cDecompressSlice(fa, pack_data[pos..], 0) orelse
+            (zlib_compat.decompressSlice(fa, pack_data[pos..]) catch return error.CorruptObject);
+        defer fa.free(delta_data);
+
+        // Apply delta directly to content
+        const result_size = objects_mod.deltaResultSize(delta_data) catch return error.CorruptObject;
+        const result = fa.alloc(u8, result_size) catch return error.ObjectNotFound;
+        _ = objects_mod.applyDeltaInto(base_content, delta_data, result) catch {
+            fa.free(result);
+            return error.CorruptObject;
+        };
+        return result;
+    }
+
+    /// Resolve a pack object at offset returning only content (no header).
+    /// Used by delta resolution to avoid header construction at every chain level.
+    fn resolvePackContentOnly(self: *Repository, pack_data: []const u8, offset: u64) ObjectReadError![]u8 {
+        if (offset >= pack_data.len) return error.InvalidPackOffset;
+        const fa = self._fast_alloc;
+
+        var pos = @as(usize, offset);
+        const first_byte = pack_data[pos];
+        const obj_type_raw = (first_byte >> 4) & 0x07;
+        var obj_size: u64 = first_byte & 0x0f;
+        var shift_val: u6 = 4;
+        pos += 1;
+
+        while (pack_data[pos - 1] & 0x80 != 0) {
+            if (pos >= pack_data.len) return error.InvalidPackObject;
+            obj_size |= @as(u64, @as(u64, pack_data[pos] & 0x7f)) << shift_val;
+            shift_val += 7;
+            pos += 1;
+        }
+
+        switch (obj_type_raw) {
+            1, 2, 3, 4 => {
+                return objects_mod.cDecompressSlice(fa, pack_data[pos..], @as(usize, @intCast(obj_size))) orelse
+                    (zlib_compat.decompressSlice(fa, pack_data[pos..]) catch return error.CorruptObject);
+            },
+            6 => return self.resolveOfsDeltaContentOnly(pack_data, pos, obj_size, offset),
+            7 => return self.resolveRefDeltaContentOnly(pack_data, pos, obj_size),
             else => return error.InvalidPackObject,
         }
     }
