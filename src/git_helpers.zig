@@ -221,6 +221,7 @@ const NATIVE_COMMANDS = [_][]const u8{
     "rebase", "cherry-pick", "revert", "daemon", "bisect",
     "grep", "notes", "format-patch", "whatchanged", "for-each-repo", "bugreport", "diagnose",
     "web--browse", "fast-import", "fast-export", "pack-refs",
+    "shortlog",
 };
 
 
