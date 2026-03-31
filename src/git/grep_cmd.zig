@@ -1400,10 +1400,89 @@ fn collectFilesRecursive(allocator: Allocator, path: []const u8, files: *std.arr
 
 /// Core grep function - search content and output matches
 /// Returns true if any match was found
+/// Fast path for simple fixed-string grep: scan content line by line without allocation.
+fn grepContentFastFixed(
+    allocator: Allocator,
+    opts: *GrepOptions,
+    display_path: []const u8,
+    content: []const u8,
+    tp: []const u8,
+    pattern: []const u8,
+    platform_impl: *const platform_mod.Platform,
+    prev_file_had_output: bool,
+) !bool {
+    _ = prev_file_had_output;
+    var found = false;
+    var line_num: u32 = 1;
+    var pos: usize = 0;
+    const show_line_num = opts.show_line_number;
+    const suppress_fn = opts.suppress_filename;
+    // Pre-build the prefix to avoid per-match allocation
+    // Format: [tp][display_path][:linenum]:line
+    var prefix_buf: [1024]u8 = undefined;
+    var prefix_len: usize = 0;
+    if (!suppress_fn) {
+        if (tp.len > 0 and prefix_len + tp.len < prefix_buf.len) {
+            @memcpy(prefix_buf[prefix_len..prefix_len + tp.len], tp);
+            prefix_len += tp.len;
+        }
+        if (prefix_len + display_path.len < prefix_buf.len) {
+            @memcpy(prefix_buf[prefix_len..prefix_len + display_path.len], display_path);
+            prefix_len += display_path.len;
+        }
+    }
+    const prefix_str = prefix_buf[0..prefix_len];
+    // Batch all output into a single buffer
+    var out_buf = std.array_list.Managed(u8).init(allocator);
+    defer out_buf.deinit();
+
+    while (pos < content.len) {
+        var line_end = pos;
+        while (line_end < content.len and content[line_end] != '\n') : (line_end += 1) {}
+        const line = content[pos..line_end];
+
+        if (std.mem.indexOf(u8, line, pattern) != null) {
+            found = true;
+            try out_buf.appendSlice(prefix_str);
+            if (show_line_num) {
+                try out_buf.append(':');
+                var num_buf: [12]u8 = undefined;
+                const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{line_num}) catch "?";
+                try out_buf.appendSlice(num_str);
+            }
+            try out_buf.append(':');
+            try out_buf.appendSlice(line);
+            try out_buf.append('\n');
+        }
+
+        pos = line_end + 1;
+        line_num += 1;
+    }
+    if (out_buf.items.len > 0) {
+        try platform_impl.writeStdout(out_buf.items);
+    }
+    return found;
+}
+
 fn grepContent(allocator: Allocator, opts: *GrepOptions, display_path: []const u8, content: []const u8, tree_prefix_opt: ?[]const u8, platform_impl: *const platform_mod.Platform, prev_file_had_output: bool) !bool {
     _ = tree_prefix_opt;
 
     const tp = opts.tree_prefix_display;
+
+    // FAST PATH: simple grep (fixed or plain-string pattern, no special options)
+    if (!opts.invert_match and !opts.count_only and !opts.files_only and !opts.files_without_match and
+        !opts.quiet and !opts.only_matching and !opts.show_function and !opts.function_body and
+        !opts.has_boolean_expr and !opts.show_column and
+        opts.context_before == 0 and opts.context_after == 0 and opts.max_count == null and
+        opts.patterns.items.len == 1 and !isBinaryContent(content))
+    {
+        const eff_pt = opts.effectivePatternType();
+        const pat = opts.patterns.items[0];
+        const use_fixed = eff_pt == .fixed or (eff_pt != .perl and isPlainString(pat, eff_pt == .extended));
+        if (use_fixed and !opts.case_insensitive and !opts.word_match) {
+            return grepContentFastFixed(allocator, opts, display_path, content, tp, pat, platform_impl, prev_file_had_output);
+        }
+    }
 
     // Check if content is binary
     if (isBinaryContent(content)) {
