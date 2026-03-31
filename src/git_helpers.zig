@@ -1369,6 +1369,140 @@ pub fn expandHashOnlyFormat(format: []const u8, commit_hash: []const u8, out: *s
 }
 
 /// Output a formatted commit using pre-loaded commit data (avoids re-loading object and re-finding git dir)
+pub fn buildDecorationMap(allocator: std.mem.Allocator, git_path: []const u8, platform_impl: *const platform_mod.Platform, map: *std.StringHashMap([]const u8)) !void {
+    _ = platform_impl;
+    // Read HEAD
+    const head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{git_path});
+    defer allocator.free(head_path);
+    const head_content = std.fs.cwd().readFileAlloc(allocator, head_path, 256) catch null;
+    defer if (head_content) |hc| allocator.free(hc);
+    const head_trimmed = if (head_content) |hc| std.mem.trimRight(u8, hc, "\n\r ") else "";
+    var head_ref: ?[]const u8 = null;
+    if (std.mem.startsWith(u8, head_trimmed, "ref: ")) head_ref = head_trimmed[5..];
+
+    // Resolve HEAD hash
+    var head_hash: ?[]u8 = null;
+    defer if (head_hash) |hh| allocator.free(hh);
+    if (head_ref) |hr| {
+        const ref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, hr }) catch null;
+        defer if (ref_path) |rp| allocator.free(rp);
+        if (ref_path) |rp| {
+            const ref_data = std.fs.cwd().readFileAlloc(allocator, rp, 256) catch null;
+            if (ref_data) |rd| {
+                const rt = std.mem.trimRight(u8, rd, "\n\r ");
+                if (rt.len >= 40) {
+                    head_hash = allocator.dupe(u8, rt[0..40]) catch null;
+                }
+                allocator.free(rd);
+            }
+        }
+    }
+
+    // Collect refs from refs/heads/, refs/tags/, refs/remotes/
+    const ref_dirs = [_]struct { dir: []const u8, prefix: []const u8 }{
+        .{ .dir = "refs/heads", .prefix = "" },
+        .{ .dir = "refs/tags", .prefix = "tag: " },
+        .{ .dir = "refs/remotes", .prefix = "" },
+    };
+    for (ref_dirs) |rd| {
+        const dir_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, rd.dir }) catch continue;
+        defer allocator.free(dir_path);
+        collectDecorationRefs(allocator, dir_path, rd.dir, rd.prefix, map) catch {};
+    }
+    // Packed refs
+    collectPackedDecorationRefs(allocator, git_path, map) catch {};
+
+    // Add HEAD -> branch decoration
+    if (head_hash) |hh| {
+        const head_name = blk: {
+            if (head_ref) |hr| {
+                if (std.mem.startsWith(u8, hr, "refs/heads/"))
+                    break :blk std.fmt.allocPrint(allocator, "HEAD -> {s}", .{hr["refs/heads/".len..]}) catch break :blk allocator.dupe(u8, "HEAD") catch return;
+            }
+            break :blk allocator.dupe(u8, "HEAD") catch return;
+        };
+        defer allocator.free(head_name);
+        const gop = map.getOrPut(allocator.dupe(u8, hh) catch return) catch return;
+        if (gop.found_existing) {
+            const old = gop.value_ptr.*;
+            gop.value_ptr.* = std.fmt.allocPrint(allocator, "{s}, {s}", .{ head_name, old }) catch return;
+            allocator.free(old);
+            allocator.free(gop.key_ptr.*);
+            gop.key_ptr.* = allocator.dupe(u8, hh) catch return;
+        } else {
+            gop.value_ptr.* = allocator.dupe(u8, head_name) catch return;
+        }
+    }
+}
+
+fn collectDecorationRefs(allocator: std.mem.Allocator, dir_path: []const u8, ref_prefix: []const u8, display_prefix: []const u8, map: *std.StringHashMap([]const u8)) !void {
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind == .directory) {
+            const sp = std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
+            defer allocator.free(sp);
+            const srp = std.fmt.allocPrint(allocator, "{s}/{s}", .{ ref_prefix, entry.name }) catch continue;
+            defer allocator.free(srp);
+            collectDecorationRefs(allocator, sp, srp, display_prefix, map) catch {};
+        } else {
+            const fp = std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
+            defer allocator.free(fp);
+            const content = std.fs.cwd().readFileAlloc(allocator, fp, 256) catch continue;
+            defer allocator.free(content);
+            const hash = std.mem.trimRight(u8, content, "\n\r ");
+            if (hash.len < 40) continue;
+            const ref_name = std.fmt.allocPrint(allocator, "{s}/{s}", .{ ref_prefix, entry.name }) catch continue;
+            defer allocator.free(ref_name);
+            const short = blk: {
+                if (std.mem.startsWith(u8, ref_name, "refs/heads/"))
+                    break :blk std.fmt.allocPrint(allocator, "{s}{s}", .{ display_prefix, ref_name["refs/heads/".len..] }) catch continue;
+                if (std.mem.startsWith(u8, ref_name, "refs/tags/"))
+                    break :blk std.fmt.allocPrint(allocator, "{s}{s}", .{ display_prefix, ref_name["refs/tags/".len..] }) catch continue;
+                if (std.mem.startsWith(u8, ref_name, "refs/remotes/"))
+                    break :blk std.fmt.allocPrint(allocator, "{s}{s}", .{ display_prefix, ref_name["refs/remotes/".len..] }) catch continue;
+                break :blk allocator.dupe(u8, ref_name) catch continue;
+            };
+            const gop = map.getOrPut(allocator.dupe(u8, hash[0..40]) catch continue) catch { allocator.free(short); continue; };
+            if (gop.found_existing) {
+                const old = gop.value_ptr.*;
+                gop.value_ptr.* = std.fmt.allocPrint(allocator, "{s}, {s}", .{ old, short }) catch { allocator.free(short); continue; };
+                allocator.free(old);
+                allocator.free(gop.key_ptr.*);
+                gop.key_ptr.* = allocator.dupe(u8, hash[0..40]) catch { allocator.free(short); continue; };
+                allocator.free(short);
+            } else {
+                gop.value_ptr.* = short;
+            }
+        }
+    }
+}
+
+fn collectPackedDecorationRefs(allocator: std.mem.Allocator, git_path: []const u8, map: *std.StringHashMap([]const u8)) !void {
+    const pp = try std.fmt.allocPrint(allocator, "{s}/packed-refs", .{git_path});
+    defer allocator.free(pp);
+    const content = std.fs.cwd().readFileAlloc(allocator, pp, 10 * 1024 * 1024) catch return;
+    defer allocator.free(content);
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        if (line.len < 41 or line[0] == '#' or line[0] == '^') continue;
+        if (line[40] != ' ') continue;
+        const hash = line[0..40];
+        const rn = line[41..];
+        const short = blk: {
+            if (std.mem.startsWith(u8, rn, "refs/heads/")) break :blk allocator.dupe(u8, rn["refs/heads/".len..]) catch continue;
+            if (std.mem.startsWith(u8, rn, "refs/tags/")) break :blk std.fmt.allocPrint(allocator, "tag: {s}", .{rn["refs/tags/".len..]}) catch continue;
+            if (std.mem.startsWith(u8, rn, "refs/remotes/")) break :blk allocator.dupe(u8, rn["refs/remotes/".len..]) catch continue;
+            break :blk allocator.dupe(u8, rn) catch continue;
+        };
+        // Only add if not already present from loose refs
+        if (map.contains(hash)) { allocator.free(short); continue; }
+        const gop = map.getOrPut(allocator.dupe(u8, hash) catch { allocator.free(short); continue; }) catch { allocator.free(short); continue; };
+        gop.value_ptr.* = short;
+    }
+}
+
 pub fn outputFormattedCommitFromData(format: []const u8, commit_hash: []const u8, commit_data: []const u8, out: *std.array_list.Managed(u8), allocator: std.mem.Allocator) !void {
     return outputFormattedCommitFromDataWithDecor(format, commit_hash, commit_data, out, allocator, null);
 }

@@ -664,7 +664,14 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     
     // Try commit-graph fast path for common cases (oneline or format strings, no excludes)
     const has_filters = author_filters.items.len > 0 or committer_filters.items.len > 0 or grep_filters.items.len > 0;
-    const use_cg_format = format_string != null and exclude_refs.items.len == 0 and include_refs.items.len == 0 and output_encoding == null;
+    const format_needs_decor = if (format_string) |fs| blk: {
+        var fdi: usize = 0;
+        while (fdi < fs.len) : (fdi += 1) {
+            if (fs[fdi] == '%' and fdi + 1 < fs.len and (fs[fdi + 1] == 'd' or fs[fdi + 1] == 'D')) break :blk true;
+        }
+        break :blk false;
+    } else false;
+    const use_cg_format = format_string != null and exclude_refs.items.len == 0 and include_refs.items.len == 0 and output_encoding == null and !format_needs_decor;
     if (use_cg_format and !show_graph) {
         // Commit-graph fast path for format strings
         if (commit_graph_mod.CommitGraph.open(git_path, allocator)) |cg| {
@@ -1161,6 +1168,32 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         }
     }
 
+    // Build decoration map for %d/%D format specifiers
+    var decoration_map = std.StringHashMap([]const u8).init(allocator);
+    defer {
+        var dit = decoration_map.iterator();
+        while (dit.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.*);
+        }
+        decoration_map.deinit();
+    }
+    if (format_string != null) {
+        // Check if format uses %d or %D
+        const fmt = format_string.?;
+        var needs_decor = false;
+        var fi: usize = 0;
+        while (fi < fmt.len) : (fi += 1) {
+            if (fmt[fi] == '%' and fi + 1 < fmt.len and (fmt[fi + 1] == 'd' or fmt[fi + 1] == 'D')) {
+                needs_decor = true;
+                break;
+            }
+        }
+        if (needs_decor) {
+            helpers.buildDecorationMap(allocator, git_path, platform_impl, &decoration_map) catch {};
+        }
+    }
+
     // Pre-allocate output buffer for batched writes
     var output_buf = std.array_list.Managed(u8).init(allocator);
     defer output_buf.deinit();
@@ -1504,7 +1537,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             if (show_graph) try platform_impl.writeStdout("* ");
             // Use pre-loaded commit data to avoid re-loading object and re-finding git dir
             output_buf.clearRetainingCapacity();
-            try helpers.outputFormattedCommitFromData(fmt, cur_hash, commit_data, &output_buf, allocator);
+            try helpers.outputFormattedCommitFromDataWithDecor(fmt, cur_hash, commit_data, &output_buf, allocator, if (decoration_map.count() > 0) &decoration_map else null);
             // Apply line_prefix to each line in multi-line output
             if (line_prefix.len > 0 and std.mem.indexOfScalar(u8, output_buf.items, '\n') != null) {
                 var prefixed = std.array_list.Managed(u8).init(allocator);
