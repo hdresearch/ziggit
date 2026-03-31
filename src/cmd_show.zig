@@ -644,6 +644,7 @@ pub fn showTagObject(git_object: objects.GitObject, git_path: []const u8, platfo
 pub fn showTreeObject(git_object: objects.GitObject, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
     // helpers.Parse tree object and show entries
     var i: usize = 0;
+    const hex_lut = "0123456789abcdef";
     
     while (i < git_object.data.len) {
         // helpers.Parse tree entry: "<mode> <name>\0<20-byte-hash>"
@@ -663,7 +664,10 @@ pub fn showTreeObject(git_object: objects.GitObject, platform_impl: *const platf
         const hash_bytes = git_object.data[i..i + 20];
         const hash_hex = try allocator.alloc(u8, 40);
         defer allocator.free(hash_hex);
-        _ = std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes}) catch break;
+        for (hash_bytes, 0..) |byte, bi| {
+            hash_hex[bi * 2] = hex_lut[byte >> 4];
+            hash_hex[bi * 2 + 1] = hex_lut[byte & 0x0f];
+        }
         
         i += 20;
         
@@ -680,6 +684,7 @@ pub fn showTreeObject(git_object: objects.GitObject, platform_impl: *const platf
 pub fn showTreeObjectFormatted(git_object: objects.GitObject, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) !void {
     // helpers.Parse tree object and show entries in a nice format
     var i: usize = 0;
+    const hex_lut = "0123456789abcdef";
     
     while (i < git_object.data.len) {
         // helpers.Parse tree entry: "<mode> <name>\0<20-byte-hash>"
@@ -699,7 +704,10 @@ pub fn showTreeObjectFormatted(git_object: objects.GitObject, platform_impl: *co
         const hash_bytes = git_object.data[i..i + 20];
         const hash_hex = try allocator.alloc(u8, 40);
         defer allocator.free(hash_hex);
-        _ = std.fmt.bufPrint(hash_hex, "{x}", .{hash_bytes}) catch break;
+        for (hash_bytes, 0..) |byte, bi| {
+            hash_hex[bi * 2] = hex_lut[byte >> 4];
+            hash_hex[bi * 2 + 1] = hex_lut[byte & 0x0f];
+        }
         
         i += 20;
         
@@ -762,7 +770,11 @@ pub fn showRefToWorkingTreeDiff(ref_name: []const u8, index: *const index_mod.In
         const old_content = if (de.is_new) try allocator.dupe(u8, "") else blk: {
             if (tree_entries_map.get(de.path)) |te| {
                 var hash_buf: [40]u8 = undefined;
-                _ = std.fmt.bufPrint(&hash_buf, "{x}", .{&te.hash}) catch unreachable;
+                const hl = "0123456789abcdef";
+                for (te.hash, 0..) |byte, bi| {
+                    hash_buf[bi * 2] = hl[byte >> 4];
+                    hash_buf[bi * 2 + 1] = hl[byte & 0x0f];
+                }
                 break :blk helpers.readBlobContent(allocator, git_path, &hash_buf, platform_impl) catch try allocator.dupe(u8, "");
             } else break :blk try allocator.dupe(u8, "");
         };
