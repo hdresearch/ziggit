@@ -60,7 +60,7 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
     }
     defer allocator.free(start_commit);
 
-    const debug_timing = false;
+    const debug_timing = true;
     var t0: i128 = 0;
     if (debug_timing) t0 = std.time.nanoTimestamp();
 
