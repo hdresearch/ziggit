@@ -1218,11 +1218,33 @@ fn walkTreeAndGrep(
     tree_prefix: []const u8,
     platform_impl: *const platform_mod.Platform,
 ) error{OutOfMemory}!void {
-    // Load tree object (need allocated copy since recursive calls will overwrite shared buffers)
-    const tree_obj = objects.GitObject.load(tree_hash, git_dir, platform_impl, allocator) catch return;
-    defer tree_obj.deinit(allocator);
-    if (tree_obj.type != .tree) return;
-    try walkTreeDataAndGrep(allocator, git_dir, tree_obj.data, path_prefix, opts, prefix, found_match, prev_file_had_output, tree_prefix, platform_impl);
+    // Try fast pack-based tree loading (then copy for recursive safety)
+    var tree_data_owned: ?[]u8 = null;
+    defer if (tree_data_owned) |d| allocator.free(d);
+
+    const tree_data: ?[]const u8 = blk: {
+        if (pack_data_global.len > 0) {
+            var oid_bytes: [20]u8 = undefined;
+            _ = std.fmt.hexToBytes(&oid_bytes, tree_hash) catch break :blk null;
+            if (objects.readPackObjectDirect(pack_data_global, idx_data_global, oid_bytes)) |result| {
+                if (result.obj_type == 2) {
+                    // Must copy since recursive calls overwrite the shared buffer
+                    tree_data_owned = allocator.dupe(u8, result.data) catch break :blk null;
+                    break :blk tree_data_owned;
+                }
+            }
+        }
+        break :blk null;
+    };
+
+    if (tree_data) |data| {
+        try walkTreeDataAndGrep(allocator, git_dir, data, path_prefix, opts, prefix, found_match, prev_file_had_output, tree_prefix, platform_impl);
+    } else {
+        const tree_obj = objects.GitObject.load(tree_hash, git_dir, platform_impl, allocator) catch return;
+        defer tree_obj.deinit(allocator);
+        if (tree_obj.type != .tree) return;
+        try walkTreeDataAndGrep(allocator, git_dir, tree_obj.data, path_prefix, opts, prefix, found_match, prev_file_had_output, tree_prefix, platform_impl);
+    }
 }
 
 fn walkTreeDataAndGrep(
