@@ -302,6 +302,11 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             if (std.mem.startsWith(u8, trimmed_head, "ref: ")) {
                 // Symbolic ref - check if the target ref file exists and has content
                 const ref_target = trimmed_head[5..];
+                // Check for invalid ref names (e.g. ending in .lock)
+                if (std.mem.endsWith(u8, ref_target, ".lock")) {
+                    try platform_impl.writeStderr("fatal: your current branch appears to be broken\n");
+                    std.process.exit(128);
+                }
                 const ref_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, ref_target }) catch {
                     try platform_impl.writeStderr("fatal: your current branch does not have any commits yet\n");
                     std.process.exit(128);
@@ -1311,9 +1316,12 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
                     if (!any_committer) break :filterCommit false;
                 }
                 if (has_grep_filter) {
+                    var all_grep_match = true;
                     for (grep_filters.items) |gf| {
-                        if (!matchesFilter(msg_text, gf, fixed_strings, ignore_case)) break :filterCommit false;
+                        if (!matchesFilter(msg_text, gf, fixed_strings, ignore_case)) { all_grep_match = false; break; }
                     }
+                    const eff_grep = if (invert_grep) !all_grep_match else all_grep_match;
+                    if (!eff_grep) break :filterCommit false;
                 }
                 break :filterCommit true;
             } else {
@@ -1347,26 +1355,13 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
                         }
                     }
                 }
-                break :filterCommit grep_match and author_match and committer_match;
+                // --invert-grep only inverts grep match, not author/committer
+                const effective_grep = if (invert_grep and has_grep_filter) !grep_match else grep_match;
+                break :filterCommit effective_grep and author_match and committer_match;
             }
         };
 
-        if (invert_grep) {
-            // --invert-grep without --grep is a NOOP
-            if (grep_filters.items.len == 0) {
-                // no grep filter, so invert-grep doesn't change anything
-            } else if (should_show) {
-                // Add parents to queue and continue without displaying
-                for (parent_hashes) |ph| {
-                    if (!visited.contains(ph)) {
-                        const ts = getTs.get(ph, maybe_cg, git_path, platform_impl, allocator);
-                        try queue.append(.{ .hash = try allocator.dupe(u8, ph), .timestamp = ts });
-                        try visited.put(try allocator.dupe(u8, ph), {});
-                    }
-                }
-                continue;
-            }
-        } else {
+        {
             if (!should_show) {
                 // Add parents to queue and continue without displaying
                 for (parent_hashes) |ph| {

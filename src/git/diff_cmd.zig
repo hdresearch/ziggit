@@ -5202,9 +5202,12 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
                         if (!any) break :blk false;
                     }
                     if (has_grep_f) {
+                        var all_grep_match = true;
                         for (lo.grep_filters.items) |gf| {
-                            if (!logFilterMatch(msg, gf, lo.fixed_strings)) break :blk false;
+                            if (!logFilterMatch(msg, gf, lo.fixed_strings)) { all_grep_match = false; break; }
                         }
+                        const effective_grep = if (lo.invert_grep) !all_grep_match else all_grep_match;
+                        if (!effective_grep) break :blk false;
                     }
                     break :blk true;
                 } else blk: {
@@ -5227,10 +5230,12 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
                             if (logFilterMatch(committer_val, cf, lo.fixed_strings)) { committer_ok = true; break; }
                         }
                     }
-                    break :blk grep_ok and author_ok and committer_ok;
+                    // --invert-grep only inverts the grep match, not author/committer
+                    const effective_grep = if (lo.invert_grep and has_grep_f) !grep_ok else grep_ok;
+                    break :blk effective_grep and author_ok and committer_ok;
                 };
 
-                const skip = if (lo.invert_grep) should_show else !should_show;
+                const skip = !should_show;
                 if (skip) {
                     addParentsToQueue(&queue, &visited, parents.items, lo.first_parent, git_path, pi, allocator) catch {};
                     continue;

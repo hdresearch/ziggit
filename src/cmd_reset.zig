@@ -396,6 +396,13 @@ fn resetIndexPaths(git_path: []const u8, commit_hash: []const u8, paths: []const
     var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch index_mod.Index.init(allocator);
     defer idx.deinit();
 
+    // Build map of old index entries for stat preservation
+    var old_entries = std.StringHashMap(index_mod.IndexEntry).init(allocator);
+    defer old_entries.deinit();
+    for (idx.entries.items) |entry| {
+        old_entries.put(entry.path, entry) catch {};
+    }
+
     // For each requested path, update or remove from index
     for (paths) |path| {
         // Check if this path matches any index entry or tree entry

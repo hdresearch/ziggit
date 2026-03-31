@@ -43,15 +43,20 @@ pub fn cmdShow(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgItera
 
     var refs_to_show = std.array_list.Managed([]const u8).init(allocator);
     defer refs_to_show.deinit();
+    var exclude_refs = std.array_list.Managed([]const u8).init(allocator);
+    defer exclude_refs.deinit();
     var name_only = false;
     var pretty_format: ?[]const u8 = null;
     var stat_only = false;
     var suppress_diff = false;
     var no_patch = false;
+    var max_count: ?u32 = null;
 
     // helpers.Parse arguments
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--name-only")) {
+        if (std.mem.startsWith(u8, arg, "-") and arg.len > 1 and std.ascii.isDigit(arg[1])) {
+            max_count = std.fmt.parseInt(u32, arg[1..], 10) catch null;
+        } else if (std.mem.eql(u8, arg, "--name-only")) {
             name_only = true;
         } else if (std.mem.eql(u8, arg, "--stat")) {
             stat_only = true;
@@ -85,13 +90,120 @@ pub fn cmdShow(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgItera
         } else if (std.mem.eql(u8, arg, "--")) {
             // skip
         } else if (!std.mem.startsWith(u8, arg, "-")) {
-            try refs_to_show.append(arg);
+            // Handle ^ref (exclude) and A..B (range) syntax
+            if (std.mem.startsWith(u8, arg, "^") and arg.len > 1) {
+                try exclude_refs.append(arg[1..]);
+            } else if (std.mem.indexOf(u8, arg, "..")) |dot_pos| {
+                if (dot_pos > 0) try exclude_refs.append(arg[0..dot_pos]);
+                if (dot_pos + 2 < arg.len) try refs_to_show.append(arg[dot_pos + 2..]);
+            } else {
+                try refs_to_show.append(arg);
+            }
         }
     }
 
     // helpers.Default to helpers.HEAD if no ref specified
-    if (refs_to_show.items.len == 0) {
+    if (refs_to_show.items.len == 0 and exclude_refs.items.len == 0) {
         try refs_to_show.append("HEAD");
+    }
+
+    // Handle range walking (A..B, ^A B, or -N ref)
+    if (exclude_refs.items.len > 0 or (max_count != null and refs_to_show.items.len == 1)) {
+        // Build excluded commit set
+        var excluded = std.StringHashMap(void).init(allocator);
+        defer {
+            var exc_it = excluded.iterator();
+            while (exc_it.next()) |entry| allocator.free(entry.key_ptr.*);
+            excluded.deinit();
+        }
+        for (exclude_refs.items) |exc_ref| {
+            const exc_hash = helpers.resolveCommittish(git_path, exc_ref, platform_impl, allocator) catch continue;
+            defer allocator.free(exc_hash);
+            var exc_queue = std.array_list.Managed([]const u8).init(allocator);
+            defer exc_queue.deinit();
+            try exc_queue.append(try allocator.dupe(u8, exc_hash));
+            while (exc_queue.items.len > 0) {
+                const h = exc_queue.pop();
+                if (excluded.contains(h)) { allocator.free(@constCast(h)); continue; }
+                try excluded.put(h, {});
+                const eobj = objects.GitObject.load(h, git_path, platform_impl, allocator) catch continue;
+                defer eobj.deinit(allocator);
+                var elit = std.mem.splitSequence(u8, eobj.data, "\n");
+                while (elit.next()) |eline| {
+                    if (eline.len == 0) break;
+                    if (std.mem.startsWith(u8, eline, "parent ")) {
+                        try exc_queue.append(try allocator.dupe(u8, eline["parent ".len..]));
+                    }
+                }
+            }
+        }
+
+        // Walk from include refs
+        if (refs_to_show.items.len == 0) try refs_to_show.append("HEAD");
+        const QEntry = struct { hash: []const u8, timestamp: i64 };
+        var queue = std.array_list.Managed(QEntry).init(allocator);
+        defer {
+            for (queue.items) |entry| allocator.free(@constCast(entry.hash));
+            queue.deinit();
+        }
+        var visited = std.StringHashMap(void).init(allocator);
+        defer {
+            var vi = visited.iterator();
+            while (vi.next()) |entry| allocator.free(entry.key_ptr.*);
+            visited.deinit();
+        }
+        for (refs_to_show.items) |inc_ref| {
+            const inc_hash = helpers.resolveCommittish(git_path, inc_ref, platform_impl, allocator) catch continue;
+            if (!visited.contains(inc_hash)) {
+                try visited.put(try allocator.dupe(u8, inc_hash), {});
+                try queue.append(.{ .hash = try allocator.dupe(u8, inc_hash), .timestamp = helpers.getCommitTimestamp(inc_hash, git_path, platform_impl, allocator) });
+            }
+            allocator.free(inc_hash);
+        }
+
+        var shown: u32 = 0;
+        while (queue.items.len > 0) {
+            if (max_count) |mc| { if (shown >= mc) break; }
+            var best: usize = 0;
+            for (queue.items, 0..) |entry, i| {
+                if (entry.timestamp > queue.items[best].timestamp) best = i;
+            }
+            const current = queue.swapRemove(best);
+            defer allocator.free(@constCast(current.hash));
+
+            if (excluded.contains(current.hash)) continue;
+
+            const git_object = objects.GitObject.load(current.hash, git_path, platform_impl, allocator) catch continue;
+            defer git_object.deinit(allocator);
+            if (git_object.type != .commit) continue;
+
+            // Add parents to queue
+            var lit = std.mem.splitSequence(u8, git_object.data, "\n");
+            while (lit.next()) |line| {
+                if (line.len == 0) break;
+                if (std.mem.startsWith(u8, line, "parent ")) {
+                    const ph = line["parent ".len..];
+                    if (!visited.contains(ph) and !excluded.contains(ph)) {
+                        try visited.put(try allocator.dupe(u8, ph), {});
+                        try queue.append(.{ .hash = try allocator.dupe(u8, ph), .timestamp = helpers.getCommitTimestamp(ph, git_path, platform_impl, allocator) });
+                    }
+                }
+            }
+
+            if (shown > 0) try platform_impl.writeStdout("\n");
+            if (suppress_diff or no_patch) {
+                try showCommitHeaderOnly(git_object, current.hash, platform_impl, allocator);
+            } else if (pretty_format) |format| {
+                try showCommitPrettyFormat(git_object, current.hash, format, platform_impl, allocator);
+                try showCommitDiffOnly(git_object, git_path, platform_impl, allocator);
+            } else if (name_only) {
+                try showCommitNameOnly(git_object, git_path, platform_impl, allocator);
+            } else {
+                try showCommitDefault(git_object, current.hash, git_path, platform_impl, allocator);
+            }
+            shown += 1;
+        }
+        return;
     }
 
     for (refs_to_show.items, 0..) |ref_to_show, ref_idx| {
@@ -506,7 +618,17 @@ pub fn showTagObject(git_object: objects.GitObject, git_path: []const u8, platfo
         try platform_impl.writeStdout("\n");
         
         // helpers.Recursively show the referenced object
-        const referenced_object = objects.GitObject.load(hash, git_path, platform_impl, allocator) catch return;
+        const referenced_object = objects.GitObject.load(hash, git_path, platform_impl, allocator) catch |err| {
+            switch (err) {
+                error.ObjectNotFound => {
+                    const msg = try std.fmt.allocPrint(allocator, "fatal: bad object {s}\n", .{hash});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(128);
+                },
+                else => return err,
+            }
+        };
         defer referenced_object.deinit(allocator);
         
         switch (referenced_object.type) {
