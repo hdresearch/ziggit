@@ -416,22 +416,24 @@ fn resetIndexPaths(git_path: []const u8, commit_hash: []const u8, paths: []const
 
         // Now add entries from tree that match this path
         if (tree_map.get(path)) |tree_entry| {
-            // Exact file match
+            // Exact file match - preserve stat if sha1 unchanged
+            const old = old_entries.get(tree_entry.path);
+            const preserve = old != null and std.mem.eql(u8, &old.?.sha1, &tree_entry.sha1);
             idx.entries.append(.{
                 .mode = tree_entry.mode,
                 .path = allocator.dupe(u8, tree_entry.path) catch continue,
                 .sha1 = tree_entry.sha1,
                 .flags = tree_entry.flags,
                 .extended_flags = null,
-                .ctime_sec = 0,
-                .ctime_nsec = 0,
-                .mtime_sec = 0,
-                .mtime_nsec = 0,
-                .dev = 0,
-                .ino = 0,
-                .uid = 0,
-                .gid = 0,
-                .size = 0,
+                .ctime_sec = if (preserve) old.?.ctime_sec else 0,
+                .ctime_nsec = if (preserve) old.?.ctime_nsec else 0,
+                .mtime_sec = if (preserve) old.?.mtime_sec else 0,
+                .mtime_nsec = if (preserve) old.?.mtime_nsec else 0,
+                .dev = if (preserve) old.?.dev else 0,
+                .ino = if (preserve) old.?.ino else 0,
+                .uid = if (preserve) old.?.uid else 0,
+                .gid = if (preserve) old.?.gid else 0,
+                .size = if (preserve) old.?.size else 0,
             }) catch {};
         } else {
             // Check if it's a directory prefix - add all tree entries under it
