@@ -25,6 +25,7 @@ const wildmatch_mod = @import("wildmatch.zig");
 const crlf_mod = @import("crlf.zig");
 const check_attr = @import("cmd_check_attr.zig");
 const hooks = @import("git/hooks.zig");
+const filter_driver = @import("git/filter_driver.zig");
 
 pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     if (@import("builtin").target.os.tag == .freestanding) {
@@ -417,7 +418,10 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                     if (std.fs.path.dirname(full_path)) |dir| {
                         std.fs.cwd().makePath(dir) catch {};
                     }
-                    platform_impl.fs.writeFile(full_path, blob.data) catch {};
+                    // Apply smudge filter
+                    const smudged = filter_driver.applySmudgeFilter(allocator, entry.path, blob.data, git_path, platform_impl);
+                    defer if (smudged) |s| allocator.free(s);
+                    platform_impl.fs.writeFile(full_path, smudged orelse blob.data) catch {};
                 }
             }
         }
@@ -454,7 +458,10 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                     // Apply CRLF conversion
                     const converted = crlf_mod.applyCheckoutConversion(allocator, blob.data, entry.path, attr_rules.items, autocrlf_val, eol_config_val) catch blob.data;
                     defer if (converted.ptr != blob.data.ptr) allocator.free(converted);
-                    platform_impl.fs.writeFile(full_path, converted) catch {};
+                    // Apply smudge filter
+                    const smudged = filter_driver.applySmudgeFilter(allocator, entry.path, converted, git_path, platform_impl);
+                    defer if (smudged) |s| allocator.free(s);
+                    platform_impl.fs.writeFile(full_path, smudged orelse converted) catch {};
                 }
             }
         }
@@ -639,7 +646,10 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                                 const blob = objects.GitObject.load(&hash_hex, git_path, platform_impl, allocator) catch continue;
                                 defer blob.deinit(allocator);
                                 if (blob.type == .blob) {
-                                    std.fs.cwd().writeFile(.{ .sub_path = full_path, .data = blob.data }) catch {};
+                                    // Apply smudge filter
+                                    const smudged = filter_driver.applySmudgeFilter(allocator, entry.path, blob.data, git_path, platform_impl);
+                                    defer if (smudged) |s| allocator.free(s);
+                                    std.fs.cwd().writeFile(.{ .sub_path = full_path, .data = smudged orelse blob.data }) catch {};
                                 }
                             }
                         }
@@ -1375,7 +1385,10 @@ pub fn cmdRestore(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator,
                 // Apply CRLF conversion
                 const converted_r = crlf_mod.applyCheckoutConversion(allocator, blob.data, entry.path, attr_rules_r.items, autocrlf_r, eol_r) catch blob.data;
                 defer if (converted_r.ptr != blob.data.ptr) allocator.free(converted_r);
-                platform_impl.fs.writeFile(full_path, converted_r) catch {};
+                // Apply smudge filter
+                const smudged_r = filter_driver.applySmudgeFilter(allocator, entry.path, converted_r, git_path, platform_impl);
+                defer if (smudged_r) |s| allocator.free(s);
+                platform_impl.fs.writeFile(full_path, smudged_r orelse converted_r) catch {};
                 break;
             }
         }
