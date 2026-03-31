@@ -110,7 +110,12 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         } else if (std.mem.startsWith(u8, arg, "--grep=")) {
             try grep_filters.append(arg["--grep=".len..]);
         } else if (std.mem.eql(u8, arg, "--grep")) {
-            if (args.next()) |val| try grep_filters.append(val);
+            if (args.next()) |val| {
+                try grep_filters.append(val);
+            } else {
+                try platform_impl.writeStderr("error: option `grep' requires a value\n");
+                std.process.exit(128);
+            }
         } else if (std.mem.eql(u8, arg, "--all-match")) {
             all_match = true;
         } else if (std.mem.eql(u8, arg, "-F") or std.mem.eql(u8, arg, "--fixed-strings")) {
