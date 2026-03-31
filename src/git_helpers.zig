@@ -1206,9 +1206,10 @@ pub fn findGitDirectory(allocator: std.mem.Allocator, platform_impl: *const plat
             break; // We've reached the root directory
         }
         
-        // Move to parent directory
+        // Move to parent directory - must dupe before freeing since parent is a slice of dir_to_check
+        const new_dir = try allocator.dupe(u8, parent.?);
         allocator.free(dir_to_check);
-        dir_to_check = try allocator.dupe(u8, parent.?);
+        dir_to_check = new_dir;
     }
     
     allocator.free(dir_to_check);
