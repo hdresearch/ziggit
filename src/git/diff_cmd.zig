@@ -3061,6 +3061,7 @@ const LogOpts = struct {
     grep_filters: std.array_list.Managed([]const u8) = std.array_list.Managed([]const u8).init(std.heap.page_allocator),
     all_match: bool = false,
     fixed_strings: bool = false,
+    fixed_strings_explicit: bool = false,
     grep_reflog: bool = false,
     invert_grep: bool = false,
     use_color: bool = false,
@@ -3221,20 +3222,49 @@ fn logFilterMatch(text: []const u8, pattern: []const u8, fixed: bool) bool {
     }
     const search_pat = unescaped_buf[0..ulen];
 
-    // Check each line for anchored matches
+    // Check each line for matches
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
-        if (anchor_start and anchor_end) {
-            if (std.mem.eql(u8, line, search_pat)) return true;
-        } else if (anchor_start) {
-            if (std.mem.startsWith(u8, line, search_pat)) return true;
-        } else if (anchor_end) {
-            if (std.mem.endsWith(u8, line, search_pat)) return true;
+        if (has_regex_chars) {
+            // Simple regex matching with . as wildcard
+            if (anchor_start and anchor_end) {
+                if (line.len == search_pat.len and simplePatternMatch(line, search_pat)) return true;
+            } else if (anchor_start) {
+                if (line.len >= search_pat.len and simplePatternMatch(line[0..search_pat.len], search_pat)) return true;
+            } else if (anchor_end) {
+                if (line.len >= search_pat.len and simplePatternMatch(line[line.len - search_pat.len ..], search_pat)) return true;
+            } else {
+                // Substring regex match
+                if (search_pat.len == 0) return true;
+                if (line.len >= search_pat.len) {
+                    var si: usize = 0;
+                    while (si + search_pat.len <= line.len) : (si += 1) {
+                        if (simplePatternMatch(line[si .. si + search_pat.len], search_pat)) return true;
+                    }
+                }
+            }
         } else {
-            if (std.mem.indexOf(u8, line, search_pat) != null) return true;
+            if (anchor_start and anchor_end) {
+                if (std.mem.eql(u8, line, search_pat)) return true;
+            } else if (anchor_start) {
+                if (std.mem.startsWith(u8, line, search_pat)) return true;
+            } else if (anchor_end) {
+                if (std.mem.endsWith(u8, line, search_pat)) return true;
+            } else {
+                if (std.mem.indexOf(u8, line, search_pat) != null) return true;
+            }
         }
     }
     return false;
+}
+
+/// Simple pattern matching: '.' matches any character, all other chars match literally
+fn simplePatternMatch(text: []const u8, pattern: []const u8) bool {
+    if (text.len != pattern.len) return false;
+    for (text, pattern) |tc, pc| {
+        if (pc != '.' and tc != pc) return false;
+    }
+    return true;
 }
 
 fn extractMessage(data: []const u8) []const u8 {
@@ -4524,6 +4554,10 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
             lo.all_match = true;
         } else if (std.mem.eql(u8, arg, "-F") or std.mem.eql(u8, arg, "--fixed-strings")) {
             lo.fixed_strings = true;
+            lo.fixed_strings_explicit = true;
+        } else if (std.mem.eql(u8, arg, "-G") or std.mem.eql(u8, arg, "--basic-regexp") or std.mem.eql(u8, arg, "-E") or std.mem.eql(u8, arg, "--extended-regexp") or std.mem.eql(u8, arg, "-P") or std.mem.eql(u8, arg, "--perl-regexp")) {
+            lo.fixed_strings = false;
+            lo.fixed_strings_explicit = true;
         } else if (std.mem.eql(u8, arg, "--grep-reflog") or std.mem.startsWith(u8, arg, "--grep-reflog=")) {
             lo.grep_reflog = true;
         } else if (std.mem.eql(u8, arg, "--invert-grep")) {
@@ -4776,6 +4810,16 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
         }
     }
 
+    // Read grep.patternType from config (overridden by -F/-E/-G/-P flags)
+    if (!lo.fixed_strings_explicit) {
+        if (git_helpers_mod.getConfigValueByKey(git_path, "grep.patterntype", allocator)) |pt_val| {
+            if (std.ascii.eqlIgnoreCase(pt_val, "fixed")) {
+                lo.fixed_strings = true;
+            }
+            allocator.free(pt_val);
+        }
+    }
+
     // Validate --grep-reflog can only be used with -g
     if (lo.grep_reflog and !lo.walk_reflog) {
         try pi.writeStderr("fatal: --grep-reflog can only be used under -g\n");
@@ -4941,6 +4985,17 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
                 continue;
             }
             if (obj.type != .commit) continue;
+
+            // Apply --grep filtering in show mode
+            if (lo.grep_filters.items.len > 0) {
+                const msg = extractMessage(obj.data);
+                var grep_ok = false;
+                for (lo.grep_filters.items) |gf| {
+                    if (logFilterMatch(msg, gf, lo.fixed_strings)) { grep_ok = true; break; }
+                }
+                const skip = if (lo.invert_grep) grep_ok else !grep_ok;
+                if (skip) continue;
+            }
 
             const parents = try getAllParents(obj.data, allocator);
             defer parents.deinit();

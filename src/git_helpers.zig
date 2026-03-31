@@ -1529,7 +1529,7 @@ pub fn outputFormattedCommitFromData(format: []const u8, commit_hash: []const u8
                     defer rest_buf.deinit();
                     try outputFormattedCommitFromData(format[rest_start..], commit_hash, commit_data, &rest_buf, out.allocator);
                     if (rest_buf.items.len > 0 and (wrap_width > 0 or wrap_indent1 > 0 or wrap_indent2 > 0)) {
-                        const effective_width = if (wrap_width == 0) @as(usize, 65536) else wrap_width;
+                        const effective_width = if (wrap_width == 0) @as(usize, 76) else wrap_width;
                         const wrapped = try wrapText(out.allocator, rest_buf.items, effective_width, wrap_indent1, wrap_indent2);
                         defer out.allocator.free(wrapped);
                         try out.appendSlice(wrapped);
