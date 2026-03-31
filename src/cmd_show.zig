@@ -62,8 +62,8 @@ pub fn cmdShow(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgItera
             suppress_diff = true;
             no_patch = true;
         } else if (std.mem.eql(u8, arg, "--graph")) {
-            try platform_impl.writeStderr("fatal: --graph option is not supported with 'show'\n");
-            std.process.exit(1);
+            try platform_impl.writeStderr("fatal: options '--no-walk' and '--graph' cannot be used together\n");
+            std.process.exit(128);
             unreachable;
         } else if (std.mem.startsWith(u8, arg, "--pretty=")) {
             pretty_format = arg[9..];
@@ -125,7 +125,7 @@ pub fn cmdShow(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgItera
                 } else if (pretty_format) |format| {
                     try showCommitPrettyFormat(git_object, commit_hash, format, platform_impl, allocator);
                     // Also show diff for git show with pretty format
-                    if (!suppress_diff) {
+                    if (!suppress_diff and !no_patch) {
                         try showCommitDiffOnly(git_object, git_path, platform_impl, allocator);
                     }
                 } else if (suppress_diff) {
