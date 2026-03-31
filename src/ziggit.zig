@@ -1238,14 +1238,7 @@ pub const Repository = struct {
             return;
         }
         
-        // 2. Use arena allocator for checkout to batch alloc/free (reduces mmap/munmap syscalls)
-        var arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
-        defer arena.deinit();
-        const saved_fast_alloc = self._fast_alloc;
-        self._fast_alloc = arena.allocator();
-        defer self._fast_alloc = saved_fast_alloc;
-
-        // Recursively checkout tree to working directory AND build index in one pass
+        // 2. Recursively checkout tree to working directory AND build index in one pass
         var git_index = index_parser.GitIndex.init(self.allocator);
         errdefer git_index.deinit();
         try self.checkoutTreeAndIndex(&tree_hash, self.path, "", &git_index);
@@ -2450,6 +2443,12 @@ pub const Repository = struct {
             self._cached_pack_data = pack_mmap[0..pack_stat.size];
             self._cached_idx_mmap = idx_mmap;
             self._cached_idx_data = idx_mmap[0..idx_stat.size];
+
+            // Tell kernel we'll need these pages soon (async prefetch)
+            if (comptime @import("builtin").os.tag == .linux) {
+                std.posix.madvise(@ptrCast(pack_mmap.ptr), pack_mmap.len, std.posix.MADV.WILLNEED) catch {};
+                std.posix.madvise(@ptrCast(idx_mmap.ptr), idx_mmap.len, std.posix.MADV.WILLNEED) catch {};
+            }
 
             return self.readPackObjectFromData(self._cached_pack_data.?, offset) catch continue;
         }
