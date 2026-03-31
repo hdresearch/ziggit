@@ -6,6 +6,115 @@ const refs = helpers.refs;
 const commit_graph_mod = @import("git/commit_graph.zig");
 const builtin = @import("builtin");
 
+const NUM_WORKER_THREADS = 3; // + main thread = 4 total
+
+const PackOffset = struct { pack_idx: u8, offset: u32 };
+
+/// Per-thread work context for parallel author extraction
+const WorkerCtx = struct {
+    // Input
+    offsets: []const PackOffset,
+    pack_data_arr: *const [8][]const u8,
+    idx_data_arr: *const [8][]const u8,
+    num_packs: usize,
+    include_email: bool,
+
+    // Output: flat buffer of author strings separated by \x00
+    result_buf: []u8,
+    result_len: usize,
+    author_count: usize,
+};
+
+fn workerFn(ctx: *WorkerCtx) void {
+    processChunk(ctx);
+}
+
+fn processChunk(ctx: *WorkerCtx) void {
+    var decomp_buf: [2048]u8 = undefined;
+    var result_pos: usize = 0;
+    var count: usize = 0;
+
+    // Get zlib streaming inflate functions for partial decompression
+    objects.initCZlib();
+    const inflate_init2_fn = objects.getInflateInit2Fn() orelse return;
+    const inflate_fn = objects.getInflateFn() orelse return;
+    const inflate_end_fn = objects.getInflateEndFn() orelse return;
+    const inflate_reset_fn = objects.getInflateResetFn() orelse return;
+
+    // Initialize a persistent zlib stream for this thread
+    var stream: objects.ZStream = std.mem.zeroes(objects.ZStream);
+    if (inflate_init2_fn(&stream, 15, "1.2.13", @sizeOf(objects.ZStream)) != 0) return;
+    defer _ = inflate_end_fn(&stream);
+
+    for (ctx.offsets) |po| {
+        if (po.offset == 0) continue;
+        const pi = po.pack_idx;
+        const pack_data = ctx.pack_data_arr[pi];
+
+        const data = decompressCommitStreaming(pack_data, po.offset, &decomp_buf, &stream, inflate_fn, inflate_reset_fn) orelse continue;
+
+        const author = extractAuthor(data, ctx.include_email);
+        if (author.len > 0 and result_pos + author.len + 1 <= ctx.result_buf.len) {
+            @memcpy(ctx.result_buf[result_pos .. result_pos + author.len], author);
+            ctx.result_buf[result_pos + author.len] = 0;
+            result_pos += author.len + 1;
+            count += 1;
+        }
+    }
+
+    ctx.result_len = result_pos;
+    ctx.author_count = count;
+}
+
+/// Thread-safe streaming decompression: parse pack header and inflate into provided buffer.
+/// Uses streaming inflate so we only need to decompress the first N bytes (for author line).
+fn decompressCommitStreaming(
+    pack_data: []const u8,
+    offset: usize,
+    out_buf: *[2048]u8,
+    stream: *objects.ZStream,
+    inflate_fn: *const fn (*objects.ZStream, c_int) callconv(.c) c_int,
+    inflate_reset_fn: *const fn (*objects.ZStream) callconv(.c) c_int,
+) ?[]const u8 {
+    const content_end = if (pack_data.len > 20) pack_data.len - 20 else return null;
+    var pos = offset;
+    if (pos >= content_end) return null;
+
+    const first_byte = pack_data[pos];
+    pos += 1;
+    const pack_type_num: u3 = @truncate((first_byte >> 4) & 7);
+
+    // Read variable-length size
+    var cur = first_byte;
+    while (cur & 0x80 != 0 and pos < content_end) {
+        cur = pack_data[pos];
+        pos += 1;
+    }
+
+    if (pos >= content_end) return null;
+
+    // Only handle non-delta commits
+    if (pack_type_num != 1) return null;
+
+    // Streaming inflate: decompress only what fits in our buffer
+    _ = inflate_reset_fn(stream);
+    stream.next_in = pack_data[pos..].ptr;
+    stream.avail_in = @intCast(@min(pack_data.len - pos, std.math.maxInt(c_uint)));
+    stream.next_out = out_buf;
+    stream.avail_out = out_buf.len;
+
+    const Z_NO_FLUSH = 0;
+    const Z_STREAM_END = 1;
+    const Z_OK = 0;
+    const ret = inflate_fn(stream, Z_NO_FLUSH);
+    const produced = @as(usize, @intCast(stream.total_out));
+
+    if (ret == Z_OK or ret == Z_STREAM_END) {
+        return out_buf[0..produced];
+    }
+    return null;
+}
+
 pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     const allocator = if (comptime builtin.target.os.tag != .freestanding and builtin.target.os.tag != .wasi)
         std.heap.c_allocator
@@ -60,7 +169,6 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
     }
     defer allocator.free(start_commit);
 
-    // Count commits per author
     const AuthorCount = struct { name: []const u8, count: u32 };
     var author_map = std.StringHashMap(u32).init(allocator);
     defer {
@@ -75,8 +183,8 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
         const pack_dir_path = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_path}) catch null;
         defer if (pack_dir_path) |p| allocator.free(p);
 
-        var pack_data_arr: [8][]const u8 = undefined;
-        var idx_data_arr: [8][]const u8 = undefined;
+        var pack_data_arr: [8][]const u8 = .{""} ** 8;
+        var idx_data_arr: [8][]const u8 = .{""} ** 8;
         var num_packs: usize = 0;
 
         if (pack_dir_path) |pdp| {
@@ -114,7 +222,7 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
             }
         }
 
-        // Phase 1: Walk commit-graph collecting all reachable commit positions
+        // Phase 1: Walk commit-graph, collect all reachable positions
         const num_commits = cg.num_commits;
         const bitset_words = (num_commits + 63) / 64;
         const visited_bits = allocator.alloc(u64, bitset_words) catch null;
@@ -123,7 +231,6 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
         if (visited_bits) |bits| {
             @memset(bits, 0);
 
-            // Collect all positions
             var positions = std.array_list.Managed(u32).init(allocator);
             defer positions.deinit();
             positions.ensureTotalCapacity(num_commits) catch {};
@@ -134,7 +241,6 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
 
             if (cg.findCommit(start_commit)) |pos| {
                 stack.append(pos) catch {};
-
                 while (stack.items.len > 0) {
                     const cur = stack.items[stack.items.len - 1];
                     stack.items.len -= 1;
@@ -156,8 +262,7 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
                 }
             }
 
-            // Phase 2: Resolve pack offsets for all positions
-            const PackOffset = struct { pack_idx: u8, offset: u32 };
+            // Phase 2: Resolve pack offsets
             const pack_offsets = allocator.alloc(PackOffset, positions.items.len) catch null;
             defer if (pack_offsets) |po| allocator.free(po);
 
@@ -173,27 +278,114 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
                     }
                 }
 
-                // Phase 3: Decompress and extract authors
-                for (offsets) |po| {
-                    if (po.offset == 0) continue;
-                    const pi = po.pack_idx;
-                    const data = objects.readPackCommitHeaderDirect(
-                        pack_data_arr[pi],
-                        idx_data_arr[pi],
-                        po.offset,
-                    ) orelse continue;
+                // Phase 3: Parallel decompression + author extraction
+                const total = offsets.len;
+                const total_threads = NUM_WORKER_THREADS + 1;
+                const chunk_size = (total + total_threads - 1) / total_threads;
 
-                    const author = extractAuthor(data, email);
-                    if (author.len > 0) {
-                        if (author_map.getPtr(author)) |cnt| {
-                            cnt.* += 1;
-                        } else {
-                            author_map.put(allocator.dupe(u8, author) catch continue, 1) catch {};
+                // Allocate result buffers for worker threads
+                var worker_ctxs: [NUM_WORKER_THREADS]WorkerCtx = undefined;
+                var worker_bufs: [NUM_WORKER_THREADS][]u8 = undefined;
+                var threads: [NUM_WORKER_THREADS]std.Thread = undefined;
+                var spawned: usize = 0;
+
+                for (0..NUM_WORKER_THREADS) |t| {
+                    const start = (t + 1) * chunk_size;
+                    if (start >= total) break;
+                    const end = @min(start + chunk_size, total);
+                    const buf = allocator.alloc(u8, (end - start) * 128) catch break;
+                    worker_bufs[t] = buf;
+                    worker_ctxs[t] = .{
+                        .offsets = offsets[start..end],
+                        .pack_data_arr = &pack_data_arr,
+                        .idx_data_arr = &idx_data_arr,
+                        .num_packs = num_packs,
+                        .include_email = email,
+                        .result_buf = buf,
+                        .result_len = 0,
+                        .author_count = 0,
+                    };
+                    threads[t] = std.Thread.spawn(.{}, workerFn, .{&worker_ctxs[t]}) catch break;
+                    spawned += 1;
+                }
+
+                // Main thread processes first chunk
+                var main_ctx = WorkerCtx{
+                    .offsets = offsets[0..@min(chunk_size, total)],
+                    .pack_data_arr = &pack_data_arr,
+                    .idx_data_arr = &idx_data_arr,
+                    .num_packs = num_packs,
+                    .include_email = email,
+                    .result_buf = undefined,
+                    .result_len = 0,
+                    .author_count = 0,
+                };
+                const main_buf = allocator.alloc(u8, @min(chunk_size, total) * 128) catch null;
+                defer if (main_buf) |b| allocator.free(b);
+                if (main_buf) |b| {
+                    main_ctx.result_buf = b;
+                    processChunk(&main_ctx);
+                    // Merge main thread results
+                    mergeResults(&author_map, main_ctx.result_buf[0..main_ctx.result_len], allocator);
+                }
+
+                // Wait for workers and merge their results
+                var total_found: usize = main_ctx.author_count;
+                for (0..spawned) |t| {
+                    threads[t].join();
+                    mergeResults(&author_map, worker_ctxs[t].result_buf[0..worker_ctxs[t].result_len], allocator);
+                    total_found += worker_ctxs[t].author_count;
+                    allocator.free(worker_bufs[t]);
+                }
+
+                // Phase 4: Handle any missed commits (deltas, large objects)
+                // The parallel workers only handle non-delta commits.
+                if (total_found < positions.items.len) {
+                    // Check each commit's pack type and use global decompressor for deltas
+                    for (positions.items, offsets) |pos_val, po| {
+                        if (po.offset == 0) continue;
+                        // Quick check: is this a delta?
+                        const pack_data = pack_data_arr[po.pack_idx];
+                        if (po.offset >= pack_data.len) continue;
+                        const first_byte = pack_data[po.offset];
+                        const pack_type_num: u3 = @truncate((first_byte >> 4) & 7);
+                        if (pack_type_num == 1) continue; // Already handled by worker
+
+                        // Delta commit: use global decompressor
+                        const data = objects.readPackCommitHeaderDirect(
+                            pack_data,
+                            idx_data_arr[po.pack_idx],
+                            po.offset,
+                        ) orelse blk: {
+                            // Final fallback: full object load
+                            var hash_hex: [40]u8 = undefined;
+                            cg.getOidHex(pos_val, &hash_hex);
+                            if (objects.GitObject.load(&hash_hex, git_path, platform_impl, allocator)) |obj| {
+                                defer obj.deinit(allocator);
+                                const author2 = extractAuthor(obj.data, email);
+                                if (author2.len > 0) {
+                                    if (author_map.getPtr(author2)) |cnt| {
+                                        cnt.* += 1;
+                                    } else {
+                                        author_map.put(allocator.dupe(u8, author2) catch continue, 1) catch {};
+                                    }
+                                }
+                            } else |_| {}
+                            break :blk null;
+                        };
+                        if (data) |d| {
+                            const author = extractAuthor(d, email);
+                            if (author.len > 0) {
+                                if (author_map.getPtr(author)) |cnt| {
+                                    cnt.* += 1;
+                                } else {
+                                    author_map.put(allocator.dupe(u8, author) catch continue, 1) catch {};
+                                }
+                            }
                         }
                     }
                 }
             }
-
         }
     } else {
         // Fallback: regular object loading (no commit-graph)
@@ -286,6 +478,27 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
     }
     if (out_buf.items.len > 0) {
         try platform_impl.writeStdout(out_buf.items);
+    }
+}
+
+/// Merge null-separated author names from result buffer into author_map
+fn mergeResults(author_map: *std.StringHashMap(u32), data: []const u8, allocator: std.mem.Allocator) void {
+    var pos: usize = 0;
+    while (pos < data.len) {
+        var end = pos;
+        while (end < data.len and data[end] != 0) : (end += 1) {}
+        if (end > pos) {
+            const author = data[pos..end];
+            if (author_map.getPtr(author)) |cnt| {
+                cnt.* += 1;
+            } else {
+                author_map.put(allocator.dupe(u8, author) catch {
+                    pos = end + 1;
+                    continue;
+                }, 1) catch {};
+            }
+        }
+        pos = end + 1;
     }
 }
 
