@@ -50,6 +50,9 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     var no_walk_unsorted = false;
     var reverse = false;
     var show_linear_break = false;
+    var no_merges = false;
+    var min_parents: ?u32 = null;
+    var max_parents: ?u32 = null;
     var pretty_alias: ?[]const u8 = null; // unresolved pretty.<name> alias
     var author_filters = std.array_list.Managed([]const u8).init(allocator);
     defer author_filters.deinit();
@@ -151,6 +154,15 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             show_graph = false;
         } else if (std.mem.eql(u8, arg, "--reverse")) {
             reverse = true;
+        } else if (std.mem.eql(u8, arg, "--no-merges")) {
+            no_merges = true;
+            max_parents = 1;
+        } else if (std.mem.eql(u8, arg, "--merges")) {
+            min_parents = 2;
+        } else if (std.mem.startsWith(u8, arg, "--min-parents=")) {
+            min_parents = std.fmt.parseInt(u32, arg["--min-parents=".len..], 10) catch null;
+        } else if (std.mem.startsWith(u8, arg, "--max-parents=")) {
+            max_parents = std.fmt.parseInt(u32, arg["--max-parents=".len..], 10) catch null;
         } else if (std.mem.eql(u8, arg, "--show-linear-break") or std.mem.startsWith(u8, arg, "--show-linear-break=")) {
             show_linear_break = true;
         } else if (std.mem.startsWith(u8, arg, "--encoding=")) {
@@ -166,6 +178,12 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         } else if (std.mem.eql(u8, arg, "--diff-algorithm")) {
             // Accept diff-related options with separate value
             _ = args.next();
+        } else if (std.mem.startsWith(u8, arg, "--default=")) {
+            // Accept --default=<rev> (used as fallback when no rev given)
+        } else if (std.mem.eql(u8, arg, "--default")) {
+            _ = args.next(); // consume value
+        } else if (std.mem.startsWith(u8, arg, "--branches") or std.mem.startsWith(u8, arg, "--tags=") or std.mem.startsWith(u8, arg, "--remotes=") or std.mem.eql(u8, arg, "--ignore-missing") or std.mem.eql(u8, arg, "--stdin")) {
+            // Accept but ignore for now
         } else if (std.mem.eql(u8, arg, "--no-renames")) {
             no_renames = true;
         } else if (std.mem.eql(u8, arg, "--find-renames") or std.mem.eql(u8, arg, "--find-copies") or std.mem.eql(u8, arg, "--find-copies-harder") or std.mem.eql(u8, arg, "--name-only") or std.mem.eql(u8, arg, "--name-status") or std.mem.eql(u8, arg, "--stat") or std.mem.eql(u8, arg, "--numstat") or std.mem.eql(u8, arg, "--shortstat") or std.mem.eql(u8, arg, "--dirstat") or std.mem.eql(u8, arg, "--summary") or std.mem.eql(u8, arg, "--raw") or std.mem.eql(u8, arg, "--no-stat") or std.mem.eql(u8, arg, "--patch") or std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--no-patch") or std.mem.eql(u8, arg, "-s")) {
@@ -1222,6 +1240,37 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             }
         }
         const parent_hashes = parent_hashes_buf[0..parent_count];
+
+        // --no-merges / --merges / --min-parents / --max-parents filtering
+        if (max_parents) |mp| {
+            if (parent_count > mp) {
+                // Skip this commit but add its parents to the queue
+                if (!no_walk) {
+                    for (parent_hashes) |ph| {
+                        if (!visited.contains(ph)) {
+                            const ts = getTs.get(ph, maybe_cg, git_path, platform_impl, allocator);
+                            try queue.append(.{ .hash = try allocator.dupe(u8, ph), .timestamp = ts });
+                            try visited.put(try allocator.dupe(u8, ph), {});
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+        if (min_parents) |mp| {
+            if (parent_count < mp) {
+                if (!no_walk) {
+                    for (parent_hashes) |ph| {
+                        if (!visited.contains(ph)) {
+                            const ts = getTs.get(ph, maybe_cg, git_path, platform_impl, allocator);
+                            try queue.append(.{ .hash = try allocator.dupe(u8, ph), .timestamp = ts });
+                            try visited.put(try allocator.dupe(u8, ph), {});
+                        }
+                    }
+                }
+                continue;
+            }
+        }
         
         // Build message from commit data
         var message = std.array_list.Managed(u8).init(allocator);

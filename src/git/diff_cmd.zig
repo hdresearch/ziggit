@@ -3042,6 +3042,10 @@ const LogOpts = struct {
     show_mode: bool = false,
     // whatchanged-specific
     whatchanged_mode: bool = false,
+    // commit filtering
+    no_merges: bool = false,
+    min_parents: ?u32 = null,
+    max_parents: ?u32 = null,
     // diff options
     context_lines: u32 = 3,
     full_index: bool = false,
@@ -4473,6 +4477,15 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
             lo.root = true;
         } else if (std.mem.eql(u8, arg, "--first-parent")) {
             lo.first_parent = true;
+        } else if (std.mem.eql(u8, arg, "--no-merges")) {
+            lo.no_merges = true;
+            lo.max_parents = 1;
+        } else if (std.mem.eql(u8, arg, "--merges")) {
+            lo.min_parents = 2;
+        } else if (std.mem.startsWith(u8, arg, "--min-parents=")) {
+            lo.min_parents = std.fmt.parseInt(u32, arg["--min-parents=".len..], 10) catch null;
+        } else if (std.mem.startsWith(u8, arg, "--max-parents=")) {
+            lo.max_parents = std.fmt.parseInt(u32, arg["--max-parents=".len..], 10) catch null;
         } else if (std.mem.eql(u8, arg, "--no-diff-merges") or std.mem.eql(u8, arg, "--diff-merges=off")) {
             lo.diff_merges = .off;
             lo.diff_merges_explicit = true;
@@ -4948,6 +4961,104 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
         return;
     }
 
+    // Show mode: walk history when ranges/exclude or -N is used
+    if (show_mode and (exclude_hashes.items.len > 0 or (lo.max_count != null and lo.max_count.? > 1))) {
+        // Build excluded set by walking excluded refs
+        var excluded_set = std.StringHashMap(void).init(allocator);
+        defer {
+            var eit = excluded_set.iterator();
+            while (eit.next()) |entry| allocator.free(entry.key_ptr.*);
+            excluded_set.deinit();
+        }
+        for (exclude_hashes.items) |eh| {
+            var ewq = std.array_list.Managed([]const u8).init(allocator);
+            defer ewq.deinit();
+            try ewq.append(try allocator.dupe(u8, eh));
+            while (ewq.items.len > 0) {
+                const ewh = ewq.pop();
+                if (excluded_set.contains(ewh)) { allocator.free(@constCast(ewh)); continue; }
+                try excluded_set.put(ewh, {});
+                const eobj = objects.GitObject.load(ewh, git_path, pi, allocator) catch continue;
+                defer eobj.deinit(allocator);
+                var elines = std.mem.splitSequence(u8, eobj.data, "\n");
+                while (elines.next()) |eline| {
+                    if (eline.len == 0) break;
+                    if (std.mem.startsWith(u8, eline, "parent ")) {
+                        try ewq.append(try allocator.dupe(u8, eline["parent ".len..]));
+                    }
+                }
+            }
+        }
+
+        // Walk from start hashes
+        const ShowQE = struct { hash: []const u8, ts: i64 };
+        var show_q = std.array_list.Managed(ShowQE).init(allocator);
+        defer {
+            for (show_q.items) |sq| allocator.free(@constCast(sq.hash));
+            show_q.deinit();
+        }
+        var show_visited = std.StringHashMap(void).init(allocator);
+        defer {
+            var svi = show_visited.iterator();
+            while (svi.next()) |entry| allocator.free(entry.key_ptr.*);
+            show_visited.deinit();
+        }
+        for (start_hashes.items) |sh| {
+            if (!show_visited.contains(sh)) {
+                try show_visited.put(try allocator.dupe(u8, sh), {});
+                try show_q.append(.{ .hash = try allocator.dupe(u8, sh), .ts = git_helpers_mod.getCommitTimestamp(sh, git_path, pi, allocator) });
+            }
+        }
+
+        var show_count: u32 = 0;
+        while (show_q.items.len > 0) {
+            if (lo.max_count) |mc| { if (show_count >= mc) break; }
+
+            var best_i: usize = 0;
+            for (show_q.items, 0..) |sq, si| {
+                if (sq.ts > show_q.items[best_i].ts) best_i = si;
+            }
+            const cur = show_q.swapRemove(best_i);
+            defer allocator.free(@constCast(cur.hash));
+
+            if (excluded_set.contains(cur.hash)) continue;
+
+            const sobj = objects.GitObject.load(cur.hash, git_path, pi, allocator) catch continue;
+            defer sobj.deinit(allocator);
+            if (sobj.type != .commit) continue;
+
+            // Add parents
+            var slines = std.mem.splitSequence(u8, sobj.data, "\n");
+            while (slines.next()) |sline| {
+                if (sline.len == 0) break;
+                if (std.mem.startsWith(u8, sline, "parent ")) {
+                    const sph = sline["parent ".len..];
+                    if (!show_visited.contains(sph) and !excluded_set.contains(sph)) {
+                        try show_visited.put(try allocator.dupe(u8, sph), {});
+                        try show_q.append(.{ .hash = try allocator.dupe(u8, sph), .ts = git_helpers_mod.getCommitTimestamp(sph, git_path, pi, allocator) });
+                    }
+                }
+            }
+
+            if (show_count > 0) try pi.writeStdout("\n");
+            if (lo.format_string) |fmt| {
+                if (lo.format_is_separator and show_count > 0) try pi.writeStdout("\n");
+                try writeFormattedCommit(fmt, cur.hash, sobj.data, pi, allocator);
+                if (!lo.format_is_separator) try pi.writeStdout("\n");
+            } else {
+                try writeCommitHeader(cur.hash, sobj.data, &lo, true, pi, allocator, git_path);
+            }
+            if (lo.show_patch) {
+                const sparents = try getAllParents(sobj.data, allocator);
+                defer sparents.deinit();
+                const sp_parent: ?[]const u8 = if (sparents.items.len > 0) sparents.items[0] else null;
+                try writeDiffForCommit(cur.hash, sobj.data, sp_parent, &lo, git_path, pi, allocator);
+            }
+            show_count += 1;
+        }
+        return;
+    }
+
     // Show mode: just show the specified commits (don't walk history for non-show)
     if (show_mode) {
         for (start_hashes.items, 0..) |hash, idx| {
@@ -4981,7 +5092,73 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
                 continue;
             }
             if (obj.type == .tag) {
-                try pi.writeStdout(obj.data);
+                // Parse and display tag object properly
+                var tlines = std.mem.splitSequence(u8, obj.data, "\n");
+                var tag_obj_hash: ?[]const u8 = null;
+                var tag_name_val: ?[]const u8 = null;
+                var tagger_val: ?[]const u8 = null;
+                var tag_msg_start: usize = obj.data.len;
+                {
+                    var tpos2: usize = 0;
+                    while (tpos2 < obj.data.len) {
+                        const tnl = std.mem.indexOfScalarPos(u8, obj.data, tpos2, '\n') orelse obj.data.len;
+                        const tline = obj.data[tpos2..tnl];
+                        if (tline.len == 0) { tag_msg_start = tnl + 1; break; }
+                        if (std.mem.startsWith(u8, tline, "object ")) tag_obj_hash = tline["object ".len..];
+                        if (std.mem.startsWith(u8, tline, "tag ")) tag_name_val = tline["tag ".len..];
+                        if (std.mem.startsWith(u8, tline, "tagger ")) tagger_val = tline["tagger ".len..];
+                        tpos2 = tnl + 1;
+                    }
+                }
+                _ = tlines;
+                if (tag_name_val) |tn| {
+                    const th = try std.fmt.allocPrint(allocator, "tag {s}\n", .{tn});
+                    defer allocator.free(th);
+                    try pi.writeStdout(th);
+                }
+                if (tagger_val) |tv| {
+                    // Extract name <email> part
+                    if (std.mem.indexOf(u8, tv, ">")) |gt| {
+                        const tname = tv[0 .. gt + 1];
+                        const tout = try std.fmt.allocPrint(allocator, "Tagger: {s}\n", .{tname});
+                        defer allocator.free(tout);
+                        try pi.writeStdout(tout);
+                    }
+                }
+                try pi.writeStdout("\n");
+                if (tag_msg_start < obj.data.len) {
+                    try pi.writeStdout(std.mem.trimRight(u8, obj.data[tag_msg_start..], "\n"));
+                    try pi.writeStdout("\n");
+                }
+                // Now show the referenced object
+                if (tag_obj_hash) |toh| {
+                    try pi.writeStdout("\n");
+                    const ref_obj = objects.GitObject.load(toh, git_path, pi, allocator) catch {
+                        const emsg = try std.fmt.allocPrint(allocator, "fatal: bad object {s}\n", .{toh});
+                        defer allocator.free(emsg);
+                        try pi.writeStderr(emsg);
+                        std.process.exit(128);
+                    };
+                    defer ref_obj.deinit(allocator);
+                    if (ref_obj.type == .commit) {
+                        // Show the commit with diff
+                        if (lo.format_string) |fmt| {
+                            try writeFormattedCommit(fmt, toh, ref_obj.data, pi, allocator);
+                        } else {
+                            try writeCommitHeader(toh, ref_obj.data, &lo, true, pi, allocator, git_path);
+                        }
+                        if (lo.show_patch) {
+                            const cparents = try getAllParents(ref_obj.data, allocator);
+                            defer cparents.deinit();
+                            const pparent: ?[]const u8 = if (cparents.items.len > 0) cparents.items[0] else null;
+                            try writeDiffForCommit(toh, ref_obj.data, pparent, &lo, git_path, pi, allocator);
+                        }
+                    } else if (ref_obj.type == .blob) {
+                        try pi.writeStdout(ref_obj.data);
+                    } else if (ref_obj.type == .tree) {
+                        try pi.writeStdout(ref_obj.data);
+                    }
+                }
                 continue;
             }
             if (obj.type != .commit) continue;
@@ -5149,6 +5326,20 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
         const parents = try getAllParents(obj.data, allocator);
         defer parents.deinit();
         const is_merge = parents.items.len > 1;
+
+        // --no-merges / --merges / --min-parents / --max-parents filtering
+        if (lo.max_parents) |mp| {
+            if (parents.items.len > mp) {
+                addParentsToQueue(&queue, &visited, parents.items, lo.first_parent, git_path, pi, allocator) catch {};
+                continue;
+            }
+        }
+        if (lo.min_parents) |mp| {
+            if (parents.items.len < mp) {
+                addParentsToQueue(&queue, &visited, parents.items, lo.first_parent, git_path, pi, allocator) catch {};
+                continue;
+            }
+        }
 
         // Pickaxe filtering
         if (lo.pickaxe_s) |search| {
