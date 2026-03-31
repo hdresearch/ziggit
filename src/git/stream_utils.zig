@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const zlib_compat = @import("zlib_compat.zig");
+const objects_mod = @import("objects.zig");
 
 /// Get the appropriate allocator for temporary decompression buffers.
 /// On freestanding/WASM, page_allocator.free() is a no-op which leaks memory.
@@ -91,10 +92,18 @@ pub fn hashGitObject(git_type: []const u8, data: []const u8) [20]u8 {
 }
 
 /// Decompress zlib data into a pre-cleared ArrayList, returning bytes consumed.
+/// Uses C zlib when available (faster).
 pub fn decompressInto(
     compressed_data: []const u8,
     output: *std.array_list.Managed(u8),
 ) !struct { decompressed_size: usize, bytes_consumed: usize } {
+    // Try C zlib inflate (faster, exact consumed bytes)
+    if (objects_mod.cDecompressWithConsumed(output.allocator, compressed_data, 0)) |res| {
+        try output.appendSlice(res.data);
+        output.allocator.free(res.data);
+        return .{ .decompressed_size = res.data.len, .bytes_consumed = res.consumed };
+    }
+    // Fallback to Zig flate
     const tmp_alloc = getTempAllocator();
     const res = zlib_compat.decompressSliceWithConsumed(tmp_alloc, compressed_data) catch return error.ZlibDecompressError;
     defer tmp_alloc.free(res.data);
@@ -103,10 +112,19 @@ pub fn decompressInto(
 }
 
 /// Decompress zlib data into a pre-sized buffer (no allocation).
+/// Uses C zlib when available (faster).
 pub fn decompressIntoBuf(
     compressed_data: []const u8,
     buf: []u8,
 ) !struct { decompressed_size: usize, bytes_consumed: usize } {
+    // Try C zlib inflate (faster)
+    if (objects_mod.cDecompressWithConsumed(std.heap.page_allocator, compressed_data, buf.len)) |res| {
+        const n = @min(res.data.len, buf.len);
+        @memcpy(buf[0..n], res.data[0..n]);
+        std.heap.page_allocator.free(res.data);
+        return .{ .decompressed_size = n, .bytes_consumed = res.consumed };
+    }
+    // Fallback to Zig flate
     const tmp_alloc = getTempAllocator();
     const res = zlib_compat.decompressSliceWithConsumed(tmp_alloc, compressed_data) catch return error.ZlibDecompressError;
     defer tmp_alloc.free(res.data);
@@ -128,6 +146,17 @@ pub fn decompressHashIntoBuf(
     const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ git_type, object_size }) catch unreachable;
     sha_hasher.update(header);
 
+    // Try C zlib inflate (faster)
+    if (objects_mod.cDecompressWithConsumed(std.heap.page_allocator, compressed_data, object_size)) |res| {
+        const total = @min(res.data.len, buf.len);
+        @memcpy(buf[0..total], res.data[0..total]);
+        sha_hasher.update(buf[0..total]);
+        var result_sha1: [20]u8 = undefined;
+        sha_hasher.final(&result_sha1);
+        std.heap.page_allocator.free(res.data);
+        return .{ .sha1 = result_sha1, .decompressed_size = total, .bytes_consumed = res.consumed };
+    }
+    // Fallback to Zig flate
     const tmp_alloc = getTempAllocator();
     const res = zlib_compat.decompressSliceWithConsumed(tmp_alloc, compressed_data) catch return error.ZlibDecompressError;
     defer tmp_alloc.free(res.data);
