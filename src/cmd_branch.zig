@@ -59,7 +59,7 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             } else |_| {}
         }
         if (std.mem.eql(u8, a, "--abbrev")) abbrev_len = 7;
-        if (std.mem.eql(u8, a, "-d") or std.mem.eql(u8, a, "-D")) { has_delete = true; mode_count += 1; }
+        if (std.mem.eql(u8, a, "-d") or std.mem.eql(u8, a, "-D") or std.mem.eql(u8, a, "--delete")) { has_delete = true; mode_count += 1; }
         if (std.mem.eql(u8, a, "-m") or std.mem.eql(u8, a, "-M")) { has_move = true; mode_count += 1; }
         if (std.mem.eql(u8, a, "-c") or std.mem.eql(u8, a, "-C")) { has_copy = true; mode_count += 1; }
         if (std.mem.eql(u8, a, "-l") or std.mem.eql(u8, a, "--list")) { has_list = true; mode_count += 1; }
@@ -305,7 +305,7 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         }
         std.fs.cwd().writeFile(.{ .sub_path = config_path, .data = new_config.items }) catch {};
 
-    } else if (std.mem.eql(u8, first_arg.?, "-d") or std.mem.eql(u8, first_arg.?, "-D")) {
+    } else if (std.mem.eql(u8, first_arg.?, "-d") or std.mem.eql(u8, first_arg.?, "-D") or std.mem.eql(u8, first_arg.?, "--delete")) {
         // helpers.Delete branch - may have -r flag and/or multiple branch names
         var is_remote = false;
         var names_to_delete = std.array_list.Managed([]const u8).init(allocator);
@@ -400,8 +400,9 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                 };
                 defer if (was_info.len > 0) allocator.free(was_info);
 
-                // For -d (not -D), check if branch is fully merged into HEAD
-                if (std.mem.eql(u8, first_arg.?, "-d")) {
+                // For -d (not -D or --delete --force), check if branch is fully merged into HEAD
+                const is_force_delete = std.mem.eql(u8, first_arg.?, "-D") or force_flag;
+                if (!is_force_delete) {
                     const head_hash = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
                     defer if (head_hash) |hh| allocator.free(hh);
                     const branch_hash_str = blk_bh: {
