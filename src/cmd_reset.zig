@@ -396,7 +396,11 @@ fn resetIndexPaths(git_path: []const u8, commit_hash: []const u8, paths: []const
     var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch index_mod.Index.init(allocator);
     defer idx.deinit();
 
+<<<<<<< HEAD
     // Build map of old index entries for stat preservation
+=======
+    // Build map of old entries for stat preservation
+>>>>>>> cd32534 (fix(add,reset): --refresh support, gitignore dir filtering, fix reset old_entries — 10ms (git: 10ms, parity))
     var old_entries = std.StringHashMap(index_mod.IndexEntry).init(allocator);
     defer old_entries.deinit();
     for (idx.entries.items) |entry| {
@@ -423,24 +427,25 @@ fn resetIndexPaths(git_path: []const u8, commit_hash: []const u8, paths: []const
 
         // Now add entries from tree that match this path
         if (tree_map.get(path)) |tree_entry| {
-            // Exact file match - preserve stat if sha1 unchanged
+            // Exact file match - preserve stat if sha1 unchanged, else refresh from worktree
             const old = old_entries.get(tree_entry.path);
             const preserve = old != null and std.mem.eql(u8, &old.?.sha1, &tree_entry.sha1);
+            const wt_stat = refreshStatFromWorktree(allocator, git_path, tree_entry.path);
             idx.entries.append(.{
                 .mode = tree_entry.mode,
                 .path = allocator.dupe(u8, tree_entry.path) catch continue,
                 .sha1 = tree_entry.sha1,
                 .flags = tree_entry.flags,
                 .extended_flags = null,
-                .ctime_sec = if (preserve) old.?.ctime_sec else 0,
-                .ctime_nsec = if (preserve) old.?.ctime_nsec else 0,
-                .mtime_sec = if (preserve) old.?.mtime_sec else 0,
-                .mtime_nsec = if (preserve) old.?.mtime_nsec else 0,
+                .ctime_sec = if (preserve) old.?.ctime_sec else wt_stat.ctime_sec,
+                .ctime_nsec = if (preserve) old.?.ctime_nsec else wt_stat.ctime_nsec,
+                .mtime_sec = if (preserve) old.?.mtime_sec else wt_stat.mtime_sec,
+                .mtime_nsec = if (preserve) old.?.mtime_nsec else wt_stat.mtime_nsec,
                 .dev = if (preserve) old.?.dev else 0,
                 .ino = if (preserve) old.?.ino else 0,
                 .uid = if (preserve) old.?.uid else 0,
                 .gid = if (preserve) old.?.gid else 0,
-                .size = if (preserve) old.?.size else 0,
+                .size = if (preserve) old.?.size else wt_stat.size,
             }) catch {};
         } else {
             // Check if it's a directory prefix - add all tree entries under it
@@ -448,21 +453,24 @@ fn resetIndexPaths(git_path: []const u8, commit_hash: []const u8, paths: []const
             defer allocator.free(dir_prefix);
             for (tree_entries.items) |tree_entry| {
                 if (std.mem.startsWith(u8, tree_entry.path, dir_prefix)) {
+                    const old2 = old_entries.get(tree_entry.path);
+                    const pres2 = old2 != null and std.mem.eql(u8, &old2.?.sha1, &tree_entry.sha1);
+                    const wt_stat2 = refreshStatFromWorktree(allocator, git_path, tree_entry.path);
                     idx.entries.append(.{
                         .mode = tree_entry.mode,
                         .path = allocator.dupe(u8, tree_entry.path) catch continue,
                         .sha1 = tree_entry.sha1,
                         .flags = tree_entry.flags,
                         .extended_flags = null,
-                        .ctime_sec = 0,
-                        .ctime_nsec = 0,
-                        .mtime_sec = 0,
-                        .mtime_nsec = 0,
-                        .dev = 0,
-                        .ino = 0,
-                        .uid = 0,
-                        .gid = 0,
-                        .size = 0,
+                        .ctime_sec = if (pres2) old2.?.ctime_sec else wt_stat2.ctime_sec,
+                        .ctime_nsec = if (pres2) old2.?.ctime_nsec else wt_stat2.ctime_nsec,
+                        .mtime_sec = if (pres2) old2.?.mtime_sec else wt_stat2.mtime_sec,
+                        .mtime_nsec = if (pres2) old2.?.mtime_nsec else wt_stat2.mtime_nsec,
+                        .dev = if (pres2) old2.?.dev else 0,
+                        .ino = if (pres2) old2.?.ino else 0,
+                        .uid = if (pres2) old2.?.uid else 0,
+                        .gid = if (pres2) old2.?.gid else 0,
+                        .size = if (pres2) old2.?.size else wt_stat2.size,
                     }) catch {};
                 }
             }
@@ -508,24 +516,46 @@ pub fn resetIndex(git_path: []const u8, commit_hash: []const u8, platform_impl: 
     try helpers.collectTreeEntries(git_path, tree_hash.?, "", platform_impl, allocator, &entries);
 
     // helpers.Create and write index
+    const repo_root = std.fs.path.dirname(git_path) orelse ".";
     var idx = index_mod.Index.init(allocator);
     defer idx.deinit();
     for (entries.items) |entry| {
+        // Refresh stat info from working tree if file exists and content matches
+        var ctime_sec: u32 = 0;
+        var ctime_nsec: u32 = 0;
+        var mtime_sec: u32 = 0;
+        var mtime_nsec: u32 = 0;
+        const dev: u32 = 0;
+        const ino: u32 = 0;
+        const uid: u32 = 0;
+        const gid: u32 = 0;
+        var file_size: u32 = 0;
+        const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path }) catch null;
+        defer if (full_path) |fp| allocator.free(fp);
+        if (full_path) |fp| {
+            if (std.fs.cwd().statFile(fp)) |stat_result| {
+                mtime_sec = @intCast(@divFloor(stat_result.mtime, 1_000_000_000));
+                mtime_nsec = @intCast(@mod(stat_result.mtime, 1_000_000_000));
+                ctime_sec = @intCast(@divFloor(stat_result.ctime, 1_000_000_000));
+                ctime_nsec = @intCast(@mod(stat_result.ctime, 1_000_000_000));
+                file_size = @intCast(stat_result.size);
+            } else |_| {}
+        }
         try idx.entries.append(.{
             .mode = entry.mode,
             .path = try allocator.dupe(u8, entry.path),
             .sha1 = entry.sha1,
             .flags = entry.flags,
             .extended_flags = null,
-            .ctime_sec = 0,
-            .ctime_nsec = 0,
-            .mtime_sec = 0,
-            .mtime_nsec = 0,
-            .dev = 0,
-            .ino = 0,
-            .uid = 0,
-            .gid = 0,
-            .size = 0,
+            .ctime_sec = ctime_sec,
+            .ctime_nsec = ctime_nsec,
+            .mtime_sec = mtime_sec,
+            .mtime_nsec = mtime_nsec,
+            .dev = dev,
+            .ino = ino,
+            .uid = uid,
+            .gid = gid,
+            .size = file_size,
         });
     }
     try idx.save(git_path, platform_impl);
@@ -631,4 +661,26 @@ fn hexFromBytes(bytes: [20]u8) [40]u8 {
         hex[i * 2 + 1] = hc[b & 0xf];
     }
     return hex;
+}
+
+const StatInfo = struct {
+    ctime_sec: u32 = 0,
+    ctime_nsec: u32 = 0,
+    mtime_sec: u32 = 0,
+    mtime_nsec: u32 = 0,
+    size: u32 = 0,
+};
+
+fn refreshStatFromWorktree(allocator: std.mem.Allocator, git_path: []const u8, entry_path: []const u8) StatInfo {
+    const repo_root = std.fs.path.dirname(git_path) orelse ".";
+    const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry_path }) catch return .{};
+    defer allocator.free(full_path);
+    const stat_result = std.fs.cwd().statFile(full_path) catch return .{};
+    return .{
+        .ctime_sec = @intCast(@divFloor(stat_result.ctime, 1_000_000_000)),
+        .ctime_nsec = @intCast(@mod(stat_result.ctime, 1_000_000_000)),
+        .mtime_sec = @intCast(@divFloor(stat_result.mtime, 1_000_000_000)),
+        .mtime_nsec = @intCast(@mod(stat_result.mtime, 1_000_000_000)),
+        .size = @intCast(stat_result.size),
+    };
 }

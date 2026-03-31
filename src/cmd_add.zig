@@ -97,7 +97,7 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             cwd
         else
             std.fs.path.dirname(git_path) orelse ".";
-        for (index.entries.items) |*entry| {
+        for (refresh_index.entries.items) |*entry| {
             // If pathspecs given, only refresh matching entries
             if (collected_add_paths.items.len > 0) {
                 var matches = false;
@@ -119,6 +119,27 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             entry.ctime_sec = @intCast(@divFloor(stat_result.ctime, 1_000_000_000));
             entry.ctime_nsec = @intCast(@mod(stat_result.ctime, 1_000_000_000));
             entry.size = @intCast(stat_result.size);
+        }
+        // Check if any pathspecs didn't match
+        if (collected_add_paths.items.len > 0) {
+            for (collected_add_paths.items) |p| {
+                if (std.mem.eql(u8, p, ".")) continue;
+                var found = false;
+                for (refresh_index.entries.items) |entry| {
+                    if (std.mem.eql(u8, entry.path, p) or
+                        std.mem.startsWith(u8, entry.path, p))
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    const msg = try std.fmt.allocPrint(allocator, "fatal: pathspec '{s}' did not match any files\n", .{p});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    std.process.exit(128);
+                }
+            }
         }
         try refresh_index.save(git_path, platform_impl);
         return;
